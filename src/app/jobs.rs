@@ -55,6 +55,8 @@ pub(crate) enum WorkerResult {
     Lexicon(crate::app::LexiconJob),
     /// 扫描本机字体目录的结果。中文字体文件很大，扫描放在后台线程。
     SystemFonts(Vec<system_fonts::SystemFont>),
+    /// 关于窗的更新检查结果。
+    UpdateChecked(Result<crate::update_check::ReleaseInfo, String>),
     /// 导出全量备份：目标路径与文件字节数。
     BackupExported {
         path: PathBuf,
@@ -241,6 +243,31 @@ impl GongwenApp {
         });
     }
 
+    /// 检查最新发布。只发一次请求，结果回到关于窗内联显示。
+    pub(crate) fn start_update_check(&mut self) {
+        if matches!(
+            self.update_check,
+            crate::update_check::UpdateCheckState::Checking
+        ) {
+            return;
+        }
+        let url = self.config.update_check_url.trim().to_string();
+        if url.is_empty() {
+            self.update_check = crate::update_check::UpdateCheckState::Failed(
+                "更新检查地址为空，请到设置页填写".into(),
+            );
+            return;
+        }
+        self.update_check = crate::update_check::UpdateCheckState::Checking;
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let result = crate::update_check::fetch_latest(&url, std::time::Duration::from_secs(5))
+                .and_then(|body| crate::update_check::parse_latest_release(&body))
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::UpdateChecked(result));
+        });
+    }
+
     /// 真跑一次 rerank，验证端点路径与响应字段是否对得上。
     ///
     /// 只查 `/v1/models` 是不够的：有些服务（如 LM Studio）对不认识的路径会记
@@ -363,6 +390,22 @@ impl GongwenApp {
                         format!("已找到 {} 个本机字体。", fonts.len())
                     };
                     self.system_fonts = fonts;
+                }
+                WorkerResult::UpdateChecked(result) => {
+                    self.update_check = match result {
+                        Ok(info) => {
+                            if crate::update_check::compare_versions(
+                                env!("CARGO_PKG_VERSION"),
+                                &info.version,
+                            ) == std::cmp::Ordering::Less
+                            {
+                                crate::update_check::UpdateCheckState::Available(info)
+                            } else {
+                                crate::update_check::UpdateCheckState::Latest
+                            }
+                        }
+                        Err(error) => crate::update_check::UpdateCheckState::Failed(error),
+                    };
                 }
                 WorkerResult::BackupExported { path, result } => {
                     self.backup_busy = false;

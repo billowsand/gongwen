@@ -141,7 +141,7 @@ impl SettingsSection {
                 "PDF 由内置 Typst 引擎在程序里直接排版，公文与研究报告都是，不依赖本机安装任何排版软件。"
             }
             SettingsSection::Theme => {
-                "界面配色与屏幕上的纸色，点选后立即生效并保存。导出的公文不受影响，\
+                "界面配色、界面缩放与屏幕上的纸色，改动立即生效并保存。导出的公文不受影响，\
                  仍按规范为白纸黑字红头。"
             }
             SettingsSection::Font => "界面、Markdown 编辑器与公文编译三处字体分别设置，互不牵连。",
@@ -495,6 +495,25 @@ impl GongwenApp {
         }
     }
 
+    /// 调整全局界面缩放并立即生效。下一步重排就按新的 `zoom_factor` 计算；
+    /// 保存失败只写状态栏，当前这次缩放仍然有效。
+    pub(crate) fn apply_ui_scale(&mut self, ctx: &egui::Context, scale: f32) {
+        use crate::models::{UI_SCALE_MAX, UI_SCALE_MIN};
+        let scale = if scale.is_finite() {
+            scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX)
+        } else {
+            1.0
+        };
+        self.config.ui_scale = scale;
+        // set_zoom_factor 在帧末统一生效，避免本帧已按旧比例量过的控件错位。
+        ctx.set_zoom_factor(scale);
+        ctx.request_repaint();
+        self.status = format!("界面缩放已调整为 {:.0}%。", scale * 100.0);
+        if let Err(error) = storage::save(&self.config) {
+            self.status = format!("界面缩放已在本次生效，但配置保存失败：{error:#}");
+        }
+    }
+
     /// 画一张图表样式卡：白纸上一框、一菱形、一框的缩略流程。「按文种自动」
     /// 左右各画公文与研究报告的实际配色。
     fn diagram_theme_card(&self, ui: &mut egui::Ui, diagram_theme: DiagramTheme) -> egui::Response {
@@ -646,9 +665,46 @@ impl GongwenApp {
         response
     }
 
-    /// 界面主题：配色预设按明暗分两组多行展示，点选立即生效并保存。
-    /// 公文纸面单独一项，且只作用于屏幕——导出永远是白纸黑字红头。
+    /// 界面缩放与主题：缩放按百分比立即生效；配色预设按明暗分两组多行展示，
+    /// 点选立即生效并保存。公文纸面单独一项，且只作用于屏幕——导出永远是白纸黑字红头。
     pub(crate) fn theme_settings_ui(&mut self, ui: &mut egui::Ui) {
+        sub_heading(
+            ui,
+            "界面缩放",
+            Some(
+                "整个界面按比例放大或缩小，不影响导出的公文版式。拖动或输入百分比后立即生效并保存。",
+            ),
+        );
+        let mut pending_scale = None;
+        setting_row(ui, "缩放比例", None, |ui| {
+            let mut scale = self.config.ui_scale;
+            let response = ui
+                .add(
+                    egui::DragValue::new(&mut scale)
+                        .range(crate::models::UI_SCALE_MIN..=crate::models::UI_SCALE_MAX)
+                        .speed(0.05)
+                        .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                        .custom_parser(|text| {
+                            text.trim()
+                                .trim_end_matches('%')
+                                .trim()
+                                .parse::<f64>()
+                                .ok()
+                                .map(|value| value / 100.0)
+                        }),
+                )
+                .on_hover_text("范围 80%–175%，步进 5%");
+            if response.changed() {
+                pending_scale = Some(scale);
+            }
+        });
+        if let Some(scale) = pending_scale {
+            self.apply_ui_scale(ui.ctx(), scale);
+        }
+        setting_continuation(ui, |ui| {
+            ui.weak("高分屏上字太小或窗口装不下两栏时，先调这里。");
+        });
+
         sub_heading(
             ui,
             "配色预设",
@@ -1240,6 +1296,21 @@ impl GongwenApp {
                     self.start_provider_probe(&pid);
                 }
             }
+        });
+
+        sub_heading(
+            ui,
+            "更新检查",
+            Some("关于窗里的「检查更新」按这个地址读取最新发布；只在点击时请求一次。"),
+        );
+        setting_field(
+            ui,
+            "更新检查地址",
+            &mut self.config.update_check_url,
+            crate::update_check::DEFAULT_UPDATE_CHECK_URL,
+        );
+        setting_continuation(ui, |ui| {
+            ui.weak("内网可改成镜像地址；留空则检查时提示未配置。");
         });
     }
 

@@ -2136,6 +2136,15 @@ pub struct AppConfig {
     pub heading_focus_large: bool,
     /// Markdown 源码编辑器的字号（px）。可用 Ctrl+滚轮或 Ctrl± 调整。
     pub editor_font_size: f32,
+    /// 全局界面缩放。旧配置没有该字段时按 100% 处理。
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
+    /// 更新检查地址（GitHub `releases/latest` 接口）。内网环境可改成镜像地址。
+    #[serde(default = "default_update_check_url")]
+    pub update_check_url: String,
+    /// 首次启动的示例稿是否已写入稿件库。旧配置没有该字段时视为尚未写入。
+    #[serde(default)]
+    pub samples_seeded: bool,
     /// AI 优化提示词库。首次载入为空时补齐预置项，见 `ensure_ai_prompts`。
     pub ai_prompts: Vec<AiPrompt>,
     /// 上次使用的提示词 id，供选择面板默认高亮。
@@ -2197,6 +2206,9 @@ impl Default for AppConfig {
             show_preview_line_numbers: false,
             heading_focus_large: false,
             editor_font_size: 14.0,
+            ui_scale: 1.0,
+            update_check_url: default_update_check_url(),
+            samples_seeded: false,
             ai_prompts: vec![],
             last_ai_prompt: 0,
             rag: RagConfig::default(),
@@ -2217,6 +2229,15 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// 应用到 egui 的缩放值：旧配置或手工改坏的值都收进可选范围。
+    pub fn clamped_ui_scale(&self) -> f32 {
+        if self.ui_scale.is_finite() {
+            self.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX)
+        } else {
+            1.0
+        }
+    }
+
     pub fn provider(&self, id: &str) -> Option<&ProviderConfig> {
         self.providers.iter().find(|p| p.id == id)
     }
@@ -3037,6 +3058,20 @@ impl AppConfig {
             .unwrap_or(0)
             + 1
     }
+}
+
+/// 界面缩放的可选范围：再小看不清控件，再大普通笔记本一屏放不下两栏。
+pub const UI_SCALE_MIN: f32 = 0.8;
+pub const UI_SCALE_MAX: f32 = 1.75;
+
+/// 旧配置文件没有界面缩放；缺省 100%。
+fn default_ui_scale() -> f32 {
+    1.0
+}
+
+/// 旧配置文件没有更新检查地址；缺省用项目主页的 GitHub 发布接口。
+fn default_update_check_url() -> String {
+    crate::update_check::DEFAULT_UPDATE_CHECK_URL.to_string()
 }
 
 /// 旧配置文件里没有这个开关；缺省按开启处理。
@@ -4142,5 +4177,38 @@ mod tests {
         let json = serde_json::to_string(&config).expect("配置应能序列化");
         let back: AppConfig = serde_json::from_str(&json).expect("配置应能反序列化");
         assert_eq!(back.editor_fonts, config.editor_fonts);
+    }
+
+    /// 界面缩放、更新检查地址与示例稿标记都是后加字段：旧配置省略它们时
+    /// 要落回默认值，序列化后再读也不能丢。
+    #[test]
+    fn new_settings_fall_back_to_defaults_in_old_configs() {
+        let config: AppConfig = serde_json::from_str("{}").expect("空配置应能读出默认值");
+        assert_eq!(config.ui_scale, 1.0);
+        assert_eq!(config.clamped_ui_scale(), 1.0);
+        assert_eq!(
+            config.update_check_url,
+            crate::update_check::DEFAULT_UPDATE_CHECK_URL
+        );
+        assert!(!config.samples_seeded);
+
+        let json = serde_json::to_string(&config).expect("配置应能序列化");
+        let back: AppConfig = serde_json::from_str(&json).expect("配置应能反序列化");
+        assert_eq!(back.ui_scale, config.ui_scale);
+        assert_eq!(back.update_check_url, config.update_check_url);
+        assert_eq!(back.samples_seeded, config.samples_seeded);
+    }
+
+    #[test]
+    fn ui_scale_is_clamped_to_the_supported_range() {
+        let mut config = AppConfig::default();
+        config.ui_scale = 0.1;
+        assert_eq!(config.clamped_ui_scale(), UI_SCALE_MIN);
+        config.ui_scale = 3.0;
+        assert_eq!(config.clamped_ui_scale(), UI_SCALE_MAX);
+        config.ui_scale = 1.25;
+        assert_eq!(config.clamped_ui_scale(), 1.25);
+        config.ui_scale = f32::NAN;
+        assert_eq!(config.clamped_ui_scale(), 1.0);
     }
 }

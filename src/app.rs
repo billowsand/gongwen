@@ -169,6 +169,8 @@ pub struct GongwenApp {
     vocabulary_sort_undo: Option<vocabulary::SortUndo>,
     /// "关于公文助手"弹窗显隐。
     about_window_open: bool,
+    /// 关于窗里「检查更新」的当前状态；只留在本次运行。
+    update_check: crate::update_check::UpdateCheckState,
     /// 应用内帮助页（[`NavPage::Help`] 标签）的状态。
     help: crate::help::HelpState,
     quick_find: Option<quick_find::QuickFind>,
@@ -416,7 +418,6 @@ impl GongwenApp {
         } else {
             "就绪。先在“AI 管理”中连接模型服务。".into()
         };
-        let macos_titlebar_metrics = crate::macos_window::configure_native_titlebar(cc);
         // 预览字体要按配置装，所以先读配置再装字体。
         theme::set_current(config.theme);
         theme::set_current_paper(config.paper);
@@ -424,6 +425,17 @@ impl GongwenApp {
         theme::configure_fonts(&cc.egui_ctx, &config.fonts);
         theme::configure_icons(&cc.egui_ctx);
         theme::configure_style(&cc.egui_ctx);
+        // 全局界面缩放要赶在测量原生标题栏之前应用：macOS 的避让宽度按
+        // 当前 zoom_factor 折算（见 macos_window.rs），晚一步会按 100% 算错。
+        let ui_scale = config.clamped_ui_scale();
+        config.ui_scale = ui_scale;
+        cc.egui_ctx.options_mut(|options| {
+            options.zoom_factor = ui_scale;
+            // 全局缩放只认设置页：egui 内置的 Ctrl± 会绕开配置，且与源码编辑器
+            // 用 Ctrl± 调字号冲突（编辑器在快捷键处理里先消费，页面切换后却会失灵）。
+            options.zoom_with_keyboard = false;
+        });
+        let macos_titlebar_metrics = crate::macos_window::configure_native_titlebar(cc);
 
         // 载入即整理：补齐词条 id，按层级重排单位并重新生成层级编码。
         units::normalize(&mut config.vocabulary);
@@ -513,6 +525,7 @@ impl GongwenApp {
             vocabulary_move: None,
             vocabulary_sort_undo: None,
             about_window_open: false,
+            update_check: crate::update_check::UpdateCheckState::default(),
             help: crate::help::HelpState::default(),
             quick_find: None,
             modal_guard: crate::modal::ModalGuard::default(),
@@ -626,12 +639,43 @@ impl GongwenApp {
             knowledge_preview: None,
         };
         app.restore_session();
+        app.seed_samples_once();
         // 词表里的词同步给应用内输入法（静默：失败只写状态栏）。
         app.sync_lexicon_to_ime(false);
         if app.config.vocabulary_setup == VocabularySetupStatus::Pending {
             app.open_page(NavPage::Vocabulary);
         }
         app
+    }
+
+    /// 首次启动把两篇示例稿写进稿件库。稿件库不可用时保持未标记，下次启动再试；
+    /// 失败只写状态栏，不打断启动。
+    fn seed_samples_once(&mut self) {
+        if self.config.samples_seeded {
+            return;
+        }
+        let Some(store) = self.manuscript_store.as_mut() else {
+            return;
+        };
+        match crate::samples::seed(store, &mut self.config) {
+            Ok(created) => {
+                if created > 0 {
+                    self.manuscript_dirty = true;
+                    // 配置损坏、崩溃日志这类启动提示优先，不被示例稿消息盖掉。
+                    if self.status.starts_with("就绪") {
+                        self.status =
+                            format!("已载入 {created} 篇示例稿，可到「稿件管理」查看或直接修改。");
+                    }
+                }
+                if let Err(error) = storage::save(&self.config) {
+                    self.status =
+                        format!("示例稿已处理，但配置保存失败（下次启动可能重复检查）：{error:#}");
+                }
+            }
+            Err(error) => {
+                self.status = format!("载入示例稿失败：{error:#}");
+            }
+        }
     }
 
     // ---------- AI 管理（优化提示词库） ----------

@@ -278,5 +278,8 @@
     "auto_commit": false,
     "fifth_commit": true
   },
-  "theme": "claude"
+  "theme": "claude",
+  "ui_scale": 1.0,
+  "update_check_url": "https://api.github.com/repos/billowsand/gongwen/releases/latest",
+  "samples_seeded": false
 }

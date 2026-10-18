@@ -56,6 +56,7 @@ mod redline;
 mod revise_cases;
 mod revise_model;
 mod revision;
+mod samples;
 mod skill_pack;
 mod storage;
 mod system_fonts;
@@ -65,6 +66,7 @@ mod typst_engine;
 #[cfg(test)]
 mod ui_snapshot;
 mod units;
+mod update_check;
 mod validator;
 mod version;
 mod version_link;
