@@ -55,6 +55,14 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 附件或文种规则（`src/export/parse.rs`、`src/prompt.rs`）要同步这里的文档；新增文件要登记进
 `skill_pack::FILES`，测试会检查两边一致。
 
+改完技能包跑三样：`cargo test --locked skill_pack`（模板能被解析、frontmatter 合规范）、
+`python skills/gongwen-markdown/scripts/check_gongwen_md.py --selftest`（判据自测）、
+`cargo test --locked model_outputs_survive -- --ignored`（拿模型产物过解析器与校验器，
+需 `GONGWEN_SKILL_EVAL_MANIFEST` 指向评测 run 的 `manifest.json`）。要知道「模型照这份文档
+能不能写对」用 `python scripts/gongwen-skill-eval.py`（密钥只从 gitignore 的
+`model_api_test.md.txt` 或环境变量读），方法与最近一次实测数字见
+`docs/gongwen-skill-model-eval.md`。
+
 顶层模块清单在 `src/main.rs`。注意 `mod` 声明里 `outline`、`proofread_rules` 等
 并非全部集中在文件头部，改动前先 `grep -n "^mod " src/main.rs`。
 

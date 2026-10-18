@@ -101,6 +101,16 @@ CROSS_MATRIX: dict[str, list[str]] = {
     "siliconflow": ["deepseek-ai/DeepSeek-V4-Flash", "Qwen/Qwen3.8-27B"],
 }
 
+# 跨厂商补充验证（同为七牛入口的其它厂商模型），用于扩大「中等规模模型」样本。
+VENDOR_MATRIX: dict[str, list[str]] = {
+    "qny": [
+        "z-ai/glm-5.3-flash",
+        "stepfun/step-3.7-flash",
+        "bytedance/doubao-seed-2-1-turbo",
+        "qwen/qwen3.7-flash",
+    ],
+}
+
 KINDS = [
     "official-letter",
     "plain-document",
@@ -1067,9 +1077,10 @@ def evaluate_one(
     timeout: float,
     retries: int,
     force: bool,
+    repeat: int = 1,
     gate: "RateGate | None" = None,
 ) -> dict:
-    file_stem = f"{provider}__{safe_name(model)}"
+    file_stem = f"{provider}__{safe_name(model)}" + (f"-r{repeat}" if repeat > 1 else "")
     case_dir = run_dir / condition / kind
     case_dir.mkdir(parents=True, exist_ok=True)
     raw_file = case_dir / f"{file_stem}.raw.md"
@@ -1082,6 +1093,7 @@ def evaluate_one(
         "model": model,
         "kind": kind,
         "condition": condition,
+        "repeat": repeat,
         "status": "ok",
         "file": relative_clean,
         "raw_file": relative_raw,
@@ -1249,7 +1261,7 @@ def run_results(
     }
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
         futures = {}
-        for provider, model, kind, condition in tasks:
+        for provider, model, kind, condition, repeat in tasks:
             credential = credentials.get(provider)
             if not credential:
                 results.append(
@@ -1258,6 +1270,7 @@ def run_results(
                         "model": model,
                         "kind": kind,
                         "condition": condition,
+                        "repeat": repeat,
                         "status": "missing-key",
                         "file": "",
                         "raw_file": "",
@@ -1279,6 +1292,7 @@ def run_results(
                 model=model,
                 kind=kind,
                 condition=condition,
+                repeat=repeat,
                 texts=texts,
                 check_script=check_script,
                 max_tokens=max_tokens,
@@ -1287,9 +1301,9 @@ def run_results(
                 force=force,
                 gate=gates.get(provider),
             )
-            futures[future] = (provider, model, kind, condition)
+            futures[future] = (provider, model, kind, condition, repeat)
         for index, future in enumerate(as_completed(futures), start=1):
-            provider, model, kind, condition = futures[future]
+            provider, model, kind, condition, repeat = futures[future]
             try:
                 result = future.result()
             except Exception as error:  # noqa: BLE001 - 单次失败不能中断整批
@@ -1298,6 +1312,7 @@ def run_results(
                     "model": model,
                     "kind": kind,
                     "condition": condition,
+                    "repeat": repeat,
                     "status": "unexpected-error",
                     "file": "",
                     "raw_file": "",
@@ -1309,8 +1324,9 @@ def run_results(
                     "error": f"{type(error).__name__}: {error}",
                 }
             results.append(result)
+            suffix = f"-r{repeat}" if repeat > 1 else ""
             print(
-                f"[{index}/{len(futures)}] {provider} {model} {kind} {condition} "
+                f"[{index}/{len(futures)}] {provider} {model} {kind} {condition}{suffix} "
                 f"→ {result['status']} E{result['errors']} W{result['warnings']} "
                 f"{','.join(result['modes'])}",
                 flush=True,
@@ -1437,6 +1453,7 @@ def write_summary(
         "model",
         "kind",
         "condition",
+        "repeat",
         "status",
         "errors",
         "warnings",
@@ -1678,7 +1695,11 @@ def write_manifest(
 def smoke(credentials: dict[str, dict[str, str]], timeout: float, retries: int) -> int:
     failures = 0
     print("provider\tmodel\tstatus\tlatency_ms\tcontent\tusage")
-    for provider, models in MODEL_MATRIX.items():
+    matrix: dict[str, list[str]] = {provider: list(models) for provider, models in MODEL_MATRIX.items()}
+    for provider, models in VENDOR_MATRIX.items():
+        merged = matrix.setdefault(provider, [])
+        merged.extend(model for model in models if model not in merged)
+    for provider, models in matrix.items():
         credential = credentials.get(provider)
         if not credential:
             for model in models:
@@ -1967,30 +1988,44 @@ def build_tasks(
     only_models: list[str],
     only_kinds: list[str],
     conditions: list[str],
-) -> list[tuple[str, str, str, str]]:
+    repeats: int = 0,
+) -> list[tuple[str, str, str, str, int]]:
+    """`repeats=N` 表示本次 run 内每个用例共采样 N+1 次（编号 r1…r(N+1)，全部是独立调用）。
+
+    方差观测的用法：主矩阵那次算第 1 次，重复轮再用 `--repeats 2` 产生 r1/r2/r3，
+    每个靶点合计 4 次独立采样（主矩阵 1 次 + 重复轮 3 次）。
+    """
     if matrix == "baseline":
         matrix_models = BASELINE_MATRIX
         matrix_conditions = conditions
     elif matrix == "cross":
         matrix_models = CROSS_MATRIX
         matrix_conditions = conditions
+    elif matrix == "vendors":
+        matrix_models = VENDOR_MATRIX
+        matrix_conditions = conditions
     elif matrix == "all":
         matrix_models = {
-            provider: sorted(set(BASELINE_MATRIX.get(provider, [])) | set(CROSS_MATRIX.get(provider, [])))
+            provider: sorted(
+                set(BASELINE_MATRIX.get(provider, []))
+                | set(CROSS_MATRIX.get(provider, []))
+                | set(VENDOR_MATRIX.get(provider, []))
+            )
             for provider in PROVIDERS
         }
         matrix_conditions = conditions
     else:
         raise SystemExit(f"不认识的 matrix：{matrix}")
     kinds = [kind for kind in KINDS if not only_kinds or kind in only_kinds]
-    tasks: list[tuple[str, str, str, str]] = []
+    tasks: list[tuple[str, str, str, str, int]] = []
     for provider, models in matrix_models.items():
         for model in models:
             if only_models and not any(token in model or token == provider for token in only_models):
                 continue
             for kind in kinds:
                 for condition in matrix_conditions:
-                    tasks.append((provider, model, kind, condition))
+                    for repeat in range(1, repeats + 2):
+                        tasks.append((provider, model, kind, condition, repeat))
     return tasks
 
 
@@ -2021,10 +2056,17 @@ def main(argv: list[str] | None = None) -> int:
 
     run_parser = subparsers.add_parser("run", help="跑评测矩阵")
     add_common(run_parser)
-    run_parser.add_argument("--matrix", choices=["baseline", "cross", "all"], default="baseline")
+    run_parser.add_argument("--matrix", choices=["baseline", "cross", "vendors", "all"], default="baseline")
     run_parser.add_argument("--run-id", default="", help="产物子目录名；默认 baseline-<时间戳>")
     run_parser.add_argument("--max-tokens", type=int, default=32768)
     run_parser.add_argument("--workers", type=int, default=4)
+    run_parser.add_argument(
+        "--repeats",
+        type=int,
+        default=0,
+        help="每个用例在本次 run 内共采样 N+1 次（r1…r(N+1)，独立调用），用于方差观测",
+    )
+    run_parser.add_argument("--concurrency", action="append", default=[], help="覆盖提供商并发：provider=N（可重复）")
     run_parser.add_argument("--conditions", default="A,B")
     run_parser.add_argument("--only-model", action="append", default=[], help="只跑匹配的模型（可重复）")
     run_parser.add_argument("--only-kind", action="append", default=[], help="只跑指定文种（可重复）")
@@ -2130,7 +2172,18 @@ def main(argv: list[str] | None = None) -> int:
     if not conditions:
         print("条件只能是 A/B", file=sys.stderr)
         return 2
-    tasks = build_tasks(args.matrix, args.only_model, args.only_kind, conditions)
+    for item in args.concurrency:
+        if "=" not in item:
+            print(f"--concurrency 需要 provider=N 形式：{item}", file=sys.stderr)
+            return 2
+        provider, _, value = item.partition("=")
+        provider = provider.strip()
+        if provider not in PROVIDERS:
+            print(f"不认识的提供商：{provider}", file=sys.stderr)
+            return 2
+        PROVIDER_LIMITS.setdefault(provider, {})["concurrency"] = int(value)
+        print(f"并发覆盖：{provider}={value}")
+    tasks = build_tasks(args.matrix, args.only_model, args.only_kind, conditions, args.repeats)
     if not tasks:
         print("没有匹配的任务", file=sys.stderr)
         return 2

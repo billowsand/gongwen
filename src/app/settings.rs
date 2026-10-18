@@ -1415,7 +1415,7 @@ impl GongwenApp {
         setting_toggle(
             ui,
             "全角标点",
-            None,
+            Some("中文模式使用全角标点；顿号键盘上没有半角位，按反斜杠出。"),
             &mut self.config.ime.full_width_punctuation,
             "中文模式使用全角标点",
         );
@@ -1476,7 +1476,7 @@ impl GongwenApp {
         sub_heading(ui, "按键速查", None);
         setting_note(
             ui,
-            "Shift 切中英；空格选择高亮，1–9 选候选；设置的翻页键或 PageUp / PageDown 翻页；Esc 清码；回车原样上屏编码；方向键、退格、Delete 编辑编码；Ctrl+Delete 屏蔽高亮候选；Ctrl+Shift+A 造词（取选区或最近上屏的字），正文右键可加词、查编码；候选上点右键可置顶、调序、屏蔽。",
+            "Shift 切中英；空格选择高亮，1–9 选候选；设置的翻页键或 PageUp / PageDown 翻页；Esc 清码；回车原样上屏编码；方向键、退格、Delete 编辑编码；Ctrl+Delete 屏蔽高亮候选；Ctrl+Shift+A 造词（取选区或最近上屏的字），正文右键可加词、查编码；候选上点右键可置顶、调序、屏蔽。全角标点下顿号按反斜杠出。",
         );
     }
     fn ime_candidates_ui(&mut self, ui: &mut egui::Ui) {

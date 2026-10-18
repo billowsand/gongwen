@@ -733,6 +733,9 @@ impl Ime {
                 self.single_quote_open = !self.single_quote_open;
                 if self.single_quote_open { "‘" } else { "’" }
             }
+            // 顿号键盘上没有半角位，通行约定是按反斜杠出（微软拼音等都一样）。
+            // 公文里逐项并列全靠它，漏了只能去别的输入法打。
+            '\\' => "、",
             _ => return c.to_string(),
         }
         .into()
@@ -947,6 +950,34 @@ mod tests {
         assert!(!out.consumed);
         assert_eq!(out.commit.as_deref(), Some("ab"));
     }
+    /// 中文标点里只有顿号没有半角键位，按反斜杠出（微软拼音等的通行约定）。
+    /// 漏了这一项，公文里逐项并列就只能换输入法打。
+    #[test]
+    fn backslash_commits_dunhao_in_chinese_and_stays_literal_in_half_width() {
+        let mut ime = ime();
+        let mut kept = Vec::new();
+        assert!(ime.handle(Key::Char('\\'), &mut kept));
+        assert_eq!(
+            kept.iter()
+                .filter_map(|event| match event {
+                    egui::Event::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["、"]
+        );
+        // 半角标点模式与英文模式都不接管：反斜杠原样留给文本框。
+        ime.settings.full_width_punctuation = false;
+        let mut kept = Vec::new();
+        assert!(!ime.handle(Key::Char('\\'), &mut kept));
+        assert!(kept.is_empty());
+        ime.settings.full_width_punctuation = true;
+        ime.toggle_english();
+        let mut kept = Vec::new();
+        assert!(!ime.handle(Key::Char('\\'), &mut kept));
+        assert!(kept.is_empty());
+    }
+
     #[test]
     fn focus_change_clears_code_and_mouse_commit_keeps_target() {
         let mut ime = ime();
