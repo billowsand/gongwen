@@ -29,7 +29,7 @@
 |---|---|
 | Windows | `%APPDATA%\LocalTools\GongwenAssistant\config\` |
 | Linux | `~/.config/gongwenassistant/` |
-| macOS | `~/Library/Application Support/LocalTools/GongwenAssistant/config/` |
+| macOS | `~/Library/Application Support/cn.LocalTools.GongwenAssistant/config/` |
 
 > **提示** 程序内置配置文件在**用户配置目录**，不在安装目录。所以卸载重装**不丢数据**——除非你主动删配置目录。
 

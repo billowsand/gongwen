@@ -1625,13 +1625,27 @@ impl GongwenApp {
         }
     }
 
-    /// 保存与现场分区：自动保存到稿件库的开关。
+    /// 保存与现场分区：自动保存到稿件库的开关与间隔。
     fn persistence_section_ui(&mut self, ui: &mut egui::Ui) {
         ui.checkbox(&mut self.config.auto_save, "自动保存到稿件库")
             .on_hover_text(
-                "每 2 分钟以及切换标签、关闭窗口前，把改动静默写回稿件库。
+                "按下方设置的间隔以及切换标签、关闭窗口前，把改动静默写回稿件库。
 自动保存不会提交版本——版本链什么时候留痕，始终由你决定。",
             );
+        let enabled = self.config.auto_save;
+        setting_row(ui, "自动保存间隔", None, |ui| {
+            ui.add_enabled(
+                enabled,
+                egui::DragValue::new(&mut self.config.auto_save_interval_secs)
+                    .range(
+                        crate::models::AUTO_SAVE_INTERVAL_MIN_SECS
+                            ..=crate::models::AUTO_SAVE_INTERVAL_MAX_SECS,
+                    )
+                    .speed(5)
+                    .suffix(" 秒"),
+            )
+            .on_hover_text("范围 30–600 秒，默认 120 秒（2 分钟）；改完立即按新间隔计时");
+        });
     }
 
     /// 密级规则分区：三级密级的保密期限上限与「长期」标注开关。

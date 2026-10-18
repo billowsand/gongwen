@@ -7,7 +7,7 @@
 //! - 任何一件编译失败整个导出失败，先写临时文件、成功后才改名到目标路径，
 //!   不留缺件的半成品，也不截断已有的同名文件。
 //!
-//! 编译函数由调用方传入：正式导出走 TeX，测试里换成现成的 PDF 字节。
+//! 编译函数由调用方传入：正式导出走 Typst，测试里换成现成的 PDF 字节。
 
 use crate::manuscript::send_package::{ExportItemRecord, PlanEntry, SendPackagePlan};
 use crate::models::{DraftInput, TemplateKind, TemplateProfile};

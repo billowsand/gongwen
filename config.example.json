@@ -212,10 +212,12 @@
   "export": {
     "markdown": true,
     "docx": true,
-    "tex": true,
+    "pdf": true,
     "overwrite": false
   },
   "auto_export": false,
+  "auto_save": true,
+  "auto_save_interval_secs": 120,
   "security_rules": {
     "secret_max_years": 10,
     "confidential_max_years": 20,

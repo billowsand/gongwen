@@ -4,8 +4,8 @@
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
 use crate::app::{
-    AUTOSAVE_INTERVAL, GongwenApp, NavPage, TabRef, VersionCommitDraft, VersionScope,
-    default_version_name, unique_version_name,
+    GongwenApp, NavPage, TabRef, VersionCommitDraft, VersionScope, default_version_name,
+    unique_version_name,
 };
 use crate::draft_page::{DocKey, DraftSession, editor_id};
 use crate::manuscript;
@@ -485,7 +485,9 @@ impl GongwenApp {
         if !self.config.auto_save {
             return;
         }
-        if self.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
+        let interval =
+            std::time::Duration::from_secs(self.config.clamped_auto_save_interval_secs());
+        if self.last_autosave.elapsed() < interval {
             return;
         }
         self.last_autosave = std::time::Instant::now();

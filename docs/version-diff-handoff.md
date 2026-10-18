@@ -1,5 +1,18 @@
 # 版本变更与花脸稿改造：交接说明
 
+> **现行实现已迁至 Typst（见 `docs/typst-engine.md`）。** PDF 由进程内的 Typst 排版，
+> World 在 `src/typst_engine.rs`，公文模板 `assets/typst/gongwen.typ`、研究报告模板
+> `assets/typst/research.typ`。原 Tectonic / XeLaTeX / `gonghan-gwa.cls` / `md2tex.cls`
+> 链路已整体移除：不需要本机装 TeX，也不再受「沙箱里没有 TeX 运行时」的限制。
+>
+> 本文写于迁移前，下列内容已按现状校准：代码地图、测试名、验收与排查命令、工作约定。
+> 其余提到 TeX 宏、`.cls`、`xelatex` 的段落属于历史记录，保留作实现背景；相关段落已就地
+> 标注「（历史）」或补充现行做法，不要照它们改代码。现行花脸稿见 `src/export/typst/runs.rs`（`marked_runs` / `redline_chunks`）、
+> `src/export/typst/frame.rs`（版头版记要素）与两份模板里的 `del` / `add` 片段。
+> 真排版检查：`cargo test --locked typst_samples -- --ignored --nocapture`（含花脸稿样张）；
+> `manual_element_pdf_full_probe` 与 `manual_cleared_element_pdf_text_probe` 真排 PDF，
+> 后者还需本机 `pdftotext`（poppler），它只是人工探针，不是应用依赖。
+
 > 给接手的开发者（含本地 Claude）：先读 `docs/version-diff-redesign.md`（方案与需求结论），
 > 再读本文（做到哪了、和方案有什么出入、下一步怎么做、有哪些坑）。
 > 本文随进度更新；每完成一期，把「当前进度」和「下一步」改掉。
@@ -34,13 +47,19 @@
     整删块和移动注记。
   - `serialize.rs`：`RedlineOverlay` → 带哨兵的 Markdown。标注逐字投影回原文（`project`）：
     加粗按每个字的状态重新开合，并且**只在加粗闭合时开合哨兵**，`**` 永远不跨哨兵。
-  - `postprocess.rs`：研究报告专用。mdx 转换出的 TeX / DOCX 落地后，再把哨兵换成宏或 run 格式。
+  - `postprocess.rs`：研究报告 Word 专用。mdx 转换出的 DOCX 落地后，再把哨兵换成 run 格式；
+    PDF 侧由 `src/export/typst/research_redline.rs` 直接写进模板数据。
 - `src/redline.rs`：花脸稿入口，`build(old, new)` 和 `export_files`。
-- 导出侧的标记：
-  - `src/export/latex/text.rs`：`body_text_to_tex`、`redline_macro`、`marked_tex_escape`、`marked_heading_tex`；
-  - `src/export/table.rs`：表格单元格；
-  - `src/export/docx/runs.rs`：`apply_redline`、`marked_runs`；
-  - `gonghan-gwa.cls`：「花脸稿标记」一节。
+- 导出侧的标记（现行 Typst）：
+  - `src/export/typst/runs.rs`：`body_runs` / `marked_runs` / `cell_runs` / `heading_runs`，
+    把哨兵切成 `m: "del" | "add"` 的片段；
+  - `src/export/table.rs`：表格单元格（`cell_runs`）；
+  - `src/export/typst/frame.rs`：版头版记要素的 `marked_runs`；
+  - `assets/typst/gongwen.typ` / `assets/typst/research.typ`：`del` 红删除线、`add` 蓝框；
+  - `src/export/docx/runs.rs`：`apply_redline`、`marked_runs`（Word 仍由 docx-rs 生成）。
+- （历史）原 TeX 链路在 `src/export/latex/text.rs`（`body_text_to_tex`、
+  `redline_macro`、`marked_tex_escape`、`marked_heading_tex`）与 `gonghan-gwa.cls`，
+  已随 Tectonic 整体移除，仅供翻 git 历史时对照。
 
 ### 标记样式（三端必须一致）
 - 删除：红色 `#C00000` 直删除线穿过字身，删除的文字也是红色。
@@ -53,9 +72,10 @@
 - `generated_edits_always_restore_both_sides`：生成式不变式。400 组真实公文句子随机增删改，
   逐字核对「去新增 == 旧版、去删除 == 新版」。**改归并规则或序列化后必须跑它**。
   它曾抓到过吃字和重复字的问题。
-- `src/redline.rs` 的一致性测试：同一份花脸稿 Markdown，DOCX run 序列与 TeX 片段序列的
+- `src/redline.rs` 的一致性测试：同一份花脸稿 Markdown，DOCX run 序列与 PDF（Typst 片段）序列的
   `(文字, 类型)` 必须相同。
-- `src/export/latex.rs` 的 `redline_styles_wrap_outside_the_mark_macros`：锁住「样式包在宏外面」这个写法。
+- `redline::typst_tests::the_templates_wire_the_mark_styles`：锁住删除线红色、新增框蓝色，
+  以及两份 Typst 模板确实用了 `strike(...)` / `highlight(...)`。
 
 ## 第 ② 期交付了什么
 
@@ -71,7 +91,7 @@
   - 整块图形（公式）用 `paint_block_mark`：删除画一道中线、新增套完整框。
 - 标记接入点：`layout.rs` 的 `append_inline`（正文 / 列表 / 对齐行 / 紧缩标题正文）、
   `line_block_runs`（标题、附件名，经 `marks::plain_keep_marks` 保留哨兵）、表格单元格、
-  `render.rs` 的 `heading_job`（新增标题连编号加框，与 DOCX / TeX 一致）、
+  `render.rs` 的 `heading_job`（新增标题连编号加框，与 DOCX / PDF 一致）、
   `red.rs`（红头呈批件分页：`RedFlowSegment.mark` 跟着字跨页）、
   `math_flow.rs`（研究报告公式混排：标记状态跨公式片段接力，公式整体标注）。
 - `src/visual_diff/serialize.rs` 的 `to_marked_markdown_with_spans`：序列化同时产出
@@ -100,7 +120,7 @@
 - F7 / Shift+F7 与工具栏上下箭头走同一个 `DiffViewState::step`，首尾循环。
 
 ### 测试（不许删，只许加）
-- `redline.rs` 一致性测试扩成三方：预览（`marks::body_sequence`）= DOCX = TeX。
+- `redline.rs` 一致性测试扩成三方：预览（`marks::body_sequence`）= DOCX = PDF（Typst 片段）。
 - `preview::marks::tests`：跨行新增只有两条竖边、删除红字带删除线、新增标题编号在框里。
 - `version_link::tests`：改段 / 整删段 / 新增标题的双向换算。
 - `draft_page::version_diff::tests`：内存库 + 真 egui 上下文画整页，两栏都出字、
@@ -122,8 +142,9 @@
   -> ElementMarks`；每个字段 / 部件给出「没变」或（旧显示值，新显示值）
   （`FieldMark::change()`），`FieldMark::marked()` 取带哨兵文本（没变返回新值原文，
   变了 `mark_deleted(旧) + mark_added(新)`，一侧为空只剩另一侧）。
-  按部件标：成文日期（年/月/日）、发文字号（代字/年份/序号）——TeX 里它们各是三条
-  命令、中间夹着类文件写死的年月日与〔〕号；落款单位每行一个部件。日期切不开
+  按部件标：成文日期（年/月/日）、发文字号（代字/年份/序号）——版式里它们各是独立部件
+  （原 TeX 实现是三条命令、中间夹着类文件写死的年月日与〔〕号；Typst 数据里同样是分开的
+  字段），落款单位每行一个部件。日期切不开
   （自由文本）整串一个部件。预览版留白（文号序号、日期「日」位）两侧都换占位后再比，
   纸面没变的不出标注。
 - `src/redline.rs`：`RedlineDoc` 增加 `elements: ElementMarks`（`is_empty` 把要素改动
@@ -132,9 +153,13 @@
   `export_files` 把 `doc.elements` 传给导出器。
 - 版本对照页 `sync_draft_diff` 三处（首帧同步 / 150ms 防抖后台 / 导出兜底）都走新入口，
   旧值取 `Baseline.snapshot` 的 `DraftInput`，后台线程随任务带走词库。
-- TeX：`official.rs` / `papers.rs` 的要素命令参数走 `element_arg`（变了
-  `marked_tex_escape`，没变原生取值）；密级整段进 `\SecurityLevel`、`\SecurityPeriod`
-  留空（类里的 ★ 是条件输出）；日期 / 文号按部件。**类文件新增打印接缝**
+- 现行 Typst：`src/export/typst/frame.rs` 的要素命令参数统一走 `marked_runs`（变了就带
+  `m: "del"` / `"add"`，没变是普通片段）；密级整段走要素标注、日期 / 文号按部件。
+  版记抄送段落按有无标注决定是否保留“抄送：”与旧值删除段（见 `frame.rs` 的
+  `copies_to` 分支）。份数统计只读未标注的新值。
+- （历史：TeX 实现，已随 Tectonic 移除）`official.rs` / `papers.rs` 的要素命令参数走
+  `element_arg`（变了 `marked_tex_escape`，没变原生取值）；密级整段进 `\SecurityLevel`、
+  `\SecurityPeriod` 留空（类里的 ★ 是条件输出）；日期 / 文号按部件。类文件新增打印接缝
   `\RecipientMarked` / `\CopiesToMarked`（默认等于原命令）——`\Recipient` / `\CopiesTo`
   始终写未标注的新值，供类里的统计 / 判空用（见「已知的坑」）。
 - Word：`docx/runs.rs` 的 `marked_runs` / `security_runs(…, mark)`；版头 / 版记各段落
@@ -144,24 +169,29 @@
   `preview/marks.rs` 新增 `marked_line_galley`（自行摆位的行用），`layout.rs` 的
   `stacked` 补 `paint_galley_marks`；`header.rs`（密级、文号）、`tail.rs`（主送、落款、
   日期、版记抄送）、`red.rs`（呈批件密级 / 文号 / 呈报领导 / 落款 / 日期）都按字段接。
-- 红头呈批件：`papers.rs` 的 redapproval 与 `preview/red.rs` 全部覆盖；联合发文落款的
+- 红头呈批件：`export/typst/frame.rs` 的 redapproval 与 `preview/red.rs` 全部覆盖；联合发文落款的
   单位表（发文单位）与呈批件承办区不在本期。
 
 ### 测试（只加不删）
 - `visual_diff::elements::tests`：字段改了 / 没改 / 一侧为空、去删除段等于新显示值、
   删除侧等于旧显示值、预览版留白不标、要素全没变时没有任何哨兵。
-- `redline::consistency_tests::element_marks_agree_across_preview_docx_and_tex`：
+- `redline::consistency_tests::element_marks_agree_across_preview_docx_and_pdf`：
   同一组要素变化，每个标注单元分别过预览 `append_marked_text` / DOCX `marked_runs` /
-  TeX `marked_tex_escape` 三条真实管线，`(文字, 类型)` 序列必须相同。
+  Typst `marked_runs` 三条真实管线，`(文字, 类型)` 序列必须相同。
 - `redline::consistency_tests::unchanged_elements_keep_the_plain_output_byte_for_byte`：
-  空标注与定稿导出逐字节相同（TeX 文件、DOCX 的 `word/document.xml`）。
+  空标注与定稿导出逐字节相同（Typst 模板数据、DOCX 的 `word/document.xml`）。
 - `redline::tests::element_only_changes_still_produce_a_redline`：正文没动只改密级。
-- `redline::consistency_tests::element_change_matrix_keeps_marks_in_tex_word_and_preview`：六要素 × 清空 / 新增 / 修改，覆盖公函、红头呈批件及电话通知、白头件、普通公文、会议议程各自现有的版位；逐项核对真实 TeX 宏、所有 `word/*.xml` 的删除线 / 边框 run、全页预览文字与删增片段序列。
-- `redline::consistency_tests::manual_cleared_element_pdf_text_probe`（`#[ignore]`）：内置 Tectonic 编译清空要素的公函 / 红头呈批件，用 `pdftotext` 检查删除侧确实进入 PDF 文本层。
-- `redline::consistency_tests::manual_element_pdf_full_probe`（`#[ignore]`）：真编译 +
+- `redline::consistency_tests::element_change_matrix_keeps_marks_in_pdf_word_and_preview`：六要素 × 清空 / 新增 / 修改，覆盖公函、红头呈批件及电话通知、白头件、普通公文、会议议程各自现有的版位；逐项核对 Typst 模板数据里的 `m` 标注、所有 `word/*.xml` 的删除线 / 边框 run、全页预览文字与删增片段序列。
+- `redline::consistency_tests::manual_cleared_element_pdf_text_probe`（`#[ignore]`）：Typst 排清空要素的公函 / 红头呈批件 PDF，用 `pdftotext` 检查删除侧确实进入 PDF 文本层。
+- `redline::consistency_tests::manual_element_pdf_full_probe`（`#[ignore]`）：真排版 +
   栅格化探针，见下。
 
-### 实测（内置 Tectonic，2026-09-25）
+### 实测（历史：内置 Tectonic，2026-09-25）
+
+> 以下是迁移到 Typst 之前的 TeX 实测记录，问题与结论保留作背景。现行探针同名，改由
+> Typst 排版：`cargo test --locked manual_element_pdf_full_probe -- --ignored`，
+> 产物仍在 `tmp/element-marks-full/`，用 hayro 栅格化。
+
 `cargo test --locked manual_element_pdf_full_probe -- --ignored` 真编译两份花脸稿 PDF
 （公函 1 页、红头呈批件 2 页），`hayro` 栅格化首页 / 末页到 `tmp/element-marks-full/`。
 逐字二分定位到一个**真编译才暴露的问题**：主送 / 抄送带标注时
@@ -176,12 +206,15 @@
 
 ## 第 ② 期要素清空标注修复（2026-09-25）
 
+> 本节是 TeX 时代的修复记录（历史）。现行 Typst 的清空标注由 `export/typst/frame.rs`
+> 与模板处理，行为由 `element_change_matrix_keeps_marks_in_pdf_word_and_preview` 守着。
+
 - 根因：主送、抄送、密级、落款等绘制路径先按新版空值跳过版位，导致只含旧值删除段的标注未进入输出。
-- TeX：密级命令仅在「新版密级为空且密级未变」时省略。类文件新增 `\CopiesToMarkedRow`（默认 `false`）；抄送字段有标注时导出设置为 `true`，新版抄送为空仍排“抄送：”与旧值删除线。份数统计继续只读未标注的新值；没有标注时定稿 TeX 与空标注输出逐字节测试保持一致。
+- （历史：TeX）密级命令仅在「新版密级为空且密级未变」时省略。类文件新增 `\CopiesToMarkedRow`（默认 `false`）；抄送字段有标注时导出设置为 `true`，新版抄送为空仍排“抄送：”与旧值删除线。份数统计继续只读未标注的新值；没有标注时定稿 TeX 与空标注输出逐字节测试保持一致。
 - 预览：密级、主送与红头呈批件的密级 / 呈报领导都在有标注时保留版位；抄送沿用原有字段片段绘制。落款只有新版单位行为空、且没有单位或日期标注时才跳过。
 - Word：清空密级、主送、抄送仍生成标注段；新版落款单位为空时仍生成旧单位删除 run，日期有标注时也不被空单位门控吞掉。矩阵从 `word/` 下所有 XML 部件检查 run 属性，覆盖页眉 / 页脚部件。
 - 红头呈批件无抄送版位，矩阵不为它虚构抄送输出；其余适用字段逐项覆盖。
-- 验证：`cargo fmt --all -- --check` 与 `cargo clippy --locked --all-targets -- -D warnings` 通过；`cargo test --locked --all-targets` 为 1204 passed、0 failed、33 ignored。`manual_cleared_element_pdf_text_probe` 另以 `cargo test --locked manual_cleared_element_pdf_text_probe -- --ignored --nocapture` 通过，内置 Tectonic 编译两种文种并由 `pdftotext` 抽取删除值。
+- （历史：验证数字来自 TeX 时代）`cargo fmt --all -- --check` 与 `cargo clippy --locked --all-targets -- -D warnings` 通过；`cargo test --locked --all-targets` 为 1204 passed、0 failed、33 ignored。`manual_cleared_element_pdf_text_probe` 另以 `cargo test --locked manual_cleared_element_pdf_text_probe -- --ignored --nocapture` 通过，内置 Tectonic 编译两种文种并由 `pdftotext` 抽取删除值。
 
 ## 第 ③ 期交付了什么
 
@@ -328,16 +361,16 @@ diff 编辑器（每帧给全部源码行画行号、铺底色，60 页约 0.6 m
    显示值统一走 `export::element_display`，标注走 `visual_diff::elements` + `RedlineDoc.elements`，
    三处渲染各自接标注（见「第 ② 期『公文要素就地标注』交付了什么」）。`DocumentModel::from_inputs`
    仍标着 `#[allow(dead_code)]`（它那套原始拼接只适合做比较，没接进渲染）。
-3. 研究报告的花脸稿是在 mdx 产物上后处理（`visual_diff::postprocess`），不是像公文那样在
-   导出器里接标记。TeX 侧（第 ③ 期测试后重写）：标记内容按顶层切段，样式命令包在宏外、
-   公式 / 引用整体装盒另画、独立公式整块标注，见「第 ③ 期测试后的修正」第 2 条；只有
-   花括号不平衡（哨兵跨过命令的括号，序列化保证不会发生）时才退回整段一个宏。
+3. 研究报告的花脸稿：Word 侧在 mdx 产物上后处理（`visual_diff::postprocess`），
+   PDF 侧由 `export/typst/research_redline.rs` 直接写进 Typst 模板数据，不是像公文那样在
+   `export/typst/runs.rs` 里切片段。研究报告 PDF 的花脸稿按顶层切段、
+   公式 / 引用整体装盒另画、独立公式整块标注，见「第 ③ 期测试后的修正」第 2 条。
    Word 侧：标记未收尾时中间的 run 整个追加删除线 / 边框。研究报告 Word 里的公式本来就是
    `$…$` 源码文字（mdx 的既有行为），花脸稿里照样标。
 4. （第 ② 期）**视觉 diff 仍在界面线程同步算**，按内容哈希缓存。本期左栏只读、改字要
    切回 Markdown 模式，停在对照模式时内容不变，缓存一直命中；第 ③ 期边改边看时再按
    方案第五节挪到后台线程 + 防抖。**第 ③ 期已完成**：首帧同步算，之后后台线程 + 150ms 防抖。
-5. （第 ② 期）预览里的新增框不像 TeX 那样把字往里挤 1.5pt：竖边画在进出新增块时
+5. （第 ② 期）预览里的新增框不像 TeX 那样把字往里挤 1.5pt（历史对比）：竖边画在进出新增块时
    留的 `leading_space` 缝里。研究报告公式混排的断行按原子宽度预算，那条路径**不留缝**
    （否则算好的断行会溢出），竖边会贴字。
 6. （第 ② 期）稿件管理的对照窗、AI 工作台的比对仍用旧的分栏视图
@@ -349,9 +382,10 @@ diff 编辑器（每帧给全部源码行画行号、铺底色，60 页约 0.6 m
    的段、夹缝里再做加权 LCS」。上限以内结果逐字节不变；上限以外理论上可能与全局最优锚定
    不同（例如一个完全相同的段与一串高相似段交叉时），测试里的长稿两条路径结果相同。
 9. （第 ③ 期）逐块还原的单位是「变更块」而不是逐行变更；F7 在可编辑时也按变更块跳。
-10. （第 ② 期要素标注）**发文字号按部件标（代字 / 年份 / 序号），不是整串**。类文件把文号
-    拆成 `\DepartmentCode` / `\Year` / `\DocumentNumber` 三条命令、中间夹着写死的〔〕号，
-    整串塞不进任一参数；与成文日期（年/月/日）同一规则。典型的「只改序号」因此比整串替换
+10. （第 ② 期要素标注）**发文字号按部件标（代字 / 年份 / 序号），不是整串**。版式把文号
+    拆成三个独立部件（原 TeX 实现是 `\DepartmentCode` / `\Year` / `\DocumentNumber` 三条命令、
+    中间夹着写死的〔〕号；Typst 数据里同样是分开的字段），整串塞不进任一部件；与成文日期
+    （年/月/日）同一规则。典型的「只改序号」因此比整串替换
     更干净（`某教函〔2026〕~~12~~[15] 号`）。
 11. （第 ② 期要素标注）**呈报领导算在主送位**：白头件 / 红头呈批件的主送位印的是
     `reporting_leaders`，与函稿主送同属一个版位，标注一并覆盖。
@@ -372,39 +406,47 @@ diff 编辑器（每帧给全部源码行画行号、铺底色，60 页约 0.6 m
     把未来版本当旧版。
 
 ## 已知的坑
-- **xeCJKfntef 的标注宏（`\GwDel` / `\GwAdd`）里面，字体切换只作用到第一个字。**
+
+> 下面大半是 TeX 时代的宏级坑（历史），留作理解旧产物与旧截图的背景，不要照它们改新代码。
+> 现行 Typst 的对应实现见 `docs/typst-engine.md`、`assets/typst/gongwen.typ` 与
+> `src/export/typst/`：删除线 `strike(...)`、新增框 `highlight(...)`，连续同类标注先合组。
+
+- （历史：TeX）**xeCJKfntef 的标注宏（`\GwDel` / `\GwAdd`）里面，字体切换只作用到第一个字。**
   加粗、括号楷体必须包在宏**外面**。所以一段新增按样式切开，分成
   `\GwAddOpen` / `\GwAddMid` / `\GwAddClose` 三种；括号小一号字之前先 `\GwBoxFreeze` 定死框高。
   以后往花脸稿里加任何样式，都照这个规则来。
-- **删除线的颜色要写在平铺单元里**（`\GwStrikeUnit`）。
-- **xeCJKfntef 宏里的字，颜色 special 染不上**：它（底下是 ulem）把字逐个装盒再放，外层
+- （历史：TeX）**删除线的颜色要写在平铺单元里**（`\GwStrikeUnit`）。
+- （历史：TeX）**xeCJKfntef 宏里的字，颜色 special 染不上**：它（底下是 ulem）把字逐个装盒再放，外层
   `\textcolor`、`textformat=\color{…}` 都只染到它跳过的标点，汉字照样是黑的。删掉的字要
   红色，只能在宏外面切字体颜色：`\addfontfeatures{Color=C00000}\addCJKfontfeatures{Color=C00000}`
   （与「样式包在宏外」同一条规则）。未实测：自动落到后备字体（宋体）上的生僻字可能不带这个颜色。
-- **生成的 TeX 里，控制序列后面紧跟汉字要加 `{}`**：XeTeX 里汉字是字母，`\GwBoxBar为` 会被读成
+- （历史：TeX）**生成的 TeX 里，控制序列后面紧跟汉字要加 `{}`**：XeTeX 里汉字是字母，`\GwBoxBar为` 会被读成
   一个叫「GwBoxBar为」的未定义控制序列。宏定义里不受影响（定义时已切好词），只有往正文里
   直接写控制序列时才会踩到（研究报告后处理的收尾竖边写成 `\GwBoxBar{}`）。
-- **公式、`\ref`、`\cite`、`\href` 不能放进 xeCJKfntef 的宏**（`\(…\)` 放进去直接编译失败），
+- （历史：TeX）**公式、`\ref`、`\cite`、`\href` 不能放进 xeCJKfntef 的宏**（`\(…\)` 放进去直接编译失败），
   研究报告后处理把它们装盒另画：`\GwDelAtom`（红色 + 竖直中线）、`\GwAddAtom`（只画上下边，
   与两侧文字的框接上）、`\GwAddDisplay`（独立公式整块套框）。`\footnote` 装盒会丢，原样
   留在标记外面。
 - 独立公式的哨兵写在 `$$` **里面**（`$$〔删:…〕$$`，每个公式单独成段）：mdx 只认行首的
   `$$`，哨兵挡在前面就退化成普通段落、印出公式源码。预览（`preview::research::display_mark`）
-  与 TeX 后处理都按这个写法认整块。
+  与 Typst 研究报告花脸稿（`export/typst/research_redline.rs`）都按这个写法认整块。
 - 导出器先按哨兵切块，再在块内配对 `**`。所以带哨兵的 Markdown 里 `**` 绝不能跨哨兵（`serialize::MarkWriter` 保证了这一点）。
-- **新增框的断行与四角**（`gonghan-gwa.cls` 与研究报告导言区同一套）：
+- （历史：TeX）**新增框的断行与四角**（`gonghan-gwa.cls` 与研究报告导言区同一套）：
   - 框里的 1.5pt 留白用 `\kern`，不能用 `\hspace`——胶是断点，竖边会与字断开到两行；
   - 竖边与字之间 `\nobreak`，断点只留在框**前面**（`\GwBoxBarL` 里的 `\penalty5000`：正文里
     字间到处能断，几乎用不上；表格窄列这种没别处可断的，宁可在框前换行也不冲出格子）；
   - `\CJKunderdblline` 的上下边实际占 `[Top-0.5pt, Top]` 与 `[-Bottom-0.5pt, -Bottom]`，而且画不满
     框内留白，所以竖边加长 0.5pt 往下伸、左右竖边各带两截 2pt 短边（`\GwBoxStubs`）补齐四角。
     研究报告公式原子（`\GwAddAtom`）的上下边也按这两条线的位置画。
-- 框的上下边位置（`\GwBoxTop` 0.96em、`\GwBoxBottom` 0.24em）是用思源宋体调的。第 ③ 期测试
+- 框的上下边位置（`\GwBoxTop` 0.96em、`\GwBoxBottom` 0.24em）是用思源宋体调的，现行模板对应
+  `top-edge: 0.96em` / `bottom-edge: -0.24em`。第 ③ 期测试
   在内置仿宋 / 小标宋 / 黑体上量过（矢量线对照 1200dpi 字墨）：仿宋 16pt 上 1.0–2.0pt、
-  下 1.8–2.4pt，小标宋 22pt 上下约 2.9pt，都不压字。要调的话只调 `.cls` 和 `postprocess.rs`
-  导言区这两处；预览侧对应 `preview/marks.rs` 的 `BOX_TOP_EM` / `BOX_BOTTOM_EM`，三处一起改。
-- 删除线在仿宋上偏高：约在字墨从上往下 0.38 处，比中线高约 1.8pt（`\GwWaveDepth = -0.5em`
+  下 1.8–2.4pt，小标宋 22pt 上下约 2.9pt，都不压字。要调的话只改 `assets/typst/gongwen.typ`
+  与 `assets/typst/research.typ` 的 `add-mark`；预览侧对应 `preview/marks.rs` 的
+  `BOX_TOP_EM` / `BOX_BOTTOM_EM`，两处一起改。
+- （历史：TeX）删除线在仿宋上偏高：约在字墨从上往下 0.38 处，比中线高约 1.8pt（`\GwWaveDepth = -0.5em`
   是按思源宋体调的）；且 xeCJKfntef 默认**跳过标点**，、，“”（）。处线是断的。待人眼确认。
+  现行模板用 `strike(offset: -0.32em)`，实测位置以样张为准。
 - （第 ② 期）预览里的新增框是**用单测验证的几何**（竖边条数、每行上下边），界面上的
   实际观感还没有人眼核对过：进对照模式看一眼框和删除线的位置，与「打印预览」的 PDF 对照。
 - （第 ② 期）增删块的记号借用了 `TextFormat::underline`（线宽 0，颜色为新增蓝 / 删除红）。
@@ -417,21 +459,25 @@ diff 编辑器（每帧给全部源码行画行号、铺底色，60 页约 0.6 m
   用户挪了光标再按 Ctrl+Z，第一下只回到还原后的光标位置，这是 egui 撤销器的既有行为。
 - `highlight::tests::swapping_light_and_dark_relayouts_against_the_rebuilt_font_atlas`
   在全量并行跑时偶发失败、单独跑通过，与本改造无关（共享字体图集状态），别为它改测试。
-- （第 ② 期要素标注）**类里的 `\Recipient` / `\CopiesTo` 会被 `\ifthenelse`、`\StrCount`
+- （历史：TeX 要素标注）**类里的 `\Recipient` / `\CopiesTo` 会被 `\ifthenelse`、`\StrCount`
   展开**（`\CalculateTotalCopies` 判空、数单位算共印份数）。带标注时它们装着
   `\GwDel` / `\GwAdd`，一展开就 `! Argument of \@imakebox has an extra }`。所以：
   `\Recipient` / `\CopiesTo` 永远写**未标注的新值**，纸面另印接缝宏
   `\RecipientMarked` / `\CopiesToMarked`（默认等于原命令）。以后往版头 / 版记要素里加
-  任何宏，先确认它不会被这两个命令的展开碰到。
+  任何宏，先确认它不会被这两个命令的展开碰到。现行 Typst 在 Rust 侧统计（`frame.rs`），
+  没有宏展开问题，但「统计读未标注新值」这条不要改。
 - （第 ② 期要素标注）**按宽度算版式的要素，标注后宽度变了**。红头呈批件落款是定宽摆位
-  （`\SignatureUnitWidth`），带标注时必须按「旧值 + 新值」重算（`papers.rs` 已做），
+  （`\SignatureUnitWidth`），带标注时必须按「旧值 + 新值」重算（现行由
+  `export::red_signature_unit_width_mm` 计算、`export/typst/frame.rs` 调用），
   否则落款与日期居中会偏；Word / 预览的落款是右对齐、向左生长，不受影响。
   「新增框线本就贴着字身」（0.5pt 框线 + 1.5pt 留白），视觉上像轻微压字，属设计。
-- 可以不用内置 Tectonic 验证 TeX：
-  1. 装 XeLaTeX（Debian 系：`texlive-xetex texlive-lang-chinese texlive-latex-extra texlive-plain-generic fonts-noto-cjk`）；
-  2. 写个临时测试，调 `redline::build` + `export::write_tex_for_kind` 把 `.tex` 写到临时目录；
-  3. 把 `.cls` 里的字体名替换成本机有的字体后执行 `xelatex`。
-  - 空 `DraftInput` 会让 `\makeletter` 报 “There's no line here to end”，这是版记要素为空导致的，与花脸稿无关。
+- 改花脸稿版式后要真排一眼，不用另装排版软件（Typst 在进程内）：
+  1. `cargo test --locked typst_samples_redline -- --ignored --nocapture` 出各文种花脸稿样张；
+  2. 要素标注用 `cargo test --locked manual_element_pdf_full_probe -- --ignored --nocapture`，
+     PDF 与栅格图落在 `tmp/element-marks-full/`；
+  3. 想直接看 PDF 文本层，可装 poppler 的 `pdftotext`；它只服务于
+     `manual_cleared_element_pdf_text_probe`，不是应用依赖。
+  - 空 `DraftInput` 在版记要素为空时可能少排版位，这是数据问题，不是排版引擎故障。
 - （第 ④ 期）**egui 的 `Frame::show` / `Ui` 背景 `response.clicked()` 永远为 false**
   （背景只感应悬停），「点整块卡片选中」必须用显式 `ui.add(Label::sense(click))`
   或 `ui.interact`。`ui.interact` 后画的内容在它下面、会被它抢走点击，
@@ -472,23 +518,25 @@ diff 编辑器（每帧给全部源码行画行号、铺底色，60 页约 0.6 m
 
 ## 第 ③ 期测试后的修正（2026-09-25）
 
-用真实稿件（稿件库里的公函、普通公文、红头呈批件、研究报告）经内置 Tectonic + 随包字体实际编译、
-转图片逐页核对，发现并修了下面这些（每条单独一个提交，括号里是回归测试）：
+用真实稿件（稿件库里的公函、普通公文、红头呈批件、研究报告）经内置排版引擎 + 随包字体实际编译、
+转图片逐页核对，发现并修了下面这些（每条单独一个提交，括号里是回归测试；第 2、5、8 条
+的原始修复发生在 TeX 时代，测试名已按现行 Typst 更新）：
 
 1. **视觉 diff 移动识别下标混用 → 闪退**（`review_probes::p13`）。`resolve_run` 的移动候选把
    组内块序号当段落序号又查了一遍；组里全是段落时两者相等，测不出来。同一节里有锚不上的
    表格 / 列表项、又挪了段落，就越界 panic——进版本对照首帧、导出、打印预览都在界面线程
    同步算，程序直接闪退；后台线程 panic 后右栏静默停在旧花脸稿。不越界时比错段落，移动被标成
    整段删 + 整段增。这是第 ① 期就有的问题。
-2. **研究报告 TeX 后处理重写**（`postprocess::tests` 新增三条）：新增里带行内公式编译失败；
+2. **（历史：TeX 后处理）研究报告花脸稿重写**（`postprocess::tests` 新增三条）：新增里带行内公式编译失败；
    新增里的加粗只粗第一个字；改过的独立公式印出源码（配合序列化把哨兵写进 `$$` 里）。
-   做法见「已知的坑」。
+   做法见「已知的坑」。现行 PDF 侧对应 `export/typst/research_redline.rs`，Word 侧仍用 `postprocess`。
 3. **删除侧的公式被转义**（`serialize::tests::a_deleted_formula_is_written_verbatim`）：删除片段
    按纯文本写回，`$w_i$` 成了 `$w\_i$`。公式原样写，公式外照常转义。
 4. **研究报告 Word 标记在加粗 / 公式处中断**（`postprocess::tests::ooxml_runs_between_sentinels_get_the_mark_too`）：
    只改写文字里带哨兵的 run，中间的 run 原样穿过。
-5. **PDF 里删掉的字是黑色**（`redline::tex_tests::the_class_wires_the_new_mark_styles` 加了断言）：
-   见「已知的坑」，改用字体颜色。四个文种删除线下的字实测全部 #C00000。
+5. **PDF 里删掉的字是黑色**（原始断言在 TeX 时代的 `redline::tex_tests`，现行由
+   `redline::typst_tests::the_templates_wire_the_mark_styles` 守模板颜色）：
+   见「已知的坑」。四个文种删除线下的字实测全部 #C00000。
 6. **加 / 删一个标题，下面没动的正文整段删了又加**（`review_probes::p14`）：章节按标题文字对齐，
    只有一边有的章单独对着「空」比。现在只有一边有的**普通标题**章并进前一组比较（标题本身
    作为内容块），正文照常锚定，只标标题；文档标题、正文 / 附件区段标记照旧单独成组
@@ -497,8 +545,9 @@ diff 编辑器（每帧给全部源码行画行号、铺底色，60 页约 0.6 m
    标题增删。
 7. **左栏新增的空行不显示「（空行）」**（`version_diff::tests::an_added_blank_line_shows_a_placeholder`）：
    只有删掉的空行（画在空隙里）有。现在新增空行的行尾画同样的淡色标签，不进正文、不占光标。
-8. **新增框的竖边与字断开到两行、四角合不上**（`redline::tex_tests::the_class_wires_the_new_mark_styles`
-   加了断言）：表格窄列里删旧插新挤不下一行时，左竖边留在上一行行尾。做法见「已知的坑」的
+8. **新增框的竖边与字断开到两行、四角合不上**（原始断言在 TeX 时代的 `redline::tex_tests`，
+   现行对应 `redline::typst_tests::the_templates_wire_the_mark_styles` 与样张）：
+   表格窄列里删旧插新挤不下一行时，左竖边留在上一行行尾。做法见「已知的坑」的
    「新增框的断行与四角」。实测公函表格「96.8%」整框换到下一行，正文四角矢量线首尾相接。
 9. **CI 的 Linux ARM64 上两个几何测试失败**（与上面的改动无关，之前就一直红）：容器里没有中文
    字体，退回 egui 自带字体后度量不同。`diff_gaps::find_highlight_backgrounds_move_with_their_rows`
@@ -634,5 +683,6 @@ spike 不通过时的退路：行号槽画删除三角，点开浮层显示被�
 
 ## 工作约定（在 AGENTS.md 之外补充）
 - 改视觉 diff 必须保持两侧不变式成立。**不许为了让测试通过而删测试或放宽断言**，行为确实变了，就在测试注释里写清楚为什么。
-- 涉及 TeX 版式的改动要实际编译看一眼（方法见上文），光单测不够。
+- 涉及花脸稿版式的改动要实际排版看一眼（方法见上文），光单测不够；样张命令是
+  `cargo test --locked typst_samples -- --ignored`。
 - 每完成一期，更新本文的「当前进度」和「下一步」。

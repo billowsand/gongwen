@@ -2112,6 +2112,9 @@ pub struct AppConfig {
     /// 定时与切标签时把改动静默写回稿件库。关掉就只认主快捷键+S。
     #[serde(default = "auto_save_default")]
     pub auto_save: bool,
+    /// 定时自动保存的间隔（秒）。旧配置没有该字段时按 2 分钟处理。
+    #[serde(default = "default_auto_save_interval_secs")]
+    pub auto_save_interval_secs: u64,
     pub security_rules: SecurityRules,
     /// 允许在词库之外手工填写单位、联系人等字段。
     pub allow_free_text: bool,
@@ -2197,6 +2200,7 @@ impl Default for AppConfig {
             export: ExportSelection::default(),
             auto_export: false,
             auto_save: true,
+            auto_save_interval_secs: DEFAULT_AUTO_SAVE_INTERVAL_SECS,
             security_rules: SecurityRules::default(),
             allow_free_text: true,
             show_editor_line_numbers: true,
@@ -2236,6 +2240,12 @@ impl AppConfig {
         } else {
             1.0
         }
+    }
+
+    /// 自动保存实际使用的间隔：手工改坏或超出范围的配置都收进可选范围。
+    pub fn clamped_auto_save_interval_secs(&self) -> u64 {
+        self.auto_save_interval_secs
+            .clamp(AUTO_SAVE_INTERVAL_MIN_SECS, AUTO_SAVE_INTERVAL_MAX_SECS)
     }
 
     pub fn provider(&self, id: &str) -> Option<&ProviderConfig> {
@@ -3063,6 +3073,17 @@ impl AppConfig {
 /// 界面缩放的可选范围：再小看不清控件，再大普通笔记本一屏放不下两栏。
 pub const UI_SCALE_MIN: f32 = 0.8;
 pub const UI_SCALE_MAX: f32 = 1.75;
+
+/// 自动保存间隔的可选范围（秒）：太密会和输入抢 SQLite 写锁，太疏又护不住现场。
+pub const AUTO_SAVE_INTERVAL_MIN_SECS: u64 = 30;
+pub const AUTO_SAVE_INTERVAL_MAX_SECS: u64 = 600;
+/// 默认 2 分钟，与既有行为一致。
+pub const DEFAULT_AUTO_SAVE_INTERVAL_SECS: u64 = 120;
+
+/// 旧配置文件没有自动保存间隔；缺省 2 分钟。
+fn default_auto_save_interval_secs() -> u64 {
+    DEFAULT_AUTO_SAVE_INTERVAL_SECS
+}
 
 /// 旧配置文件没有界面缩放；缺省 100%。
 fn default_ui_scale() -> f32 {
@@ -4187,6 +4208,14 @@ mod tests {
         assert_eq!(config.ui_scale, 1.0);
         assert_eq!(config.clamped_ui_scale(), 1.0);
         assert_eq!(
+            config.auto_save_interval_secs,
+            DEFAULT_AUTO_SAVE_INTERVAL_SECS
+        );
+        assert_eq!(
+            config.clamped_auto_save_interval_secs(),
+            DEFAULT_AUTO_SAVE_INTERVAL_SECS
+        );
+        assert_eq!(
             config.update_check_url,
             crate::update_check::DEFAULT_UPDATE_CHECK_URL
         );
@@ -4195,8 +4224,29 @@ mod tests {
         let json = serde_json::to_string(&config).expect("配置应能序列化");
         let back: AppConfig = serde_json::from_str(&json).expect("配置应能反序列化");
         assert_eq!(back.ui_scale, config.ui_scale);
+        assert_eq!(back.auto_save_interval_secs, config.auto_save_interval_secs);
         assert_eq!(back.update_check_url, config.update_check_url);
         assert_eq!(back.samples_seeded, config.samples_seeded);
+    }
+
+    #[test]
+    fn auto_save_interval_is_clamped_to_the_supported_range() {
+        let mut config = AppConfig::default();
+        config.auto_save_interval_secs = 5;
+        assert_eq!(
+            config.clamped_auto_save_interval_secs(),
+            AUTO_SAVE_INTERVAL_MIN_SECS
+        );
+        config.auto_save_interval_secs = 9000;
+        assert_eq!(
+            config.clamped_auto_save_interval_secs(),
+            AUTO_SAVE_INTERVAL_MAX_SECS
+        );
+        config.auto_save_interval_secs = 45;
+        assert_eq!(config.clamped_auto_save_interval_secs(), 45);
+        let json = serde_json::to_string(&config).expect("配置应能序列化");
+        let back: AppConfig = serde_json::from_str(&json).expect("配置应能反序列化");
+        assert_eq!(back.auto_save_interval_secs, 45);
     }
 
     #[test]

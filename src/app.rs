@@ -104,8 +104,6 @@ pub(crate) const FORM_PANEL_DEFAULT_WIDTH: f32 = 420.0;
 /// 文稿标签的宽度区间：最窄仍能显示约 5 个汉字加关闭按钮。
 const DOC_TAB_MIN_WIDTH: f32 = 132.0;
 const DOC_TAB_MAX_WIDTH: f32 = 250.0;
-/// 自动保存的间隔。太密会和输入抢 SQLite 写锁，太疏又护不住现场。
-const AUTOSAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
 /// 标签标题超过这个字数就中部省略。
 const DOC_TAB_TITLE_CHARS: usize = 14;
 /// 标签里除标题以外的固定占位：内边距 + 状态标记 + 关闭键热区与它前面的留白。
@@ -429,6 +427,7 @@ impl GongwenApp {
         // 当前 zoom_factor 折算（见 macos_window.rs），晚一步会按 100% 算错。
         let ui_scale = config.clamped_ui_scale();
         config.ui_scale = ui_scale;
+        config.auto_save_interval_secs = config.clamped_auto_save_interval_secs();
         cc.egui_ctx.options_mut(|options| {
             options.zoom_factor = ui_scale;
             // 全局缩放只认设置页：egui 内置的 Ctrl± 会绕开配置，且与源码编辑器
