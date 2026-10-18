@@ -34,6 +34,23 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.json"))
 }
 
+/// 启动最早处只为取窗口图标主题时使用：只读解析，不迁移、不挪走损坏文件。
+///
+/// 真正的配置读取与损坏兜底留给 `GongwenApp::new`——如果这里也调 [`load`]，
+/// 损坏的 `config.json` 会在界面建起来之前就被改名，后面再也收不到「配置已损坏」
+/// 的提示。
+pub fn peek_theme() -> crate::models::ThemeName {
+    let Ok(path) = config_path() else {
+        return AppConfig::default().theme;
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return AppConfig::default().theme;
+    };
+    serde_json::from_str::<AppConfig>(&raw)
+        .map(|config| config.theme)
+        .unwrap_or_default()
+}
+
 /// 稿件库 SQLite 文件，与 config.json 同目录，仅保存在本机。
 pub fn manuscript_db_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("manuscripts.db"))
@@ -96,21 +113,52 @@ fn atomic_write(
     Ok(())
 }
 
-pub fn load() -> Result<AppConfig> {
+/// 读取配置。第二个返回值是本次被挪走的损坏配置路径：非空表示 `config.json`
+/// 解析失败，调用方已经拿到一份默认配置，应把这件事告诉用户。
+///
+/// 解析失败时把原文件原地改名为 `config.json.损坏-YYYYMMDD-HHMMSS`，保留证据，
+/// 也避免下次保存时用默认值静默覆盖用户数据。改名失败同样回落到默认配置，
+/// 只是没有可报告的留底路径。读取文件本身失败（权限、路径是目录等）仍返回 Err，
+/// 那种情况不是「配置内容坏了」，不该拿默认值顶替。
+pub fn load() -> Result<(AppConfig, Option<PathBuf>)> {
     let path = config_path()?;
     let mut config = if !path.exists() {
         AppConfig::default()
     } else {
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("读取配置失败：{}", path.display()))?;
-        serde_json::from_str(&raw).context("配置文件格式无效")?
+        match serde_json::from_str(&raw) {
+            Ok(config) => config,
+            Err(_) => {
+                let backup = corrupted_config_path(&path);
+                let moved = fs::rename(&path, &backup).is_ok();
+                return Ok((AppConfig::default(), moved.then_some(backup)));
+            }
+        }
     };
     // 旧配置里的内联地址 / 密钥归并成提供商清单；迁移结果立即写回，
     // 写盘失败也不影响本次运行（下次启动再迁一次）。
     if config.migrate_providers() && path.exists() {
         let _ = save(&config);
     }
-    Ok(config)
+    Ok((config, None))
+}
+
+/// 损坏配置的留底路径：与原文件同目录，文件名带秒级时间戳；同一秒里再次损坏
+/// 就追加序号，绝不覆盖上一份证据。
+fn corrupted_config_path(path: &std::path::Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.json".into());
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let mut candidate = path.with_file_name(format!("{name}.损坏-{stamp}"));
+    let mut index = 2;
+    while candidate.exists() {
+        candidate = path.with_file_name(format!("{name}.损坏-{stamp}-{index}"));
+        index += 1;
+    }
+    candidate
 }
 
 pub fn save(config: &AppConfig) -> Result<()> {
@@ -365,5 +413,84 @@ mod tests {
             SecurityLevel::Unmarked,
             "旧配置里空密级应视为不标注"
         );
+    }
+
+    /// 损坏配置不能静默丢掉：返回默认配置，同时把原文件改名留底。
+    #[test]
+    fn corrupt_config_falls_back_to_defaults_and_keeps_the_broken_file() {
+        let dir = tempfile::tempdir().unwrap();
+        super::set_test_config_dir(Some(dir.path().to_path_buf()));
+        let path = dir.path().join("config.json");
+        fs::write(&path, b"{ this is not json").unwrap();
+
+        let (config, recovered) = load().expect("内容损坏不应返回 IO 错误");
+        super::set_test_config_dir(None);
+
+        assert_eq!(config.output_dir, AppConfig::default().output_dir);
+        let recovered = recovered.expect("应报告留底的损坏文件");
+        assert!(!path.exists(), "损坏的 config.json 应被挪走");
+        assert!(
+            recovered
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("config.json.损坏-"),
+            "留底文件名应带「损坏」与时间戳：{}",
+            recovered.display()
+        );
+        assert_eq!(
+            fs::read(&recovered).unwrap(),
+            b"{ this is not json",
+            "留底文件应原样保留证据"
+        );
+    }
+
+    /// 正常配置不带兜底标记，调用方不该弹恢复提示。
+    #[test]
+    fn valid_config_loads_without_recovery_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        super::set_test_config_dir(Some(dir.path().to_path_buf()));
+        let path = dir.path().join("config.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&AppConfig::default()).expect("序列化默认配置"),
+        )
+        .unwrap();
+
+        let (config, recovered) = load().expect("正常配置应能读取");
+        super::set_test_config_dir(None);
+
+        assert_eq!(config.output_dir, AppConfig::default().output_dir);
+        assert!(recovered.is_none());
+        assert!(path.exists());
+    }
+
+    /// IO 错误不是「内容损坏」，必须维持 Err，不能拿默认值顶替。
+    #[test]
+    fn unreadable_config_still_returns_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        super::set_test_config_dir(Some(dir.path().to_path_buf()));
+        // 把配置路径做成目录：exists() 为真，read_to_string 必然失败。
+        fs::create_dir(dir.path().join("config.json")).unwrap();
+
+        let result = load();
+        super::set_test_config_dir(None);
+
+        assert!(result.is_err(), "路径不可读时应如实报错");
+    }
+
+    /// 启动早期取主题只能只读：它若把损坏文件挪走，界面上就收不到恢复提示了。
+    #[test]
+    fn peek_theme_leaves_a_corrupt_config_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        super::set_test_config_dir(Some(dir.path().to_path_buf()));
+        let path = dir.path().join("config.json");
+        fs::write(&path, b"not json").unwrap();
+
+        let theme = peek_theme();
+        super::set_test_config_dir(None);
+
+        assert_eq!(theme, AppConfig::default().theme);
+        assert!(path.exists(), "peek_theme 不能改写或挪走配置文件");
     }
 }

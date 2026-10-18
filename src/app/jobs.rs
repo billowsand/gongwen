@@ -55,6 +55,21 @@ pub(crate) enum WorkerResult {
     Lexicon(crate::app::LexiconJob),
     /// 扫描本机字体目录的结果。中文字体文件很大，扫描放在后台线程。
     SystemFonts(Vec<system_fonts::SystemFont>),
+    /// 导出全量备份：目标路径与文件字节数。
+    BackupExported {
+        path: PathBuf,
+        result: Result<u64, String>,
+    },
+    /// 校验备份文件：ZIP 路径与条目概要。
+    BackupInspected {
+        path: PathBuf,
+        result: Result<crate::data_backup::BackupInfo, String>,
+    },
+    /// 恢复备份：源 ZIP 与恢复报告（留底目录、解出文件数）。
+    BackupRestored {
+        path: PathBuf,
+        result: Result<crate::data_backup::RestoreReport, String>,
+    },
     /// 送批材料合并导出的进度与结果。
     SendPackage(crate::app::SendPackageEvent),
     /// 稿件 PDF 批量导出的结果。`path` 是保存的 zip 路径。
@@ -348,6 +363,56 @@ impl GongwenApp {
                         format!("已找到 {} 个本机字体。", fonts.len())
                     };
                     self.system_fonts = fonts;
+                }
+                WorkerResult::BackupExported { path, result } => {
+                    self.backup_busy = false;
+                    self.status = match result {
+                        Ok(bytes) => format!(
+                            "备份完成：{}（{}）。",
+                            path.display(),
+                            crate::data_backup::format_bytes(bytes)
+                        ),
+                        Err(error) => format!("导出备份失败：{error}"),
+                    };
+                }
+                WorkerResult::BackupInspected { path, result } => {
+                    self.backup_busy = false;
+                    match result {
+                        Ok(info) => {
+                            self.status = format!(
+                                "已校验备份：{} 个文件，共 {}。请确认后恢复。",
+                                info.file_count,
+                                crate::data_backup::format_bytes(info.total_bytes)
+                            );
+                            self.backup_restore_prompt = Some((path, info));
+                        }
+                        Err(error) => {
+                            self.status = format!("备份文件校验失败：{error}");
+                            self.backup_restore_error =
+                                Some(format!("无法恢复这个文件：\n{error}"));
+                        }
+                    }
+                }
+                WorkerResult::BackupRestored { path, result } => {
+                    self.backup_busy = false;
+                    self.backup_restore_running = false;
+                    match result {
+                        Ok(report) => {
+                            self.status = format!(
+                                "已从 {} 恢复 {} 个文件，请重启应用。",
+                                path.display(),
+                                report.restored_files
+                            );
+                            self.backup_restore_result = Some(report);
+                        }
+                        Err(error) => {
+                            // 恢复中途失败时数据已按留底目录回滚；连接要重新打开，
+                            // 否则界面会一直停在「稿件库不可用」。
+                            self.reopen_local_stores();
+                            self.status = format!("恢复备份失败：{error}");
+                            self.backup_restore_error = Some(error);
+                        }
+                    }
                 }
                 WorkerResult::RerankVerify(result) => {
                     self.rerank_verify_busy = false;

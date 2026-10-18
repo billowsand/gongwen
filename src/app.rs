@@ -33,6 +33,7 @@ mod ai_prompts;
 mod ai_proposal;
 mod api_settings;
 mod chrome;
+mod data_safety;
 mod jobs;
 mod lexicon_jobs;
 mod manuscript_ui;
@@ -254,6 +255,20 @@ pub struct GongwenApp {
     /// 上次定时自动保存的时刻。
     last_autosave: std::time::Instant,
     status: String,
+    /// 本次启动时损坏的配置文件被挪到了哪里；有值时首帧弹一次说明。
+    config_recovered_from: Option<PathBuf>,
+    /// 上次异常退出留下的崩溃日志；有值时首帧弹一次说明。
+    crash_report_pending: Option<PathBuf>,
+    /// 备份导出 / 校验 / 恢复是否在后台跑。
+    backup_busy: bool,
+    /// 正在恢复：独占模态窗，恢复期间不接受其他操作。
+    backup_restore_running: bool,
+    /// 待二次确认的恢复：已校验的 ZIP 与条目概要。
+    backup_restore_prompt: Option<(PathBuf, crate::data_backup::BackupInfo)>,
+    /// 恢复完成后的报告（留底目录、解出文件数）。
+    backup_restore_result: Option<crate::data_backup::RestoreReport>,
+    /// 恢复失败的原因；有值时弹窗告知，而不是只写状态栏。
+    backup_restore_error: Option<String>,
     /// 全局任务（当前只有模型探测）。稿件自己的生成/导出记在各自的会话上。
     busy: bool,
     sender: Sender<WorkerResult>,
@@ -381,7 +396,26 @@ pub(crate) struct KnowledgeImportDraft {
 
 impl GongwenApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut config = storage::load().unwrap_or_default();
+        // 配置文件内容坏了就带着默认配置启动，并把留底路径交给首帧的提示窗；
+        // 读取失败（权限、路径不是文件）仍按默认配置启动，但状态栏如实说明。
+        let (mut config, config_recovered_from, config_load_error) = match storage::load() {
+            Ok((config, recovered)) => (config, recovered, None),
+            Err(error) => (
+                AppConfig::default(),
+                None,
+                Some(format!("读取配置失败，本次以默认设置启动：{error:#}")),
+            ),
+        };
+        let crash_report_pending = crate::crash_log::take_unseen_report();
+        let startup_status = if let Some(path) = &config_recovered_from {
+            format!("配置文件已损坏，原文件已备份到：{}", path.display())
+        } else if let Some(path) = &crash_report_pending {
+            format!("上次运行异常退出，崩溃日志：{}", path.display())
+        } else if let Some(error) = &config_load_error {
+            error.clone()
+        } else {
+            "就绪。先在“AI 管理”中连接模型服务。".into()
+        };
         let macos_titlebar_metrics = crate::macos_window::configure_native_titlebar(cc);
         // 预览字体要按配置装，所以先读配置再装字体。
         theme::set_current(config.theme);
@@ -528,11 +562,14 @@ impl GongwenApp {
             exit_prompt: None,
             exit_confirmed: false,
             last_autosave: std::time::Instant::now(),
-            // 上次闪退留下了日志就先告诉用户在哪，方便发给维护者排查。
-            status: match crate::crash_log::take_unseen_report() {
-                Some(path) => format!("上次运行异常退出，崩溃日志：{}", path.display()),
-                None => "就绪。先在“AI 管理”中连接模型服务。".into(),
-            },
+            status: startup_status,
+            config_recovered_from,
+            crash_report_pending,
+            backup_busy: false,
+            backup_restore_running: false,
+            backup_restore_prompt: None,
+            backup_restore_result: None,
+            backup_restore_error: None,
             busy: false,
             sender,
             receiver,
@@ -773,6 +810,8 @@ impl eframe::App for GongwenApp {
         self.knowledge_preview_window(&ctx);
         self.about_window(&ctx);
         self.quick_find_window(&ctx);
+        // 损坏配置、崩溃日志、备份恢复都是全局提示，不依附任何标签页。
+        self.data_safety_windows(&ctx);
         // 缩放边框放在最后：它要盖在所有浮窗之上，贴边那几像素归窗口缩放。
         self.window_resize_borders(&ctx);
         // 候选窗浮在所有面板之上；这时编辑框已经画完，光标矩形是本帧最终的那一个。

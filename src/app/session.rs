@@ -194,6 +194,17 @@ impl GongwenApp {
         if !ctx.input(|input| input.viewport().close_requested()) {
             return;
         }
+        // 恢复备份时后台线程正在替换文件，这时退出会留下半成品。
+        if self.backup_restore_running {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.status = "正在恢复备份，请等待完成后再退出。".into();
+            return;
+        }
+        // 恢复已完成：当前内存里是旧数据，既不能自动保存，也不能再攒退出确认。
+        if self.backup_restore_result.is_some() {
+            self.exit_confirmed = true;
+            return;
+        }
         if self.exit_confirmed {
             return;
         }

@@ -5,6 +5,7 @@ mod ai_guard;
 mod ai_panel;
 mod app;
 mod crash_log;
+mod data_backup;
 #[cfg(test)]
 mod dependency_bench;
 mod diff;
@@ -79,7 +80,7 @@ use app::GongwenApp;
 fn main() -> eframe::Result {
     // 最先装：之后读配置、装字体、建窗口任何一步 panic 都要留下日志。
     crash_log::install();
-    let app_icon = theme::app_icon(storage::load().unwrap_or_default().theme);
+    let app_icon = theme::app_icon(storage::peek_theme());
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
         // 760 宽能在常见 1920 屏幕的二等分平铺与高 DPI 逻辑尺寸下正常容纳；

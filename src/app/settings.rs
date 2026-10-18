@@ -55,6 +55,8 @@ pub(crate) enum SettingsSection {
     Export,
     /// 保存与现场。
     Persistence,
+    /// 数据备份与恢复。
+    Backup,
     /// 密级与保密期限规则。
     Security,
     /// 输入法（应用内词表查询）。
@@ -84,6 +86,7 @@ const MENU_GROUPS: [(&str, &[SettingsSection]); 4] = [
             SettingsSection::Output,
             SettingsSection::Export,
             SettingsSection::Persistence,
+            SettingsSection::Backup,
         ],
     ),
     (
@@ -103,6 +106,7 @@ impl SettingsSection {
             SettingsSection::Numbering => "标题与列表编号",
             SettingsSection::Export => "导出格式",
             SettingsSection::Persistence => "保存与现场",
+            SettingsSection::Backup => "数据备份",
             SettingsSection::Security => "密级规则",
             SettingsSection::Input => "输入法",
             SettingsSection::Guide => "上手指引",
@@ -119,6 +123,7 @@ impl SettingsSection {
             SettingsSection::Numbering => theme::Icon::ListOrdered,
             SettingsSection::Export => theme::Icon::FileDown,
             SettingsSection::Persistence => theme::Icon::Save,
+            SettingsSection::Backup => theme::Icon::Archive,
             SettingsSection::Security => theme::Icon::Shield,
             SettingsSection::Input => theme::Icon::Edit,
             SettingsSection::Guide => theme::Icon::Book,
@@ -149,6 +154,9 @@ impl SettingsSection {
             }
             SettingsSection::Persistence => {
                 "新建的稿件在第一次真正改动时自动入库；下次启动会恢复本次打开的标签。"
+            }
+            SettingsSection::Backup => {
+                "把配置、稿件库、图片、数据接口与输入法词表一键打包成 ZIP；恢复前会自动留底当前数据。"
             }
             SettingsSection::Security => {
                 "默认取自《保守国家秘密法》第十五条：绝密级不超过三十年、机密级不超过二十年、\
@@ -1130,6 +1138,7 @@ impl GongwenApp {
                             SettingsSection::Numbering => self.numbering_settings_ui(ui),
                             SettingsSection::Export => self.export_section_ui(ui),
                             SettingsSection::Persistence => self.persistence_section_ui(ui),
+                            SettingsSection::Backup => self.backup_section_ui(ui),
                             SettingsSection::Security => self.security_section_ui(ui),
                             SettingsSection::Input => self.ime_section_ui(ui),
                             SettingsSection::Guide => {
