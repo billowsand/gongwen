@@ -235,7 +235,12 @@ render 256 icon_256x256.png
 render 512 icon_256x256@2x.png
 render 512 icon_512x512.png
 render 1024 icon_512x512@2x.png
-iconutil -c icns "$ICONSET" -o "$RESOURCES_DIR/AppIcon.icns"
+if ! iconutil -c icns "$ICONSET" -o "$RESOURCES_DIR/AppIcon.icns"; then
+    # iconutil 在部分新版 macOS 上会拒绝 sips 生成的合法 PNG iconset；
+    # 图标不影响应用运行，继续打包并省略图标声明。
+    rm -f "$RESOURCES_DIR/AppIcon.icns"
+    echo "警告：系统 iconutil 无法转换图标，DMG 将使用默认应用图标" >&2
+fi
 
 cat >"$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -246,8 +251,6 @@ cat >"$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist" <<EOF
 	<string>zh_CN</string>
 	<key>CFBundleExecutable</key>
 	<string>gongwen-assistant</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>$BUNDLE_ID</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -271,6 +274,10 @@ cat >"$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+if [ -f "$RESOURCES_DIR/AppIcon.icns" ]; then
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' \
+        "$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist"
+fi
 
 # 没有 Developer ID，做 ad-hoc 签名（identity "-"），保证 Apple Silicon 上可直接运行。
 codesign --force --deep --sign - "$BUILD_ROOT/$BUNDLE_NAME"
