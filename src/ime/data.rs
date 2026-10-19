@@ -24,6 +24,20 @@ pub(super) fn save_json(path: &Path, value: &impl Serialize) -> anyhow::Result<(
     save_bytes(path, &serde_json::to_vec_pretty(value)?)
 }
 
+/// 保留 Windows 的 quan.txt 与 macOS 的 mabiao.txt，两者均可作为后备来源。
+pub(super) fn development_base_path() -> Option<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fuma");
+    let names = if cfg!(target_os = "macos") {
+        ["mabiao.txt", "quan.txt"]
+    } else {
+        ["quan.txt", "mabiao.txt"]
+    };
+    names
+        .into_iter()
+        .map(|name| root.join(name))
+        .find(|path| path.is_file())
+}
+
 pub(super) fn load_base() -> anyhow::Result<Vec<super::table::Entry>> {
     let dir = directory()?;
     let target = dir.join("base.txt");
@@ -36,7 +50,9 @@ pub(super) fn load_base() -> anyhow::Result<Vec<super::table::Entry>> {
     {
         paths.push(parent.join("runtime/ime/base.txt"));
     }
-    paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/fuma/quan.txt"));
+    if let Some(path) = development_base_path() {
+        paths.push(path);
+    }
     paths.push(dir.join("yinxing/flypy-yinxing.txt"));
     for path in paths {
         if path.is_file() {

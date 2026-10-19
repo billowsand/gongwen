@@ -19,7 +19,8 @@
 - 中文处理：`jieba-rs`（含用户词典）、`pinyin`；文档读取用 `anydoc`。
 - 输入法：应用内词表输入法，按完整编码查询基础表与公文四码表，不使用拼音、
   整句模型、自动调频或独立进程。代码在 `src/ime/`，设计与交接见 `docs/table-ime.md`。
-  - 初始基础表：本机 `assets/fuma/quan.txt`；打包时若存在，独立复制到
+  - 初始基础表：Windows / Linux 优先本机 `assets/fuma/quan.txt`，macOS 优先
+    `assets/fuma/mabiao.txt`（互为后备）；打包时若存在，独立复制到
     `runtime/ime/base.txt`，不嵌入二进制。源码中的本机资源不入库。
   - 用户基础表与个人词表：`config_dir()/ime/base.txt`、`tables.json`；基础表可动态
     修改，公文表可导入、停用与撤销。公文词表只加载已接受且为四码的词。

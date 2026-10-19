@@ -148,6 +148,7 @@ else
         expected="$(printf '%s' "$sum" | tr '[:lower:]' '[:upper:]')"
         [ "$actual" = "$expected" ] || die "SHA-256 不匹配：$src（期望 $expected，实际 $actual）"
         case "$rel" in
+            ime/base.txt) dest="runtime/$rel" ;;
             # PDF 由 Typst 在进程内排版，旧 runtime 清单里的 TeX 资产不随包。
             ime/* | tectonic/* | texbundle/* | licenses/LICENSE.CTAN | licenses/LICENSE.TL | licenses/TECTONIC-LICENSE.txt) continue ;;
             *) dest="runtime/$rel" ;;
@@ -171,6 +172,19 @@ else
             -x '*__pycache__*' -x '*.DS_Store')
 
     chmod 755 "$STAGE/gongwen-assistant"
+fi
+
+# 与 Windows 便携包一致：本机存在基础词表时独立随包，不嵌入二进制。
+# 使用现成 staging 时保留其中的 base.txt，不能因排除旧输入法而一并丢弃。
+BASE_TABLE="$PROJECT_ROOT/assets/fuma/mabiao.txt"
+if [ ! -f "$BASE_TABLE" ]; then
+    BASE_TABLE="$PROJECT_ROOT/assets/fuma/quan.txt"
+fi
+if [ -f "$BASE_TABLE" ]; then
+    mkdir -p "$STAGE/runtime/ime"
+    cp "$BASE_TABLE" "$STAGE/runtime/ime/base.txt"
+elif [ ! -f "$STAGE/runtime/ime/base.txt" ]; then
+    echo "警告：未找到基础词表；安装后需在「输入法词表」页导入，内置输入法才能接管" >&2
 fi
 
 if [ ! -x "$STAGE/gongwen-assistant" ]; then

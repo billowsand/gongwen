@@ -413,7 +413,7 @@ mod tests {
     #[test]
     #[ignore = "本机基础词表不入库"]
     fn real_base_table_is_complete_and_exact() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fuma/quan.txt");
+        let path = crate::ime::data::development_base_path().expect("本机基础词表不存在");
         let parsed = parse(&crate::text_file::read_to_string(&path).unwrap(), false);
         assert!(parsed.entries.len() >= 60_000);
         let mut table = Table {

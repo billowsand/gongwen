@@ -5,7 +5,7 @@
 ## 定位与数据
 
 输入法只接受编码、查询词表、选词上屏，不区分全拼、双拼或任何输入方案。
-以本机 `assets/fuma/quan.txt` 为初始基础表，完整保留单字、词组与简码。
+以本机 `assets/fuma/quan.txt` 或 `assets/fuma/mabiao.txt` 为初始基础表，完整保留单字、词组与简码。
 动态叠加稿件库中已接受的公文四码词、导入的四码表与个人词条。
 词条可以自己指定编码；公文词表原有编码建议与读音维护仍保留在维护侧。
 
@@ -78,7 +78,8 @@
 | `config_dir()/ime/history/` | 个人层最近 20 次修改前的文件与 `index.json` |
 
 首次基础表查找顺序：用户 `base.txt` → 环境指定的 runtime → 可执行文件旁
-`runtime/ime/base.txt` → 开发 `assets/fuma/quan.txt` → 旧用户音形表。
+`runtime/ime/base.txt` → 开发词表（Windows / Linux 优先 `assets/fuma/quan.txt`，macOS 优先
+`assets/fuma/mabiao.txt`，互为后备）→ 旧用户音形表。
 初始表只在用户没有当前基础表时复制，重新安装不会覆盖用户维护。
 
 ## 裁剪与打包
@@ -89,7 +90,7 @@
 
 所有平台打包排除旧 runtime 的 `ime/` 数据，不再携带 `dict.qj`、`lm.qj`。
 本机旧文件合计 47,943,072 字节（45.7 MiB）；初始 `quan.txt` 为 1,333,336 字节。
-便携打包在本机存在 `quan.txt` 时独立复制成 `runtime/ime/base.txt`，无需编译 feature。
+便携打包在本机存在 `quan.txt` 或 `mabiao.txt` 时独立复制成 `runtime/ime/base.txt`，无需编译 feature。
 CI 中没有该本机资源时仍可构建和安装，使用者在设置中导入基础表。
 发布工作流保留 PDF runtime 冒烟检查，删除已无意义的拼音数据冒烟步骤。
 
@@ -102,6 +103,14 @@ CI 中没有该本机资源时仍可构建和安装，使用者在设置中导�
 安装后基础表首次复制及用户基础表跨安装保留。
 
 ## 注意
+
+2026-10-20：初始基础词表兼容 `quan.txt` 与 `mabiao.txt`（本机后者为 UTF-16，
+读取器按 BOM 解码）。Windows / Linux 开发加载及 Windows 便携包优先 `quan.txt`，
+macOS 开发加载和两条打包链优先 `mabiao.txt`，缺少首选时使用另一份；
+词表仍作为独立资源，不嵌入二进制、不入库。修正 `package-macos.sh` 清理旧
+输入法资源时误删 `runtime/ime/base.txt` 的问题，并让 `package-dmg.sh` 允许
+清单中的该文件；两者在本机存在基础词表时都补入，缺表则明确提示需安装后导入。
+没有有效基础表时，勾选“启用”仍会回退系统输入法，须先确认设置页的基础表条数。
 
 词表页结果不设上限，只在筛选条件或词表变化时重算（本机全表 6 万行加体检约 70 ms，开发构建）。
 公文表扫描是收词流程，待确认词不会自动进候选。基础表更新独立于个人屏蔽与排序。

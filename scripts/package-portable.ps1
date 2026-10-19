@@ -205,6 +205,9 @@ foreach ($entry in $runtimeEntries) {
 
 # 初始基础词表独立随包，便于更新；缺少本机源文件时由使用者在设置页导入。
 $baseTableSource = Join-Path $projectRoot "assets/fuma/quan.txt"
+if (-not (Test-Path -LiteralPath $baseTableSource -PathType Leaf)) {
+    $baseTableSource = Join-Path $projectRoot "assets/fuma/mabiao.txt"
+}
 if (Test-Path -LiteralPath $baseTableSource -PathType Leaf) {
     $baseTableDir = Join-Path $OutputDir "runtime/ime"
     New-Item -ItemType Directory -Force -Path $baseTableDir | Out-Null

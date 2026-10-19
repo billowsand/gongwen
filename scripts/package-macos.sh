@@ -123,11 +123,26 @@ fi
 
 # runtime 是可选的：没有也能启动查看界面，PDF 排版需要其中的字体。
 RUNTIME_DIR="$STAGE/runtime"
+# 旧输入法资源不随包，但要保留新词表；不能把整个 ime/ 删完就直接打包。
+BASE_TABLE="$PROJECT_ROOT/assets/fuma/mabiao.txt"
+if [ ! -f "$BASE_TABLE" ]; then
+    BASE_TABLE="$PROJECT_ROOT/assets/fuma/quan.txt"
+fi
+if [ ! -f "$BASE_TABLE" ] && [ -f "$RUNTIME_DIR/ime/base.txt" ]; then
+    cp "$RUNTIME_DIR/ime/base.txt" "$WORK_DIR/ime-base.txt"
+    BASE_TABLE="$WORK_DIR/ime-base.txt"
+fi
 if [ -d "$RUNTIME_DIR" ]; then
     # PDF 由 Typst 在进程内排版，旧 runtime 里的 TeX 资产不随包。
     rm -rf "$RUNTIME_DIR/tectonic" "$RUNTIME_DIR/texbundle" "$RUNTIME_DIR/ime"
 else
     warn "no runtime/ directory; app bundle will not include the bundled fonts (PDF export unavailable)"
+fi
+if [ -f "$BASE_TABLE" ]; then
+    mkdir -p "$RUNTIME_DIR/ime"
+    cp "$BASE_TABLE" "$RUNTIME_DIR/ime/base.txt"
+else
+    warn "未找到基础词表；安装后需在「输入法词表」页导入，内置输入法才能接管"
 fi
 
 # 生成 .icns（sips + iconutil 为 macOS 自带）；不可用则跳过图标。
