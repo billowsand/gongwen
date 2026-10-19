@@ -131,6 +131,23 @@ calamine 升级后的词表导入中位数为 1.659 ms，导出 1.600 ms；相�
 - 待真机验收：真实窗口的输入法（本应用词表输入法）、候选选择、快捷键、选区拖动、撤销/重做、
   长稿滚动缩放、花脸稿、公式与 PDF 标签；Linux ARM64 未在本机验证。Windows 自动验证通过。
 
+## 5B：文件选择器
+
+- rfd 0.15.4 → 0.17.2。上游删除了 `tokio` / `async-std` feature，portal 后端改为自带 D-Bus 实现，
+  `ashpd`、`async-fs`、`async-net`、`urlencoding` 随旧后端一并移除。
+- `linux-portal-dialogs` feature 改为 `rfd/xdg-portal` + `rfd/wayland`：新版 portal 后端用
+  `wayland` feature 解析 Wayland 父窗口句柄（wayland-backend/client/protocols），不再需要异步运行时；
+  默认 `linux-gtk-dialogs`（`rfd/gtk3`）保持不变。业务代码未使用 `set_parent`，无需适配。
+- 在本机用 `cargo tree --target x86_64-unknown-linux-gnu` 分别核对两种 Linux feature 的解析：
+  portal 变体只带 pollster 与 wayland 链，没有 async-std；GTK3 变体带 gtk-sys/glib-sys/gobject-sys。
+  本机没有 Linux target 与 pkg-config，未能实际编译 Linux 变体。
+- Windows x64：格式检查通过，clippy 全目标零警告；完整测试 2049 通过、0 失败、57 忽略。
+  对话框相关测试走临时目录，未弹真实系统窗口。
+- 待真机验收：Windows 打开/保存/选文件夹/多选/取消/中文与空格路径/扩展名过滤；Linux ARM64
+  的 GTK3 与 portal/Wayland 两种后端、Debian buster 构建、Ubuntu 20.04 / 麒麟启动。
+- 锁文件提示：rfd 0.17 的 macOS target 依赖带 objc2 0.6，与根代码仍钉的 objc2 0.5 并存。
+  macOS 不在发布与 CI 范围（见计划「暂缓清单」），本批不做 objc2 迁移。
+
 ## 最终安全复扫与剩余验收
 
 - 最终锁文件共有 798 个 registry 包；2026-10-01 对每个锁定版本查询 OSV。rustls 及旧 quick-xml 的三项已知漏洞匹配均已消除。
