@@ -46,14 +46,18 @@
 // 中文字体，与 xeCJK 的分类一致）。标题类（黑体：章节、部分、目录章条目、图表题标签、
 // 文框标题、封面黑体字；封面小标宋大标题）用 Termes Bold，见 heavy；其余 Regular，
 // 正文里的 **加粗** 另走 fake-bold-cjk。
-#let latin = (name: if terminal { F.mono } else { F.latin }, covers: "latin-in-cjk")
-#let song = (latin, if terminal { F.hei } else { F.song }, F.fallback)
-#let kai = (latin, if terminal { F.hei } else { F.kai }, F.fallback)
-#let hei = (latin, F.hei, F.fallback)
-#let xbs = (latin, if terminal { F.hei } else { F.xbs }, F.fallback)
+// 字体角色在应用内是字符串，导出的 Typst 包里是一串系统字体别名。chain 把两种取值
+// 统一成数组；latin-families 按别名逐个生成 covers 字典（Typst 逐名回退）。
+#let chain(x) = if type(x) == array { x } else { (x,) }
+#let latin-families(x) = chain(x).map(n => (name: n, covers: "latin-in-cjk"))
+#let latin = latin-families(if terminal { F.mono } else { F.latin })
+#let song = (..latin, ..chain(if terminal { F.hei } else { F.song }), ..chain(F.fallback))
+#let kai = (..latin, ..chain(if terminal { F.hei } else { F.kai }), ..chain(F.fallback))
+#let hei = (..latin, ..chain(F.hei), ..chain(F.fallback))
+#let xbs = (..latin, ..chain(if terminal { F.hei } else { F.xbs }), ..chain(F.fallback))
 // 标题类文字：西文落到 Termes Bold（中文字体只有常规字重，不受影响）。
 #let heavy(font, ..args, body) = text(font: font, weight: "bold", ..args, body)
-#let mono = ((name: F.mono, covers: "latin-in-cjk"), if terminal { F.hei } else { F.kai }, F.fallback)
+#let mono = (..latin-families(F.mono), ..chain(if terminal { F.hei } else { F.kai }), ..chain(F.fallback))
 
 // ---------------- 行内片段 ----------------
 // 加粗：西文换 Termes Bold，汉字描边伪粗（xeCJK AutoFakeBold，只作用于中文字体）。
@@ -565,7 +569,7 @@
       set par(first-line-indent: 0pt, justify: false, leading: 0pt, spacing: 0pt)
       grid(columns: (0pt, 1fr), row-gutter: 0pt,
         ..lines.enumerate().map(((i, l)) => (
-          place(right, dx: -10 * texpt, text(size: 6.5pt, fill: rgb(153, 153, 153), font: (latin,), str(i + 1))),
+          place(right, dx: -10 * texpt, text(size: 6.5pt, fill: rgb(153, 153, 153), font: latin, str(i + 1))),
           par(l),
         )).flatten())
     }))
@@ -730,11 +734,11 @@
       if v.kind == "section" {
         par(link(target, h(15.75pt) + if v.prefix != none { v.prefix + h(0.5em) } + runs(v.text)
           + box(width: 1fr, repeat(gap: 10.5pt - 0.25em, justify: false)[.]) + h(1.5em)
-          + box(width: 1.55em, align(right, text(font: (latin,), num)))))
+          + box(width: 1.55em, align(right, text(font: latin, num)))))
       } else {
         let label = if v.prefix != none { chapter-prefix(v.prefix) + h(0.8em) }
         par(link(target, heavy(hei, label + runs(v.text)) + h(1fr)
-          + text(font: (latin,), weight: "bold", num)))
+          + text(font: latin, weight: "bold", num)))
       }
     }
   }
@@ -822,7 +826,7 @@
       y += measure(v).height
     }
     if c.original != "" {
-      at(105mm, y + 6mm, box(width: 150mm, text(font: (latin, F.song), style: "italic", size: 15pt,
+      at(105mm, y + 6mm, box(width: 150mm, text(font: (..latin, ..chain(F.song)), style: "italic", size: 15pt,
         par(leading: 20pt - 15pt, first-line-indent: 0pt, justify: false, c.original))))
     }
   }

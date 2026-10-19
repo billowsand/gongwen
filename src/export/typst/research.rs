@@ -93,11 +93,23 @@ fn attach_heading_lines(data: &mut Value, markdown: &str) {
 }
 
 /// 生成模板数据与公式 SVG。`source` 是 mdx 源码目录里的 Markdown（插图、文献都在旁边）。
-fn document(
+/// `pub(crate)`：Typst 包导出也走这一条，只把字体表换掉，不另拼一份数据。
+pub(crate) fn document(
     source: &Path,
     input: &DraftInput,
     numbering: &NumberingConfig,
     markdown: &str,
+) -> Result<Prepared> {
+    document_with_fonts(source, input, numbering, markdown, fonts()?)
+}
+
+/// 出包时直接注入便携字体表，避免先加载、校验本机内置字体。
+pub(crate) fn document_with_fonts(
+    source: &Path,
+    input: &DraftInput,
+    numbering: &NumberingConfig,
+    markdown: &str,
+    fonts: Value,
 ) -> Result<Prepared> {
     let doc = mdx::typst_research::build_with_body_normalizer(source, |body| {
         super::research_body::normalize(body, numbering)
@@ -121,7 +133,7 @@ fn document(
             latex_rust::Color::rgb(0, 0, 0)
         },
     );
-    data["fonts"] = fonts()?;
+    data["fonts"] = fonts;
     data["terminal"] = terminal.into();
     data["dark"] = dark.into();
     let data = serde_json::to_string(&data).context("无法序列化研究报告排版数据")?;

@@ -1462,6 +1462,10 @@ impl GongwenApp {
             )
             .on_disabled_hover_text("Word 导出仍在完善，当前请使用 PDF");
             ui.checkbox(&mut self.config.export.pdf, "PDF");
+            ui.checkbox(&mut self.config.export.typst, "Typst 包")
+                .on_hover_text(
+                    "模板、数据与插图打成一个 zip，装有仿宋/楷体/黑体/宋体的机器可用 Typst 命令行编译",
+                );
         });
         if !self.config.export.any() {
             setting_continuation(ui, |ui| {

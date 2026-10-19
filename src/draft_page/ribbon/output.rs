@@ -40,6 +40,7 @@ impl DraftPage<'_> {
                         markdown: false,
                         docx: true,
                         pdf: false,
+                        typst: false,
                         overwrite,
                     },
                     "这一次只出 docx，不改设置里勾好的常用格式",
@@ -51,6 +52,7 @@ impl DraftPage<'_> {
                         markdown: false,
                         docx: false,
                         pdf: true,
+                        typst: false,
                         overwrite,
                     },
                     "这一次只出 PDF，不改设置里勾好的常用格式",
@@ -62,9 +64,22 @@ impl DraftPage<'_> {
                         markdown: true,
                         docx: false,
                         pdf: false,
+                        typst: false,
                         overwrite,
                     },
                     "这一次只出 Markdown 源码包：md 正文、稿中引用的图片，研究报告另含 references.bib",
+                ),
+                (
+                    theme::Icon::Package,
+                    "仅 Typst 包",
+                    ExportSelection {
+                        markdown: false,
+                        docx: false,
+                        pdf: false,
+                        typst: true,
+                        overwrite,
+                    },
+                    "这一次只出 Typst 包：模板、数据与插图打成 zip，装有常用中文字体的机器可用 typst 命令行编译",
                 ),
             ] {
                 if ui
@@ -78,7 +93,9 @@ impl DraftPage<'_> {
         });
         if let Some((selection, label)) = only {
             self.start_export_with(selection);
-            *self.status = format!("正在按「{label}」导出…");
+            if self.doc.busy {
+                *self.status = format!("正在按「{label}」导出…");
+            }
         }
     }
 

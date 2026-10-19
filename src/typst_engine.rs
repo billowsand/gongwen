@@ -227,6 +227,25 @@ pub fn font_set(fonts: &FontConfig) -> Result<FontSet> {
     })
 }
 
+/// 测试用：不带任何字面的空字体集。模板只取家族名、或要验证「完全没有本机字体
+/// 也排得出来」时用它——导出包能否在装有系统字体的机器上编译，与 App 内字体无关。
+#[cfg(test)]
+pub(crate) fn empty_font_set_for_test() -> FontSet {
+    FontSet {
+        fonts: Vec::new(),
+        families: FontFamilies {
+            title: String::new(),
+            heading1: String::new(),
+            heading2: String::new(),
+            body: String::new(),
+            page_number: String::new(),
+            bold: None,
+            page_number_latin: None,
+            fallback: Vec::new(),
+        },
+    }
+}
+
 struct GongwenWorld {
     library: LazyHash<Library>,
     book: LazyHash<FontBook>,

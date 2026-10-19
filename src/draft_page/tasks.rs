@@ -283,7 +283,7 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 仿 WinEdt 的成品入口：TEX / PDF / WORD 三枚，当前文稿的导出目录里有
+    /// 成品入口：PDF / Word / Typst 包，当前文稿的导出目录里有
     /// 对应成品才点亮，点开的是当前文稿最近一次导出（属于它的子目录中修改时间
     /// 最新）留下的那一份。右键可复制文件到剪贴板、另存到别处或在文件管理器里定位。
     pub(crate) fn export_open_buttons(&mut self, ui: &mut egui::Ui) {

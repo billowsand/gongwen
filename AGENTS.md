@@ -122,6 +122,12 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
   五期已全部实现，**待真机验收**（排版→合并整条链、ZIP 往返）。方案、各期进度、
   与方案的出入和已知坑见 `docs/send-package-design.md`（单文件）。版本与校验值复用离线
   同步的版本图，随行件按稿件 UUID 引用；改导出、归档或同步导入前先读它。
+- **导出 Typst 包**（模板 + `doc.json` + 插图 / Mermaid / 公式 SVG / `references.bib`
+  打成 zip，不含字体；`doc.json` 的 fonts 换成系统字体别名数组，解压后
+  `typst compile gongwen.typ` / `research.typ` 即可编译）：已实现，**待真机验收**
+  （装有常见中文字体的机器实际编译一次）。代码在 `src/export/typst/package.rs`，
+  方案与包结构见 `docs/typst-engine.md`「导出 Typst 包」一节。模板的字体角色同时接受
+  字符串与数组，改 `fam()` / `chain()` 前先读那一节。
 - **AI 智能体内核加固**（2026-10-07 重排为五期：工具契约（复用 `apidef::tooling` 的校验与
   两级访问）→ 提案逐块接受 → 用量 / 提案卡留痕 / 备用模型 → 每步检查点与崩溃续跑 → 全流程
   预算与算子内只读并行；控制流 `goto` / `loop` 与子图暂缓）：**第 1 期（工具契约）、第 2 期

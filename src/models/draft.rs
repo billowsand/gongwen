@@ -266,6 +266,9 @@ pub struct ExportSelection {
     /// PDF（Typst 排版）。旧配置里这一栏叫 `tex`（当年出的是 TeX 源文件与 PDF）。
     #[serde(alias = "tex")]
     pub pdf: bool,
+    /// Typst 包：模板、数据与插图打成 zip，装有常见中文字体的机器可用 typst CLI 编译。
+    /// 与 PDF 分开勾选——它只准备数据，不依赖本机字体。
+    pub typst: bool,
     /// 反复导出同一篇稿件时覆盖同名文件，而不是不断生成 `-2`、`-3` 副本。
     pub overwrite: bool,
 }
@@ -276,6 +279,7 @@ impl Default for ExportSelection {
             markdown: true,
             docx: true,
             pdf: true,
+            typst: false,
             overwrite: false,
         }
     }
@@ -283,7 +287,7 @@ impl Default for ExportSelection {
 
 impl ExportSelection {
     pub(crate) fn any(&self) -> bool {
-        self.markdown || self.docx || self.pdf
+        self.markdown || self.docx || self.pdf || self.typst
     }
 }
 

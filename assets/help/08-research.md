@@ -318,6 +318,7 @@ $$\int_0^1 x^2\,dx = \frac{1}{3}$$
 | `研究报告-名称-版本名称.pdf` | PDF：封面、目录、正文、附录与参考文献 |
 | `研究报告-名称-版本名称.docx` | Word 版（研究报告自己的转换器，封面、目录、页码与 PDF 对齐） |
 | `研究报告-名称-版本名称-源码包.zip` | Markdown 源码包：正文、图片与 `references.bib` |
+| `研究报告-名称-版本名称-Typst包.zip` | Typst 包：模板、数据、图片、公式 SVG 与 `references.bib`，可用 Typst 命令行编译 |
 
 版式以 PDF 为准；Word 版用于需要改稿或按 Word 流转的场合。
 

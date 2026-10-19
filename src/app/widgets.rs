@@ -1067,8 +1067,7 @@ pub(crate) fn export_and_compile(
     let (fonts, mut warnings) = system_fonts::resolve(fonts);
     let mut proof_warnings: Vec<ReviewNote> = Vec::new();
     let mut proof_measured = false;
-    let mut compile_error: Option<String> = None;
-    let artifacts = match export::export_artifacts(
+    let artifacts = export::export_artifacts(
         output_dir,
         input,
         markdown,
@@ -1077,18 +1076,8 @@ pub(crate) fn export_and_compile(
         &fonts,
         numbering,
         version_name,
-    ) {
-        Ok(artifacts) => artifacts,
-        // PDF 排版失败时 md / docx 已经写好了，不让整次导出作废，走红色提示框。
-        Err(error) if selection.pdf => {
-            compile_error = Some(format!("{error:#}"));
-            export::ExportArtifacts {
-                files: Vec::new(),
-                typst: None,
-            }
-        }
-        Err(error) => return Err(error),
-    };
+    )?;
+    let compile_error = artifacts.compile_error;
     let files = artifacts.files;
     if let Some(outcome) = artifacts.typst {
         // 孤行只有排完版才知道：模板在段首段尾留下位置，拼成探针报告。
@@ -1113,7 +1102,7 @@ pub(crate) fn export_and_compile(
             }));
         }
         warnings.extend(outcome.warnings);
-        progress("PDF 排版完成，正在整理导出结果…");
+        progress("正在整理导出结果…");
     }
     Ok(ExportOutcome {
         files,

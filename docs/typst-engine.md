@@ -220,6 +220,71 @@ PDF 与模板数据（`doc.json`）在 `tmp/typst-samples/<用例>/`。改模板
 `typst`、`typst-pdf`、`typst-layout` 三者同版本一起升；`typst-layout` 是 vendored 副本，按
 `vendor/typst-layout/README.md` 重新打补丁，再出一遍样张对比。
 
+## 导出 Typst 包（2026-10-19）
+
+导出格式新增「Typst 包」：把模板、`doc.json` 与全部资源打成 `{主干名}-Typst包.zip`，
+**不含字体**。解压后在包目录执行 `typst compile gongwen.typ`（研究报告为
+`typst compile research.typ`）即可出 PDF。出包只准备数据，不调用进程内排版——本机缺字体
+不影响出包，编译由拿到包的人在装有常见中文字体的机器上完成。
+
+包内结构（解压目录即 Typst 项目根）：
+
+```text
+gongwen.typ / research.typ   模板，与二进制里内嵌的是同一份
+doc.json                     模板数据，fonts 已换成便携字体别名链
+README.txt                   编译命令、字体清单、与 App 内 PDF 的差异
+images/…                     正文与附件插图，保持原相对路径
+mermaid-cache/…              Mermaid 图
+math/N.svg                   研究报告公式（绝对虚拟路径去掉前导 /）
+references.bib               研究报告文献（有文献时）
+```
+
+`doc.json` 的 `fonts` 由 `export::typst::package` 整体替换成固定的系统字体别名数组：
+应用内的合成字体 `GW FangSong` / `GW Kai` 与拉丁子集 `GWSimSunLatin` 只存在于本机，
+不能带出。每个角色给中英文族名与方正文件名，Typst 按数组逐名回退：
+
+| 角色 | 别名链 |
+|---|---|
+| 公文正文 | FangSong, 仿宋, 仿宋_GB2312, FangSong_GB2312, FZFangSong-Z02, 方正仿宋_GBK |
+| 公文二级标题、研究楷体 | KaiTi, 楷体, 楷体_GB2312, KaiTi_GB2312, FZKai-Z03, 方正楷体_GBK |
+| 公文一级标题、研究黑体 | FZHei-B01, 方正黑体_GBK, SimHei, 黑体 |
+| 公文大标题、研究小标宋 | FZXiaoBiaoSong-B05, 方正小标宋_GBK, FZXiaoBiaoSong-B05S, 方正小标宋简体 |
+| 公文页码、研究宋体与兜底 | FZShuSong-Z01, 方正书宋_GBK, SimSun, 宋体 |
+| 研究西文 | TeX Gyre Termes, Times New Roman |
+| 研究等宽 | JetBrains Mono, Consolas, Courier New |
+
+`bold` 与 `page_number_latin` 为 `null`：包里用描边伪粗，页码数字直接落中文字体的拉丁字面。
+字体表是常量，导出时无条件替换，不受设置页「本机字体」影响。
+
+模板的字体角色因此同时接受字符串与数组：`gongwen.typ` 的 `fam()`、`research.typ` 的
+`chain()` / `latin-families()` 把两种取值统一成数组。应用内编译仍传字符串，行为不变。
+
+与 App 内 PDF 的差异：官方 typst CLI 没有 vendored `typst-layout` 的标点收缩补丁，
+断行、分页可能略有不同；字体换成本机系统字体，字形与字宽可能有细微差异。别名链里
+未安装的名字会让 typst CLI 逐条报 `unknown font family`，只要每个角色命中一个别名
+即可忽略。README.txt 在包内写明这些点，并给出 `--font-path` 指向应用
+`runtime/fonts` 的备选做法。
+
+实现：`src/export/typst/package.rs`（`portable_official_fonts` /
+`portable_research_fonts`、`rewrite_fonts`、`write_package`）。公文复用
+`typst::prepare_package` 的 Mermaid 物化与缺图剔除，研究报告复用 `research::document`
+的数据准备（`document_with_fonts` 直接传入便携字体表，不先读取内置字体），
+不复制模板、不改模板里的字体名。单元测试把导出的包
+解压后用空字体集喂回 `typst_engine::compile`，确认数组取值排得出 PDF。
+
+2026-10-19 导出入口复查修复：
+
+- 成品入口新增 Typst 包，按 `-Typst包.zip` 识别，避免误开 Markdown 源码包；
+  纳入文件时间扫描、缓存失效与当前稿件过滤，支持打开、另存、复制和定位。
+- 成功状态显示实际输出子目录；临时格式按钮不再覆盖导出启动失败的原因。
+- PDF 失败单独收集为 `ExportArtifacts::compile_error`，继续生成 Typst 包并保留
+  已生成文件的入口；包生成失败也不再误报为 PDF 排版错误。
+- 研究报告出包跳过随包字体校验；ZIP 先写同目录临时文件，完整结束后再替换目标，
+  避免写入失败毁掉旧包。
+
+回归覆盖：两种 ZIP 区分、切换稿件后入口失效、PDF 失败仍生成包并保留源码包、
+公文与研究报告包解压编译（图片、公式、文献）。独立 Typst CLI 编译仍待真机验收。
+
 ## 研究报告多模板（2026-10-07）
 
 要素 `ResearchMetadata.template` 选择经典报告 / 研究终端；`palette` 选择暗场 / 白图。

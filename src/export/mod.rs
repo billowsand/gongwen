@@ -316,16 +316,22 @@ pub fn export_all_with_numbering(
     fonts: &FontConfig,
     numbering: &NumberingConfig,
 ) -> Result<Vec<PathBuf>> {
-    Ok(export_artifacts(
+    let artifacts = export_artifacts(
         output_dir, input, markdown, selection, display, fonts, numbering, None,
-    )?
-    .files)
+    )?;
+    if let Some(error) = artifacts.compile_error {
+        anyhow::bail!("{error}");
+    }
+    Ok(artifacts.files)
 }
 
 /// 一次导出的产物。
 pub(crate) struct ExportArtifacts {
     pub files: Vec<PathBuf>,
-    /// 排出了 PDF 时的附带信息（孤行探针报告、排版警告）。
+    /// PDF 排版失败不阻断其余格式，界面保留已生成文件并单独显示失败原因。
+    pub compile_error: Option<String>,
+    /// 排出了 PDF 时的附带信息（孤行探针报告、排版警告）；只出 Typst 包时，
+    /// 这里也装着出包警告（缺图等），由界面照常提示。
     pub typst: Option<typst_engine::TypstOutcome>,
 }
 
@@ -382,6 +388,7 @@ pub(crate) fn export_artifacts(
         files.push(path);
     }
     let mut typst = None;
+    let mut compile_error = None;
     if selection.pdf {
         let path = document_dir.join(format!("{export_stem}.pdf"));
         let outcome = write_pdf(
@@ -392,11 +399,42 @@ pub(crate) fn export_artifacts(
             fonts,
             numbering,
             &Default::default(),
+        );
+        match outcome {
+            Ok(outcome) => {
+                files.push(path);
+                typst = Some(outcome);
+            }
+            Err(error) => compile_error = Some(format!("{error:#}")),
+        }
+    }
+    if selection.typst {
+        let path = document_dir.join(format!("{export_stem}-Typst包.zip"));
+        let warnings = typst::package::write_package(
+            &path,
+            input,
+            markdown,
+            display,
+            numbering,
+            &Default::default(),
         )?;
         files.push(path);
-        typst = Some(outcome);
+        // 没排 PDF 时也塞一个空结果，让缺图等出包警告照常进审校提示。
+        match &mut typst {
+            Some(outcome) => outcome.warnings.extend(warnings),
+            None => {
+                typst = Some(typst_engine::TypstOutcome {
+                    warnings,
+                    ..Default::default()
+                })
+            }
+        }
     }
-    Ok(ExportArtifacts { files, typst })
+    Ok(ExportArtifacts {
+        files,
+        typst,
+        compile_error,
+    })
 }
 
 /// 排一份 PDF 写到 `path`：研究报告走 `typst::research`，其余文种走公文模板。
@@ -1582,6 +1620,7 @@ mod tests {
             markdown: true,
             docx: false,
             pdf: false,
+            typst: false,
             overwrite: true,
         };
         let files = export_all(
@@ -1623,6 +1662,7 @@ mod tests {
             markdown: true,
             docx: false,
             pdf: false,
+            typst: false,
             overwrite: true,
         };
         let markdown = format!("# 标题\n\n正文。\n\n![图](images/{name})");
@@ -1656,6 +1696,7 @@ mod tests {
             markdown: true,
             docx: false,
             pdf: false,
+            typst: false,
             overwrite: true,
         };
         let files = export_all(
@@ -1693,6 +1734,7 @@ mod tests {
             markdown: true,
             docx: false,
             pdf: false,
+            typst: false,
             overwrite: true,
         };
         let first = export_all(
@@ -1760,6 +1802,7 @@ mod tests {
             markdown: true,
             docx: true,
             pdf: fonts_available,
+            typst: false,
             overwrite: false,
         };
         let run = || {

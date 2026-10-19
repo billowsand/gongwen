@@ -89,16 +89,18 @@ pub(crate) use table::{
 pub(crate) enum ExportKind {
     Pdf,
     Word,
+    Typst,
 }
 
 impl ExportKind {
-    pub(crate) const ALL: [Self; 2] = [Self::Pdf, Self::Word];
+    pub(crate) const ALL: [Self; 3] = [Self::Pdf, Self::Word, Self::Typst];
 
     /// 悬停说明里用的格式名。
     fn label(self) -> &'static str {
         match self {
             Self::Pdf => "PDF",
             Self::Word => "WORD",
+            Self::Typst => "Typst 包",
         }
     }
 
@@ -106,6 +108,7 @@ impl ExportKind {
         match self {
             Self::Pdf => theme::Icon::FileTypePdf,
             Self::Word => theme::Icon::FileTypeDoc,
+            Self::Typst => theme::Icon::Package,
         }
     }
 
@@ -113,11 +116,12 @@ impl ExportKind {
         match self {
             Self::Pdf => "pdf",
             Self::Word => "docx",
+            Self::Typst => "zip",
         }
     }
 }
 
-/// 导出目录里当前文稿最近一次产出的 pdf/docx，供「输出」分区的入口点亮与打开。
+/// 导出目录里当前文稿最近一次产出的 PDF / Word / Typst 包，供成品入口点亮与打开。
 ///
 /// 导出的落盘结构是 `输出目录/<文件名主干>/<文件名主干>.{md,docx,pdf}`，
 /// 同一文稿按版本名称或“待提交”分子目录，不覆盖同名文件时再追加编号，也会和
@@ -133,6 +137,7 @@ pub(crate) struct ExportLinks {
     scanned_at: Option<Instant>,
     pdf: Option<PathBuf>,
     docx: Option<PathBuf>,
+    typst: Option<PathBuf>,
 }
 
 impl ExportLinks {
@@ -148,6 +153,7 @@ impl ExportLinks {
         match kind {
             ExportKind::Pdf => self.pdf.as_deref(),
             ExportKind::Word => self.docx.as_deref(),
+            ExportKind::Typst => self.typst.as_deref(),
         }
     }
 
@@ -180,6 +186,7 @@ impl ExportLinks {
         self.scanned_at = Some(Instant::now());
         self.pdf = None;
         self.docx = None;
+        self.typst = None;
 
         let root = Path::new(dir.trim());
         if dir.trim().is_empty() || !root.is_dir() {
@@ -203,6 +210,7 @@ impl ExportLinks {
                         format!("{name}.pdf"),
                         format!("{name}.docx"),
                         format!("{name}-源码包.zip"),
+                        format!("{name}-Typst包.zip"),
                     ]
                     .iter()
                     .filter_map(|file| std::fs::metadata(path.join(file)).ok()?.modified().ok())
@@ -237,11 +245,14 @@ impl ExportLinks {
     }
 
     fn complete(&self) -> bool {
-        self.pdf.is_some() && self.docx.is_some()
+        self.pdf.is_some() && self.docx.is_some() && self.typst.is_some()
     }
 
     /// 先到先得：调用顺序已经保证是从新到旧。
     fn take(&mut self, path: &Path) {
+        if !path.is_file() {
+            return;
+        }
         let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
             return;
         };
@@ -249,9 +260,18 @@ impl ExportLinks {
         let Some(kind) = ExportKind::ALL.into_iter().find(|k| k.extension() == ext) else {
             return;
         };
+        if kind == ExportKind::Typst
+            && !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("-Typst包.zip"))
+        {
+            return;
+        }
         let slot = match kind {
             ExportKind::Pdf => &mut self.pdf,
             ExportKind::Word => &mut self.docx,
+            ExportKind::Typst => &mut self.typst,
         };
         if slot.is_none() {
             *slot = Some(path.to_path_buf());

@@ -29,7 +29,8 @@
 #let add-color = rgb("#1F4E9E")
 #let topskip = 10 * texpt                  // 首页 picture 原点比版心顶低一个 \topskip
 
-#let fam(main) = (main, ..F.fallback)
+// 字体角色在应用内是字符串，导出的 Typst 包里是一串系统字体别名（逐个别名回退）。
+#let fam(main) = if type(main) == array { (..main, ..F.fallback) } else { (main, ..F.fallback) }
 // 仿宋、楷体是合成字体，西文数字等非汉字自带仿宋_GB2312 / 楷体_GB2312 字面；页码数字
 // 用宋体字面的拉丁子集（只含 ASCII），排在页码字体前面，Typst 逐字回退时数字先落到
 // 子集上（页码选了本机字体时缺省）。黑体、小标宋用自带字面。

@@ -8,6 +8,7 @@ pub(crate) mod body;
 pub(crate) mod data;
 mod frame;
 mod math;
+pub(crate) mod package;
 pub(crate) mod research;
 mod research_body;
 mod research_redline;
@@ -126,6 +127,35 @@ fn page_count_with_base(
 
 #[cfg(test)]
 mod page_count_tests;
+
+/// 导出 Typst 包用的模板数据。不装本机字体集（省掉上百兆字体读取）：字体角色先填
+/// 占位名，打包时整体替换成便携字体表；缺图与 PDF 导出同口径地剔掉并回报。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_package(
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    numbering: &NumberingConfig,
+    elements: &ElementMarks,
+    base_dir: &Path,
+) -> Result<(String, String, Vec<String>)> {
+    let rendered = crate::mermaid::materialize(
+        markdown,
+        crate::mermaid::Style::Official,
+        crate::mermaid::Format::Pdf,
+    )?;
+    let mut doc = frame::document(
+        input,
+        &rendered,
+        display,
+        numbering,
+        elements,
+        package::placeholder_fonts(),
+    );
+    let missing = drop_missing_images(&mut doc, base_dir);
+    let data = serde_json::to_string(&doc).context("无法序列化 Typst 文档数据")?;
+    Ok((rendered, data, missing))
+}
 
 #[allow(clippy::too_many_arguments)]
 fn prepare(

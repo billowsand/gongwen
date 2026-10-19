@@ -189,6 +189,14 @@ fn export_links_only_open_latest_dir_of_current_stem() {
     touch_export(&a_old, "pdf");
     touch_export(&a_new, "pdf");
     touch_export(&a_new, "docx");
+    std::fs::write(
+        a_new.join(format!(
+            "{}-Typst包.zip",
+            a_new.file_name().unwrap().to_str().unwrap()
+        )),
+        b"zip",
+    )
+    .unwrap();
     // 别的文稿最新导出也有 pdf——旧实现会在这里取到它的 pdf/docx。
     touch_export(&b_latest, "pdf");
     touch_export(&b_latest, "docx");
@@ -205,6 +213,28 @@ fn export_links_only_open_latest_dir_of_current_stem() {
             "{kind:?} 应指向当前文稿最新导出目录"
         );
     }
+}
+
+/// 两种 ZIP 必须区分；切换稿件后不得沿用之前的包入口。
+#[test]
+fn export_links_distinguishes_typst_package_from_markdown_archive() {
+    let root = tempfile::tempdir().unwrap();
+    let stem = "普通公文-测试";
+    let folder = root.path().join(format!("{stem}-待提交"));
+    std::fs::create_dir(&folder).unwrap();
+    let source = folder.join(format!("{stem}-待提交-源码包.zip"));
+    std::fs::write(&source, b"markdown").unwrap();
+    let mut links = ExportLinks::default();
+    links.refresh(root.path().to_str().unwrap(), Some(stem));
+    assert!(links.path(ExportKind::Typst).is_none());
+    let package = folder.join(format!("{stem}-待提交-Typst包.zip"));
+    std::fs::write(&package, b"typst").unwrap();
+    links.invalidate();
+    links.refresh(root.path().to_str().unwrap(), Some(stem));
+    assert_eq!(links.path(ExportKind::Typst), Some(package.as_path()));
+    // 切换到别的稿件后，不能沿用先前的包入口。
+    links.refresh(root.path().to_str().unwrap(), Some("普通公文-其他"));
+    assert!(links.path(ExportKind::Typst).is_none());
 }
 
 /// 覆盖旧版本的成品时，即使目录自身时间不变，“最近导出”也必须跟上。

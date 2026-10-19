@@ -927,6 +927,12 @@ fn settings_changes(a: &AppConfig, b: &AppConfig) -> Vec<FieldChange> {
     );
     field(
         &mut out,
+        "导出：Typst 包",
+        yes_no(a.export.typst),
+        yes_no(b.export.typst),
+    );
+    field(
+        &mut out,
         "覆盖同名文件",
         yes_no(a.export.overwrite),
         yes_no(b.export.overwrite),

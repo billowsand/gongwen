@@ -1395,7 +1395,7 @@ impl GongwenApp {
                 self.docs[index]
                     .warnings
                     .dedup_by(|a, b| a.message == b.message);
-                // 成品不再进抽屉：让工具栏那三枚 TEX/PDF/WORD 入口重新扫盘点亮即可。
+                // 成品不再进抽屉：让工具栏的 PDF / Word / Typst 包入口重新扫盘点亮即可。
                 self.export_links.invalidate();
                 let orphans = self.docs[index].proof_warnings.len();
                 // 要素问题不挡导出，但导出成功不等于这稿子能签发。数出来缀在状态栏
@@ -1433,6 +1433,12 @@ impl GongwenApp {
                         self.docs[index].output_files.len()
                     )
                 };
+                if let Some(path) = self.docs[index].output_files.first() {
+                    self.status.push_str(&format!(
+                        " 输出位置：{}",
+                        path.parent().unwrap_or(path).display()
+                    ));
+                }
             }
             DocJob::RedlineExported(Ok(files)) => {
                 let pdf = files
