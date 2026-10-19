@@ -7,6 +7,8 @@
 //! 电子版 PDF 复用 anydoc 的本地文字提取，不执行 OCR；检测到扫描页时整份拒收。
 //! PDF 的段落、标题与表格由版面推断，导入后需要人工核对，不保证还原原版式。
 
+mod structure;
+
 use crate::models::ResearchMetadata;
 use anyhow::{Context, Result, anyhow, bail};
 use regex::Regex;
@@ -200,6 +202,24 @@ pub(crate) fn to_knowledge_markdown(path: &Path) -> Result<String> {
     } else {
         Ok(promote_headings(&markdown))
     }
+}
+
+/// 起草页导入用的转换：在 [`to_markdown`] 之上按公文版式还原标题、列表、文档
+/// 标题与附件标记（规则见 [`structure`]，纯确定性规则，不调用模型）。
+///
+/// `detect_title` 为假时不把开头的段落升成 `# `——往已经有标题的稿子里插入时用。
+/// Markdown 原文作者自己排过结构，不动；纯文本按「一行一段」读。
+pub(crate) fn to_draft_markdown(path: &Path, detect_title: bool) -> Result<String> {
+    let extension = extension_of(path);
+    let markdown = to_markdown(path)?;
+    if matches!(extension.as_str(), "md" | "markdown") {
+        return Ok(markdown);
+    }
+    let options = structure::Options {
+        detect_title,
+        lines_are_paragraphs: extension == "txt",
+    };
+    Ok(normalize(&structure::restructure(&markdown, &options)))
 }
 
 /// PDF 提取结果需要人工核对；其它格式沿用现有导入提示。
@@ -914,6 +934,94 @@ mod tests {
             "{markdown}"
         );
         assert!(markdown.contains("$$\nx^{2}\n$$"), "{markdown}");
+    }
+
+    /// 起草页导入要把手打编号与 Word 自动编号都还原成公文结构。自动编号走
+    /// numbering.xml：汉字计数的「一、」anydoc 会转成 `- 1、 `，这里现造一份核对。
+    #[test]
+    fn draft_import_restores_official_document_structure() {
+        use std::io::Write as _;
+
+        const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let para =
+            |text: &str| format!("<w:p><w:r><w:t xml:space=\"preserve\">{text}</w:t></w:r></w:p>");
+        let numbered = |level: u8, text: &str| {
+            format!(
+                "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"{level}\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr>\
+                 <w:r><w:t>{text}</w:t></w:r></w:p>"
+            )
+        };
+        let body = [
+            para("关于做好防汛工作的通知"),
+            para("各区县人民政府："),
+            para("　　一、总体要求"),
+            "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>（一）加强组织领导。</w:t></w:r>\
+             <w:r><w:t>各单位要高度重视。</w:t></w:r></w:p>"
+                .to_string(),
+            "<w:p><w:r><w:t>（二）工作目标</w:t></w:r><w:r><w:br/></w:r>\
+             <w:r><w:t>到2027年基本建成。</w:t></w:r></w:p>"
+                .to_string(),
+            para("请报送以下材料："),
+            para("1.工作总结；"),
+            para("2.统计报表。"),
+            numbered(0, "主要任务"),
+            para("正文。"),
+            numbered(1, "排查隐患"),
+            para("正文。"),
+        ]
+        .concat();
+        let document = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{W}"><w:body>{body}</w:body></w:document>"#
+        );
+        let numbering = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0">
+<w:lvl w:ilvl="0"><w:start w:val="2"/><w:numFmt w:val="chineseCounting"/><w:lvlText w:val="%1、"/></w:lvl>
+<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="chineseCounting"/><w:lvlText w:val="（%2）"/></w:lvl>
+</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+        );
+        let document_rels = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{R}/numbering" Target="numbering.xml"/></Relationships>"#
+        );
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            ("word/_rels/document.xml.rels", document_rels.as_str()),
+            ("word/document.xml", document.as_str()),
+            ("word/numbering.xml", numbering.as_str()),
+        ];
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("通知.docx");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).expect("创建 docx"));
+        for (name, content) in parts {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .expect("写入 docx 部件");
+            zip.write_all(content.as_bytes()).expect("写入 docx 部件");
+        }
+        zip.finish().expect("收尾 docx");
+
+        let raw = to_markdown(&path).unwrap();
+        let markdown = to_draft_markdown(&path, true).unwrap();
+        assert_eq!(
+            markdown,
+            "# 关于做好防汛工作的通知\n\n各区县人民政府：\n\n## 总体要求\n\n\
+             ### 加强组织领导\n各单位要高度重视。\n\n### 工作目标\n到2027年基本建成。\n\n\
+             请报送以下材料：\n\n1. 工作总结；\n2. 统计报表。\n\n\
+             ## 主要任务\n\n正文。\n\n### 排查隐患\n\n正文。",
+            "anydoc 原始输出：\n{raw}"
+        );
     }
 
     #[test]

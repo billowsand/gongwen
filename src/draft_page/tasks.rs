@@ -424,7 +424,13 @@ impl DraftPage<'_> {
         let Some(path) = doc_import::pick_file() else {
             return;
         };
-        match doc_import::to_markdown(&path) {
+        // 稿子里已经有 `# 标题` 就不再从导入的正文里认标题，免得正文区出现两个。
+        let detect_title = !self
+            .doc
+            .generated_markdown
+            .lines()
+            .any(|line| line.trim_start().starts_with("# "));
+        match doc_import::to_draft_markdown(&path, detect_title) {
             Ok(markdown) => self.insert_imported_markdown(ctx, &markdown, &path),
             Err(error) => *self.status = format!("导入失败：{error:#}"),
         }

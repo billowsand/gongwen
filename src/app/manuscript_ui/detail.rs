@@ -854,7 +854,7 @@ impl GongwenApp {
         let Some(path) = doc_import::pick_file() else {
             return;
         };
-        match doc_import::to_markdown(&path) {
+        match doc_import::to_draft_markdown(&path, true) {
             Ok(markdown) => {
                 let chars = markdown.chars().count();
                 let session = DraftSession::with_markdown(0, &self.config, markdown);
