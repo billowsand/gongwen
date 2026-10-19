@@ -200,6 +200,16 @@ YAML 行为；是否迁移应与 typst/hayagriva 的上游动作一起评估。
 有稳定版配套；届时按计划用中文节点、特殊字形、长标签、甘特图、透明度、SVG 滤镜和中文嵌套公式
 对照预览、PNG、PDF 与 DOCX 图像。
 
+## 最终整体验证
+
+- 最终 HEAD：`cargo fmt --all -- --check` 通过，`cargo clippy --locked --all-targets -- -D warnings`
+  零警告，`cargo test --locked --all-targets` 2049 通过 / 0 失败 / 57 忽略，
+  `cargo build --release --locked` 通过（7 分 30 秒）。
+- 补充样张：`cargo test --locked typst_samples -- --ignored` 10 项全部通过（7.1 秒），
+  说明本机字体环境下公文与研究报告 PDF 输出链正常；本批未改 Typst/vendor 排版代码。
+- 本机没有 Linux target、pkg-config，也未接 Office/WPS、打印机与真实同步包，故 Linux 构建、
+  跨版本应用往返、真实 GUI 与打印仍属未验收项，不能由 Windows 自动测试替代。
+
 ## 最终安全复扫与剩余验收
 
 - 最终锁文件共有 798 个 registry 包；2026-10-01 对每个锁定版本查询 OSV。rustls 及旧 quick-xml 的三项已知漏洞匹配均已消除。
