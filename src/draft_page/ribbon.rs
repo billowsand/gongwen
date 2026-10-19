@@ -1,13 +1,15 @@
-//! 功能区（Ribbon）各分区：开始/插入/研报/格式/审校/视图/输出。
+//! 功能区（Ribbon）各分区：开始/插入/研报/格式/清洗/审校/视图/输出。
 //! 「研报」只在研究报告下出现，其余各分区所有文种都在。
 //!
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::ribbon`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::app::{DraftAction, VersionScope, warn};
+use crate::doc_import::clean;
 use crate::draft_page::{
     DraftPage, PreviewMode, TOOLBAR_CONTROL_HEIGHT, TableOp, body_stats, chinese_today,
-    editor_selection, table_grid_picker, tidy_blank_lines, toggle_bullet, toolbar_separator,
+    editor_selection, format_clean, table_grid_picker, tidy_blank_lines, toggle_bullet,
+    toolbar_separator,
 };
 use crate::export;
 use crate::export::ColumnAlign;
@@ -55,6 +57,34 @@ const BOX_NAMES: [(&str, &str); 4] = [
     ("做法", "某地、某部门的具体做法"),
 ];
 
+/// 「清洗」分区里点下的动作。按钮只记下选了什么，等闭包结束再动正文——
+/// 否则取 `&mut self` 与借 `self.doc` 会在同一个闭包里打架。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanAction {
+    /// 段首手打编号 → Markdown 标题与列表。
+    BusinessToMarkdown,
+    /// Markdown 标题 → 段首公文编号。
+    MarkdownToBusiness,
+    /// 去掉 Markdown 标记，变正文。
+    StripMarkers,
+    /// 再去掉段首公文编号，全部变正文。
+    StripNumbering,
+    /// 清理多余空格与全角数字、字母。
+    NormalizeSpaces,
+    /// 中文语境里的半角标点改全角。
+    NormalizePunctuation,
+    /// 删目录、链接、脚注、代码围栏与分隔线等转换噪音。
+    StripConverterNoise,
+    /// 表格按分隔行补齐列数、规范单元格。
+    NormalizeTables,
+    /// 按导入端的固定顺序把上面几步全跑一遍。
+    CleanAll,
+    /// 直引号统一成配对的中文引号。
+    NormalizeQuotes,
+    /// 连续空行压成一行、去行尾空格。
+    TidyBlankLines,
+}
+
 impl DraftPage<'_> {
     /// 起草页功能区：第一行是分区卡与常驻入口，第二行是当前分区的按钮。
     ///
@@ -91,6 +121,7 @@ impl DraftPage<'_> {
                             RibbonTab::Insert => self.ribbon_insert(ui),
                             RibbonTab::Research => self.ribbon_research(ui),
                             RibbonTab::Format => self.ribbon_format(ui),
+                            RibbonTab::Clean => self.ribbon_clean(ui),
                             RibbonTab::Review => self.ribbon_review(ui),
                             RibbonTab::View => self.ribbon_view(ui),
                             RibbonTab::Output => self.ribbon_output(ui),
@@ -1183,6 +1214,184 @@ impl DraftPage<'_> {
         }
     }
 
+    /// 清洗：编号互转与格式清理。
+    ///
+    /// 这里的命令全是确定性的文本替换：只改审校稿 `generated_markdown`，改完重新
+    /// 校验。只读稿件与 AI 工作区视图下整组禁用——那种视图里的正文不许就地改。
+    pub(crate) fn ribbon_clean(&mut self, ui: &mut egui::Ui) {
+        let editable = !self.doc.read_only() && self.doc.ai_panel.workspace_view.is_none();
+        let mut action = None;
+        ui.add_enabled_ui(editable, |ui| {
+            // 一、编号互转
+            if ui
+                .add(theme::icon_text_button(
+                    theme::Icon::Heading,
+                    "编号→Markdown",
+                ))
+                .on_hover_text(
+                    "段首的「一、」「（一）」「1.」「（1）」「①」按公文版式转成 Markdown 标题与列表",
+                )
+                .clicked()
+            {
+                action = Some(CleanAction::BusinessToMarkdown);
+            }
+            if ui
+                .add(theme::icon_text_button(
+                    theme::Icon::ListOrdered,
+                    "Markdown→公文编号",
+                ))
+                .on_hover_text(
+                    "把 ## 至 ##### 标题按编号设置展开成「一、」「（一）」「1.」「（1）」正文段落；文档标题与列表不动",
+                )
+                .clicked()
+            {
+                action = Some(CleanAction::MarkdownToBusiness);
+            }
+            if ui
+                .add(theme::icon_text_button(
+                    theme::Icon::RemoveFormatting,
+                    "去 Markdown 标记",
+                ))
+                .on_hover_text("去掉行首的 # 标题与 - 、* 、1. 列表标记，只留文字")
+                .clicked()
+            {
+                action = Some(CleanAction::StripMarkers);
+            }
+            if ui
+                .add(theme::icon_text_button(
+                    theme::Icon::Eraser,
+                    "清除全部编号",
+                ))
+                .on_hover_text("去掉 Markdown 标记后，再剥掉段首的手打公文编号，全部变成正文")
+                .clicked()
+            {
+                action = Some(CleanAction::StripNumbering);
+            }
+            toolbar_separator(ui);
+
+            // 二、文本格式：都复用导入端同一套清洗函数，不另写一份规则。
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Type, "清理空格"))
+                .on_hover_text("清理多余空格、汉字之间的空格、全角数字与全角字母")
+                .clicked()
+            {
+                action = Some(CleanAction::NormalizeSpaces);
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::PencilLine, "规范标点"))
+                .on_hover_text("把中文语境里的半角逗号、句号、冒号、括号等统一成全角标点")
+                .clicked()
+            {
+                action = Some(CleanAction::NormalizePunctuation);
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Trash, "删转换残留"))
+                .on_hover_text("删掉目录行、链接地址、脚注定义、代码围栏与分隔线，只留文字")
+                .clicked()
+            {
+                action = Some(CleanAction::StripConverterNoise);
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Table, "规范表格"))
+                .on_hover_text("按分隔行补齐或截断表格列数，单元格里的 <br> 改成「；」")
+                .clicked()
+            {
+                action = Some(CleanAction::NormalizeTables);
+            }
+            toolbar_separator(ui);
+
+            // 三、一键与原有清理
+            if ui
+                .add(theme::icon_text_button(
+                    theme::Icon::WandSparkles,
+                    "一键整理",
+                ))
+                .on_hover_text(
+                    "按「删转换残留 → 清理空格 → 规范标点 → 规范表格 → 清理空行」的顺序全跑一遍",
+                )
+                .clicked()
+            {
+                action = Some(CleanAction::CleanAll);
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Quote, "规范引号"))
+                .on_hover_text("把全文的直引号、方向错乱的引号统一成配对的中文引号")
+                .clicked()
+            {
+                action = Some(CleanAction::NormalizeQuotes);
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Eraser, "清理空行"))
+                .on_hover_text("连续空行压成一行，去掉行尾空格")
+                .clicked()
+            {
+                action = Some(CleanAction::TidyBlankLines);
+            }
+        });
+        if let Some(action) = action {
+            self.apply_clean(action);
+        }
+    }
+
+    /// 执行「清洗」分区的一条命令：只改审校稿，有变化才写回并重新校验。
+    fn apply_clean(&mut self, action: CleanAction) {
+        // 按钮在只读与 AI 工作区视图下已经禁用；这里再挡一道，免得以后有人
+        // 从别处调用时把不该改的稿子改了。
+        if self.doc.read_only() || self.doc.ai_panel.workspace_view.is_some() {
+            return;
+        }
+        let before = std::mem::take(&mut self.doc.generated_markdown);
+        let numbering = self.config.numbering;
+        let after = match action {
+            CleanAction::BusinessToMarkdown => {
+                clean::tidy(&crate::doc_import::structure::restructure(
+                    &before,
+                    &crate::doc_import::structure::Options::restructure_only(),
+                ))
+            }
+            CleanAction::MarkdownToBusiness => {
+                format_clean::markdown_to_business_numbering(&before, &numbering)
+            }
+            CleanAction::StripMarkers => format_clean::strip_markdown_markers(&before),
+            CleanAction::StripNumbering => format_clean::strip_all_numbering(&before),
+            CleanAction::NormalizeSpaces => clean::normalize_spaces(&before),
+            CleanAction::NormalizePunctuation => clean::normalize_punctuation(&before),
+            CleanAction::StripConverterNoise => clean::strip_converter_noise(&before),
+            CleanAction::NormalizeTables => clean::normalize_tables(&before),
+            CleanAction::CleanAll => clean::clean_before_structure(&before),
+            CleanAction::NormalizeQuotes => export::normalize_chinese_quotes(&before),
+            CleanAction::TidyBlankLines => tidy_blank_lines(&before),
+        };
+        if after == before {
+            self.doc.generated_markdown = before;
+            *self.status = "没有可清理的内容。".into();
+            return;
+        }
+        let changed = changed_line_count(&before, &after);
+        let status = match action {
+            CleanAction::BusinessToMarkdown => format!(
+                "已按公文版式整理编号（识别出 {} 个标题）。",
+                format_clean::heading_line_count(&after)
+            ),
+            CleanAction::MarkdownToBusiness => format!(
+                "已把 {} 处 Markdown 标题展开为公文编号。",
+                format_clean::heading_line_count(&before)
+            ),
+            CleanAction::StripMarkers => format!("已去掉 {changed} 行 Markdown 标记。"),
+            CleanAction::StripNumbering => format!("已清除 {changed} 行的编号与标记。"),
+            CleanAction::NormalizeSpaces => format!("已清理 {changed} 行的多余空格与全角字符。"),
+            CleanAction::NormalizePunctuation => format!("已规范 {changed} 行的标点。"),
+            CleanAction::StripConverterNoise => format!("已删掉转换残留（{changed} 行有变化）。"),
+            CleanAction::NormalizeTables => format!("已规范表格（{changed} 行有变化）。"),
+            CleanAction::CleanAll => format!("已按顺序完成一轮格式整理（{changed} 行有变化）。"),
+            CleanAction::NormalizeQuotes => "已把全文引号规范为中文引号。".to_string(),
+            CleanAction::TidyBlankLines => "已清理多余空行与行尾空格。".to_string(),
+        };
+        self.doc.generated_markdown = after;
+        self.revalidate();
+        *self.status = status;
+    }
+
     /// 审校：校验、版本比对、查找，外加一个字数。
     pub(crate) fn ribbon_review(&mut self, ui: &mut egui::Ui) {
         let has_draft = !self.doc.generated_markdown.trim().is_empty();
@@ -1572,6 +1781,22 @@ fn crossref_row(target: &LabelTarget, width: f32) -> egui::Button<'static> {
         .truncate()
         .corner_radius(theme::chrome_radius(5))
         .min_size(egui::vec2(width, 26.0))
+}
+
+/// 数一数两次文本之间有多少行发生了变化（含多出/少掉的行）。
+///
+/// 清洗命令只用来在状态栏报个大概的改动数，不要求精确到字符；行数不一致时
+/// 把差出来的行也算进去。
+fn changed_line_count(before: &str, after: &str) -> usize {
+    let before: Vec<&str> = before.split('\n').collect();
+    let after: Vec<&str> = after.split('\n').collect();
+    let mut changed = before.len().abs_diff(after.len());
+    changed += before
+        .iter()
+        .zip(after.iter())
+        .filter(|(old, new)| old != new)
+        .count();
+    changed
 }
 
 #[cfg(test)]

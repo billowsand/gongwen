@@ -7,7 +7,8 @@
 //! 电子版 PDF 复用 anydoc 的本地文字提取，不执行 OCR；检测到扫描页时整份拒收。
 //! PDF 的段落、标题与表格由版面推断，导入后需要人工核对，不保证还原原版式。
 
-mod structure;
+pub(crate) mod clean;
+pub(crate) mod structure;
 
 use crate::models::ResearchMetadata;
 use anyhow::{Context, Result, anyhow, bail};
@@ -204,22 +205,37 @@ pub(crate) fn to_knowledge_markdown(path: &Path) -> Result<String> {
     }
 }
 
-/// 起草页导入用的转换：在 [`to_markdown`] 之上按公文版式还原标题、列表、文档
-/// 标题与附件标记（规则见 [`structure`]，纯确定性规则，不调用模型）。
+/// 起草页导入用的转换：在 [`to_markdown`] 之上先做文本清洗（见 [`clean`]），
+/// 再按公文版式还原标题、列表、文档标题与附件标记（规则见 [`structure`]，纯确定性
+/// 规则，不调用模型）。
 ///
 /// `detect_title` 为假时不把开头的段落升成 `# `——往已经有标题的稿子里插入时用。
-/// Markdown 原文作者自己排过结构，不动；纯文本按「一行一段」读。
+/// Markdown 原文作者自己排过结构，不动，只把正文引用的本地图片复制入库；纯文本按
+/// 「一行一段」读。
 pub(crate) fn to_draft_markdown(path: &Path, detect_title: bool) -> Result<String> {
     let extension = extension_of(path);
     let markdown = to_markdown(path)?;
     if matches!(extension.as_str(), "md" | "markdown") {
-        return Ok(markdown);
+        // 正文引用的本地图片复制进应用资源库并改写引用。缺图、格式不支持、路径
+        // 越界都只跳过，不能因为一张图让整份稿子导不进来。
+        let base = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        return Ok(
+            match crate::images::import_referenced_from(&markdown, base) {
+                Ok((rewritten, _skipped)) if !rewritten.trim().is_empty() => rewritten,
+                _ => markdown,
+            },
+        );
     }
-    let options = structure::Options {
-        detect_title,
-        lines_are_paragraphs: extension == "txt",
-    };
-    Ok(normalize(&structure::restructure(&markdown, &options)))
+    let cleaned = clean::clean_before_structure(&markdown);
+    // Word 另存的纯文本是一行一段（没有空行）；别的系统导出的折行文本段与段之间
+    // 通常留空行，这时按 Markdown 读，折行由结构清洗接回自然段。
+    let lines_are_paragraphs = extension == "txt" && !cleaned.contains("\n\n");
+    let mut options = structure::Options::import(detect_title, lines_are_paragraphs);
+    options.repair_merged_paragraphs = extension == "pdf";
+    Ok(normalize(&structure::restructure(&cleaned, &options)))
 }
 
 /// PDF 提取结果需要人工核对；其它格式沿用现有导入提示。
@@ -1139,5 +1155,115 @@ mod tests {
         .unwrap();
         let error = import_research_folder(dir.path()).unwrap_err();
         assert!(format!("{error:#}").contains("第二份 frontmatter"));
+    }
+
+    /// 纯文本导入先做空格与全角数字规范化，再把「1．」认成列表项、把开头的
+    /// 标题升成「# 」。
+    #[test]
+    fn draft_cleans_plain_text_before_detecting_structure() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("来文.txt");
+        std::fs::write(
+            &path,
+            "工作 的 通知
+
+１．内容",
+        )
+        .expect("写入");
+        assert_eq!(
+            to_draft_markdown(&path, true).unwrap(),
+            "# 工作的通知\n\n1. 内容"
+        );
+    }
+
+    /// 导入 .md 时引用的图片文件缺失：正文照常返回，引用原样保留，不阻断导入。
+    #[test]
+    fn draft_markdown_skips_missing_images_instead_of_failing() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("带图.md");
+        std::fs::write(&path, "# 标题\n\n![缺图](figures/missing.png)\n\n正文。").expect("写入");
+        let markdown = to_draft_markdown(&path, true).expect("缺图不应阻断导入");
+        assert!(markdown.contains("正文。"), "{markdown}");
+        assert!(markdown.contains("missing.png"), "{markdown}");
+    }
+
+    /// 真实公文样例目录。生成与更新办法见同目录 generate_samples.py。
+    fn import_sample_paths() -> Vec<PathBuf> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/import");
+        let mut paths = std::fs::read_dir(&root)
+            .unwrap_or_else(|error| panic!("读不到样例目录 {}：{error}", root.display()))
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| {
+                            matches!(ext.to_ascii_lowercase().as_str(), "docx" | "txt" | "pdf")
+                        })
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    fn sample_actual_path(path: &Path) -> PathBuf {
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/import-samples")
+            .join(format!("{stem}.actual.md"))
+    }
+
+    /// 只导出样例的实际清洗结果，供审阅后写 .expected.md；不参与普通测试。
+    #[test]
+    #[ignore = "用 --ignored 导出样例实际输出，便于人工审阅后更新期望文件"]
+    fn dump_import_sample_outputs() {
+        for path in import_sample_paths() {
+            let actual = to_draft_markdown(&path, true)
+                .unwrap_or_else(|error| panic!("{}：{error:#}", path.display()));
+            let output = sample_actual_path(&path);
+            std::fs::create_dir_all(output.parent().expect("有上级目录")).expect("建输出目录");
+            std::fs::write(&output, &actual).expect("写实际输出");
+            // 转换器原样输出也留一份，便于核对是哪一步把文本改坏的。
+            let raw = to_markdown(&path).unwrap_or_default();
+            let raw_output = output.with_extension("raw.md");
+            std::fs::write(&raw_output, raw).expect("写转换器原始输出");
+            eprintln!("{} -> {}", path.display(), output.display());
+        }
+    }
+
+    /// 真实样例：通知（含软回车折行标题、附件、合并单元格、版头版记）、请示
+    /// （段内一是/二是）、办法（章条）、带标题样式的方案、Word 另存纯文本、
+    /// 空行分隔的折行纯文本、讲话稿（防误判）、带文字层的 PDF。
+    #[test]
+    fn realistic_import_samples_match_expected_markdown() {
+        let paths = import_sample_paths();
+        assert!(
+            paths.len() >= 8,
+            "样例目录至少要 8 份文件，实际 {} 份",
+            paths.len()
+        );
+        for path in paths {
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+            let actual = to_draft_markdown(&path, true)
+                .unwrap_or_else(|error| panic!("样例 {stem} 导入失败：{error:#}"));
+            assert!(!actual.trim().is_empty(), "样例 {stem} 输出为空");
+            let output = sample_actual_path(&path);
+            std::fs::create_dir_all(output.parent().expect("有上级目录")).expect("建输出目录");
+            std::fs::write(&output, &actual).expect("写实际输出");
+            let expected_path = path.with_file_name(format!("{stem}.expected.md"));
+            let expected = std::fs::read_to_string(&expected_path).unwrap_or_else(|_| {
+                panic!(
+                    "缺少期望文件 {}；先跑 cargo test --locked --ignored dump_import_sample_outputs 审阅实际输出",
+                    expected_path.display()
+                )
+            });
+            assert_eq!(
+                actual.trim_end(),
+                expected.trim_end(),
+                "样例 {stem} 与期望不一致；实际输出见 {}",
+                output.display()
+            );
+        }
     }
 }

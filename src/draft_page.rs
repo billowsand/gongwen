@@ -33,6 +33,7 @@ pub(crate) mod diff_hunks;
 mod editor;
 mod find;
 mod form;
+mod format_clean;
 mod heading_focus;
 mod markdown;
 mod navigator;

@@ -114,7 +114,7 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
         "07-ribbon",
         Part::Writing,
         "功能区与插入构件",
-        "七个分区与公文构件的插入"
+        "八个分区与公文构件的插入"
     ),
     chapter!(
         "08-research",

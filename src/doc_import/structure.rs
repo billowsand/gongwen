@@ -13,13 +13,21 @@
 //!   否则是干条，转成列表 `1. `。`①` 一律当列表。
 //! - 原本就是 Markdown 标题、但文字带编号的（Word 标题样式），按编号重排层级。
 //! - 开头没有 `# ` 时，把像公文标题的段落（「关于……」或以文种结尾）升成 `# `，
-//!   两行折开的标题先接起来。
-//! - 单独一行的「附件」「附件2」后接一行短标题，改成 `<!-- [附件] -->` + `# 标题`。
+//!   两行、三行折开的标题先接起来，后面的「（征求意见稿）」括注并进标题。
+//! - 单独一行的「附件」「附件2」后接短标题，或「附件1：清单」写成一行，都改成
+//!   `<!-- [附件] -->` + `# 标题`；正文末尾程序会重新生成的「附件：1.××」说明行删掉。
+//! - `第X章/节/部分` 比「一、」还浅一层；全角数字、`1)`、字母编号也认。
+//! - 文首版头（份号、密级、紧急程度、发文机关标志、文号、签发人）与文末版记
+//!   （落款单位、成文日期、抄送、印发机关）按整行高置信度规则剥离。
+//! - 段内「一是……；二是……」拆成一项一行，引子（到第一个逗号 / 句号）加粗；
+//!   没有编号的短标题、条文里的「第X条」也加粗——这些版面线索不够，加粗比猜
+//!   标题层级安全。
 //!
-//! 剥掉的编号由程序按层级重新生成，输出里不留原编号；认不准的段落原样保留，
-//! 宁可少认也不错认。
+//! 只按实际用到的编号层级压紧输出，避免 `##` 下面直接出现 `####`。剥掉的编号由
+//! 程序按层级重新生成，输出里不留原编号；认不准的段落原样保留，宁可少认也不错认。
 
 use regex::Regex;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 /// 句号前的标题最多这么多字；再长就是段首带编号的正文段。
@@ -33,6 +41,10 @@ const RUN_IN_TITLE_MAX: usize = 20;
 const RUN_IN_BODY_MIN: usize = 30;
 /// 文档标题最多这么多字。
 const DOC_TITLE_MAX: usize = 60;
+/// 没编号的短标题最多这么多字；再长就是正文段。
+const UNNUMBERED_TITLE_MAX: usize = 14;
+/// 版头 / 版记最多往前 / 往后看这么多块。
+const LAYOUT_SCAN: usize = 10;
 
 /// 公文标题常见的结尾文种，用来认开头那行是不是文档标题。
 const DOC_KINDS: &[&str] = &[
@@ -73,16 +85,84 @@ pub(crate) struct Options {
     /// 每个非空行就是一段。Word 另存的纯文本段与段之间不空行，按 Markdown 读会
     /// 全部接成一段。
     pub(crate) lines_are_paragraphs: bool,
+    /// 剥掉文首版头（密级、紧急程度、文号、签发人、份号）与文末版记（落款单位、
+    /// 成文日期、抄送、印发机关与日期）。导入已有公文时用；对正在写的稿子做
+    /// 结构整理时关掉，免得把作者刚写的落款当成版记删掉。
+    pub(crate) strip_layout: bool,
+    /// 把没有编号、单独成行的短标题加粗（`**总体要求**`），而不是升成 Markdown
+    /// 标题——版面上没有字号线索，加粗比猜层级安全。
+    pub(crate) bold_unnumbered: bool,
+    /// 把段内的「一是……；二是……」拆成一项一行，并把「一是」到第一个逗号
+    /// （或句号）之间的内容加粗。公文里这是标准的段内枚举写法，Markdown 没有
+    /// 对应语法，用加粗凸显。
+    pub(crate) inline_enumeration: bool,
+    /// 修复 PDF 抽文字时并成一段的多个自然段：PDF 的段落间距小，转换器常把
+    /// 主送、正文、加粗标题、附件说明、落款并进同一个段落。只有 PDF 走这条。
+    pub(crate) repair_merged_paragraphs: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            detect_title: true,
+            lines_are_paragraphs: false,
+            strip_layout: true,
+            bold_unnumbered: true,
+            inline_enumeration: true,
+            repair_merged_paragraphs: false,
+        }
+    }
+}
+
+impl Options {
+    /// 导入一份现成公文时的选项。
+    pub(crate) fn import(detect_title: bool, lines_are_paragraphs: bool) -> Self {
+        Self {
+            detect_title,
+            lines_are_paragraphs,
+            ..Self::default()
+        }
+    }
+
+    /// 对正在写的稿子做「公文编号 → Markdown 编号」整理：稿子里已经有标题、附件
+    /// 与要素，不认标题、不剥版头版记，只把段首编号转成结构。
+    pub(crate) fn restructure_only() -> Self {
+        Self {
+            detect_title: false,
+            lines_are_paragraphs: false,
+            strip_layout: false,
+            bold_unnumbered: false,
+            inline_enumeration: false,
+            repair_merged_paragraphs: false,
+        }
+    }
 }
 
 /// 按公文版式还原标题、列表、文档标题与附件标记。输入是归一化过的 markdown。
 pub(crate) fn restructure(markdown: &str, options: &Options) -> String {
+    let repaired;
+    let markdown = if options.repair_merged_paragraphs {
+        repaired = repair_merged_paragraphs(markdown);
+        repaired.as_str()
+    } else {
+        markdown
+    };
     let mut blocks = parse_blocks(markdown, options.lines_are_paragraphs);
+    if options.strip_layout {
+        strip_layout(&mut blocks);
+    }
     resolve_ambiguous_levels(&mut blocks);
     if options.detect_title {
         promote_title(&mut blocks);
     }
     mark_attachments(&mut blocks);
+    if options.inline_enumeration {
+        split_inline_enumerations(&mut blocks);
+    }
+    if options.bold_unnumbered {
+        bold_unnumbered_titles(&mut blocks);
+    }
+    bold_article_labels(&mut blocks);
     let roles = classify(&blocks);
     render(&blocks, &roles)
 }
@@ -104,7 +184,9 @@ enum Block {
 
 #[derive(Debug)]
 struct Item {
-    /// 1 = `一、`，2 = `（一）`，3 = `1.`，4 = `（1）`，5 = `①`。
+    /// 编号样式从浅到深：0 = `第X章/节/部分`，1 = `一、`，2 = `（一）`，
+    /// 3 = `1.`，4 = `（1）`，5 = `①`。定级先按样式，输出时再按全篇实际
+    /// 用到的层级压紧，避免跳级。
     level: u8,
     /// 阿拉伯数字与圈号的序号，用来判断是不是同一组；汉字序号不需要，记 0。
     number: u32,
@@ -268,7 +350,7 @@ fn heading_block(level: usize, text: &str, source: &str) -> Block {
     let Some(prefix) = parse_prefix(&plain, false) else {
         return Block::Heading(level, text.to_string());
     };
-    let title = plain[prefix.len..].trim().to_string();
+    let title = strip_leading_punct(&plain[prefix.len..]).to_string();
     Block::Item(Item {
         level: prefix.level,
         number: prefix.number,
@@ -350,7 +432,8 @@ fn paragraph_block(lines: Vec<String>, from_list: bool) -> Block {
     let Some(prefix) = parse_prefix(&plain_first, from_list) else {
         return Block::Para(lines);
     };
-    let mut rest = vec![plain_first[prefix.len..].trim().to_string()];
+    // 「（一）、加强领导」这种编号后多打一个顿号的，顿号不算标题内容。
+    let mut rest = vec![strip_leading_punct(&plain_first[prefix.len..]).to_string()];
     rest.extend(lines[1..].iter().map(|line| strip_bold(line)));
     let bold_title = bold
         .filter(|inner| inner.len() > prefix.len)
@@ -372,6 +455,12 @@ fn paragraph_block(lines: Vec<String>, from_list: bool) -> Block {
         styled: false,
         ambiguous: prefix.ambiguous,
     })
+}
+
+/// 编号后误带的顿号 / 逗号 / 句点（「（一）、加强领导」）不算标题内容。
+fn strip_leading_punct(text: &str) -> &str {
+    text.trim_start_matches(['、', '，', ',', '．', '.', '。', '）', ')', '；', ';'])
+        .trim_start()
 }
 
 /// 行首 `**…**` 一截：返回加粗里的文字与其后的文字。
@@ -398,19 +487,41 @@ struct Prefix {
 /// 认段首编号。`from_list` 表示编号来自 Word 自动编号：汉字计数的「一、」会被
 /// 转成「1、」，所以这时 `N、` 算一级标题。
 fn parse_prefix(text: &str, from_list: bool) -> Option<Prefix> {
-    static PATTERNS: OnceLock<[Regex; 5]> = OnceLock::new();
-    let [chinese, chinese_paren, arabic, arabic_paren, circled] = PATTERNS.get_or_init(|| {
+    static PATTERNS: OnceLock<[Regex; 7]> = OnceLock::new();
+    let [
+        chapter,
+        chinese,
+        chinese_paren,
+        arabic,
+        arabic_paren,
+        arabic_stop,
+        circled,
+    ] = PATTERNS.get_or_init(|| {
         let numeral = "[一二三四五六七八九十百零〇]{1,4}";
+        let digits = "[0-9０-９]{1,3}";
         [
+            // 第X章 / 第X节 / 第X部分 / 第X编：比「一、」还浅的一层。
+            Regex::new(
+                r"^第([一二三四五六七八九十百零〇0-9０-９]{1,4})(章|节|部分|编)\s*[、.．:：]?\s*",
+            ),
             Regex::new(&format!(r"^({numeral})[、，,．.]\s*")),
             Regex::new(&format!(r"^[（(]({numeral})[）)]\s*")),
-            Regex::new(r"^(\d{1,3})([.．、])\s*"),
-            Regex::new(r"^[（(](\d{1,3})[）)]\s*"),
+            Regex::new(&format!(r"^({digits})([.．、])\s*")),
+            Regex::new(&format!(r"^[（(]({digits})[）)]\s*")),
+            // 「1)」：公文常见，Word 自动编号也常转成这个形状。
+            Regex::new(&format!(r"^({digits})[)）]\s*")),
             Regex::new(r"^([①-⑳])\s*"),
         ]
         .map(|re| re.expect("valid numbering pattern"))
     });
-    let prefix = if let Some(caps) = chinese.captures(text) {
+    let prefix = if let Some(caps) = chapter.captures(text) {
+        Prefix {
+            level: 0,
+            number: 0,
+            len: caps[0].len(),
+            ambiguous: false,
+        }
+    } else if let Some(caps) = chinese.captures(text) {
         Prefix {
             level: 1,
             number: 0,
@@ -426,23 +537,33 @@ fn parse_prefix(text: &str, from_list: bool) -> Option<Prefix> {
         }
     } else if let Some(caps) = arabic.captures(text) {
         // 「1.5亿元」「3.2.1」不是编号。
-        if text[caps[0].len()..].starts_with(|ch: char| ch.is_ascii_digit())
+        if text[caps[0].len()..]
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_digit() || ('０'..='９').contains(&ch))
             && caps[0].len() == caps[1].len() + caps[2].len()
         {
             return None;
         }
         Prefix {
             level: if from_list && &caps[2] == "、" { 1 } else { 3 },
-            number: caps[1].parse().ok()?,
+            number: parse_number(&caps[1])?,
             len: caps[0].len(),
             ambiguous: false,
         }
     } else if let Some(caps) = arabic_paren.captures(text) {
         Prefix {
             level: 4,
-            number: caps[1].parse().ok()?,
+            number: parse_number(&caps[1])?,
             len: caps[0].len(),
             ambiguous: from_list,
+        }
+    } else if let Some(caps) = arabic_stop.captures(text) {
+        Prefix {
+            level: 4,
+            number: parse_number(&caps[1])?,
+            len: caps[0].len(),
+            ambiguous: false,
         }
     } else {
         let caps = circled.captures(text)?;
@@ -461,11 +582,25 @@ fn parse_prefix(text: &str, from_list: bool) -> Option<Prefix> {
     Some(prefix)
 }
 
+/// 把编号里的数字读成 `u32`：全角数字（`１`）与半角数字都认。
+fn parse_number(text: &str) -> Option<u32> {
+    let mut value = 0u32;
+    for ch in text.chars() {
+        let digit = match ch {
+            '0'..='9' => ch as u32 - '0' as u32,
+            '０'..='９' => ch as u32 - '０' as u32,
+            _ => return None,
+        };
+        value = value.checked_mul(10)?.checked_add(digit)?;
+    }
+    Some(value)
+}
+
 /// 「一、二季度」「2、3月份」：顿号连着的是并列的数，不是编号。
 fn is_enumeration(rest: &str) -> bool {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"^(?:[一二三四五六七八九十]+|\d+)[、，,季月年日号]")
+        Regex::new(r"^(?:[一二三四五六七八九十]+|[0-9０-９]+)[、，,季月年日号]")
             .expect("valid enumeration pattern")
     })
     .is_match(rest)
@@ -574,7 +709,7 @@ fn resolve_ambiguous_levels(blocks: &mut [Block]) {
     }
 }
 
-/// 开头像公文标题的段落升成 `# `。只看第一个编号段之前的几段。
+/// 开头像公文标题的段落升成 `# `。只看第一个编号段、主送机关之前的几段。
 fn promote_title(blocks: &mut Vec<Block>) {
     if blocks
         .iter()
@@ -583,31 +718,95 @@ fn promote_title(blocks: &mut Vec<Block>) {
         return;
     }
     let mut index = 0;
-    while index < blocks.len().min(8) {
+    while index < blocks.len().min(LAYOUT_SCAN) {
         let text = match &blocks[index] {
             Block::Para(lines) => para_text(lines),
             Block::Raw(_) => {
                 index += 1;
                 continue;
             }
-            _ => return,
+            Block::Item(_) | Block::Attachment(_) | Block::Heading(..) => return,
         };
-        // 两行折开的标题：「关于做好××工作」「的通知」。
-        if let Some(Block::Para(next)) = blocks.get(index + 1) {
-            let next = para_text(next);
-            let joined = format!("{text}{next}");
-            if chars(&next) <= 20 && !ends_with_kind(&text) && is_doc_title(&joined) {
-                blocks[index] = Block::Heading(1, joined);
-                blocks.remove(index + 1);
-                return;
-            }
+        if text.trim().is_empty() {
+            index += 1;
+            continue;
         }
-        if is_doc_title(&text) {
-            blocks[index] = Block::Heading(1, text);
+        // 主送机关（「各区县人民政府：」）之后不会再有文档标题。
+        if is_recipient_line(&text) {
+            return;
+        }
+        // 两行、三行折开的标题：「关于做好××工作」「的通知」。只有以文种结尾才算
+        // 标题完整；「关于……」开头的半截标题要继续接下一行。
+        let mut joined = text.clone();
+        let mut consumed = 1usize;
+        while consumed <= 3 && !title_complete(&joined) {
+            if joined.contains('。') || ends_with_punctuation(&joined) {
+                break;
+            }
+            let Some(Block::Para(next)) = blocks.get(index + consumed) else {
+                break;
+            };
+            let next = para_text(next);
+            if chars(&next) > 20
+                || next.trim().is_empty()
+                || ends_with_kind(&joined)
+                || ends_with_punctuation(&next)
+                || is_recipient_line(&next)
+            {
+                break;
+            }
+            // 只接能让标题收在文种上的那半截，或「的通知」这种虚词开头；否则多半
+            // 是下一段的短标题，接上去会把标题写坏。
+            let candidate = format!("{joined}{next}");
+            if !ends_with_kind(&candidate) && !next.starts_with(['的', '之']) {
+                break;
+            }
+            joined = candidate;
+            consumed += 1;
+        }
+        if is_doc_title(&joined) {
+            for _ in 1..consumed {
+                blocks.remove(index + 1);
+            }
+            blocks[index] = Block::Heading(1, joined);
+            // 标题后紧跟的「（征求意见稿）」这类括注并进标题。
+            if let Some(Block::Para(lines)) = blocks.get(index + 1) {
+                let suffix = para_text(lines);
+                if is_title_suffix(&suffix) {
+                    if let Block::Heading(1, title) = &mut blocks[index] {
+                        title.push_str(&suffix);
+                    }
+                    blocks.remove(index + 1);
+                }
+            }
             return;
         }
         index += 1;
     }
+}
+
+/// 主送机关行：「各区县人民政府：」「办公室：」。
+fn is_recipient_line(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && chars(text) <= 30
+        && text.ends_with(['：', ':'])
+        && !text.contains('。')
+        && !text.starts_with('（')
+}
+
+/// 标题后的括注：「（征求意见稿）」「（代拟稿）」。
+fn is_title_suffix(text: &str) -> bool {
+    let text = text.trim();
+    chars(text) <= 16
+        && text.starts_with(['（', '('])
+        && text.ends_with(['）', ')'])
+        && (text.contains('稿') || text.contains("草案") || text.contains("试行"))
+}
+
+/// 标题已经写到文种，可以停手了；「关于××工作」这种半截还要接下一行。
+fn title_complete(text: &str) -> bool {
+    is_doc_title(text) && ends_with_kind(text)
 }
 
 fn is_doc_title(text: &str) -> bool {
@@ -631,32 +830,712 @@ fn para_text(lines: &[String]) -> String {
     )
 }
 
-/// 单独一行的「附件」「附件2」后接一行短标题 → 附件起点。
+/// 段落块的文字；编号段、标题、原始块返回 `None`。
+fn single_para_text(block: &Block) -> Option<String> {
+    match block {
+        Block::Para(lines) if !lines.is_empty() => Some(para_text(lines)),
+        _ => None,
+    }
+}
+
+/// 附件起点：「附件」「附件2」单独一行后接短标题；「附件1：物资清单」写成一行也认。
 fn mark_attachments(blocks: &mut Vec<Block>) {
     let mut index = 0;
-    while index + 1 < blocks.len() {
-        let label = match &blocks[index] {
-            Block::Para(lines) if lines.len() == 1 => is_attachment_label(&strip_bold(&lines[0])),
-            _ => false,
+    while index < blocks.len() {
+        let current = match &blocks[index] {
+            Block::Para(lines) if lines.len() == 1 => strip_bold(&lines[0]),
+            _ => {
+                index += 1;
+                continue;
+            }
         };
-        let title = match &blocks[index + 1] {
-            Block::Para(lines) if label => Some(para_text(lines)),
-            _ => None,
-        };
-        if let Some(title) = title.filter(|title| {
-            chars(title) <= DOC_TITLE_MAX && !title.contains('。') && !ends_with_punctuation(title)
-        }) {
+        // 「附件：1.×× 2.××」是附件说明，不是附件标题；文件里有附件内容时最后会删掉。
+        if is_attachment_list_line(&current) {
+            index += 1;
+            continue;
+        }
+        // 同行写法：标号与标题都在一行。
+        if let Some(title) = attachment_inline_title(&current)
+            && let Some(title) = clean_attachment_title(&title)
+        {
             blocks[index] = Block::Attachment(title);
-            blocks.remove(index + 1);
+            index += 1;
+            continue;
+        }
+        if !is_attachment_label(&current) {
+            index += 1;
+            continue;
+        }
+        // 单独一行的标号：后接一行或两行短标题（折行）。
+        let mut title = String::new();
+        let mut consumed = 0usize;
+        while consumed < 2 {
+            let Some(Block::Para(lines)) = blocks.get(index + 1 + consumed) else {
+                break;
+            };
+            let piece = para_text(lines);
+            if chars(&piece) > DOC_TITLE_MAX
+                || piece.contains('。')
+                || ends_with_punctuation(&piece)
+            {
+                break;
+            }
+            title.push_str(&piece);
+            consumed += 1;
+        }
+        if let Some(title) = clean_attachment_title(&title) {
+            for _ in 0..consumed {
+                blocks.remove(index + 1);
+            }
+            blocks[index] = Block::Attachment(title);
         }
         index += 1;
     }
+
+    // 正文末尾的「附件：1.×× 2.××」说明行由程序重新生成；文件里已有附件内容时删掉。
+    if blocks
+        .iter()
+        .any(|block| matches!(block, Block::Attachment(_)))
+    {
+        blocks.retain(|block| {
+            !single_para_text(block).is_some_and(|text| is_attachment_list_line(&text))
+        });
+    }
+}
+
+/// 「附件1：物资清单」这种把标号与标题写在一行的，取冒号后的标题。
+fn attachment_inline_title(text: &str) -> Option<String> {
+    let rest = text.trim().strip_prefix("附件")?;
+    let mut rest = rest.trim_start();
+    let digits = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    rest = &rest[digits..];
+    let rest = rest.trim_start().strip_prefix(['：', ':'])?.trim();
+    (!rest.is_empty()).then(|| rest.to_string())
+}
+
+fn clean_attachment_title(title: &str) -> Option<String> {
+    let title = title.trim();
+    (!title.is_empty()
+        && chars(title) <= DOC_TITLE_MAX
+        && !title.contains('。')
+        && !ends_with_punctuation(title))
+    .then(|| title.to_string())
 }
 
 fn is_attachment_label(text: &str) -> bool {
     let text = text.trim().trim_end_matches(['：', ':']);
     text.strip_prefix("附件")
         .is_some_and(|number| number.trim().chars().all(|ch| ch.is_ascii_digit()))
+}
+
+/// 「附件：1.×× 2.××」：附件说明行，程序会按附件标题重新生成。
+fn is_attachment_list_line(text: &str) -> bool {
+    let Some(rest) = text.trim().strip_prefix("附件") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    let digits = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    let rest = rest[digits..].trim_start();
+    let Some(rest) = rest.strip_prefix(['：', ':']) else {
+        return false;
+    };
+    let rest = rest.trim();
+    let numbered = rest.starts_with("1.")
+        || rest.starts_with("1、")
+        || rest.starts_with("（1）")
+        || rest.starts_with("(1)");
+    numbered
+        && (rest.contains("2.")
+            || rest.contains("2、")
+            || rest.contains("（2）")
+            || rest.contains("(2)"))
+}
+
+// ---------------------------------------------------------------- PDF 并段修复
+
+/// PDF 转换器按行间距判段落，公文行距紧时常把多段并成一段。这里只切「明显该断」
+/// 的地方：段内加粗编号标题、主送机关冒号、附件说明、抄送、落款单位 + 成文日期，
+/// 以及列表项短句后接的正文；只对 PDF 打开，Word / 纯文本段落本来就是分开的。
+fn repair_merged_paragraphs(markdown: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut previous_nonblank: Option<String> = None;
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !out
+                .last()
+                .is_some_and(|last: &String| last.trim().is_empty())
+            {
+                out.push(String::new());
+            }
+            previous_nonblank = None;
+            continue;
+        }
+        // 表格、代码围栏、公式、图片、已有标题、注释：保持原样。
+        if is_raw_line(trimmed) || markdown_heading(trimmed).is_some() {
+            out.push(line.to_string());
+            previous_nonblank = Some(trimmed.to_string());
+            continue;
+        }
+        let mut pieces = split_inline_headings(line);
+        pieces = pieces
+            .into_iter()
+            .flat_map(|piece| split_after_recipient(&piece))
+            .collect();
+        pieces = pieces
+            .into_iter()
+            .flat_map(|piece| split_before_layout_markers(&piece))
+            .collect();
+        pieces = pieces
+            .into_iter()
+            .flat_map(|piece| split_signature_and_date(&piece))
+            .collect();
+        // 只有上一非空行也是列表项时才拆「3.短句。后文」，免得把带正文的
+        // 「1.排查隐患。对河道……」这种标题当列表项。
+        let in_list = previous_nonblank
+            .as_deref()
+            .is_some_and(starts_with_list_marker);
+        if in_list {
+            pieces = pieces
+                .into_iter()
+                .flat_map(|piece| split_list_item_body(&piece))
+                .collect();
+        }
+        if pieces.len() > 1 {
+            if starts_new_paragraph(trimmed)
+                && !out
+                    .last()
+                    .is_some_and(|last: &String| last.trim().is_empty())
+            {
+                out.push(String::new());
+            }
+            for (index, piece) in pieces.iter().enumerate() {
+                if index > 0 {
+                    out.push(String::new());
+                }
+                out.push(piece.trim().to_string());
+            }
+        } else {
+            if starts_new_paragraph(trimmed)
+                && !out
+                    .last()
+                    .is_some_and(|last: &String| last.trim().is_empty())
+            {
+                out.push(String::new());
+            }
+            out.push(line.to_string());
+        }
+        previous_nonblank = Some(trimmed.to_string());
+    }
+    let mut repaired: Vec<String> = Vec::new();
+    for line in out {
+        if line.trim().is_empty() {
+            if !repaired
+                .last()
+                .is_some_and(|last: &String| last.trim().is_empty())
+            {
+                repaired.push(String::new());
+            }
+        } else {
+            repaired.push(line);
+        }
+    }
+    while repaired
+        .first()
+        .is_some_and(|line: &String| line.trim().is_empty())
+    {
+        repaired.remove(0);
+    }
+    while repaired
+        .last()
+        .is_some_and(|line: &String| line.trim().is_empty())
+    {
+        repaired.pop();
+    }
+    repaired.join("\n")
+}
+
+/// 段内的加粗编号标题（如两星号包住的「一、总体要求」）：PDF 会把它们和前后正文并成一行。
+fn split_inline_headings(line: &str) -> Vec<String> {
+    let mut cuts = Vec::new();
+    let mut search = 0;
+    while let Some(relative) = line[search..].find("**") {
+        let open = search + relative;
+        let Some(close_relative) = line[open + 2..].find("**") else {
+            break;
+        };
+        let close = open + 2 + close_relative;
+        if is_inline_heading(&line[open + 2..close]) {
+            cuts.push(open);
+        }
+        search = close + 2;
+    }
+    split_at_cuts(line, cuts)
+}
+
+fn is_inline_heading(inner: &str) -> bool {
+    let inner = inner.trim();
+    !inner.is_empty() && chars(inner) <= TITLE_MAX && parse_prefix(inner, false).is_some()
+}
+
+/// 主送机关与正文并在一行：「各区县人民政府：为切实做好……」。
+fn split_after_recipient(line: &str) -> Vec<String> {
+    let trimmed = line.trim_start();
+    let Some((colon, ch)) = trimmed
+        .char_indices()
+        .find(|(_, ch)| matches!(ch, '：' | ':'))
+    else {
+        return vec![line.to_string()];
+    };
+    let prefix = &trimmed[..colon];
+    let rest = trimmed[colon + ch.len_utf8()..].trim_start();
+    if rest.is_empty() || !looks_like_recipient(prefix) {
+        return vec![line.to_string()];
+    }
+    vec![
+        trimmed[..colon + ch.len_utf8()].trim_end().to_string(),
+        rest.to_string(),
+    ]
+}
+
+fn looks_like_recipient(prefix: &str) -> bool {
+    let prefix = prefix.trim();
+    (2..=30).contains(&chars(prefix))
+        && !prefix.contains(['。', '；', '！', '？'])
+        && (prefix.contains('各')
+            || prefix.ends_with("单位")
+            || prefix.ends_with("部门")
+            || prefix.ends_with("政府")
+            || prefix.ends_with("委员会")
+            || prefix.ends_with("办公室")
+            || prefix.ends_with("同志"))
+}
+
+/// 附件说明、抄送与前面的正文并在一行。
+fn split_before_layout_markers(line: &str) -> Vec<String> {
+    let mut cuts = Vec::new();
+    for marker in ["附件：", "附件:", "抄送：", "抄送:"] {
+        if let Some(position) = line.find(marker)
+            && position > 0
+            && line[..position].chars().next_back().is_some_and(|ch| {
+                ch.is_whitespace() || matches!(ch, '。' | '；' | '：' | '！' | '？' | '日')
+            })
+        {
+            cuts.push(position);
+        }
+    }
+    split_at_cuts(line, cuts)
+}
+
+/// 落款单位与成文日期并在一行。
+fn split_signature_and_date(line: &str) -> Vec<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r"((?:\d{4}|[〇零一二三四五六七八九]{4})年(?:\d{1,2}|[一二三四五六七八九十]{1,3})月(?:\d{1,2}|[一二三四五六七八九十]{1,3})日)$",
+        )
+        .expect("valid date suffix pattern")
+    });
+    let trimmed = line.trim();
+    let Some(caps) = re.captures(trimmed) else {
+        return vec![line.to_string()];
+    };
+    let start = caps.get(1).map_or(trimmed.len(), |caps| caps.start());
+    let unit = trimmed[..start].trim_end();
+    if !looks_like_signature_unit(unit) {
+        return vec![line.to_string()];
+    }
+    vec![unit.to_string(), trimmed[start..].to_string()]
+}
+
+fn looks_like_signature_unit(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && !text.contains(['。', '；', '：', '，', '！', '？'])
+        && [
+            "办公室",
+            "局",
+            "厅",
+            "委员会",
+            "政府",
+            "公司",
+            "中心",
+            "院",
+            "部",
+            "处",
+            "科",
+            "室",
+            "所",
+            "站",
+            "队",
+            "组",
+        ]
+        .iter()
+        .any(|suffix| text.ends_with(suffix))
+}
+
+/// 上一行是不是 1. / - 这种列表项。
+fn starts_with_list_marker(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+        return true;
+    }
+    let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+    (1..=3).contains(&digits) && trimmed[digits..].starts_with(['.', '．', '、'])
+}
+
+/// 列表项短句后接正文：「3.严格信息报送。各单位要于……前报送。」
+fn split_list_item_body(line: &str) -> Vec<String> {
+    if !starts_with_list_marker(line) {
+        return vec![line.to_string()];
+    }
+    let Some(stop) = line.find('。') else {
+        return vec![line.to_string()];
+    };
+    let end = stop + '。'.len_utf8();
+    let rest = line[end..].trim_start();
+    if rest.is_empty() {
+        vec![line.to_string()]
+    } else {
+        vec![line[..end].trim_end().to_string(), rest.to_string()]
+    }
+}
+
+/// 这一行应该新起一段：附件说明、抄送、成文日期。
+fn starts_new_paragraph(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    ["附件：", "附件:", "抄送：", "抄送:"]
+        .iter()
+        .any(|marker| trimmed.starts_with(marker))
+        || is_date_line(trimmed)
+}
+
+/// 按给定的字节位置切行，返回各段（空段丢掉）。
+fn split_at_cuts(line: &str, mut cuts: Vec<usize>) -> Vec<String> {
+    cuts.sort_unstable();
+    cuts.dedup();
+    if cuts.is_empty() {
+        return vec![line.to_string()];
+    }
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    for cut in cuts {
+        if cut > start {
+            let piece = line[start..cut].trim();
+            if !piece.is_empty() {
+                pieces.push(piece.to_string());
+            }
+        }
+        start = cut;
+    }
+    let tail = line[start..].trim();
+    if !tail.is_empty() {
+        pieces.push(tail.to_string());
+    }
+    pieces
+}
+
+// ---------------------------------------------------------------- 版头版记
+
+/// 剥掉文首版头与文末版记。只认高置信度的整行标记；拿不准的保留，宁可少删。
+fn strip_layout(blocks: &mut Vec<Block>) {
+    // 文首：份号、密级、紧急程度、发文机关标志、文号、签发人。
+    let index = 0;
+    while index < blocks.len() && index < LAYOUT_SCAN {
+        let Some(text) = single_para_text(&blocks[index]) else {
+            break;
+        };
+        if !is_layout_head_line(&text) {
+            break;
+        }
+        blocks.remove(index);
+    }
+    // 文末：抄送、印发机关与印发日期。
+    while let Some(text) = blocks.last().and_then(single_para_text) {
+        if !is_layout_tail_line(&text) {
+            break;
+        }
+        blocks.pop();
+    }
+    // 落款单位 + 成文日期：日期在最后，单位在它上面一行。
+    if let Some(text) = blocks.last().and_then(single_para_text)
+        && is_date_line(&text)
+    {
+        blocks.pop();
+        if let Some(previous) = blocks.last().and_then(single_para_text)
+            && is_signature_unit(&previous)
+        {
+            blocks.pop();
+        }
+    }
+}
+
+fn is_layout_head_line(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    static RE: OnceLock<[Regex; 3]> = OnceLock::new();
+    let [security, document_number, serial] = RE.get_or_init(|| {
+        [
+            // 「机密」「机密★1年」「秘密★长期」这类密级与保密期限。
+            Regex::new(r"^(?:绝密|机密|秘密|内部)(?:★.*)?$").expect("valid security pattern"),
+            // 「××发〔2026〕12号」「××函〔2026〕3号」。
+            Regex::new(r"[〔\[［]\s*[12]\d{3}\s*[〕\]］].*号").expect("valid number pattern"),
+            // 份号：六位数字。
+            Regex::new(r"^\d{6}$").expect("valid serial pattern"),
+        ]
+    });
+    security.is_match(text)
+        || document_number.is_match(text)
+        || serial.is_match(text)
+        || matches!(text, "特急" | "加急" | "平急" | "特提")
+        || text.starts_with("签发人")
+        || is_org_logo_line(text)
+}
+
+/// 发文机关标志：「××市人民政府文件」。
+fn is_org_logo_line(text: &str) -> bool {
+    let text = text.trim();
+    chars(text) <= 24
+        && text.ends_with("文件")
+        && !text.contains(['。', '，', '：', ':'])
+        && !text.contains("关于")
+}
+
+fn is_layout_tail_line(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with("抄送")
+        || text.starts_with("印发")
+        || (text.ends_with("印发") && chars(text) <= 40)
+}
+
+/// 成文日期：阿拉伯数字（2026年5月10日）或中文数字（二〇二六年五月十日）。
+fn is_date_line(text: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^(?:[0-9０-９]{4}年[0-9０-９]{1,2}月[0-9０-９]{1,2}日|[〇零一二三四五六七八九]{4}年[一二三四五六七八九十]{1,3}月[一二三四五六七八九十]{1,3}日)$",
+        )
+        .expect("valid date pattern")
+    })
+    .is_match(text.trim())
+}
+
+/// 落款单位行：短、不带句读，且不是「特此通知」这类结语。
+fn is_signature_unit(text: &str) -> bool {
+    let text = text.trim();
+    (2..=25).contains(&chars(text))
+        && !text.contains(['。', '，', '；', '：', ':', '！', '？'])
+        && !text.starts_with("附件")
+        && !text.starts_with(['（', '('])
+        && ![
+            "特此", "妥否", "以上", "请", "拟", "此致", "敬礼", "注", "说明",
+        ]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
+
+// ---------------------------------------------------------------- 非标准写法
+
+/// 段内「一是……；二是……」拆成一项一行，并把引子（到第一个逗号 / 句号）加粗。
+fn split_inline_enumerations(blocks: &mut Vec<Block>) {
+    let mut output = Vec::with_capacity(blocks.len());
+    for block in blocks.drain(..) {
+        match block {
+            Block::Para(lines) => {
+                let text = para_text(&lines);
+                let parts = split_enumeration(&text);
+                if parts.len() > 1 {
+                    output.extend(parts.into_iter().map(|part| Block::Para(vec![part])));
+                } else {
+                    output.push(Block::Para(lines));
+                }
+            }
+            other => output.push(other),
+        }
+    }
+    *blocks = output;
+}
+
+fn split_enumeration(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut starts = Vec::new();
+    for index in 0..chars.len() {
+        if !matches!(
+            chars[index],
+            '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十'
+        ) {
+            continue;
+        }
+        if chars.get(index + 1) != Some(&'是') {
+            continue;
+        }
+        let at_sentence_start = index == 0
+            || matches!(
+                chars[index - 1],
+                '。' | '；' | '！' | '？' | '：' | '，' | ',' | '\n' | ' '
+            );
+        if at_sentence_start {
+            starts.push(index);
+        }
+    }
+    if starts.len() < 2 {
+        return vec![text.to_string()];
+    }
+    let mut parts = Vec::new();
+    if starts[0] > 0 {
+        let prefix: String = chars[..starts[0]].iter().collect();
+        let prefix = prefix.trim().to_string();
+        if !prefix.is_empty() {
+            parts.push(prefix);
+        }
+    }
+    for (position, &start) in starts.iter().enumerate() {
+        let end = starts.get(position + 1).copied().unwrap_or(chars.len());
+        let segment: String = chars[start..end].iter().collect();
+        parts.push(bold_enumeration_lead(&segment));
+    }
+    parts
+}
+
+/// 「一是加强组织领导，……」→「**一是加强组织领导**，……」。
+fn bold_enumeration_lead(segment: &str) -> String {
+    const MARKER: usize = 2; // 「一是」「二是」这类引子都是两个汉字。
+    let segment = segment.trim();
+    let marker_bytes: usize = segment
+        .chars()
+        .take(MARKER)
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if marker_bytes == 0 {
+        return segment.to_string();
+    }
+    let body = &segment[marker_bytes.min(segment.len())..];
+    let stop = body
+        .char_indices()
+        .find(|(_, ch)| matches!(ch, '，' | ',' | '。' | '；' | ';' | '：' | ':' | '、'))
+        .map(|(offset, _)| offset);
+    match stop {
+        Some(stop) => {
+            let lead = segment[..marker_bytes + stop].trim_end();
+            format!("**{lead}**{}", &segment[marker_bytes + stop..])
+        }
+        None => segment.to_string(),
+    }
+}
+
+/// 没有编号的短标题加粗：只在已经有编号标题的公文里认，避免讲话稿的短行被误加粗。
+fn bold_unnumbered_titles(blocks: &mut [Block]) {
+    let has_numbered_heading = blocks
+        .iter()
+        .any(|block| matches!(block, Block::Item(item) if item.split.is_some()));
+    if !has_numbered_heading {
+        return;
+    }
+    for index in 0..blocks.len() {
+        let Some(text) = single_para_text(&blocks[index]) else {
+            continue;
+        };
+        if !is_unnumbered_title(&text) {
+            continue;
+        }
+        let next_len = blocks
+            .get(index + 1)
+            .and_then(single_para_text)
+            .map(|text| chars(&text))
+            .unwrap_or(0);
+        if next_len < RUN_IN_BODY_MIN {
+            continue;
+        }
+        blocks[index] = Block::Para(vec![format!("**{}**", text.trim())]);
+    }
+}
+
+fn is_unnumbered_title(text: &str) -> bool {
+    let text = text.trim();
+    let count = chars(text);
+    (2..=UNNUMBERED_TITLE_MAX).contains(&count)
+        && !text.contains([
+            '。', '，', '；', '：', '！', '？', '、', '的', '了', '着', '过', '是', '在', '就',
+            '也', '都', '将', '被', '把', '对', '从', '向', '于', '而', '且', '或', '与', '和',
+            '并', '及', '请', '拟', '各',
+        ])
+        && !ends_with_punctuation(text)
+        && !text.starts_with(['（', '('])
+        && !text.starts_with("第")
+        && !text.starts_with("附件")
+        && ![
+            "特此", "妥否", "以上", "现将", "根据", "按照", "为了", "此致", "敬礼", "注", "要",
+            "应", "需", "须", "可", "必", "凡", "当前", "目前", "近期", "今天", "下面",
+        ]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
+
+/// 条文里的「第X条」加粗成引子，避免整条降成标题后被程序重新编号。
+fn bold_article_labels(blocks: &mut [Block]) {
+    for block in blocks.iter_mut() {
+        let Block::Para(lines) = block else {
+            continue;
+        };
+        let Some(first) = lines.first() else {
+            continue;
+        };
+        let text = first.trim();
+        if text.starts_with("**") {
+            continue;
+        }
+        let Some(label_len) = article_label_len(text) else {
+            continue;
+        };
+        let label = &text[..label_len];
+        let rest = &text[label_len..];
+        lines[0] = format!("**{label}**{rest}");
+    }
+}
+
+fn article_label_len(text: &str) -> Option<usize> {
+    let mut chars = text.char_indices();
+    let (_, first) = chars.next()?;
+    if first != '第' {
+        return None;
+    }
+    let mut end = '第'.len_utf8();
+    let mut count = 0usize;
+    for (offset, ch) in chars {
+        if is_numeral_char(ch) {
+            end = offset + ch.len_utf8();
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    if count == 0 || !text[end..].starts_with('条') {
+        return None;
+    }
+    Some(end + '条'.len_utf8())
+}
+
+fn is_numeral_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '一' | '二'
+            | '三'
+            | '四'
+            | '五'
+            | '六'
+            | '七'
+            | '八'
+            | '九'
+            | '十'
+            | '百'
+            | '千'
+            | '零'
+            | '〇'
+            | '0'..='9'
+            | '０'..='９'
+    )
 }
 
 // ---------------------------------------------------------------- 定性
@@ -666,7 +1545,7 @@ fn classify(blocks: &[Block]) -> Vec<Role> {
     let mut roles = vec![Role::Literal; blocks.len()];
     let mut groups: Vec<Vec<usize>> = Vec::new();
     // 下标是层级：记着该级正在进行的那一组与上一个序号。
-    let mut open: [Option<(usize, u32)>; 6] = [None; 6];
+    let mut open: [Option<(usize, u32)>; 7] = [None; 7];
     for (index, block) in blocks.iter().enumerate() {
         match block {
             Block::Item(item) => {
@@ -675,7 +1554,7 @@ fn classify(blocks: &[Block]) -> Vec<Role> {
                     *slot = None;
                 }
                 match item.level {
-                    1 | 2 if item.split.is_some() => roles[index] = Role::Heading,
+                    0..=2 if item.split.is_some() => roles[index] = Role::Heading,
                     3 | 4 => match open[level] {
                         Some((group, last)) if item.number == last + 1 => {
                             groups[group].push(index);
@@ -690,7 +1569,7 @@ fn classify(blocks: &[Block]) -> Vec<Role> {
                     _ => {}
                 }
             }
-            Block::Heading(..) | Block::Attachment(_) => open = [None; 6],
+            Block::Heading(..) | Block::Attachment(_) => open = [None; 7],
             _ => {}
         }
     }
@@ -759,21 +1638,28 @@ fn has_content_after(blocks: &[Block], index: usize) -> bool {
 // ---------------------------------------------------------------- 输出
 
 fn render(blocks: &[Block], roles: &[Role]) -> String {
+    let heading_levels = heading_level_map(blocks, roles);
     // 每个单元之间空一行；同一组列表项挤在一个单元里，中间不能空行。
     let mut units: Vec<String> = Vec::new();
     let mut previous_list: Option<u8> = None;
     for (block, &role) in blocks.iter().zip(roles) {
         let mut list_level = None;
         let unit = match block {
-            Block::Para(lines) | Block::Raw(lines) => lines.join("\n"),
+            // 折行的段落接回一行：中文之间不补空格，西文词间补一个空格。
+            Block::Para(lines) => join_pieces(lines),
+            Block::Raw(lines) => lines.join("\n"),
             Block::Heading(level, text) => format!("{} {text}", "#".repeat(*level)),
             Block::Attachment(title) => format!("<!-- [附件] -->\n\n# {title}"),
             Block::Item(item) => match (role, &item.split) {
                 (Role::Heading, Some(split)) => {
-                    let hashes = "#".repeat(item.level.min(4) as usize + 1);
-                    let mut lines = vec![format!("{hashes} {}", split.title)];
-                    lines.extend(split.body.iter().cloned());
-                    lines.join("\n")
+                    let level = heading_levels.get(&item.level).copied().unwrap_or(2);
+                    let hashes = "#".repeat(level as usize);
+                    let body = join_pieces(&split.body);
+                    if body.is_empty() {
+                        format!("{hashes} {}", split.title)
+                    } else {
+                        format!("{hashes} {}\n{body}", split.title)
+                    }
                 }
                 (Role::List, _) => {
                     list_level = Some(item.level);
@@ -792,6 +1678,34 @@ fn render(blocks: &[Block], roles: &[Role]) -> String {
         previous_list = list_level;
     }
     units.join("\n\n")
+}
+
+/// 把全篇实际用到的编号层级压紧成连续的 `##`…`#####`：样式按从浅到深排，
+/// 第一层保持它原本的固定层级，后面每层紧跟上一层加一，避免「## 下面直接出现
+/// ####」这种跳级。只出现 `1.` 的文档仍从 `####` 开始（作者只用了这一级）。
+fn heading_level_map(blocks: &[Block], roles: &[Role]) -> BTreeMap<u8, u8> {
+    let mut ranks: BTreeSet<u8> = BTreeSet::new();
+    for (block, role) in blocks.iter().zip(roles) {
+        if let (Block::Item(item), Role::Heading) = (block, role) {
+            ranks.insert(item.level);
+        }
+    }
+    let mut map = BTreeMap::new();
+    let mut previous: Option<u8> = None;
+    for rank in ranks {
+        let level = match previous {
+            None => match rank {
+                0 | 1 => 2,
+                2 => 3,
+                3 => 4,
+                _ => 5,
+            },
+            Some(previous) => (previous + 1).min(5),
+        };
+        map.insert(rank, level);
+        previous = Some(level);
+    }
+    map
 }
 
 /// 把几行接成一行：中文之间直接相连，西文 / 数字之间补一个空格。
@@ -819,13 +1733,7 @@ mod tests {
     use super::*;
 
     fn clean(markdown: &str) -> String {
-        restructure(
-            markdown,
-            &Options {
-                detect_title: true,
-                lines_are_paragraphs: false,
-            },
-        )
+        restructure(markdown, &Options::import(true, false))
     }
 
     #[test]
@@ -933,7 +1841,7 @@ mod tests {
             "关于做好防汛工作的通知\n\n正文。",
             &Options {
                 detect_title: false,
-                lines_are_paragraphs: false,
+                ..Default::default()
             },
         );
         assert_eq!(off, "关于做好防汛工作的通知\n\n正文。");
@@ -984,13 +1892,7 @@ mod tests {
     #[test]
     fn plain_text_lines_are_paragraphs() {
         let raw = "关于开展安全检查的通知\n各单位：\n一、检查范围\n全市所有生产经营单位。";
-        let cleaned = restructure(
-            raw,
-            &Options {
-                detect_title: true,
-                lines_are_paragraphs: true,
-            },
-        );
+        let cleaned = restructure(raw, &Options::import(true, true));
         assert_eq!(
             cleaned,
             "# 关于开展安全检查的通知\n\n各单位：\n\n## 检查范围\n\n全市所有生产经营单位。"
@@ -1021,5 +1923,112 @@ mod tests {
             .filter(|block| matches!(block, MarkdownBlock::OrderedListItem { .. }))
             .count();
         assert_eq!((headings, items), (2, 2), "{cleaned}\n{blocks:#?}");
+    }
+
+    #[test]
+    fn inline_enumeration_splits_and_bolds_each_lead() {
+        let raw = "会议强调，一是加强组织领导，明确责任分工；二是强化督导检查，确保任务落实；\
+                   三是严格考核问责，倒逼工作落地。";
+        assert_eq!(
+            clean(raw),
+            "会议强调，\n\n**一是加强组织领导**，明确责任分工；\n\n\
+             **二是强化督导检查**，确保任务落实；\n\n\
+             **三是严格考核问责**，倒逼工作落地。"
+        );
+    }
+
+    #[test]
+    fn unnumbered_short_heading_is_bolded() {
+        let raw = "一、总体要求\n\n各单位要高度重视，明确责任分工，确保各项任务落到实处。\n\n\
+                   工作目标\n\n到2027年基本建成，重点领域和关键环节取得实质性进展，形成一批可复制可推广的经验做法。";
+        assert_eq!(
+            clean(raw),
+            "## 总体要求\n\n各单位要高度重视，明确责任分工，确保各项任务落到实处。\n\n\
+             **工作目标**\n\n到2027年基本建成，重点领域和关键环节取得实质性进展，形成一批可复制可推广的经验做法。"
+        );
+    }
+
+    #[test]
+    fn article_labels_are_bolded_not_promoted() {
+        let raw = "第一条　为规范管理，制定本办法。\n\n第二条　本办法适用于本单位。";
+        assert_eq!(
+            clean(raw),
+            "**第一条**　为规范管理，制定本办法。\n\n**第二条**　本办法适用于本单位。"
+        );
+    }
+
+    #[test]
+    fn layout_head_and_tail_are_stripped() {
+        let raw = "000123\n\n秘密★1年\n\n××市人民政府文件\n\n\
+                   ×政发〔2026〕12号\n\n签发人：张三\n\n\
+                   关于做好防汛工作的通知\n\n各区县人民政府：\n\n正文。\n\n\
+                   ××市人民政府办公室\n\n2026年5月10日\n\n\
+                   抄送：市委办公室。\n\n××市人民政府办公室　2026年5月10日印发";
+        assert_eq!(
+            clean(raw),
+            "# 关于做好防汛工作的通知\n\n各区县人民政府：\n\n正文。"
+        );
+    }
+
+    #[test]
+    fn chapter_headings_are_recognized() {
+        let raw = "第一章 总则\n\n正文。\n\n一、总体要求\n\n正文。";
+        assert_eq!(clean(raw), "## 总则\n\n正文。\n\n### 总体要求\n\n正文。");
+    }
+
+    #[test]
+    fn full_width_digits_and_half_paren_numbering_are_recognized() {
+        assert_eq!(
+            parse_prefix("１．总体要求", false).map(|prefix| prefix.level),
+            Some(3)
+        );
+        assert_eq!(
+            parse_prefix("1)具体事项", false).map(|prefix| prefix.level),
+            Some(4)
+        );
+        assert_eq!(
+            parse_prefix("第一章　总则", false).map(|prefix| prefix.level),
+            Some(0)
+        );
+        assert!(parse_prefix("第一条　为规范管理", false).is_none());
+    }
+
+    #[test]
+    fn skipped_third_level_is_compressed_under_its_parent() {
+        let raw = "一、总体要求\n\n正文。\n\n1.具体任务\n\n正文。";
+        assert_eq!(
+            clean(raw),
+            "## 总体要求\n\n正文。\n\n### 具体任务\n\n正文。"
+        );
+    }
+
+    #[test]
+    fn same_line_attachment_and_title_suffix_are_handled() {
+        let raw = "关于做好防汛工作的通知\n\n（征求意见稿）\n\n正文。\n\n\
+                   附件1：2026年防汛物资清单\n\n一、物资种类\n\n正文。";
+        assert_eq!(
+            clean(raw),
+            "# 关于做好防汛工作的通知（征求意见稿）\n\n正文。\n\n\
+             <!-- [附件] -->\n\n# 2026年防汛物资清单\n\n## 物资种类\n\n正文。"
+        );
+    }
+
+    #[test]
+    fn attachment_description_line_is_dropped_when_content_follows() {
+        let raw = "正文。\n\n附件：1.物资清单 2.责任分工\n\n附件1\n\n物资清单\n\n内容。";
+        assert_eq!(
+            clean(raw),
+            "正文。\n\n<!-- [附件] -->\n\n# 物资清单\n\n内容。"
+        );
+    }
+
+    #[test]
+    fn ribbon_restructure_keeps_title_and_layout() {
+        // 对已有稿子做结构整理：不认标题、不剥版头版记、不拆段内枚举。
+        let raw = "关于做好防汛工作的通知\n\n一、总体要求\n\n一是加强领导；二是强化督导。";
+        assert_eq!(
+            restructure(raw, &Options::restructure_only()),
+            "关于做好防汛工作的通知\n\n## 总体要求\n\n一是加强领导；二是强化督导。"
+        );
     }
 }

@@ -353,6 +353,8 @@ pub enum RibbonTab {
     Research,
     /// 改已有文字的 Markdown 标记：标题层级、加粗、列表、清理。
     Format,
+    /// 公文编号与 Markdown 编号互转，以及空格、标点、表格等格式清理。
+    Clean,
     /// 校验、版本比对、查找、字数。
     Review,
     /// 显示方式、缩放与各个面板的开关。
@@ -364,11 +366,12 @@ pub enum RibbonTab {
 impl RibbonTab {
     /// 分区卡顺序即屏幕上从左到右的顺序。「研报」紧挨着「插入」：两者干的是
     /// 同一类活（往稿子里放构件），只是一个通用、一个只有研究报告用得上。
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Home,
         Self::Insert,
         Self::Research,
         Self::Format,
+        Self::Clean,
         Self::Review,
         Self::View,
         Self::Output,
@@ -386,6 +389,7 @@ impl RibbonTab {
             Self::Insert => "插入",
             Self::Research => "研报",
             Self::Format => "格式",
+            Self::Clean => "清洗",
             Self::Review => "审校",
             Self::View => "视图",
             Self::Output => "输出",
@@ -398,6 +402,7 @@ impl RibbonTab {
             Self::Insert => "表格、图片、正文与附件标记、词库词条、日期与符号",
             Self::Research => "研究报告的区段标记、锚点、交叉引用、文献引用、脚注与表题",
             Self::Format => "标题层级、加粗、项目符号，以及引号与空行的规范化",
+            Self::Clean => "公文编号与 Markdown 编号互转、空格/标点/表格/目录等格式清理",
             Self::Review => "重新校验、版本对照、查找替换、字数统计",
             Self::View => "显示方式、预览缩放、各个面板的开关",
             Self::Output => "按格式导出、打开输出目录与最近一次的成品",
