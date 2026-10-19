@@ -148,6 +148,53 @@ calamine 升级后的词表导入中位数为 1.659 ms，导出 1.600 ms；相�
 - 锁文件提示：rfd 0.17 的 macOS target 依赖带 objc2 0.6，与根代码仍钉的 objc2 0.5 并存。
   macOS 不在发布与 CI 范围（见计划「暂缓清单」），本批不做 objc2 迁移。
 
+## 第 6 批：字体与 SVG 渲染链（评估后暂缓）
+
+按计划要求先做依赖清单与上游配套核对，结论是**本批条件不满足，未改动任何依赖**。本批的目标是
+逐步替换停止维护的字体依赖，而不是把某一个 resvg 版本加进树里就宣布旧链清除。
+
+### 当前树（2026-10-19）
+
+| 依赖 | 锁定版本 | 主要父库 | 上游状态 |
+| --- | --- | --- | --- |
+| ttf-parser | 0.25.1 | 根代码直接使用；fontdb 0.23（typst 0.15.1、svg2pdf 0.13、merman 0.7、krilla-svg 0.8.1） | 最新即 0.25.1；RUSTSEC-2026-0192 为停止维护公告 |
+| rustybuzz | 0.20.1 | krilla 0.8.2 / typst-pdf 0.15.1、vendor/typst-layout | 最新即 0.20.1；RUSTSEC-2026-0206 为停止维护公告 |
+| paste | 1.0.15 | biblatex 0.12、hayagriva 0.10.1（typst 0.15.1） | RUSTSEC-2024-0436 为停止维护公告 |
+| resvg / usvg | 0.45.1、0.46.0、0.47.0 | egui_extras 0.36.2 + svg2pdf 0.13（0.45）、根代码 + merman 0.7（0.46）、krilla-svg（0.47） | 最新 0.48.1 |
+| tiny-skia | 0.11.4、0.12.0 | latex-rust（vendor）、merman 0.7、resvg 0.45；krilla-svg / resvg 0.47 | 最新 0.12.0 |
+| merman / merman-render | 0.7.0 | 根代码（Mermaid 预览与导出） | 最新稳定 0.9.1 |
+| svg2pdf | 0.13.0 | 根代码与 merman 0.7 | 最新即 0.13.0 |
+
+### 为什么不迁
+
+1. **ttf-parser / rustybuzz 的公告无法通过本批清除。** 两者同时被 typst 0.15.1 与 vendor
+   `typst-layout` 固定，直接依赖迁移到 skrifa 只能去掉根代码的一处引用，锁文件里仍有公告匹配；
+   上游 ttf-parser / rustybuzz 也没有更新的补丁版本。迁移要在 typst 升级时统一做。
+2. **单独升级根 resvg 到 0.48.1 不划算。** egui_extras 与 svg2pdf 仍要 0.45，merman 0.7 要 0.46，
+   typst 的 krilla-svg 要 0.47；再加 0.48 会变成四份副本，且不减少任何旧字体依赖。计划已明确
+   不以此宣称清除旧链。
+3. **merman 0.9.1 虽已是稳定版，但升级它是 Mermaid 渲染管线的 API 迁移，不是字体链清理。**
+   0.9 的子 crate 拆分与 `TextMeasurer` 接口都要重做；即使升级，typst 侧仍保留 ttf-parser /
+   rustybuzz。应另立方案评估，不混进本批。
+4. **tiny-skia 0.12 只在本地 renderer 完成适配时升级。** 当前 Mermaid 的 PNG 预渲染仍走
+   resvg 0.46 的 0.11 API，未做适配。
+5. **paste 随 biblatex / hayagriva / typst 跟进。** 三者都钉在 typst 0.15.1 的配套版本，不能单独替换。
+6. vendor/latex-rust 的中文字体回退与数组行距补丁保持原样，本批未启用其旧 egui feature。
+
+### serde_yaml（不在 4B/5/6 批内）
+
+`serde_yaml` 0.9.34+deprecated 已由上游归档。它仍是根代码（SKILL.md frontmatter、接口 YAML）
+与 hayagriva 0.10.1 / typst 0.15.1 的共同依赖。按任务边界**只记录状态、不替换**：直接换成
+`serde_yaml_ng` 之类的分叉不会降低锁文件里的依赖数，还要重新核对 frontmatter 与接口文件的
+YAML 行为；是否迁移应与 typst/hayagriva 的上游动作一起评估。
+
+### 结论与后续条件
+
+本批不产生依赖变更，`Cargo.toml` / `Cargo.lock` 不动；RUSTSEC 的三条匹配仍是停止维护公告，
+不是已确认可利用漏洞。重新启动条件：typst/hayagriva 升级带来新的字体后端，且 merman/svg2pdf
+有稳定版配套；届时按计划用中文节点、特殊字形、长标签、甘特图、透明度、SVG 滤镜和中文嵌套公式
+对照预览、PNG、PDF 与 DOCX 图像。
+
 ## 最终安全复扫与剩余验收
 
 - 最终锁文件共有 798 个 registry 包；2026-10-01 对每个锁定版本查询 OSV。rustls 及旧 quick-xml 的三项已知漏洞匹配均已消除。
