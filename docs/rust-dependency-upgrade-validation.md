@@ -120,9 +120,11 @@ calamine 升级后的词表导入中位数为 1.659 ms，导出 1.600 ms；相�
   `IMEPurpose::Normal`）。另外 egui 0.36 收紧了两个测试可见的行为，已在测试侧适配，未改业务逻辑：
   1. `TexturesDelta` 析构前必须被处理，否则 `debug_assert`。新增 `test_support::run_ui`
      统一清掉不建渲染器的测试帧纹理；`ui_snapshot::Canvas::absorb` 改为读完即清空，
-     快照样张仍能跨帧复用字体图集。测试停止进程崩溃（STATUS_STACK_BUFFER_OVERRUN）。
+     快照样张仍能跨帧复用字体图集。修复前测试进程会以 STATUS_STACK_BUFFER_OVERRUN 崩溃。
   2. `TextEdit` 只保留获得焦点的编辑框的选区。候选区测试改为先把焦点交给源码编辑框，
      与真实用户选字时的状态一致。
+  3. 逐项核对了 0.36 的其余公开变化：`RawInput` 不再携带 `Modifiers`（本项目未读该字段）、
+     `clip_rect_margin` 移除（未使用）、「按下后移出控件算拖拽」由现有拖拽/选区测试覆盖。
 - 格式检查通过，clippy 全目标零警告；完整测试 2049 通过、0 失败、57 忽略。
 - 图形样张：重新生成 68 张 `tmp/*.png`，其中 66 张有升级前基线，逐像素比较全部 0 差异
   （PNG 编码字节不同，像素内容一致）；另 2 张（`mdex-square-*`）为本批新增样张，已目视检查。
