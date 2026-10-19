@@ -909,7 +909,8 @@ mod tests {
         }
 
         fn frame(&mut self, events: Vec<egui::Event>, open: bool) -> egui::FullOutput {
-            self.ctx.clone().run_ui(
+            crate::test_support::run_ui(
+                &self.ctx,
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,

@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn squeezing_narrows_every_coordinate_around_the_center() {
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |_| {});
         let galley = galley_of(&ctx, "Squeeze the glyphs", Align::Center);
         let squeezed = squeeze(galley.clone(), 0.8);
         assert!((squeezed.rect.width() - galley.rect.width() * 0.8).abs() < 0.01);

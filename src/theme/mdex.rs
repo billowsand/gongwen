@@ -126,7 +126,8 @@ fn mdex_theme_sample() {
         let mut canvas = ui_snapshot::Canvas::default();
         let mut title = "关于开展专项工作的通知".to_owned();
         for _ in 0..5 {
-            let output = ctx.run_ui(
+            let output = crate::test_support::run_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()

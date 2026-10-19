@@ -487,7 +487,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        ctx.run_ui(raw, |ui| {
+        crate::test_support::run_ui(&ctx, raw, |ui| {
             let _ = official_preview(
                 ui,
                 &input,

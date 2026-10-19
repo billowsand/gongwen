@@ -705,7 +705,8 @@ mod tests {
                 sample_provider("硅基流动", 97),
             ];
             let mut rects = Vec::new();
-            let output = ctx.run_ui(
+            let output = crate::test_support::run_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,

@@ -70,7 +70,8 @@ impl Harness {
     fn frame(&mut self, events: Vec<egui::Event>) -> (egui::FullOutput, Option<PanelAction>) {
         self.clock += 0.05;
         let mut action = None;
-        let output = self.ctx.run_ui(
+        let output = crate::test_support::run_ui(
+            &self.ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,

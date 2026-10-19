@@ -109,6 +109,28 @@ calamine 升级后的词表导入中位数为 1.659 ms，导出 1.600 ms；相�
 - 待真机验收：用旧版应用导出的真实同步包在升级版导入、升级版导出的包回到旧版导入、
   成品 DOCX/PDF 在 Office/WPS 中打开，以及 GUI 导入预览交互。当前为 Windows 自动验证通过。
 
+## 5A：egui 四件套与配套控件
+
+- eframe / egui / egui_extras / egui_kittest 0.35.0 → 0.36.2；egui_dnd 0.16.0 → 0.17.0
+  （0.16 钉在 egui 0.35，必须同步，否则依赖树会出现两份 egui）。
+- 随 egui 生态带入的传递依赖变化：harfrust 0.7 → 0.12、新增 skrifa 0.44 与 read-fonts 0.41、
+  vello_cpu 0.0.9 → 0.1.0、wgpu/naga 29 → 30、itertools 0.14 → 0.15、hello_egui_utils 0.13。
+  这些由 epaint / eframe 的依赖约束决定，没有单独指定版本。
+- 业务 API 适配只有一处：`egui::output::IMEOutput` 新增 `purpose` 字段（测试构造处补
+  `IMEPurpose::Normal`）。另外 egui 0.36 收紧了两个测试可见的行为，已在测试侧适配，未改业务逻辑：
+  1. `TexturesDelta` 析构前必须被处理，否则 `debug_assert`。新增 `test_support::run_ui`
+     统一清掉不建渲染器的测试帧纹理；`ui_snapshot::Canvas::absorb` 改为读完即清空，
+     快照样张仍能跨帧复用字体图集。测试停止进程崩溃（STATUS_STACK_BUFFER_OVERRUN）。
+  2. `TextEdit` 只保留获得焦点的编辑框的选区。候选区测试改为先把焦点交给源码编辑框，
+     与真实用户选字时的状态一致。
+- 格式检查通过，clippy 全目标零警告；完整测试 2049 通过、0 失败、57 忽略。
+- 图形样张：重新生成 68 张 `tmp/*.png`，其中 66 张有升级前基线，逐像素比较全部 0 差异
+  （PNG 编码字节不同，像素内容一致）；另 2 张（`mdex-square-*`）为本批新增样张，已目视检查。
+  样张覆盖 AI 侧栏（含长输入、斜杠、@、要素卡、会话）、数据接口工作台、管理页、归档/批量删除/
+  导入预览对话框、技能管理、Mdex/Smartisan 起草页与对比视图、页签拼接；中文、图标与字号未见变化。
+- 待真机验收：真实窗口的输入法（本应用词表输入法）、候选选择、快捷键、选区拖动、撤销/重做、
+  长稿滚动缩放、花脸稿、公式与 PDF 标签；Linux ARM64 未在本机验证。Windows 自动验证通过。
+
 ## 最终安全复扫与剩余验收
 
 - 最终锁文件共有 798 个 registry 包；2026-10-01 对每个锁定版本查询 OSV。rustls 及旧 quick-xml 的三项已知漏洞匹配均已消除。

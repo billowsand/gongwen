@@ -81,7 +81,7 @@ fn form_chrome_draws_without_panicking() {
         draft.profile.security_level.clear();
         let check = check_form(&draft);
         let mut manual = BTreeSet::new();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             assert!(
                 layout_thumbnail(ui, kind, &check).is_none(),
                 "没有点击时缩略图不应产生跳转"
@@ -691,7 +691,7 @@ fn switching_kind_combo_to_plain_document_does_not_panic() {
             events,
             ..Default::default()
         };
-        let output = ctx.clone().run_ui(raw, |ui| {
+        let output = crate::test_support::run_ui(ctx, raw, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 let mut page = DraftPage {
                     doc: &mut doc,

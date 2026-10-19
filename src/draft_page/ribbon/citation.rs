@@ -467,7 +467,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let output = ctx.run_ui(raw, |ui| {
+        let output = crate::test_support::run_ui(&ctx, raw, |ui| {
             let _ = citation_menu(ui, markdown, &library, &cited, cursor);
         });
         output

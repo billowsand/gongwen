@@ -63,7 +63,8 @@ fn clicking_a_markdown_reference_opens_the_package_file() {
     let size = egui::vec2(600.0, 300.0);
     let frame = |events| {
         let mut target = None;
-        let output = ctx.run_ui(
+        let output = crate::test_support::run_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                 events,
@@ -130,7 +131,8 @@ fn overview_and_files_render_at_wide_and_narrow_widths() {
                 ..Default::default()
             };
             for _ in 0..2 {
-                let output = ctx.run_ui(
+                let output = crate::test_support::run_ui(
+                    &ctx,
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,
@@ -178,12 +180,14 @@ fn skill_manager_samples() {
             )
         };
         for _ in 0..20 {
-            canvas.absorb(&frame().textures_delta);
+            canvas.absorb(&mut frame().textures_delta);
         }
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tmp")
             .join(format!("skill-manager-{name}.png"));
-        canvas.render(&ctx, frame(), size, theme::canvas(), &path);
+        let mut output = frame();
+        output.textures_delta.clear();
+        canvas.render(&ctx, output, size, theme::canvas(), &path);
         println!("{}", path.display());
     };
     shoot(&mut page, "overview", egui::vec2(1500.0, 950.0));

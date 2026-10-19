@@ -21,29 +21,32 @@ pub(crate) struct Canvas {
 }
 
 impl Canvas {
-    pub(crate) fn absorb(&mut self, delta: &egui::TexturesDelta) {
-        for (id, change) in &delta.set {
-            let egui::ImageData::Color(image) = &change.image;
-            let [width, height] = image.size;
-            match change.pos {
-                None => {
-                    self.textures.insert(
-                        *id,
-                        Texture {
-                            width,
-                            height,
-                            pixels: image.pixels.clone(),
-                        },
-                    );
-                }
-                Some([x0, y0]) => {
-                    if let Some(texture) = self.textures.get_mut(id) {
-                        for y in 0..height {
-                            for x in 0..width {
-                                let (tx, ty) = (x0 + x, y0 + y);
-                                if tx < texture.width && ty < texture.height {
-                                    texture.pixels[ty * texture.width + tx] =
-                                        image.pixels[y * width + x];
+    /// 收下本帧的纹理增量。egui 0.36 要求调用方处理完再析构，这里读完即清空。
+    pub(crate) fn absorb(&mut self, delta: &mut egui::TexturesDelta) {
+        for (id, changes) in &delta.set {
+            for change in changes {
+                let egui::ImageData::Color(image) = &change.image;
+                let [width, height] = image.size;
+                match change.pos {
+                    None => {
+                        self.textures.insert(
+                            *id,
+                            Texture {
+                                width,
+                                height,
+                                pixels: image.pixels.clone(),
+                            },
+                        );
+                    }
+                    Some([x0, y0]) => {
+                        if let Some(texture) = self.textures.get_mut(id) {
+                            for y in 0..height {
+                                for x in 0..width {
+                                    let (tx, ty) = (x0 + x, y0 + y);
+                                    if tx < texture.width && ty < texture.height {
+                                        texture.pixels[ty * texture.width + tx] =
+                                            image.pixels[y * width + x];
+                                    }
                                 }
                             }
                         }
@@ -54,18 +57,19 @@ impl Canvas {
         for id in &delta.free {
             self.textures.remove(id);
         }
+        delta.clear();
     }
 
     /// 把一帧画到 `path`。`size` 是屏幕大小（点）。
     pub(crate) fn render(
         &mut self,
         ctx: &egui::Context,
-        output: egui::FullOutput,
+        mut output: egui::FullOutput,
         size: egui::Vec2,
         background: egui::Color32,
         path: &Path,
     ) {
-        self.absorb(&output.textures_delta);
+        self.absorb(&mut output.textures_delta);
         let ppp = output.pixels_per_point;
         let width = (size.x * ppp).round() as usize;
         let height = (size.y * ppp).round() as usize;

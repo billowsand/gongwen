@@ -147,7 +147,7 @@ mod tests {
     fn galley(text: &str) -> std::sync::Arc<Galley> {
         let ctx = egui::Context::default();
         let mut galley = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             let mut job = LayoutJob::default();
             job.append(
                 text,
@@ -204,7 +204,7 @@ mod tests {
         };
         let ctx = egui::Context::default();
         let mut caret = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             let mut job = LayoutJob::default();
             job.append("## ", 0.0, tiny.clone());
             job.append("标题", 0.0, body.clone());

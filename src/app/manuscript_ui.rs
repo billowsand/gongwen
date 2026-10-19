@@ -217,11 +217,11 @@ mod dialog_snapshot_tests {
         };
         // 多跑几帧，等模态的淡入动画走完（默认每帧按 1/60 秒推进）。
         for _ in 0..30 {
-            let output = frame();
-            canvas.absorb(&output.textures_delta);
+            let mut output = frame();
+            canvas.absorb(&mut output.textures_delta);
         }
-        let output = frame();
-        canvas.absorb(&output.textures_delta);
+        let mut output = frame();
+        canvas.absorb(&mut output.textures_delta);
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tmp")
             .join(format!("{name}.png"));

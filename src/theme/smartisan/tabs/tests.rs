@@ -49,7 +49,7 @@ fn smartisan_tab_join_samples() {
     for scale in [1.0, 1.25, 1.5, 2.0, 4.0] {
         ctx.set_pixels_per_point(scale);
         for frame in 0..3 {
-            let output = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
@@ -101,8 +101,10 @@ fn smartisan_tab_join_samples() {
                 },
             );
             if frame < 2 {
-                canvas.absorb(&output.textures_delta);
+                canvas.absorb(&mut output.textures_delta);
             } else {
+                let mut output = output;
+                output.textures_delta.clear();
                 canvas.render(
                     &ctx,
                     output,

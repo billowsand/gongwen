@@ -1201,7 +1201,8 @@ mod tests {
             let config = AppConfig::default();
             let store = crate::agent::api::ApiStore::default();
             for _ in 0..2 {
-                let _ = ctx.run_ui(
+                let _ = crate::test_support::run_ui(
+                    &ctx,
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,

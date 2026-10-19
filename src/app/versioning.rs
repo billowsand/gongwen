@@ -1020,7 +1020,8 @@ mod tests {
                          events: Vec<egui::Event>|
          -> egui::FullOutput {
             clock += 0.05;
-            ctx.clone().run_ui(
+            crate::test_support::run_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,

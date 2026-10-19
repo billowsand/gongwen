@@ -1142,7 +1142,7 @@ mod tests {
     #[test]
     fn math_slot_reserves_exactly_its_box_width() {
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(Default::default(), |_| {});
+        let _ = crate::test_support::run_ui(&ctx, Default::default(), |_| {});
         let font = egui::FontId::proportional(16.0);
         let box_width = 50.0;
         for prefix in ["ab", ""] {

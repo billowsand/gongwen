@@ -438,7 +438,7 @@ mod tests {
             events,
             ..Default::default()
         };
-        let output = ctx.run_ui(raw, |ui| help_page(ui, state));
+        let output = crate::test_support::run_ui(ctx, raw, |ui| help_page(ui, state));
         output
             .shapes
             .iter()

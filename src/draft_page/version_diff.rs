@@ -1368,7 +1368,7 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            self.ctx.clone().run_ui(raw, |ui| {
+            crate::test_support::run_ui(&self.ctx, raw, |ui| {
                 let mut page = DraftPage {
                     doc: &mut self.doc,
                     config: &mut self.config,

@@ -1941,7 +1941,7 @@ mod tests {
         for zoom in [0.5, 1.0, 1.5, 2.0] {
             let metrics = Metrics::new(1000.0, Some(zoom));
             let mut measured = None;
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
                 measured = measure_table(
                     ui,
                     &metrics,
@@ -1984,7 +1984,7 @@ mod tests {
                 vec![long.to_string(), note.to_string()],
             ];
             let mut measured = None;
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
                 measured = measure_table(ui, &metrics, &rows, &aligns, &[], false, metrics.content);
             });
             let table = measured.expect("表格应排出");
@@ -2136,7 +2136,7 @@ mod tests {
             },
         ];
         set_text_selection(&ctx, source, Some(range.clone()));
-        let output = ctx.run_ui(Default::default(), |ui| {
+        let output = crate::test_support::run_ui(&ctx, Default::default(), |ui| {
             let metrics = Metrics::research(1000.0, Some(1.0));
             let mut scroll = false;
             let mut clicked = None;
@@ -2167,7 +2167,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let metrics = Metrics::research(1000.0, Some(1.0));
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, Default::default(), |ui| {
             let text = format!(
                 "{}现在的任务就是很好的达到了所需要的效果",
                 indent(INDENT_CHARS)

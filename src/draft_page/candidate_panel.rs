@@ -653,7 +653,7 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            self.ctx.clone().run_ui(raw, |ui| {
+            crate::test_support::run_ui(&self.ctx, raw, |ui| {
                 let mut page = DraftPage {
                     doc: &mut self.doc,
                     config: &mut self.config,
@@ -693,6 +693,9 @@ mod tests {
 
         /// 把源码编辑框的选区设成正文里的 `picked`（为空串时只放光标到 `at` 之后）。
         fn select_in_editor(&mut self, picked: &str) {
+            // egui 0.36 只保留获得焦点的 TextEdit 的选区；真实用户选字时编辑框必然有焦点。
+            self.ctx
+                .memory_mut(|memory| memory.request_focus(editor_id()));
             let text = &self.doc.generated_markdown;
             let byte = text.find(picked).unwrap();
             let start = text[..byte].chars().count();
@@ -823,6 +826,9 @@ mod tests {
         let end = text[..text.find("继续推进。").unwrap() + "继续推进。".len()]
             .chars()
             .count();
+        harness
+            .ctx
+            .memory_mut(|memory| memory.request_focus(editor_id()));
         let mut state = egui::TextEdit::load_state(&harness.ctx, editor_id()).unwrap();
         state
             .cursor

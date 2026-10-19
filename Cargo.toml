@@ -30,10 +30,10 @@ chardetng = "1.0.0"
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 docx-rs = "0.4.22"
-eframe = { version = "0.35.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland", "x11"] }
-egui = "0.35.0"
-egui_dnd = "0.16.0"
-egui_extras = { version = "0.35.0", features = ["image", "svg"] }
+eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland", "x11"] }
+egui = "0.36.2"
+egui_dnd = "0.17.0"
+egui_extras = { version = "0.36.2", features = ["image", "svg"] }
 encoding_rs = "0.8.41"
 # 文献著录预览：与 Typst 排 PDF 参考文献表同一个库、同一份 GB/T 7714 样式，
 # 版本钉在 typst 所用的 0.10.1，不多编一份。
@@ -115,7 +115,7 @@ strip = true
 opt-level = 3
 
 [dev-dependencies]
-egui_kittest = { version = "0.35", default-features = false }
+egui_kittest = { version = "0.36.2", default-features = false }
 insta = "1.48.0"
 proptest = "1.11.0"
 

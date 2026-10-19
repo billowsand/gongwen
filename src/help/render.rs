@@ -1147,7 +1147,7 @@ mod tests {
             ..Default::default()
         };
         let mut jump = None;
-        let output = ctx.run_ui(raw, |ui| {
+        let output = crate::test_support::run_ui(ctx, raw, |ui| {
             jump = show(ui, source, TEST_WIDTH, None);
         });
         let drawn = output
@@ -1298,7 +1298,8 @@ mod tests {
                 ..Default::default()
             });
             let close = zoom_overlay(&ctx, "images/diag-layout.png");
-            let _ = ctx.end_pass();
+            let mut output = ctx.end_pass();
+            output.textures_delta.clear();
             close
         };
         assert!(!overlay(vec![]), "没点的时候放大层要留着");
@@ -1337,7 +1338,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let output = ctx.run_ui(raw, |ui| {
+        let output = crate::test_support::run_ui(&ctx, raw, |ui| {
             show(ui, &long, 2000.0, None);
         });
         for clipped in &output.shapes {

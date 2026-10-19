@@ -424,7 +424,7 @@ mod text_drag_tests {
                     ..Default::default()
                 };
                 let mut positions = [egui::Pos2::ZERO; 3];
-                let output = ctx.clone().run_ui(raw, |ui| {
+                let output = crate::test_support::run_ui(&ctx, raw, |ui| {
                     let before = candidates::selection_before_show(ui.ctx(), editor_id());
                     let output = egui::TextEdit::multiline(&mut text)
                         .id(editor_id())

@@ -1747,7 +1747,7 @@ mod tests {
             events,
             ..Default::default()
         };
-        let output = ctx.run_ui(raw, |ui| {
+        let output = crate::test_support::run_ui(ctx, raw, |ui| {
             font_choice_row(
                 ui,
                 "test",

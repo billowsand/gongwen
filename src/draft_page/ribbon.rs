@@ -1590,7 +1590,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let output = ctx.run_ui(raw, |ui| {
+        let output = crate::test_support::run_ui(&ctx, raw, |ui| {
             ui.set_max_width(320.0);
             let _ = crossref_menu(ui, markdown);
         });

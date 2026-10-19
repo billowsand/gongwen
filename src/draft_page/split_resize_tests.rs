@@ -14,10 +14,9 @@ const SETTLE_WIDTH: f32 = 700.0;
 /// 图片、图标等别的纹理整张上传是后台解码完成的时刻决定的，与拖动无关，
 /// 不能混进来。
 fn font_atlas_reuploaded(out: &egui::FullOutput) -> bool {
-    out.textures_delta
-        .set
-        .iter()
-        .any(|(id, delta)| *id == egui::TextureId::default() && delta.pos.is_none())
+    out.textures_delta.set.iter().any(|(id, deltas)| {
+        *id == egui::TextureId::default() && deltas.iter().any(|delta| delta.pos.is_none())
+    })
 }
 
 /// 把 `markdown_render` 放进一个可控的 egui 上下文里跑若干帧，
@@ -156,7 +155,7 @@ fn workspace_theme_samples(
         theme::configure_style(&harness.ctx);
         let mut canvas = crate::ui_snapshot::Canvas::default();
         for frame in 0..3 {
-            let output = harness.ctx.clone().run_ui(
+            let mut output = harness.ctx.clone().run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
@@ -181,7 +180,7 @@ fn workspace_theme_samples(
                 },
             );
             if frame < 2 {
-                canvas.absorb(&output.textures_delta);
+                canvas.absorb(&mut output.textures_delta);
                 continue;
             }
             canvas.render(
@@ -304,7 +303,7 @@ impl Harness {
             )),
             ..Default::default()
         };
-        let out = self.ctx.clone().run_ui(raw, |ui| {
+        let out = crate::test_support::run_ui(&self.ctx, raw, |ui| {
             let mut page = DraftPage {
                 doc: &mut self.doc,
                 config: &mut self.config,
@@ -351,7 +350,7 @@ impl Harness {
 
     /// 用给定的原始输入画一帧审校提示面板。
     fn warnings_frame(&mut self, raw: egui::RawInput) {
-        let _ = self.ctx.clone().run_ui(raw, |ui| {
+        let _ = crate::test_support::run_ui(&self.ctx, raw, |ui| {
             let mut page = DraftPage {
                 doc: &mut self.doc,
                 config: &mut self.config,
@@ -651,7 +650,8 @@ impl Harness {
             ..Default::default()
         };
         let started = std::time::Instant::now();
-        let out = self.ctx.clone().run_ui(raw, |ui| {
+        let mut out = self.ctx.clone().run_ui(raw, |ui| {
+            // 字体图集增量要给 `font_atlas_reuploaded` 看，不能提前清掉。
             let mut page = DraftPage {
                 doc: &mut self.doc,
                 config: &mut self.config,
@@ -667,7 +667,9 @@ impl Harness {
             page.markdown_render(ui);
         });
         let elapsed = started.elapsed().as_secs_f32() * 1000.0;
-        (elapsed, font_atlas_reuploaded(&out))
+        let reuploaded = font_atlas_reuploaded(&out);
+        out.textures_delta.clear();
+        (elapsed, reuploaded)
     }
 
     /// 在同一宽度上反复出帧，直到字体图集连续若干帧不再整份重传。
@@ -707,7 +709,7 @@ impl Harness {
                 events: vec![egui::Event::PointerMoved(pointer)],
                 ..Default::default()
             };
-            let frame = self.ctx.clone().run_ui(raw, |ui| {
+            let frame = crate::test_support::run_ui(&self.ctx, raw, |ui| {
                 let mut page = DraftPage {
                     doc: &mut self.doc,
                     config: &mut self.config,
@@ -756,7 +758,7 @@ impl Harness {
                 ],
                 ..Default::default()
             };
-            let _ = self.ctx.clone().run_ui(raw, |ui| {
+            let _ = crate::test_support::run_ui(&self.ctx, raw, |ui| {
                 let mut page = DraftPage {
                     doc: &mut self.doc,
                     config: &mut self.config,
@@ -835,7 +837,7 @@ fn source_minimap_wheel_scrolls_its_own_long_canvas() {
         ],
         ..Default::default()
     };
-    let _ = harness.ctx.clone().run_ui(raw, |ui| {
+    let _ = crate::test_support::run_ui(&harness.ctx, raw, |ui| {
         let mut page = DraftPage {
             doc: &mut harness.doc,
             config: &mut harness.config,
@@ -870,7 +872,7 @@ fn source_minimap_edge_drag_advances_smoothly_across_frames() {
             events,
             ..Default::default()
         };
-        let _ = harness.ctx.clone().run_ui(raw, |ui| {
+        let _ = crate::test_support::run_ui(&harness.ctx, raw, |ui| {
             let mut page = DraftPage {
                 doc: &mut harness.doc,
                 config: &mut harness.config,

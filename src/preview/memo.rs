@@ -133,14 +133,18 @@ mod tests {
         let ctx = egui::Context::default();
         let mut epochs = Vec::new();
         for _ in 0..3 {
-            let _ = ctx.run_ui(Default::default(), |ui| epochs.push(font_epoch(ui.ctx())));
+            let _ = crate::test_support::run_ui(&ctx, Default::default(), |ui| {
+                epochs.push(font_epoch(ui.ctx()))
+            });
         }
         assert_eq!(epochs[1], epochs[2], "字体没动，代不该变");
         // 像素密度一变，epaint 整套重建字体。
         ctx.set_pixels_per_point(2.0);
         let mut after = 0;
         for _ in 0..2 {
-            let _ = ctx.run_ui(Default::default(), |ui| after = font_epoch(ui.ctx()));
+            let _ = crate::test_support::run_ui(&ctx, Default::default(), |ui| {
+                after = font_epoch(ui.ctx())
+            });
         }
         assert_ne!(after, epochs[2], "字体重建后代要变");
     }

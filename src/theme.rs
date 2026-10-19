@@ -524,7 +524,7 @@ mod tests {
                     )),
                     ..Default::default()
                 };
-                let _ = ctx.run_ui(raw, |ui| {
+                let _ = crate::test_support::run_ui(&ctx, raw, |ui| {
                     height = egui::Area::new(egui::Id::new("popup"))
                         .fixed_pos(egui::pos2(10.0, 10.0))
                         .show(ui.ctx(), |ui| {
@@ -647,7 +647,7 @@ mod tests {
     fn reconfiguring_style_restarts_the_current_frame() {
         let ctx = egui::Context::default();
         let mut passes = 0;
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let output = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             if passes == 0 {
                 super::reconfigure_style(ui.ctx());
             }

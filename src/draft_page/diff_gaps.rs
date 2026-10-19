@@ -176,7 +176,7 @@ mod tests {
             let gaps = self.gaps.clone();
             let text = &mut self.text;
             let mut result = None;
-            let output = self.ctx.clone().run_ui(raw, |ui| {
+            let output = crate::test_support::run_ui(&self.ctx, raw, |ui| {
                 let scroll = egui::ScrollArea::vertical()
                     .id_salt("spike_scroll")
                     .auto_shrink([false; 2])
@@ -488,7 +488,7 @@ mod tests {
         // 挪过的那份画在右边，按横坐标把两份的顶点分开。
         const SHIFTED_X: f32 = 2000.0;
         let mut row_shift = 0.0;
-        let output = ctx.run_ui(Default::default(), |ui| {
+        let output = crate::test_support::run_ui(&ctx, Default::default(), |ui| {
             let mut job = egui::text::LayoutJob::default();
             for (index, line) in TEXT.split('\n').enumerate() {
                 let mut format = egui::TextFormat {
@@ -558,7 +558,7 @@ mod tests {
         let mut elapsed = Vec::new();
         let mut bases: Vec<Arc<Galley>> = Vec::new();
         for _ in 0..3 {
-            let _ = ctx.run_ui(Default::default(), |ui| {
+            let _ = crate::test_support::run_ui(&ctx, Default::default(), |ui| {
                 let job = egui::text::LayoutJob::simple(
                     text.clone(),
                     egui::FontId::proportional(16.0),
@@ -626,7 +626,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let text = format!("短行\n{}\n末行", "很长的一行".repeat(30));
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, Default::default(), |ui| {
             let job = egui::text::LayoutJob::simple(
                 text.clone(),
                 egui::FontId::proportional(16.0),
@@ -658,7 +658,7 @@ mod tests {
     fn a_gap_after_the_last_line_only_grows_the_galley() {
         let ctx = egui::Context::default();
         crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, Default::default(), |ui| {
             let job = egui::text::LayoutJob::simple(
                 TEXT.to_string(),
                 egui::FontId::proportional(16.0),

@@ -1142,8 +1142,8 @@ pub(super) mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run_ui(raw(), |ui| add(ui));
-        let mut output = ctx.run_ui(raw(), |ui| add(ui));
+        let _ = crate::test_support::run_ui(&ctx, raw(), |ui| add(ui));
+        let mut output = crate::test_support::run_ui(&ctx, raw(), |ui| add(ui));
         if !clicks.is_empty() {
             ctx.style_mut_of(egui::Theme::Dark, |style| style.animation_time = 0.0);
             ctx.style_mut_of(egui::Theme::Light, |style| style.animation_time = 0.0);
@@ -1174,9 +1174,9 @@ pub(super) mod tests {
                         modifiers: egui::Modifiers::default(),
                     },
                 ];
-                let _ = ctx.run_ui(input, |ui| add(ui));
+                let _ = crate::test_support::run_ui(&ctx, input, |ui| add(ui));
             }
-            output = ctx.run_ui(raw(), |ui| add(ui));
+            output = crate::test_support::run_ui(&ctx, raw(), |ui| add(ui));
         }
         fn collect(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
             match shape {
@@ -1307,7 +1307,7 @@ pub(super) mod tests {
             )
         };
         for _ in 0..5 {
-            canvas.absorb(&frame().textures_delta);
+            canvas.absorb(&mut frame().textures_delta);
         }
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tmp")

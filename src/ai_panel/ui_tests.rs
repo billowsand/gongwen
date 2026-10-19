@@ -104,8 +104,19 @@ impl Harness {
         ctx.run_ui(raw, |ui| self.with_page(|page| page.ai_panel_side(ui)))
     }
 
+    /// 只要形状、不上传纹理的帧：egui 0.36 要求析构前清掉纹理增量。
+    fn frame_output_cleared(
+        &mut self,
+        events: Vec<egui::Event>,
+        size: egui::Vec2,
+    ) -> egui::FullOutput {
+        let mut output = self.frame_output(events, size);
+        output.textures_delta.clear();
+        output
+    }
+
     fn frame_with(&mut self, events: Vec<egui::Event>) -> Vec<String> {
-        let output = self.frame_output(events, egui::vec2(1200.0, 900.0));
+        let output = self.frame_output_cleared(events, egui::vec2(1200.0, 900.0));
         fn collect(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
             match shape {
                 egui::epaint::Shape::Text(text) => out.push(text.galley.text().to_string()),
@@ -199,7 +210,8 @@ fn composer_bounds_long_text_and_many_materials() {
     let ctx = harness.ctx.clone();
     for size in [egui::vec2(340.0, 600.0), egui::vec2(640.0, 900.0)] {
         for _ in 0..3 {
-            let output = ctx.run_ui(
+            let output = crate::test_support::run_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
@@ -235,10 +247,10 @@ fn composer_bounds_long_text_and_many_materials() {
     let size = egui::vec2(340.0, 480.0);
     // egui 的底部 Panel 按上一帧内容定高；切换布局后先让面板尺寸收敛。
     for _ in 0..3 {
-        harness.frame_output(Vec::new(), size);
+        harness.frame_output_cleared(Vec::new(), size);
     }
     for _ in 0..3 {
-        let output = harness.frame_output(Vec::new(), size);
+        let output = harness.frame_output_cleared(Vec::new(), size);
         let sends: Vec<_> = output
             .shapes
             .iter()
@@ -285,7 +297,8 @@ fn workspace_is_shown_on_the_left_and_readonly_until_adopted() {
     ctx.memory_mut(|memory| {
         memory.request_focus(egui::Id::new(("ai_workspace_text", harness.doc.key, 1_u64)))
     });
-    let output = ctx.run_ui(
+    let output = crate::test_support::run_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -2023,7 +2036,7 @@ fn article_popup_has_no_widget_id_clashes_with_long_or_duplicate_titles() {
         egui::vec2(640.0, 720.0),
     ] {
         for _ in 0..8 {
-            harness.frame_output(Vec::new(), size);
+            harness.frame_output_cleared(Vec::new(), size);
         }
         let input_id = egui::Id::new(("ai_panel_input", harness.doc.key));
         let popup = harness
@@ -2103,17 +2116,17 @@ fn composer_samples() {
         theme::configure_style(&harness.ctx);
         harness.ctx.set_pixels_per_point(2.0);
         if name == "pasted-material-narrow" {
-            let pasted = harness.frame_output(
+            let mut pasted = harness.frame_output(
                 vec![egui::Event::Paste("这是一段很长的中文材料。\n".repeat(500))],
                 size,
             );
-            canvas.absorb(&pasted.textures_delta);
+            canvas.absorb(&mut pasted.textures_delta);
         }
         for _ in 0..15 {
-            let output = harness.frame_output(Vec::new(), size);
-            canvas.absorb(&output.textures_delta);
+            let mut output = harness.frame_output(Vec::new(), size);
+            canvas.absorb(&mut output.textures_delta);
         }
-        let output = harness.frame_output(Vec::new(), size);
+        let output = harness.frame_output_cleared(Vec::new(), size);
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tmp")
             .join(format!("ai-panel-{name}.png"));
@@ -2195,7 +2208,7 @@ fn composer_samples() {
         .ctx
         .memory(|memory| memory.area_rect(popup_id))
         .unwrap();
-    harness.frame_output(
+    harness.frame_output_cleared(
         vec![egui::Event::PointerMoved(egui::pos2(
             popup.left() + 80.0,
             popup.top() + 120.0,
@@ -2527,10 +2540,10 @@ fn session_samples() {
     theme::configure_style(&harness.ctx);
     harness.ctx.set_pixels_per_point(2.0);
     for _ in 0..15 {
-        let output = harness.frame_output(Vec::new(), size);
-        canvas.absorb(&output.textures_delta);
+        let mut output = harness.frame_output(Vec::new(), size);
+        canvas.absorb(&mut output.textures_delta);
     }
-    let output = harness.frame_output(Vec::new(), size);
+    let output = harness.frame_output_cleared(Vec::new(), size);
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tmp")
         .join("ai-panel-session.png");
@@ -2657,12 +2670,12 @@ fn question_samples() {
     theme::configure_style(&harness.ctx);
     harness.ctx.set_pixels_per_point(2.0);
     for _ in 0..15 {
-        let output = harness.frame_output(Vec::new(), size);
-        canvas.absorb(&output.textures_delta);
+        let mut output = harness.frame_output(Vec::new(), size);
+        canvas.absorb(&mut output.textures_delta);
     }
     // 滚到确认题那里，题卡全在视野里。
     for _ in 0..1 {
-        let output = harness.frame_output(
+        let mut output = harness.frame_output(
             vec![egui::Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
                 delta: egui::vec2(0.0, -400.0),
@@ -2671,9 +2684,9 @@ fn question_samples() {
             }],
             size,
         );
-        canvas.absorb(&output.textures_delta);
+        canvas.absorb(&mut output.textures_delta);
     }
-    let output = harness.frame_output(Vec::new(), size);
+    let output = harness.frame_output_cleared(Vec::new(), size);
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tmp")
         .join("ai-panel-questions.png");
@@ -3268,7 +3281,7 @@ fn long_phase_and_steps_stay_inside_the_panel() {
             ..Default::default()
         };
         let ctx = harness.ctx.clone();
-        let _ = ctx.run_ui(raw, |ui| {
+        let _ = crate::test_support::run_ui(&ctx, raw, |ui| {
             egui::CentralPanel::default()
                 .show(ui, |ui| harness.with_page(|page| page.create_ui(ui)));
         });

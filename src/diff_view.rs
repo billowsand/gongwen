@@ -905,7 +905,7 @@ mod tests {
         state.locate_context(target..target + "第3段。".len(), true);
 
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             let _ = unified_body_ui(ui, &diff, &mut state, None);
         });
         assert!(state.expanded.contains(&0), "目标行所在的折叠块要展开");

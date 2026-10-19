@@ -1031,7 +1031,8 @@ mod tests {
             let mut clicked = false;
             let mut toggle = false;
             let mut rect = egui::Rect::NOTHING;
-            let output = ctx.clone().run_ui(
+            let output = crate::test_support::run_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events,
@@ -1122,7 +1123,7 @@ mod tests {
             }
             let accent = crate::theme::accent();
             let mut galley = None;
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
                 let mut job = egui::text::LayoutJob::default();
                 job.append(
                     "## 项目安排\n\n",

@@ -193,7 +193,8 @@ mod tests {
         let display = UnitDisplay::new(&vocabulary);
         let numbering = NumberingConfig::default();
         let mut content_height = 0.0;
-        let output = ctx.run_ui(
+        let output = crate::test_support::run_ui(
+            ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,

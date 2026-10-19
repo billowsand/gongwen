@@ -140,7 +140,7 @@ mod tests {
 
     /// 画一帧：背后一个文本框，`modal` 为真时再盖一个模态。守卫在帧首跑，与应用里一致。
     fn frame(ctx: &egui::Context, guard: &mut ModalGuard, text: &mut String, modal: bool) {
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(ctx, egui::RawInput::default(), |ui| {
             guard.begin_frame(ui.ctx());
             ui.add(egui::TextEdit::singleline(text).id(editor_id()));
             if modal {
@@ -179,7 +179,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut taken = Vec::new();
         for modal in [false, true, true] {
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
                 taken.push(takes_keys(ui));
                 if modal {
                     egui::Modal::new(egui::Id::new("modal_guard_test_modal"))
@@ -201,7 +201,7 @@ mod tests {
             ..Default::default()
         };
         let mut dismissed = false;
-        let _ = ctx.run_ui(input, |ui| {
+        let _ = crate::test_support::run_ui(ctx, input, |ui| {
             dismissed = dialog(
                 ui.ctx(),
                 egui::Id::new("dialog_test"),

@@ -660,7 +660,8 @@ mod tests {
         input.phone_record.caller_person = "王某主任".into();
         input.phone_record.call_time = "2026年10月8日14时30分".into();
         input.phone_record.suggestion = "请办公室办理。".into();
-        let output = ctx.run_ui(
+        let output = crate::test_support::run_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -767,7 +768,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let output = ctx.run_ui(raw, |ui| {
+        let output = crate::test_support::run_ui(&ctx, raw, |ui| {
             let _ = official_preview(
                 ui,
                 &input,
@@ -827,7 +828,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let output = ctx.run_ui(raw, |ui| {
+        let output = crate::test_support::run_ui(&ctx, raw, |ui| {
             signature_block(
                 ui,
                 &metrics,
@@ -895,7 +896,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let output = ctx.run_ui(raw, |ui| {
+        let output = crate::test_support::run_ui(&ctx, raw, |ui| {
             signature_block(
                 ui,
                 &metrics,
@@ -931,7 +932,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let output = ctx.run_ui(raw, |ui| {
+        let output = crate::test_support::run_ui(&ctx, raw, |ui| {
             signature_block(
                 ui,
                 &metrics,
@@ -963,7 +964,8 @@ mod tests {
         let mut white = input.clone();
         white.kind = TemplateKind::WhitePaper;
         white.profile.kind = TemplateKind::WhitePaper;
-        let white_rows = text_rows(&ctx.run_ui(
+        let white_rows = text_rows(&crate::test_support::run_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1042,7 +1044,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run_ui(raw, |ui| {
+        let _ = crate::test_support::run_ui(&ctx, raw, |ui| {
             let (layout, _) = red_build_print_layout(
                 ui,
                 &metrics,
@@ -1112,7 +1114,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run_ui(raw, |ui| {
+        let _ = crate::test_support::run_ui(&ctx, raw, |ui| {
             let (layout, _) = red_build_print_layout(
                 ui,
                 &metrics,
@@ -1149,7 +1151,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let metrics = Metrics::new(1000.0, Some(1.0));
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             let galley = red::red_overlay_text(
                 ui,
                 &metrics,
@@ -1211,7 +1213,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run_ui(raw, |ui| {
+        let _ = crate::test_support::run_ui(&ctx, raw, |ui| {
             let (layout, rows) = red_build_print_layout(
                 ui,
                 &metrics,
@@ -1268,7 +1270,7 @@ mod tests {
                 theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
                 ctx.set_pixels_per_point(pixels_per_point);
                 let metrics = Metrics::new(1000.0, Some(zoom));
-                let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
                     let (layout, rows) = red_build_print_layout(
                         ui,
                         &metrics,
@@ -1331,7 +1333,7 @@ mod tests {
         let located = export::parse_markdown_located_with_numbering(&markdown, &numbering);
         let body = located.iter().collect::<Vec<_>>();
         let title = ("关于报送工作情况的请示".to_string(), 0..0);
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             let (layout, _) = red_build_print_layout(
                 ui,
                 &metrics,
@@ -1391,7 +1393,7 @@ mod tests {
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let metrics = Metrics::new(1000.0, Some(1.0));
         let text = "为进一步推进服务事项标准化、规范化、便利化，请各单位于2026年9月20日前报送年度标准化建设情况，材料编号ABC123，逾期不再受理。".repeat(2);
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             let mut job = job(metrics.content);
             let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
             job.append(
@@ -1432,7 +1434,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let metrics = Metrics::new(1000.0, Some(1.0));
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
 
             // 顶格的无序列表项没有留白，仍从第 0 个字起笔。
@@ -1476,7 +1478,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let metrics = Metrics::new(1000.0, Some(1.0));
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
             let mut job = job(metrics.content);
             append_inline(&mut job, &metrics, "很多地方我们都需要权衡。", &normal);
@@ -1508,7 +1510,7 @@ mod tests {
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let metrics = Metrics::new(1000.0, Some(1.0));
         let body = "为进一步推进服务事项标准化、规范化、便利化，请各单位于9月20日前报送材料（含附件1、附件2），逾期不再受理；材料编号ABC123，务必核对。";
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
             for pad in 0..6 {
                 let text = format!("{}{body}{body}", "汉".repeat(pad));
@@ -1558,7 +1560,8 @@ mod tests {
         }];
         let paragraph = "为进一步推进服务事项标准化、规范化、便利化，全面掌握各单位年度工作进展，请结合实际报送年度标准化建设情况。".repeat(8);
         let markdown = format!("# 关于报送标准化建设情况的函\n\n{paragraph}");
-        let output = ctx.run_ui(
+        let output = crate::test_support::run_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1657,7 +1660,7 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            let output = ctx.run_ui(raw, |ui| {
+            let output = crate::test_support::run_ui(&ctx, raw, |ui| {
                 line_block(
                     ui,
                     &metrics,
@@ -1703,7 +1706,7 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            ctx.run_ui(raw, |ui| fit::title_block(ui, metrics, title))
+            crate::test_support::run_ui(&ctx, raw, |ui| fit::title_block(ui, metrics, title))
                 .shapes
                 .iter()
                 .filter_map(|clipped| match &clipped.shape {
@@ -1730,7 +1733,7 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            ctx.run_ui(raw, |ui| fit::title_block(ui, &metrics, title))
+            crate::test_support::run_ui(&ctx, raw, |ui| fit::title_block(ui, &metrics, title))
         };
         let per_line = export::title::chars_per_line();
         // 排出来的行数：按 galley 的行数，不按文本图形个数（一个标题只一个图形）。
@@ -1790,7 +1793,7 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            let output = ctx.run_ui(raw, |ui| {
+            let output = crate::test_support::run_ui(&ctx, raw, |ui| {
                 aligned_block(ui, &metrics, "特此**通知**", align);
             });
             // 量排版框（按字宽），不量墨迹：对齐是排版位置的事。没有中文字体的环境
@@ -1825,7 +1828,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         // 字体集要跑过一帧才就绪。
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |_| {});
         let definitions = ctx.fonts(|fonts| fonts.definitions().clone());
         for family in [
             theme::FONT_FANGSONG,
@@ -1852,7 +1855,7 @@ mod tests {
         }
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |_| {});
         let definitions = ctx.fonts(|fonts| fonts.definitions().clone());
         let head = |family: &str| {
             definitions
@@ -1893,7 +1896,7 @@ mod tests {
         );
         let ctx = egui::Context::default();
         ctx.set_fonts(probe);
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |_| {});
         let width = |text: &str, family: &str| {
             let font = egui::FontId::new(20.0, egui::FontFamily::Name(family.into()));
             ctx.fonts_mut(|fonts| {
@@ -1936,7 +1939,7 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            let _ = ctx.run_ui(raw, |ui| {
+            let _ = crate::test_support::run_ui(&ctx, raw, |ui| {
                 let mut counters = [0usize; 4];
                 content_block(
                     ui,
@@ -1981,7 +1984,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run_ui(raw.clone(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, raw.clone(), |ui| {
             let mut counters = [0usize; 4];
             content_block(
                 ui,
@@ -2004,7 +2007,7 @@ mod tests {
             egui::load::SizeHint::default(),
         );
         if matches!(result, Ok(egui::load::TexturePoll::Pending { .. })) {
-            let _ = ctx.run_ui(raw, |_| {});
+            let _ = crate::test_support::run_ui(&ctx, raw, |_| {});
             result = ctx.try_load_texture(
                 &uri,
                 egui::TextureOptions::default(),
@@ -2055,7 +2058,7 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..3 {
-            let _ = ctx.run_ui(raw.clone(), |ui| {
+            let _ = crate::test_support::run_ui(&ctx, raw.clone(), |ui| {
                 let _ = official_preview(
                     ui,
                     &input,
@@ -2118,7 +2121,8 @@ mod tests {
         let uri = format!("bytes://{src}");
         let mut states = Vec::new();
         for frame in 0..4 {
-            let full = ctx.run_ui(
+            let full = crate::test_support::run_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,

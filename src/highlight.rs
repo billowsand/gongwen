@@ -1121,7 +1121,7 @@ mod tests {
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let mut highlighter = MarkdownHighlighter::default();
         let mut key_with = |scheme: &EditorFontScheme| {
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
                 highlighter.layout(ui, SAMPLE, 400.0, 14.0, None, &[], scheme, false);
             });
             highlighter.cache_key()

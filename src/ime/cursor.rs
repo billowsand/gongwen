@@ -88,7 +88,7 @@ mod tests {
     fn run_frame(ime: Option<egui::output::IMEOutput>) -> Option<egui::output::IMEOutput> {
         let ctx = egui::Context::default();
         let mut seen = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             let ctx = ui.ctx();
             ctx.output_mut(|output| output.ime = ime);
             follow_cursor(ctx);
@@ -99,6 +99,7 @@ mod tests {
 
     fn tall_editor_with_caret_at(caret_y: f32) -> egui::output::IMEOutput {
         egui::output::IMEOutput {
+            purpose: egui::IMEPurpose::Normal,
             // 铺满中央区的 Markdown 编辑框。
             rect: egui::Rect::from_min_size(egui::pos2(40.0, 80.0), egui::vec2(900.0, 940.0)),
             cursor_rect: egui::Rect::from_min_size(

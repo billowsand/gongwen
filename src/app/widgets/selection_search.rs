@@ -251,7 +251,7 @@ mod tests {
         let options = sample_options();
         let selected = vec![options[0].value.clone(), options[1].value.clone()];
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
             let id = ui.make_persistent_id(("selection_search", "units"));
             ui.data_mut(|data| {
                 data.insert_temp(
@@ -317,7 +317,8 @@ mod tests {
         let mut clock = 0;
         let mut frame = |events| {
             clock += 1;
-            ctx.run_ui(
+            crate::test_support::run_ui(
+                &ctx,
                 egui::RawInput {
                     time: Some(f64::from(clock) / 60.0),
                     screen_rect: Some(egui::Rect::from_min_size(

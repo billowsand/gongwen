@@ -157,7 +157,8 @@ impl Harness {
         self.clock += 0.05;
         self.rects.clear();
         let mut action = None;
-        let _ = self.ctx.run_ui(
+        let _ = crate::test_support::run_ui(
+            &self.ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -273,7 +274,8 @@ fn edge_scroll_only_moves_when_pointer_is_inside_tree() {
         let ctx = egui::Context::default();
         let mut offset = 0.0;
         for frame in 0..4 {
-            let _ = ctx.run_ui(
+            let _ = crate::test_support::run_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,

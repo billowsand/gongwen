@@ -146,7 +146,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let output = ctx.run_ui(raw, |ui| {
+        let output = crate::test_support::run_ui(&ctx, raw, |ui| {
             let _ = research_preview(
                 ui,
                 input,
@@ -217,7 +217,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        ctx.run_ui(raw, |ui| {
+        crate::test_support::run_ui(&ctx, raw, |ui| {
             let _ = research_preview(
                 ui,
                 input,
@@ -628,7 +628,7 @@ mod tests {
             ..Default::default()
         };
         let frame = || {
-            ctx.run_ui(raw.clone(), |ui| {
+            crate::test_support::run_ui(&ctx, raw.clone(), |ui| {
                 let _ = research_preview(
                     ui,
                     &input,

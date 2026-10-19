@@ -60,6 +60,8 @@ mod samples;
 mod skill_pack;
 mod storage;
 mod system_fonts;
+#[cfg(test)]
+mod test_support;
 mod text_file;
 mod theme;
 mod typst_engine;

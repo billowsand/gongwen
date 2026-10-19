@@ -388,7 +388,7 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            self.ctx.clone().run_ui(raw, |ui| {
+            crate::test_support::run_ui(&self.ctx, raw, |ui| {
                 self.state
                     .set_pair(self.key, &self.old, &self.new, &self.display);
                 let _ = self.state.show(
