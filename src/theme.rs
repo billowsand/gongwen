@@ -114,7 +114,7 @@ static REVISION: AtomicU64 = AtomicU64::new(0);
 /// 这里的颜色，因此不论用户把纸面调成什么，落到纸上的永远是白纸黑字红头。
 ///
 /// 「跟随主题」使用本色、宣纸白、夜墨蓝与檀黑棕，另为 MDEX 夜墨
-/// 提供灰绿墨纸。纸面只跟随冷暖和明暗，不复制主题强调色；正文只用黑或白，
+/// 提供灰绿墨纸。纸面只跟随冷暖和明暗，不复制主题强调色；锤子便签用深褐墨，其他正文用黑或白，
 /// 红头、红色反线与份号始终使用同一个规范红。
 pub mod paper {
     use super::{CURRENT_PAPER, Color32, PaperFamily, Theme, current};
@@ -156,6 +156,15 @@ pub mod paper {
         hover: Color32::from_rgb(0xF3, 0xED, 0xE1),
         border: None,
         shadow_alpha: 18,
+    };
+
+    /// 锤子便签：暖白纸底配深褐墨，正文、次级文字与表格线共用纸面取色。
+    const SMARTISAN_SHEET: Sheet = Sheet {
+        bg: Color32::from_rgb(255, 252, 245),
+        ink: Color32::from_rgb(88, 66, 53),
+        ink_muted: Color32::from_rgb(105, 82, 67),
+        ink_faint: Color32::from_rgb(148, 125, 103),
+        ..PARCHMENT_SHEET
     };
 
     /// 夜墨蓝：冷深色纸，正文严格用白色。
@@ -213,7 +222,11 @@ pub mod paper {
 
     /// 给定主题与用户选择，算出完整纸面取色。
     fn sheet_for(theme: Theme, mode: PaperMode) -> Sheet {
-        sheet_for_family(family_for(theme, mode))
+        if theme.label == super::smartisan::LABEL && mode == PaperMode::Follow {
+            SMARTISAN_SHEET
+        } else {
+            sheet_for_family(family_for(theme, mode))
+        }
     }
 
     std::thread_local! {
@@ -276,6 +289,13 @@ pub mod paper {
         sheet().bg
     }
 
+    /// 便签装饰只随锤子主题显示，显式纸色与研究终端纸面不叠加装饰。
+    pub(crate) fn smartisan_note() -> bool {
+        super::smartisan::active()
+            && *CURRENT_PAPER.read().unwrap() == PaperMode::Follow
+            && REPORT_SHEET.with(|sheet| sheet.get().is_none())
+    }
+
     /// 正文墨色，也用于表格线等纸面上的黑色笔画。
     pub fn ink() -> Color32 {
         sheet().ink
@@ -321,7 +341,7 @@ pub mod paper {
     mod tests {
         use super::{
             GREEN_INK_SHEET, NIGHT_BLUE_SHEET, ORIGINAL_SHEET, PARCHMENT_SHEET, SANDALWOOD_SHEET,
-            Sheet, sheet_for,
+            SMARTISAN_SHEET, Sheet, sheet_for,
         };
         use crate::models::{PaperMode, ThemeName};
         use crate::theme::by_name;
@@ -341,7 +361,8 @@ pub mod paper {
         #[test]
         fn follow_mode_maps_themes_to_paper_families() {
             assert_follow(&[ThemeName::Claude], ORIGINAL_SHEET);
-            assert_follow(&[ThemeName::Mdex, ThemeName::Smartisan], PARCHMENT_SHEET);
+            assert_follow(&[ThemeName::Mdex], PARCHMENT_SHEET);
+            assert_follow(&[ThemeName::Smartisan], SMARTISAN_SHEET);
             assert_follow(&[ThemeName::MdexDark], GREEN_INK_SHEET);
             assert_follow(&[ThemeName::Nord], NIGHT_BLUE_SHEET);
             assert_follow(&[ThemeName::GruvboxDark], SANDALWOOD_SHEET);
@@ -383,12 +404,16 @@ pub mod paper {
             );
         }
 
-        /// 正文只允许纯黑或纯白，不能被外观主题的文字色带偏。
+        /// 仅锤子跟随主题使用固定深褐墨，其他组合仍为纯黑或纯白。
         #[test]
-        fn body_ink_is_only_black_or_white() {
+        fn body_ink_keeps_the_note_exception_scoped_to_smartisan_follow() {
             for name in ThemeName::ALL {
                 for mode in PaperMode::ALL {
                     let ink = sheet_for(by_name(name), mode).ink;
+                    if name == ThemeName::Smartisan && mode == PaperMode::Follow {
+                        assert_eq!(ink, Color32::from_rgb(88, 66, 53));
+                        continue;
+                    }
                     assert!(
                         ink == Color32::BLACK || ink == Color32::WHITE,
                         "{name:?} / {mode:?} 的正文不是纯黑或纯白"

@@ -82,6 +82,17 @@ fn smartisan_workspace_samples() {
     }
 }
 
+/// 从真实预览页出图，检查便签纸面的双线页框、四角收口与投影。
+#[test]
+#[ignore = "出锤子便签纸面样张，手动跑"]
+fn smartisan_preview_sample() {
+    workspace_theme_samples(
+        PreviewMode::Rendered,
+        "smartisan-preview",
+        &[(crate::models::ThemeName::Smartisan, "light")],
+    );
+}
+
 /// 全主题使用同一套目录布局，检查深浅配色与无标题时的窄栏。
 #[test]
 #[ignore = "出全主题目录样张，手动跑"]
@@ -124,6 +135,11 @@ fn workspace_theme_samples(
             harness.config.show_editor_line_numbers = true;
             harness.config.editor_font_size = 16.0;
             harness.config.ribbon_tab = crate::models::RibbonTab::Output;
+            if mode == PreviewMode::Rendered {
+                harness.doc.form_collapsed = true;
+                harness.config.ribbon_collapsed = true;
+                harness.doc.preview_zoom = Some(0.65);
+            }
             if stem.contains("outline") || stem.contains("empty") || stem.contains("scrolled") {
                 harness.config.show_source_outline = true;
                 harness.config.show_source_minimap = true;

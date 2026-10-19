@@ -1372,13 +1372,8 @@ pub(crate) fn paint_red_print_pages(
                 egui::vec2(metrics.page, metrics.page_height),
                 egui::Sense::hover(),
             );
-            ui.painter().rect(
-                page,
-                egui::CornerRadius::same(3),
-                theme::paper::bg(),
-                Stroke::new(1.0, theme::border()),
-                egui::StrokeKind::Inside,
-            );
+            ui.painter()
+                .add(super::paper::shape(metrics, page, theme::border()));
             if page_index == 0 {
                 paint_red_approval_overlay(ui, metrics, page, input, display, rows, elements);
             } else {

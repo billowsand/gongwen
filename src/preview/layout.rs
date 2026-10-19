@@ -1880,36 +1880,33 @@ pub(crate) fn sheet(
         ui.add_space(side);
         ui.vertical(|ui| {
             ui.set_max_width(metrics.page);
-            let frame = egui::Frame::new()
-                .fill(theme::paper::bg())
-                .stroke(Stroke::new(1.0, theme::paper::border()))
-                .corner_radius(egui::CornerRadius::same(3))
-                .shadow(theme::paper_shadow(theme::paper::shadow_alpha()))
-                .show(ui, |ui| {
-                    let background = ui.painter().add(egui::Shape::Noop);
-                    // 页边距用 add_space 铺出来：`Margin` 是 i8，放大后会溢出。
-                    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                    ui.set_width(metrics.page);
-                    ui.add_space(metrics.margin_top);
-                    ui.horizontal_top(|ui| {
-                        ui.add_space(metrics.margin_left);
-                        ui.vertical(|ui| {
-                            ui.set_width(metrics.content);
-                            // 竖页取纸宽（短稿不铺出一整张高纸），横页取纸高。
-                            let short_side = metrics.page.min(metrics.page_height);
-                            ui.set_min_height((short_side - metrics.margin_top * 2.0).max(0.0));
-                            ui.style_mut().visuals.override_text_color = Some(theme::paper::ink());
-                            // 预览是拿来看版式和点回源码的，不做文字选择，
-                            // 否则 Label 会把点击当成拖选吃掉。
-                            ui.style_mut().interaction.selectable_labels = false;
-                            add_contents(ui);
-                        });
+            let frame = super::paper::frame(metrics).show(ui, |ui| {
+                let background = ui.painter().add(egui::Shape::Noop);
+                // 页边距用 add_space 铺出来：`Margin` 是 i8，放大后会溢出。
+                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                ui.set_width(metrics.page);
+                ui.add_space(metrics.margin_top);
+                ui.horizontal_top(|ui| {
+                    ui.add_space(metrics.margin_left);
+                    ui.vertical(|ui| {
+                        ui.set_width(metrics.content);
+                        // 竖页取纸宽（短稿不铺出一整张高纸），横页取纸高。
+                        let short_side = metrics.page.min(metrics.page_height);
+                        ui.set_min_height((short_side - metrics.margin_top * 2.0).max(0.0));
+                        ui.style_mut().visuals.override_text_color = Some(theme::paper::ink());
+                        // 预览是拿来看版式和点回源码的，不做文字选择，
+                        // 否则 Label 会把点击当成拖选吃掉。
+                        ui.style_mut().interaction.selectable_labels = false;
+                        add_contents(ui);
                     });
-                    ui.add_space(metrics.margin_top);
-                    background
                 });
+                ui.add_space(metrics.margin_top);
+                background
+            });
             if metrics.terminal {
                 super::research_terminal::paper(ui, metrics, frame.response.rect, frame.inner);
+            } else {
+                super::paper::decorate(ui, metrics, frame.response.rect, frame.inner);
             }
         });
     });

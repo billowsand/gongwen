@@ -19,6 +19,7 @@ pub(crate) mod marks;
 mod math_flow;
 mod math_render;
 mod memo;
+mod paper;
 mod pdf_figure;
 mod phone_record;
 mod red;

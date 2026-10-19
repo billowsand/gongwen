@@ -57,13 +57,7 @@ fn record_sheet(ui: &mut egui::Ui, m: &Metrics, contents: impl FnOnce(&mut egui:
         paper.max.y = paper.bottom().max(child.min_rect().bottom() + m.mm(35.0));
         ui.painter().set(
             background,
-            egui::epaint::RectShape::filled(paper, 3.0, theme::paper::bg()),
-        );
-        ui.painter().rect_stroke(
-            paper,
-            3.0,
-            egui::Stroke::new(1.0, theme::paper::border()),
-            egui::StrokeKind::Inside,
+            super::paper::shape(m, paper, theme::paper::border()),
         );
         ui.advance_cursor_after_rect(paper);
     });
