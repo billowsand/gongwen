@@ -2,7 +2,7 @@
 use super::*;
 use crate::models::{ManuscriptStatus, VocabularyCategory, VocabularyEntry};
 
-fn fixture() -> GongwenApp {
+pub(super) fn fixture() -> GongwenApp {
     let config = AppConfig {
         theme: crate::models::ThemeName::Smartisan,
         ime: crate::models::ImeConfig {

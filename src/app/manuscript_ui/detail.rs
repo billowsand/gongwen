@@ -772,6 +772,11 @@ impl GongwenApp {
 
     /// 起草页“保存到稿件库”：新建记录或更新当前打开的记录。
     pub(crate) fn save_to_manuscript_library(&mut self) {
+        let _ = self.try_save_to_manuscript_library();
+    }
+
+    /// 备份前也复用普通保存路径，但必须把失败交给调用方，防止导出旧内容。
+    pub(crate) fn try_save_to_manuscript_library(&mut self) -> anyhow::Result<()> {
         let normalized = export::normalize_ordered_list_punctuation(&self.doc().generated_markdown);
         self.doc_mut().generated_markdown = normalized;
         // 表单刚改过而正文未动时也要在保存点重跑函号等元数据规则。
@@ -827,8 +832,12 @@ impl GongwenApp {
                 self.doc_mut().mark_saved();
                 self.refresh_committed_baseline(self.active_doc);
                 self.status = message;
+                Ok(())
             }
-            Err(error) => self.status = format!("保存失败：{error:#}"),
+            Err(error) => {
+                self.status = format!("保存失败：{error:#}");
+                Err(error)
+            }
         }
     }
 

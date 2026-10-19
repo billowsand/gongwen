@@ -1107,7 +1107,7 @@ impl GongwenApp {
             theme::window_enter_anim(ctx, egui::Id::new("about_win_anim"), &w.response);
         }
         if start_check {
-            self.start_update_check();
+            self.start_update_check(ctx);
         }
         if close_clicked {
             self.about_window_open = false;

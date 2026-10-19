@@ -93,26 +93,19 @@ pub(crate) struct RestoreReport {
 
 /// 把配置目录整目录打包到 `target_zip`。
 pub(crate) fn export_backup(target_zip: &Path) -> Result<()> {
-    checkpoint_database();
     let config_dir = crate::storage::config_dir()?;
     export_from(&config_dir, target_zip)
 }
 
-/// 导出前把 WAL 合并回主库。SQLite 的自动检查点可能正好发生在复制主库的过程中，
-/// 先做一次 FULL 检查点能显著降低「主库拷到一半、页又被写回」的概率；之后新提交
-/// 只会追加到 WAL，而 WAL 在主库之后打包，合起来仍能恢复到最新一致状态。
-/// 检查点失败（其他连接持锁等）不阻断导出。
-fn checkpoint_database() {
-    let Ok(path) = crate::storage::manuscript_db_path() else {
-        return;
-    };
-    if !path.is_file() {
-        return;
-    }
-    let Ok(connection) = rusqlite::Connection::open(&path) else {
-        return;
-    };
-    let _ = connection.execute_batch("PRAGMA wal_checkpoint(FULL);");
+/// 主库与 WAL 必须由 SQLite 合并成一致快照，不能分别复制正在变化的文件。
+/// 只读打开源库，任何快照错误都中止导出，不能退回原始文件复制。
+fn snapshot_database(source: &Path, destination: &Path) -> Result<()> {
+    let connection =
+        rusqlite::Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .context("无法打开稿件库以生成备份快照")?;
+    connection
+        .backup(rusqlite::MAIN_DB, destination, None)
+        .context("无法生成稿件库的一致备份快照")
 }
 
 /// [`export_backup`] 的可测试入口：显式指定要打包的目录。
@@ -130,6 +123,15 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path) -> Result<()> {
     fs::create_dir_all(parent)
         .with_context(|| format!("无法创建备份目录：{}", parent.display()))?;
 
+    let snapshot_dir = tempfile::Builder::new()
+        .prefix(TEMP_PREFIX)
+        .tempdir_in(parent)
+        .context("无法创建数据库备份临时目录")?;
+    let database = config_dir.join("manuscripts.db");
+    let snapshot = snapshot_dir.path().join("manuscripts.db");
+    if database.is_file() {
+        snapshot_database(&database, &snapshot)?;
+    }
     let files = collect_files(config_dir)?;
     // 先写同目录临时文件，写完再原子替换目标：导出中途失败不会留下半个 ZIP。
     let mut temp = tempfile::NamedTempFile::new_in(parent)
@@ -139,13 +141,22 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path) -> Result<()> {
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
         for rel in &files {
-            let source = config_dir.join(rel);
+            let source = if rel == Path::new("manuscripts.db") {
+                snapshot.clone()
+            } else {
+                config_dir.join(rel)
+            };
             let name = zip_entry_name(rel);
             let bytes = match fs::read(&source) {
                 Ok(bytes) => bytes,
-                // 遍历与读取之间文件被删掉（如 SQLite 的临时日志）属于正常竞争，
-                // 跳过即可；其余读取错误如实上报。
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                // 普通文件在遍历与读取之间被删掉时跳过；数据库快照必须存在，
+                // 缺失或其他读取错误都应中止导出。
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && rel != Path::new("manuscripts.db") =>
+                {
+                    continue;
+                }
                 Err(error) => {
                     return Err(error).with_context(|| format!("无法读取 {}", source.display()));
                 }
@@ -348,6 +359,13 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
 
 /// 瞬态 / 诊断文件不进入备份。
 fn is_excluded(rel: &Path) -> bool {
+    // 主库已经独立生成一致快照，原库的日志与共享内存不能混进快照。
+    if matches!(
+        rel.to_str(),
+        Some("manuscripts.db-wal" | "manuscripts.db-shm" | "manuscripts.db-journal")
+    ) {
+        return true;
+    }
     if rel.components().next().is_some_and(|first| {
         first
             .as_os_str()
@@ -482,8 +500,10 @@ mod tests {
     /// 造一份带瞬态文件的假配置目录。
     fn fake_config_dir(root: &Path) {
         write(root, "config.json", br#"{"output_dir":"C:/out"}"#);
-        write(root, "manuscripts.db", b"sqlite-db");
-        write(root, "manuscripts.db-wal", b"wal");
+        let connection = rusqlite::Connection::open(root.join("manuscripts.db")).unwrap();
+        connection
+            .execute_batch("CREATE TABLE sample(value); INSERT INTO sample VALUES ('稿件');")
+            .unwrap();
         write(root, "images/a.png", b"png-a");
         write(root, "apis/svc.openapi.json", b"{}");
         write(root, "ime/base.txt", b"aaaa");
@@ -506,7 +526,7 @@ mod tests {
 
         let info = inspect_backup(&zip).unwrap();
         assert!(info.has_config && info.has_manuscripts);
-        assert_eq!(info.file_count, 8, "只应打包 8 个有效文件");
+        assert_eq!(info.file_count, 7, "只应打包 7 个有效文件");
         let names: Vec<&str> = info.groups.iter().map(|g| g.name.as_str()).collect();
         assert!(!names.contains(&"logs"), "崩溃日志不该进备份");
         assert!(!names.contains(&".unseen-crash"));
@@ -520,10 +540,14 @@ mod tests {
         write(&target, "config.json", b"old");
 
         let report = restore_backup(&zip, &target).unwrap();
-        assert_eq!(report.restored_files, 8);
+        assert_eq!(report.restored_files, 7);
         assert_eq!(read(&target, "config.json"), br#"{"output_dir":"C:/out"}"#);
-        assert_eq!(read(&target, "manuscripts.db"), b"sqlite-db");
-        assert_eq!(read(&target, "manuscripts.db-wal"), b"wal");
+        assert!(!target.join("manuscripts.db-wal").exists());
+        let restored = rusqlite::Connection::open(target.join("manuscripts.db")).unwrap();
+        let value: String = restored
+            .query_row("SELECT value FROM sample", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "稿件");
         assert_eq!(read(&target, "images/a.png"), b"png-a");
         assert_eq!(read(&target, "apis/svc.openapi.json"), b"{}");
         assert_eq!(read(&target, "ime/base.txt"), b"aaaa");
@@ -545,6 +569,107 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(RESTORE_BACKUP_PREFIX)
         );
+    }
+
+    #[test]
+    fn backup_keeps_committed_wal_data_with_a_pinned_reader_and_pending_writer() {
+        let source = tempfile::tempdir().unwrap();
+        let path = source.path().join("manuscripts.db");
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; CREATE TABLE sample(value); \
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        let reader = rusqlite::Connection::open(&path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT * FROM sample;")
+            .unwrap();
+        writer
+            .execute("INSERT INTO sample VALUES ('已提交')", [])
+            .unwrap();
+        let busy: i64 = writer
+            .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(busy, 1, "读事务应阻止旧方案的 FULL 检查点完成");
+        writer
+            .execute_batch("BEGIN IMMEDIATE; INSERT INTO sample VALUES ('未提交');")
+            .unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let zip = out.path().join("backup.zip");
+        export_from(source.path(), &zip).unwrap();
+        let mut archive = open_archive(&zip).unwrap();
+        assert!(archive.by_name("manuscripts.db-wal").is_err());
+        assert!(archive.by_name("manuscripts.db-shm").is_err());
+        assert!(archive.by_name("manuscripts.db-journal").is_err());
+        drop(archive);
+        writer.execute_batch("ROLLBACK;").unwrap();
+        reader.execute_batch("COMMIT;").unwrap();
+        writer
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+
+        let target = out.path().join("restored");
+        restore_backup(&zip, &target).unwrap();
+        let restored = rusqlite::Connection::open(target.join("manuscripts.db")).unwrap();
+        let values: Vec<String> = restored
+            .prepare("SELECT value FROM sample")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(values, ["已提交"]);
+        let integrity: String = restored
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+    }
+
+    #[test]
+    fn a_broken_database_aborts_export_without_replacing_the_previous_backup() {
+        let source = tempfile::tempdir().unwrap();
+        write(source.path(), "manuscripts.db", b"broken database");
+        let out = tempfile::tempdir().unwrap();
+        let zip = out.path().join("backup.zip");
+        fs::write(&zip, b"previous backup").unwrap();
+        assert!(export_from(source.path(), &zip).is_err());
+        assert_eq!(fs::read(&zip).unwrap(), b"previous backup");
+        assert_eq!(read(source.path(), "manuscripts.db"), b"broken database");
+        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn restores_legacy_backups_that_carry_a_database_and_its_wal() {
+        let source = tempfile::tempdir().unwrap();
+        let database = source.path().join("manuscripts.db");
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; CREATE TABLE sample(value); \
+                 PRAGMA wal_checkpoint(TRUNCATE); INSERT INTO sample VALUES ('旧包稿件');",
+            )
+            .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let zip = out.path().join("legacy.zip");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&zip).unwrap());
+        for name in ["manuscripts.db", "manuscripts.db-wal"] {
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(&read(source.path(), name)).unwrap();
+        }
+        archive.finish().unwrap();
+        let target = out.path().join("restored");
+        restore_backup(&zip, &target).unwrap();
+        let restored = rusqlite::Connection::open(target.join("manuscripts.db")).unwrap();
+        let value: String = restored
+            .query_row("SELECT value FROM sample", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "旧包稿件");
     }
 
     #[test]

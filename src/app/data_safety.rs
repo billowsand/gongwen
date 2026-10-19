@@ -67,6 +67,7 @@ impl GongwenApp {
                 ui.weak("选一个配置目录之外的位置保存 ZIP。");
             });
             setting_continuation(ui, |ui| {
+                ui.weak("导出前会保存所有已修改稿件；保存失败将取消备份。");
                 ui.weak("导出期间请勿关闭应用；完成后状态栏会显示文件大小。");
             });
             ui.add_space(8.0);
@@ -119,6 +120,24 @@ impl GongwenApp {
         true
     }
 
+    /// 显式导出备份时保存全部已改动稿件，不受定时自动保存开关影响。
+    /// 任一保存失败都中止打包，且无论成功与否都还原当前稿件下标。
+    fn prepare_backup_export(&mut self) -> anyhow::Result<()> {
+        let previous = self.active_doc;
+        let result = (|| {
+            for index in 0..self.docs.len() {
+                let doc = &self.docs[index];
+                if doc.is_dirty() || (doc.manuscript_id.is_none() && doc.touched()) {
+                    self.active_doc = index;
+                    self.try_save_to_manuscript_library()?;
+                }
+            }
+            storage::save(&self.config)
+        })();
+        self.active_doc = previous;
+        result
+    }
+
     /// 选目标路径并在后台打包。打包期间状态栏给出进度提示。
     pub(crate) fn start_backup_export(&mut self) {
         if !self.backup_ready() {
@@ -138,6 +157,10 @@ impl GongwenApp {
         let Some(path) = dialog.save_file() else {
             return;
         };
+        if let Err(error) = self.prepare_backup_export() {
+            self.status = format!("备份前保存失败，未导出备份：{error:#}");
+            return;
+        }
         self.backup_busy = true;
         self.status = format!("正在打包备份到 {}…", path.display());
         let tx = self.sender.clone();
@@ -175,7 +198,7 @@ impl GongwenApp {
 
     /// 用户确认后真正执行恢复：先释放 SQLite 连接，再在后台替换数据。
     fn begin_backup_restore(&mut self, zip: PathBuf) {
-        if self.backup_busy {
+        if !self.backup_ready() {
             return;
         }
         let config_dir = match storage::config_dir() {
@@ -497,6 +520,108 @@ mod tests {
     use egui_kittest::kittest::Queryable;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    /// 所有文件读写都留在临时配置目录，测试结束时清除线程级覆盖。
+    fn with_app(test: impl FnOnce(&mut GongwenApp, &Path)) {
+        let dir = tempfile::tempdir().unwrap();
+        storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                storage::set_test_config_dir(None);
+            }
+        }
+        let _reset = Reset;
+        let mut app = crate::app::management_samples::fixture();
+        test(&mut app, dir.path());
+    }
+
+    #[test]
+    fn backup_saves_existing_and_new_documents_even_when_autosave_is_disabled() {
+        with_app(|app, dir| {
+            app.config.auto_save = false;
+            app.docs[0].generated_markdown = "# 原稿\n\n旧内容。".into();
+            app.try_save_to_manuscript_library().unwrap();
+            let existing_id = app.docs[0].manuscript_id.unwrap();
+            app.docs[0].generated_markdown = "# 原稿\n\n最新修改。".into();
+            let mut new = crate::draft_page::DraftSession::blank(1, &app.config);
+            new.generated_markdown = "# 新稿\n\n尚未入库。".into();
+            app.docs.push(new);
+            app.active_doc = 1;
+
+            app.prepare_backup_export().unwrap();
+
+            assert_eq!(app.active_doc, 1);
+            assert!(!app.config.auto_save);
+            assert!(dir.join("config.json").exists());
+            let store = app.manuscript_store.as_mut().unwrap();
+            assert_eq!(
+                store.get(existing_id).unwrap().unwrap().content_markdown,
+                "# 原稿\n\n最新修改。"
+            );
+            let new_id = app.docs[1].manuscript_id.unwrap();
+            assert_eq!(
+                store.get(new_id).unwrap().unwrap().content_markdown,
+                "# 新稿\n\n尚未入库。"
+            );
+            assert!(app.docs.iter().all(|doc| !doc.is_dirty()));
+        });
+    }
+
+    #[test]
+    fn backup_save_failure_is_returned_and_restores_the_active_document() {
+        with_app(|app, dir| {
+            app.docs[0].generated_markdown = "# 尚未保存".into();
+            app.docs[0].manuscript_id = Some(-1);
+            app.docs
+                .push(crate::draft_page::DraftSession::blank(1, &app.config));
+            app.active_doc = 1;
+            assert!(app.prepare_backup_export().is_err());
+            assert_eq!(app.active_doc, 1);
+            assert!(app.docs[0].is_dirty());
+            assert!(!dir.join("config.json").exists());
+            assert!(!app.backup_busy);
+        });
+    }
+
+    #[test]
+    fn lexicon_scan_blocks_backup_and_restore_without_closing_stores() {
+        with_app(|app, dir| {
+            app.lexicon_busy = true;
+            assert!(!app.backup_ready());
+            app.begin_backup_restore(dir.join("unused.zip"));
+            assert!(!app.backup_restore_running);
+            assert!(app.manuscript_store.is_some());
+            assert!(app.knowledge_store.is_some());
+            assert!(app.lexicon_store.is_some());
+            app.lexicon_busy = false;
+            assert!(app.backup_ready());
+        });
+    }
+
+    #[test]
+    fn update_check_wakes_an_idle_context_when_the_worker_finishes() {
+        with_app(|app, _| {
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                let _ = crate::test_support::run_ui(&ctx, Default::default(), |_| {});
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            ctx.set_request_repaint_callback(move |_| {
+                let _ = tx.send(());
+            });
+            // 不支持的协议在本机立即报错，无需网络或测试 HTTP 服务。
+            app.config.update_check_url = "unsupported://example.invalid".into();
+            app.start_update_check(&ctx);
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("后台完成时必须唤醒空闲界面");
+            app.poll_worker(&ctx);
+            assert!(matches!(
+                app.update_check,
+                crate::update_check::UpdateCheckState::Failed(_)
+            ));
+        });
+    }
 
     #[test]
     fn config_recovery_dialog_closes_once_and_clears_the_marker() {

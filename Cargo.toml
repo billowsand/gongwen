@@ -63,7 +63,7 @@ resvg = "0.46"
 # Linux 文件选择器后端由上面的 crate feature 选择。不能同时把两种后端写在这里，
 # 因为 rfd 在启用 gtk3 时会固定选择 GTK3，而不会在运行时退回 portal。
 rfd = { version = "0.17.2", default-features = false }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["backup", "bundled"] }
 rust_xlsxwriter = "0.99.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

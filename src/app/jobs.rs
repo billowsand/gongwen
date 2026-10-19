@@ -244,7 +244,7 @@ impl GongwenApp {
     }
 
     /// 检查最新发布。只发一次请求，结果回到关于窗内联显示。
-    pub(crate) fn start_update_check(&mut self) {
+    pub(crate) fn start_update_check(&mut self, ctx: &egui::Context) {
         if matches!(
             self.update_check,
             crate::update_check::UpdateCheckState::Checking
@@ -260,11 +260,13 @@ impl GongwenApp {
         }
         self.update_check = crate::update_check::UpdateCheckState::Checking;
         let tx = self.sender.clone();
+        let ctx = ctx.clone();
         thread::spawn(move || {
             let result = crate::update_check::fetch_latest(&url, std::time::Duration::from_secs(5))
                 .and_then(|body| crate::update_check::parse_latest_release(&body))
                 .map_err(|error| format!("{error:#}"));
             let _ = tx.send(WorkerResult::UpdateChecked(result));
+            ctx.request_repaint();
         });
     }
 

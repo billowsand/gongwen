@@ -299,6 +299,7 @@ impl GongwenApp {
     pub(crate) fn any_busy(&self) -> bool {
         self.busy
             || self.knowledge_busy
+            || self.lexicon_busy
             || self.backup_busy
             || self.docs.iter().any(|doc| doc.busy)
             || self.pdfs.iter().any(PdfSession::busy)
