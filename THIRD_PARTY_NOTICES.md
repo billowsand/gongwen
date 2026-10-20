@@ -42,6 +42,14 @@ preserved at `vendor/anydoc/LICENSE`.
 - Project: <https://github.com/firecrawl/anydoc>
 - Version: `anydoc@0.2.4`
 
+## emf-core and wmf-core
+
+EMF and WMF metafiles embedded in imported documents are converted to SVG by
+`emf-core` and `wmf-core` (both MIT License) and then rasterized with resvg.
+
+- Project: <https://github.com/mythrnr/emf-rs>, <https://github.com/mythrnr/wmf-rs>
+- Version: `emf-core@0.1.1`, `wmf-core@0.1.2`
+
 ## latex-rust and STIX Two Math
 
 Math formulas in research reports are rendered in-process by the

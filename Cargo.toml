@@ -30,6 +30,8 @@ chardetng = "1.0.0"
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 docx-rs = "0.4.22"
+# Word 里的 EMF / WMF 矢量图转 SVG（再经 resvg 出 PNG），见 src/metafile.rs。
+emf-core = { version = "0.1.1", default-features = false, features = ["svg"] }
 eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland", "x11"] }
 egui = "0.36.2"
 egui_dnd = "0.17.0"

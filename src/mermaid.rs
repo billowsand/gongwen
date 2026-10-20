@@ -679,7 +679,7 @@ fn compose(svg: &str, placement: Placement, background: Option<&str>) -> Result<
 
 /// 画图用的字体库：随包字体只读一次，之后每张图共用。找不到随包字体（开发环境
 /// 没放 runtime）才退到系统字体。
-fn fonts() -> Arc<usvg::fontdb::Database> {
+pub(crate) fn fonts() -> Arc<usvg::fontdb::Database> {
     static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     FONTS
         .get_or_init(|| {

@@ -32,6 +32,7 @@ mod macos_window;
 mod manuscript;
 mod manuscript_io;
 mod mermaid;
+mod metafile;
 mod metrics;
 mod modal;
 mod models;
