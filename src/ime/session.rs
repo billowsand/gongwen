@@ -439,7 +439,17 @@ impl Ime {
     /// 走一遍本帧的事件：该吃的吃掉，该上屏的塞回去。
     fn route_events(&mut self, events: Vec<egui::Event>) -> Vec<egui::Event> {
         let mut kept = Vec::with_capacity(events.len() + 2);
-        for event in events {
+        for mut event in events {
+            // macOS 即使关闭系统预编辑，也可能送来已转换的中文标点。
+            // 英文模式在入口统一还原，兼顾一次提交多个字符；粘贴不经过转换。
+            if self.english {
+                match &mut event {
+                    egui::Event::Text(text) | egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                        *text = english_punctuation(text);
+                    }
+                    _ => {}
+                }
+            }
             let consumed = match &event {
                 egui::Event::Key {
                     key,
@@ -759,6 +769,38 @@ fn single_char(text: &str) -> Option<char> {
     chars.next().is_none().then_some(c)
 }
 
+/// 只还原键入的标点，保留汉字、字母与数字；顿号按本输入法的键位还原为反斜杠。
+fn english_punctuation(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    for c in text.chars() {
+        let mapped = match c {
+            '。' => '.',
+            '、' => '\\',
+            '【' | '「' | '『' => '[',
+            '】' | '」' | '』' => ']',
+            '《' | '〈' => '<',
+            '》' | '〉' => '>',
+            '“' | '”' => '"',
+            '‘' | '’' => '\'',
+            '—' => '-',
+            '·' => '`',
+            '￥' => '$',
+            '…' => {
+                result.push_str("...");
+                continue;
+            }
+            // 全角 ASCII 区按固定偏移还原，仅转换标点，不动全角字母和数字。
+            '\u{ff01}'..='\u{ff5e}' => {
+                let half = char::from_u32(c as u32 - 0xfee0).unwrap();
+                if half.is_ascii_punctuation() { half } else { c }
+            }
+            _ => c,
+        };
+        result.push(mapped);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -949,6 +991,53 @@ mod tests {
         let out = ime.execute_guarded(Action::FlushRaw);
         assert!(!out.consumed);
         assert_eq!(out.commit.as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn english_mode_normalizes_typed_and_system_committed_punctuation() {
+        let mut ime = ime();
+        ime.toggle_english();
+        let source = "，。；：？！（）【】《》“”‘’、";
+        let expected = ",.;:?!()[]<>\"\"''\\";
+        // 单字键入与系统一次提交多个字符都要转换，事件种类保持不变。
+        let mut events: Vec<_> = source
+            .chars()
+            .map(|c| egui::Event::Text(c.to_string()))
+            .collect();
+        events.push(egui::Event::Text(source.into()));
+        events.push(egui::Event::Ime(egui::ImeEvent::Commit(source.into())));
+        let routed = ime.route_events(events);
+        for (event, c) in routed.iter().zip(expected.chars()) {
+            assert_eq!(event, &egui::Event::Text(c.to_string()));
+        }
+        assert_eq!(routed.len(), source.chars().count() + 2);
+        assert_eq!(routed[routed.len() - 2], egui::Event::Text(expected.into()));
+        assert_eq!(
+            routed[routed.len() - 1],
+            egui::Event::Ime(egui::ImeEvent::Commit(expected.into()))
+        );
+        assert_eq!(
+            ime.route_events(vec![egui::Event::Text(
+                "…—·￥＃＠％＋＝／＼中文Ａ１abc123".into()
+            )]),
+            vec![egui::Event::Text("...-`$#@%+=/\\中文Ａ１abc123".into())]
+        );
+    }
+
+    #[test]
+    fn english_punctuation_conversion_preserves_paste_and_chinese_mode() {
+        let mut ime = ime();
+        let chinese = vec![
+            egui::Event::Text("，".into()),
+            egui::Event::Ime(egui::ImeEvent::Commit("“中文。”".into())),
+        ];
+        assert_eq!(ime.route_events(chinese.clone()), chinese);
+        ime.toggle_english();
+        let unchanged = vec![
+            egui::Event::Paste("“中文，原样粘贴。”".into()),
+            egui::Event::Text("English, punctuation.".into()),
+        ];
+        assert_eq!(ime.route_events(unchanged.clone()), unchanged);
     }
     /// 中文标点里只有顿号没有半角键位，按反斜杠出（微软拼音等的通行约定）。
     /// 漏了这一项，公文里逐项并列就只能换输入法打。
