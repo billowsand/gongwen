@@ -1213,6 +1213,8 @@ impl GongwenApp {
         ui.separator();
         ui.add_space(4.0);
         ui.horizontal(|ui| {
+            // 与右侧设置卡片的内边距一致，避免按钮贴着窗口左边缘。
+            ui.add_space(18.0);
             if theme::primary_icon_button(ui, theme::Icon::Save, "保存设置").clicked() {
                 self.persist();
             }
