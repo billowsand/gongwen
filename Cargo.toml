@@ -120,5 +120,7 @@ insta = "1.48.0"
 proptest = "1.11.0"
 
 # Typst 排版引擎打了一处公文补丁（两端对齐不压行内标点），见 vendor/typst-layout/README.md。
+# anydoc 公开了文档模型的 Markdown 渲染，供导入时把内嵌图片入库，见 vendor/anydoc/README.md。
 [patch.crates-io]
 typst-layout = { path = "vendor/typst-layout" }
+anydoc = { path = "vendor/anydoc" }

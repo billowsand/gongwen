@@ -105,30 +105,7 @@ fn import_into(dir: &Path, files: &[PathBuf]) -> Result<Vec<ImportedImage>> {
             }
             let bytes =
                 fs::read(file).with_context(|| format!("无法读取图片文件 {}", file.display()))?;
-            let sanitized = sanitize_file_name(name);
-            let mut stored_name = format!("{stamp}_{sanitized}");
-            let mut dest = dir.join(&stored_name);
-            let mut suffix = 2usize;
-            while dest.exists() && fs::read(&dest).ok().as_deref() != Some(bytes.as_slice()) {
-                let source = Path::new(&sanitized);
-                let stem = source
-                    .file_stem()
-                    .map(|value| value.to_string_lossy())
-                    .unwrap_or_default();
-                let extension = source
-                    .extension()
-                    .map(|value| format!(".{}", value.to_string_lossy()))
-                    .unwrap_or_default();
-                stored_name = format!("{stamp}_{stem}_{suffix}{extension}");
-                dest = dir.join(&stored_name);
-                suffix += 1;
-            }
-            let rel_path = format!("{IMAGE_DIR}/{stored_name}");
-            if !dest.exists() {
-                fs::write(&dest, &bytes)
-                    .with_context(|| format!("无法写入图片文件 {}", dest.display()))?;
-                created.push(dest);
-            }
+            let rel_path = store(dir, &stamp, name, &bytes, &mut created)?;
             let alt = sanitize_alt(
                 Path::new(name)
                     .file_stem()
@@ -146,6 +123,67 @@ fn import_into(dir: &Path, files: &[PathBuf]) -> Result<Vec<ImportedImage>> {
         }
     }
     result
+}
+
+/// 把内存里的图片字节入库，返回 markdown 引用用的相对路径，顺序与输入一致。
+/// 供文档导入用：Word 等文档里内嵌的图片由转换器取出，没有现成的文件可复制。
+/// `name` 是带扩展名的建议文件名，同样会被净化、加时间戳；任一张写失败时本批
+/// 已写入的文件全部删掉。
+pub(crate) fn import_bytes(items: &[(String, Vec<u8>)]) -> Result<Vec<String>> {
+    import_bytes_into(&image_dir()?, items)
+}
+
+pub(crate) fn import_bytes_into(dir: &Path, items: &[(String, Vec<u8>)]) -> Result<Vec<String>> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    fs::create_dir_all(dir).with_context(|| format!("无法创建图片目录 {}", dir.display()))?;
+    let stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let mut created = Vec::new();
+    let result = items
+        .iter()
+        .map(|(name, bytes)| store(dir, &stamp, name, bytes, &mut created))
+        .collect::<Result<Vec<_>>>();
+    if result.is_err() {
+        for path in created {
+            let _ = fs::remove_file(path);
+        }
+    }
+    result
+}
+
+/// 把一份图片字节写进资源目录，返回相对路径。同名文件内容相同就直接复用，内容
+/// 不同则在文件名后加 `_2`、`_3`……；新写入的文件记进 `created`，供失败时回滚。
+fn store(
+    dir: &Path,
+    stamp: &str,
+    name: &str,
+    bytes: &[u8],
+    created: &mut Vec<PathBuf>,
+) -> Result<String> {
+    let sanitized = sanitize_file_name(name);
+    let mut stored_name = format!("{stamp}_{sanitized}");
+    let mut dest = dir.join(&stored_name);
+    let mut suffix = 2usize;
+    while dest.exists() && fs::read(&dest).ok().as_deref() != Some(bytes) {
+        let source = Path::new(&sanitized);
+        let stem = source
+            .file_stem()
+            .map(|value| value.to_string_lossy())
+            .unwrap_or_default();
+        let extension = source
+            .extension()
+            .map(|value| format!(".{}", value.to_string_lossy()))
+            .unwrap_or_default();
+        stored_name = format!("{stamp}_{stem}_{suffix}{extension}");
+        dest = dir.join(&stored_name);
+        suffix += 1;
+    }
+    if !dest.exists() {
+        fs::write(&dest, bytes).with_context(|| format!("无法写入图片文件 {}", dest.display()))?;
+        created.push(dest);
+    }
+    Ok(format!("{IMAGE_DIR}/{stored_name}"))
 }
 
 /// 把外部 Markdown 引用的本地图片复制入应用资源库并改写引用，返回改写后的

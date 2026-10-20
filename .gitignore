@@ -2,6 +2,9 @@
 /target/
 # vendor/mdx 不是 workspace 成员，在它目录里跑 cargo 会另起一个 target/
 /vendor/mdx/target/
+# vendor/anydoc 同理；编辑器在里面跑 cargo 还会生成一份用不上的 Cargo.lock
+/vendor/anydoc/target/
+/vendor/anydoc/Cargo.lock
 *.rs.bk
 
 # Generated application output

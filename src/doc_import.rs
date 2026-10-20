@@ -8,6 +8,7 @@
 //! PDF 的段落、标题与表格由版面推断，导入后需要人工核对，不保证还原原版式。
 
 pub(crate) mod clean;
+pub(crate) mod embedded;
 pub(crate) mod structure;
 
 use crate::models::ResearchMetadata;
@@ -205,29 +206,48 @@ pub(crate) fn to_knowledge_markdown(path: &Path) -> Result<String> {
     }
 }
 
+/// 起草页导入的结果。
+#[derive(Debug)]
+pub(crate) struct DraftImport {
+    pub(crate) markdown: String,
+    /// 文档里内嵌图片的入库情况（只有走 anydoc 的格式才有），界面据此补一句提示。
+    pub(crate) images: embedded::ImageReport,
+}
+
 /// 起草页导入用的转换：在 [`to_markdown`] 之上先做文本清洗（见 [`clean`]），
 /// 再按公文版式还原标题、列表、文档标题与附件标记（规则见 [`structure`]，纯确定性
-/// 规则，不调用模型）。
+/// 规则，不调用模型）。Word 等文档里内嵌的图片同时入库（见 [`embedded`]）。
 ///
 /// `detect_title` 为假时不把开头的段落升成 `# `——往已经有标题的稿子里插入时用。
 /// Markdown 原文作者自己排过结构，不动，只把正文引用的本地图片复制入库；纯文本按
 /// 「一行一段」读。
-pub(crate) fn to_draft_markdown(path: &Path, detect_title: bool) -> Result<String> {
+pub(crate) fn to_draft_markdown(path: &Path, detect_title: bool) -> Result<DraftImport> {
     let extension = extension_of(path);
-    let markdown = to_markdown(path)?;
-    if matches!(extension.as_str(), "md" | "markdown") {
+    let mut images = embedded::ImageReport::default();
+    let markdown = if CONVERTED.contains(&extension.as_str()) {
+        let rendered = convert_with_images(path)?;
+        images = rendered.images;
+        rendered.markdown
+    } else {
+        to_markdown(path)?
+    };
+    let markdown = draft_structure(path, &extension, markdown, detect_title);
+    Ok(DraftImport { markdown, images })
+}
+
+/// [`to_draft_markdown`] 拿到转换结果后的结构还原。
+fn draft_structure(path: &Path, extension: &str, markdown: String, detect_title: bool) -> String {
+    if matches!(extension, "md" | "markdown") {
         // 正文引用的本地图片复制进应用资源库并改写引用。缺图、格式不支持、路径
         // 越界都只跳过，不能因为一张图让整份稿子导不进来。
         let base = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        return Ok(
-            match crate::images::import_referenced_from(&markdown, base) {
-                Ok((rewritten, _skipped)) if !rewritten.trim().is_empty() => rewritten,
-                _ => markdown,
-            },
-        );
+        return match crate::images::import_referenced_from(&markdown, base) {
+            Ok((rewritten, _skipped)) if !rewritten.trim().is_empty() => rewritten,
+            _ => markdown,
+        };
     }
     let cleaned = clean::clean_before_structure(&markdown);
     // Word 另存的纯文本是一行一段（没有空行）；别的系统导出的折行文本段与段之间
@@ -235,7 +255,32 @@ pub(crate) fn to_draft_markdown(path: &Path, detect_title: bool) -> Result<Strin
     let lines_are_paragraphs = extension == "txt" && !cleaned.contains("\n\n");
     let mut options = structure::Options::import(detect_title, lines_are_paragraphs);
     options.repair_merged_paragraphs = extension == "pdf";
-    Ok(normalize(&structure::restructure(&cleaned, &options)))
+    normalize(&structure::restructure(&cleaned, &options))
+}
+
+/// 走 anydoc 的格式先解析成文档模型，内嵌图片入库后再渲染（见 [`embedded`]）。
+/// 格式判定与 `anydoc::to_markdown` 相同：先认文件内容，认不出再看扩展名；
+/// 内容其实是 PDF 的交给 PDF 那条路。
+fn convert_with_images(path: &Path) -> Result<embedded::Rendered> {
+    let bytes = std::fs::read(path).with_context(|| format!("读取 {} 失败", file_label(path)))?;
+    let format = anydoc::Format::from_bytes(&bytes).or_else(|| anydoc::Format::from_path(path));
+    if format == Some(anydoc::Format::Pdf) {
+        return Ok(embedded::Rendered {
+            markdown: convert_pdf(path)?,
+            images: embedded::ImageReport::default(),
+        });
+    }
+    let document = format
+        .ok_or_else(|| anyhow!("无法识别文件内容"))
+        .and_then(|format| anydoc::to_document(&bytes, format).map_err(describe_convert_error))
+        .with_context(|| format!("解析 {} 失败", file_label(path)))?;
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut rendered = embedded::render(document, &stem, crate::images::import_bytes);
+    rendered.markdown = finish(path, &rendered.markdown)?;
+    Ok(rendered)
 }
 
 /// PDF 提取结果需要人工核对；其它格式沿用现有导入提示。
@@ -1029,7 +1074,7 @@ mod tests {
         zip.finish().expect("收尾 docx");
 
         let raw = to_markdown(&path).unwrap();
-        let markdown = to_draft_markdown(&path, true).unwrap();
+        let markdown = to_draft_markdown(&path, true).unwrap().markdown;
         assert_eq!(
             markdown,
             "# 关于做好防汛工作的通知\n\n各区县人民政府：\n\n## 总体要求\n\n\
@@ -1038,6 +1083,104 @@ mod tests {
              ## 主要任务\n\n正文。\n\n### 排查隐患\n\n正文。",
             "anydoc 原始输出：\n{raw}"
         );
+    }
+
+    /// Word 里内嵌的图片：PNG 入库、独占一行，替代文字不当图题；EMF 暂不支持，
+    /// 原位留注释。anydoc 自己的 `to_markdown` 会把两张图都悄悄丢掉。
+    #[test]
+    fn draft_import_stores_embedded_word_images() {
+        use std::io::Write as _;
+
+        const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        const WP: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+        const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+        const PIC: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
+        let drawing = |rel: &str| {
+            format!(
+                "<w:r><w:drawing><wp:inline><wp:docPr id=\"1\" name=\"图片 1\" descr=\"自动生成的描述\"/>\
+                 <a:graphic><a:graphicData uri=\"{PIC}\"><pic:pic><pic:blipFill>\
+                 <a:blip r:embed=\"{rel}\"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>\
+                 </wp:inline></w:drawing></w:r>"
+            )
+        };
+        let body = format!(
+            "<w:p><w:r><w:t>关于报送现场照片的报告</w:t></w:r></w:p>\
+             <w:p><w:r><w:t>现场情况如图：</w:t></w:r>{}</w:p>\
+             <w:p>{}</w:p>\
+             <w:p><w:r><w:t>以上，请审阅。</w:t></w:r></w:p>",
+            drawing("rId5"),
+            drawing("rId6"),
+        );
+        let document = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{W}" xmlns:r="{R}" xmlns:wp="{WP}" xmlns:a="{A}" xmlns:pic="{PIC}"><w:body>{body}</w:body></w:document>"#
+        );
+        let document_rels = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId5" Type="{R}/image" Target="media/image1.png"/><Relationship Id="rId6" Type="{R}/image" Target="media/image2.emf"/></Relationships>"#
+        );
+        let mut png = Vec::new();
+        image::RgbImage::from_pixel(2, 2, image::Rgb([200, 30, 30]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("编码 PNG");
+        let mut emf = vec![1, 0, 0, 0];
+        emf.resize(40, 0);
+        emf.extend_from_slice(b" EMF");
+        emf.resize(108, 0);
+        let parts: [(&str, &[u8]); 6] = [
+            (
+                "[Content_Types].xml",
+                br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="emf" ContentType="image/x-emf"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            ("word/_rels/document.xml.rels", document_rels.as_bytes()),
+            ("word/document.xml", document.as_bytes()),
+            ("word/media/image1.png", &png),
+            ("word/media/image2.emf", &emf),
+        ];
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("现场照片.docx");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).expect("创建 docx"));
+        for (name, content) in parts {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .expect("写入 docx 部件");
+            zip.write_all(content).expect("写入 docx 部件");
+        }
+        zip.finish().expect("收尾 docx");
+
+        let config = tempfile::tempdir().expect("临时配置目录");
+        crate::storage::set_test_config_dir(Some(config.path().to_path_buf()));
+        let imported = to_draft_markdown(&path, true);
+        crate::storage::set_test_config_dir(None);
+        let imported = imported.expect("导入");
+
+        let refs = crate::images::image_refs(&imported.markdown);
+        assert_eq!(refs.len(), 1, "{}", imported.markdown);
+        assert!(refs[0].ends_with("_现场照片_图1.png"), "{}", refs[0]);
+        assert_eq!(
+            std::fs::read(config.path().join(&refs[0])).ok(),
+            Some(png),
+            "图片按原字节入库"
+        );
+        assert_eq!(
+            imported.markdown,
+            format!(
+                "# 关于报送现场照片的报告\n\n现场情况如图：\n\n![]({})\n\n\
+                 <!-- [图片未导入：EMF 矢量图，暂不支持] -->\n\n以上，请审阅。",
+                refs[0]
+            ),
+        );
+        assert_eq!(imported.images.imported, 1);
+        assert_eq!(imported.images.skipped, ["EMF 矢量图，暂不支持"]);
+        // 同一份文件的知识库 / 通用转换不落盘，图片照旧只剩文字。
+        assert!(!to_markdown(&path).unwrap().contains("!["));
     }
 
     #[test]
@@ -1171,7 +1314,7 @@ mod tests {
         )
         .expect("写入");
         assert_eq!(
-            to_draft_markdown(&path, true).unwrap(),
+            to_draft_markdown(&path, true).unwrap().markdown,
             "# 工作的通知\n\n1. 内容"
         );
     }
@@ -1182,7 +1325,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("临时目录");
         let path = dir.path().join("带图.md");
         std::fs::write(&path, "# 标题\n\n![缺图](figures/missing.png)\n\n正文。").expect("写入");
-        let markdown = to_draft_markdown(&path, true).expect("缺图不应阻断导入");
+        let markdown = to_draft_markdown(&path, true)
+            .expect("缺图不应阻断导入")
+            .markdown;
         assert!(markdown.contains("正文。"), "{markdown}");
         assert!(markdown.contains("missing.png"), "{markdown}");
     }
@@ -1220,7 +1365,8 @@ mod tests {
     fn dump_import_sample_outputs() {
         for path in import_sample_paths() {
             let actual = to_draft_markdown(&path, true)
-                .unwrap_or_else(|error| panic!("{}：{error:#}", path.display()));
+                .unwrap_or_else(|error| panic!("{}：{error:#}", path.display()))
+                .markdown;
             let output = sample_actual_path(&path);
             std::fs::create_dir_all(output.parent().expect("有上级目录")).expect("建输出目录");
             std::fs::write(&output, &actual).expect("写实际输出");
@@ -1246,7 +1392,8 @@ mod tests {
         for path in paths {
             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
             let actual = to_draft_markdown(&path, true)
-                .unwrap_or_else(|error| panic!("样例 {stem} 导入失败：{error:#}"));
+                .unwrap_or_else(|error| panic!("样例 {stem} 导入失败：{error:#}"))
+                .markdown;
             assert!(!actual.trim().is_empty(), "样例 {stem} 输出为空");
             let output = sample_actual_path(&path);
             std::fs::create_dir_all(output.parent().expect("有上级目录")).expect("建输出目录");

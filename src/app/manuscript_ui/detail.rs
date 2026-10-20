@@ -855,15 +855,16 @@ impl GongwenApp {
             return;
         };
         match doc_import::to_draft_markdown(&path, true) {
-            Ok(markdown) => {
-                let chars = markdown.chars().count();
-                let session = DraftSession::with_markdown(0, &self.config, markdown);
+            Ok(imported) => {
+                let chars = imported.markdown.chars().count();
+                let session = DraftSession::with_markdown(0, &self.config, imported.markdown);
                 self.open_doc(session);
                 self.status = format!(
                     "已从 {} 新建稿件（{chars} 字）：请核对正文结构并补齐左侧文档要素。",
                     doc_import::file_label(&path)
                 );
                 self.status.push_str(doc_import::import_notice(&path));
+                self.status.push_str(&imported.images.notice());
             }
             Err(error) => self.status = format!("导入失败：{error:#}"),
         }

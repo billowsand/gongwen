@@ -431,7 +431,10 @@ impl DraftPage<'_> {
             .lines()
             .any(|line| line.trim_start().starts_with("# "));
         match doc_import::to_draft_markdown(&path, detect_title) {
-            Ok(markdown) => self.insert_imported_markdown(ctx, &markdown, &path),
+            Ok(imported) => {
+                self.insert_imported_markdown(ctx, &imported.markdown, &path);
+                self.status.push_str(&imported.images.notice());
+            }
             Err(error) => *self.status = format!("导入失败：{error:#}"),
         }
     }
