@@ -1085,8 +1085,9 @@ mod tests {
         );
     }
 
-    /// Word 里内嵌的图片：PNG 入库、独占一行，替代文字不当图题；EMF 暂不支持，
-    /// 原位留注释。anydoc 自己的 `to_markdown` 会把两张图都悄悄丢掉。
+    /// Word 里内嵌的图片：PNG 原样入库，EMF / WMF 矢量图转成 PNG 入库，都独占一行、
+    /// 替代文字不当图题；TIFF 暂不支持，原位留注释。anydoc 自己的 `to_markdown` 会把
+    /// 这些图都悄悄丢掉。EMF / WMF 是 GDI+ 录的真实图元文件（见 tests/fixtures/metafile）。
     #[test]
     fn draft_import_stores_embedded_word_images() {
         use std::io::Write as _;
@@ -1107,10 +1108,12 @@ mod tests {
         let body = format!(
             "<w:p><w:r><w:t>关于报送现场照片的报告</w:t></w:r></w:p>\
              <w:p><w:r><w:t>现场情况如图：</w:t></w:r>{}</w:p>\
-             <w:p>{}</w:p>\
+             <w:p>{}</w:p><w:p>{}</w:p><w:p>{}</w:p>\
              <w:p><w:r><w:t>以上，请审阅。</w:t></w:r></w:p>",
             drawing("rId5"),
             drawing("rId6"),
+            drawing("rId7"),
+            drawing("rId8"),
         );
         let document = format!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1118,21 +1121,27 @@ mod tests {
         );
         let document_rels = format!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId5" Type="{R}/image" Target="media/image1.png"/><Relationship Id="rId6" Type="{R}/image" Target="media/image2.emf"/></Relationships>"#
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId5" Type="{R}/image" Target="media/image1.png"/><Relationship Id="rId6" Type="{R}/image" Target="media/image2.emf"/><Relationship Id="rId7" Type="{R}/image" Target="media/image3.wmf"/><Relationship Id="rId8" Type="{R}/image" Target="media/image4.tiff"/></Relationships>"#
         );
         let mut png = Vec::new();
         image::RgbImage::from_pixel(2, 2, image::Rgb([200, 30, 30]))
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("编码 PNG");
-        let mut emf = vec![1, 0, 0, 0];
-        emf.resize(40, 0);
-        emf.extend_from_slice(b" EMF");
-        emf.resize(108, 0);
-        let parts: [(&str, &[u8]); 6] = [
+        let fixture = |name: &str| {
+            std::fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/metafile")
+                    .join(name),
+            )
+            .expect("读图元文件样本")
+        };
+        let emf = fixture("flow-dual.emf");
+        let wmf = fixture("flow.wmf");
+        let parts: [(&str, &[u8]); 8] = [
             (
                 "[Content_Types].xml",
                 br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="emf" ContentType="image/x-emf"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="emf" ContentType="image/x-emf"/><Default Extension="wmf" ContentType="image/x-wmf"/><Default Extension="tiff" ContentType="image/tiff"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
             ),
             (
                 "_rels/.rels",
@@ -1143,6 +1152,8 @@ mod tests {
             ("word/document.xml", document.as_bytes()),
             ("word/media/image1.png", &png),
             ("word/media/image2.emf", &emf),
+            ("word/media/image3.wmf", &wmf),
+            ("word/media/image4.tiff", b"II*\0not-really-a-tiff"),
         ];
 
         let dir = tempfile::tempdir().expect("临时目录");
@@ -1162,23 +1173,27 @@ mod tests {
         let imported = imported.expect("导入");
 
         let refs = crate::images::image_refs(&imported.markdown);
-        assert_eq!(refs.len(), 1, "{}", imported.markdown);
-        assert!(refs[0].ends_with("_现场照片_图1.png"), "{}", refs[0]);
-        assert_eq!(
-            std::fs::read(config.path().join(&refs[0])).ok(),
-            Some(png),
-            "图片按原字节入库"
-        );
+        assert_eq!(refs.len(), 3, "{}", imported.markdown);
+        for (index, src) in refs.iter().enumerate() {
+            let suffix = format!("_现场照片_图{}.png", index + 1);
+            assert!(src.ends_with(&suffix), "{src}");
+        }
+        let stored = |src: &str| std::fs::read(config.path().join(src)).expect("图片已入库");
+        assert_eq!(stored(&refs[0]), png, "PNG 按原字节入库");
+        for src in &refs[1..] {
+            let converted = image::load_from_memory(&stored(src)).expect("转出的是位图");
+            assert!(converted.width() > 500, "矢量图要放大：{src}");
+        }
         assert_eq!(
             imported.markdown,
             format!(
-                "# 关于报送现场照片的报告\n\n现场情况如图：\n\n![]({})\n\n\
-                 <!-- [图片未导入：EMF 矢量图，暂不支持] -->\n\n以上，请审阅。",
-                refs[0]
+                "# 关于报送现场照片的报告\n\n现场情况如图：\n\n![]({})\n\n![]({})\n\n![]({})\n\n\
+                 <!-- [图片未导入：TIFF 图片，暂不支持] -->\n\n以上，请审阅。",
+                refs[0], refs[1], refs[2]
             ),
         );
-        assert_eq!(imported.images.imported, 1);
-        assert_eq!(imported.images.skipped, ["EMF 矢量图，暂不支持"]);
+        assert_eq!(imported.images.imported, 3);
+        assert_eq!(imported.images.skipped, ["TIFF 图片，暂不支持"]);
         // 同一份文件的知识库 / 通用转换不落盘，图片照旧只剩文字。
         assert!(!to_markdown(&path).unwrap().contains("!["));
     }

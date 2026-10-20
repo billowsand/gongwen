@@ -6,9 +6,10 @@
 //!
 //! - 应用本来就认的位图（PNG、JPEG，以及 GIF、BMP、WebP）原样写进图片资源库，引用
 //!   改成相对路径；按字节判断格式，不信部件扩展名。同一份字节只存一次；
+//! - EMF / WMF 矢量图转成 PNG 再入库（见 [`crate::metafile`]），同一份字节只转一次；
 //! - 解析器只认独占一行的图片：段落里的图把段落拆开，图单独成段；标题、表格、列表、
 //!   引用里的图挪到所在块之后；
-//! - 转不了的（EMF / WMF 矢量图、TIFF、外链图片、源文件里缺数据的）在原位留一行
+//! - 收不了的（TIFF、SVG、转换失败的图元文件、外链图片、源文件里缺数据的）在原位留一行
 //!   `<!-- [图片未导入：原因] -->`：注释不落到纸上，编辑器里看得到，提示里另有汇总；
 //!   写成方括号标记，导入清洗才会像 `<!-- [附件] -->` 一样留着它；
 //! - 脚注里的图片丢掉，只计入汇总；
@@ -89,10 +90,11 @@ pub(crate) fn render(
     let mut sources = Vec::new();
     collect_assets(&doc.blocks, &mut sources);
 
-    // 按出现顺序给能入库的图片编号；同一份字节（哪怕 Word 里是两个部件）只存一次。
+    // 按出现顺序给能入库的图片编号；同一份字节（哪怕 Word 里是两个部件）只存一次，
+    // 图元文件也只转换一次。
     let mut items: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut item_of_asset: BTreeMap<usize, usize> = BTreeMap::new();
-    let mut item_of_bytes: HashMap<&[u8], usize> = HashMap::new();
+    let mut item_of_asset: BTreeMap<usize, Prepared> = BTreeMap::new();
+    let mut item_of_bytes: HashMap<&[u8], Prepared> = HashMap::new();
     for id in sources {
         let Entry::Vacant(slot) = item_of_asset.entry(id) else {
             continue;
@@ -100,17 +102,11 @@ pub(crate) fn render(
         let Some(asset) = doc.assets.get(id) else {
             continue;
         };
-        let Some(extension) = bitmap_extension(&asset.bytes) else {
-            continue;
-        };
-        let index = *item_of_bytes
+        let prepared = item_of_bytes
             .entry(asset.bytes.as_slice())
-            .or_insert_with(|| {
-                let name = format!("{stem}_图{}.{extension}", items.len() + 1);
-                items.push((name, asset.bytes.clone()));
-                items.len() - 1
-            });
-        slot.insert(index);
+            .or_insert_with(|| prepare(asset, &stem, &mut items))
+            .clone();
+        slot.insert(prepared);
     }
     let stored = if items.is_empty() {
         Ok(Vec::new())
@@ -128,7 +124,6 @@ pub(crate) fn render(
     let blocks = std::mem::take(&mut doc.blocks);
     let mut notes = std::mem::take(&mut doc.notes);
     let mut rewriter = Rewriter {
-        assets: &doc.assets,
         item_of_asset: &item_of_asset,
         paths: &paths,
         store_error: store_error.as_deref(),
@@ -181,6 +176,29 @@ fn marker_text(reason: &str) -> String {
             ch => ch,
         })
         .collect()
+}
+
+/// 一份内嵌图片的去向：入库清单里的序号，或不能入库的原因。
+type Prepared = std::result::Result<usize, String>;
+
+/// 决定一份内嵌图片怎么入库：位图原样收，图元文件转成 PNG，其余记下原因。
+fn prepare(asset: &Asset, stem: &str, items: &mut Vec<(String, Vec<u8>)>) -> Prepared {
+    let (extension, bytes) = if let Some(extension) = bitmap_extension(&asset.bytes) {
+        (extension, asset.bytes.clone())
+    } else if crate::metafile::is_metafile(&asset.bytes) {
+        let kind = if crate::metafile::is_emf(&asset.bytes) {
+            "EMF 矢量图"
+        } else {
+            "WMF 矢量图"
+        };
+        let png =
+            crate::metafile::to_png(&asset.bytes).map_err(|error| format!("{kind}，{error}"))?;
+        ("png", png)
+    } else {
+        return Err(unsupported_reason(asset));
+    };
+    items.push((format!("{stem}_图{}.{extension}", items.len() + 1), bytes));
+    Ok(items.len() - 1)
 }
 
 /// 一行是不是占位伪链接，是则返回占位序号。
@@ -266,8 +284,7 @@ enum Piece {
 }
 
 struct Rewriter<'a> {
-    assets: &'a [Asset],
-    item_of_asset: &'a BTreeMap<usize, usize>,
+    item_of_asset: &'a BTreeMap<usize, Prepared>,
     paths: &'a [String],
     store_error: Option<&'a str>,
     report: ImageReport,
@@ -422,18 +439,15 @@ impl Rewriter<'_> {
         }
         let reason = match source {
             ImageSource::Asset(id) => match self.item_of_asset.get(&id.0) {
-                Some(&item) => match self.paths.get(item) {
+                Some(Ok(item)) => match self.paths.get(*item) {
                     Some(path) => {
                         self.report.imported += 1;
                         return Some(image_paragraph(path.clone()));
                     }
                     None => self.store_error.unwrap_or("写入图片目录失败").to_string(),
                 },
-                None => self
-                    .assets
-                    .get(id.0)
-                    .map(unsupported_reason)
-                    .unwrap_or_else(|| "源文件里缺少图片数据".to_string()),
+                Some(Err(reason)) => reason.clone(),
+                None => "源文件里缺少图片数据".to_string(),
             },
             ImageSource::External(_) => "链接到外部的图片".to_string(),
             ImageSource::Unavailable => "源文件里缺少图片数据".to_string(),
@@ -492,16 +506,10 @@ fn bitmap_extension(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// 收不了的内嵌图片的原因，写进占位注释与提示。
+/// EMF / WMF 不走这里，由 [`prepare`] 转成 PNG。
 fn unsupported_reason(asset: &Asset) -> String {
     let bytes = asset.bytes.as_slice();
-    let kind = if bytes.len() >= 44 && &bytes[40..44] == b" EMF" {
-        "EMF 矢量图".to_string()
-    } else if bytes.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A])
-        || bytes.starts_with(&[0x01, 0x00, 0x09, 0x00])
-        || bytes.starts_with(&[0x02, 0x00, 0x09, 0x00])
-    {
-        "WMF 矢量图".to_string()
-    } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+    let kind = if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
         "TIFF 图片".to_string()
     } else if asset.media_type.contains("svg") {
         "SVG 矢量图".to_string()
@@ -660,14 +668,14 @@ mod tests {
                 Block::Paragraph(vec![Inline::plain("续。")]),
             ],
             notes: Vec::new(),
-            assets: vec![asset(0, "image/x-emf", &emf())],
+            assets: vec![asset(0, "image/tiff", b"II*\0rest")],
         };
         let mut seen = Vec::new();
         let rendered = render(doc, "稿", fake_store(&mut seen));
-        assert!(seen.is_empty(), "EMF 不入库");
+        assert!(seen.is_empty(), "TIFF 不入库");
         assert_eq!(
             rendered.markdown.trim_end(),
-            "流程如下：\n\n<!-- [图片未导入：EMF 矢量图，暂不支持] -->\n\n\
+            "流程如下：\n\n<!-- [图片未导入：TIFF 图片，暂不支持] -->\n\n\
              <!-- [图片未导入：链接到外部的图片] -->\n\n续。"
         );
         assert_eq!(rendered.images.imported, 0);
@@ -676,8 +684,43 @@ mod tests {
             rendered
                 .images
                 .notice()
-                .contains("EMF 矢量图，暂不支持 1 张")
+                .contains("TIFF 图片，暂不支持 1 张")
         );
+    }
+
+    /// EMF 转成 PNG 入库；同一份字节只转一次、存一份；解析不了的 EMF 原位留注释。
+    #[test]
+    fn metafiles_are_converted_to_png() {
+        let flow = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/metafile/flow-dual.emf"),
+        )
+        .expect("读样本");
+        let doc = Document {
+            blocks: vec![
+                Block::Paragraph(vec![image(0)]),
+                Block::Paragraph(vec![image(1)]),
+                Block::Paragraph(vec![image(2)]),
+            ],
+            notes: Vec::new(),
+            assets: vec![
+                asset(0, "image/x-emf", &flow),
+                asset(1, "image/x-emf", &flow),
+                asset(2, "image/x-emf", &emf()),
+            ],
+        };
+        let mut seen = Vec::new();
+        let rendered = render(doc, "稿", fake_store(&mut seen));
+        assert_eq!(seen.len(), 1, "同一份 EMF 只存一份");
+        assert_eq!(seen[0].0, "稿_图1.png");
+        assert!(seen[0].1.starts_with(b"\x89PNG"), "存的是 PNG");
+        assert_eq!(
+            rendered.markdown.trim_end(),
+            "![](images/稿_图1.png)\n\n![](images/稿_图1.png)\n\n\
+             <!-- [图片未导入：EMF 矢量图，无法解析] -->"
+        );
+        assert_eq!(rendered.images.imported, 2);
+        assert_eq!(rendered.images.skipped, ["EMF 矢量图，无法解析"]);
     }
 
     #[test]
@@ -719,10 +762,6 @@ mod tests {
         assert_eq!(bitmap_extension(JPEG), Some("jpg"));
         assert_eq!(bitmap_extension(b"GIF89a...."), Some("gif"));
         assert_eq!(bitmap_extension(&emf()), None);
-        assert_eq!(
-            unsupported_reason(&asset(0, "image/png", &emf())),
-            "EMF 矢量图，暂不支持"
-        );
         assert_eq!(
             unsupported_reason(&asset(0, "image/tiff", b"II*\0rest")),
             "TIFF 图片，暂不支持"
