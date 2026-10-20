@@ -1266,7 +1266,19 @@ mod tests {
             let blocks = minimap_blocks(&scrolled, layout, rect);
             assert!(!blocks.is_empty());
             assert!(blocks.iter().all(|(_, color)| *color != accent));
-            assert!(blocks.iter().all(|(block, _)| block.bottom() >= rect.top()));
+            // 滚动边界上可能压着半行：它的块中心落在视口上沿之上，整块会被
+            // 裁掉一截，但不该有整行落在可见范围之外。行距随字体度量变化，
+            // 越界那一行会差零点几像素，判据按「越界的行数」给，不写死像素。
+            let rows_above: std::collections::BTreeSet<u32> = blocks
+                .iter()
+                .filter(|(block, _)| block.bottom() < rect.top())
+                .map(|(block, _)| block.top().to_bits())
+                .collect();
+            assert!(
+                rows_above.len() <= 1,
+                "滚动边界上最多一行越界，实际 {} 行",
+                rows_above.len()
+            );
         }
     }
 
