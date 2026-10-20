@@ -1043,13 +1043,13 @@ fn settings_changes(a: &AppConfig, b: &AppConfig) -> Vec<FieldChange> {
     );
     field(
         &mut out,
-        "列表编号：一级列表",
+        "列表编号：段内列表",
         a.numbering.list1.label(),
         b.numbering.list1.label(),
     );
     field(
         &mut out,
-        "列表编号：二级列表",
+        "列表编号：独立列表",
         a.numbering.list2.label(),
         b.numbering.list2.label(),
     );

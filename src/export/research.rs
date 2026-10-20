@@ -1,11 +1,10 @@
 //! 研究报告导出：frontmatter、插图与参考文献装进临时目录，交给固定版本 mdx：
 //! Word 由 mdx 的 research 转换器生成，PDF 由 mdx 整理排版数据、`export::typst::research`
-//! 排版。
+//! 排版。两者的普通段落与列表都先过预览解析器（`typst::research_body::normalize`）。
 
 use crate::export::parse::{MarkdownBlock, TableSpan, table_span_at};
 use crate::models::{DraftInput, NumberingConfig, ResearchMetadata};
 use anyhow::{Context, Result};
-use mdx::{ConvertRequest, DocumentStyle, OutputFormat};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -162,11 +161,10 @@ pub(crate) fn write_docx(
         crate::mermaid::Format::Png,
         &crate::storage::config_dir()?,
     )?;
-    mdx::convert(ConvertRequest {
-        input: source.markdown.clone(),
-        output: Some(path.to_path_buf()),
-        format: OutputFormat::Docx,
-        style: DocumentStyle::Research,
+    // 普通段落与列表先过预览解析器，与 PDF 同一套规则（段内列表、独立列表
+    // 及其缩进子项、软换行），见 `typst::research_body::normalize`。
+    mdx::convert_research_docx_with_body_normalizer(&source.markdown, path, |body| {
+        super::typst::research_body::normalize(body, numbering)
     })
     .with_context(|| format!("研究报告 Word 转换失败：{}", path.display()))?;
     if input.research.template == crate::models::ResearchTemplate::Terminal {
@@ -480,6 +478,63 @@ mod tests {
         assert!(!center.contains("w:firstLine"), "{center}");
         let right = paragraph("居右一行");
         assert!(right.contains(r#"<w:jc w:val="right" />"#), "{right}");
+    }
+
+    /// 研究报告 Word 的列表与 PDF 同一套规则：独立列表项下缩进写的子项并进
+    /// 父项按段内列表编号，紧贴正文的列表并进上一段；编号用设置里的样式。
+    #[test]
+    fn research_word_export_lists_follow_the_preview_rule() {
+        use std::io::Read as _;
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("报告.docx");
+        let input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "列表测试".into(),
+            ..Default::default()
+        };
+        write_docx(
+            &path,
+            &input,
+            "<!-- [正文] -->\n\n## 方法\n\n要求：\n- 甲\n- 乙\n\n1. 主要任务：\n    1. 完善制度\n    1. 强化督查\n2. 保障措施",
+            &NumberingConfig::default(),
+        )
+        .expect("研究报告 Word 应转换成功");
+        let file = fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        // 按段落取出纯文字。
+        let texts: Vec<String> = xml
+            .split("</w:p>")
+            .map(|paragraph| {
+                paragraph
+                    .split("<w:t")
+                    .skip(1)
+                    .filter_map(|run| run.split_once('>').map(|(_, rest)| rest))
+                    .filter_map(|rest| rest.split_once("</w:t>").map(|(text, _)| text))
+                    .collect::<String>()
+            })
+            .filter(|text| !text.is_empty())
+            .collect();
+        for expected in [
+            "要求：①甲。②乙。",
+            "1.主要任务：①完善制度。②强化督查。",
+            "2.保障措施。",
+        ] {
+            assert!(
+                texts.iter().any(|text| text == expected),
+                "{expected} 不在 {texts:?}"
+            );
+        }
+        assert!(
+            !xml.contains(mdx::typst_research::LIST_LABEL_OPEN)
+                && !xml.contains(mdx::typst_research::LIST_LABEL_CLOSE),
+            "编号标记不许落到纸上"
+        );
     }
 
     #[test]

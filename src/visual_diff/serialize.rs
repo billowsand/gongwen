@@ -267,6 +267,22 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
                 }
                 vec![marked]
             }
+            MarkdownBlock::OrderedListItem { number, .. }
+                if !deleted && !inline_items.is_empty() =>
+            {
+                // 带子项的独立列表项：父项一行，子项按缩进写回各自的列表行
+                // （编号由导出器按设置再生成）。
+                let parts = project(&overlay.text, raw, inline_items);
+                let mut lines: Vec<String> = Vec::new();
+                for (index, marked) in parts.into_iter().enumerate() {
+                    if index == 0 {
+                        lines.push(format!("{number}. {marked}"));
+                    } else {
+                        lines.push(format!("    1. {marked}"));
+                    }
+                }
+                lines
+            }
             MarkdownBlock::OrderedListItem { number, .. } => {
                 let marked = styled_marked(&overlay.text, raw);
                 if marked.is_empty() {
@@ -509,9 +525,10 @@ fn mark_fragments(fragments: &[Fragment]) -> String {
 /// 哨兵只在「加粗已闭合」时开合，所以 `**` 永远不会跨过哨兵——导出器先按
 /// 哨兵切块、再在块内配对加粗，跨块的 `**` 会配错。
 ///
-/// `splits` 是新版纯文本里的切点（段内列表各项的起点），在切点处另起一段
-/// 输出；位于切点上的 Deleted 片段归前一段（被删的项折进前一项末尾，不占
-/// 编号）。没有切点时恒返回一段。
+/// `splits` 是新版纯文本里的切点（段内列表各项、独立列表项的子项的起点），
+/// 在切点处另起一段输出。位于切点上的 Deleted 片段：整项被删的归前一段
+/// （折进前一项末尾，不占编号）；项内改动的留在本项里（切点提前）。没有切点
+/// 时恒返回一段。
 fn project(fragments: &[Fragment], raw: &str, splits: &[usize]) -> Vec<String> {
     if fragments.is_empty() {
         return vec![String::new()];
@@ -520,19 +537,32 @@ fn project(fragments: &[Fragment], raw: &str, splits: &[usize]) -> Vec<String> {
         return vec![raw.to_string()];
     }
     let spans = inline_char_spans(raw);
+    // 纯文本的可见字数（切点与片段都按可见字计，`raw` 里还夹着 `**` 等标记）。
+    let visible_len = spans.len();
     let mut writer = MarkWriter::default();
     let mut parts: Vec<String> = Vec::new();
-    let mut splits = splits.iter().copied().peekable();
+    let mut split_index = 0usize;
     let mut pos = 0usize;
     for fragment in fragments {
         if fragment.kind == RedlineKind::Deleted {
+            // 删除片段正好落在切点上时：整项被删的折进前一项（不占编号），
+            // 项内改动的（改字、改词）留在本项里——切点提前，删除跟着本项走。
+            if splits.get(split_index) == Some(&pos) {
+                let item_end = splits.get(split_index + 1).copied().unwrap_or(visible_len);
+                let deleted_len = fragment.text.chars().count();
+                if deleted_len < item_end.saturating_sub(pos) {
+                    parts.push(writer.finish());
+                    split_index += 1;
+                }
+            }
             writer.set_kind(RedlineKind::Deleted);
             writer.push_plain(&fragment.text);
             continue;
         }
         for ch in fragment.text.chars() {
-            while splits.next_if(|split| *split <= pos).is_some() {
+            while splits.get(split_index).is_some_and(|split| *split <= pos) {
                 parts.push(writer.finish());
+                split_index += 1;
             }
             writer.set_kind(fragment.kind);
             match spans.get(pos) {

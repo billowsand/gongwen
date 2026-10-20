@@ -133,7 +133,8 @@ pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String
         .find('\n')
         .map_or(text.len(), |index| cursor + index);
     let line = &text[line_start..line_end];
-    let (number, content) = export::parse_ordered_item(line)?;
+    // 独立列表的子项可以缩进四格以上，也要能回车续写。
+    let (indent_len, number, content) = export::parse_indented_ordered_item(line)?;
     let content_start = content.as_ptr() as usize - line.as_ptr() as usize;
     if cursor < line_start + content_start {
         return None;
@@ -159,13 +160,14 @@ pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String
         return Some((updated, new_cursor));
     }
 
-    let indent_len = line.len() - line.trim_start_matches(' ').len();
-    let marker = format!("\n{}{}. ", " ".repeat(indent_len.min(3)), number + 1);
+    let indent = &line[..indent_len];
+    let indent_columns = export::indent_columns(indent);
+    let marker = format!("\n{indent}{}. ", number + 1);
     let mut updated = text.to_string();
     updated.insert_str(cursor, &marker);
     // 光标后方同一连续列表组（相同缩进、紧邻的有序列表行，遇空行或非列表行即止）
     // 里已有项的序号依次重排为新行序号 +1、+2……，只重写数字部分，
-    // 各行的缩进、分隔符与内容原样保留。
+    // 各行的缩进、分隔符与内容原样保留。缩进更深的行是夹在中间的子项，跳过不编。
     let mut expected = number + 2;
     let mut pos = line_end + marker.len();
     while pos < updated.len() && updated.as_bytes()[pos] == b'\n' {
@@ -174,8 +176,16 @@ pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String
             .find('\n')
             .map_or(updated.len(), |index| item_start + index);
         let item = &updated[item_start..item_end];
-        let item_indent = item.len() - item.trim_start_matches(' ').len();
-        if item_indent != indent_len || export::parse_ordered_item(item).is_none() {
+        if export::parse_list_item(item.trim()).is_some()
+            && export::indent_columns(item) > indent_columns
+        {
+            pos = item_end;
+            continue;
+        }
+        let Some((item_indent, _, _)) = export::parse_indented_ordered_item(item) else {
+            break;
+        };
+        if item[..item_indent] != *indent {
             break;
         }
         let digits = item[item_indent..]
@@ -1055,6 +1065,23 @@ mod ordered_list_tests {
         let cursor = "1. 第一项".len();
         let (updated, _) = continue_ordered_list(text, cursor).unwrap();
         assert_eq!(updated, "1. 第一项\n2. \n\n5. 另一组");
+    }
+
+    #[test]
+    fn enter_on_a_deeply_indented_child_keeps_its_indent() {
+        let text = "1. 甲：\n    1. 子一\n    2. 子二\n2. 乙";
+        let cursor = "1. 甲：\n    1. 子一".len();
+        let (updated, cursor) = continue_ordered_list(text, cursor).unwrap();
+        assert_eq!(updated, "1. 甲：\n    1. 子一\n    2. \n    3. 子二\n2. 乙");
+        assert_eq!(&updated[..cursor], "1. 甲：\n    1. 子一\n    2. ");
+    }
+
+    #[test]
+    fn enter_on_a_parent_renumbers_siblings_past_its_children() {
+        let text = "1. 甲\n2. 乙：\n   1. 子\n3. 丙";
+        let cursor = "1. 甲".len();
+        let (updated, _) = continue_ordered_list(text, cursor).unwrap();
+        assert_eq!(updated, "1. 甲\n2. \n3. 乙：\n   1. 子\n4. 丙");
     }
 
     #[test]

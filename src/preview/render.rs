@@ -244,7 +244,10 @@ pub(crate) fn clickable_content_block(
                 ui,
                 metrics,
                 &format!("{prefix}{text}"),
-                std::slice::from_ref(&(0..prefix.chars().count())),
+                &export::list_item_number_ranges(
+                    prefix.chars().count(),
+                    &located.generated_prefixes,
+                ),
                 true,
                 source,
                 anchor,

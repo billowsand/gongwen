@@ -495,6 +495,30 @@ mod review_probes {
         );
     }
 
+    /// 独立列表项并进来的子项：花脸稿写回源码时仍是父项加缩进子项，重新解析
+    /// 后还是同样两项，改动落在子项里。
+    #[test]
+    fn nested_list_children_round_trip_through_the_marked_markdown() {
+        let old = "1. 主要任务：\n    1. 完善制度；\n    1. 强化督查\n2. 保障措施";
+        let new = "1. 主要任务：\n    1. 完善制度；\n    1. 加强督查\n2. 保障措施";
+        let blocks = parsed(old, new);
+        assert_eq!(blocks.len(), 2, "{blocks:?}");
+        assert!(
+            blocks[0].starts_with("L1:主要任务：①完善制度；②"),
+            "{blocks:?}"
+        );
+        assert!(
+            blocks[0].contains('[') && blocks[0].contains('~'),
+            "{blocks:?}"
+        );
+        assert_eq!(blocks[1], "L2:保障措施。");
+        // 没改动时原样写回。
+        assert_eq!(
+            parsed(old, old),
+            ["L1:主要任务：①完善制度；②强化督查。", "L2:保障措施。"]
+        );
+    }
+
     fn parsed(old: &str, new: &str) -> Vec<String> {
         let overlay = diff_documents(
             &DocumentModel::from_markdown(old),

@@ -46,9 +46,10 @@ pub(crate) use headings::{
 pub(crate) use parse::{
     ColumnAlign, LineAlign, LocatedBlock, MarkdownBlock, MarkdownSection, QuoteBox, QuoteLine,
     QuoteLineKind, ResearchSection, TableSpan, block_span_for_line, block_start_lines,
-    body_heading_max_level, circled_number, compact_heading_flags, flatten_quotes,
-    normalize_ordered_list_punctuation, parse_align_marker, parse_list_item, parse_markdown,
-    parse_markdown_located, parse_markdown_located_research, parse_markdown_located_with_numbering,
+    body_heading_max_level, circled_number, compact_heading_flags, flatten_quotes, indent_columns,
+    list_item_number_ranges, normalize_ordered_list_punctuation, parse_align_marker,
+    parse_indented_ordered_item, parse_list_item, parse_markdown, parse_markdown_located,
+    parse_markdown_located_research, parse_markdown_located_with_numbering,
     parse_markdown_with_lines, parse_markdown_with_lines_and_prefixes,
     parse_markdown_with_lines_with_numbering, parse_markdown_with_numbering,
     parse_numbered_table_marker, parse_ordered_item, parse_research_marker, parse_section_marker,

@@ -206,7 +206,8 @@ pub(crate) fn sections(
             MarkdownBlock::OrderedListItem { number, text } => {
                 let prefix = render_list_number(numbering.list2, *number);
                 let mut runs = super::runs::plain_runs(&prefix);
-                runs.extend(body_runs(text));
+                // 并进来的子项编号（①②）与段内列表一样，不排括号楷体。
+                runs.extend(numbered_body_runs(text, numbers(index)));
                 target(section, &mut body, &mut attachments).push(Block::Par {
                     runs: super::runs::with_cjk_latin_gaps(runs),
                     line,

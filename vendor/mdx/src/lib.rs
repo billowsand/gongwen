@@ -123,6 +123,21 @@ pub fn convert_with_progress(
     Ok(ConvertOutcome { output })
 }
 
+/// 生成研究报告 Word，正文先交宿主按自己的规则规范一遍（见
+/// `docx_research::run_with_body_normalizer`）：宿主用它让 Word 与 PDF 的普通
+/// 段落、列表出自同一套解析。
+pub fn convert_research_docx_with_body_normalizer(
+    input: &Path,
+    output: &Path,
+    normalize: impl FnOnce(&str) -> String,
+) -> Result<ConvertOutcome> {
+    input::classify(input)?;
+    docx_research::run_with_body_normalizer(input, Some(output), normalize)?;
+    Ok(ConvertOutcome {
+        output: output.to_path_buf(),
+    })
+}
+
 /// 按 CLI 既有规则计算默认输出文件名。
 pub fn default_output(input: &Path, format: OutputFormat) -> PathBuf {
     input::default_output(input, format.extension())

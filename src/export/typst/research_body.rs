@@ -5,7 +5,7 @@ use crate::export::{MarkdownBlock, parse_markdown_located_with_numbering, render
 use crate::models::NumberingConfig;
 use mdx::typst_research::{LIST_LABEL_CLOSE, LIST_LABEL_OPEN};
 
-pub(super) fn normalize(markdown: &str, numbering: &NumberingConfig) -> String {
+pub(crate) fn normalize(markdown: &str, numbering: &NumberingConfig) -> String {
     let mut output = String::new();
     let mut ordinary = String::new();
     let mut code = false;
@@ -50,6 +50,19 @@ pub(super) fn normalize(markdown: &str, numbering: &NumberingConfig) -> String {
     output
 }
 
+/// 给解析器生成的段内列表编号包上临时标记，mdx 据此排成列表编号字面。
+/// 可见字符范围由预览解析器计算，反投影回 Markdown 字节范围；从后往前插，
+/// 不改正文、粗体、引用和公式的源码。
+fn mark_labels(text: &mut String, labels: &[std::ops::Range<usize>]) {
+    let spans = crate::export::inline_char_spans(text);
+    for range in labels.iter().rev() {
+        let start = spans[range.start].0.start;
+        let end = spans[range.end - 1].0.end;
+        text.insert(end, LIST_LABEL_CLOSE);
+        text.insert(start, LIST_LABEL_OPEN);
+    }
+}
+
 fn is_caption(line: &str) -> bool {
     ["Table:", "table:", "TABLE:", "表:", "表：", ":"]
         .iter()
@@ -63,19 +76,13 @@ fn flush(ordinary: &mut String, output: &mut String, numbering: &NumberingConfig
     for located in parse_markdown_located_with_numbering(ordinary, numbering) {
         match located.block {
             MarkdownBlock::Paragraph(mut text) => {
-                // 可见字符范围由预览解析器计算，反投影回 Markdown 字节范围。
-                // 从后往前插临时标记，不改正文、粗体、引用和公式的源码。
-                let spans = crate::export::inline_char_spans(&text);
-                for range in located.generated_prefixes.iter().rev() {
-                    let start = spans[range.start].0.start;
-                    let end = spans[range.end - 1].0.end;
-                    text.insert(end, LIST_LABEL_CLOSE);
-                    text.insert(start, LIST_LABEL_OPEN);
-                }
+                mark_labels(&mut text, &located.generated_prefixes);
                 output.push_str(&text);
             }
-            MarkdownBlock::OrderedListItem { number, text } => {
+            MarkdownBlock::OrderedListItem { number, mut text } => {
                 let prefix = render_list_number(numbering.list2, number);
+                // 并进来的子项编号同段内列表一样标出来。
+                mark_labels(&mut text, &located.generated_prefixes);
                 // 写成字面编号：不可让 mdx 再解析为列表，重编号或改变成段方式。
                 output.push(LIST_LABEL_OPEN);
                 output.push_str(&prefix);
@@ -100,6 +107,20 @@ mod tests {
 
     fn unmark(source: &str) -> String {
         source.replace([LIST_LABEL_OPEN, LIST_LABEL_CLOSE], "")
+    }
+
+    #[test]
+    fn indented_children_join_the_standalone_item_with_marked_labels() {
+        let source = "1. 主要任务：\n   1. 完善制度\n   1. 强化督查\n2. 保障措施\n";
+        let normalized = normalize(source, &NumberingConfig::default());
+        assert_eq!(
+            unmark(&normalized),
+            "1.主要任务：①完善制度。②强化督查。\n\n2.保障措施。\n\n"
+        );
+        // 本项序号与两个子项编号都标成列表编号，PDF 排成西文字面。
+        let first = normalized.lines().next().unwrap();
+        assert_eq!(first.matches(LIST_LABEL_OPEN).count(), 3);
+        assert!(first.contains(&format!("{LIST_LABEL_OPEN}①{LIST_LABEL_CLOSE}")));
     }
 
     #[test]

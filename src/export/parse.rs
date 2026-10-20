@@ -14,6 +14,9 @@ use std::borrow::Cow;
 #[cfg(test)]
 mod regression_tests;
 
+#[cfg(test)]
+mod nested_list_tests;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum MarkdownBlock {
     Title(String),
@@ -22,6 +25,10 @@ pub(crate) enum MarkdownBlock {
     /// 独立列表的一项。源码写 `1. 内容` 或 `- 内容` 都归到这里——公文不分有序
     /// 无序（见 `parse_list_item`）。`number` 是按同一组连续列表自动计算后的
     /// 显示序号，样式取设置里的有序列表编号。
+    ///
+    /// 这一项下面缩进写的列表行是它的子项：不另起段，按段内列表的编号样式
+    /// 接在 `text` 后面（`主要任务：①甲；②乙。`），子项编号占的字符范围记在
+    /// [`LocatedBlock::generated_prefixes`] 里，相对 `text` 计，不含本项的序号。
     OrderedListItem {
         number: usize,
         text: String,
@@ -270,7 +277,8 @@ pub(crate) struct LocatedBlock {
     pub(crate) range: std::ops::Range<usize>,
     /// 段落中每一条物理源码行在最终可见文本里占用的字符范围。
     pub(crate) source_segments: Vec<RenderedSourceSegment>,
-    /// 段内列表（一级列表）自动编号在可见文本里占用的字符范围。编号是程序
+    /// 段内列表自动编号在可见文本里占用的字符范围（段落里的段内列表，或独立
+    /// 列表项里并进来的子项；后者不含独立列表项自己的序号）。编号是程序
     /// 生成的版式，不是正文：视觉 diff 比较与序列化时都要剥掉，由导出器按
     /// 设置重新生成（见 `visual_diff`）。
     pub(crate) generated_prefixes: Vec<std::ops::Range<usize>>,
@@ -305,7 +313,7 @@ pub(crate) fn parse_markdown(markdown: &str) -> Vec<MarkdownBlock> {
     parse_markdown_with_numbering(markdown, &NumberingConfig::default())
 }
 
-/// 与 [`parse_markdown`] 相同，另按设置生成段内列表（一级列表）的编号样式。
+/// 与 [`parse_markdown`] 相同，另按设置生成段内列表的编号样式。
 pub(crate) fn parse_markdown_with_numbering(
     markdown: &str,
     numbering: &NumberingConfig,
@@ -324,7 +332,7 @@ pub(crate) fn parse_markdown_with_lines(markdown: &str) -> (Vec<MarkdownBlock>, 
     parse_markdown_with_lines_with_numbering(markdown, &NumberingConfig::default())
 }
 
-/// 与 [`parse_markdown_with_lines`] 相同，另按设置生成段内列表（一级列表）的编号样式。
+/// 与 [`parse_markdown_with_lines`] 相同，另按设置生成段内列表的编号样式。
 pub(crate) fn parse_markdown_with_lines_with_numbering(
     markdown: &str,
     numbering: &NumberingConfig,
@@ -488,7 +496,7 @@ pub(crate) fn parse_markdown_located(markdown: &str) -> Vec<LocatedBlock> {
     parse_markdown_located_with_numbering(markdown, &NumberingConfig::default())
 }
 
-/// 与 [`parse_markdown_located`] 相同，另按设置生成段内列表（一级列表）的编号样式。
+/// 与 [`parse_markdown_located`] 相同，另按设置生成段内列表的编号样式。
 pub(crate) fn parse_markdown_located_with_numbering(
     markdown: &str,
     numbering: &NumberingConfig,
@@ -817,26 +825,33 @@ fn parse_located(
             // `- ` 与 `1. ` 归在同一组，混着写也只编一串号。
             let start_number = start_number.unwrap_or(1);
             let mut group_end = span.end;
+            // (源码范围, 缩进列数, 显式序号, 内容)
             let mut items = Vec::new();
             while index < lines.len() {
                 let item = &lines[index];
-                let Some((_, text)) = parse_list_item(item.text.trim()) else {
+                let Some((number, text)) = parse_list_item(item.text.trim()) else {
                     break;
                 };
-                items.push((item.start..item.start + item.len, text.to_string()));
+                items.push((
+                    item.start..item.start + item.len,
+                    indent_columns(&item.text),
+                    number,
+                    text.to_string(),
+                ));
                 group_end = item.start + item.len;
                 index += 1;
             }
-            let normalized = normalize_ordered_item_punctuation(
-                &items
-                    .iter()
-                    .map(|(_, text)| text.clone())
-                    .collect::<Vec<_>>(),
-            );
             if !paragraph.is_empty() {
                 // 正文之后没有空行：源码仍逐项换行，成文时把它们接回同一自然段，
-                // 使用圈号且不额外插入空格。
-                for (offset, ((source, _), text)) in items.into_iter().zip(normalized).enumerate() {
+                // 使用圈号且不额外插入空格。段内列表不分父子，缩进一律拉平。
+                let normalized = normalize_ordered_item_punctuation(
+                    &items
+                        .iter()
+                        .map(|(_, _, _, text)| text.clone())
+                        .collect::<Vec<_>>(),
+                );
+                let items = items.into_iter().map(|(source, _, _, text)| (source, text));
+                for (offset, ((source, _), text)) in items.zip(normalized).enumerate() {
                     let number = render_list_number(numbering.list1, start_number + offset);
                     paragraph.push(ParagraphPart {
                         prefix_chars: number.chars().count(),
@@ -847,15 +862,64 @@ fn parse_located(
                 }
                 paragraph_range.end = group_end;
             } else {
-                for (offset, ((source, _), text)) in items.into_iter().zip(normalized).enumerate() {
+                // 独立列表：每项单独成段。缩进写在某一项下面的列表行是它的子项，
+                // 不另起段，按段内列表的编号接在父项后面（见 `nest_list_items`）。
+                let nested = nest_list_items(
+                    items
+                        .into_iter()
+                        .map(|(source, indent, number, text)| (indent, (source, number, text)))
+                        .collect(),
+                );
+                let normalized = normalize_nested_item_punctuation(
+                    &nested
+                        .iter()
+                        .map(|item| NestedItem {
+                            head: item.head.2.clone(),
+                            children: item.children.iter().map(|child| child.2.clone()).collect(),
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                for (offset, (item, texts)) in nested.into_iter().zip(normalized).enumerate() {
+                    let number = start_number + offset;
+                    let head_source = item.head.0;
+                    if item.children.is_empty() {
+                        blocks.push(LocatedBlock {
+                            block: MarkdownBlock::OrderedListItem {
+                                number,
+                                text: texts.head,
+                            },
+                            range: head_source,
+                            source_segments: Vec::new(),
+                            generated_prefixes: Vec::new(),
+                        });
+                        continue;
+                    }
+                    // 子项从组首子项写的序号起编，与段内列表一样只认首项。
+                    let child_start = item.children[0].1.unwrap_or(1);
+                    let range_end = item.children.last().map_or(head_source.end, |c| c.0.end);
+                    let mut parts = vec![ParagraphPart {
+                        source: head_source.clone(),
+                        text: texts.head,
+                        join: ParagraphJoin::Soft,
+                        prefix_chars: 0,
+                    }];
+                    for (child_offset, (child, text)) in
+                        item.children.into_iter().zip(texts.children).enumerate()
+                    {
+                        let label = render_list_number(numbering.list1, child_start + child_offset);
+                        parts.push(ParagraphPart {
+                            prefix_chars: label.chars().count(),
+                            source: child.0,
+                            text: format!("{label}{text}"),
+                            join: ParagraphJoin::Direct,
+                        });
+                    }
+                    let (text, _, generated_prefixes) = mapped_paragraph(&parts);
                     blocks.push(LocatedBlock {
-                        block: MarkdownBlock::OrderedListItem {
-                            number: start_number + offset,
-                            text,
-                        },
-                        range: source,
+                        block: MarkdownBlock::OrderedListItem { number, text },
+                        range: head_source.start..range_end,
                         source_segments: Vec::new(),
-                        generated_prefixes: Vec::new(),
+                        generated_prefixes,
                     });
                 }
             }
@@ -893,6 +957,129 @@ pub(crate) fn parse_list_item(line: &str) -> Option<(Option<usize>, &str)> {
         .strip_prefix("- ")
         .or_else(|| line.strip_prefix("* "))?;
     Some((None, text.trim()))
+}
+
+/// 独立列表项排成 `序号 + text` 之后，所有编号占的可见字符范围：开头本项的
+/// 序号（`prefix_chars` 个字符），加上 `text` 里并进来的子项编号（`generated`，
+/// 相对 `text` 计，见 [`LocatedBlock::generated_prefixes`]）往后挪过序号的长度。
+pub(crate) fn list_item_number_ranges(
+    prefix_chars: usize,
+    generated: &[std::ops::Range<usize>],
+) -> Vec<std::ops::Range<usize>> {
+    std::iter::once(0..prefix_chars)
+        .chain(
+            generated
+                .iter()
+                .map(|range| range.start + prefix_chars..range.end + prefix_chars),
+        )
+        .collect()
+}
+
+/// 子项比所在列表组的首项至少多缩进的列数。
+const LIST_CHILD_INDENT: usize = 2;
+
+/// 行首缩进的列数：空格记一列，制表符记四列。
+pub(crate) fn indent_columns(raw: &str) -> usize {
+    raw.chars()
+        .take_while(|ch| matches!(ch, ' ' | '\t'))
+        .map(|ch| if ch == '\t' { 4 } else { 1 })
+        .sum()
+}
+
+/// 独立列表的一项：父项本身与紧跟在它下面、缩进更深的子项。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NestedItem<T> {
+    pub(crate) head: T,
+    pub(crate) children: Vec<T>,
+}
+
+/// 按缩进把一组连续的列表行分成父项与子项。
+///
+/// 只分两级：以组内首项的缩进为基准，缩进比它多 [`LIST_CHILD_INDENT`] 列及以上、
+/// 且前面已经有父项的行，归到最近的父项下当子项；子项里再缩进也不再往下分。
+/// 其余的行都是父项。输入是 `(缩进列数, 内容)`。
+pub(crate) fn nest_list_items<T>(items: Vec<(usize, T)>) -> Vec<NestedItem<T>> {
+    let base = items.first().map_or(0, |(indent, _)| *indent);
+    let mut nested: Vec<NestedItem<T>> = Vec::new();
+    for (indent, item) in items {
+        match nested.last_mut() {
+            Some(parent) if indent >= base + LIST_CHILD_INDENT => parent.children.push(item),
+            _ => nested.push(NestedItem {
+                head: item,
+                children: Vec::new(),
+            }),
+        }
+    }
+    nested
+}
+
+/// 独立列表带子项时的末尾标点。
+///
+/// - 父项按组统一（规则同 [`normalize_ordered_item_punctuation`]），带子项的父项
+///   以它最后一个子项的末尾标点参与判定；
+/// - 带子项的父项本身原样保留，引出子项的冒号不动；
+/// - 每个父项的子项另成一组统一，最后一个子项落父项那一级的标点；父项那一级
+///   落分号时，子项中间也统一成分号。
+pub(crate) fn normalize_nested_item_punctuation(
+    items: &[NestedItem<String>],
+) -> Vec<NestedItem<String>> {
+    let tails = items
+        .iter()
+        .map(|item| item.children.last().unwrap_or(&item.head).clone())
+        .collect::<Vec<_>>();
+    let tails = normalize_ordered_item_punctuation(&tails);
+    items
+        .iter()
+        .zip(tails)
+        .map(|(item, tail)| {
+            if item.children.is_empty() {
+                return NestedItem {
+                    head: tail,
+                    children: Vec::new(),
+                };
+            }
+            let mut children = normalize_ordered_item_punctuation(&item.children);
+            // 这一项落分号时，子项中间也用分号：「甲：①子一；②子二；」，
+            // 不出现「①子一。②子二；」这样句中断成句号的样子。
+            if tail.ends_with('；') {
+                let count = children.len();
+                for child in children.iter_mut().take(count.saturating_sub(1)) {
+                    if let Some(body) = child.strip_suffix('。') {
+                        *child = format!("{body}；");
+                    }
+                }
+            }
+            if let Some(last) = children.last_mut() {
+                *last = tail;
+            }
+            NestedItem {
+                head: item.head.clone(),
+                children,
+            }
+        })
+        .collect()
+}
+
+/// 任意缩进的有序列表行：返回 `(缩进字节数, 序号, 内容)`。
+///
+/// 与 [`parse_ordered_item`] 同一个写法，只是不限行首空白：独立列表的子项
+/// 可以缩进四格甚至更多，源码层面的续写、重排与标点规范都要认得它。
+pub(crate) fn parse_indented_ordered_item(line: &str) -> Option<(usize, usize, &str)> {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let (number, text) = parse_ordered_item(&line[indent..])?;
+    Some((indent, number, text))
+}
+
+/// 一组列表行是否紧贴在一段正文后面（中间没有空行）：那样的列表并进上一段
+/// 成为段内列表，不分父子。`previous` 是组首项的上一行；判定口径与
+/// `parse_located` 一致——标题、表格、图片、HTML 注释、引用块之后都不算正文。
+fn list_follows_paragraph(previous: Option<&str>) -> bool {
+    let Some(previous) = previous.map(str::trim) else {
+        return false;
+    };
+    !previous.is_empty()
+        && !previous.starts_with(['#', '|', '<', '>', '!', '$', '`'])
+        && parse_list_item(previous).is_none()
 }
 
 /// 标准 Markdown 有序列表项：允许行首最多三个空格，点号后必须有空白。
@@ -999,44 +1186,111 @@ pub(crate) fn circled_number(number: usize) -> String {
         .unwrap_or_else(|| format!("({number})"))
 }
 
-/// 把 Markdown 源码中的每组连续有序列表就地规范成同一种末尾标点风格。
-/// 仅重写列表项正文，保留用户写下的序号、缩进、空行与换行结尾。
-pub(crate) fn normalize_ordered_list_punctuation(markdown: &str) -> String {
-    let lines = markdown.split('\n').collect::<Vec<_>>();
-    let mut output = Vec::with_capacity(lines.len());
+/// 源码里一组连续的有序列表行（任意缩进）：每行的行号、缩进字节数、序号与内容。
+struct SourceOrderedLine<'a> {
+    line: usize,
+    indent: usize,
+    number: usize,
+    content: &'a str,
+}
+
+/// 按行切开的源码里，每组连续有序列表行，连同这一组是否紧贴在正文后面
+/// （段内列表不分父子，见 [`list_follows_paragraph`]）。
+fn source_ordered_groups<'a>(lines: &[&'a str]) -> Vec<(bool, Vec<SourceOrderedLine<'a>>)> {
+    let strip = |line: &'a str| line.strip_suffix('\r').unwrap_or(line);
+    let mut groups = Vec::new();
     let mut index = 0usize;
     while index < lines.len() {
-        let raw = lines[index].strip_suffix('\r').unwrap_or(lines[index]);
-        if parse_ordered_item(raw.trim_end()).is_none() {
-            output.push(lines[index].to_string());
+        let first = index;
+        let mut group = Vec::new();
+        while index < lines.len() {
+            let Some((indent, number, content)) =
+                parse_indented_ordered_item(strip(lines[index]).trim_end())
+            else {
+                break;
+            };
+            group.push(SourceOrderedLine {
+                line: index,
+                indent,
+                number,
+                content,
+            });
+            index += 1;
+        }
+        if group.is_empty() {
             index += 1;
             continue;
         }
+        let previous = first.checked_sub(1).map(|line| strip(lines[line]));
+        groups.push((list_follows_paragraph(previous), group));
+    }
+    groups
+}
 
-        let first = index;
-        let mut contents = Vec::new();
-        let mut prefixes = Vec::new();
-        let mut crlf = Vec::new();
-        while index < lines.len() {
-            let raw = lines[index].strip_suffix('\r').unwrap_or(lines[index]);
-            let Some((_, content)) = parse_ordered_item(raw.trim_end()) else {
-                break;
-            };
-            let content_start = content.as_ptr() as usize - raw.as_ptr() as usize;
-            prefixes.push(raw[..content_start].to_string());
-            contents.push(content.to_string());
-            crlf.push(lines[index].ends_with('\r'));
-            index += 1;
+/// 一组列表行按缩进分出父子（见 [`nest_list_items`]），返回每个父项的行
+/// 与它的子项行在组里的下标。
+fn nested_line_indices(lines: &[&str], group: &[SourceOrderedLine]) -> Vec<NestedItem<usize>> {
+    nest_list_items(
+        group
+            .iter()
+            .enumerate()
+            .map(|(position, item)| {
+                let raw = lines[item.line]
+                    .strip_suffix('\r')
+                    .unwrap_or(lines[item.line]);
+                (indent_columns(raw), position)
+            })
+            .collect(),
+    )
+}
+
+/// 把 Markdown 源码中的每组连续有序列表就地规范成同一种末尾标点风格。
+/// 仅重写列表项正文，保留用户写下的序号、缩进、空行与换行结尾。
+///
+/// 独立列表里缩进写的子项与解析器同一个口径（见 [`normalize_nested_item_punctuation`]）：
+/// 父项的冒号保留，子项另成一组；紧贴正文的段内列表不分父子，整组统一。
+pub(crate) fn normalize_ordered_list_punctuation(markdown: &str) -> String {
+    let lines = markdown.split('\n').collect::<Vec<_>>();
+    let mut output = lines
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    for (inline, group) in source_ordered_groups(&lines) {
+        let contents = group
+            .iter()
+            .map(|item| item.content.to_string())
+            .collect::<Vec<_>>();
+        let normalized = if inline {
+            normalize_ordered_item_punctuation(&contents)
+        } else {
+            let nested = nested_line_indices(&lines, &group);
+            let texts = nested
+                .iter()
+                .map(|item| NestedItem {
+                    head: contents[item.head].clone(),
+                    children: item.children.iter().map(|&c| contents[c].clone()).collect(),
+                })
+                .collect::<Vec<_>>();
+            let mut normalized = vec![String::new(); contents.len()];
+            for (item, texts) in nested.iter().zip(normalize_nested_item_punctuation(&texts)) {
+                normalized[item.head] = texts.head;
+                for (&child, text) in item.children.iter().zip(texts.children) {
+                    normalized[child] = text;
+                }
+            }
+            normalized
+        };
+        for (item, text) in group.iter().zip(normalized) {
+            let raw = lines[item.line];
+            let crlf = raw.ends_with('\r');
+            let raw = raw.strip_suffix('\r').unwrap_or(raw);
+            let content_start = item.content.as_ptr() as usize - raw.as_ptr() as usize;
+            output[item.line] = format!(
+                "{}{text}{}",
+                &raw[..content_start],
+                if crlf { "\r" } else { "" }
+            );
         }
-        let normalized = normalize_ordered_item_punctuation(&contents);
-        for offset in 0..normalized.len() {
-            let suffix = if crlf[offset] { "\r" } else { "" };
-            output.push(format!(
-                "{}{}{suffix}",
-                prefixes[offset], normalized[offset]
-            ));
-        }
-        debug_assert_eq!(output.len(), index, "group beginning at line {first}");
     }
     output.join("\n")
 }
@@ -1045,41 +1299,48 @@ pub(crate) fn normalize_ordered_list_punctuation(markdown: &str) -> String {
 ///
 /// 组首的序号原样保留——源码里第一项写几，整组就从几开始编，
 /// 见 `first_source_number_controls_automatic_numbering`。缩进、`. ` 分隔符与
-/// 内容也原样保留，只重写数字那几个字符。
+/// 内容也原样保留，只重写数字那几个字符。独立列表里缩进写的子项各按父项
+/// 另编一串，从该父项下第一个子项写的序号起编。
 ///
 /// 排版结果本来就会自动编号，源码写成一串 `1.` 也能导出对的文件；但源码是**给人
 /// 看、给人改的**，一列全是 `1.` 时挪动、删除某一项完全看不出位置，所以工具栏
 /// 生成列表时按实际序号写。
 pub(crate) fn renumber_ordered_groups(markdown: &str) -> String {
     let lines = markdown.split('\n').collect::<Vec<_>>();
-    let mut output = Vec::with_capacity(lines.len());
-    let mut index = 0usize;
-    while index < lines.len() {
-        let raw = lines[index].strip_suffix('\r').unwrap_or(lines[index]);
-        let Some((first_number, _)) = parse_ordered_item(raw.trim_end()) else {
-            output.push(lines[index].to_string());
-            index += 1;
-            continue;
-        };
-        let mut expected = first_number;
-        while index < lines.len() {
-            let line = lines[index];
-            let raw = line.strip_suffix('\r').unwrap_or(line);
-            if parse_ordered_item(raw.trim_end()).is_none() {
-                break;
+    let mut output = lines
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    for (inline, group) in source_ordered_groups(&lines) {
+        let mut numbers = vec![0usize; group.len()];
+        if inline {
+            for (offset, number) in numbers.iter_mut().enumerate() {
+                *number = group[0].number + offset;
             }
-            let indent = raw.len() - raw.trim_start_matches(' ').len();
-            let digits = raw[indent..].bytes().take_while(u8::is_ascii_digit).count();
-            let mut rewritten = String::with_capacity(line.len() + 1);
-            rewritten.push_str(&raw[..indent]);
-            rewritten.push_str(&expected.to_string());
-            rewritten.push_str(&raw[indent + digits..]);
-            if line.ends_with('\r') {
-                rewritten.push('\r');
+        } else {
+            let nested = nested_line_indices(&lines, &group);
+            let first = group[nested[0].head].number;
+            for (offset, item) in nested.iter().enumerate() {
+                numbers[item.head] = first + offset;
+                if let Some(&first_child) = item.children.first() {
+                    let start = group[first_child].number;
+                    for (child_offset, &child) in item.children.iter().enumerate() {
+                        numbers[child] = start + child_offset;
+                    }
+                }
             }
-            output.push(rewritten);
-            expected += 1;
-            index += 1;
+        }
+        for (item, number) in group.iter().zip(numbers) {
+            let line = lines[item.line];
+            let digits = line[item.indent..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            output[item.line] = format!(
+                "{}{number}{}",
+                &line[..item.indent],
+                &line[item.indent + digits..]
+            );
         }
     }
     output.join("\n")

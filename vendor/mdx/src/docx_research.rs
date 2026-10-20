@@ -34,6 +34,7 @@ use crate::common::numbering::{int_to_roman, number_to_uppercase_letter};
 use crate::common::table::{span_at, TableSpan};
 use crate::common::table_layout::{analyze_table, cell_alignment, to_docx_grid, ColumnAlignment};
 use crate::parser;
+use crate::typst_research::{LIST_LABEL_CLOSE, LIST_LABEL_OPEN};
 
 // ===== 字体（与 LaTeX md2tex.cls 一致；用户须装相应字体，否则 Word 端字体回退） =====
 const FONT_TITLE: &str = "FZXiaoBiaoSong-B05"; // 方正小标宋简体
@@ -101,10 +102,22 @@ fn font_set(name: &str) -> RunFonts {
 
 /// 入口：研究报告 docx 转换。
 pub fn run(input: &Path, output: Option<&Path>) -> Result<()> {
+    run_with_body_normalizer(input, output, str::to_owned)
+}
+
+/// 同 [`run`]，另由宿主先把正文（frontmatter 之后）按自己的规则规范一遍，与
+/// [`crate::typst_research::build_with_body_normalizer`] 同一个钩子：Word 与 PDF
+/// 的普通段落、列表因此出自同一套解析。宿主写进正文的列表编号用
+/// [`LIST_LABEL_OPEN`] / [`LIST_LABEL_CLOSE`] 包着，这里按普通文字排。
+pub fn run_with_body_normalizer(
+    input: &Path,
+    output: Option<&Path>,
+    normalize: impl FnOnce(&str) -> String,
+) -> Result<()> {
     let input_kind = crate::input::classify(input)?;
     let raw = crate::input::collect_raw(input)?;
     let (metadata, content) = front_matter::parse(&raw);
-    let content = crate::input::strip_horizontal_rules(&content);
+    let content = crate::input::strip_horizontal_rules(&normalize(&content));
     let output_path = output
         .map(Path::to_path_buf)
         .unwrap_or_else(|| crate::input::default_output(input, "docx"));
@@ -1652,6 +1665,8 @@ fn add_inlines_with(
             continue;
         }
         let (text, bold, italic) = inline_run_style(ip);
+        // 宿主标出的列表编号（见 `run_with_body_normalizer`）在 Word 里就是普通文字。
+        let text = text.replace([LIST_LABEL_OPEN, LIST_LABEL_CLOSE], "");
         let mut run = Run::new().add_text(&text).size(size);
         // 斜体在中文里用楷体表达（与 LaTeX `ItalicFont={FZKai-Z03}` 一致）
         if italic {

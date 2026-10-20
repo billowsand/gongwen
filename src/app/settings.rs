@@ -983,7 +983,7 @@ impl GongwenApp {
         }
     }
 
-    /// 标题与列表编号：各级标题与一、二级列表分别选择编号样式。
+    /// 标题与列表编号：各级标题、段内列表与独立列表分别选择编号样式。
     ///
     /// 选择立即写入配置并在保存时生效；预览与导出的 PDF、Word 共用同一套选择，
     /// 保证所见即所得。
@@ -1027,14 +1027,10 @@ impl GongwenApp {
         for (key, label, style) in [
             (
                 "list1",
-                "一级列表（段内）",
+                "段内列表（含独立列表的子项）",
                 &mut self.config.numbering.list1,
             ),
-            (
-                "list2",
-                "二级列表（独立）",
-                &mut self.config.numbering.list2,
-            ),
+            ("list2", "独立列表", &mut self.config.numbering.list2),
         ] {
             setting_row(ui, label, None, |ui| {
                 egui::ComboBox::from_id_salt(format!("list_numbering_{key}"))

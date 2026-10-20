@@ -899,7 +899,10 @@ pub(crate) fn red_build_print_layout(
                 let mut segments = red_flow_segments(
                     &format!("{prefix}{text}"),
                     RedTextStyle::List,
-                    std::slice::from_ref(&(0..prefix.chars().count())),
+                    &export::list_item_number_ranges(
+                        prefix.chars().count(),
+                        &located.generated_prefixes,
+                    ),
                 );
                 if let Some(first) = segments.first_mut() {
                     first.text = format!("{}{}", indent(INDENT_CHARS), first.text);

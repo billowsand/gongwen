@@ -470,8 +470,9 @@ impl HeadingNumbering {
     }
 }
 
-/// 列表项的编号样式。一级列表对应「段内有序列表」（圈号），二级列表对应
-/// 「独立有序列表」（数字），二者可分别配置。
+/// 列表项的编号样式。`list1` 对应段内列表（圈号；独立列表项下缩进写的子项也
+/// 并成段内列表，用同一种编号），`list2` 对应独立列表（数字），二者可分别配置。
+/// 字段名里的一、二是历史命名，不是嵌套层级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ListNumbering {
@@ -517,9 +518,9 @@ pub struct NumberingConfig {
     pub heading3: HeadingNumbering,
     /// 四级标题（`#####`）。
     pub heading4: HeadingNumbering,
-    /// 一级列表（段内有序列表）编号样式。
+    /// 段内列表编号样式；独立列表项下缩进写的子项也用它。
     pub list1: ListNumbering,
-    /// 二级列表（独立有序列表）编号样式。
+    /// 独立列表编号样式。
     pub list2: ListNumbering,
     /// 序号表（表前一行 `<!-- [序号表] -->`）里分组行的编号样式。
     pub table_group: HeadingNumbering,
