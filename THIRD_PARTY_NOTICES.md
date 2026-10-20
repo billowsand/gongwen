@@ -30,6 +30,18 @@ executable; the upstream notice is preserved at `vendor/mdx/LICENSE`.
 - Project: <https://github.com/billowsand/mdx>
 - Version: `mdx@2.16.3`
 
+## anydoc
+
+Imported documents (Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, CSV and
+text-layer PDF) are converted to Markdown by anydoc, distributed under the MIT
+License. A source copy is vendored in `vendor/anydoc` with a documented patch
+(the document-model Markdown renderer is made public so embedded images can be
+stored before rendering, see the README there); the upstream license text is
+preserved at `vendor/anydoc/LICENSE`.
+
+- Project: <https://github.com/firecrawl/anydoc>
+- Version: `anydoc@0.2.4`
+
 ## latex-rust and STIX Two Math
 
 Math formulas in research reports are rendered in-process by the

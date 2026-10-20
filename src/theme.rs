@@ -33,9 +33,10 @@ pub(crate) use fonts::{
     preview_uses_dedicated_bold, research_family,
 };
 #[cfg(test)]
-pub(crate) use fonts::{
-    FONT_RESEARCH_BIAOSONG, FONT_RESEARCH_KAI, FONT_RESEARCH_SONG, line_gap_offset_factor,
-};
+pub(crate) use fonts::{FONT_RESEARCH_BIAOSONG, FONT_RESEARCH_KAI, FONT_RESEARCH_SONG};
+// 只有 macOS 的冬青黑体测试用它；其它平台导出就成了未使用的 import。
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use fonts::line_gap_offset_factor;
 pub(crate) use icons::{
     Icon, app_icon, apply_app_icon, brand_image, chrome_radius, configure_icons, is_mdex,
     primary_shortcut,

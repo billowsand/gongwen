@@ -16,7 +16,8 @@
   XLSX（`rust_xlsxwriter`）、稿件库与词表用 `rusqlite`。研究报告支持 LaTeX 写法的数学
   公式（`$...$` / `$$...$$`）：预览与导出都用 `latex-rust` 进程内排版（vendor 在
   `vendor/latex-rust/`，加了中文字形回退与数组行距 / 数学轴居中补丁；导出出 SVG 嵌进 PDF）。
-- 中文处理：`jieba-rs`（含用户词典）、`pinyin`；文档读取用 `anydoc`。
+- 中文处理：`jieba-rs`（含用户词典）、`pinyin`；文档读取用 `anydoc`（vendor 在 `vendor/anydoc/`，
+  补丁公开了文档模型的渲染函数，起草页导入据此把内嵌图片入库，见 `src/doc_import/embedded.rs`）。
 - 输入法：应用内词表输入法，按完整编码查询基础表与公文四码表，不使用拼音、
   整句模型、自动调频或独立进程。代码在 `src/ime/`，设计与交接见 `docs/table-ime.md`。
   - 初始基础表：Windows / Linux 优先本机 `assets/fuma/quan.txt`，macOS 优先
