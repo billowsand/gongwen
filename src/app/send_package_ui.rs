@@ -1599,7 +1599,14 @@ impl GongwenApp {
                             panel.reload(store);
                         }
                         // 应用内的 PDF 标签自带打印、系统打开与定位。
-                        self.open_pdf(outcome.path, Some(format!("{title}（送批材料）")));
+                        self.open_pdf_with_hints(
+                            outcome.path,
+                            Some(format!("{title}（送批材料）")),
+                            crate::print::PrintHints {
+                                duplex_typeset: false,
+                                send_package: true,
+                            },
+                        );
                     }
                     Err(error) => {
                         self.status = format!("送批材料导出失败，没有生成文件：{error}");

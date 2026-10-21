@@ -352,7 +352,10 @@ impl DraftPage<'_> {
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
         {
-            self.actions.push(DraftAction::OpenPdf(path.clone()));
+            self.actions.push(DraftAction::OpenPdf {
+                path: path.clone(),
+                duplex_typeset: self.doc.draft.profile.duplex_printing,
+            });
             *self.status = format!(
                 "已在应用内打开 {}。",
                 path.file_name()

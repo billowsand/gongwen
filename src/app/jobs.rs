@@ -96,6 +96,11 @@ pub(crate) enum WorkerResult {
         name: String,
         state: crate::print::PrinterState,
     },
+    /// 打印对话框打开时从 PDF 自身测得的版式事实。读不出来是 `None`。
+    PdfInspected {
+        dialog: u64,
+        facts: Option<crate::print::PdfFacts>,
+    },
     /// 打印对话框里某台打印机的能力（双面、颜色、纸张、纸盒）。
     PrinterCapsChecked {
         dialog: u64,
@@ -546,6 +551,9 @@ impl GongwenApp {
                 } => self.apply_printer_state(dialog, &name, state),
                 WorkerResult::PrinterCapsChecked { dialog, name, caps } => {
                     self.apply_printer_caps(dialog, &name, caps)
+                }
+                WorkerResult::PdfInspected { dialog, facts } => {
+                    self.apply_pdf_inspected(dialog, facts)
                 }
                 WorkerResult::PdfPrinted {
                     path,

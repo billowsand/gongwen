@@ -16,6 +16,7 @@
 #[cfg(unix)]
 mod cups;
 mod dialog;
+mod inspect;
 mod pages;
 mod raster;
 #[cfg(windows)]
@@ -23,6 +24,7 @@ mod raster;
 mod win;
 
 pub(crate) use dialog::{DialogOutcome, PrintDialog};
+pub(crate) use inspect::{PdfFacts, inspect_pdf};
 pub(crate) use pages::PageSpan;
 
 use serde::{Deserialize, Serialize};
@@ -81,6 +83,15 @@ pub(crate) struct PrinterCaps {
     pub(crate) default_tray: Option<String>,
 }
 
+/// 调用方知道的、与打印有关的版式事实。打开归档扫描件时两项都是 false。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PrintHints {
+    /// 稿件按双面排了页码（模板 `profile.duplex_printing`，奇右偶左）。
+    pub(crate) duplex_typeset: bool,
+    /// 送批材料合并件：每件从奇数页起排。
+    pub(crate) send_package: bool,
+}
+
 /// 打开打印对话框所需的信息，由 PDF 查看器给出。
 #[derive(Debug, Clone)]
 pub(crate) struct PrintRequest {
@@ -91,6 +102,7 @@ pub(crate) struct PrintRequest {
     pub(crate) page_count: usize,
     /// 正在看的页（从 0 起）。
     pub(crate) current_page: usize,
+    pub(crate) hints: PrintHints,
 }
 
 /// 一台打印机。
@@ -168,6 +180,68 @@ pub(crate) enum PrintOutcome {
     Printed,
     /// 用户在系统打印对话框里点了取消。不是错误，不该报红。
     Cancelled,
+}
+
+/// 按稿件与打印机能力决定双面的默认值。只在用户没动过双面时用：
+/// 送批材料与按双面排的稿件默认长边，整份横排默认短边（装订边才对得上）。
+pub(crate) fn default_duplex(
+    hints: PrintHints,
+    facts: Option<PdfFacts>,
+    caps: &PrinterCaps,
+) -> Option<Duplex> {
+    if !caps.duplex || !(hints.send_package || hints.duplex_typeset) {
+        return None;
+    }
+    let all_rotated = facts.is_some_and(|facts| facts.all_rotated);
+    Some(if all_rotated {
+        Duplex::ShortEdge
+    } else {
+        Duplex::LongEdge
+    })
+}
+
+/// 公文场景的提醒。都只是提醒，不拦打印。
+pub(crate) fn print_warnings(
+    hints: PrintHints,
+    facts: Option<PdfFacts>,
+    caps: &PrinterCaps,
+    job: &PrintJob,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let single_sided = job.duplex == Some(Duplex::Simplex);
+    if single_sided && hints.duplex_typeset {
+        warnings.push("页码按双面排（奇右偶左），单面打印页码会左右交替。".to_string());
+    }
+    if single_sided && hints.send_package {
+        warnings.push("送批材料每件从奇数页起排，单面打印会多出空白页。".to_string());
+    }
+    let all_rotated = facts.is_some_and(|facts| facts.all_rotated);
+    if all_rotated && job.duplex == Some(Duplex::LongEdge) {
+        warnings.push("整份横排，双面建议选短边翻转，装订边才对得上。".to_string());
+    }
+    let has_red = facts.is_some_and(|facts| facts.has_red);
+    if has_red && (job.color == Some(ColorMode::Mono) || !caps.color) {
+        warnings.push("版面有红色（版头或印章），黑白打印会印成灰色。".to_string());
+    }
+    if job.scaling == Scaling::Actual
+        && let Some(paper) = &job.paper
+        && !paper_is_a4(paper, caps)
+    {
+        warnings.push("所选纸张不是 A4，公文按 A4 排版，建议改为「适合纸张」。".to_string());
+    }
+    warnings
+}
+
+/// 纸张编号或它在能力列表里的名字里带「A4」就算 A4（各驱动的编号体系不同，
+/// Windows 的 `DMPAPER_A4` 是 9，CUPS 的 id 就是 A4 字样）。
+fn paper_is_a4(paper: &str, caps: &PrinterCaps) -> bool {
+    let label = caps
+        .papers
+        .iter()
+        .find(|option| option.id == paper)
+        .map(|option| option.label.as_str())
+        .unwrap_or(paper);
+    paper.to_ascii_uppercase().contains("A4") || label.to_ascii_uppercase().contains("A4")
 }
 
 /// 本机是否具备打印能力。不具备时界面把「打印」按钮置灰，并引导改用
@@ -319,6 +393,178 @@ fn windows_status(status: u32, work_offline: bool) -> PrinterState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn caps(duplex: bool, color: bool) -> PrinterCaps {
+        PrinterCaps {
+            duplex,
+            color,
+            papers: vec![MediaOption {
+                id: "9".to_string(),
+                label: "A4".to_string(),
+            }],
+            default_paper: Some("9".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn a4_job() -> PrintJob {
+        PrintJob {
+            path: PathBuf::from("/tmp/a.pdf"),
+            title: "测试".to_string(),
+            printer: None,
+            copies: 1,
+            collate: false,
+            pages: None,
+            duplex: Some(Duplex::Simplex),
+            color: None,
+            paper: None,
+            tray: None,
+            scaling: Scaling::Actual,
+        }
+    }
+
+    #[test]
+    fn duplex_defaults_when_the_document_is_typeset_for_double_sided() {
+        let hints = PrintHints {
+            duplex_typeset: true,
+            send_package: false,
+        };
+        assert_eq!(
+            default_duplex(hints, None, &caps(true, true)),
+            Some(Duplex::LongEdge)
+        );
+        let hints = PrintHints {
+            duplex_typeset: false,
+            send_package: true,
+        };
+        assert_eq!(
+            default_duplex(hints, None, &caps(true, true)),
+            Some(Duplex::LongEdge)
+        );
+        // 整份横排：短边翻转装订边才对得上。
+        let facts = PdfFacts {
+            all_rotated: true,
+            has_red: false,
+        };
+        assert_eq!(
+            default_duplex(hints, Some(facts), &caps(true, true)),
+            Some(Duplex::ShortEdge)
+        );
+        // 没有双面单元、或文档没按双面排：不设默认。
+        assert_eq!(default_duplex(hints, None, &caps(false, true)), None);
+        assert_eq!(
+            default_duplex(PrintHints::default(), None, &caps(true, true)),
+            None
+        );
+    }
+
+    #[test]
+    fn typeset_for_double_sided_but_printing_single_sided_warns() {
+        let hints = PrintHints {
+            duplex_typeset: true,
+            send_package: false,
+        };
+        let warnings = print_warnings(hints, None, &caps(true, true), &a4_job());
+        assert_eq!(
+            warnings,
+            ["页码按双面排（奇右偶左），单面打印页码会左右交替。"]
+        );
+    }
+
+    #[test]
+    fn send_package_printed_single_sided_warns_about_blank_pages() {
+        let hints = PrintHints {
+            duplex_typeset: false,
+            send_package: true,
+        };
+        let warnings = print_warnings(hints, None, &caps(true, true), &a4_job());
+        assert_eq!(
+            warnings,
+            ["送批材料每件从奇数页起排，单面打印会多出空白页。"]
+        );
+    }
+
+    #[test]
+    fn all_rotated_with_long_edge_warns_about_binding() {
+        let facts = PdfFacts {
+            all_rotated: true,
+            has_red: false,
+        };
+        let job = PrintJob {
+            duplex: Some(Duplex::LongEdge),
+            ..a4_job()
+        };
+        let warnings = print_warnings(PrintHints::default(), Some(facts), &caps(true, true), &job);
+        assert_eq!(warnings, ["整份横排，双面建议选短边翻转，装订边才对得上。"]);
+    }
+
+    #[test]
+    fn red_header_on_a_mono_choice_or_mono_printer_warns_about_grey() {
+        let facts = PdfFacts {
+            all_rotated: false,
+            has_red: true,
+        };
+        let mono = PrintJob {
+            color: Some(ColorMode::Mono),
+            ..a4_job()
+        };
+        assert_eq!(
+            print_warnings(PrintHints::default(), Some(facts), &caps(true, true), &mono),
+            ["版面有红色（版头或印章），黑白打印会印成灰色。"]
+        );
+        // 单色机即使没选颜色也要提醒。
+        let plain = a4_job();
+        assert_eq!(
+            print_warnings(
+                PrintHints::default(),
+                Some(facts),
+                &caps(true, false),
+                &plain
+            ),
+            ["版面有红色（版头或印章），黑白打印会印成灰色。"]
+        );
+        // 彩色打印不提醒。
+        let color = PrintJob {
+            color: Some(ColorMode::Color),
+            ..a4_job()
+        };
+        assert!(
+            print_warnings(
+                PrintHints::default(),
+                Some(facts),
+                &caps(true, true),
+                &color
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn non_a4_paper_at_actual_size_warns() {
+        let caps = caps(true, true);
+        let letter = PrintJob {
+            paper: Some("1".to_string()),
+            ..a4_job()
+        };
+        let warnings = print_warnings(PrintHints::default(), None, &caps, &letter);
+        // 编号 1 不在能力列表里，名称按编号本身算，也不含 A4。
+        assert_eq!(
+            warnings,
+            ["所选纸张不是 A4，公文按 A4 排版，建议改为「适合纸张」。"]
+        );
+        // A4、或改成「适合纸张」就不提醒。
+        let a4 = PrintJob {
+            paper: Some("9".to_string()),
+            ..a4_job()
+        };
+        assert!(print_warnings(PrintHints::default(), None, &caps, &a4).is_empty());
+        let fit = PrintJob {
+            paper: Some("1".to_string()),
+            scaling: Scaling::Fit,
+            ..a4_job()
+        };
+        assert!(print_warnings(PrintHints::default(), None, &caps, &fit).is_empty());
+    }
 
     #[test]
     fn fixed_width_names_stop_at_the_first_nul() {

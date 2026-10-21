@@ -266,6 +266,8 @@ pub(crate) struct PdfSession {
     frame: u64,
     selection: TextSelection,
     error: Option<String>,
+    /// 打开这份 PDF 的调用方知道的打印提示（稿件按双面排、送批材料合并件）。
+    print_hints: crate::print::PrintHints,
 }
 
 impl PdfSession {
@@ -312,11 +314,18 @@ impl PdfSession {
             frame: 0,
             selection: TextSelection::default(),
             error: None,
+            print_hints: crate::print::PrintHints::default(),
         }
     }
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 调用方后来才知道的打印提示也要更新上去：同一份 PDF 可能先当普通成品打开，
+    /// 后来又作为送批材料打开一次。
+    pub(crate) fn set_print_hints(&mut self, hints: crate::print::PrintHints) {
+        self.print_hints = hints;
     }
 
     pub(crate) fn title(&self) -> &str {
@@ -576,6 +585,7 @@ impl PdfSession {
                     title: self.title.clone(),
                     page_count: self.page_count(),
                     current_page: self.current_page,
+                    hints: self.print_hints,
                 }));
             }
 

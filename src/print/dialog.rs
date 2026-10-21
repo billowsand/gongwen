@@ -6,8 +6,8 @@
 
 use super::pages::{self, PageSpan};
 use super::{
-    ColorMode, Duplex, MAX_COPIES, PrintJob, PrintRequest, PrinterCaps, PrinterInfo, PrinterState,
-    Scaling,
+    ColorMode, Duplex, MAX_COPIES, PdfFacts, PrintJob, PrintRequest, PrinterCaps, PrinterInfo,
+    PrinterState, Scaling,
 };
 use crate::modal::{self, Dismiss};
 use crate::theme;
@@ -62,6 +62,8 @@ pub(crate) struct PrintDialog {
     paper: Option<String>,
     tray: Option<String>,
     scaling: Scaling,
+    /// 从 PDF 自身测得的事实（整份横排、有红色）。外壳在后台测好送进来。
+    facts: Option<PdfFacts>,
     /// 用户动过哪几项。没动过的，在能力 / 文档默认到达时才可以被预填覆盖。
     duplex_touched: bool,
     color_touched: bool,
@@ -84,6 +86,7 @@ impl PrintDialog {
             caps: HashMap::new(),
             caps_request: None,
             caps_in_flight: HashSet::new(),
+            facts: None,
             duplex: None,
             color: None,
             paper: None,
@@ -127,6 +130,23 @@ impl PrintDialog {
     pub(crate) fn caps_loaded(&mut self, name: &str, caps: PrinterCaps) {
         self.caps_in_flight.remove(name);
         self.caps.insert(name.to_string(), caps);
+        self.recompute_defaults();
+    }
+
+    /// PDF 自身的版式事实测回来了。读不出来（`None`）就当不知道。
+    pub(crate) fn facts_loaded(&mut self, facts: Option<PdfFacts>) {
+        self.facts = facts;
+        self.recompute_defaults();
+    }
+
+    /// 文档默认值只填用户没动过的控件；能力与事实各到达一次，各重算一次。
+    fn recompute_defaults(&mut self) {
+        if self.duplex_touched {
+            return;
+        }
+        if let Some(caps) = self.gated_caps().flatten() {
+            self.duplex = super::default_duplex(self.request.hints, self.facts, &caps);
+        }
     }
 
     /// 外壳该去查哪台打印机的能力了。交出去之后在能力回来之前（或换回来之前）
@@ -263,6 +283,9 @@ impl PrintDialog {
         self.tray = None;
         self.paper_touched = false;
         self.tray_touched = false;
+        // 新打印机的能力可能已经在缓存里（换回来过），默认值当场重算；没缓存就等
+        // `caps_loaded`。
+        self.recompute_defaults();
     }
 
     /// 在「页码」之后画双面、颜色、纸张、纸盒、缩放。能力查回来之前只画一个
@@ -506,6 +529,14 @@ impl PrintDialog {
                 "打印机份数只是把同一份重复打出；份号不同的多份请在导出时生成。",
             );
         }
+        // 公文场景的提醒：只提醒，不拦打印。
+        if let Some(caps) = self.gated_caps().flatten()
+            && let Some(job) = self.job(pages)
+        {
+            for warning in super::print_warnings(self.request.hints, self.facts, &caps, &job) {
+                ui.colored_label(theme::warn(), warning);
+            }
+        }
         match &self.printers {
             Printers::Failed(error) => {
                 ui.colored_label(
@@ -743,6 +774,7 @@ mod tests {
                 title: "关于××的请示".to_string(),
                 page_count,
                 current_page: 2,
+                hints: super::super::PrintHints::default(),
             },
             "Office",
         )
@@ -893,6 +925,56 @@ mod tests {
     }
 
     #[test]
+    fn document_hints_fill_in_the_duplex_default_until_the_user_touches_it() {
+        let mut dialog = dialog(12);
+        dialog.request.hints = super::super::PrintHints {
+            duplex_typeset: true,
+            send_package: false,
+        };
+        dialog.printers_loaded(Ok(vec![printer("Office", true)]));
+        // 能力回来之前不瞎猜。
+        assert_eq!(dialog.duplex, None);
+        dialog.caps_loaded("Office", caps(true, true));
+        assert_eq!(dialog.duplex, Some(Duplex::LongEdge));
+        // 事实回来（整份横排）后改成短边。
+        dialog.facts_loaded(Some(PdfFacts {
+            all_rotated: true,
+            has_red: false,
+        }));
+        assert_eq!(dialog.duplex, Some(Duplex::ShortEdge));
+        assert_eq!(
+            dialog.job(&dialog.pages()).expect("全部").duplex,
+            Some(Duplex::ShortEdge)
+        );
+    }
+
+    #[test]
+    fn a_duplex_choice_the_user_made_wins_over_the_document_default() {
+        let mut dialog = dialog(12);
+        dialog.request.hints = super::super::PrintHints {
+            duplex_typeset: true,
+            send_package: false,
+        };
+        dialog.printers_loaded(Ok(vec![printer("Office", true)]));
+        dialog.duplex = Some(Duplex::Simplex);
+        dialog.duplex_touched = true;
+        dialog.caps_loaded("Office", caps(true, true));
+        assert_eq!(dialog.duplex, Some(Duplex::Simplex));
+    }
+
+    #[test]
+    fn no_duplex_default_on_a_printer_without_the_unit() {
+        let mut dialog = dialog(12);
+        dialog.request.hints = super::super::PrintHints {
+            duplex_typeset: false,
+            send_package: true,
+        };
+        dialog.printers_loaded(Ok(vec![printer("Office", true)]));
+        dialog.caps_loaded("Office", caps(false, true));
+        assert_eq!(dialog.duplex, None);
+    }
+
+    #[test]
     fn caps_are_requested_once_per_printer() {
         let mut dialog = dialog(12);
         assert_eq!(dialog.take_caps_request(), None, "还没选中打印机");
@@ -973,6 +1055,22 @@ mod tests {
         ready.printer_state("Office", PrinterState::Ready);
         ready.caps_loaded("Office", caps(true, true));
         snapshot(&mut ready, "ready");
+
+        // 整份横排 + 选了长边 + 黑白 + 有红：三条公文提醒同时出现。
+        let mut warned = dialog(12);
+        warned.request.hints = super::super::PrintHints {
+            duplex_typeset: true,
+            send_package: false,
+        };
+        warned.printers_loaded(Ok(vec![printer("Office", true)]));
+        warned.caps_loaded("Office", caps(true, true));
+        warned.facts_loaded(Some(PdfFacts {
+            all_rotated: true,
+            has_red: true,
+        }));
+        warned.duplex = Some(Duplex::LongEdge);
+        warned.color = Some(ColorMode::Mono);
+        snapshot(&mut warned, "warnings-rotated-red");
 
         // 能力还没回来：five 行只剩一个 spinner。
         let mut loading_caps = dialog(12);

@@ -12,6 +12,7 @@ impl GongwenApp {
     pub(crate) fn open_print_dialog(&mut self, request: PrintRequest, ctx: &egui::Context) {
         let id = self.next_print_dialog;
         self.next_print_dialog += 1;
+        let path = request.path.clone();
         self.print_dialog = Some(PrintDialog::new(
             id,
             request,
@@ -31,6 +32,10 @@ impl GongwenApp {
                 })
                 .unwrap_or_default();
             let _ = tx.send(WorkerResult::PrintersListed { dialog: id, result });
+            ctx.request_repaint();
+            // 整份横排、红色版头只能从文件本身测；打不开就是 None，不拦打印。
+            let facts = crate::print::inspect_pdf(&path);
+            let _ = tx.send(WorkerResult::PdfInspected { dialog: id, facts });
             ctx.request_repaint();
             // 清单先到、状态逐台补：网络打印机查一次可能要几秒，不能让整张清单等它。
             for name in names {
@@ -71,6 +76,20 @@ impl GongwenApp {
             .filter(|open| open.id() == dialog)
         {
             open.printer_state(name, state);
+        }
+    }
+
+    pub(crate) fn apply_pdf_inspected(
+        &mut self,
+        dialog: u64,
+        facts: Option<crate::print::PdfFacts>,
+    ) {
+        if let Some(open) = self
+            .print_dialog
+            .as_mut()
+            .filter(|open| open.id() == dialog)
+        {
+            open.facts_loaded(facts);
         }
     }
 

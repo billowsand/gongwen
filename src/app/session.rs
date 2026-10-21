@@ -50,8 +50,8 @@ pub(crate) enum DraftAction {
     },
     /// 把当前版式记进配置并落盘。
     Persist,
-    /// 在应用内打开最近导出的 PDF。
-    OpenPdf(PathBuf),
+    /// 在应用内打开最近导出的 PDF；`duplex_typeset` 是版式是否按双面排了页码。
+    OpenPdf { path: PathBuf, duplex_typeset: bool },
 }
 
 impl GongwenApp {

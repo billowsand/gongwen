@@ -179,19 +179,33 @@ impl GongwenApp {
 
     /// 在应用内打开 PDF。同一路径已经开着时只切换标签，不重复占用纹理。
     pub(crate) fn open_pdf(&mut self, path: PathBuf, title: Option<String>) {
-        if let Some(index) = self.pdfs.iter().position(|pdf| pdf.path() == path)
-            && let Some(tab) = self
+        self.open_pdf_with_hints(path, title, crate::print::PrintHints::default());
+    }
+
+    /// 打开 PDF，并带上调用方知道的打印提示（稿件按双面排、送批材料合并件）。
+    /// 同一路径已经开着时把提示更新上去，不重复开标签。
+    pub(crate) fn open_pdf_with_hints(
+        &mut self,
+        path: PathBuf,
+        title: Option<String>,
+        hints: crate::print::PrintHints,
+    ) {
+        if let Some(index) = self.pdfs.iter().position(|pdf| pdf.path() == path) {
+            self.pdfs[index].set_print_hints(hints);
+            if let Some(tab) = self
                 .tabs
                 .iter()
                 .position(|item| *item == TabRef::Pdf(self.pdfs[index].key))
-        {
-            self.activate_tab(tab);
+            {
+                self.activate_tab(tab);
+            }
             return;
         }
         let key = self.next_pdf_key;
         self.next_pdf_key += 1;
-        self.pdfs
-            .push(PdfSession::new(key, path, title, self.sender.clone()));
+        let mut session = PdfSession::new(key, path, title, self.sender.clone());
+        session.set_print_hints(hints);
+        self.pdfs.push(session);
         self.tabs.push(TabRef::Pdf(key));
         self.activate_tab(self.tabs.len() - 1);
     }
@@ -353,7 +367,17 @@ impl GongwenApp {
                     version_number,
                 } => self.load_manuscript_version(manuscript_id, version_number),
                 DraftAction::Persist => self.persist(),
-                DraftAction::OpenPdf(path) => self.open_pdf(path, None),
+                DraftAction::OpenPdf {
+                    path,
+                    duplex_typeset,
+                } => self.open_pdf_with_hints(
+                    path,
+                    None,
+                    crate::print::PrintHints {
+                        duplex_typeset,
+                        send_package: false,
+                    },
+                ),
             }
         }
     }
