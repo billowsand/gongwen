@@ -104,6 +104,7 @@ impl Document {
         dc: &DcGuard,
         title: &str,
         sequence: impl Iterator<Item = u32>,
+        force_fit: bool,
     ) -> Result<(), String> {
         let device = geometry(dc)?;
         let raster_dpi = device.dpi_x.clamp(96, MAX_PRINT_DPI);
@@ -148,7 +149,7 @@ impl Document {
             let Some((_, bitmap)) = &last else {
                 continue;
             };
-            if let Err(reason) = bitmap.draw(dc, &device) {
+            if let Err(reason) = bitmap.draw(dc, &device, force_fit) {
                 return Err(doc.abort(reason));
             }
         }
@@ -172,8 +173,13 @@ struct PageBitmap {
 
 impl PageBitmap {
     /// 开一页、画上去、收页。
-    fn draw(&self, dc: &DcGuard, device: &DeviceGeometry) -> Result<(), &'static str> {
-        let (dx, dy, dw, dh) = place_page(self.width_pt, self.height_pt, device);
+    fn draw(
+        &self,
+        dc: &DcGuard,
+        device: &DeviceGeometry,
+        force_fit: bool,
+    ) -> Result<(), &'static str> {
+        let (dx, dy, dw, dh) = place_page(self.width_pt, self.height_pt, device, force_fit);
         // 负高度 = 自顶向下的 DIB，行序与 hayro 的输出一致。
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {

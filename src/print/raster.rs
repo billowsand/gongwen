@@ -92,14 +92,20 @@ const PAPER_TOLERANCE: f64 = 1.02;
 ///
 /// 放得下就按**实际大小**、以整张纸为基准居中：公文的版心、页边距都是按毫米定的，
 /// 以前塞进可打印区会按硬件边距整页缩小约 4%，版心量出来不够 156 mm。纸张信息拿
-/// 不到或页面比纸大（A3 稿打到 A4 上），退回按可打印区等比缩放。
+/// 不到或页面比纸大（A3 稿打到 A4 上），退回按可打印区等比缩放。`force_fit` 为真
+/// 时跳过实际大小，直接走「适合纸张」。
 pub(crate) fn place_page(
     page_w_pt: f32,
     page_h_pt: f32,
     device: &DeviceGeometry,
+    force_fit: bool,
 ) -> (i32, i32, i32, i32) {
     let page_w = f64::from(page_w_pt.max(1.0)) / 72.0 * f64::from(device.dpi_x);
     let page_h = f64::from(page_h_pt.max(1.0)) / 72.0 * f64::from(device.dpi_y);
+    // 用户选了「适合纸张」：无论放不放得下都缩进可打印区，给非 A4 来源的 PDF 用。
+    if force_fit {
+        return fit_rect(page_w, page_h, device.area_w, device.area_h);
+    }
     let paper_known =
         device.paper_w > 0 && device.paper_h > 0 && device.dpi_x > 0 && device.dpi_y > 0;
     if paper_known
@@ -163,7 +169,7 @@ mod tests {
     #[test]
     fn a4_page_prints_at_actual_size_aligned_to_the_paper() {
         let device = a4_600dpi();
-        let (x, y, w, h) = place_page(595.28, 841.89, &device);
+        let (x, y, w, h) = place_page(595.28, 841.89, &device, false);
         // 实际大小：宽 210 mm = 4961 像素左右，不按可打印区缩小。
         assert!((w - 4961).abs() <= 1, "宽 {w}");
         assert!((h - 7016).abs() <= 1, "高 {h}");
@@ -175,7 +181,7 @@ mod tests {
     fn oversized_page_falls_back_to_fitting_the_printable_area() {
         let device = a4_600dpi();
         // A3 稿打到 A4 纸上：放不下，等比缩进可打印区。
-        let (x, y, w, h) = place_page(841.89, 1190.55, &device);
+        let (x, y, w, h) = place_page(841.89, 1190.55, &device, false);
         assert!(w <= device.area_w && h <= device.area_h);
         assert!(x >= 0 && y >= 0);
     }
@@ -184,8 +190,19 @@ mod tests {
     fn unknown_paper_size_falls_back_to_fitting() {
         let mut device = a4_600dpi();
         device.paper_w = 0;
-        let (_, _, w, h) = place_page(595.28, 841.89, &device);
+        let (_, _, w, h) = place_page(595.28, 841.89, &device, false);
         assert!(w <= device.area_w && h <= device.area_h);
+    }
+
+    #[test]
+    fn fit_mode_shrinks_an_a4_page_into_the_printable_area() {
+        let device = a4_600dpi();
+        // A4 稿放得下，但用户选了「适合纸张」：照样缩进可打印区并居中。
+        let (x, y, w, h) = place_page(595.28, 841.89, &device, true);
+        assert_eq!(w, device.area_w);
+        assert!(h <= device.area_h);
+        assert_eq!(x, 0);
+        assert!(y > 0);
     }
 
     #[test]

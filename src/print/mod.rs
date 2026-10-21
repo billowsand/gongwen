@@ -25,10 +25,64 @@ mod win;
 pub(crate) use dialog::{DialogOutcome, PrintDialog};
 pub(crate) use pages::PageSpan;
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// 份数上限。再多就该去印刷厂了，也免得手滑输入一个天文数字把打印队列塞满。
 pub(crate) const MAX_COPIES: u32 = 999;
+
+/// 双面方式。`None` 表示沿用打印机自己的设置，所以选项用 `Option<Duplex>`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Duplex {
+    Simplex,
+    /// 长边翻转：竖纸上的公文，翻面后沿长边翻，像翻书。
+    LongEdge,
+    /// 短边翻转：整份横排时用，装订边才对得上。
+    ShortEdge,
+}
+
+/// 彩色 / 黑白。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ColorMode {
+    Color,
+    Mono,
+}
+
+/// 缩放方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Scaling {
+    /// 实际大小：放不下时自动缩小（第一期的行为，公文按毫米打准靠它）。
+    Actual,
+    /// 适合纸张：按可打印区等比缩放，给非 A4 来源的 PDF 用。
+    Fit,
+}
+
+/// 纸张或纸盒的一个可选项。`id` 交给驱动 / CUPS，`label` 给人看。
+// 第二步（对话框）才用上这些字段；先按步骤单独提交，免得把界面和查询揉在一起。
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MediaOption {
+    pub(crate) id: String,
+    pub(crate) label: String,
+}
+
+/// 一台打印机支持哪些选项。查不到就用 [`Default`]：双面、彩色都当不支持，
+/// 纸张与纸盒列表为空，界面据此置灰而不是报错。
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Default)]
+pub(crate) struct PrinterCaps {
+    /// 有双面单元。
+    pub(crate) duplex: bool,
+    /// 能在彩色 / 黑白之间选。
+    pub(crate) color: bool,
+    pub(crate) papers: Vec<MediaOption>,
+    pub(crate) default_paper: Option<String>,
+    pub(crate) trays: Vec<MediaOption>,
+    pub(crate) default_tray: Option<String>,
+}
 
 /// 打开打印对话框所需的信息，由 PDF 查看器给出。
 #[derive(Debug, Clone)]
@@ -98,6 +152,15 @@ pub(crate) struct PrintJob {
     pub(crate) collate: bool,
     /// `None` 表示全部页。
     pub(crate) pages: Option<Vec<PageSpan>>,
+    /// `None` 表示沿用打印机的双面设置。
+    pub(crate) duplex: Option<Duplex>,
+    /// `None` 表示沿用打印机的颜色设置。
+    pub(crate) color: Option<ColorMode>,
+    /// 纸张的驱动编号 / CUPS 关键字；`None` 表示打印机默认。
+    pub(crate) paper: Option<String>,
+    /// 纸盒的驱动编号 / CUPS 关键字；`None` 表示自动选择。
+    pub(crate) tray: Option<String>,
+    pub(crate) scaling: Scaling,
 }
 
 /// 打印任务的结果。「打完了」和「用户取消」是两回事，状态栏文案要分开。
@@ -138,6 +201,21 @@ pub(crate) fn list_printers() -> Result<Vec<PrinterInfo>, String> {
     #[cfg(unix)]
     {
         cups::list_printers()
+    }
+}
+
+/// 查一台打印机支持的双面、颜色、纸张与纸盒。阻塞调用，调用方放后台线程。
+/// 查不到返回默认值（什么都不支持），不报错：能力只用来置灰选项，不该拦住打印。
+// 第二步的对话框接上后就有调用方，届时去掉这行。
+#[allow(dead_code)]
+pub(crate) fn printer_caps(name: &str) -> PrinterCaps {
+    #[cfg(windows)]
+    {
+        win::printer_caps(name)
+    }
+    #[cfg(unix)]
+    {
+        cups::printer_caps(name)
     }
 }
 
@@ -188,6 +266,19 @@ fn check_size(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 从定长宽字符缓冲区里取一个名字：到第一个 NUL 为止，没有 NUL 就取全长。
+///
+/// Windows 的 `DC_PAPERNAMES` / `DC_BINNAMES` 每项定长（32 / 24 个宽字符），
+/// 名字短于定长时有 NUL，正好占满时没有。放在平台无关处好在 macOS 上单测。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn fixed_wide_name(units: &[u16]) -> String {
+    let end = units
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(units.len());
+    String::from_utf16_lossy(&units[..end])
+}
+
 /// Windows 打印机状态位（`PRINTER_INFO_6::dwStatus`）转成界面上的状态。
 /// 放在平台无关处，好在任何平台上单测；常量取自 winspool 头文件。
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -233,6 +324,28 @@ fn windows_status(status: u32, work_offline: bool) -> PrinterState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_width_names_stop_at_the_first_nul() {
+        let mut padded: Vec<u16> = "A4".encode_utf16().collect();
+        padded.extend([0; 8]);
+        assert_eq!(fixed_wide_name(&padded), "A4");
+
+        // 名字正好占满定长缓冲区时没有 NUL，取全长。
+        let full: Vec<u16> = "Legal".encode_utf16().collect();
+        assert_eq!(fixed_wide_name(&full), "Legal");
+
+        assert_eq!(fixed_wide_name(&[0, u16::from(b'X')]), "");
+        assert_eq!(fixed_wide_name(&[]), "");
+    }
+
+    #[test]
+    fn unknown_capabilities_enable_nothing() {
+        let caps = PrinterCaps::default();
+        assert!(!caps.duplex && !caps.color);
+        assert!(caps.papers.is_empty() && caps.default_paper.is_none());
+        assert!(caps.trays.is_empty() && caps.default_tray.is_none());
+    }
 
     #[test]
     fn windows_status_bits_map_to_states() {

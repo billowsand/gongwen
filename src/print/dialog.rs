@@ -346,6 +346,12 @@ impl PrintDialog {
             copies: self.copies.clamp(1, MAX_COPIES),
             collate: self.copies > 1 && self.collate,
             pages: selection.spans.clone(),
+            // 第二期才在对话框里给这几项；现在先按「沿用打印机默认」提交。
+            duplex: None,
+            color: None,
+            paper: None,
+            tray: None,
+            scaling: super::Scaling::Actual,
         })
     }
 

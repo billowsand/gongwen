@@ -8,7 +8,10 @@
 //! 用户数据（打印机名、任务名、文件路径）都作为独立参数交给 `Command`，不经 shell；
 //! 页码先解析成区间再格式化，不原样透传；文件名前有 `--`。
 
-use super::{PrintJob, PrintOutcome, PrinterInfo, PrinterState, pages};
+use super::{
+    ColorMode, Duplex, MediaOption, PrintJob, PrintOutcome, PrinterCaps, PrinterInfo, PrinterState,
+    Scaling, pages,
+};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
@@ -38,6 +41,16 @@ pub(super) fn printer_state(name: &str) -> PrinterState {
         Ok(output) => parse_state(&output),
         Err(_) => PrinterState::Unknown,
     }
+}
+
+/// 查一台打印机支持的选项。`lpoptions -l` 每行形如
+/// `Key/Label: 值1 *值2 值3`，带 `*` 的是当前默认值。
+// 第二步的对话框接上后就有调用方，届时去掉这行。
+#[allow(dead_code)]
+pub(super) fn printer_caps(name: &str) -> PrinterCaps {
+    run("lpoptions", &["-p", name, "-l"])
+        .map(|output| parse_caps(&output))
+        .unwrap_or_default()
 }
 
 /// 交给 `lp`，成败看退出码。`lp` 自己的报错（没有默认打印机之类）比我们编的话
@@ -85,6 +98,27 @@ pub(super) fn lp_args(job: &PrintJob) -> Vec<OsString> {
         args.push("-P".into());
         args.push(pages::format_spans(spans).into());
     }
+    // IPP 标准选项优先，CUPS 自己映射到 PPD；`-o` 都放在 `-t` 与 `--` 之前。
+    if let Some(duplex) = job.duplex {
+        push_option(&mut args, duplex_option(duplex).to_string());
+    }
+    if let Some(color) = job.color {
+        let mode = match color {
+            ColorMode::Color => "print-color-mode=color",
+            ColorMode::Mono => "print-color-mode=monochrome",
+        };
+        push_option(&mut args, mode.to_string());
+    }
+    if let Some(paper) = &job.paper {
+        push_option(&mut args, format!("PageSize={paper}"));
+    }
+    if let Some(tray) = &job.tray {
+        push_option(&mut args, format!("InputSlot={tray}"));
+    }
+    // 实际大小是 CUPS 的 auto（放不下才缩），只有「适合纸张」需要明说。
+    if job.scaling == Scaling::Fit {
+        push_option(&mut args, "print-scaling=fit".to_string());
+    }
     if !job.title.trim().is_empty() {
         args.push("-t".into());
         args.push(job.title.as_str().into());
@@ -93,6 +127,20 @@ pub(super) fn lp_args(job: &PrintJob) -> Vec<OsString> {
     args.push("--".into());
     args.push(job.path.as_os_str().to_owned());
     args
+}
+
+fn push_option(args: &mut Vec<OsString>, value: String) {
+    args.push("-o".into());
+    args.push(value.into());
+}
+
+/// 双面方式 → CUPS 的 `sides` 取值。
+fn duplex_option(duplex: Duplex) -> &'static str {
+    match duplex {
+        Duplex::Simplex => "sides=one-sided",
+        Duplex::LongEdge => "sides=two-sided-long-edge",
+        Duplex::ShortEdge => "sides=two-sided-short-edge",
+    }
 }
 
 fn run(name: &str, args: &[&str]) -> Result<String, String> {
@@ -229,6 +277,73 @@ fn parse_state(output: &str) -> PrinterState {
     }
 }
 
+/// `lpoptions -l` 的输出 → 能力。键名与取值随 PPD 各厂商不一，只认 IPP 标准的
+/// `Duplex` / `ColorModel` / `PageSize` / `InputSlot`，认不出的不展示。
+#[cfg_attr(not(test), allow(dead_code))]
+fn parse_caps(output: &str) -> PrinterCaps {
+    let mut caps = PrinterCaps::default();
+    // 没有 ColorModel 键时不知道能不能选彩色：当作能选，CUPS 不支持会忽略。
+    let mut has_color_model = false;
+    let mut gray = false;
+    let mut color = false;
+    for line in output.lines() {
+        let Some((head, tail)) = line.split_once(':') else {
+            continue;
+        };
+        // `Key/Label` 只取斜杠前的键名；没有标签时整段就是键名。
+        let key = head.split_once('/').map_or(head, |(key, _)| key).trim();
+        let values: Vec<&str> = tail.split_whitespace().collect();
+        let default = values.iter().find_map(|value| value.strip_prefix('*'));
+        match key {
+            "Duplex" => caps.duplex = values.iter().any(|value| keyword(value) != "None"),
+            "ColorModel" => {
+                has_color_model = true;
+                for value in &values {
+                    let value = keyword(value);
+                    gray |= value.contains("Gray");
+                    color |=
+                        value.contains("RGB") || value.contains("CMYK") || value.contains("Color");
+                }
+            }
+            "PageSize" => {
+                caps.papers = media_options(&values);
+                caps.default_paper = default
+                    .filter(|id| !id.starts_with("Custom."))
+                    .map(str::to_string);
+            }
+            "InputSlot" => {
+                caps.trays = media_options(&values);
+                caps.default_tray = default.map(str::to_string);
+            }
+            _ => {}
+        }
+    }
+    // 只有灰度与彩色两类都在，才谈得上「能选彩色」；纯灰度机不置灰就让人白选。
+    caps.color = !has_color_model || (gray && color);
+    caps
+}
+
+/// 选项值去掉表示默认值的 `*`。
+#[cfg_attr(not(test), allow(dead_code))]
+fn keyword(value: &str) -> &str {
+    value.strip_prefix('*').unwrap_or(value)
+}
+
+/// 纸张 / 纸盒的取值列表成选项。`Custom.WIDTHxHEIGHT` 是让用户现填尺寸的占位，
+/// 不是一种纸，去掉。
+#[cfg_attr(not(test), allow(dead_code))]
+fn media_options(values: &[&str]) -> Vec<MediaOption> {
+    values
+        .iter()
+        .map(|value| keyword(value))
+        .filter(|id| !id.starts_with("Custom."))
+        .map(|id| MediaOption {
+            id: id.to_string(),
+            label: id.to_string(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +434,64 @@ mod tests {
         assert_eq!(parse_state(""), PrinterState::Unknown);
     }
 
+    /// 本机 HP DeskJet 4900 的真实 `lpoptions -p … -l` 输出：没有 Duplex 键，
+    /// 所以这台机器没有双面单元。
+    const DESKJET_LPOPTIONS: &str = "Collate/Collate: True *False
+ColorModel/Color Mode: Gray Gray16 DeviceGray DeviceGray16 *RGB AdobeRGB DeviceRGB DeviceRGB16
+cupsPrintQuality/Quality: Draft *Normal High
+PageSize/Media Size: 100x150mm 3.5x5 4x6 5x7 5x8 8x10 *A4 A5 A6 B5 Env10 EnvC6 EnvChou3 EnvChou4 EnvDL Executive ISOB5 Legal Letter Postcard Custom.WIDTHxHEIGHT
+MediaType/MediaType: stationery photographic-glossy com.hp-specialty-glossy com.hp-matte-brochure stationery-lightweight *any";
+
+    /// 编的样本：有双面单元与两个纸盒、没有 ColorModel 键。
+    const WITH_DUPLEX: &str = "Duplex/2-Sided Printing: *None DuplexNoTumble DuplexTumble
+InputSlot/Media Source: *Auto Tray1 Tray2
+PageSize/Media Size: *A4 Letter";
+
+    #[test]
+    fn desktjet_reports_color_and_a4_but_no_duplex() {
+        let caps = parse_caps(DESKJET_LPOPTIONS);
+        assert!(!caps.duplex);
+        assert!(caps.color);
+        assert_eq!(caps.default_paper.as_deref(), Some("A4"));
+        assert!(
+            caps.papers
+                .iter()
+                .any(|paper| paper.id == "A4" && paper.label == "A4")
+        );
+        assert!(
+            !caps
+                .papers
+                .iter()
+                .any(|paper| paper.id.starts_with("Custom."))
+        );
+        assert_eq!(caps.papers.len(), 20);
+        assert!(caps.trays.is_empty() && caps.default_tray.is_none());
+    }
+
+    #[test]
+    fn duplex_and_trays_come_from_the_options_that_have_them() {
+        let caps = parse_caps(WITH_DUPLEX);
+        assert!(caps.duplex);
+        assert_eq!(caps.default_tray.as_deref(), Some("Auto"));
+        assert_eq!(
+            caps.trays
+                .iter()
+                .map(|tray| tray.id.as_str())
+                .collect::<Vec<_>>(),
+            ["Auto", "Tray1", "Tray2"]
+        );
+        // 没有 ColorModel 键：不知道就让人选，CUPS 不支持会忽略。
+        assert!(caps.color);
+    }
+
+    #[test]
+    fn all_none_duplex_and_grayscale_printer_are_reported_as_such() {
+        assert!(!parse_caps("Duplex/2-Sided Printing: *None").duplex);
+        assert!(!parse_caps("ColorModel/Color Mode: *Gray Gray16").color);
+        // 什么都没列出来时判断不了，按「不知道就让人选」处理。
+        assert!(parse_caps("").color);
+    }
+
     fn job() -> PrintJob {
         PrintJob {
             path: PathBuf::from("/tmp/-请示.pdf"),
@@ -327,6 +500,11 @@ mod tests {
             copies: 1,
             collate: true,
             pages: None,
+            duplex: None,
+            color: None,
+            paper: None,
+            tray: None,
+            scaling: Scaling::Actual,
         }
     }
 
@@ -362,6 +540,39 @@ mod tests {
                 "collate=false",
                 "-P",
                 "1-3,5",
+                "-t",
+                "关于××的请示",
+                "--",
+                "/tmp/-请示.pdf",
+            ]
+            .map(OsString::from)
+            .to_vec()
+        );
+    }
+
+    #[test]
+    fn print_options_become_separate_arguments() {
+        let job = PrintJob {
+            duplex: Some(Duplex::ShortEdge),
+            color: Some(ColorMode::Mono),
+            paper: Some("A4".to_string()),
+            tray: Some("Tray2".to_string()),
+            scaling: Scaling::Fit,
+            ..job()
+        };
+        assert_eq!(
+            lp_args(&job),
+            [
+                "-o",
+                "sides=two-sided-short-edge",
+                "-o",
+                "print-color-mode=monochrome",
+                "-o",
+                "PageSize=A4",
+                "-o",
+                "InputSlot=Tray2",
+                "-o",
+                "print-scaling=fit",
                 "-t",
                 "关于××的请示",
                 "--",

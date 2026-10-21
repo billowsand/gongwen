@@ -1,19 +1,30 @@
 //! 打印机清单、状态，以及按所选打印机建设备上下文。
 
-use super::super::{PrinterInfo, PrinterState, windows_status};
+use super::super::{
+    ColorMode, Duplex, MediaOption, PrintJob, PrinterCaps, PrinterInfo, PrinterState,
+    fixed_wide_name, windows_status,
+};
 use super::gdi::DcGuard;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateDCW, DEVMODEW, DM_COLLATE, DM_COPIES, DM_IN_BUFFER, DM_OUT_BUFFER, DMCOLLATE_FALSE,
-    DMCOLLATE_TRUE,
+    CreateDCW, DEVMODEW, DM_COLLATE, DM_COLOR, DM_COPIES, DM_DEFAULTSOURCE, DM_DUPLEX,
+    DM_IN_BUFFER, DM_OUT_BUFFER, DM_PAPERSIZE, DMCOLLATE_FALSE, DMCOLLATE_TRUE, DMCOLOR_COLOR,
+    DMCOLOR_MONOCHROME, DMDUP_HORIZONTAL, DMDUP_SIMPLEX, DMDUP_VERTICAL,
 };
 use windows_sys::Win32::Graphics::Printing::{
     ClosePrinter, DocumentPropertiesW, EnumPrintersW, GetDefaultPrinterW, GetPrinterW,
     OpenPrinterW, PRINTER_ATTRIBUTE_WORK_OFFLINE, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
     PRINTER_HANDLE, PRINTER_INFO_4W, PRINTER_INFO_6,
 };
-use windows_sys::Win32::Storage::Xps::{DC_COLLATE, DC_COPIES, DeviceCapabilitiesW};
+use windows_sys::Win32::Storage::Xps::{
+    DC_BINNAMES, DC_BINS, DC_COLLATE, DC_COLORDEVICE, DC_COPIES, DC_DUPLEX, DC_PAPERNAMES,
+    DC_PAPERS, DeviceCapabilitiesW,
+};
+
+/// `DC_PAPERNAMES` 每项定长 64 个宽字符，`DC_BINNAMES` 24 个（见 winspool 头文件）。
+const PAPER_NAME_UNITS: usize = 64;
+const BIN_NAME_UNITS: usize = 24;
 
 /// 以 NUL 结尾的宽字符串。
 pub(super) fn wide(text: &str) -> Vec<u16> {
@@ -215,19 +226,121 @@ pub(in crate::print) fn printer_state(name: &str) -> PrinterState {
     windows_status(info.dwStatus, offline)
 }
 
-/// 建好的打印机设备上下文。
-pub(super) struct Device {
-    pub(super) dc: DcGuard,
-    /// 份数与逐份已交给驱动，程序只需出一份。
-    pub(super) driver_copies: bool,
+/// 查一台打印机支持的双面、颜色、纸张与纸盒。查不到给空能力，不报错。
+pub(in crate::print) fn printer_caps(name: &str) -> PrinterCaps {
+    let wide_name = wide(name);
+    let mut caps = PrinterCaps {
+        duplex: capability_flag(&wide_name, DC_DUPLEX),
+        color: capability_flag(&wide_name, DC_COLORDEVICE),
+        papers: media_list(&wide_name, DC_PAPERS, DC_PAPERNAMES, PAPER_NAME_UNITS),
+        trays: media_list(&wide_name, DC_BINS, DC_BINNAMES, BIN_NAME_UNITS),
+        ..Default::default()
+    };
+    // 默认纸张与纸盒在驱动的默认 DEVMODE 里，不在能力查询的返回值里。
+    if let Some(printer) = PrinterHandle::open(&wide_name)
+        && let Some(buffer) = default_devmode(&printer, &wide_name)
+    {
+        // SAFETY: 缓冲区不小于 `DEVMODEW`、8 字节对齐，内容由驱动填好；按值读出纯数据。
+        let devmode = unsafe { buffer.as_ptr().cast::<DEVMODEW>().read() };
+        // SAFETY: 读默认 DEVMODE 的联合体字段（纸张尺寸、纸盒）。`devmode` 是刚按值
+        // 读出的本地副本，字段是 i16、不涉及指针，读出后与缓冲区无关。
+        let (paper, source) = unsafe {
+            (
+                devmode.Anonymous1.Anonymous1.dmPaperSize,
+                devmode.Anonymous1.Anonymous1.dmDefaultSource,
+            )
+        };
+        caps.default_paper = (paper > 0).then(|| paper.to_string());
+        caps.default_tray = (source > 0).then(|| source.to_string());
+    }
+    // 默认值不在列表里就无从显示，当没有默认。
+    if let Some(default) = &caps.default_paper
+        && !caps.papers.iter().any(|paper| &paper.id == default)
+    {
+        caps.default_paper = None;
+    }
+    if let Some(default) = &caps.default_tray
+        && !caps.trays.iter().any(|tray| &tray.id == default)
+    {
+        caps.default_tray = None;
+    }
+    caps
 }
 
-/// 按打印机的默认设置建设备上下文；驱动能自己印多份就把份数与逐份写进 DEVMODE。
-/// 其余设置（纸张、双面、颜色）一期不动，沿用打印机首选项。
-pub(super) fn open_device(name: &str, copies: u32, collate: bool) -> Result<Device, String> {
-    let wide_name = wide(name);
-    let printer = PrinterHandle::open(&wide_name)
-        .ok_or_else(|| format!("无法打开打印机「{name}」，它可能已被删除或无权访问"))?;
+/// `DC_DUPLEX` / `DC_COLORDEVICE` 这类只回一个布尔的能力。
+fn capability_flag(wide_name: &[u16], capability: u16) -> bool {
+    // SAFETY: 打印机名以 NUL 结尾；这一级能力查询不写输出缓冲区（传空）。
+    let value =
+        unsafe { DeviceCapabilitiesW(wide_name.as_ptr(), null(), capability, null_mut(), null()) };
+    value == 1
+}
+
+/// 取纸张 / 纸盒列表：先查个数，再分别取编号与名字。两次调用的个数对不上、
+/// 或返回 -1（驱动不支持），都当查不到，给空列表。
+fn media_list(
+    wide_name: &[u16],
+    codes_capability: u16,
+    names_capability: u16,
+    name_units: usize,
+) -> Vec<MediaOption> {
+    // SAFETY: 打印机名以 NUL 结尾；这一级查询只取个数，不写输出缓冲区。
+    let count = unsafe {
+        DeviceCapabilitiesW(
+            wide_name.as_ptr(),
+            null(),
+            codes_capability,
+            null_mut(),
+            null(),
+        )
+    };
+    let Ok(count) = usize::try_from(count) else {
+        return Vec::new();
+    };
+    if count == 0 {
+        return Vec::new();
+    }
+    let mut codes = vec![0u16; count];
+    // SAFETY: 输出缓冲区有 `count` 个 u16，`count` 正是上一次调用给出的个数。
+    let written = unsafe {
+        DeviceCapabilitiesW(
+            wide_name.as_ptr(),
+            null(),
+            codes_capability,
+            codes.as_mut_ptr(),
+            null(),
+        )
+    };
+    if usize::try_from(written).ok() != Some(count) {
+        return Vec::new();
+    }
+    let units = count.saturating_mul(name_units);
+    let mut names = vec![0u16; units];
+    // SAFETY: 输出缓冲区为 `count × name_units` 个宽字符，正是这一级能力要求的布局。
+    let written = unsafe {
+        DeviceCapabilitiesW(
+            wide_name.as_ptr(),
+            null(),
+            names_capability,
+            names.as_mut_ptr(),
+            null(),
+        )
+    };
+    if usize::try_from(written).ok() != Some(count) {
+        return Vec::new();
+    }
+    codes
+        .iter()
+        .zip(names.chunks_exact(name_units))
+        .map(|(&code, name)| MediaOption {
+            id: code.to_string(),
+            label: fixed_wide_name(name),
+        })
+        .collect()
+}
+
+/// 取一台打印机的默认 DEVMODE，放在 8 字节对齐的缓冲区里（驱动会填公共部分与
+/// 私有区）。`open_device` 按本次选择改它，能力查询只读默认纸张与纸盒。
+fn default_devmode(printer: &PrinterHandle, wide_name: &[u16]) -> Option<Buffer> {
     // SAFETY: 输出输入都传空、模式 0，只取 DEVMODE 所需字节数。
     let size = unsafe {
         DocumentPropertiesW(
@@ -239,10 +352,7 @@ pub(super) fn open_device(name: &str, copies: u32, collate: bool) -> Result<Devi
             0,
         )
     };
-    let size = u32::try_from(size)
-        .ok()
-        .filter(|&size| size > 0)
-        .ok_or_else(|| format!("无法读取打印机「{name}」的默认设置"))?;
+    let size = u32::try_from(size).ok().filter(|&size| size > 0)?;
     let size = size.max(u32::try_from(size_of::<DEVMODEW>()).unwrap_or(u32::MAX));
     let mut buffer = Buffer::new(size);
     let devmode = buffer.as_mut_ptr().cast::<DEVMODEW>();
@@ -258,21 +368,73 @@ pub(super) fn open_device(name: &str, copies: u32, collate: bool) -> Result<Devi
             DM_OUT_BUFFER,
         )
     };
-    if filled < 0 {
-        return Err(format!("无法读取打印机「{name}」的默认设置"));
-    }
+    (filled >= 0).then_some(buffer)
+}
 
-    let driver_copies = copies > 1 && driver_handles_copies(&wide_name, copies, collate);
+/// 建好的打印机设备上下文。
+pub(super) struct Device {
+    pub(super) dc: DcGuard,
+    /// 份数与逐份已交给驱动，程序只需出一份。
+    pub(super) driver_copies: bool,
+}
+
+/// 按打印机的默认设置建带本次选择的设备上下文。份数与逐份交给驱动（驱动不支持
+/// 就由程序重复出纸），双面、颜色、纸张、纸盒写进 DEVMODE，任何一项改了就走一次
+/// `DM_IN_BUFFER | DM_OUT_BUFFER` 合并，让驱动把它们并回自己的私有区。
+pub(super) fn open_device(name: &str, job: &PrintJob) -> Result<Device, String> {
+    let wide_name = wide(name);
+    let printer = PrinterHandle::open(&wide_name)
+        .ok_or_else(|| format!("无法打开打印机「{name}」，它可能已被删除或无权访问"))?;
+    let mut buffer = default_devmode(&printer, &wide_name)
+        .ok_or_else(|| format!("无法读取打印机「{name}」的默认设置"))?;
+    let devmode = buffer.as_mut_ptr().cast::<DEVMODEW>();
+
+    let driver_copies =
+        job.copies > 1 && driver_handles_copies(&wide_name, job.copies, job.collate);
+    let mut changed = false;
+    // SAFETY: `devmode` 指向上面已由驱动填好的完整 `DEVMODEW`，缓冲区归本函数独占。
+    let mut head = unsafe { devmode.read() };
     if driver_copies {
-        // SAFETY: `devmode` 指向上面已由驱动填好的完整 `DEVMODEW`，缓冲区归本函数独占。
-        let mut head = unsafe { devmode.read() };
         head.dmFields |= DM_COPIES | DM_COLLATE;
-        head.Anonymous1.Anonymous1.dmCopies = i16::try_from(copies).unwrap_or(i16::MAX);
-        head.dmCollate = if collate {
+        head.Anonymous1.Anonymous1.dmCopies = i16::try_from(job.copies).unwrap_or(i16::MAX);
+        head.dmCollate = if job.collate {
             DMCOLLATE_TRUE
         } else {
             DMCOLLATE_FALSE
         };
+        changed = true;
+    }
+    if let Some(duplex) = job.duplex {
+        head.dmFields |= DM_DUPLEX;
+        // 我们总是按竖向纸张出图，所以长边翻转 = 竖向翻转、短边 = 横向翻转。
+        head.dmDuplex = match duplex {
+            Duplex::Simplex => DMDUP_SIMPLEX,
+            Duplex::LongEdge => DMDUP_VERTICAL,
+            Duplex::ShortEdge => DMDUP_HORIZONTAL,
+        };
+        changed = true;
+    }
+    if let Some(color) = job.color {
+        head.dmFields |= DM_COLOR;
+        head.dmColor = match color {
+            ColorMode::Color => DMCOLOR_COLOR,
+            ColorMode::Mono => DMCOLOR_MONOCHROME,
+        };
+        changed = true;
+    }
+    // 纸张与纸盒的 id 是 `DeviceCapabilitiesW` 给的十进制编号；解析不了就不设，
+    // 由驱动按自己的默认值处理，不让一个坏编号毁掉整次打印。
+    if let Some(size) = job.paper.as_deref().and_then(|id| id.parse::<i16>().ok()) {
+        head.dmFields |= DM_PAPERSIZE;
+        head.Anonymous1.Anonymous1.dmPaperSize = size;
+        changed = true;
+    }
+    if let Some(source) = job.tray.as_deref().and_then(|id| id.parse::<i16>().ok()) {
+        head.dmFields |= DM_DEFAULTSOURCE;
+        head.Anonymous1.Anonymous1.dmDefaultSource = source;
+        changed = true;
+    }
+    if changed {
         // SAFETY: 同上；只写回公共部分，紧随其后的驱动私有区不动。
         unsafe { devmode.write(head) };
         // SAFETY: 输入输出是同一块缓冲区，驱动按 `dmSize + dmDriverExtra` 读写，

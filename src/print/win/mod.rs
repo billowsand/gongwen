@@ -4,10 +4,10 @@
 mod gdi;
 mod printers;
 
-pub(super) use printers::{list_printers, printer_state};
+pub(super) use printers::{list_printers, printer_caps, printer_state};
 
 use super::pages::{self, PageSpan};
-use super::{PrintJob, PrintOutcome};
+use super::{PrintJob, PrintOutcome, Scaling};
 use gdi::{DcGuard, Document, GlobalMemory};
 use std::path::Path;
 use windows_sys::Win32::UI::Controls::Dialogs::{
@@ -27,7 +27,7 @@ pub(super) fn print(job: &PrintJob) -> Result<PrintOutcome, String> {
         .clone()
         .or_else(printers::default_printer)
         .ok_or_else(|| "本机没有设置默认打印机，请在对话框里选一台".to_string())?;
-    let device = printers::open_device(&name, job.copies, job.collate)?;
+    let device = printers::open_device(&name, job)?;
     let (copies, collate) = if device.driver_copies {
         (1, false)
     } else {
@@ -37,6 +37,7 @@ pub(super) fn print(job: &PrintJob) -> Result<PrintOutcome, String> {
         &device.dc,
         &job.title,
         pages::print_sequence(&spans, copies, collate),
+        job.scaling == Scaling::Fit,
     )?;
     Ok(PrintOutcome::Printed)
 }
@@ -114,6 +115,12 @@ pub(super) fn print_with_system_dialog(path: &Path) -> Result<PrintOutcome, Stri
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "PDF".to_string());
     let spans = [(u32::from(from), u32::from(to))];
-    document.print(&dc, &title, pages::print_sequence(&spans, copies, true))?;
+    // 系统对话框里驱动自己的设置说了算，程序只按实际大小出图。
+    document.print(
+        &dc,
+        &title,
+        pages::print_sequence(&spans, copies, true),
+        false,
+    )?;
     Ok(PrintOutcome::Printed)
 }
