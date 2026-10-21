@@ -18,6 +18,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// 预览栏宽度。
+const PREVIEW_WIDTH: f32 = 180.0;
+/// 预览纸张的最大高度（A4 在 180 宽时约 255）。
+const PREVIEW_HEIGHT: f32 = 260.0;
+
 /// 对话框的结果。
 pub(crate) enum DialogOutcome {
     /// 开始打印；对话框留在屏幕上显示进度，打完（或失败）由外壳转回结果。
@@ -127,6 +132,8 @@ pub(crate) struct PrintDialog {
     cancel: Arc<AtomicBool>,
     /// 进度：已送页数 / 总页数。CUPS 不报，一直是 `None`。
     progress: Option<(u32, u32)>,
+    /// 预览翻到「要打的页」里的第几张（从 0 起）。
+    preview_index: usize,
 }
 
 impl PrintDialog {
@@ -136,6 +143,7 @@ impl PrintDialog {
         remembered: &str,
         prefs: BTreeMap<String, PrinterPrefs>,
     ) -> Self {
+        let preview_index = request.current_page;
         Self {
             id,
             request,
@@ -176,6 +184,7 @@ impl PrintDialog {
             manual_reverse_dirty: false,
             cancel: Arc::new(AtomicBool::new(false)),
             progress: None,
+            preview_index,
         }
     }
 
@@ -323,8 +332,13 @@ impl PrintDialog {
         }
     }
 
-    /// 画对话框。返回 `Some` 时调用方关掉它并照办。
-    pub(crate) fn ui(&mut self, ctx: &egui::Context) -> Option<DialogOutcome> {
+    /// 画对话框。`textures` 按页号（从 0 起）取 PDF 标签里已经渲染好的纹理，
+    /// 没有就返回 `None`；预览不为这一页另起渲染线程。
+    pub(crate) fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        textures: &dyn Fn(usize) -> Option<(egui::TextureId, egui::Vec2)>,
+    ) -> Option<DialogOutcome> {
         // 打印进行中不认 Esc 和遮罩，免得一不小心把正在送纸的对话框关掉。
         let dismiss = match self.stage {
             Stage::Printing { .. } => Dismiss::ButtonsOnly,
@@ -334,9 +348,9 @@ impl PrintDialog {
             ctx,
             egui::Id::new("print_dialog"),
             "打印",
-            500.0,
+            680.0,
             dismiss,
-            |ui| self.contents(ui),
+            |ui| self.contents(ui, textures),
         );
         if dialog.inner.is_some() {
             return dialog.inner;
@@ -344,20 +358,36 @@ impl PrintDialog {
         dialog.dismissed.then_some(DialogOutcome::Cancel)
     }
 
-    fn contents(&mut self, ui: &mut egui::Ui) -> Option<DialogOutcome> {
+    fn contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        textures: &dyn Fn(usize) -> Option<(egui::TextureId, egui::Vec2)>,
+    ) -> Option<DialogOutcome> {
         ui.add(
             egui::Label::new(egui::RichText::new(&self.request.title).color(theme::text_soft()))
                 .truncate(),
         );
         ui.add_space(10.0);
-        match self.stage {
-            Stage::Editing => self.editing_contents(ui),
-            Stage::Printing { manual } => {
-                self.printing_contents(ui, manual);
-                None
-            }
-            Stage::WaitingFlip => self.waiting_flip_contents(ui),
-        }
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(PREVIEW_WIDTH, 0.0),
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| self.preview_column(ui, textures),
+            );
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(10.0);
+            ui.vertical(|ui| match self.stage {
+                Stage::Editing => self.editing_contents(ui),
+                Stage::Printing { manual } => {
+                    self.printing_contents(ui, manual);
+                    None
+                }
+                Stage::WaitingFlip => self.waiting_flip_contents(ui),
+            })
+            .inner
+        })
+        .inner
     }
 
     fn editing_contents(&mut self, ui: &mut egui::Ui) -> Option<DialogOutcome> {
@@ -387,6 +417,174 @@ impl PrintDialog {
         let outcome = self.buttons(ui, &pages);
         self.request_caps();
         outcome
+    }
+
+    /// 左侧预览：按所选纸张的比例画纸张轮廓，里面摆当前预览页。
+    fn preview_column(
+        &mut self,
+        ui: &mut egui::Ui,
+        textures: &dyn Fn(usize) -> Option<(egui::TextureId, egui::Vec2)>,
+    ) {
+        let numbers = print_page_numbers(&self.pages(), self.request.page_count);
+        let total = numbers.len();
+        // 换了页码范围后原来的位置可能越界，夹到最后一页。
+        self.preview_index = if total == 0 {
+            0
+        } else {
+            self.preview_index.min(total - 1)
+        };
+        let (paper_w, paper_h) = self.preview_paper_size_mm();
+        let aspect = paper_h / paper_w.max(1.0);
+        let width = PREVIEW_WIDTH.min(ui.available_width().max(60.0));
+        let height = (width * aspect).min(PREVIEW_HEIGHT);
+        let width = (height / aspect).min(width);
+        let (outer, _) = ui.allocate_exact_size(
+            egui::vec2(PREVIEW_WIDTH, PREVIEW_HEIGHT),
+            egui::Sense::hover(),
+        );
+        let paper = egui::Rect::from_center_size(
+            egui::pos2(outer.center().x, outer.top() + height / 2.0),
+            egui::vec2(width, height),
+        );
+        let painter = ui.painter().clone();
+        // 纸张轮廓：白纸 + 一点投影 + 细边，和编辑区里的纸一样。
+        painter.rect_filled(
+            paper.translate(egui::vec2(0.0, 2.0)),
+            2.0,
+            egui::Color32::from_black_alpha(22),
+        );
+        painter.rect_filled(paper, 2.0, egui::Color32::WHITE);
+        painter.rect_stroke(
+            paper,
+            2.0,
+            egui::Stroke::new(1.0, theme::border_strong()),
+            egui::StrokeKind::Inside,
+        );
+        // 「适合纸张」按可打印区缩一点，「实际大小」填满纸面。
+        let content = match self.scaling {
+            Scaling::Actual => paper,
+            Scaling::Fit => paper.shrink(paper.width() * 0.05),
+        };
+        if let Some(page) = numbers.get(self.preview_index) {
+            // 页号从 1 起，纹理槽从 0 起。
+            match textures(page.saturating_sub(1) as usize) {
+                Some((texture, size)) => {
+                    let image = fit_inside(content.size(), size.y / size.x.max(1.0));
+                    let rect = egui::Rect::from_center_size(content.center(), image);
+                    painter.image(
+                        texture,
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
+                None => {
+                    // 占位底色取纸张与文字之间的灰：浅色主题浅灰、深色主题深灰。
+                    let placeholder = if theme::current().dark {
+                        egui::Color32::from_gray(58)
+                    } else {
+                        egui::Color32::from_gray(236)
+                    };
+                    painter.rect_filled(content, 1.0, placeholder);
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(content.shrink(8.0))
+                            .layout(egui::Layout::top_down(egui::Align::Center)),
+                        |ui| {
+                            ui.add_space(content.height() * 0.28);
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("这一页还没渲染，滚动到该页后可预览")
+                                        .small()
+                                        .color(theme::text_muted()),
+                                )
+                                .wrap(),
+                            );
+                        },
+                    );
+                }
+            }
+            // 双面时在纸角标出这一页是正面还是反面。
+            if self.double_sided() {
+                let label = if self.preview_index.is_multiple_of(2) {
+                    "正面"
+                } else {
+                    "反面"
+                };
+                painter.text(
+                    paper.left_top() + egui::vec2(4.0, 4.0),
+                    egui::Align2::LEFT_TOP,
+                    label,
+                    egui::FontId::proportional(12.0),
+                    theme::text_soft(),
+                );
+            }
+        }
+        ui.add_space(6.0);
+        if total > 0 {
+            // 在「要打的页」里翻，不是按 PDF 的页码翻。
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(self.preview_index > 0, egui::Button::new("◀"))
+                    .clicked()
+                {
+                    self.preview_index -= 1;
+                }
+                ui.label(
+                    egui::RichText::new(format!("{} / {total}", self.preview_index + 1))
+                        .color(theme::text_soft()),
+                );
+                if ui
+                    .add_enabled(self.preview_index + 1 < total, egui::Button::new("▶"))
+                    .clicked()
+                {
+                    self.preview_index += 1;
+                }
+            });
+        } else {
+            ui.label(
+                egui::RichText::new("页数未知")
+                    .small()
+                    .color(theme::text_muted()),
+            );
+        }
+    }
+
+    fn double_sided(&self) -> bool {
+        matches!(
+            self.effective_duplex(),
+            Some(Duplex::LongEdge | Duplex::ShortEdge | Duplex::Manual)
+        )
+    }
+
+    /// 所选纸张的尺寸（毫米，宽 × 高）。拿不到就用 A4。
+    fn preview_paper_size_mm(&self) -> (f32, f32) {
+        let caps = self.gated_caps().flatten();
+        let (id, label) = match (&self.paper, caps.as_ref()) {
+            (Some(id), Some(caps)) => caps
+                .papers
+                .iter()
+                .find(|paper| &paper.id == id)
+                .map(|paper| (paper.id.as_str(), paper.label.as_str()))
+                .unwrap_or((id.as_str(), id.as_str())),
+            (Some(id), None) => (id.as_str(), id.as_str()),
+            (None, Some(caps)) => match caps.default_paper.as_deref() {
+                Some(default) => caps
+                    .papers
+                    .iter()
+                    .find(|paper| paper.id == default)
+                    .map(|paper| (paper.id.as_str(), paper.label.as_str()))
+                    .unwrap_or((default, default)),
+                None => ("A4", "A4"),
+            },
+            (None, None) => ("A4", "A4"),
+        };
+        paper_size_mm(id, label).unwrap_or((210.0, 297.0))
+    }
+
+    /// 打印对话框对应哪个 PDF 标签（页面预览从那里取纹理）。
+    pub(crate) fn pdf_key(&self) -> Option<crate::pdf_viewer::PdfKey> {
+        self.request.pdf_key
     }
 
     /// 选中的打印机没查过能力就记下来，外壳每帧取走一次、在后台查。
@@ -744,10 +942,7 @@ impl PrintDialog {
 
     fn notes(&self, ui: &mut egui::Ui, pages: &Result<Selection, String>) {
         if let Ok(selection) = pages {
-            let double_sided = matches!(
-                self.effective_duplex(),
-                Some(Duplex::LongEdge | Duplex::ShortEdge | Duplex::Manual)
-            );
+            let double_sided = self.double_sided();
             let summary = match selection.page_total {
                 Some(total) => {
                     let per_copy = if double_sided {
@@ -1178,6 +1373,42 @@ struct Selection {
     truncated: bool,
 }
 
+/// 要打的页号（从 1 起，按出纸顺序，不展开份数重复）。
+fn print_page_numbers(pages: &Result<Selection, String>, page_count: usize) -> Vec<u32> {
+    let Ok(selection) = pages else {
+        return Vec::new();
+    };
+    match &selection.spans {
+        Some(spans) => spans.iter().flat_map(|&(start, end)| start..=end).collect(),
+        None => (1..=u32::try_from(page_count).unwrap_or(0)).collect(),
+    }
+}
+
+/// 常见纸型的毫米尺寸（宽 × 高）。认不出的纸型由调用方退回 A4。
+fn paper_size_mm(id: &str, label: &str) -> Option<(f32, f32)> {
+    let text = format!("{id} {label}").to_ascii_uppercase();
+    let table: [(&str, (f32, f32)); 8] = [
+        ("A3", (297.0, 420.0)),
+        ("A4", (210.0, 297.0)),
+        ("A5", (148.0, 210.0)),
+        ("A6", (105.0, 148.0)),
+        ("B5", (176.0, 250.0)),
+        ("LETTER", (215.9, 279.4)),
+        ("LEGAL", (215.9, 355.6)),
+        ("EXECUTIVE", (184.15, 266.7)),
+    ];
+    table
+        .iter()
+        .find_map(|(needle, size)| text.contains(needle).then_some(*size))
+}
+
+/// 按纵横比（高 / 宽）把页面放进容器并等比缩小。
+fn fit_inside(size: egui::Vec2, aspect: f32) -> egui::Vec2 {
+    let aspect = aspect.max(0.01);
+    let width = size.x.min(size.y / aspect);
+    egui::vec2(width, width * aspect)
+}
+
 fn duplex_label(duplex: Option<Duplex>) -> String {
     match duplex {
         None => "打印机默认".to_string(),
@@ -1267,6 +1498,7 @@ mod tests {
                 page_count,
                 current_page: 2,
                 hints: super::super::PrintHints::default(),
+                pdf_key: None,
             },
             "Office",
             BTreeMap::new(),
@@ -1367,6 +1599,7 @@ mod tests {
                 page_count: 12,
                 current_page: 2,
                 hints: super::super::PrintHints::default(),
+                pdf_key: None,
             },
             "Office",
             prefs,
@@ -1655,6 +1888,25 @@ mod tests {
     }
 
     #[test]
+    fn preview_pages_follow_the_page_selection() {
+        let mut dialog = dialog(10);
+        let pages = dialog.pages();
+        assert_eq!(print_page_numbers(&pages, 10), (1..=10).collect::<Vec<_>>());
+        dialog.range = Range::Custom;
+        dialog.custom = "1-3,5".to_string();
+        let pages = dialog.pages();
+        assert_eq!(print_page_numbers(&pages, 10), vec![1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn common_paper_sizes_are_known_for_the_preview() {
+        assert_eq!(paper_size_mm("9", "A4"), Some((210.0, 297.0)));
+        assert_eq!(paper_size_mm("A3", "A3"), Some((297.0, 420.0)));
+        assert_eq!(paper_size_mm("1", "Letter"), Some((215.9, 279.4)));
+        assert_eq!(paper_size_mm("custom", "自定义"), None);
+    }
+
+    #[test]
     fn a_plain_print_keeps_the_dialog_open_until_it_finishes() {
         let mut dialog = ready_dialog();
         let pages = dialog.pages();
@@ -1735,7 +1987,8 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    let _ = dialog.ui(ui.ctx());
+                    // 样张里没有页面纹理：预览显示灰色占位。
+                    let _ = dialog.ui(ui.ctx(), &|_index| None);
                 },
             )
         };
@@ -1778,6 +2031,12 @@ mod tests {
         warned.duplex = Some(Duplex::LongEdge);
         warned.color = Some(ColorMode::Mono);
         snapshot(&mut warned, "warnings-rotated-red");
+
+        // 页面预览：没有页面纹理时显示灰色占位与提示。
+        let mut preview = dialog(12);
+        preview.printers_loaded(Ok(vec![printer("Office", true)]));
+        preview.caps_loaded("Office", caps(true, true));
+        snapshot(&mut preview, "preview-placeholder");
 
         // 手动双面等翻面（奇数页）：翻面说明、「继续打印反面」与倒序复选框。
         let mut flip = dialog(5);

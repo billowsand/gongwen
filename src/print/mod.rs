@@ -107,6 +107,8 @@ pub(crate) struct PrintRequest {
     /// 正在看的页（从 0 起）。
     pub(crate) current_page: usize,
     pub(crate) hints: PrintHints,
+    /// 对应的 PDF 标签。对话框的页面预览从这里取已经渲染好的纹理，不另起渲染。
+    pub(crate) pdf_key: Option<crate::pdf_viewer::PdfKey>,
 }
 
 /// 一台打印机。

@@ -151,7 +151,16 @@ impl GongwenApp {
             return;
         };
         let dialog_id = dialog.id();
-        let outcome = dialog.ui(ctx);
+        // 预览从 PDF 标签已经渲染好的纹理来，不为预览另起渲染线程。
+        let pdf_key = dialog.pdf_key();
+        let outcome = {
+            let pdfs = &self.pdfs;
+            let textures = |index: usize| -> Option<(egui::TextureId, egui::Vec2)> {
+                let key = pdf_key?;
+                pdfs.iter().find(|pdf| pdf.key == key)?.page_texture(index)
+            };
+            dialog.ui(ctx, &textures)
+        };
         // 对话框只提出「要查这台」「要弹首选项」，线程由外壳起：UI 线程不碰打印接口。
         let caps_request = dialog.take_caps_request().map(|name| (dialog_id, name));
         #[cfg(windows)]

@@ -328,6 +328,13 @@ impl PdfSession {
         self.print_hints = hints;
     }
 
+    /// 打印对话框的页面预览用：某一页已经渲染好的纹理。没有就 `None`，
+    /// 这里**不**触发渲染（预览不为了一页另起一条渲染线程）。
+    pub(crate) fn page_texture(&self, index: usize) -> Option<(egui::TextureId, egui::Vec2)> {
+        let texture = self.slots.get(index)?.texture.as_ref()?;
+        Some((texture.id(), texture.size_vec2()))
+    }
+
     pub(crate) fn title(&self) -> &str {
         &self.title
     }
@@ -586,6 +593,7 @@ impl PdfSession {
                     page_count: self.page_count(),
                     current_page: self.current_page,
                     hints: self.print_hints,
+                    pdf_key: Some(self.key),
                 }));
             }
 
