@@ -221,11 +221,19 @@ pub(crate) fn print_warnings(
     job: &PrintJob,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
+    let wants_double = hints.duplex_typeset || hints.send_package;
+    if wants_double && !caps.duplex && job.duplex != Some(Duplex::Manual) {
+        // 没有双面单元时双面默认值不会生效，选项又是「打印机默认」，前两条提醒都
+        // 不会触发——偏偏这正是最容易打成单面的情形，单独说一句并指出手动双面。
+        warnings.push(
+            "稿件按双面排，这台打印机没有双面单元，会打成单面；可选「手动双面」。".to_string(),
+        );
+    }
     let single_sided = job.duplex == Some(Duplex::Simplex);
-    if single_sided && hints.duplex_typeset {
+    if single_sided && hints.duplex_typeset && caps.duplex {
         warnings.push("页码按双面排（奇右偶左），单面打印页码会左右交替。".to_string());
     }
-    if single_sided && hints.send_package {
+    if single_sided && hints.send_package && caps.duplex {
         warnings.push("送批材料每件从奇数页起排，单面打印会多出空白页。".to_string());
     }
     let all_rotated = facts.is_some_and(|facts| facts.all_rotated);
@@ -515,6 +523,38 @@ mod tests {
         assert_eq!(
             warnings,
             ["送批材料每件从奇数页起排，单面打印会多出空白页。"]
+        );
+    }
+
+    #[test]
+    fn a_printer_without_the_duplex_unit_points_to_manual_duplex() {
+        let hints = PrintHints {
+            duplex_typeset: true,
+            send_package: true,
+        };
+        let expected = ["稿件按双面排，这台打印机没有双面单元，会打成单面；可选「手动双面」。"];
+        // 选项留在「打印机默认」或单面：只说这一句，不再叠加两条单面提醒。
+        let default = PrintJob {
+            duplex: None,
+            ..a4_job()
+        };
+        assert_eq!(
+            print_warnings(hints, None, &caps(false, true), &default),
+            expected
+        );
+        assert_eq!(
+            print_warnings(hints, None, &caps(false, true), &a4_job()),
+            expected
+        );
+        // 已选手动双面：不提醒。
+        let manual = PrintJob {
+            duplex: Some(Duplex::Manual),
+            ..a4_job()
+        };
+        assert!(print_warnings(hints, None, &caps(false, true), &manual).is_empty());
+        // 稿件没按双面排：不提醒。
+        assert!(
+            print_warnings(PrintHints::default(), None, &caps(false, true), &default).is_empty()
         );
     }
 

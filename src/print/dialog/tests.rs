@@ -382,6 +382,35 @@ fn a_failed_manual_pass_comes_back_with_the_error() {
 }
 
 #[test]
+fn cancelling_the_front_pass_returns_to_editing_instead_of_waiting_for_a_flip() {
+    let mut dialog = dialog(5);
+    dialog.printers_loaded(Ok(vec![printer("HP", true)]));
+    dialog.caps_loaded("HP", caps(false, true));
+    dialog.duplex = Some(Duplex::Manual);
+    dialog.duplex_touched = true;
+    let pages = dialog.pages();
+    dialog.print_outcome(&pages).expect("第一轮");
+    // 正面一张没出完就取消了：没有可翻的纸，不能停在「等待翻面」。
+    assert!(!dialog.manual_finished(&Ok(PrintOutcome::Cancelled)));
+    assert_eq!(dialog.stage, Stage::Editing);
+    assert!(dialog.manual_error.is_some());
+}
+
+#[test]
+fn toggling_reverse_survives_later_default_recalculation() {
+    let mut dialog = dialog(5);
+    dialog.printers_loaded(Ok(vec![printer("HP", true)]));
+    dialog.manual_reverse = true;
+    dialog.manual_reverse_dirty = true;
+    let (name, prefs) = dialog.take_preferences_update().expect("要写回偏好");
+    assert_eq!(name, "HP");
+    assert!(prefs.manual_reverse);
+    // 能力随后才到，预填值重算一遍，刚改的倒序不能被旧偏好改回去。
+    dialog.caps_loaded("HP", caps(false, true));
+    assert!(dialog.manual_reverse);
+}
+
+#[test]
 fn manual_duplex_needs_a_known_page_count() {
     let mut dialog = dialog(0);
     dialog.printers_loaded(Ok(vec![printer("HP", true)]));
@@ -590,6 +619,19 @@ fn print_dialog_samples() {
 
     ready.custom = "5-3".to_string();
     snapshot(&mut ready, "bad-range");
+
+    // 打印进行中：进度、取消与「转到后台」。
+    let mut printing = ready_dialog();
+    printing.start_printing(None);
+    printing.progress(3, 12);
+    snapshot(&mut printing, "printing");
+
+    // 没有双面单元、稿件按双面排：指向手动双面。
+    let mut no_unit = dialog(12);
+    no_unit.request.hints.duplex_typeset = true;
+    no_unit.printers_loaded(Ok(vec![printer("HP_DeskJet", true)]));
+    no_unit.caps_loaded("HP_DeskJet", caps(false, true));
+    snapshot(&mut no_unit, "no-duplex-unit");
 
     let mut empty = dialog(12);
     empty.printers_loaded(Ok(Vec::new()));

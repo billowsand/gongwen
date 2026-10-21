@@ -191,7 +191,10 @@ impl GongwenApp {
         hints: crate::print::PrintHints,
     ) {
         if let Some(index) = self.pdfs.iter().position(|pdf| pdf.path() == path) {
-            self.pdfs[index].set_print_hints(hints);
+            // 不带提示的再次打开（如送批材料面板里「打开文件」）不能把已知的提示抹掉。
+            if hints != crate::print::PrintHints::default() {
+                self.pdfs[index].set_print_hints(hints);
+            }
             if let Some(tab) = self
                 .tabs
                 .iter()

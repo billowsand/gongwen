@@ -379,10 +379,7 @@ impl PrintDialog {
             ui.add_space(10.0);
             ui.vertical(|ui| match self.stage {
                 Stage::Editing => self.editing_contents(ui),
-                Stage::Printing { manual } => {
-                    self.printing_contents(ui, manual);
-                    None
-                }
+                Stage::Printing { manual } => self.printing_contents(ui, manual),
                 Stage::WaitingFlip => self.waiting_flip_contents(ui),
             })
             .inner
@@ -486,21 +483,21 @@ impl PrintDialog {
                         egui::Color32::from_gray(236)
                     };
                     painter.rect_filled(content, 1.0, placeholder);
-                    ui.scope_builder(
+                    // 用不占位的子 Ui 画在纸面上：`scope_builder` 会把父 Ui 的光标推到
+                    // 纸面中间，下面的翻页按钮就叠到纸上去了。
+                    let mut text_ui = ui.new_child(
                         egui::UiBuilder::new()
                             .max_rect(content.shrink(8.0))
                             .layout(egui::Layout::top_down(egui::Align::Center)),
-                        |ui| {
-                            ui.add_space(content.height() * 0.28);
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new("这一页还没渲染，滚动到该页后可预览")
-                                        .small()
-                                        .color(theme::text_muted()),
-                                )
-                                .wrap(),
-                            );
-                        },
+                    );
+                    text_ui.add_space(content.height() * 0.28);
+                    text_ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("这一页还没渲染，滚动到该页后可预览")
+                                .small()
+                                .color(theme::text_muted()),
+                        )
+                        .wrap(),
                     );
                 }
             }
@@ -949,6 +946,16 @@ impl PrintDialog {
     }
 
     fn notes(&self, ui: &mut egui::Ui, pages: &Result<Selection, String>) {
+        // 上一次打印失败或被取消的原因：对话框退回编辑状态，改完可以直接重试。
+        if let Some(error) = &self.manual_error {
+            ui.colored_label(theme::danger(), error);
+        }
+        // 手动双面固定一份（份数框置灰时里面的数字不算数）。
+        let copies = if self.effective_duplex() == Some(Duplex::Manual) {
+            1
+        } else {
+            self.copies
+        };
         if let Ok(selection) = pages {
             let double_sided = self.double_sided();
             let summary = match selection.page_total {
@@ -958,19 +965,19 @@ impl PrintDialog {
                     } else {
                         total
                     };
-                    let sheets = per_copy * u64::from(self.copies);
+                    let sheets = per_copy * u64::from(copies);
                     let mode = if double_sided { "双面" } else { "单面" };
-                    if self.copies > 1 {
-                        format!("共 {total} 页 × {} 份，{mode}约 {sheets} 张纸", self.copies)
+                    if copies > 1 {
+                        format!("共 {total} 页 × {} 份，{mode}约 {sheets} 张纸", copies)
                     } else {
                         format!("共 {total} 页，{mode}约 {sheets} 张纸")
                     }
                 }
-                None => format!("全部页面 × {} 份", self.copies),
+                None => format!("全部页面 × {} 份", copies),
             };
             ui.label(egui::RichText::new(summary).color(theme::text_soft()));
         }
-        if self.copies > 1 {
+        if copies > 1 {
             muted(
                 ui,
                 "打印机份数只是把同一份重复打出；份号不同的多份请在导出时生成。",
@@ -1057,8 +1064,16 @@ impl PrintDialog {
         outcome
     }
 
-    /// 正在送纸：3.2 只显示一个 spinner，第三期补进度与取消。
-    fn printing_contents(&mut self, ui: &mut egui::Ui, manual: Option<ManualPass>) {
+    /// 正在送纸：进度、取消，以及把窗口让开的出口。
+    ///
+    /// 对话框是模态的，一直挡着会把整个程序锁住：上百页的光栅打印要几分钟，驱动
+    /// 卡住时取消也要等当前页画完才生效。所以普通打印可以「转到后台」，取消之后
+    /// 可以直接「关闭窗口」；任务照常在后台结束，结果仍回状态栏。
+    fn printing_contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        manual: Option<ManualPass>,
+    ) -> Option<DialogOutcome> {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.spinner();
@@ -1080,21 +1095,41 @@ impl PrintDialog {
             ui.colored_label(theme::danger(), error);
         }
         ui.add_space(12.0);
+        let mut outcome = None;
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.cancelling() {
+                    if ui
+                        .button("关闭窗口")
+                        .on_hover_text("不再等待；正在画的那一页画完后任务作废")
+                        .clicked()
+                    {
+                        outcome = Some(DialogOutcome::Cancel);
+                    }
                     ui.add_enabled(false, egui::Button::new("正在取消…"));
-                } else if ui.button("取消").clicked() {
-                    self.request_cancel();
+                } else {
+                    if ui.button("取消").clicked() {
+                        self.request_cancel();
+                    }
+                    // 手动双面还要回来等翻面，不能转后台。
+                    if manual.is_none()
+                        && ui
+                            .button("转到后台")
+                            .on_hover_text("关掉这个窗口继续干活，打完后在状态栏报告")
+                            .clicked()
+                    {
+                        outcome = Some(DialogOutcome::Cancel);
+                    }
                 }
             });
         });
+        outcome
     }
 
     /// 手动双面第一轮打完：等用户把整叠纸翻面放回纸盒。
     fn waiting_flip_contents(&mut self, ui: &mut egui::Ui) -> Option<DialogOutcome> {
         ui.add_space(4.0);
-        ui.label("正面已送打印机。等纸全部打出后，把整叠纸翻面放回纸盒，再点『继续打印反面』。");
+        ui.label("正面已送打印机。等纸全部打出后，把整叠纸翻面放回纸盒，再点「继续打印反面」。");
         if self.manual_passes.as_ref().is_some_and(|passes| passes.odd) {
             ui.label("最后一张没有反面，放回前先把它取出。");
         }
@@ -1224,6 +1259,17 @@ impl PrintDialog {
                 self.stage = Stage::Editing;
                 false
             }
+            // 手动双面正面轮被取消：没有正面可翻，回到可编辑状态。
+            (
+                Stage::Printing {
+                    manual: Some(ManualPass::First),
+                },
+                Ok(PrintOutcome::Cancelled),
+            ) => {
+                self.manual_error = Some("已取消打印。".to_string());
+                self.stage = Stage::Editing;
+                false
+            }
             // 手动双面第一轮成功后等翻面。
             (
                 Stage::Printing {
@@ -1273,7 +1319,11 @@ impl PrintDialog {
             return None;
         }
         self.manual_reverse_dirty = false;
-        self.preferences()
+        let update = self.preferences()?;
+        // 对话框里的偏好副本也要跟着改：之后能力、事实再到达时重算预填值，
+        // 不能把刚改的「反面倒序」又按旧偏好改回去。
+        self.prefs.insert(update.0.clone(), update.1.clone());
+        Some(update)
     }
 
     fn job(&self, pages: &Result<Selection, String>) -> Option<PrintJob> {

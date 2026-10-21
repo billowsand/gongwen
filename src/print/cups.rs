@@ -45,8 +45,6 @@ pub(super) fn printer_state(name: &str) -> PrinterState {
 
 /// 查一台打印机支持的选项。`lpoptions -l` 每行形如
 /// `Key/Label: 值1 *值2 值3`，带 `*` 的是当前默认值。
-// 第二步的对话框接上后就有调用方，届时去掉这行。
-#[allow(dead_code)]
 pub(super) fn printer_caps(name: &str) -> PrinterCaps {
     run("lpoptions", &["-p", name, "-l"])
         .map(|output| parse_caps(&output))
@@ -335,7 +333,6 @@ fn parse_state(output: &str) -> PrinterState {
 
 /// `lpoptions -l` 的输出 → 能力。键名与取值随 PPD 各厂商不一，只认 IPP 标准的
 /// `Duplex` / `ColorModel` / `PageSize` / `InputSlot`，认不出的不展示。
-#[cfg_attr(not(test), allow(dead_code))]
 fn parse_caps(output: &str) -> PrinterCaps {
     let mut caps = PrinterCaps::default();
     // 没有 ColorModel 键时不知道能不能选彩色：当作能选，CUPS 不支持会忽略。
@@ -380,14 +377,12 @@ fn parse_caps(output: &str) -> PrinterCaps {
 }
 
 /// 选项值去掉表示默认值的 `*`。
-#[cfg_attr(not(test), allow(dead_code))]
 fn keyword(value: &str) -> &str {
     value.strip_prefix('*').unwrap_or(value)
 }
 
 /// 纸张 / 纸盒的取值列表成选项。`Custom.WIDTHxHEIGHT` 是让用户现填尺寸的占位，
 /// 不是一种纸，去掉。
-#[cfg_attr(not(test), allow(dead_code))]
 fn media_options(values: &[&str]) -> Vec<MediaOption> {
     values
         .iter()

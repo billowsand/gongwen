@@ -38,17 +38,25 @@ pub(super) fn print(
     } else {
         (job.copies, job.collate)
     };
-    let mut sequence: Vec<u32> = pages::print_sequence(&spans, copies, collate).collect();
-    if job.reverse {
-        sequence.reverse();
-    }
+    let total = u32::try_from(pages::span_page_count(&spans).saturating_mul(u64::from(copies)))
+        .unwrap_or(u32::MAX);
+    // 份数乘页数可能很大，出纸顺序按迭代器走，不展开成数组。只有手动双面第二轮
+    // 倒序，那时固定一份，展开也只有页数那么长。
+    let forward = pages::print_sequence(&spans, copies, collate);
+    let sequence: Box<dyn Iterator<Item = u32> + '_> = if job.reverse {
+        let mut all: Vec<u32> = forward.collect();
+        all.reverse();
+        Box::new(all.into_iter())
+    } else {
+        Box::new(forward)
+    };
     let status = document.print(
         &device.dc,
         &job.title,
-        &sequence,
+        sequence,
+        total,
         job.scaling == Scaling::Fit,
-        progress,
-        cancel,
+        &gdi::Feedback { progress, cancel },
     )?;
     Ok(match status {
         gdi::PrintStatus::Done => PrintOutcome::Printed { job: None },
@@ -129,11 +137,17 @@ pub(super) fn print_with_system_dialog(path: &Path) -> Result<PrintOutcome, Stri
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "PDF".to_string());
     let spans = [(u32::from(from), u32::from(to))];
-    let sequence: Vec<u32> = pages::print_sequence(&spans, copies, true).collect();
+    let total = u32::try_from(pages::span_page_count(&spans).saturating_mul(u64::from(copies)))
+        .unwrap_or(u32::MAX);
+    let sequence = pages::print_sequence(&spans, copies, true);
     // 系统对话框自己就是入口，这里不报进度、也不取消。
     let cancel = AtomicBool::new(false);
     // 系统对话框里驱动自己的设置说了算，程序只按实际大小出图。
-    let status = document.print(&dc, &title, &sequence, false, &|_, _| {}, &cancel)?;
+    let feedback = gdi::Feedback {
+        progress: &|_, _| {},
+        cancel: &cancel,
+    };
+    let status = document.print(&dc, &title, sequence, total, false, &feedback)?;
     Ok(match status {
         gdi::PrintStatus::Done => PrintOutcome::Printed { job: None },
         gdi::PrintStatus::Cancelled => PrintOutcome::Cancelled,

@@ -77,6 +77,14 @@ impl Drop for DocGuard {
     }
 }
 
+/// 出纸过程中往外报进度、往里看取消。
+pub(super) struct Feedback<'a> {
+    /// 已送页数 / 总页数，每画完一页调一次。
+    pub(super) progress: &'a dyn Fn(u32, u32),
+    /// 页与页之间检查；置位后任务作废。
+    pub(super) cancel: &'a AtomicBool,
+}
+
 /// 一轮打印是打完了还是被用户取消。
 pub(super) enum PrintStatus {
     Done,
@@ -110,10 +118,10 @@ impl Document {
         &self,
         dc: &DcGuard,
         title: &str,
-        sequence: &[u32],
+        sequence: impl Iterator<Item = u32>,
+        total: u32,
         force_fit: bool,
-        progress: &dyn Fn(u32, u32),
-        cancel: &AtomicBool,
+        feedback: &Feedback<'_>,
     ) -> Result<PrintStatus, String> {
         let device = geometry(dc)?;
         let raster_dpi = device.dpi_x.clamp(96, MAX_PRINT_DPI);
@@ -141,11 +149,10 @@ impl Document {
         let cache = RenderCache::new();
         // 不逐份打印时同一页连着出好几张，光栅化一次就够。
         let mut last: Option<(u32, PageBitmap)> = None;
-        let total = u32::try_from(sequence.len()).unwrap_or(u32::MAX);
         let mut sent = 0u32;
-        for &page_number in sequence {
+        for page_number in sequence {
             // 取消只在页与页之间检查：画到一半的页交给 GDI 画完，任务整体作废。
-            if cancel.load(Ordering::Relaxed) {
+            if feedback.cancel.load(Ordering::Relaxed) {
                 return Ok(PrintStatus::Cancelled);
             }
             let Some(page) = page_number
@@ -168,10 +175,10 @@ impl Document {
                 return Err(doc.abort(reason));
             }
             sent = sent.saturating_add(1);
-            progress(sent.min(total), total);
+            (feedback.progress)(sent.min(total), total);
         }
         // 取消检查在每个循环开头；这里再确认一次，免得用户在最后一页之后才点。
-        if cancel.load(Ordering::Relaxed) {
+        if feedback.cancel.load(Ordering::Relaxed) {
             return Ok(PrintStatus::Cancelled);
         }
         // SAFETY: `dc.0` 有效，文档任务已由 `StartDocW` 开启。

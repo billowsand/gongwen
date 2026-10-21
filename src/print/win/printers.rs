@@ -82,6 +82,15 @@ impl Buffer {
         Ok(buffer)
     }
 
+    /// 补零加长到至少 `bytes` 字节，原有内容不动。
+    fn grow_to(&mut self, bytes: u32) {
+        let bytes = usize::try_from(bytes).unwrap_or(usize::MAX);
+        let words = bytes.div_ceil(8);
+        if words > self.0.len() {
+            self.0.resize(words, 0);
+        }
+    }
+
     /// 原样写回字节流（末尾不足 8 字节的补零一并带上）。
     fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.0.len() * 8);
@@ -377,9 +386,8 @@ fn media_list(
         .collect()
 }
 
-/// 取一台打印机的默认 DEVMODE，放在 8 字节对齐的缓冲区里（驱动会填公共部分与
-/// 私有区）。`open_device` 按本次选择改它，能力查询只读默认纸张与纸盒。
-fn default_devmode(printer: &PrinterHandle, wide_name: &[u16]) -> Option<Buffer> {
+/// 驱动此刻要求的 DEVMODE 字节数（含私有区），且不小于 `DEVMODEW`。
+fn devmode_size(printer: &PrinterHandle, wide_name: &[u16]) -> Option<u32> {
     // SAFETY: 输出输入都传空、模式 0，只取 DEVMODE 所需字节数。
     let size = unsafe {
         DocumentPropertiesW(
@@ -392,7 +400,13 @@ fn default_devmode(printer: &PrinterHandle, wide_name: &[u16]) -> Option<Buffer>
         )
     };
     let size = u32::try_from(size).ok().filter(|&size| size > 0)?;
-    let size = size.max(u32::try_from(size_of::<DEVMODEW>()).unwrap_or(u32::MAX));
+    Some(size.max(u32::try_from(size_of::<DEVMODEW>()).unwrap_or(u32::MAX)))
+}
+
+/// 取一台打印机的默认 DEVMODE，放在 8 字节对齐的缓冲区里（驱动会填公共部分与
+/// 私有区）。`open_device` 按本次选择改它，能力查询只读默认纸张与纸盒。
+fn default_devmode(printer: &PrinterHandle, wide_name: &[u16]) -> Option<Buffer> {
+    let size = devmode_size(printer, wide_name)?;
     let mut buffer = Buffer::new(size);
     let devmode = buffer.as_mut_ptr().cast::<DEVMODEW>();
     // SAFETY: 缓冲区不小于驱动要求的字节数，也不小于 `DEVMODEW`，8 字节对齐；
@@ -429,7 +443,15 @@ pub(super) fn open_device(name: &str, job: &PrintJob) -> Result<Device, String> 
     // 把对话框里的选择写进去。
     let from_preferences = job.devmode.is_some();
     let mut buffer = match &job.devmode {
-        Some(bytes) => Buffer::from_devmode(bytes)?,
+        Some(bytes) => {
+            let mut buffer = Buffer::from_devmode(bytes)?;
+            // 下面的合并调用里驱动按它此刻的大小写回同一块缓冲区；首选项存下来之后
+            // 驱动若升级变大，原样的字节会被写越界，所以先补足到驱动要求的大小。
+            if let Some(required) = devmode_size(&printer, &wide_name) {
+                buffer.grow_to(required);
+            }
+            buffer
+        }
         None => default_devmode(&printer, &wide_name)
             .ok_or_else(|| format!("无法读取打印机「{name}」的默认设置"))?,
     };
@@ -529,14 +551,16 @@ pub(in crate::print) fn edit_preferences(
     let wide_name = wide(name);
     let printer = PrinterHandle::open(&wide_name)
         .ok_or_else(|| format!("无法打开打印机「{name}」，它可能已被删除或无权访问"))?;
-    // 输入：优先用上次改过的，其次驱动默认值。长度不够的旧数据当没有。
+    // 输入：优先用上次改过的（照样过一遍校验），其次驱动默认值。坏数据当没有。
     let base = current
-        .filter(|bytes| bytes.len() >= size_of::<DEVMODEW>())
-        .map(Buffer::from_bytes)
+        .and_then(|bytes| Buffer::from_devmode(bytes).ok())
         .or_else(|| default_devmode(&printer, &wide_name))
         .ok_or_else(|| format!("无法读取打印机「{name}」的默认设置"))?;
-    // 输出缓冲区不小于输入：驱动会把输入连同自己改的私有区写到输出。
-    let size = u32::try_from(base.len_bytes()).map_err(|_| "打印机首选项数据过大".to_string())?;
+    // 输出缓冲区按驱动此刻要求的字节数分配，且不小于输入：驱动按自己的
+    // `dmSize + dmDriverExtra` 往里写，只看输入大小会在驱动升级后写越界。
+    let required = devmode_size(&printer, &wide_name)
+        .ok_or_else(|| format!("无法读取打印机「{name}」的默认设置"))?;
+    let size = required.max(u32::try_from(base.len_bytes()).unwrap_or(u32::MAX));
     let mut output = Buffer::new(size);
     // SAFETY: hwnd 传空（对话框独立出现，不归档到主窗口）；打印机句柄有效；名字以
     // NUL 结尾；输入输出都是 8 字节对齐、长度不小于 DEVMODE 的缓冲区。
