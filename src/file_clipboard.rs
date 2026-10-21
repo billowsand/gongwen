@@ -81,8 +81,9 @@ mod platform {
             1,             // fWide：路径是宽字符
         ];
         let mut header = [0u8; DROPFILES_LEN as usize];
-        for (chunk, field) in header.chunks_exact_mut(4).zip(fields) {
-            chunk.copy_from_slice(&field.to_le_bytes());
+        let (chunks, _) = header.as_chunks_mut::<4>();
+        for (chunk, field) in chunks.iter_mut().zip(fields) {
+            *chunk = field.to_le_bytes();
         }
         header
     }
