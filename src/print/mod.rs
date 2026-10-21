@@ -42,6 +42,9 @@ pub(crate) enum Duplex {
     LongEdge,
     /// 短边翻转：整份横排时用，装订边才对得上。
     ShortEdge,
+    /// 手动双面：先打正面（要打的页里第 1、3、5… 张），用户把纸翻面放回后再打背面。
+    /// 不需要打印机有双面单元。
+    Manual,
 }
 
 /// 彩色 / 黑白。
@@ -174,6 +177,9 @@ pub(crate) struct PrintJob {
     /// Windows「打印机首选项」改过的整块 DEVMODE；有它时双面、颜色、纸张、纸盒
     /// 都以首选项为准。Unix 恒为 `None`。
     pub(crate) devmode: Option<Vec<u8>>,
+    /// 倒序出纸（页码从大到小）。手动双面第二轮用：出纸面朝上的机器翻面后
+    /// 正反才对得上。
+    pub(crate) reverse: bool,
 }
 
 /// 打印任务的结果。「打完了」和「用户取消」是两回事，状态栏文案要分开。
@@ -435,6 +441,7 @@ mod tests {
             tray: None,
             scaling: Scaling::Actual,
             devmode: None,
+            reverse: false,
         }
     }
 

@@ -103,7 +103,7 @@ impl Document {
         &self,
         dc: &DcGuard,
         title: &str,
-        sequence: impl Iterator<Item = u32>,
+        sequence: &[u32],
         force_fit: bool,
     ) -> Result<(), String> {
         let device = geometry(dc)?;
@@ -132,7 +132,7 @@ impl Document {
         let cache = RenderCache::new();
         // 不逐份打印时同一页连着出好几张，光栅化一次就够。
         let mut last: Option<(u32, PageBitmap)> = None;
-        for page_number in sequence {
+        for &page_number in sequence {
             let Some(page) = page_number
                 .checked_sub(1)
                 .and_then(|index| pages.get(usize::try_from(index).ok()?))

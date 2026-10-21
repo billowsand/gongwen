@@ -119,6 +119,8 @@ pub(crate) enum WorkerResult {
         path: PathBuf,
         /// 送到哪台打印机；`None` 是系统默认或系统对话框里选的。
         printer: Option<String>,
+        /// 打完不关的对话框（手动双面的两轮）；普通的打印对话框提交时就关了。
+        dialog: Option<u64>,
         result: Result<crate::print::PrintOutcome, String>,
     },
 }
@@ -571,19 +573,9 @@ impl GongwenApp {
                 WorkerResult::PdfPrinted {
                     path,
                     printer,
+                    dialog,
                     result,
-                } => {
-                    self.status = match result {
-                        Ok(crate::print::PrintOutcome::Printed) => match printer {
-                            Some(printer) => {
-                                format!("已送打印机「{printer}」：{}。", path.display())
-                            }
-                            None => format!("已送打印机：{}。", path.display()),
-                        },
-                        Ok(crate::print::PrintOutcome::Cancelled) => "已取消打印。".into(),
-                        Err(error) => format!("打印失败：{error}"),
-                    };
-                }
+                } => self.apply_pdf_printed(path, printer, dialog, result),
             }
             ctx.request_repaint();
         }

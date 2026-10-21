@@ -456,7 +456,8 @@ pub(super) fn open_device(name: &str, job: &PrintJob) -> Result<Device, String> 
             head.dmFields |= DM_DUPLEX;
             // 我们总是按竖向纸张出图，所以长边翻转 = 竖向翻转、短边 = 横向翻转。
             head.dmDuplex = match duplex {
-                Duplex::Simplex => DMDUP_SIMPLEX,
+                // 手动双面的每一轮都只打一面，双面由人翻纸完成。
+                Duplex::Simplex | Duplex::Manual => DMDUP_SIMPLEX,
                 Duplex::LongEdge => DMDUP_VERTICAL,
                 Duplex::ShortEdge => DMDUP_HORIZONTAL,
             };

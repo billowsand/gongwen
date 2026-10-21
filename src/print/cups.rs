@@ -119,6 +119,10 @@ pub(super) fn lp_args(job: &PrintJob) -> Vec<OsString> {
     if job.scaling == Scaling::Fit {
         push_option(&mut args, "print-scaling=fit".to_string());
     }
+    // 手动双面第二轮：出纸面朝上的机器要倒序，翻面后正反才对得上。
+    if job.reverse {
+        push_option(&mut args, "outputorder=reverse".to_string());
+    }
     if !job.title.trim().is_empty() {
         args.push("-t".into());
         args.push(job.title.as_str().into());
@@ -137,7 +141,8 @@ fn push_option(args: &mut Vec<OsString>, value: String) {
 /// 双面方式 → CUPS 的 `sides` 取值。
 fn duplex_option(duplex: Duplex) -> &'static str {
     match duplex {
-        Duplex::Simplex => "sides=one-sided",
+        // 手动双面的每一轮都只打一面，双面由人翻纸完成。
+        Duplex::Simplex | Duplex::Manual => "sides=one-sided",
         Duplex::LongEdge => "sides=two-sided-long-edge",
         Duplex::ShortEdge => "sides=two-sided-short-edge",
     }
@@ -506,6 +511,7 @@ PageSize/Media Size: *A4 Letter";
             tray: None,
             scaling: Scaling::Actual,
             devmode: None,
+            reverse: false,
         }
     }
 
@@ -582,6 +588,29 @@ PageSize/Media Size: *A4 Letter";
             .map(OsString::from)
             .to_vec()
         );
+    }
+
+    #[test]
+    fn reverse_output_is_an_extra_option() {
+        let job = PrintJob {
+            reverse: true,
+            ..job()
+        };
+        assert_eq!(
+            lp_args(&job),
+            [
+                "-o",
+                "outputorder=reverse",
+                "-t",
+                "关于××的请示",
+                "--",
+                "/tmp/-请示.pdf",
+            ]
+            .map(OsString::from)
+            .to_vec()
+        );
+        // 手动双面每一轮按单面交给 CUPS。
+        assert_eq!(duplex_option(Duplex::Manual), "sides=one-sided");
     }
 
     /// 用假 `lp` 跑一遍真实的进程调用：参数原样到达，退出码与报错如实回传。

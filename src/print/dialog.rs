@@ -6,8 +6,8 @@
 
 use super::pages::{self, PageSpan};
 use super::{
-    ColorMode, Duplex, MAX_COPIES, PdfFacts, PrintJob, PrintRequest, PrinterCaps, PrinterInfo,
-    PrinterState, Scaling,
+    ColorMode, Duplex, MAX_COPIES, PdfFacts, PrintJob, PrintOutcome, PrintRequest, PrinterCaps,
+    PrinterInfo, PrinterState, Scaling,
 };
 use crate::modal::{self, Dismiss};
 use crate::models::PrinterPrefs;
@@ -19,6 +19,8 @@ use std::path::Path;
 /// 对话框的结果。
 pub(crate) enum DialogOutcome {
     Print(PrintJob),
+    /// 打印但对话框不关：手动双面的两轮，打完由外壳把结果转回对话框。
+    PrintKeepOpen(PrintJob),
     /// 改用系统自带的打印对话框（只有 Windows 有这个按钮）。
     #[cfg_attr(not(windows), allow(dead_code))]
     SystemDialog,
@@ -37,6 +39,32 @@ enum Printers {
     Loaded(Vec<PrinterInfo>),
     /// 列不出来（Unix 上没有 `lpstat` 之类）。仍可交给系统默认打印机。
     Failed(String),
+}
+
+/// 手动双面进行到哪一轮。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManualPass {
+    /// 正面：要打的页里第 1、3、5… 张。
+    First,
+    /// 背面：翻面放回后的第 2、4、6… 张。
+    Second,
+}
+
+/// 对话框进行到哪一步。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// 可编辑。普通打印从打开到提交都在这一步。
+    Editing,
+    /// 正在送纸；`manual` 是手动双面的哪一轮，普通打印是 `None`。
+    Printing { manual: Option<ManualPass> },
+    /// 手动双面第一轮打完，等用户把整叠纸翻面放回纸盒。
+    WaitingFlip,
+}
+
+/// 手动双面第一轮打完以后要用的东西：背面轮打哪些页，以及页数是不是奇数。
+struct ManualPasses {
+    back: Vec<PageSpan>,
+    odd: bool,
 }
 
 pub(crate) struct PrintDialog {
@@ -87,6 +115,13 @@ pub(crate) struct PrintDialog {
     scaling_touched: bool,
     /// 手动双面第二轮是否倒序出纸（逐台记住）。
     manual_reverse: bool,
+    /// 手动双面进行到哪一步；普通打印一直在 [`Stage::Editing`]。
+    stage: Stage,
+    manual_passes: Option<ManualPasses>,
+    /// 手动双面某一轮失败的原因，显示在对话框里。
+    manual_error: Option<String>,
+    /// 「反面倒序」刚改过，要马上写进这台打印机的偏好。
+    manual_reverse_dirty: bool,
 }
 
 impl PrintDialog {
@@ -130,6 +165,10 @@ impl PrintDialog {
             tray_touched: false,
             scaling_touched: false,
             manual_reverse: false,
+            stage: Stage::Editing,
+            manual_passes: None,
+            manual_error: None,
+            manual_reverse_dirty: false,
         }
     }
 
@@ -222,7 +261,10 @@ impl PrintDialog {
             self.duplex = from_document.or_else(|| {
                 let remembered = prefs.as_ref().and_then(|prefs| prefs.duplex);
                 // 新选的打印机可能没有双面单元：记着的双面方式要按能力过滤。
-                remembered.filter(|_| caps.as_ref().is_none_or(|caps| caps.duplex))
+                // 手动双面也不从偏好恢复：第一次用哪台机器都要人看着翻面。
+                remembered.filter(|duplex| {
+                    *duplex != Duplex::Manual && caps.as_ref().is_none_or(|caps| caps.duplex)
+                })
             });
         }
         if !self.color_touched {
@@ -276,12 +318,17 @@ impl PrintDialog {
 
     /// 画对话框。返回 `Some` 时调用方关掉它并照办。
     pub(crate) fn ui(&mut self, ctx: &egui::Context) -> Option<DialogOutcome> {
+        // 打印进行中不认 Esc 和遮罩，免得一不小心把正在送纸的对话框关掉。
+        let dismiss = match self.stage {
+            Stage::Printing { .. } => Dismiss::ButtonsOnly,
+            _ => Dismiss::EscOnly,
+        };
         let dialog = modal::dialog(
             ctx,
             egui::Id::new("print_dialog"),
             "打印",
             500.0,
-            Dismiss::EscOnly,
+            dismiss,
             |ui| self.contents(ui),
         );
         if dialog.inner.is_some() {
@@ -296,6 +343,17 @@ impl PrintDialog {
                 .truncate(),
         );
         ui.add_space(10.0);
+        match self.stage {
+            Stage::Editing => self.editing_contents(ui),
+            Stage::Printing { manual } => {
+                self.printing_contents(ui, manual);
+                None
+            }
+            Stage::WaitingFlip => self.waiting_flip_contents(ui),
+        }
+    }
+
+    fn editing_contents(&mut self, ui: &mut egui::Ui) -> Option<DialogOutcome> {
         let pages = self.pages();
         egui::Grid::new("print_dialog_grid")
             .num_columns(2)
@@ -487,7 +545,7 @@ impl PrintDialog {
     fn duplex_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps, locked: bool) {
         let text = duplex_label(self.duplex);
         let row = ui.horizontal(|ui| {
-            ui.add_enabled_ui(caps.duplex && !locked, |ui| {
+            ui.add_enabled_ui(!locked, |ui| {
                 egui::ComboBox::from_id_salt("print_dialog_duplex")
                     .width(180.0)
                     .selected_text(text)
@@ -495,8 +553,16 @@ impl PrintDialog {
                         let mut chosen = self.duplex;
                         ui.selectable_value(&mut chosen, None, "打印机默认");
                         ui.selectable_value(&mut chosen, Some(Duplex::Simplex), "单面");
-                        ui.selectable_value(&mut chosen, Some(Duplex::LongEdge), "长边翻转");
-                        ui.selectable_value(&mut chosen, Some(Duplex::ShortEdge), "短边翻转");
+                        if caps.duplex {
+                            ui.selectable_value(&mut chosen, Some(Duplex::LongEdge), "长边翻转");
+                            ui.selectable_value(&mut chosen, Some(Duplex::ShortEdge), "短边翻转");
+                        }
+                        // 手动双面不需要双面单元，什么打印机都能选。
+                        ui.selectable_value(
+                            &mut chosen,
+                            Some(Duplex::Manual),
+                            "手动双面（翻面再打）",
+                        );
                         if chosen != self.duplex {
                             self.duplex = chosen;
                             self.duplex_touched = true;
@@ -505,7 +571,8 @@ impl PrintDialog {
             });
         });
         if !caps.duplex {
-            row.response.on_hover_text("这台打印机没有双面单元");
+            row.response
+                .on_hover_text("这台打印机没有双面单元，可用「手动双面」");
         }
     }
 
@@ -603,18 +670,26 @@ impl PrintDialog {
     }
 
     fn copies_row(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::DragValue::new(&mut self.copies)
-                    .range(1..=MAX_COPIES)
-                    .speed(0.1),
-            );
-            ui.add_space(8.0);
-            ui.add_enabled(
-                self.copies > 1,
-                egui::Checkbox::new(&mut self.collate, "逐份打印"),
-            )
-            .on_hover_text("一份打完再打下一份；不勾则每页连打几张");
+        // 手动双面一次只翻一叠纸，多份没法对齐，所以固定一份、份数框置灰。
+        let manual = self.effective_duplex() == Some(Duplex::Manual);
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.add_enabled(
+                    !manual,
+                    egui::DragValue::new(&mut self.copies)
+                        .range(1..=MAX_COPIES)
+                        .speed(0.1),
+                );
+                ui.add_space(8.0);
+                ui.add_enabled(
+                    !manual && self.copies > 1,
+                    egui::Checkbox::new(&mut self.collate, "逐份打印"),
+                )
+                .on_hover_text("一份打完再打下一份；不勾则每页连打几张");
+            });
+            if manual {
+                muted(ui, "手动双面每次只打一份");
+            }
         });
     }
 
@@ -664,7 +739,7 @@ impl PrintDialog {
         if let Ok(selection) = pages {
             let double_sided = matches!(
                 self.effective_duplex(),
-                Some(Duplex::LongEdge | Duplex::ShortEdge)
+                Some(Duplex::LongEdge | Duplex::ShortEdge | Duplex::Manual)
             );
             let summary = match selection.page_total {
                 Some(total) => {
@@ -757,7 +832,7 @@ impl PrintDialog {
                 if theme::primary_icon_button_enabled(ui, can_print, theme::Icon::Print, "打印")
                     .clicked()
                 {
-                    outcome = self.job(pages).map(DialogOutcome::Print);
+                    outcome = self.print_outcome(pages);
                 }
                 if ui.button("取消").clicked() {
                     outcome = Some(DialogOutcome::Cancel);
@@ -767,21 +842,211 @@ impl PrintDialog {
         // 回车即打印：下拉开着时回车归下拉。
         let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
         if outcome.is_none() && can_print && enter && !egui::Popup::is_any_open(ui.ctx()) {
-            outcome = self.job(pages).map(DialogOutcome::Print);
+            outcome = self.print_outcome(pages);
         }
         outcome
     }
 
+    /// 正在送纸：3.2 只显示一个 spinner，第三期补进度与取消。
+    fn printing_contents(&mut self, ui: &mut egui::Ui, manual: Option<ManualPass>) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spinner();
+            let text = match manual {
+                Some(ManualPass::First) => "正在打印正面…",
+                Some(ManualPass::Second) => "正在打印反面…",
+                None => "正在打印…",
+            };
+            ui.label(text);
+        });
+        if let Some(error) = &self.manual_error {
+            ui.add_space(6.0);
+            ui.colored_label(theme::danger(), error);
+        }
+    }
+
+    /// 手动双面第一轮打完：等用户把整叠纸翻面放回纸盒。
+    fn waiting_flip_contents(&mut self, ui: &mut egui::Ui) -> Option<DialogOutcome> {
+        ui.add_space(4.0);
+        ui.label("正面已送打印机。等纸全部打出后，把整叠纸翻面放回纸盒，再点『继续打印反面』。");
+        if self.manual_passes.as_ref().is_some_and(|passes| passes.odd) {
+            ui.label("最后一张没有反面，放回前先把它取出。");
+        }
+        if let Some(error) = &self.manual_error {
+            ui.add_space(4.0);
+            ui.colored_label(theme::danger(), error);
+        }
+        ui.add_space(8.0);
+        let changed = ui
+            .checkbox(&mut self.manual_reverse, "反面倒序出纸")
+            .on_hover_text("出纸面朝上的机器倒序打出，翻面后正反才对得上")
+            .changed();
+        if changed {
+            self.manual_reverse_dirty = true;
+        }
+        muted(ui, "第一次用这台打印机，建议先拿两三页试一下翻面方向。");
+        ui.add_space(12.0);
+        let mut outcome = None;
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::primary_icon_button(ui, theme::Icon::Print, "继续打印反面").clicked()
+                {
+                    outcome = self.begin_second_pass();
+                }
+                if ui.button("取消").clicked() {
+                    outcome = Some(DialogOutcome::Cancel);
+                }
+            });
+        });
+        outcome
+    }
+
+    /// 点「打印」：手动双面先送正面轮并留在对话框里，其余照旧交给外壳。
+    fn print_outcome(&mut self, pages: &Result<Selection, String>) -> Option<DialogOutcome> {
+        if self.effective_duplex() == Some(Duplex::Manual) {
+            return match self.begin_manual(pages) {
+                Ok(job) => Some(DialogOutcome::PrintKeepOpen(job)),
+                Err(error) => {
+                    self.manual_error = Some(error);
+                    None
+                }
+            };
+        }
+        self.job(pages).map(DialogOutcome::Print)
+    }
+
+    /// 要打的页展开成区间；「全部」用总页数补出来。页数未知时不能手动双面
+    /// （不知道该把第几张分到正面）。
+    fn current_spans(&self, pages: &Result<Selection, String>) -> Option<Vec<PageSpan>> {
+        let selection = pages.as_ref().ok()?;
+        match &selection.spans {
+            Some(spans) => Some(spans.clone()),
+            None => {
+                let count = u32::try_from(self.request.page_count).ok()?;
+                (count > 0).then_some(vec![(1, count)])
+            }
+        }
+    }
+
+    fn begin_manual(&mut self, pages: &Result<Selection, String>) -> Result<PrintJob, String> {
+        let spans = self
+            .current_spans(pages)
+            .ok_or_else(|| "页数未知，无法手动双面".to_string())?;
+        let (front, back, odd) = pages::manual_duplex_passes(&spans);
+        if front.is_empty() {
+            return Err("没有要打印的页面".to_string());
+        }
+        let job = self.manual_job(&front, false);
+        self.manual_passes = Some(ManualPasses { back, odd });
+        self.manual_error = None;
+        self.stage = Stage::Printing {
+            manual: Some(ManualPass::First),
+        };
+        Ok(job)
+    }
+
+    fn begin_second_pass(&mut self) -> Option<DialogOutcome> {
+        let back = self.manual_passes.as_ref()?.back.clone();
+        // 只有一页时没有反面可打，直接收场。
+        if back.is_empty() {
+            return Some(DialogOutcome::Cancel);
+        }
+        let job = self.manual_job(&back, self.manual_reverse);
+        self.manual_error = None;
+        self.stage = Stage::Printing {
+            manual: Some(ManualPass::Second),
+        };
+        Some(DialogOutcome::PrintKeepOpen(job))
+    }
+
+    /// 手动双面的每一轮：只打这一轮的页、固定一份、倒序按偏好。
+    fn manual_job(&self, pages: &[PageSpan], reverse: bool) -> PrintJob {
+        let mut job = self.build_job(Some(pages.to_vec()), 1, false, Some(Duplex::Manual));
+        job.reverse = reverse;
+        job
+    }
+
+    /// 后台打印结果回来了。返回 `true` 表示对话框可以关了。
+    pub(crate) fn manual_finished(&mut self, result: &Result<PrintOutcome, String>) -> bool {
+        match (self.stage, result) {
+            // 普通打印不经过这里（提交时对话框就关了）；手动双面第一轮成功后等翻面。
+            (
+                Stage::Printing {
+                    manual: Some(ManualPass::First),
+                },
+                Ok(_),
+            ) => {
+                self.manual_error = None;
+                self.stage = Stage::WaitingFlip;
+                false
+            }
+            (
+                Stage::Printing {
+                    manual: Some(ManualPass::First),
+                },
+                Err(error),
+            ) => {
+                // 第一轮失败：回到可编辑状态，让用户改完重试。
+                self.manual_error = Some(error.clone());
+                self.stage = Stage::Editing;
+                false
+            }
+            (
+                Stage::Printing {
+                    manual: Some(ManualPass::Second),
+                },
+                Ok(_),
+            ) => true,
+            (
+                Stage::Printing {
+                    manual: Some(ManualPass::Second),
+                },
+                Err(error),
+            ) => {
+                // 第二轮失败：回到等待翻面，纸别动，修好后可以再点继续。
+                self.manual_error = Some(error.clone());
+                self.stage = Stage::WaitingFlip;
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// 「反面倒序」改了要马上记进这台打印机的偏好（外壳每帧取一次）。
+    pub(crate) fn take_preferences_update(&mut self) -> Option<(String, PrinterPrefs)> {
+        if !self.manual_reverse_dirty {
+            return None;
+        }
+        self.manual_reverse_dirty = false;
+        self.preferences()
+    }
+
     fn job(&self, pages: &Result<Selection, String>) -> Option<PrintJob> {
         let selection = pages.as_ref().ok()?;
-        Some(PrintJob {
+        let copies = self.copies.clamp(1, MAX_COPIES);
+        Some(self.build_job(
+            selection.spans.clone(),
+            copies,
+            copies > 1 && self.collate,
+            self.effective_duplex(),
+        ))
+    }
+
+    fn build_job(
+        &self,
+        pages: Option<Vec<PageSpan>>,
+        copies: u32,
+        collate: bool,
+        duplex: Option<Duplex>,
+    ) -> PrintJob {
+        PrintJob {
             path: self.request.path.clone(),
             title: self.request.title.clone(),
             printer: self.selected.clone(),
-            copies: self.copies.clamp(1, MAX_COPIES),
-            collate: self.copies > 1 && self.collate,
-            pages: selection.spans.clone(),
-            duplex: self.effective_duplex(),
+            copies,
+            collate,
+            pages,
+            duplex,
             color: self.effective_color(),
             paper: self.paper.clone(),
             tray: self.tray.clone(),
@@ -790,12 +1055,16 @@ impl PrintDialog {
             devmode: self.devmode.clone(),
             #[cfg(not(windows))]
             devmode: None,
-        })
+            reverse: false,
+        }
     }
 
     /// 这台打印机不支持双面时，即使状态里留着长边也不提交：新选的打印机可能
-    /// 没有双面单元（换机前留下的选择、或从偏好里预填的）。
+    /// 没有双面单元（换机前留下的选择、或从偏好里预填的）。手动双面不需要硬件。
     fn effective_duplex(&self) -> Option<Duplex> {
+        if self.duplex == Some(Duplex::Manual) {
+            return self.duplex;
+        }
         let supported = self
             .selected
             .as_deref()
@@ -863,6 +1132,7 @@ fn duplex_label(duplex: Option<Duplex>) -> String {
         Some(Duplex::Simplex) => "单面".to_string(),
         Some(Duplex::LongEdge) => "长边翻转".to_string(),
         Some(Duplex::ShortEdge) => "短边翻转".to_string(),
+        Some(Duplex::Manual) => "手动双面（翻面再打）".to_string(),
     }
 }
 
@@ -1255,6 +1525,84 @@ mod tests {
     }
 
     #[test]
+    fn manual_duplex_submits_the_front_pass_and_waits_for_the_user() {
+        let mut dialog = dialog(5);
+        dialog.printers_loaded(Ok(vec![printer("HP", true)]));
+        // 没有双面单元也能选手动双面：每一轮只打单面。
+        dialog.caps_loaded("HP", caps(false, true));
+        dialog.duplex = Some(Duplex::Manual);
+        dialog.duplex_touched = true;
+        let pages = dialog.pages();
+        let outcome = dialog.print_outcome(&pages).expect("应能打印");
+        let DialogOutcome::PrintKeepOpen(job) = outcome else {
+            panic!("手动双面第一轮要留在对话框里");
+        };
+        assert_eq!(job.copies, 1);
+        assert_eq!(job.duplex, Some(Duplex::Manual));
+        assert_eq!(job.pages, Some(vec![(1, 1), (3, 3), (5, 5)]));
+        assert!(!job.reverse);
+        assert_eq!(
+            dialog.stage,
+            Stage::Printing {
+                manual: Some(ManualPass::First)
+            }
+        );
+        assert!(!dialog.manual_finished(&Ok(PrintOutcome::Printed)));
+        assert_eq!(dialog.stage, Stage::WaitingFlip);
+        assert!(
+            dialog
+                .manual_passes
+                .as_ref()
+                .is_some_and(|passes| passes.odd)
+        );
+
+        dialog.manual_reverse = true;
+        let outcome = dialog.begin_second_pass().expect("继续打印反面");
+        let DialogOutcome::PrintKeepOpen(job) = outcome else {
+            panic!("第二轮也不关对话框");
+        };
+        assert_eq!(job.pages, Some(vec![(2, 2), (4, 4)]));
+        assert!(job.reverse);
+        assert!(dialog.manual_finished(&Ok(PrintOutcome::Printed)));
+    }
+
+    #[test]
+    fn a_failed_manual_pass_comes_back_with_the_error() {
+        let mut dialog = dialog(5);
+        dialog.printers_loaded(Ok(vec![printer("HP", true)]));
+        dialog.caps_loaded("HP", caps(true, true));
+        dialog.duplex = Some(Duplex::Manual);
+        dialog.duplex_touched = true;
+        let pages = dialog.pages();
+        dialog.print_outcome(&pages).expect("第一轮");
+        assert!(!dialog.manual_finished(&Err("卡纸".to_string())));
+        assert_eq!(dialog.stage, Stage::Editing);
+        assert!(
+            dialog
+                .manual_error
+                .as_deref()
+                .is_some_and(|error| error.contains("卡纸"))
+        );
+    }
+
+    #[test]
+    fn manual_duplex_needs_a_known_page_count() {
+        let mut dialog = dialog(0);
+        dialog.printers_loaded(Ok(vec![printer("HP", true)]));
+        dialog.caps_loaded("HP", caps(true, true));
+        dialog.duplex = Some(Duplex::Manual);
+        dialog.duplex_touched = true;
+        let pages = dialog.pages();
+        assert!(dialog.print_outcome(&pages).is_none());
+        assert!(
+            dialog
+                .manual_error
+                .as_deref()
+                .is_some_and(|error| error.contains("页数未知"))
+        );
+    }
+
+    #[test]
     fn caps_are_requested_once_per_printer() {
         let mut dialog = dialog(12);
         assert_eq!(dialog.take_caps_request(), None, "还没选中打印机");
@@ -1351,6 +1699,17 @@ mod tests {
         warned.duplex = Some(Duplex::LongEdge);
         warned.color = Some(ColorMode::Mono);
         snapshot(&mut warned, "warnings-rotated-red");
+
+        // 手动双面等翻面（奇数页）：翻面说明、「继续打印反面」与倒序复选框。
+        let mut flip = dialog(5);
+        flip.printers_loaded(Ok(vec![printer("HP_Deskjet_4900", true)]));
+        flip.caps_loaded("HP_Deskjet_4900", caps(false, true));
+        flip.duplex = Some(Duplex::Manual);
+        flip.duplex_touched = true;
+        let pages = flip.pages();
+        let _ = flip.print_outcome(&pages);
+        let _ = flip.manual_finished(&Ok(PrintOutcome::Printed));
+        snapshot(&mut flip, "manual-flip-odd");
 
         // 能力还没回来：five 行只剩一个 spinner。
         let mut loading_caps = dialog(12);

@@ -125,6 +125,28 @@ pub(crate) fn span_page_count(spans: &[PageSpan]) -> u64 {
         .sum()
 }
 
+/// 手动双面分两轮：把要打的页按顺序编号，第 1、3、5… 个进正面轮，第 2、4… 个
+/// 进背面轮，各自写成单页区间。第三个返回值是「页数为奇数，最后一张没有背面」。
+///
+/// 按**要打的页的序号**分，不是按页码奇偶：自定义「2-4」时正面是 2、4，背面是 3。
+pub(crate) fn manual_duplex_passes(spans: &[PageSpan]) -> (Vec<PageSpan>, Vec<PageSpan>, bool) {
+    let mut front = Vec::new();
+    let mut back = Vec::new();
+    let mut index = 0usize;
+    for &(start, end) in spans {
+        for page in start..=end {
+            if index.is_multiple_of(2) {
+                front.push((page, page));
+            } else {
+                back.push((page, page));
+            }
+            index += 1;
+        }
+    }
+    // 区间是升序合并过的，页数就是总张数。
+    (front, back, !index.is_multiple_of(2))
+}
+
 /// 出纸顺序（页码从 1 起）。逐份打印是「1 2 3, 1 2 3」，不逐份是「1 1, 2 2, 3 3」。
 /// 份数与页数相乘可能很大，所以返回迭代器，不展开成数组。
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -201,6 +223,43 @@ mod tests {
     fn formats_spans_for_lp() {
         assert_eq!(format_spans(&[(1, 3), (5, 5)]), "1-3,5");
         assert_eq!(span_page_count(&[(1, 3), (5, 5)]), 4);
+    }
+
+    #[test]
+    fn manual_duplex_splits_even_pages_into_two_passes() {
+        let (front, back, odd) = manual_duplex_passes(&[(1, 4)]);
+        assert_eq!(front, vec![(1, 1), (3, 3)]);
+        assert_eq!(back, vec![(2, 2), (4, 4)]);
+        assert!(!odd);
+    }
+
+    #[test]
+    fn manual_duplex_flags_an_odd_page_count() {
+        let (front, back, odd) = manual_duplex_passes(&[(1, 5)]);
+        assert_eq!(front, vec![(1, 1), (3, 3), (5, 5)]);
+        assert_eq!(back, vec![(2, 2), (4, 4)]);
+        assert!(odd);
+        // 只有一页时背面轮是空的。
+        let (_, back, odd) = manual_duplex_passes(&[(1, 1)]);
+        assert!(back.is_empty() && odd);
+    }
+
+    #[test]
+    fn manual_duplex_splits_by_print_order_not_page_parity() {
+        // 自定义 2-4：正面 2、4，背面 3——不是按页码奇偶。
+        let (front, back, odd) = manual_duplex_passes(&[(2, 4)]);
+        assert_eq!(front, vec![(2, 2), (4, 4)]);
+        assert_eq!(back, vec![(3, 3)]);
+        assert!(odd);
+        // 不连续的区间同样按序号继续交替：5 是奇数页，但在背面轮（第 4 个）。
+        let (front, back, odd) = manual_duplex_passes(&[(1, 3), (5, 5)]);
+        assert_eq!(front, vec![(1, 1), (3, 3)]);
+        assert_eq!(back, vec![(2, 2), (5, 5)]);
+        assert!(!odd);
+        let (front, back, odd) = manual_duplex_passes(&[(2, 2), (9, 9)]);
+        assert_eq!(front, vec![(2, 2)]);
+        assert_eq!(back, vec![(9, 9)]);
+        assert!(!odd);
     }
 
     #[test]

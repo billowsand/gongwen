@@ -4,7 +4,8 @@
 use crate::app::{GongwenApp, WorkerResult};
 use crate::models::PrinterPrefs;
 use crate::print::{
-    DialogOutcome, PrintDialog, PrintJob, PrintRequest, PrinterCaps, PrinterInfo, PrinterState,
+    DialogOutcome, PrintDialog, PrintJob, PrintOutcome, PrintRequest, PrinterCaps, PrinterInfo,
+    PrinterState,
 };
 use eframe::egui;
 
@@ -158,6 +159,8 @@ impl GongwenApp {
         let path = dialog.path().to_path_buf();
         // 点「打印」时的选择要写回配置（和「上次用的打印机」同处保存）。
         let printer_prefs = dialog.preferences();
+        // 「反面倒序」这类改了即记住的偏好，当帧就落盘。
+        let prefs_update = dialog.take_preferences_update();
         if let Some((id, name)) = caps_request {
             self.start_caps_query(id, name, ctx);
         }
@@ -165,14 +168,56 @@ impl GongwenApp {
         if let Some((id, name, devmode)) = preferences_request {
             self.start_preferences_edit(id, name, devmode, ctx);
         }
+        if let Some((printer, prefs)) = prefs_update {
+            self.config.print.printers.insert(printer, prefs);
+            let _ = crate::storage::save(&self.config);
+        }
         let Some(outcome) = outcome else {
             return;
         };
-        self.print_dialog = None;
         match outcome {
-            DialogOutcome::Cancel => {}
-            DialogOutcome::Print(job) => self.start_print(job, printer_prefs, ctx),
-            DialogOutcome::SystemDialog => self.start_system_dialog_print(path, ctx),
+            DialogOutcome::Cancel => self.print_dialog = None,
+            DialogOutcome::Print(job) => {
+                self.print_dialog = None;
+                self.start_print(job, printer_prefs, None, ctx);
+            }
+            // 手动双面的一轮：对话框留在屏幕上，结果按 dialog 编号转回来。
+            DialogOutcome::PrintKeepOpen(job) => {
+                self.start_print(job, printer_prefs, Some(dialog_id), ctx);
+            }
+            DialogOutcome::SystemDialog => {
+                self.print_dialog = None;
+                self.start_system_dialog_print(path, ctx);
+            }
+        }
+    }
+
+    /// 打印任务结束：状态栏照旧，手动双面的一轮还要把结果转回对话框。
+    pub(crate) fn apply_pdf_printed(
+        &mut self,
+        path: std::path::PathBuf,
+        printer: Option<String>,
+        dialog: Option<u64>,
+        result: Result<PrintOutcome, String>,
+    ) {
+        self.status = match &result {
+            Ok(PrintOutcome::Printed) => match &printer {
+                Some(printer) => format!("已送打印机「{printer}」：{}。", path.display()),
+                None => format!("已送打印机：{}。", path.display()),
+            },
+            Ok(PrintOutcome::Cancelled) => "已取消打印。".into(),
+            Err(error) => format!("打印失败：{error}"),
+        };
+        let Some(id) = dialog else {
+            return;
+        };
+        let close = self
+            .print_dialog
+            .as_mut()
+            .filter(|open| open.id() == id)
+            .is_some_and(|open| open.manual_finished(&result));
+        if close {
+            self.print_dialog = None;
         }
     }
 
@@ -193,6 +238,7 @@ impl GongwenApp {
         &mut self,
         job: PrintJob,
         prefs: Option<(String, PrinterPrefs)>,
+        dialog: Option<u64>,
         ctx: &egui::Context,
     ) {
         let mut changed = false;
@@ -218,6 +264,7 @@ impl GongwenApp {
             let _ = tx.send(WorkerResult::PdfPrinted {
                 path: job.path,
                 printer: job.printer,
+                dialog,
                 result,
             });
             // 主线程可能正闲着睡着，主动敲醒它。

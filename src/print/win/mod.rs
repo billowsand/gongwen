@@ -33,10 +33,14 @@ pub(super) fn print(job: &PrintJob) -> Result<PrintOutcome, String> {
     } else {
         (job.copies, job.collate)
     };
+    let mut sequence: Vec<u32> = pages::print_sequence(&spans, copies, collate).collect();
+    if job.reverse {
+        sequence.reverse();
+    }
     document.print(
         &device.dc,
         &job.title,
-        pages::print_sequence(&spans, copies, collate),
+        &sequence,
         job.scaling == Scaling::Fit,
     )?;
     Ok(PrintOutcome::Printed)
@@ -115,12 +119,8 @@ pub(super) fn print_with_system_dialog(path: &Path) -> Result<PrintOutcome, Stri
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "PDF".to_string());
     let spans = [(u32::from(from), u32::from(to))];
+    let sequence: Vec<u32> = pages::print_sequence(&spans, copies, true).collect();
     // 系统对话框里驱动自己的设置说了算，程序只按实际大小出图。
-    document.print(
-        &dc,
-        &title,
-        pages::print_sequence(&spans, copies, true),
-        false,
-    )?;
+    document.print(&dc, &title, &sequence, false)?;
     Ok(PrintOutcome::Printed)
 }
