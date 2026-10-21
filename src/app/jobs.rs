@@ -1496,6 +1496,25 @@ impl GongwenApp {
                         path.parent().unwrap_or(path).display()
                     ));
                 }
+                // 起草页「打印…」：PDF 排好就打开它，打开完自动弹打印对话框。
+                // 标记取一次就清；排版失败或没出 PDF 就不打印。
+                if self.docs[index].take_print_after_export() {
+                    let pdf = super::printing::exported_pdf_to_print(
+                        &self.docs[index].output_files,
+                        self.docs[index].export_error.as_deref(),
+                    );
+                    match pdf {
+                        Some(path) => {
+                            let hints = crate::print::PrintHints {
+                                duplex_typeset: self.docs[index].draft.profile.duplex_printing,
+                                send_package: false,
+                            };
+                            self.open_pdf_for_printing(path, hints);
+                            self.status.push_str(" 正在打开打印对话框…");
+                        }
+                        None => self.status.push_str(" PDF 没有排出来，无法打印。"),
+                    }
+                }
             }
             DocJob::RedlineExported(Ok(files)) => {
                 let pdf = files
@@ -1538,6 +1557,10 @@ impl GongwenApp {
                 doc.export_error = Some(error);
                 // 失败原因全文挂在审校抽屉顶上，弹出来让人看见。
                 doc.result_drawer_open = true;
+                // 「打印…」等的那份 PDF 没出来：清掉标记，说明不能打印。
+                if doc.take_print_after_export() {
+                    self.status.push_str(" PDF 没有排出来，无法打印。");
+                }
             }
         }
     }

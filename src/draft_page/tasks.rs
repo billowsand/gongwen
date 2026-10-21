@@ -85,6 +85,25 @@ impl DraftPage<'_> {
         self.start_export_with(self.config.export.clone());
     }
 
+    /// 「打印…」：按覆盖策略只导一份 PDF，导完由外壳打开并弹打印对话框。
+    /// 走的就是 [`Self::start_export_with`]，不另写一条导出路径。
+    pub(crate) fn start_export_for_print(&mut self) {
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            pdf: true,
+            typst: false,
+            overwrite: self.config.export.overwrite,
+        };
+        self.start_export_with(selection);
+        // `start_export_with` 会拦「正在导出 / 没有内容」；真开跑了才记标记，
+        // 否则标记会留到下一次无关的导出上。
+        if self.doc.busy {
+            self.doc.request_print_after_export();
+            *self.status = "正在导出 PDF，排好后打开打印对话框…".into();
+        }
+    }
+
     /// 按给定格式导出。「输出」分区里的「仅 Word」等入口用它临时只出一种格式，
     /// 不动设置页里勾好的常用格式。
     pub(crate) fn start_export_with(&mut self, selection: ExportSelection) {

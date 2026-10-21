@@ -289,6 +289,13 @@ pub(crate) fn printing_available() -> bool {
     }
 }
 
+/// 同 [`printing_available`]，但进程内只探测一次。界面每帧都要据此决定按钮
+/// 置灰与否，Unix 上探测要扫 PATH，不能每帧都做。
+pub(crate) fn printing_available_cached() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(printing_available)
+}
+
 /// 列出本机的打印机（名字与默认标记）。状态随后用 [`printer_state`] 逐台补：
 /// 网络打印机查一次可能要几秒，不能让整张清单等它。阻塞调用，调用方放后台线程。
 pub(crate) fn list_printers() -> Result<Vec<PrinterInfo>, String> {

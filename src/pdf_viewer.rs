@@ -34,8 +34,6 @@ pub(crate) type PdfKey = u64;
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
 const ZOOM_STEP: f32 = 0.25;
-/// 本机有没有打印能力。探测要扫一遍 PATH，不能每帧都做，进程内只算一次。
-static PRINTING_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// PDF 标签里打开打印对话框。
 const PRINT_SHORTCUT: egui::KeyboardShortcut =
     egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::P);
@@ -270,6 +268,8 @@ pub(crate) struct PdfSession {
     /// 打印对话框的预览想看的页（从 0 起）。下一帧算「要哪些页」时把它放在最前面；
     /// 纹理到了就清掉。`ui` 不跑时由 [`Self::pump_preview`] 直接交给队列。
     preview_wanted: Option<usize>,
+    /// 这份 PDF 是起草页「打印…」导出来的：打开完成后自动弹一次打印对话框。
+    print_when_ready: bool,
     /// 打开这份 PDF 的调用方知道的打印提示（稿件按双面排、送批材料合并件）。
     print_hints: crate::print::PrintHints,
 }
@@ -319,6 +319,7 @@ impl PdfSession {
             selection: TextSelection::default(),
             error: None,
             preview_wanted: None,
+            print_when_ready: false,
             print_hints: crate::print::PrintHints::default(),
         }
     }
@@ -367,6 +368,37 @@ impl PdfSession {
     /// 预览页不再需要（对话框关了或页码无效）：不再钉住它，纹理淘汰照常回收。
     pub(crate) fn stop_preview(&mut self) {
         self.preview_wanted = None;
+    }
+
+    /// 起草页「打印…」导出的 PDF：打开完成后自动弹一次打印对话框。
+    pub(crate) fn request_print_when_ready(&mut self) {
+        self.print_when_ready = true;
+    }
+
+    /// 打开完成（页数已知）就交出一次打印动作；打开失败则放弃、不再等。
+    fn take_print_when_ready(&mut self) -> Option<PdfAction> {
+        if self.error.is_some() {
+            self.print_when_ready = false;
+            return None;
+        }
+        // 还没打开完：页数未知，先等着（打开失败会在上面清掉标记）。
+        if !self.print_when_ready || self.page_count() == 0 {
+            return None;
+        }
+        self.print_when_ready = false;
+        Some(PdfAction::Print(self.print_request()))
+    }
+
+    /// 交给外壳的打印请求：当前页、总页数、打印提示与对应标签。
+    fn print_request(&self) -> crate::print::PrintRequest {
+        crate::print::PrintRequest {
+            path: self.path.clone(),
+            title: self.title.clone(),
+            page_count: self.page_count(),
+            current_page: self.current_page,
+            hints: self.print_hints,
+            pdf_key: Some(self.key),
+        }
     }
 
     /// PDF 标签不在前台时 [`Self::ui`] 不会跑，`request` 也就不会跑。这里只做一件事：
@@ -483,6 +515,10 @@ impl PdfSession {
         let mut actions = Vec::new();
         self.frame += 1;
         self.ensure_worker(ui.ctx());
+        // 起草页「打印…」导出的 PDF：打开完就弹一次打印对话框。
+        if let Some(action) = self.take_print_when_ready() {
+            actions.push(action);
+        }
 
         egui::Panel::top(egui::Id::new("pdf_toolbar").with(self.key))
             .frame(theme::panel(theme::surface(), 10))
@@ -644,7 +680,7 @@ impl PdfSession {
 
             ui.separator();
             // 打印能力每帧探测一次代价太高（Unix 要扫 PATH），进程内只算一次。
-            let can_print = *PRINTING_AVAILABLE.get_or_init(crate::print::printing_available);
+            let can_print = crate::print::printing_available_cached();
             let print_button = ui.add_enabled(
                 can_print,
                 theme::icon_text_button(theme::Icon::Print, "打印"),
@@ -663,14 +699,7 @@ impl PdfSession {
                 && crate::modal::takes_keys(ui)
                 && ui.input_mut(|input| input.consume_shortcut(&PRINT_SHORTCUT));
             if print_button.clicked() || shortcut {
-                actions.push(PdfAction::Print(crate::print::PrintRequest {
-                    path: self.path.clone(),
-                    title: self.title.clone(),
-                    page_count: self.page_count(),
-                    current_page: self.current_page,
-                    hints: self.print_hints,
-                    pdf_key: Some(self.key),
-                }));
+                actions.push(PdfAction::Print(self.print_request()));
             }
 
             if ui
@@ -1860,6 +1889,33 @@ mod tests {
             },
         );
         assert_eq!(session.preview_wanted, None);
+    }
+
+    /// 起草页「打印…」导出的 PDF：打开完才弹打印对话框；打开失败就放弃、不再等。
+    #[test]
+    fn print_when_ready_waits_for_the_page_count_and_gives_up_on_errors() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut session = PdfSession::new(1, PathBuf::from("a.pdf"), None, tx);
+        session.request_print_when_ready();
+        // 还没打开完：页数未知，不触发，标记留着等。
+        assert!(session.take_print_when_ready().is_none());
+        assert!(session.print_when_ready);
+        // 打开失败：清掉标记，不再等。
+        session.error = Some("读不出来".to_string());
+        assert!(session.take_print_when_ready().is_none());
+        assert!(!session.print_when_ready);
+        // 打开成功：页数已知时弹一次，之后不再弹。
+        session.error = None;
+        session.page_sizes = vec![(595.0, 842.0); 3];
+        session.current_page = 1;
+        session.request_print_when_ready();
+        let Some(PdfAction::Print(request)) = session.take_print_when_ready() else {
+            panic!("页数已知要弹打印对话框");
+        };
+        assert_eq!((request.page_count, request.current_page), (3, 1));
+        assert_eq!(request.pdf_key, Some(1));
+        assert!(!session.print_when_ready);
+        assert!(session.take_print_when_ready().is_none());
     }
 
     /// 预览页在纸上按真实尺寸摆：A4 页 + A4 纸填满，横页落竖纸时转向。

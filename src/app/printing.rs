@@ -359,3 +359,59 @@ impl GongwenApp {
     #[cfg(not(windows))]
     fn start_system_dialog_print(&mut self, _path: std::path::PathBuf, _ctx: &egui::Context) {}
 }
+
+/// 「打印…」导出结束后要打开哪个 PDF。排版失败（`compile_error` 有值）或没导出
+/// 任何 PDF 时返回 `None`，调用方据此不打印、只说明原因。
+pub(super) fn exported_pdf_to_print(
+    files: &[std::path::PathBuf],
+    compile_error: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    if compile_error.is_some() {
+        return None;
+    }
+    files
+        .iter()
+        .find(|file| {
+            file.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+        })
+        .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn the_exported_pdf_is_opened_for_printing() {
+        let files = vec![
+            PathBuf::from("/tmp/关于××的通知.docx"),
+            PathBuf::from("/tmp/关于××的通知.PDF"),
+        ];
+        assert_eq!(
+            exported_pdf_to_print(&files, None),
+            Some(PathBuf::from("/tmp/关于××的通知.PDF"))
+        );
+    }
+
+    #[test]
+    fn nothing_is_printed_when_the_pdf_failed_or_is_missing() {
+        let files = vec![PathBuf::from("/tmp/关于××的通知.docx")];
+        assert_eq!(exported_pdf_to_print(&files, None), None);
+        assert_eq!(exported_pdf_to_print(&files, Some("字体缺失")), None);
+        let with_pdf = vec![PathBuf::from("/tmp/关于××的通知.pdf")];
+        // 排版失败：PDF 文件可能只写了一半，不打开。
+        assert_eq!(exported_pdf_to_print(&with_pdf, Some("字体缺失")), None);
+    }
+
+    #[test]
+    fn the_print_after_export_mark_is_taken_once() {
+        let mut session =
+            crate::draft_page::DraftSession::blank(1, &crate::models::AppConfig::default());
+        assert!(!session.take_print_after_export());
+        session.request_print_after_export();
+        assert!(session.take_print_after_export());
+        assert!(!session.take_print_after_export());
+    }
+}

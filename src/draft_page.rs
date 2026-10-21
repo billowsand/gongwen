@@ -341,6 +341,9 @@ pub(crate) struct DraftSession {
     pub(crate) output_files: Vec<PathBuf>,
     /// 最近一次导出失败的原因；成功导出或换稿后清空。
     pub(crate) export_error: Option<String>,
+    /// 点了「打印…」：这次导出结束后打开 PDF 并弹打印对话框。导出失败、
+    /// 排版失败或没导出 PDF 时由外壳清掉，不打印。
+    pub(crate) print_after_export: bool,
     /// 当前编辑内容来自的版本（起草页横幅）。
     pub(crate) loaded_version: Option<LoadedVersion>,
     /// 起草页“版本对照”模式的状态。
@@ -504,6 +507,7 @@ impl DraftSession {
             proof_markdown: String::new(),
             output_files: Vec::new(),
             export_error: None,
+            print_after_export: false,
             loaded_version: None,
             draft_diff: DraftDiffState::default(),
             manual_fields: BTreeSet::new(),
@@ -582,6 +586,17 @@ impl DraftSession {
             serde_json::to_string(&self.draft).unwrap_or_default(),
             self.generated_markdown.clone(),
         ));
+    }
+
+    /// 起草页点了「打印…」：记下「导出完自动打开并弹打印对话框」。导出真开始了
+    /// 才记；导出失败或没排出 PDF 时由外壳清掉。
+    pub(crate) fn request_print_after_export(&mut self) {
+        self.print_after_export = true;
+    }
+
+    /// 取走「导出后打印」标记：取一次就清，免得下一次无关的导出又弹一次。
+    pub(crate) fn take_print_after_export(&mut self) -> bool {
+        std::mem::take(&mut self.print_after_export)
     }
 
     /// 相对稿件库里的记录有没有未写入的改动。尚未入库的稿子，只要动过就算脏。

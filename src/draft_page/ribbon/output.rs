@@ -29,6 +29,21 @@ impl DraftPage<'_> {
         {
             self.start_export_current();
         }
+        // 起草页直接打印：先按覆盖策略导出一份只含 PDF 的成品，导完由外壳打开
+        // 并弹打印对话框。打印能力探测一次就够（Unix 要扫 PATH），不能每帧都问。
+        let can_print = crate::print::printing_available_cached();
+        let print_button = ui.add_enabled(
+            ready && can_print,
+            theme::icon_text_button(theme::Icon::Print, "打印…"),
+        );
+        let print_button = if can_print {
+            print_button.on_hover_text("先按覆盖策略导出一份 PDF，再打开打印对话框")
+        } else {
+            print_button.on_disabled_hover_text("未检测到打印服务，请用「系统打开」后从阅读器打印")
+        };
+        if print_button.clicked() {
+            self.start_export_for_print();
+        }
         let overwrite = self.config.export.overwrite;
         let mut only: Option<(ExportSelection, &'static str)> = None;
         ui.add_enabled_ui(ready, |ui| {

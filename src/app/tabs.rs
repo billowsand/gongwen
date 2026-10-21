@@ -213,6 +213,14 @@ impl GongwenApp {
         self.activate_tab(self.tabs.len() - 1);
     }
 
+    /// 导出后直接打印：打开 PDF（带上打印提示），等它打开完自动弹一次打印对话框。
+    pub(crate) fn open_pdf_for_printing(&mut self, path: PathBuf, hints: crate::print::PrintHints) {
+        self.open_pdf_with_hints(path.clone(), None, hints);
+        if let Some(pdf) = self.pdfs.iter_mut().find(|pdf| pdf.path() == path) {
+            pdf.request_print_when_ready();
+        }
+    }
+
     pub(crate) fn pdf_ui(&mut self, key: PdfKey, ui: &mut egui::Ui) {
         let Some(index) = self.pdf_index_of_key(key) else {
             ui.centered_and_justified(|ui| {
