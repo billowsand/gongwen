@@ -169,18 +169,28 @@ impl DraftPage<'_> {
 
         let border = if focused {
             theme::accent()
+        } else if theme::smartisan::active() {
+            theme::border()
         } else {
             theme::border().gamma_multiply(0.6)
         };
         let framed = egui::Frame::new()
-            .fill(theme::surface())
+            .fill(super::appearance::composer_fill())
             .stroke(egui::Stroke::new(1.0, border))
-            .corner_radius(egui::CornerRadius::same(14))
+            .corner_radius(egui::CornerRadius::same(if theme::smartisan::active() {
+                10
+            } else {
+                14
+            }))
             .shadow(egui::epaint::Shadow {
                 offset: [0, 4],
-                blur: 20,
+                blur: if theme::smartisan::active() { 10 } else { 20 },
                 spread: 0,
-                color: egui::Color32::from_black_alpha(24),
+                color: egui::Color32::from_black_alpha(if theme::smartisan::active() {
+                    12
+                } else {
+                    24
+                }),
             })
             .inner_margin(egui::Margin {
                 left: 12,
@@ -304,7 +314,7 @@ impl DraftPage<'_> {
                 |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt(("ai_composer_chips", self.doc.key))
-                        .max_height(76.0)
+                        .max_height(if theme::smartisan::active() { 104.0 } else { 76.0 })
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {

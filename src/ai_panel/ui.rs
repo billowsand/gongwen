@@ -34,7 +34,7 @@ fn conversation_edge_fades(ui: &egui::Ui, rect: egui::Rect, top: bool, bottom: b
         for step in 0..=8 {
             let t = step as f32 / 8.0;
             let alpha = 1.0 - t * t * (3.0 - 2.0 * t);
-            let color = theme::canvas().gamma_multiply(alpha);
+            let color = super::appearance::background().gamma_multiply(alpha);
             let y = edge + direction * height * t;
             mesh.colored_vertex(egui::pos2(rect.left(), y), color);
             mesh.colored_vertex(egui::pos2(rect.right(), y), color);
@@ -93,7 +93,7 @@ impl DraftPage<'_> {
         egui::Panel::right("ai_panel_v1")
             .default_size(PANEL_DEFAULT_WIDTH)
             .size_range(PANEL_MIN_WIDTH..=PANEL_MAX_WIDTH)
-            .frame(theme::panel(theme::canvas(), 12))
+            .frame(theme::panel(super::appearance::background(), 12))
             .show_collapsible(ui, &mut open, |ui| {
                 // 侧栏宽度只由用户拖动决定。内容画在不回报尺寸的子 Ui 里、超出的裁掉：
                 // 否则哪行字没折行，egui 会按内容把侧栏撑到最大宽度，左半截还会被正文区盖住。
@@ -150,6 +150,12 @@ impl DraftPage<'_> {
     }
 
     fn ai_panel_ui(&mut self, ui: &mut egui::Ui) {
+        if theme::smartisan::active() {
+            // 侧栏用细浮动滚动条，窄屏换行时不再出现粗重的棕色轨道。
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::floating();
+            ui.spacing_mut().scroll.bar_width = 4.0;
+            ui.spacing_mut().scroll.floating_width = 3.0;
+        }
         self.ai_panel_header(ui);
         ui.add_space(8.0);
         self.pending_banner_ui(ui);
@@ -225,10 +231,10 @@ impl DraftPage<'_> {
                 .on_hover_text(title);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::titlebar_icon_button(ui, true, theme::Icon::X, "收起 AI 侧栏").clicked() {
+                if super::appearance::header_button(ui, theme::Icon::X, "收起 AI 侧栏").clicked() {
                     self.doc.ai_panel.open = false;
                 }
-                let history = theme::titlebar_icon_button(ui, true, theme::Icon::History, "历史会话");
+                let history = super::appearance::header_button(ui, theme::Icon::History, "历史会话");
                 if history.clicked() {
                     self.refresh_ai_sessions();
                 }
@@ -238,13 +244,13 @@ impl DraftPage<'_> {
                         ui.set_min_width(300.0);
                         self.ai_sessions_menu(ui);
                     });
-                if theme::titlebar_icon_button(ui, true, theme::Icon::Plus, "新会话：从空白开始，追问不带之前的轮次")
+                if super::appearance::header_button(ui, theme::Icon::Plus, "新会话：从空白开始，追问不带之前的轮次")
                     .clicked()
                 {
                     self.new_ai_session();
                 }
                 let options =
-                    theme::titlebar_icon_button(ui, true, theme::Icon::Settings, "会话与技能管理");
+                    super::appearance::header_button(ui, theme::Icon::Settings, "会话与技能管理");
                 egui::Popup::menu(&options).show(|ui| {
                     let can_compact = !self.doc.busy
                         && self
@@ -297,6 +303,22 @@ impl DraftPage<'_> {
 
     fn ai_turns_ui(&mut self, ui: &mut egui::Ui) {
         if self.doc.ai_panel.turns.is_empty() {
+            if theme::smartisan::active() {
+                let can_fill = self.doc.ai_panel.composer.text.trim().is_empty() && !self.doc.busy;
+                if let Some(prompt) = super::appearance::welcome(
+                    ui,
+                    !self.doc.generated_markdown.trim().is_empty(),
+                    can_fill,
+                ) {
+                    self.doc.ai_panel.composer.text = prompt.into();
+                    self.doc.ai_panel.composer.skill = None;
+                    self.doc.ai_panel.composer.error = None;
+                    ui.ctx().memory_mut(|memory| {
+                        memory.request_focus(egui::Id::new(("ai_panel_input", self.doc.key)));
+                    });
+                }
+                return;
+            }
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
                 ui.weak("今天想写些什么？");

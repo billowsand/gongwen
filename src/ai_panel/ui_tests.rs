@@ -9,6 +9,56 @@ use crate::draft_page::{DraftSession, ExportLinks};
 use crate::models::{AppConfig, GeneratedDraft};
 use std::sync::mpsc::{Receiver, Sender};
 
+/// 便签侧栏的真实 egui 样张：常规、窄屏和会话中三种布局。
+#[test]
+#[ignore = "出样张，手动跑"]
+fn paper_sidebar_samples() {
+    let previous = crate::models::ThemeName::ALL
+        .iter()
+        .copied()
+        .find(|name| theme::by_name(*name).label == theme::current().label)
+        .unwrap_or_default();
+    theme::set_current(crate::models::ThemeName::Smartisan);
+    for (name, width, conversation) in [
+        ("welcome", 420.0, false),
+        ("narrow", 340.0, false),
+        ("conversation", 420.0, true),
+    ] {
+        let size = egui::vec2(width, 850.0);
+        let mut harness =
+            Harness::new("# 关于做好冬季森林防火工作的通知\n\n请各单位做好隐患排查。\n");
+        harness.with_page(|page| page.toggle_ai_panel(None));
+        if conversation {
+            harness
+                .doc
+                .ai_panel
+                .push_turn("润色".into(), "请润色这篇通知".into(), vec![], None);
+            harness.doc.ai_panel.finish(TurnState::Interrupted);
+        }
+        let mut canvas = crate::ui_snapshot::Canvas::default();
+        theme::configure_style(&harness.ctx);
+        harness.ctx.set_pixels_per_point(2.0);
+        for _ in 0..15 {
+            let mut output = harness.frame_output(Vec::new(), size);
+            canvas.absorb(&mut output.textures_delta);
+        }
+        let output = harness.frame_output_cleared(Vec::new(), size);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp")
+            .join(format!("ai-paper-{name}.png"));
+        canvas.render(
+            &harness.ctx,
+            output,
+            size,
+            crate::ai_panel::appearance::background(),
+            &path,
+        );
+        println!("{}", path.display());
+    }
+    // 样张单独运行，恢复原来的配色，避免影响后续的手动样张。
+    theme::set_current(previous);
+}
+
 struct Harness {
     ctx: egui::Context,
     doc: DraftSession,
