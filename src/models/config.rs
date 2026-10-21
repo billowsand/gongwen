@@ -93,6 +93,11 @@ pub struct AppConfig {
     pub numbering: NumberingConfig,
     /// 界面主题。旧配置没有该字段时回退默认。
     pub theme: ThemeName,
+    /// 界面明暗是否跟随系统：浅色系统用默认的 Claude 奶油，深色系统用
+    /// 「复古暗」（`ThemeName::GruvboxDark`）。默认开启，旧配置没有该字段时
+    /// 也按跟随系统处理；手动点选主题会把这一项关掉。
+    #[serde(default = "follow_system_theme_default")]
+    pub theme_follows_system: bool,
     /// 屏幕上公文纸面的明暗。导出结果不受影响。
     pub paper: PaperMode,
     /// 图表的配色与线型，预览与导出一致。旧配置缺该字段时按「按文种自动」。
@@ -150,6 +155,7 @@ impl Default for AppConfig {
             fonts: FontConfig::default(),
             numbering: NumberingConfig::default(),
             theme: ThemeName::default(),
+            theme_follows_system: true,
             paper: PaperMode::default(),
             diagram_theme: DiagramTheme::default(),
             editor_fonts: EditorFontScheme::default(),
@@ -656,6 +662,10 @@ pub const UI_SCALE_MIN: f32 = 0.8;
 
 pub const UI_SCALE_MAX: f32 = 1.75;
 
+/// 界面缩放的预设档位（百分比）。设置页按这些档位画分段按钮，不再让人手填比例；
+/// 90、100、120、150 是常用档，80 与 175 对应可选范围的两端。
+pub const UI_SCALE_PRESETS: [u32; 7] = [80, 90, 100, 110, 120, 150, 175];
+
 /// 自动保存间隔的可选范围（秒）：太密会和输入抢 SQLite 写锁，太疏又护不住现场。
 pub const AUTO_SAVE_INTERVAL_MIN_SECS: u64 = 30;
 
@@ -672,6 +682,11 @@ pub(crate) fn default_auto_save_interval_secs() -> u64 {
 /// 旧配置文件没有界面缩放；缺省 100%。
 pub(crate) fn default_ui_scale() -> f32 {
     1.0
+}
+
+/// 旧配置文件没有「跟随系统明暗」；缺省开启，升级后界面自动与桌面明暗一致。
+pub(crate) fn follow_system_theme_default() -> bool {
+    true
 }
 
 /// 旧配置文件没有更新检查地址；缺省用项目主页的 GitHub 发布接口。

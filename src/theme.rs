@@ -8,6 +8,7 @@ mod mdex;
 pub mod smartisan;
 
 use crate::models::PaperMode;
+use crate::models::ThemeName;
 use eframe::egui::Color32;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
@@ -101,6 +102,16 @@ static CURRENT: RwLock<Theme> = RwLock::new(Theme::claude());
 
 /// 当前的纸面显示模式，与 [`CURRENT`] 同样只在切换时写一次。
 static CURRENT_PAPER: RwLock<PaperMode> = RwLock::new(PaperMode::Follow);
+
+/// 跟随系统明暗时选用的配色：浅色系统用默认的 Claude 奶油，深色系统用
+/// 「复古暗」（默认主题的深色亲戚）。这里只决定配色，不改用户保存的手动主题。
+pub(crate) fn follow_system_theme(dark: bool) -> ThemeName {
+    if dark {
+        ThemeName::GruvboxDark
+    } else {
+        ThemeName::default()
+    }
+}
 
 /// 配色版本号：主题或纸面每变一次就加一。
 ///
@@ -752,6 +763,17 @@ mod tests {
                 "{name:?} 的强调色在淡底上对比度只有 {accent_on_soft:.2}，低于 3.0"
             );
         }
+    }
+
+    /// 跟随系统时只在明暗上对应：浅色落到默认奶油，深色落到复古暗。
+    #[test]
+    fn follow_system_theme_picks_a_palette_of_the_matching_brightness() {
+        let light = super::follow_system_theme(false);
+        let dark = super::follow_system_theme(true);
+        assert_eq!(light, ThemeName::default());
+        assert_eq!(dark, ThemeName::GruvboxDark);
+        assert!(!by_name(light).dark, "浅色系统不该选中深色主题");
+        assert!(by_name(dark).dark, "深色系统不该选中浅色主题");
     }
 
     /// 明暗 MDEX 的实底按钮在普通、悬停和按下时均须保持正文级对比度。

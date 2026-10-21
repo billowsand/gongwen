@@ -965,12 +965,23 @@ impl GongwenApp {
         }
     }
 
-    /// 换肤弹层：六套主题按明暗分两段，中间一道分隔线。每行左侧一枚色样
-    /// （主题底色的圆 + 强调色圆点），选中项常显淡底并在右端打勾，点了立即
-    /// 生效并保存。色样画在按钮自己的 atom 里，悬停底色才铺得满整行。
+    /// 换肤弹层：顶部一项「明暗跟随系统」，下面六套主题按明暗分两段，中间一道
+    /// 分隔线。每行左侧一枚色样（主题底色的圆 + 强调色圆点），选中项常显淡底并
+    /// 在右端打勾，点了立即生效并保存。色样画在按钮自己的 atom 里，悬停底色才
+    /// 铺得满整行。
     fn theme_menu(&mut self, ui: &mut egui::Ui) {
         compact_menu(ui);
         ui.set_min_width(148.0);
+        let follow = self.config.theme_follows_system;
+        if ui
+            .add(theme::menu_selectable_item(follow, "明暗跟随系统"))
+            .on_hover_text("随桌面深浅模式在 Claude 奶油与复古暗之间切换；点下面的主题改为手动选择")
+            .clicked()
+        {
+            self.apply_theme_follow_system(ui.ctx(), !follow);
+            ui.close();
+        }
+        ui.separator();
         let ids = egui::Id::new("theme_swatch");
         let mut index = 0usize;
         for dark in [false, true] {
@@ -982,7 +993,7 @@ impl GongwenApp {
                 .filter(|name| theme::by_name(*name).dark == dark)
             {
                 let palette = theme::by_name(name);
-                let selected = name == self.config.theme;
+                let selected = name == self.applied_theme;
                 let swatch = ids.with(index);
                 index += 1;
                 let mut item = egui::Button::new((

@@ -141,8 +141,8 @@ impl SettingsSection {
                 "PDF 由内置 Typst 引擎在程序里直接排版，公文与研究报告都是，不依赖本机安装任何排版软件。"
             }
             SettingsSection::Theme => {
-                "界面配色、界面缩放与屏幕上的纸色，改动立即生效并保存。导出的公文不受影响，\
-                 仍按规范为白纸黑字红头。"
+                "界面配色（默认跟随系统明暗）、界面缩放与屏幕上的纸色，改动立即生效并保存。\
+                 导出的公文不受影响，仍按规范为白纸黑字红头。"
             }
             SettingsSection::Font => "界面、Markdown 编辑器与公文编译三处字体分别设置，互不牵连。",
             SettingsSection::Numbering => {
@@ -463,8 +463,13 @@ fn font_choice_row(
 impl GongwenApp {
     /// 切换主题并立即生效：写入配置、刷新全局样式与窗口图标、保存。
     /// 设置页的主题卡片与应用菜单的「外观主题」子菜单共用这一入口。
+    ///
+    /// 手动点选任何一套配色都意味着「不再跟随系统明暗」；想重新跟随，勾回
+    /// 上面的「明暗跟随系统」开关即可。
     pub(crate) fn apply_theme(&mut self, ctx: &egui::Context, name: ThemeName) {
         self.config.theme = name;
+        self.config.theme_follows_system = false;
+        self.applied_theme = name;
         theme::set_current(name);
         theme::reconfigure_style(ctx);
         theme::apply_app_icon(ctx, name);
@@ -472,6 +477,60 @@ impl GongwenApp {
         if let Err(error) = storage::save(&self.config) {
             self.status = format!("界面主题已在本次生效，但配置保存失败：{error:#}");
         }
+    }
+
+    /// 开 / 关「明暗跟随系统」。开启时立刻按当前系统明暗选一套配色；关闭时保留
+    /// 屏幕上正在用的那一套，并把它写回手动主题，免得下次启动跳回配置文件里
+    /// 上一次手动选的那套。
+    pub(crate) fn apply_theme_follow_system(&mut self, ctx: &egui::Context, follow: bool) {
+        self.config.theme_follows_system = follow;
+        if follow {
+            self.sync_system_theme(ctx);
+        } else {
+            self.config.theme = self.applied_theme;
+        }
+        self.status = if follow {
+            match ctx.system_theme() {
+                Some(system) => {
+                    let system = if system == egui::Theme::Dark {
+                        "深色"
+                    } else {
+                        "浅色"
+                    };
+                    format!("界面明暗已改为跟随系统（当前系统为{system}）。")
+                }
+                None => "界面明暗已改为跟随系统；系统暂未报告明暗，先沿用当前主题。".into(),
+            }
+        } else {
+            format!(
+                "界面明暗已改为手动选择：{}。",
+                theme::by_name(self.config.theme).label
+            )
+        };
+        if let Err(error) = storage::save(&self.config) {
+            self.status = format!("界面明暗设置已在本次生效，但配置保存失败：{error:#}");
+        }
+    }
+
+    /// 系统明暗变了（或刚启动、刚打开跟随开关）时，把界面换到对应明暗的预设。
+    ///
+    /// 只在采用「跟随系统」时动手，也不写配置——配置里记的是跟随开关和手动
+    /// 主题，系统明暗由桌面决定。已经是对应配色时是空操作，每帧调用无开销。
+    pub(crate) fn sync_system_theme(&mut self, ctx: &egui::Context) {
+        if !self.config.theme_follows_system {
+            return;
+        }
+        let Some(system) = ctx.system_theme() else {
+            return;
+        };
+        let name = theme::follow_system_theme(system == egui::Theme::Dark);
+        if self.applied_theme == name {
+            return;
+        }
+        self.applied_theme = name;
+        theme::set_current(name);
+        theme::reconfigure_style(ctx);
+        theme::apply_app_icon(ctx, name);
     }
 
     /// 切换纸面显示模式并立即生效。只影响屏幕预览，导出结果不变。
@@ -612,7 +671,8 @@ impl GongwenApp {
     /// 画一张主题预览卡；返回值为卡片的点击响应。
     fn theme_card(&self, ui: &mut egui::Ui, name: ThemeName) -> egui::Response {
         let palette = theme::by_name(name);
-        let selected = name == self.config.theme;
+        // 「当前」认屏幕上真正生效的那一套：跟随系统时它可能与配置里的手动主题不同。
+        let selected = name == self.applied_theme;
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(168.0, 76.0), egui::Sense::click());
         if ui.is_rect_visible(rect) {
@@ -665,38 +725,39 @@ impl GongwenApp {
         response
     }
 
-    /// 界面缩放与主题：缩放按百分比立即生效；配色预设按明暗分两组多行展示，
-    /// 点选立即生效并保存。公文纸面单独一项，且只作用于屏幕——导出永远是白纸黑字红头。
+    /// 界面缩放与主题：缩放按预设档位点选；配色默认跟随系统明暗，也可手动
+    /// 点选。两者都立即生效并保存。公文纸面单独一项，且只作用于屏幕——导出
+    /// 永远是白纸黑字红头。
     pub(crate) fn theme_settings_ui(&mut self, ui: &mut egui::Ui) {
         sub_heading(
             ui,
             "界面缩放",
-            Some(
-                "整个界面按比例放大或缩小，不影响导出的公文版式。拖动或输入百分比后立即生效并保存。",
-            ),
+            Some("整个界面按比例放大或缩小，不影响导出的公文版式。点选常用档位后立即生效并保存。"),
         );
         let mut pending_scale = None;
+        let current_scale = self.config.ui_scale;
         setting_row(ui, "缩放比例", None, |ui| {
-            let mut scale = self.config.ui_scale;
-            let response = ui
-                .add(
-                    egui::DragValue::new(&mut scale)
-                        .range(crate::models::UI_SCALE_MIN..=crate::models::UI_SCALE_MAX)
-                        .speed(0.05)
-                        .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
-                        .custom_parser(|text| {
-                            text.trim()
-                                .trim_end_matches('%')
-                                .trim()
-                                .parse::<f64>()
-                                .ok()
-                                .map(|value| value / 100.0)
-                        }),
-                )
-                .on_hover_text("范围 80%–175%，步进 5%");
-            if response.changed() {
-                pending_scale = Some(scale);
+            let current_percent = (current_scale * 100.0).round() as u32;
+            let mut options = crate::models::UI_SCALE_PRESETS.to_vec();
+            // 旧配置里可能是 85%、125% 这类手填值：把当前值补进档位，免得界面
+            // 上一个按钮都没选中，看起来像设置丢了。
+            if !options.contains(&current_percent) {
+                options.push(current_percent);
+                options.sort_unstable();
             }
+            theme::segmented(ui, |ui| {
+                for percent in options {
+                    let scale = percent as f32 / 100.0;
+                    let selected = (current_scale - scale).abs() < 0.001;
+                    if ui
+                        .selectable_label(selected, format!("{percent}%"))
+                        .clicked()
+                        && !selected
+                    {
+                        pending_scale = Some(scale);
+                    }
+                }
+            });
         });
         if let Some(scale) = pending_scale {
             self.apply_ui_scale(ui.ctx(), scale);
@@ -708,8 +769,33 @@ impl GongwenApp {
         sub_heading(
             ui,
             "配色预设",
-            Some("深色主题借鉴常见终端配色方案。点选后立即生效并保存。"),
+            Some(
+                "默认跟随系统明暗：浅色系统用 Claude 奶油，深色系统用复古暗。\
+                 点选任一配色即改为手动选择，立即生效并保存。",
+            ),
         );
+
+        let mut pending_follow = None;
+        ui.horizontal(|ui| {
+            let mut follow = self.config.theme_follows_system;
+            if ui
+                .checkbox(&mut follow, "明暗跟随系统")
+                .on_hover_text(
+                    "开着时界面配色随桌面深浅模式自动切换；点下面的配色卡片会改为手动选择",
+                )
+                .changed()
+            {
+                pending_follow = Some(follow);
+            }
+            ui.weak(match ui.ctx().system_theme() {
+                Some(egui::Theme::Dark) => "当前系统：深色",
+                Some(_) => "当前系统：浅色",
+                None => "系统未报告明暗，按浅色处理",
+            });
+        });
+        if let Some(follow) = pending_follow {
+            self.apply_theme_follow_system(ui.ctx(), follow);
+        }
 
         let mut pending = None;
         for (title, dark) in [("浅色", false), ("深色", true)] {
@@ -725,7 +811,7 @@ impl GongwenApp {
                     .into_iter()
                     .filter(|name| theme::by_name(*name).dark == dark)
                 {
-                    if self.theme_card(ui, name).clicked() && self.config.theme != name {
+                    if self.theme_card(ui, name).clicked() && self.applied_theme != name {
                         pending = Some(name);
                     }
                 }

@@ -33,6 +33,7 @@ pub(super) fn fixture() -> GongwenApp {
             Err(error) => (None, Some(format!("词表库打开失败：{error:#}"))),
         };
     let mut app = GongwenApp {
+        applied_theme: config.theme,
         config,
         ime,
         metrics: crate::metrics::Metrics::default(),
@@ -357,6 +358,61 @@ fn smartisan_management_samples() {
                     size,
                     theme::canvas(),
                     std::path::Path::new(&format!("tmp/smartisan-{stem}.png")),
+                );
+            }
+        }
+    }
+    theme::set_current(crate::models::ThemeName::default());
+}
+
+#[test]
+#[ignore = "出界面主题设置样张，手动跑"]
+fn theme_settings_samples() {
+    let ctx = egui::Context::default();
+    theme::set_current(crate::models::ThemeName::default());
+    theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+    theme::configure_icons(&ctx);
+    theme::configure_style(&ctx);
+    ctx.set_pixels_per_point(1.0);
+    let mut app = fixture();
+    app.config.theme_follows_system = true;
+    app.config.ui_scale = 1.2;
+    let mut canvas = crate::ui_snapshot::Canvas::default();
+    for (stem, system) in [
+        ("theme-settings-light", egui::Theme::Light),
+        ("theme-settings-dark", egui::Theme::Dark),
+    ] {
+        let size = egui::vec2(1000.0, 820.0);
+        for frame in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    system_theme: Some(system),
+                    time: Some(frame as f64),
+                    ..Default::default()
+                },
+                |ui| {
+                    app.sync_system_theme(ui.ctx());
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE.fill(theme::surface()))
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                app.theme_settings_ui(ui);
+                            });
+                        });
+                },
+            );
+            if frame < 2 {
+                canvas.absorb(&mut output.textures_delta);
+            } else {
+                let mut output = output;
+                output.textures_delta.clear();
+                canvas.render(
+                    &ctx,
+                    output,
+                    size,
+                    theme::canvas(),
+                    std::path::Path::new(&format!("tmp/{stem}.png")),
                 );
             }
         }

@@ -23,6 +23,7 @@ pub(crate) use config::AUTO_SAVE_INTERVAL_MIN_SECS;
 pub(crate) use config::AppConfig;
 pub(crate) use config::UI_SCALE_MAX;
 pub(crate) use config::UI_SCALE_MIN;
+pub(crate) use config::UI_SCALE_PRESETS;
 pub(crate) use draft::DraftInput;
 pub(crate) use draft::ExportSelection;
 pub(crate) use draft::GeneratedDraft;
@@ -935,12 +936,14 @@ mod tests {
     }
 
     /// 界面缩放、更新检查地址与示例稿标记都是后加字段：旧配置省略它们时
-    /// 要落回默认值，序列化后再读也不能丢。
+    /// 要落回默认值，序列化后再读也不能丢。「跟随系统明暗」也是后加字段，
+    /// 旧配置缺省时必须默认开启，升级后界面才会自动与系统明暗一致。
     #[test]
     fn new_settings_fall_back_to_defaults_in_old_configs() {
         let config: AppConfig = serde_json::from_str("{}").expect("空配置应能读出默认值");
         assert_eq!(config.ui_scale, 1.0);
         assert_eq!(config.clamped_ui_scale(), 1.0);
+        assert!(config.theme_follows_system, "旧配置也要默认跟随系统明暗");
         assert_eq!(
             config.auto_save_interval_secs,
             DEFAULT_AUTO_SAVE_INTERVAL_SECS
@@ -958,9 +961,28 @@ mod tests {
         let json = serde_json::to_string(&config).expect("配置应能序列化");
         let back: AppConfig = serde_json::from_str(&json).expect("配置应能反序列化");
         assert_eq!(back.ui_scale, config.ui_scale);
+        assert_eq!(back.theme_follows_system, config.theme_follows_system);
         assert_eq!(back.auto_save_interval_secs, config.auto_save_interval_secs);
         assert_eq!(back.update_check_url, config.update_check_url);
         assert_eq!(back.samples_seeded, config.samples_seeded);
+    }
+
+    /// 界面缩放的预设档位要覆盖常用档，且全部落在允许范围内。
+    #[test]
+    fn ui_scale_presets_stay_inside_the_supported_range() {
+        for percent in [90, 100, 120, 150] {
+            assert!(
+                UI_SCALE_PRESETS.contains(&percent),
+                "预设里缺少常用档位 {percent}%"
+            );
+        }
+        for percent in UI_SCALE_PRESETS {
+            let scale = percent as f32 / 100.0;
+            assert!(
+                (UI_SCALE_MIN..=UI_SCALE_MAX).contains(&scale),
+                "预设档位 {percent}% 超出允许范围"
+            );
+        }
     }
 
     #[test]
