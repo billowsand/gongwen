@@ -1,6 +1,6 @@
 # 应用内打印对话框设计
 
-> 状态：三期均已实现（2026-10-21），**待真机验收**。
+> 状态：四期均已实现（2026-10-21），**待真机验收**。
 > 进度、与方案的出入、已知坑见文末第十一节。
 
 ## 一、现状与问题
@@ -407,4 +407,72 @@ UI 线程从不调用打印 API 或外部命令；后台任务带 `egui::Context
 
 交叉检查的替身工程现在要软链 `inspect.rs`、把 `dialog/` 换成空壳目录、补 `serde` 依赖与
 `crate::pdf_viewer::PdfKey` 替身。它仍然覆盖不到 `dialog/` 与 `app/printing.rs` 里的
-`#[cfg(windows)]` 分支，这部分要等 Windows CI。
+`#[cfg(windows)]` 分支，这部分要等 Windows CI。（第四期起 `dialog/` 不再用空壳、改为
+软链真文件，见下一节。）
+
+### 第四期（2026-10-21 完成，待真机验收）
+
+代码：
+
+| 文件 | 内容 |
+|---|---|
+| `src/print/mod.rs` | `HAS_DRIVER_PREFERENCES = cfg!(windows)`（界面据此画不画首选项 / 恢复 / 系统对话框按钮）；`printing_available_cached`（进程内只探测一次，起草页与 PDF 查看器共用） |
+| `src/print/dialog/mod.rs` | 首选项的字段、`take_preferences_request`、`preferences_edited`、`preferences_locked` 去掉 `#[cfg(windows)]`，所有平台编译；`build_job` 直接取 `devmode`；「使用系统对话框…」按常量画，`DialogOutcome::SystemDialog` 去掉 `allow(dead_code)`；`wanted_preview` 告诉外壳预览想看第几页；预览按真实尺寸摆 |
+| `src/print/dialog/preview.rs`（新） | `PreviewPage`、`preview_rect`（页面点在纸张毫米上的归一化矩形）、`preview_turns`（横页落竖纸转向）、`paint_page`（自绘网格画纹理，支持逆时针转 90°） |
+| `src/print/raster.rs` | `PAPER_TOLERANCE` 改 `pub(crate)`：预览「实际大小放不放得下」与出纸用同一个容差 |
+| `src/pdf_viewer.rs` | `preview_wanted` / `want_preview` / `stop_preview` / `pump_preview` / `page_size_pt` / `preview_page`：预览页进已有的渲染队列，不另起线程；`print_when_ready` 与 `request_print_when_ready`；`print_request` 抽成方法给工具栏与自动弹框共用 |
+| `src/draft_page/ribbon/output.rs`、`src/draft_page/tasks.rs`、`src/draft_page.rs` | 「输出」分区「打印…」按钮、`start_export_for_print`（只导 PDF，`overwrite` 沿用配置）、`DraftSession.print_after_export` 标记 |
+| `src/app/tabs.rs`、`src/app/jobs.rs`、`src/app/printing.rs` | `open_pdf_for_printing`；`Exported` 结果里按标记打开 PDF 并置 `print_when_ready`；`exported_pdf_to_print` 纯函数；非 Windows 的首选项请求当作用户取消送回 `PreferencesEdited` 通道复位 |
+| `docs/help/11-export.md` | 起草页打印入口会先按覆盖策略导出一份 PDF |
+
+与方案的出入：
+
+- 4.1 里非 Windows 收到首选项请求时没有新增「复位挂起标志」的方法，而是把 `Ok(None)` 送回
+  `WorkerResult::PreferencesEdited` 通道：`start_preferences_edit` 仍是 Windows 专属，但
+  `preferences_edited` 在所有平台都有调用路径，`WorkerResult` 的变体在非 Windows 上也不会
+  被判成死代码。
+- 任务规格的「A4 页 + Letter 纸实际大小上下各留出差额」按算法走不到：Letter 高 279.4 mm
+  小于 A4 的 297 mm，实际大小放不下，会退回「适合纸张」四边留边。单测按算法断言「四边至少
+  留 4.2 mm」，另补一条「A5 落 A3 实际大小四边留差额、居中」覆盖原本想验的留边。
+- 预览的转向只按「显示方向与纸张方向是否一致」判断，拿不到页面的 `/Rotate` 与介质方向，
+  所以只会有 0° / 逆时针 90° 两种；`raster::turns_for_paper` 在「横介质 + `/Rotate 90`」时
+  会要 180°，预览画不出。Typst 自己出的横页正好只差 90°。
+- 转 90° 用自绘 `egui::Mesh`：`Painter::image` 的 UV 矩形只能翻转、转不了 90°。方向与
+  `raster::rotate_ccw` 一致（源右上角落到目标左上角），样张用带角标的假纹理核对过。
+- 「适合纸张」的四边 4.2 mm 是常见硬件边距的示意，不读驱动真实可打印区；出纸仍按
+  `raster::place_page` 的设备几何算。
+- 4.3 的置灰悬停文字照任务规格沿用 PDF 查看器那句「请用『系统打开』后从阅读器打印」；
+  起草页实际没有「系统打开」这个按钮，措辞以后可改。
+- 4.3 的标记在导出真的开跑（`doc.busy` 变真）之后才记；导出失败、排版失败、没导出 PDF
+  都在 `Exported` 结果里清掉标记，不会留到下一次无关导出。
+
+已知坑：
+
+- 预览页会占一份纹理预算：对话框关掉时外壳对每个 PDF 调 `stop_preview`，否则 `evict`
+  会一直跳过它。
+- `pump_preview` 在 `render_width == 0`（PDF 标签还没画过第一帧）时什么也不做，预览要等
+  标签按视口定下宽度；在这之前对话框里是「正在渲染…」。
+- `print_when_ready` 在 `PdfSession::ui` 里推一次就清；页数未知时一直等，打开失败
+  （`error` 有值）时清掉。PDF 标签在打开完成前被关掉，就没有会话可等了。
+- 「打印…」的导出照样写文件（按覆盖策略覆盖同名成品），导出失败也照常写 `export_error`
+  并弹审校抽屉。
+- 首选项逻辑现在在 macOS 单测与 Windows 目标交叉检查里都参与编译（替身工程从第四期起
+  软链 `dialog/` 真文件），但 `src/app/printing.rs` 的 Windows 分支（真正弹驱动窗口、
+  `start_system_dialog_print`）仍只有真机 / Windows CI 能验；替身里的 `theme` / `modal`
+  是行为简化版，只能验类型与调用形状。
+- 交叉检查不能因为「unused」类警告多就当成主项目有死代码：替身没有外壳，`PrintDialog`
+  没人构造，dialog 里的函数会被级联判死。判据是「非 unused 类警告为 0」。
+
+真机验收清单（第四期）：
+
+1. 起草页有内容时点「打印…」：按覆盖策略多出一份 PDF，自动切到 PDF 标签并弹打印对话框；
+   没内容、正在导出时按钮置灰；Unix 上 `lp` 不在 PATH 时置灰、悬停有说明。
+2. 让排版失败（例如临时移走本机字体）再点「打印…」：不弹对话框，状态栏说明
+   「PDF 没有排出来，无法打印」；导出失败同理。
+3. 预览：翻到没渲染过的页，点 ◀ / ▶ 后一两秒内出图；同时在 PDF 标签里滚动不抢它的渲染；
+   A4 页在 A4 纸上占满纸面，横页在竖纸上方向正确（用带版头的横页最容易看出来）；
+   「实际大小 / 适合纸张」的差别与出纸一致（预览只是示意，量版心仍以实际出纸为准）。
+4. 深色主题（MDEX 夜墨）：预览纸张、占位文字、黄色提醒、红色错误都看得清。
+5. Windows：首选项按钮、恢复、换打印机清首选项在真机走一遍；4.1 只保证这些逻辑在
+   Windows 目标下编译、在 macOS 上跑单测。
+6. 深色与浅色主题下「打印…」按钮在「输出」分区不挤出功能区（1280 宽为基准）。

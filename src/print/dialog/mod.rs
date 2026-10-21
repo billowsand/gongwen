@@ -503,9 +503,11 @@ impl PrintDialog {
                     text_ui.add_space((page_rect.height() * 0.28).max(0.0));
                     text_ui.add(
                         egui::Label::new(
+                            // 用 text_soft 而不是 text_muted：占位底色本来就和文字挨得近，
+                            // 深色主题下 text_muted 太淡（样张里几乎看不出字）。
                             egui::RichText::new("正在渲染…")
                                 .small()
-                                .color(theme::text_muted()),
+                                .color(theme::text_soft()),
                         )
                         .wrap(),
                     );

@@ -781,4 +781,50 @@ fn print_dialog_samples() {
     let mut empty = dialog(12);
     empty.printers_loaded(Ok(Vec::new()));
     snapshot(&mut empty, "no-printer");
+
+    // 深色主题：占位底色、提醒与预览纸张在深色下要看得清（第三期没出过深色样张）。
+    let mut ready_dark = dialog(12);
+    ready_dark.printers_loaded(Ok(vec![
+        printer("HP_LaserJet_M403", true),
+        printer("Office", false),
+    ]));
+    ready_dark.printer_state("Office", PrinterState::Ready);
+    ready_dark.caps_loaded("Office", caps(true, true));
+    snapshot_with(
+        &mut ready_dark,
+        "ready-dark",
+        crate::models::ThemeName::MdexDark,
+        None,
+    );
+
+    let mut warned_dark = dialog(12);
+    warned_dark.request.hints = super::super::PrintHints {
+        duplex_typeset: true,
+        send_package: true,
+    };
+    warned_dark.printers_loaded(Ok(vec![printer("Office", true)]));
+    warned_dark.caps_loaded("Office", caps(false, true));
+    warned_dark.facts_loaded(Some(PdfFacts {
+        all_rotated: true,
+        has_red: true,
+    }));
+    warned_dark.duplex = Some(Duplex::LongEdge);
+    warned_dark.color = Some(ColorMode::Mono);
+    snapshot_with(
+        &mut warned_dark,
+        "warnings-dark",
+        crate::models::ThemeName::MdexDark,
+        None,
+    );
+
+    let mut preview_dark = dialog(12);
+    preview_dark.printers_loaded(Ok(vec![printer("Office", true)]));
+    preview_dark.caps_loaded("Office", caps(true, true));
+    preview_dark.preview_index = 0;
+    snapshot_with(
+        &mut preview_dark,
+        "preview-page-dark",
+        crate::models::ThemeName::MdexDark,
+        Some((595.28, 841.89)),
+    );
 }
