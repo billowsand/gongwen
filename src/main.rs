@@ -76,6 +76,7 @@ mod revise_cases;
 mod revise_model;
 mod revision;
 mod samples;
+mod single_instance;
 mod skill_pack;
 mod storage;
 mod system_fonts;
@@ -104,10 +105,23 @@ fn main() -> eframe::Result {
     // 最先装：之后读配置、装字体、建窗口任何一步 panic 都要留下日志。
     crash_log::install();
     // 双击 .gwx 时系统把文件路径作为参数传进来。
-    let startup_imports = package_file::startup_paths(
-        std::env::args_os().skip(1),
-        &std::env::current_dir().unwrap_or_default(),
-    );
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let new_window = args
+        .iter()
+        .any(|arg| arg == single_instance::NEW_WINDOW_FLAG);
+    let startup_imports =
+        package_file::startup_paths(args, &std::env::current_dir().unwrap_or_default());
+    // 已有窗口开着就把稿件包转交给它，本进程不建窗口。
+    let instance = if new_window {
+        None
+    } else {
+        match single_instance::start(&startup_imports) {
+            Ok(single_instance::Startup::Forwarded) => return Ok(()),
+            Ok(single_instance::Startup::Primary(instance)) => Some(instance),
+            // 锁或收件目录用不了（只读盘、网络盘不支持文件锁）：照旧开一个独立窗口。
+            Err(_) => None,
+        }
+    };
     let app_icon = theme::app_icon(storage::peek_theme());
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
@@ -150,7 +164,7 @@ fn main() -> eframe::Result {
                 cc.egui_ctx
                     .send_viewport_cmd(egui::ViewportCommand::Maximized(true));
             }
-            Ok(Box::new(GongwenApp::new(cc, startup_imports)))
+            Ok(Box::new(GongwenApp::new(cc, startup_imports, instance)))
         }),
     );
     if let Err(error) = &result {

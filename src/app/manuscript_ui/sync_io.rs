@@ -328,6 +328,27 @@ impl GongwenApp {
         }
     }
 
+    /// 每帧调用：收下后起进程转交过来的请求（再次双击 `.gwx`、再点一次图标），
+    /// 把窗口唤到前台，路径照常进导入队列。
+    pub(crate) fn receive_forwarded_requests(&mut self, ctx: &egui::Context) {
+        let Some(requests) = self.forwarded_requests.as_ref() else {
+            return;
+        };
+        let requests = requests.try_iter().collect::<Vec<_>>();
+        if requests.is_empty() {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        // 拿不到前台时至少让任务栏按钮闪一下；已在前台时系统不会闪。
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+            egui::UserAttentionType::Informational,
+        ));
+        for path in requests.into_iter().flatten() {
+            self.receive_import_package(path);
+        }
+    }
+
     /// 每帧调用：把拖进窗口的稿件包收进导入队列；拖着稿件包悬停在窗口上时盖一层提示。
     /// 别的文件类型不处理（目前窗口没有别的拖放入口）。
     pub(crate) fn receive_dropped_packages(&mut self, ctx: &egui::Context) {

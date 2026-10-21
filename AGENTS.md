@@ -33,7 +33,7 @@
 ## 常用命令
 
 ```bash
-cargo run                      # 开发运行
+cargo run -- --new-window      # 开发运行（不加时，本机开着新版公文助手会把启动转交给它后退出）
 cargo check --all-targets      # 快速基线
 cargo fmt --all -- --check     # CI 零容忍，改完必跑
 cargo clippy --locked --all-targets -- -D warnings
@@ -163,8 +163,8 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 
 - **稿件包专用后缀 `.gwx`**（同步 ZIP 换成 `.gwx`，双击 / 拖放 / 启动参数直接进现有导入流程，
   包内格式不变、旧 `.zip` 照常导入，分三步）：**第一步（后缀与统一入口 `receive_import_package`、
-  暂存副本与排队、启动参数、拖放）已实现，待真机验收**；第二步（已开窗口转交）、第三步（安装登记与
-  文档图标）未做。方案、进度与已知坑见 `docs/gwx-package-design.md`（单文件，第十一节是进度）。
+  暂存副本与排队、启动参数、拖放）、第二步（已开窗口转交：`src/single_instance.rs` 锁文件 + 收件目录）
+  已实现，待真机验收**；第三步（安装登记与文档图标）未做。方案、进度与已知坑见 `docs/gwx-package-design.md`（单文件，第十一节是进度）。
 
 - **人机决策模块**（把「问用户」从算子里抽成可组合的决策：决策形态随挂起交给界面、通用清单确认
   与修订、待决事项、自主步骤提问，分四期）：方案、分期、进度与已知坑见 `docs/decision-modules.md`

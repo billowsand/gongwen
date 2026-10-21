@@ -87,6 +87,7 @@ zip = "8.6"
 # 该 crate 已随 winit 在依赖树中，这里只是声明直接引用。
 # Graphics_Printing 用于打印对话框列打印机、查状态、改 DEVMODE。
 # DataExchange / Memory 用于把导出成品以 CF_HDROP 放进剪贴板（复制文件）。
+# WindowsAndMessaging 用于单实例转交时让出前台权（AllowSetForegroundWindow）。
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -95,6 +96,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_UI_Controls_Dialogs",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

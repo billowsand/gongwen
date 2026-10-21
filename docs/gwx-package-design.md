@@ -1,6 +1,6 @@
 # 稿件包专用后缀 .gwx：方案
 
-> 状态：第一步（后缀与统一入口）已实现（2026-10-22），第二、三步未做。进度见第十一节。
+> 状态：第一步（后缀与统一入口）、第二步（已开窗口转交）已实现（2026-10-22），第三步未做。进度见第十一节。
 
 ## 一、要做的事
 
@@ -85,10 +85,10 @@ pub(crate) fn receive_import_package(&mut self, path: PathBuf)
 3. 主实例起一个后台线程，每 300 ms 看一次 `inbox/`（只列目录，开销可忽略）；有新文件就读出
    路径、删掉请求文件，通过通道交给界面线程，并 `ctx.request_repaint()`。界面线程收到后：
    `ViewportCommand::Minimized(false)` → `ViewportCommand::Focus` → `receive_import_package`。
-4. 前台激活：Windows 不允许后台进程随便抢前台，`Focus` 可能只让任务栏按钮闪烁。
-   先接受这个结果（再补发一次 `RequestUserAttention`，确保任务栏会闪）。若真机上体验不好，
-   第二步再让转交进程退出前调 `AllowSetForegroundWindow(ASFW_ANY)`（`windows-sys` 已是依赖，
-   放进现有 FFI 模块，按安全约定写 SAFETY 注释）。
+4. 前台激活：Windows 不允许后台进程随便抢前台，单靠 `Focus` 多半只让任务栏按钮闪烁。
+   转交进程是用户双击启动的、手里有前台权，退出前调 `AllowSetForegroundWindow(ASFW_ANY)`
+   让出来（`single_instance::foreground`，模块内 `#[allow(unsafe_code)]`，带 SAFETY 注释）；
+   主实例再补发 `RequestUserAttention`，万一仍抢不到前台至少任务栏会闪。
 5. 收件目录里超过 10 分钟没被取走的请求（例如主实例当时卡死后被强杀）在下次启动时清掉，不补做导入，
    避免过了很久突然弹出口令框。
 
@@ -212,7 +212,8 @@ Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\shell\open\command
 - **与旧版本程序互传**：旧版的导入文件框只认 `.zip`，选不到 `.gwx`。内容格式没变，改名为 `.zip`
   即可；使用帮助里写明。内网各机升级到同一版本后就不再有这个问题。
 - **从开始菜单再点图标不再开第二个窗口**（第四节附带的行为变化），发布说明写明；必要时留 `--new-window`。
-- **Windows 前台激活**可能只闪任务栏，第一版接受，真机体验不好再加 `AllowSetForegroundWindow`。
+- **Windows 前台激活**已加 `AllowSetForegroundWindow`，理论上能直接到前台；个别情况（如全屏程序在前）
+  系统仍可能只闪任务栏。
 - 包里的口令仍然必须输入（一律加密不变）；「记住口令」沿用现有的 `remembered_zip_password`。
 
 ## 十一、实施进度
@@ -251,3 +252,35 @@ Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\shell\open\command
 - 把一个或多个 `.gwx` 拖进窗口：悬停时有「松开即导入稿件包」提示，松开后依次弹口令框。
 - 口令框开着时再拖一个包进来：状态栏提示排队，前一个处理完自动弹下一个。
 - 窄屏打开稿件详情时拖入稿件包，口令框能正常显示。
+
+### 第二步：已开窗口转交（2026-10-22，已实现，待真机验收）
+
+- `src/single_instance.rs`：`start` 在配置目录争 `instance.lock`（`File::try_lock`）；拿到锁是主实例，
+  先清掉收件目录里超过 10 分钟的请求；拿不到就把路径写成 `inbox/<纳秒时间戳>-<uuid>.req`
+  （先写 `.tmp` 再改名）并让出前台权后退出。`Instance::watch` 起后台线程每 300 ms 取请求、
+  送通道、`request_repaint`。锁或收件目录不可用时 `start` 报错，`main` 照旧开独立窗口。
+- `src/main.rs`：`--new-window` 跳过检查；转交成功直接 `return Ok(())`，不建窗口。
+- App 持有 `Instance`（锁随 App 活到进程结束）；`receive_forwarded_requests` 每帧取请求：
+  `Minimized(false)` → `Focus` → `RequestUserAttention`，路径进 `receive_import_package`。
+- `Cargo.toml` 给 `windows-sys` 加 `Win32_UI_WindowsAndMessaging` 特性。
+- 测试：同进程两个句柄、真起子进程（测试二进制重拉自己跑 `child_probe`）各验一遍锁与转交；
+  半截文件不读、过期清理、后台线程送达。
+
+与方案的出入：
+
+1. `AllowSetForegroundWindow` 直接在这一步做了，没有等真机体验（只是一个无指针的 Win32 调用，成本低）。
+
+已知坑：
+
+- **开发时 `cargo run` 会被转交走**：本机开着已安装的公文助手（新版）时，开发构建拿不到锁，会把请求
+  交给它后直接退出。开发运行用 `cargo run -- --new-window`。旧版程序不持锁，不受影响。
+- 转交进程恰好赶上主实例退出时，请求留在收件目录，等下次启动（10 分钟内）才处理。
+- 没有在本机跑 GUI 实测（会动到真实稿件库与标签记录），窗口唤起与排队弹框待真机验收。
+
+真机验收（第二步）：
+
+- 程序开着（含最小化）时命令行再跑 `gongwen-assistant.exe 某包.gwx`：不出第二个窗口，已开窗口到前台
+  并弹口令框；再点一次开始菜单图标：只把已开窗口唤到前台。
+- 口令框开着时再转交两个包：状态栏提示排队，依次弹出。
+- 结束主进程后再运行：正常启动新窗口。
+- `--new-window` 能另开窗口。

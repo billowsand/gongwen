@@ -237,6 +237,10 @@ pub struct GongwenApp {
     pending_imports: VecDeque<PathBuf>,
     /// 正在口令框或导入预览里处理的那个副本，处理完删掉。
     active_import: Option<PathBuf>,
+    /// 主实例的锁，随 App 活到进程结束；`--new-window` 或锁不可用时为 None。
+    _instance: Option<crate::single_instance::Instance>,
+    /// 后起进程转交过来的请求：一组要导入的稿件包路径，空表示只唤到前台。
+    forwarded_requests: Option<Receiver<Vec<PathBuf>>>,
     pending_merge: Option<PendingMergeDialog>,
     /// 提交版本对话框（稿件版或配置版）。
     version_commit: Option<VersionCommitDraft>,
@@ -410,7 +414,12 @@ pub(crate) struct KnowledgeImportDraft {
 
 impl GongwenApp {
     /// `startup_imports`：命令行带进来的稿件包，首帧起依次弹出导入流程。
-    pub fn new(cc: &eframe::CreationContext<'_>, startup_imports: Vec<PathBuf>) -> Self {
+    /// `instance`：主实例的锁，App 持有它并盯着后起进程转交过来的请求。
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        startup_imports: Vec<PathBuf>,
+        instance: Option<crate::single_instance::Instance>,
+    ) -> Self {
         // 配置文件内容坏了就带着默认配置启动，并把留底路径交给首帧的提示窗；
         // 读取失败（权限、路径不是文件）仍按默认配置启动，但状态栏如实说明。
         let (mut config, config_recovered_from, config_load_error) = match storage::load() {
@@ -578,6 +587,10 @@ impl GongwenApp {
             manuscript_import_preview: None,
             pending_imports: VecDeque::new(),
             active_import: None,
+            forwarded_requests: instance
+                .as_ref()
+                .map(|instance| instance.watch(cc.egui_ctx.clone())),
+            _instance: instance,
             pending_merge: None,
             version_commit: None,
             version_diff: None,
@@ -744,6 +757,7 @@ impl eframe::App for GongwenApp {
         crate::net::set_proxy(&self.config.proxy);
         self.handle_shortcuts(&ctx);
         self.poll_worker(&ctx);
+        self.receive_forwarded_requests(&ctx);
         self.receive_dropped_packages(&ctx);
         self.pump_pending_imports();
         if let Some(elapsed) = crate::rag::take_retrieval_elapsed() {
