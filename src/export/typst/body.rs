@@ -154,18 +154,20 @@ pub(crate) fn sections(
                 counters = [0; 4];
             }
             MarkdownBlock::Heading(level, text) => {
-                let next_is_paragraph = blocks.get(index + 1).is_some_and(|next| {
-                    matches!(next, MarkdownBlock::Paragraph(p)
-                        if !p.trim().is_empty() && is_plain_paragraph(p))
-                });
+                // 紧跟的正文段落直接在判定时取出来，下面不必再按下标取一次。
+                let next_paragraph = match blocks.get(index + 1) {
+                    Some(MarkdownBlock::Paragraph(p))
+                        if !p.trim().is_empty() && is_plain_paragraph(p) =>
+                    {
+                        Some(p)
+                    }
+                    _ => None,
+                };
                 if compact_headings[index]
                     && section == MarkdownSection::Body
-                    && next_is_paragraph
+                    && let Some(body_text) = next_paragraph
                     && let Some(number) = official_heading_prefix(*level, &mut counters, numbering)
                 {
-                    let MarkdownBlock::Paragraph(body_text) = &blocks[index + 1] else {
-                        unreachable!()
-                    };
                     let mut head = heading_runs(&number, text);
                     head.push(super::data::Run::text("。"));
                     target(section, &mut body, &mut attachments).push(Block::Compact {

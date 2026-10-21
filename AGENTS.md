@@ -205,6 +205,11 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 
 ## 约定
 
+- **安全写法**：内存安全、崩溃面、资源上限、注入与文件操作的约定见
+  `docs/security-hardening.md`。要点：全 crate `#![deny(unsafe_code)]`，`unsafe`
+  只允许出现在 `mod` 声明处 `#[allow(unsafe_code)]` 的 FFI 模块；每个 `unsafe` 块写 SAFETY 注释；句柄用 RAII 守卫；
+  读用户交来的文件先卡体积（`src/file_limits.rs`）；压缩包要有整包上限；
+  用户数据不拼进命令、SQL 与模板源码；解析失败要变成提示而不是崩窗口。
 - 提交信息用中文 Conventional Commits：`feat:` / `fix:` / `test:` / `docs:` /
   `refactor:` / `style:` / `chore: release vX.Y.Z`。
 - **本地 post-commit 钩子**（`scripts/git-hooks/post-commit`，首次使用跑

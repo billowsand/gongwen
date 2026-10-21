@@ -791,7 +791,7 @@ fn english_punctuation(text: &str) -> String {
             }
             // 全角 ASCII 区按固定偏移还原，仅转换标点，不动全角字母和数字。
             '\u{ff01}'..='\u{ff5e}' => {
-                let half = char::from_u32(c as u32 - 0xfee0).unwrap();
+                let half = char::from_u32(c as u32 - 0xfee0).unwrap_or(c);
                 if half.is_ascii_punctuation() { half } else { c }
             }
             _ => c,

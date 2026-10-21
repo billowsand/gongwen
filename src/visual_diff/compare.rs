@@ -1796,14 +1796,13 @@ fn replacement(old_text: &str, new_text: &str) -> Vec<Fragment> {
 fn cancel_identical_pairs(fragments: &mut Vec<Fragment>) {
     let mut out: Vec<Fragment> = Vec::with_capacity(fragments.len());
     for fragment in fragments.drain(..) {
-        if let Some(last) = out.last()
-            && !last.is_same()
-            && !fragment.is_same()
-            && last.kind != fragment.kind
-            && last.text == fragment.text
-        {
-            let same = Fragment::same(out.pop().expect("刚取过").text);
-            push_fragment(&mut out, same);
+        if let Some(last) = out.pop_if(|last| {
+            !last.is_same()
+                && !fragment.is_same()
+                && last.kind != fragment.kind
+                && last.text == fragment.text
+        }) {
+            push_fragment(&mut out, Fragment::same(last.text));
             continue;
         }
         push_fragment(&mut out, fragment);

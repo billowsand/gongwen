@@ -89,7 +89,12 @@ fn flush(ordinary: &mut String, output: &mut String, numbering: &NumberingConfig
                 output.push(LIST_LABEL_CLOSE);
                 output.push_str(&text);
             }
-            _ => unreachable!("普通正文区只应包含段落与列表"),
+            // 理论上普通区只有段落与列表（标题、表格、代码块等都在上面分流了）；
+            // 真出现别的块，按原文写回去，不让排版在用户正文上崩掉。
+            _other => {
+                output.push_str(ordinary.get(located.range.clone()).unwrap_or_default());
+                output.push('\n');
+            }
         }
         output.push_str("\n\n");
     }

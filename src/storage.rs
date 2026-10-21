@@ -91,7 +91,10 @@ pub fn save_remembered_zip_password(password: Option<&str>) -> Result<()> {
 
 /// 同目录暂存并刷盘后原子替换；失败时不删除原文件，暂存文件由 RAII 清理。
 /// 配置里也可能包含服务密钥，Unix 下和密码一样限制为仅当前用户可读写。
-fn atomic_write(
+///
+/// 密钥文件（`api-secrets.json` 等）也走这条路径：写一半的密钥文件会让
+/// 「读得到、但内容不完整」，比写失败更难查。
+pub(crate) fn atomic_write(
     path: &std::path::Path,
     write: impl FnOnce(&mut fs::File) -> Result<()>,
 ) -> Result<()> {

@@ -349,11 +349,14 @@ pub(crate) fn read_json<T: serde::de::DeserializeOwned + Default>(name: &str) ->
 
 pub(crate) fn write_json<T: Serialize>(name: &str, value: &T) -> anyhow::Result<()> {
     let path = store_path(name)?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&path, serde_json::to_string_pretty(value)?)?;
-    Ok(())
+    // 原子写 + 仅本人可读写：这里落的是接口密钥与配置，不能写到一半，
+    // 也不能让同机的其他用户读到。
+    let text = serde_json::to_string_pretty(value)?;
+    crate::storage::atomic_write(&path, |file| {
+        use std::io::Write as _;
+        file.write_all(text.as_bytes())?;
+        Ok(())
+    })
 }
 
 impl ApiStore {
@@ -1595,7 +1598,10 @@ pub(crate) mod test_server {
         }
 
         pub(crate) fn request(&self, index: usize) -> String {
-            self.requests.lock().unwrap()[index].clone()
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())[index]
+                .clone()
         }
     }
 }

@@ -354,7 +354,7 @@ fn handle_text_drag(
         ui.ctx().request_repaint();
         return None;
     }
-    let active = drag.take().unwrap();
+    let active = drag.take()?;
     if !released {
         return None;
     }

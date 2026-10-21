@@ -103,8 +103,12 @@ fn import_into(dir: &Path, files: &[PathBuf]) -> Result<Vec<ImportedImage>> {
             if !is_supported(file) {
                 continue;
             }
-            let bytes =
-                fs::read(file).with_context(|| format!("无法读取图片文件 {}", file.display()))?;
+            let bytes = crate::file_limits::read_bytes(
+                file,
+                crate::file_limits::MAX_IMAGE_BYTES,
+                "图片文件",
+            )
+            .with_context(|| format!("无法读取图片文件 {}", file.display()))?;
             let rel_path = store(dir, &stamp, name, &bytes, &mut created)?;
             let alt = sanitize_alt(
                 Path::new(name)

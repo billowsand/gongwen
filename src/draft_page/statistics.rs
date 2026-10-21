@@ -209,9 +209,12 @@ impl DocumentStatistics {
     ) -> (String, String) {
         self.observe(input, markdown, config);
         self.poll();
-        if self.requested && self.running.is_none() {
+        // `observe` 之后快照总在；万一没有，就先不排，等下一帧。
+        if self.requested
+            && self.running.is_none()
+            && let Some(snapshot) = self.snapshot.clone()
+        {
             self.requested = false;
-            let snapshot = self.snapshot.clone().expect("已观察到稿件");
             let generation = self.generation.load(Ordering::Relaxed);
             let current = self.generation.clone();
             let ctx = ctx.clone();

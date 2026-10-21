@@ -126,7 +126,12 @@ pub fn rerank_with_llm(
         return Ok(Vec::new());
     }
     let system = "你是公文检索系统的相关性评审。只输出 JSON，不要解释、不要 Markdown 代码块。";
-    let mut user = String::with_capacity(documents.len() * LLM_RERANK_SNIPPET_CHARS + 512);
+    let mut user = String::with_capacity(
+        documents
+            .len()
+            .saturating_mul(LLM_RERANK_SNIPPET_CHARS)
+            .saturating_add(512),
+    );
     user.push_str("给定【检索需求】和若干【候选片段】，为每个候选片段给出 0-100 的相关分：\n");
     user.push_str(
         "100 = 直接可作为写作参考，0 = 完全无关。只看与检索需求的相关性，不评价文字好坏。\n\n",

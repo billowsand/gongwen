@@ -64,7 +64,9 @@ impl ImeSettings {
             enabled: config.enabled,
             full_width_punctuation: config.full_width_punctuation,
             page_size: config.page_size.clamp(1, MAX_PAGE_SIZE),
-            page_keys: (chars.next().unwrap(), chars.next().unwrap()),
+            // 取页键的两个字符：配置非法时退回默认的方括号，不让用户改坏
+            // 配置就把程序带崩。
+            page_keys: (chars.next().unwrap_or('['), chars.next().unwrap_or(']')),
             vertical: config.candidate_vertical,
             font_percent: config.candidate_font_percent.clamp(100, 200),
             auto_commit: config.auto_commit,

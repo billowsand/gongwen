@@ -262,7 +262,10 @@ fn draft_structure(path: &Path, extension: &str, markdown: String, detect_title:
 /// 格式判定与 `anydoc::to_markdown` 相同：先认文件内容，认不出再看扩展名；
 /// 内容其实是 PDF 的交给 PDF 那条路。
 fn convert_with_images(path: &Path) -> Result<embedded::Rendered> {
-    let bytes = std::fs::read(path).with_context(|| format!("读取 {} 失败", file_label(path)))?;
+    // 先卡体积：用户挑的文件再大也不整体读进内存。
+    let bytes =
+        crate::file_limits::read_bytes(path, crate::file_limits::MAX_DOCUMENT_BYTES, "导入的文件")
+            .with_context(|| format!("读取 {} 失败", file_label(path)))?;
     let format = anydoc::Format::from_bytes(&bytes).or_else(|| anydoc::Format::from_path(path));
     if format == Some(anydoc::Format::Pdf) {
         return Ok(embedded::Rendered {

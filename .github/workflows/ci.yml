@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # 每周一次：RustSec 数据库是持续更新的，依赖不变也可能有新披露。
+    - cron: "17 5 * * 1"
 
 permissions:
   contents: read
@@ -239,3 +242,22 @@ jobs:
           path: launch-smoke
           if-no-files-found: ignore
           retention-days: 14
+
+  # 依赖漏洞扫描：RustSec 数据库里登记的已知漏洞。审计结果不影响发布，
+  # 但要能看见 —— 依赖升级是唯一能修的漏洞类别。
+  dependency-audit:
+    name: 依赖漏洞扫描（RustSec）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Audit dependencies
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

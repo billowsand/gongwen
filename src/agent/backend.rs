@@ -137,7 +137,12 @@ impl LmBackend {
 
 impl LmBackend {
     pub(crate) fn take_notices(&self) -> Vec<String> {
-        std::mem::take(&mut *self.notices.lock().unwrap())
+        std::mem::take(
+            &mut *self
+                .notices
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
     }
 
     /// 仅传输失败或 5xx 可以换模型。4xx、超长、解析失败与空正文都保留原错。
@@ -191,10 +196,13 @@ impl LmBackend {
             Err(why) => return Err(error.context(format!("备用模型配置不可用：{why}"))),
         };
         context::window(backup);
-        self.notices.lock().unwrap().push(format!(
-            "主模型 {} 不可用（{error:#}），本次改用 {}",
-            config.model, backup.model
-        ));
+        self.notices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(format!(
+                "主模型 {} 不可用（{error:#}），本次改用 {}",
+                config.model, backup.model
+            ));
         self.tracked_once(role, backup, input, on_delta, &mut send)
             .map_err(|why| error.context(format!("备用模型 {} 也失败：{why:#}", backup.model)))
     }
@@ -221,14 +229,17 @@ impl LmBackend {
         if let Ok((_, _, extra)) = &result {
             output.push_str(extra);
         }
-        self.usage.lock().unwrap().record(
-            role,
-            &config.model,
-            input,
-            &output,
-            usage,
-            started.elapsed().as_millis() as u64,
-        );
+        self.usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record(
+                role,
+                &config.model,
+                input,
+                &output,
+                usage,
+                started.elapsed().as_millis() as u64,
+            );
         result.map(|(value, _, _)| value)
     }
 
@@ -289,7 +300,10 @@ impl LmBackend {
 
 impl ModelBackend for LmBackend {
     fn usage(&self) -> UsageTotals {
-        self.usage.lock().unwrap().clone()
+        self.usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
     fn complete(
         &self,

@@ -124,7 +124,10 @@ fn jieba_tokens(text: &str, base: usize) -> Vec<Token> {
     if text.is_empty() {
         return Vec::new();
     }
-    let cut = jieba().lock().expect("jieba 锁").cut(text, false);
+    let cut = jieba()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .cut(text, false);
     let mut tokens: Vec<Token> = Vec::new();
     for piece in cut {
         let start = base + piece.byte_start;

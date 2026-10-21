@@ -792,7 +792,17 @@ fn save_ai_session(
 ) -> Option<String> {
     use crate::ai_panel::session::SavedProposal;
     let pending = doc.ai_proposal.as_ref();
-    let make = || SavedProposal::of(pending.expect("只在有提案时调用"));
+    // 只在真有提案时才构造快照对象；没有提案时闭包不会被调用，真被调用
+    // 就给一份空快照，不让「保存会话」把程序带崩。
+    let make = || match pending {
+        Some(proposal) => SavedProposal::of(proposal),
+        None => SavedProposal {
+            before: String::new(),
+            markdown: String::new(),
+            label: String::new(),
+            truncated: false,
+        },
+    };
     doc.ai_panel.save_session(
         doc.manuscript_id,
         store,

@@ -177,9 +177,12 @@ impl Ime {
             });
         });
         if confirm {
-            let Staged {
+            let Some(Staged {
                 name, base, parsed, ..
-            } = self.manager.staged.take().expect("上面已确认有暂存");
+            }) = self.manager.staged.take()
+            else {
+                return;
+            };
             let result = if base {
                 self.replace_base(parsed.entries)
             } else {

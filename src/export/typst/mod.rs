@@ -7,6 +7,8 @@
 pub(crate) mod body;
 pub(crate) mod data;
 mod frame;
+#[cfg(test)]
+mod injection_tests;
 mod math;
 pub(crate) mod package;
 pub(crate) mod research;

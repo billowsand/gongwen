@@ -14,6 +14,8 @@ use std::sync::atomic::AtomicU64;
 
 mod chrome;
 mod fonts;
+// FFI 模块：macOS Dock 图标走 AppKit，unsafe 块带 SAFETY 注释。
+#[allow(unsafe_code)]
 mod icons;
 mod palette;
 mod style;

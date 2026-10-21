@@ -118,7 +118,8 @@ pub fn payload_hash(snapshot: &DraftInput, markdown: &str, notes: &str) -> Resul
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
+    // 预留容量用饱和乘法：长度翻倍溢出时也不至于 panic。
+    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
     for &byte in bytes {
         out.push(DIGITS[(byte >> 4) as usize] as char);
         out.push(DIGITS[(byte & 0x0f) as usize] as char);

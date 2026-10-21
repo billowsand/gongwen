@@ -207,6 +207,12 @@ pub(crate) fn ensure_knowledge_schema(conn: &Connection) -> rusqlite::Result<()>
 
 /// 表里是否已有该列（`PRAGMA table_info` 的第 2 列是列名）。
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    // PRAGMA 的表名进不了参数化查询，只能拼进语句：只认白名单里的表名，
+    // 免得日后有人把用户输入塞进来。
+    const TABLES: [&str; 2] = ["manuscripts", "knowledge_docs"];
+    if !TABLES.contains(&table) {
+        return Err(rusqlite::Error::InvalidParameterName(table.to_string()));
+    }
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {

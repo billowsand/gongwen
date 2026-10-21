@@ -30,8 +30,14 @@ pub(super) fn style_docx(path: &Path) -> Result<()> {
 }
 
 fn style_xml(name: &str, xml: &str) -> String {
+    // 正则只编译一次：每次调用都重编译既慢又没必要。
+    static FONTS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static BORDERS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static HEADINGS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static MARGINS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     // 只改字体声明，不替换正文中可能提及的字体名称或研究内容。
-    let fonts = regex::Regex::new(r"<w:rFonts\b[^>]*/>").unwrap();
+    let fonts =
+        FONTS.get_or_init(|| regex::Regex::new(r"<w:rFonts\b[^>]*/>").expect("字体声明正则"));
     let mut xml = fonts
         .replace_all(xml, |caps: &regex::Captures<'_>| {
             let formatted = caps[0]
@@ -44,17 +50,20 @@ fn style_xml(name: &str, xml: &str) -> String {
                 .replace("w:cs=\"FZHei-B01\"", "w:cs=\"JetBrains Mono\"")
         })
         .into_owned();
-    let borders =
-        regex::Regex::new(r"<w:(?:top|bottom|left|right|insideH|insideV)\b[^>]*/>").unwrap();
+    let borders = BORDERS.get_or_init(|| {
+        regex::Regex::new(r"<w:(?:top|bottom|left|right|insideH|insideV)\b[^>]*/>")
+            .expect("边框正则")
+    });
     xml = borders
         .replace_all(&xml, |caps: &regex::Captures<'_>| {
             caps[0].replace("000000", "A0ADB3")
         })
         .into_owned();
     if name == "word/styles.xml" {
-        let headings =
+        let headings = HEADINGS.get_or_init(|| {
             regex::Regex::new(r#"(?s)<w:style\b[^>]*w:styleId="Heading[123]".*?</w:style>"#)
-                .unwrap();
+                .expect("标题样式正则")
+        });
         xml = headings
             .replace_all(&xml, |caps: &regex::Captures<'_>| {
                 caps[0].replace("<w:rPr>", "<w:rPr><w:color w:val=\"B53D30\"/>")
@@ -64,7 +73,8 @@ fn style_xml(name: &str, xml: &str) -> String {
     if name == "word/document.xml" {
         let frame = "<w:pgBorders w:offsetFrom=\"page\"><w:top w:val=\"single\" w:sz=\"4\" w:space=\"24\" w:color=\"A0ADB3\"/><w:left w:val=\"single\" w:sz=\"4\" w:space=\"24\" w:color=\"A0ADB3\"/><w:bottom w:val=\"single\" w:sz=\"4\" w:space=\"24\" w:color=\"A0ADB3\"/><w:right w:val=\"single\" w:sz=\"4\" w:space=\"24\" w:color=\"A0ADB3\"/></w:pgBorders>";
         // pgBorders 位于页尺寸、页边距之后，遵守 WordprocessingML 的节属性顺序。
-        let margins = regex::Regex::new(r"<w:pgMar\b[^>]*/>").unwrap();
+        let margins =
+            MARGINS.get_or_init(|| regex::Regex::new(r"<w:pgMar\b[^>]*/>").expect("页边距正则"));
         xml = margins
             .replace_all(&xml, |caps: &regex::Captures<'_>| {
                 format!("{}{frame}", &caps[0])

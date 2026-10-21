@@ -8,6 +8,13 @@ use std::path::{Path, PathBuf};
 const MAX_FILE: u64 = 16 * 1024 * 1024;
 const MAX_PACKAGE: usize = 64 * 1024 * 1024;
 const MAX_FILES: usize = 512;
+/// 一个压缩包按条目声明大小累加的上限。
+///
+/// 实际读到的字节已由 [`Package::insert`] 按单文件 16 MB、整包 64 MB 卡住；
+/// 这里按声明大小提前拒绝，明显过大的包不必解压到一半才报错。
+const MAX_ARCHIVE_TOTAL: u64 = 128 * 1024 * 1024;
+/// 一个压缩包里的条目数上限（目录条目也算，`insert` 的 512 个文件上限管不到它们）。
+const MAX_ARCHIVE_ENTRIES: usize = 4096;
 
 include!(concat!(env!("OUT_DIR"), "/builtin_skill_files.rs"));
 
@@ -286,6 +293,11 @@ pub(crate) fn import(path: &Path) -> anyhow::Result<(Vec<String>, Vec<String>)> 
     let mut packages = BTreeMap::new();
     if path.is_file() {
         let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
+        anyhow::ensure!(
+            archive.len() <= MAX_ARCHIVE_ENTRIES,
+            "技能包里的条目超过 {MAX_ARCHIVE_ENTRIES} 个"
+        );
+        let mut total: u64 = 0;
         let mut files = Package::default();
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index)?;
@@ -295,6 +307,13 @@ pub(crate) fn import(path: &Path) -> anyhow::Result<(Vec<String>, Vec<String>)> 
             }
             let name = relative_path(entry.name())?;
             anyhow::ensure!(entry.size() <= MAX_FILE, "文件超过 16 MB：{name}");
+            // 按声明大小累加，提前拒绝明显过大的包；实际字节由 `insert` 再卡。
+            total = total.saturating_add(entry.size());
+            anyhow::ensure!(
+                total <= MAX_ARCHIVE_TOTAL,
+                "技能包解压后超过 {} MB",
+                MAX_ARCHIVE_TOTAL / 1024 / 1024
+            );
             let mut bytes = Vec::new();
             entry.by_ref().take(MAX_FILE + 1).read_to_end(&mut bytes)?;
             files.insert(name, bytes)?;

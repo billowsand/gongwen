@@ -290,18 +290,24 @@ pub(crate) fn by_name(name: ThemeName) -> Theme {
 
 /// 切换并立即生效的当前主题。
 pub(crate) fn set_current(name: ThemeName) {
-    *CURRENT.write().unwrap() = by_name(name);
+    *CURRENT
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = by_name(name);
     REVISION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// 当前主题（字段均为 `Copy`，整体拷出开销可忽略）。
 pub(crate) fn current() -> Theme {
-    *CURRENT.read().unwrap()
+    *CURRENT
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// 切换并立即生效的纸面显示模式。
 pub(crate) fn set_current_paper(mode: PaperMode) {
-    *CURRENT_PAPER.write().unwrap() = mode;
+    *CURRENT_PAPER
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = mode;
     REVISION.fetch_add(1, Ordering::Relaxed);
 }
 

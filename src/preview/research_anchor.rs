@@ -265,7 +265,8 @@ fn unique_id(prefix: &str, slug: &str, taken: &[&str]) -> String {
             None => format!("{prefix}:{n}"),
         })
         .find(|id| !taken.contains(&id.as_str()))
-        .expect("总能找到没用过的序号")
+        // 序号用尽时退回第一个：不至于让预览崩掉。
+        .unwrap_or_else(|| format!("{prefix}:1"))
 }
 
 #[cfg(test)]

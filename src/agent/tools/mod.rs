@@ -257,7 +257,7 @@ impl ArgKind {
             Self::Bool => "true 或 false",
             Self::List => "文字列表",
             Self::Numbers => "数字列表",
-            Self::OneOf(_) => unreachable!("上面已返回"),
+            Self::OneOf(_) => "指定选项之一",
             Self::Kind => "文种名称（如 公函、普通公文）",
         };
         Err(format!("参数 {name} 要是{want}，收到「{}」", shown()))

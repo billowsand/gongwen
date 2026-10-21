@@ -107,10 +107,19 @@ pub(crate) fn platform_ui_font_candidates() -> Vec<UiFontCandidate> {
 /// 往往以 TTC 安装，只有同时使用这里返回的 index 才能选中简体中文字面。
 #[cfg(target_os = "linux")]
 pub(crate) fn fontconfig_candidate(pattern: &str) -> Option<UiFontCandidate> {
+    // 模式串来自用户填的字体名：去掉控制字符并限长，别把它当命令拼进去。
+    let pattern: String = pattern
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect();
+    if pattern.trim().is_empty() {
+        return None;
+    }
     let output = std::process::Command::new("fc-match")
         .arg("-f")
         .arg("%{file}\n%{index}\n")
-        .arg(pattern)
+        .arg(&pattern)
         .output()
         .ok()?;
     if !output.status.success() {

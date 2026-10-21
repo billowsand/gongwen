@@ -430,7 +430,9 @@ fn highlight_line(job: &mut LayoutJob, line: &str, fonts: &EditorFonts, research
     }
 
     if let Some((_, rest)) = export::parse_ordered_item(trimmed) {
-        let split = rest.as_ptr() as usize - trimmed.as_ptr() as usize;
+        // `rest` 是 `trimmed` 的后缀（解析时只去掉了行首的序号与点号），
+        // 序号与内容的分界用长度差算，不用切片首地址相减。
+        let split = trimmed.len() - rest.len();
         job.append(
             &trimmed[..split],
             0.0,

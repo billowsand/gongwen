@@ -378,7 +378,9 @@ fn merge_short_tail(chunks: &mut Vec<Chunk>, start: usize, min_chars: usize) {
     if last_len >= min_chars {
         return;
     }
-    let last = chunks.pop().expect("已确认区段内长度≥2");
+    let Some(last) = chunks.pop() else {
+        return;
+    };
     if let Some(prev) = chunks.last_mut() {
         if !prev.text.is_empty() && !last.text.is_empty() {
             prev.text.push('\n');
@@ -510,7 +512,10 @@ fn clamp_query(query: &str) -> String {
 static LAST_RETRIEVAL: std::sync::Mutex<Option<std::time::Duration>> = std::sync::Mutex::new(None);
 
 pub(crate) fn take_retrieval_elapsed() -> Option<std::time::Duration> {
-    LAST_RETRIEVAL.lock().unwrap().take()
+    LAST_RETRIEVAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
 }
 
 #[test]
@@ -532,7 +537,9 @@ fn retrieval_records_elapsed_even_when_opening_database_fails() {
 struct RetrievalTimer(std::time::Instant);
 impl Drop for RetrievalTimer {
     fn drop(&mut self) {
-        *LAST_RETRIEVAL.lock().unwrap() = Some(self.0.elapsed());
+        *LAST_RETRIEVAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(self.0.elapsed());
     }
 }
 
@@ -654,20 +661,25 @@ pub fn retrieve(
         ));
     }
 
-    let mode = config.effective_rerank_mode();
-    if mode != crate::models::RerankMode::None {
-        // out 此时已按融合分降序，下标即 rerank 的输入序号。
-        let docs: Vec<String> = out.iter().map(|c| c.text.clone()).collect();
-        let ranked = match mode {
-            crate::models::RerankMode::Api => {
-                rag_client::rerank(&config.rerank, query, &docs, config.rerank_top_n)
-            }
-            // 本地模型服务没有 rerank 端点时的替代路径：用对话模型打分。
-            crate::models::RerankMode::Llm => {
-                rag_client::rerank_with_llm(chat, query, &docs, config.rerank_top_n)
-            }
-            crate::models::RerankMode::None => unreachable!("已在上面排除"),
-        };
+    // out 此时已按融合分降序，下标即 rerank 的输入序号。
+    let docs = || -> Vec<String> { out.iter().map(|c| c.text.clone()).collect() };
+    let ranked = match config.effective_rerank_mode() {
+        crate::models::RerankMode::None => None,
+        crate::models::RerankMode::Api => Some(rag_client::rerank(
+            &config.rerank,
+            query,
+            &docs(),
+            config.rerank_top_n,
+        )),
+        // 本地模型服务没有 rerank 端点时的替代路径：用对话模型打分。
+        crate::models::RerankMode::Llm => Some(rag_client::rerank_with_llm(
+            chat,
+            query,
+            &docs(),
+            config.rerank_top_n,
+        )),
+    };
+    if let Some(ranked) = ranked {
         match ranked {
             Ok(ranked) => {
                 let mut reranked: Vec<RetrievedChunk> = Vec::new();

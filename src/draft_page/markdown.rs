@@ -135,7 +135,8 @@ pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String
     let line = &text[line_start..line_end];
     // 独立列表的子项可以缩进四格以上，也要能回车续写。
     let (indent_len, number, content) = export::parse_indented_ordered_item(line)?;
-    let content_start = content.as_ptr() as usize - line.as_ptr() as usize;
+    // `content` 是 `line` 的后缀（只去掉了行首缩进与序号），内容起点用长度差算。
+    let content_start = line.len() - content.len();
     if cursor < line_start + content_start {
         return None;
     }

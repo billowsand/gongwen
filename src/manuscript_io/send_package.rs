@@ -57,7 +57,9 @@ pub fn export_send_package(
     let mut parts = Vec::with_capacity(total + 1);
     let mut page_counts = Vec::with_capacity(total);
     for (index, entry) in plan.entries.iter().enumerate() {
-        let revision = entry.revision.as_ref().expect("上面已拦下无版本的件");
+        let Some(revision) = entry.revision.as_ref() else {
+            bail!("送批材料里有拿不到版本的件");
+        };
         progress(&format!(
             "正在编译第 {}/{total} 件：《{}》…",
             index + 1,
@@ -72,10 +74,13 @@ pub fn export_send_package(
     }
     if with_toc {
         progress("正在排目录页…");
-        let owner = plan.entries[0]
-            .revision
-            .as_ref()
-            .expect("上面已拦下无版本的件");
+        let Some(owner) = plan
+            .entries
+            .first()
+            .and_then(|entry| entry.revision.as_ref())
+        else {
+            bail!("送批材料清单是空的，排不出目录页");
+        };
         let toc = compile(
             &toc_snapshot(&owner.snapshot),
             &toc_markdown(plan, &page_counts),
@@ -93,26 +98,24 @@ pub fn export_send_package(
     } else {
         (None, &merged.parts[..])
     };
-    let items = plan
-        .entries
-        .iter()
-        .zip(item_parts)
-        .enumerate()
-        .map(|(index, (entry, part))| {
-            let revision = entry.revision.as_ref().expect("上面已拦下无版本的件");
-            ExportItemRecord {
-                sort_order: index as i64,
-                document_uuid: entry.document_uuid.clone(),
-                revision_uuid: revision.revision_uuid.clone(),
-                payload_hash: revision.payload_hash.clone(),
-                visible_number: revision.visible_number,
-                title: entry.title.clone(),
-                kind: entry.kind,
-                page_count: part.pages as i64,
-                blank_pages: part.blanks as i64,
-            }
-        })
-        .collect();
+    let mut items = Vec::with_capacity(item_parts.len());
+    for (index, (entry, part)) in plan.entries.iter().zip(item_parts).enumerate() {
+        let Some(revision) = entry.revision.as_ref() else {
+            // 拿不到版本的件不出清单：归档记录不能带空的版本标识。
+            bail!("《{}》没有可用版本，不进送批材料清单", entry.title);
+        };
+        items.push(ExportItemRecord {
+            sort_order: index as i64,
+            document_uuid: entry.document_uuid.clone(),
+            revision_uuid: revision.revision_uuid.clone(),
+            payload_hash: revision.payload_hash.clone(),
+            visible_number: revision.visible_number,
+            title: entry.title.clone(),
+            kind: entry.kind,
+            page_count: part.pages as i64,
+            blank_pages: part.blanks as i64,
+        });
+    }
     Ok(SendPackageOutcome {
         path: output.to_path_buf(),
         total_pages: merged.total_pages,

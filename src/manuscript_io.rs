@@ -34,6 +34,11 @@ const VOCABULARY_NAME: &str = "vocabulary.json";
 const VOCABULARY_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// 单个 PDF 附件上限（约 100 MB），超限跳过，避免导入超大文件撑爆库。
 const MAX_PDF_BYTES: u64 = 100 * 1024 * 1024;
+/// 单张图片的上限（解压后），与插图入库同一个值，插得进去的图就带得回来。
+const MAX_IMAGE_BYTES: u64 = crate::file_limits::MAX_IMAGE_BYTES;
+/// 一次导入要读进内存的图片合计上限（解压后）：防 zip 炸弹，又给大稿件库
+/// 留足余量。
+const MAX_IMAGES_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MANIFEST_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 /// 导出密码规则：不少于 10 个字符，且至少覆盖三类字符；同时拒绝常见口令、
@@ -835,8 +840,16 @@ pub fn import_zip(
                 summary.skipped_pdfs += 1;
                 continue;
             }
+            // 声明的大小可以造假：按上限多读一个字节，实际超了照样跳过。
             let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes)?;
+            entry
+                .by_ref()
+                .take(MAX_PDF_BYTES + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > MAX_PDF_BYTES {
+                summary.skipped_pdfs += 1;
+                continue;
+            }
             store.add_pdf(new_id, &pdf.file_name, &bytes)?;
             summary.pdfs_imported += 1;
         }
@@ -892,14 +905,36 @@ fn restore_images(archive: &mut ZipArchive<File>, target: &Path, password: &str)
         .map(str::to_string)
         .collect();
     let mut count = 0usize;
+    // 单张图片与整包图片都有上限：被篡改的 zip 不能靠海量条目吃光内存。
+    let mut total: u64 = 0;
     for name in names {
         let file_name = name.strip_prefix("images/").unwrap_or(&name);
         let safe = sanitize_entry_name(file_name);
         let mut entry = archive
             .by_name_decrypt(&name, password.as_bytes())
             .map_err(map_zip_password_error)?;
+        anyhow::ensure!(
+            entry.size() <= MAX_IMAGE_BYTES,
+            "图片超过 {} MB：{name}",
+            MAX_IMAGE_BYTES / 1024 / 1024
+        );
+        // 声明的大小可以造假：按上限多读一个字节，以实际读到的为准。
         let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)?;
+        entry
+            .by_ref()
+            .take(MAX_IMAGE_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= MAX_IMAGE_BYTES,
+            "图片解压后超过 {} MB：{name}",
+            MAX_IMAGE_BYTES / 1024 / 1024
+        );
+        total = total.saturating_add(bytes.len() as u64);
+        anyhow::ensure!(
+            total <= MAX_IMAGES_TOTAL_BYTES,
+            "zip 里的图片合计超过 {} MB",
+            MAX_IMAGES_TOTAL_BYTES / 1024 / 1024
+        );
         let dest = target.join(&safe);
         // 目标已存在且内容一致时跳过，避免无谓写入；内容不同则按恢复语义覆盖。
         if std::fs::read(&dest).ok().as_deref() == Some(bytes.as_slice()) {

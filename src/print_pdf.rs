@@ -42,6 +42,16 @@ pub(crate) fn printing_available() -> bool {
 
 /// 打印一份 PDF。阻塞调用（对话框 + 逐页光栅化），调用方必须放后台线程。
 pub(crate) fn print_pdf(path: &Path) -> Result<PrintOutcome, String> {
+    // 先卡体积：两条路都从这里进，超大的 PDF 不该被整体读进内存。
+    let size = std::fs::metadata(path)
+        .map_err(|error| format!("无法读取 {}：{error}", path.display()))?
+        .len();
+    if size > crate::file_limits::MAX_PDF_BYTES {
+        return Err(format!(
+            "要打印的 PDF 超过 {} MB 上限",
+            crate::file_limits::MAX_PDF_BYTES / 1024 / 1024
+        ));
+    }
     #[cfg(windows)]
     {
         windows::print_pdf(path)
@@ -58,8 +68,17 @@ pub(crate) fn print_pdf(path: &Path) -> Result<PrintOutcome, String> {
 fn fit_rect(src_w: i32, src_h: i32, area_w: i32, area_h: i32) -> (i32, i32, i32, i32) {
     let scale = f64::from(area_w) / f64::from(src_w).max(1.0);
     let scale = scale.min(f64::from(area_h) / f64::from(src_h).max(1.0));
-    let w = (f64::from(src_w) * scale).round().max(1.0) as i32;
-    let h = (f64::from(src_h) * scale).round().max(1.0) as i32;
+    // Rust 的浮点转整数本身是饱和的（NaN 得 0），不会出未定义行为；这里显式
+    // 夹到 [1, i32::MAX] 并把 NaN 当 1，是为了极端比例下也至少画出一个像素。
+    let to_i32 = |value: f64| {
+        if value.is_nan() {
+            1
+        } else {
+            value.round().clamp(1.0, f64::from(i32::MAX)) as i32
+        }
+    };
+    let w = to_i32(f64::from(src_w) * scale);
+    let h = to_i32(f64::from(src_h) * scale);
     ((area_w - w) / 2, (area_h - h) / 2, w, h)
 }
 
@@ -124,7 +143,7 @@ mod windows {
         vello_cpu::color::palette::css::WHITE,
     };
     use std::path::Path;
-    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::Foundation::{GlobalFree, HGLOBAL};
     use windows_sys::Win32::Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteDC, GDI_ERROR, GetDeviceCaps,
         HDC, HORZRES, LOGPIXELSX, SRCCOPY, StretchDIBits, VERTRES,
@@ -146,7 +165,30 @@ mod windows {
     struct DcGuard(HDC);
     impl Drop for DcGuard {
         fn drop(&mut self) {
+            // SAFETY: `self.0` 是打印对话框交回的设备上下文，只由本守卫持有，
+            // `DeleteDC` 恰好释放一次；守卫不会复制句柄。
             unsafe { DeleteDC(self.0) };
+        }
+    }
+
+    /// 打印对话框可能交回两块需要归还的全局内存（设备模式与设备名）。
+    /// 中途早退的分支也得归还，所以用守卫托管。
+    struct GlobalMemory {
+        dev_mode: HGLOBAL,
+        dev_names: HGLOBAL,
+    }
+    impl Drop for GlobalMemory {
+        fn drop(&mut self) {
+            // SAFETY: 两块内存都由打印对话框交回、所有权转给我们；空句柄跳过，
+            // 非空句柄各 `GlobalFree` 一次，与分配方成对。
+            unsafe {
+                if !self.dev_mode.is_null() {
+                    GlobalFree(self.dev_mode);
+                }
+                if !self.dev_names.is_null() {
+                    GlobalFree(self.dev_names);
+                }
+            }
         }
     }
 
@@ -167,6 +209,8 @@ mod windows {
     impl Drop for DocGuard {
         fn drop(&mut self) {
             if !self.finished {
+                // SAFETY: 打印任务还未 `EndDoc`（`finished` 为 false），此时必须
+                // `AbortDoc` 作废它；句柄由外层的 `DcGuard` 管，不在这里释放。
                 unsafe { AbortDoc(self.dc) };
             }
         }
@@ -174,7 +218,8 @@ mod windows {
 
     pub(super) fn print_pdf(path: &Path) -> Result<PrintOutcome, String> {
         let bytes =
-            std::fs::read(path).map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
+            crate::file_limits::read_bytes(path, crate::file_limits::MAX_PDF_BYTES, "要打印的 PDF")
+                .map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
         let pdf = Pdf::new(bytes).map_err(|error| format!("PDF 文件结构无法解析：{error:?}"))?;
         let pages = pdf.pages();
         // 先取全部页面的点尺寸：既是页数，也是逐页光栅化的比例基准。
@@ -184,134 +229,145 @@ mod windows {
             return Err("PDF 中没有可打印的页面".to_string());
         }
         // PrintDlg 的页码字段是 u16，超出部分按最大页截断。
-        let max_page = page_sizes.len().min(usize::from(u16::MAX)) as u16;
+        let max_page =
+            u16::try_from(page_sizes.len().min(usize::from(u16::MAX))).unwrap_or(u16::MAX);
 
-        // SAFETY: 本模块整体是不安全代码块包裹的 Win32 调用；逐个调用处的约定在
-        // 注释里说明。PrintDlgW 我们持有 pd 的全部所有权，输出句柄按文档归还。
-        unsafe {
-            let mut pd = PRINTDLGW {
-                lStructSize: size_of::<PRINTDLGW>() as u32,
-                Flags: PD_RETURNDC | PD_USEDEVMODECOPIESANDCOLLATE,
-                nMinPage: 1,
-                nMaxPage: max_page,
-                nFromPage: 1,
-                nToPage: max_page,
-                nCopies: 1,
-                ..Default::default()
-            };
-            // hwndOwner 留空：对话框独立出现在任务栏，不归档到主窗口。打印跑在
-            // 后台线程，拿不到也不该阻塞主窗口。
-            if PrintDlgW(&mut pd) == 0 {
-                let code = CommDlgExtendedError();
-                if code == 0 {
-                    return Ok(PrintOutcome::Cancelled);
-                }
-                return Err(format!(
-                    "无法打开打印对话框（错误码 {code}），请确认已安装打印机"
-                ));
+        let mut pd = PRINTDLGW {
+            lStructSize: u32::try_from(size_of::<PRINTDLGW>()).unwrap_or(u32::MAX),
+            Flags: PD_RETURNDC | PD_USEDEVMODECOPIESANDCOLLATE,
+            nMinPage: 1,
+            nMaxPage: max_page,
+            nFromPage: 1,
+            nToPage: max_page,
+            nCopies: 1,
+            ..Default::default()
+        };
+        // hwndOwner 留空：对话框独立出现在任务栏，不归档到主窗口。打印跑在
+        // 后台线程，拿不到也不该阻塞主窗口。
+        // SAFETY: `pd` 是本函数独占的栈上结构，`PrintDlgW` 只会往里写句柄与
+        // 页码字段；句柄取出后由守卫接管。
+        if unsafe { PrintDlgW(&mut pd) } == 0 {
+            // SAFETY: 取错误码不需要任何前置条件，句柄此时已由对话框自己清理。
+            let code = unsafe { CommDlgExtendedError() };
+            if code == 0 {
+                return Ok(PrintOutcome::Cancelled);
             }
-            // PD_RETURNDC 模式下这两个句柄通常为空，非空就要 GlobalFree 归还。
-            if !pd.hDevMode.is_null() {
-                GlobalFree(pd.hDevMode);
-            }
-            if !pd.hDevNames.is_null() {
-                GlobalFree(pd.hDevNames);
-            }
-            if pd.hDC.is_null() {
-                return Err("未能从打印对话框取得打印机上下文".to_string());
-            }
-            let dc = DcGuard(pd.hDC);
+            return Err(format!(
+                "无法打开打印对话框（错误码 {code}），请确认已安装打印机"
+            ));
+        }
+        // PD_RETURNDC 模式下这两个句柄通常为空，非空就要 GlobalFree 归还。
+        let _memory = GlobalMemory {
+            dev_mode: pd.hDevMode,
+            dev_names: pd.hDevNames,
+        };
+        if pd.hDC.is_null() {
+            return Err("未能从打印对话框取得打印机上下文".to_string());
+        }
+        let dc = DcGuard(pd.hDC);
 
-            let printer_dpi = GetDeviceCaps(dc.0, LOGPIXELSX as i32);
-            let area_w = GetDeviceCaps(dc.0, HORZRES as i32);
-            let area_h = GetDeviceCaps(dc.0, VERTRES as i32);
-            if printer_dpi <= 0 || area_w <= 0 || area_h <= 0 {
-                return Err("无法读取打印机的分辨率与可打印区域".to_string());
-            }
-            let raster_dpi = printer_dpi.clamp(96, MAX_PRINT_DPI);
+        // SAFETY: `dc.0` 是打印对话框交回的设备上下文，在本函数内有效。
+        let (printer_dpi, area_w, area_h) = unsafe {
+            (
+                GetDeviceCaps(dc.0, LOGPIXELSX as i32),
+                GetDeviceCaps(dc.0, HORZRES as i32),
+                GetDeviceCaps(dc.0, VERTRES as i32),
+            )
+        };
+        if printer_dpi <= 0 || area_w <= 0 || area_h <= 0 {
+            return Err("无法读取打印机的分辨率与可打印区域".to_string());
+        }
+        let raster_dpi = printer_dpi.clamp(96, MAX_PRINT_DPI);
 
-            // PD_PAGENUMS 出现在返回值里，说明用户选了「页码范围」而非「全部」。
-            let (from, to) = if pd.Flags & PD_PAGENUMS != 0 {
-                (
-                    pd.nFromPage.clamp(1, max_page),
-                    pd.nToPage.clamp(1, max_page),
-                )
-            } else {
-                (1, max_page)
-            };
-            if from > to {
-                return Err("页码范围无效".to_string());
-            }
-            // 带 PD_USEDEVMODECOPIESANDCOLLATE 时，驱动能自己印多份就会把它留成 1
-            // 并把份数写进 DEVMODE；大于 1 才需要我们逐份重复（按页序=自动分页）。
-            let copies = pd.nCopies.max(1);
+        // PD_PAGENUMS 出现在返回值里，说明用户选了「页码范围」而非「全部」。
+        let (from, to) = if pd.Flags & PD_PAGENUMS != 0 {
+            (
+                pd.nFromPage.clamp(1, max_page),
+                pd.nToPage.clamp(1, max_page),
+            )
+        } else {
+            (1, max_page)
+        };
+        if from > to {
+            return Err("页码范围无效".to_string());
+        }
+        // 带 PD_USEDEVMODECOPIESANDCOLLATE 时，驱动能自己印多份就会把它留成 1
+        // 并把份数写进 DEVMODE；大于 1 才需要我们逐份重复（按页序=自动分页）。
+        let copies = pd.nCopies.max(1);
 
-            let doc_name: Vec<u16> = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "PDF".to_string())
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-            let info = DOCINFOW {
-                cbSize: size_of::<DOCINFOW>() as i32,
-                lpszDocName: doc_name.as_ptr(),
-                ..Default::default()
-            };
-            if StartDocW(dc.0, &info) <= 0 {
-                return Err("打印机拒绝了打印任务，请检查打印机状态".to_string());
-            }
-            let mut doc = DocGuard {
-                dc: dc.0,
-                finished: false,
-            };
+        let doc_name: Vec<u16> = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "PDF".to_string())
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let info = DOCINFOW {
+            cbSize: i32::try_from(size_of::<DOCINFOW>()).unwrap_or(i32::MAX),
+            lpszDocName: doc_name.as_ptr(),
+            ..Default::default()
+        };
+        // SAFETY: `info` 与 `doc_name` 都在本次调用期间存活，`lpszDocName` 指向
+        // 以 NUL 结尾的宽字符数组；`dc.0` 是有效的设备上下文。
+        if unsafe { StartDocW(dc.0, &info) } <= 0 {
+            return Err("打印机拒绝了打印任务，请检查打印机状态".to_string());
+        }
+        let mut doc = DocGuard {
+            dc: dc.0,
+            finished: false,
+        };
 
-            // 字体与图像的解码结果落在 cache 里全程复用；每页新建等于每页重新
-            // 解码一遍嵌入的中文字体。
-            let cache = RenderCache::new();
-            for _copy in 0..copies {
-                for page_num in from..=to {
-                    let index = usize::from(page_num - 1);
-                    let Some(page) = pages.get(index) else {
-                        continue;
-                    };
-                    let (page_width, _) = page_sizes[index];
-                    let target = ((page_width / 72.0) * raster_dpi as f32).round();
-                    let width = target.clamp(1.0, f32::from(u16::MAX)) as u16;
-                    let scale = f32::from(width) / page_width.max(1.0);
-                    let pixmap = hayro::render(
-                        page,
-                        &cache,
-                        &InterpreterSettings::default(),
-                        &RenderSettings {
-                            x_scale: scale,
-                            y_scale: scale,
-                            width: Some(width),
-                            bg_color: WHITE,
-                            ..Default::default()
-                        },
-                    );
-                    let src_w = i32::from(pixmap.width());
-                    let src_h = i32::from(pixmap.height());
-                    let bgra = rgba_to_bgra(pixmap.data_as_u8_slice());
-                    let (dx, dy, dw, dh) = fit_rect(src_w, src_h, area_w, area_h);
-                    // 负高度 = 自顶向下的 DIB，行序与 hayro 的输出一致。
-                    let bmi = BITMAPINFO {
-                        bmiHeader: BITMAPINFOHEADER {
-                            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                            biWidth: src_w,
-                            biHeight: -src_h,
-                            biPlanes: 1,
-                            biBitCount: 32,
-                            biCompression: BI_RGB,
-                            ..Default::default()
-                        },
+        // 字体与图像的解码结果落在 cache 里全程复用；每页新建等于每页重新
+        // 解码一遍嵌入的中文字体。
+        let cache = RenderCache::new();
+        for _copy in 0..copies {
+            for page_num in from..=to {
+                let index = usize::from(page_num - 1);
+                let Some(page) = pages.get(index) else {
+                    continue;
+                };
+                let (page_width, _) = page_sizes[index];
+                let target = ((page_width / 72.0) * raster_dpi as f32).round();
+                // 已夹在 u16 范围内，`as` 不会截断（NaN 饱和成 0 再被 max 抬成 1）。
+                let width = (target.clamp(1.0, f32::from(u16::MAX)) as u16).max(1);
+                let scale = f32::from(width) / page_width.max(1.0);
+                let pixmap = hayro::render(
+                    page,
+                    &cache,
+                    &InterpreterSettings::default(),
+                    &RenderSettings {
+                        x_scale: scale,
+                        y_scale: scale,
+                        width: Some(width),
+                        bg_color: WHITE,
                         ..Default::default()
-                    };
-                    if StartPage(dc.0) <= 0 {
-                        return Err(doc.abort("打印机在换页时报错，任务已取消"));
-                    }
-                    let lines = StretchDIBits(
+                    },
+                );
+                let src_w = i32::from(pixmap.width());
+                let src_h = i32::from(pixmap.height());
+                let bgra = rgba_to_bgra(pixmap.data_as_u8_slice());
+                let (dx, dy, dw, dh) = fit_rect(src_w, src_h, area_w, area_h);
+                // 负高度 = 自顶向下的 DIB，行序与 hayro 的输出一致。
+                let bmi = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).unwrap_or(u32::MAX),
+                        biWidth: src_w,
+                        biHeight: -src_h,
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                // SAFETY: `dc.0` 是有效的设备上下文，页面任务已由 `StartDocW` 开启。
+                if unsafe { StartPage(dc.0) } <= 0 {
+                    return Err(doc.abort("打印机在换页时报错，任务已取消"));
+                }
+                // SAFETY: `bgra` 与 `bmi` 在调用期间存活；`bgra` 长度是
+                // `src_w * src_h * 4`，与 DIB 的 32 位色一致；`dc.0` 有效。
+                let lines = unsafe {
+                    StretchDIBits(
                         dc.0,
                         dx,
                         dy,
@@ -325,21 +381,23 @@ mod windows {
                         &bmi,
                         DIB_RGB_COLORS,
                         SRCCOPY,
-                    );
-                    if lines == GDI_ERROR || lines == 0 {
-                        return Err(doc.abort("写入打印数据失败，任务已取消"));
-                    }
-                    if EndPage(dc.0) <= 0 {
-                        return Err(doc.abort("打印机在结束页面时报错，任务已取消"));
-                    }
+                    )
+                };
+                if lines == GDI_ERROR || lines == 0 {
+                    return Err(doc.abort("写入打印数据失败，任务已取消"));
+                }
+                // SAFETY: `dc.0` 有效，页面已由 `StartPage` 开启。
+                if unsafe { EndPage(dc.0) } <= 0 {
+                    return Err(doc.abort("打印机在结束页面时报错，任务已取消"));
                 }
             }
-            if EndDoc(dc.0) <= 0 {
-                return Err(doc.abort("收尾打印任务失败"));
-            }
-            doc.finished = true;
-            Ok(PrintOutcome::Printed)
         }
+        // SAFETY: `dc.0` 有效，文档任务已由 `StartDocW` 开启。
+        if unsafe { EndDoc(dc.0) } <= 0 {
+            return Err(doc.abort("收尾打印任务失败"));
+        }
+        doc.finished = true;
+        Ok(PrintOutcome::Printed)
     }
 }
 

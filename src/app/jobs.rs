@@ -1325,7 +1325,8 @@ impl GongwenApp {
                 done,
             } => self.docs[index].ai_panel.append(&content, &reasoning, done),
             DocJob::AiTool(line) => self.docs[index].ai_panel.step(line),
-            DocJob::AiUsage { .. } => unreachable!("用量已按原轮次回投"),
+            // 用量按原轮次回投，这一支不该走到这里；真走到就忽略，不让任务崩掉。
+            DocJob::AiUsage { .. } => {}
             DocJob::AiWorkspace(text) => self.docs[index].ai_panel.replace_content(text),
             DocJob::AiWriteBegin { prefix, suffix } => {
                 self.docs[index].ai_panel.begin_write(prefix, suffix)

@@ -85,7 +85,7 @@ fn format12_cmap(map: &BTreeMap<u32, u16>) -> Vec<u8> {
         }
         groups.push((cp, cp, glyph));
     }
-    let mut out = Vec::with_capacity(28 + groups.len() * 12);
+    let mut out = Vec::with_capacity(28 + groups.len().saturating_mul(12));
     out.extend_from_slice(&0u16.to_be_bytes()); // version
     out.extend_from_slice(&1u16.to_be_bytes()); // numTables
     out.extend_from_slice(&3u16.to_be_bytes()); // platformID: Windows

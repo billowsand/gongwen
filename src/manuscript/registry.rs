@@ -103,7 +103,10 @@ impl ManuscriptStore {
             )
             .optional()?
         {
-            return Ok(self.get_registered(id)?.expect("刚查到的登记"));
+            // 登记行可能刚被删掉：取不到就按新登记往下走。
+            if let Some(record) = self.get_registered(id)? {
+                return Ok(record);
+            }
         }
         let now = Local::now().to_rfc3339();
         self.conn.execute(

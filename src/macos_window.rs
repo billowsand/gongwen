@@ -33,8 +33,10 @@ fn configure_native_titlebar_impl(
         return None;
     };
 
-    // SAFETY: raw-window-handle 保证该指针在窗口存活期内是有效的 NSView；
-    // Retained 只在配置期间延长它的生命。
+    // SAFETY: raw-window-handle 保证该指针在窗口存活期内是有效的 NSView，
+    // 且它是非空指针（`NonNull`）；`Retained::retain` 只把它 retain 一次（+1），
+    // 之后由 `Retained` 负责 release，生命周期不越过本函数。
+    // 上面的 `MainThreadMarker` 保证我们在主线程上做这件事（AppKit 要求）。
     let view = unsafe { Retained::<NSView>::retain(handle.ns_view.as_ptr().cast()) }?;
     let window = view.window()?;
 
@@ -49,6 +51,9 @@ fn configure_native_titlebar_impl(
 
     // 声明它是可进入独立 Space 的主窗口，并允许现代 macOS 在绿色按钮
     // 悬停菜单中提供左右平铺等窗口形态。
+    // SAFETY: AppKit 的 `collectionBehavior` 只能在主线程读写；本函数开头
+    // 已用 `MainThreadMarker` 确认过主线程，`window` 是上面 retain 出来的
+    // 有效对象。
     let mut behavior = unsafe { window.collectionBehavior() };
     behavior.remove(
         NSWindowCollectionBehavior::FullScreenNone
@@ -58,6 +63,7 @@ fn configure_native_titlebar_impl(
         NSWindowCollectionBehavior::FullScreenPrimary
             | NSWindowCollectionBehavior::FullScreenAllowsTiling,
     );
+    // SAFETY: 同上：主线程 + 有效的 `window`。
     unsafe { window.setCollectionBehavior(behavior) };
 
     // 使用 NSWindow 自己的按钮实例，保留系统目标/动作、Option 点击、
@@ -98,10 +104,14 @@ pub(crate) fn perform_titlebar_double_click() {
         return;
     };
     let app = NSApplication::sharedApplication(main_thread);
+    // SAFETY: `sharedApplication` 需要主线程标记；`mainWindow` 是 AppKit 的
+    // 主线程限定调用，这里同样在主线程上执行。
     let Some(window) = app.keyWindow().or_else(|| unsafe { app.mainWindow() }) else {
         return;
     };
     let key = NSString::from_str("AppleActionOnDoubleClick");
+    // SAFETY: `standardUserDefaults` 是主线程限定的全局对象；`key` 在调用期间
+    // 存活，返回的字符串由 `Retained` 持有。
     let action = unsafe { NSUserDefaults::standardUserDefaults().stringForKey(&key) }
         .map(|value| value.to_string())
         .unwrap_or_else(|| "Maximize".to_owned());
@@ -109,8 +119,10 @@ pub(crate) fn perform_titlebar_double_click() {
     // 不使用跨平台 Maximized：AppKit 的 zoom 会在用户尺寸和系统建议尺寸间切换，
     // miniaturize 则走 Dock 动画；None/Do Nothing 保持无动作。
     if action.eq_ignore_ascii_case("Minimize") {
+        // SAFETY: 主线程限定的窗口操作；`window` 是上面取到的有效窗口。
         unsafe { window.performMiniaturize(None) };
     } else if !action.eq_ignore_ascii_case("None") && !action.eq_ignore_ascii_case("Do Nothing") {
+        // SAFETY: 同上。
         unsafe { window.performZoom(None) };
     }
 }

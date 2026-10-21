@@ -422,7 +422,9 @@ fn inline_atoms(text: &str) -> Vec<InlineAtom> {
             continue;
         }
 
-        let ch = text[index..].chars().next().expect("valid char boundary");
+        let Some(ch) = text[index..].chars().next() else {
+            break;
+        };
         if ch == '`' && !escaped_at(text, index) {
             index += ch.len_utf8();
             continue;

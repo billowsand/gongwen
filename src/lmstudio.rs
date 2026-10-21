@@ -498,7 +498,9 @@ fn chat_payload(
         "stream": stream
     });
     if disable_thinking {
-        let fields = payload.as_object_mut().expect("payload 必然是对象");
+        let Some(fields) = payload.as_object_mut() else {
+            return payload;
+        };
         // 三家写法一起带，不认的通常会被忽略；全被拒时由调用方去掉重试。
         // vLLM / SGLang / 较新的 LM Studio：透传给 chat template。
         fields.insert(

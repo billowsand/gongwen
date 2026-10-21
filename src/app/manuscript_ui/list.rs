@@ -397,8 +397,9 @@ impl GongwenApp {
         if let Some(confirm) = &self.manuscript_batch_delete {
             let dialog = batch_delete_dialog(ui.ctx(), confirm);
             if dialog.inner {
-                let confirm = self.manuscript_batch_delete.take().unwrap();
-                *action = Some(ManuscriptAction::DeleteSelected(confirm.deletable));
+                if let Some(confirm) = self.manuscript_batch_delete.take() {
+                    *action = Some(ManuscriptAction::DeleteSelected(confirm.deletable));
+                }
             } else if dialog.dismissed {
                 self.manuscript_batch_delete = None;
             }
@@ -439,12 +440,15 @@ impl GongwenApp {
                 },
             );
             if dialog.inner {
-                let export = self.manuscript_pdf_export.take().unwrap();
-                let options = manuscript_io::PdfExportOptions {
-                    stamped: export.stamped,
-                    compiled: export.compiled,
-                };
-                self.open_zip_password_dialog(ZipPasswordPurpose::PdfExport(options, export.ids));
+                if let Some(export) = self.manuscript_pdf_export.take() {
+                    let options = manuscript_io::PdfExportOptions {
+                        stamped: export.stamped,
+                        compiled: export.compiled,
+                    };
+                    self.open_zip_password_dialog(ZipPasswordPurpose::PdfExport(
+                        options, export.ids,
+                    ));
+                }
             } else if dialog.dismissed {
                 self.manuscript_pdf_export = None;
             }

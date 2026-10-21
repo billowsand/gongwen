@@ -125,7 +125,9 @@ pub fn inspect_one(
             incoming_hash,
         });
     };
-    let local = store.get(local_id)?.expect("稿件身份应对应记录");
+    let Some(local) = store.get(local_id)? else {
+        bail!("稿件 {} 在库里找不到，无法合并", local_id);
+    };
     let local_hash = payload_hash(&local.snapshot, &local.content_markdown, &local.notes)?;
     let local_pdf_hashes = local
         .pdfs
@@ -153,7 +155,9 @@ pub fn inspect_one(
         }
     }
     let (_, local_head) = store.document_identity(local_id)?;
-    let remote_head = record.head_revision_uuid.as_deref().expect("v2 已校验");
+    let Some(remote_head) = record.head_revision_uuid.as_deref() else {
+        bail!("同步包缺少头版本标识，无法合并");
+    };
     let clean = local_head
         .as_ref()
         .and_then(|head| graph.get(head))
@@ -925,6 +929,8 @@ fn read_images(
     actions: &[ImportAction],
 ) -> Result<Vec<Blob>> {
     let mut out = Vec::new();
+    // 全部图片的解压总量上限：单张有上限还不够，成百上千张照样能吃光内存。
+    let mut total: u64 = 0;
     if manifest.schema == 2 {
         let mut needed = HashSet::new();
         for (record, action) in manifest.records.iter().zip(actions) {
@@ -948,10 +954,16 @@ fn read_images(
             if !needed.contains(&asset.path) {
                 continue;
             }
-            let bytes = read_blob(archive, &asset.path, password, super::MAX_PDF_BYTES)?;
+            let bytes = read_blob(archive, &asset.path, password, super::MAX_IMAGE_BYTES)?;
             if super::bytes_hash(&bytes) != asset.sha256 {
                 bail!("图片资源校验失败：{}", asset.path);
             }
+            total = total.saturating_add(bytes.len() as u64);
+            anyhow::ensure!(
+                total <= super::MAX_IMAGES_TOTAL_BYTES,
+                "包里的图片合计超过 {} MB",
+                super::MAX_IMAGES_TOTAL_BYTES / 1024 / 1024
+            );
             out.push((asset.path.clone(), bytes));
         }
     } else {
@@ -964,10 +976,14 @@ fn read_images(
             if !safe_image_path(&path) {
                 bail!("旧版包图片路径不安全：{path}");
             }
-            out.push((
-                path.clone(),
-                read_blob(archive, &path, password, super::MAX_PDF_BYTES)?,
-            ));
+            let bytes = read_blob(archive, &path, password, super::MAX_IMAGE_BYTES)?;
+            total = total.saturating_add(bytes.len() as u64);
+            anyhow::ensure!(
+                total <= super::MAX_IMAGES_TOTAL_BYTES,
+                "包里的图片合计超过 {} MB",
+                super::MAX_IMAGES_TOTAL_BYTES / 1024 / 1024
+            );
+            out.push((path.clone(), bytes));
         }
     }
     Ok(out)

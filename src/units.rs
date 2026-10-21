@@ -169,8 +169,11 @@ pub fn normalize_preserving_codes(vocab: &mut Vec<VocabularyEntry>) {
         if slots[index].is_none() {
             return;
         }
-        let placeholder = format!("@{}", slots[index].as_ref().unwrap().id);
-        let is_placeholder = slots[index].as_ref().unwrap().code.trim() == placeholder;
+        let Some(entry) = slots[index].as_ref() else {
+            return;
+        };
+        let placeholder = format!("@{}", entry.id);
+        let is_placeholder = entry.code.trim() == placeholder;
         if is_placeholder {
             walk(
                 index,
@@ -184,7 +187,7 @@ pub fn normalize_preserving_codes(vocab: &mut Vec<VocabularyEntry>) {
         } else {
             // 用户已填真实编码：保留它的字面值进入 walk，但 child/people
             // 仍按 placeholder 收集的人员树走完。
-            let code = slots[index].as_ref().unwrap().code.trim().to_string();
+            let code = entry.code.trim().to_string();
             walk_preserve_code(index, &code, slots, &children, &people, output, None);
         }
         root_order += 1;

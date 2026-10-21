@@ -429,10 +429,10 @@ impl AppConfig {
     pub(crate) fn migrate_providers(&mut self) -> bool {
         if !self.providers.is_empty() {
             // 旧版 Go 模板漏了地址，只修复原名且地址仍为空的条目，保留自定义连接。
-            let preset = PROVIDER_PRESETS
-                .iter()
-                .find(|p| p.id == "opencode-go")
-                .unwrap();
+            // 预设表里没有这一条就不做迁移，不让升级路径把程序带崩。
+            let Some(preset) = PROVIDER_PRESETS.iter().find(|p| p.id == "opencode-go") else {
+                return false;
+            };
             let mut changed = false;
             for provider in &mut self.providers {
                 if provider.name == preset.name && provider.base_url.trim().is_empty() {

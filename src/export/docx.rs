@@ -372,7 +372,9 @@ pub fn write_docx_with_numbering(
             }
         }
         TemplateKind::MeetingAgenda | TemplateKind::ResearchReport | TemplateKind::PhoneRecord => {
-            unreachable!()
+            // 这三个文种各有各的 Word 通道（前面已经分流），走到这里说明分流
+            // 的判断与这里的模板分支对不上：报出来，不让程序崩在导出中途。
+            bail!("该文种不走公文 Word 排版，请检查导出分流");
         }
     }
     let title_plain = plain_text(title);

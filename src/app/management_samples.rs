@@ -16,15 +16,22 @@ pub(super) fn fixture() -> GongwenApp {
     let ime = crate::ime::Ime::new(session::ime_settings_of(&config.ime));
     let docs = vec![DraftSession::blank(0, &config)];
     let (sender, receiver) = mpsc::channel();
-    let manuscript_store =
-        Some(manuscript::ManuscriptStore::open(std::path::Path::new(":memory:")).unwrap());
-    let manuscript_error = None;
-    let knowledge_store =
-        Some(knowledge::KnowledgeStore::open(std::path::Path::new(":memory:")).unwrap());
-    let knowledge_error = None;
-    let lexicon_store =
-        Some(lexicon::LexiconStore::open(std::path::Path::new(":memory:")).unwrap());
-    let lexicon_error = None;
+    // 内存库打开失败也不阻塞启动：记下错误，界面照常走。
+    let (manuscript_store, manuscript_error) =
+        match manuscript::ManuscriptStore::open(std::path::Path::new(":memory:")) {
+            Ok(store) => (Some(store), None),
+            Err(error) => (None, Some(format!("稿件库打开失败：{error:#}"))),
+        };
+    let (knowledge_store, knowledge_error) =
+        match knowledge::KnowledgeStore::open(std::path::Path::new(":memory:")) {
+            Ok(store) => (Some(store), None),
+            Err(error) => (None, Some(format!("知识库打开失败：{error:#}"))),
+        };
+    let (lexicon_store, lexicon_error) =
+        match lexicon::LexiconStore::open(std::path::Path::new(":memory:")) {
+            Ok(store) => (Some(store), None),
+            Err(error) => (None, Some(format!("词表库打开失败：{error:#}"))),
+        };
     let mut app = GongwenApp {
         config,
         ime,

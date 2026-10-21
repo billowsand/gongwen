@@ -367,8 +367,12 @@ impl Encoder {
         for _ in 0..MAX_COMBINATIONS {
             let mut code = String::new();
             for (word_pick, letter_pick) in &formula.picks {
-                let index = word_pick.resolve(word.len()).expect("上面已解析");
-                let slot = used.binary_search(&index).expect("上面已收集");
+                let Some(index) = word_pick.resolve(word.len()) else {
+                    continue;
+                };
+                let Ok(slot) = used.binary_search(&index) else {
+                    continue;
+                };
                 let char_code = &options[slot][choice[slot]].0;
                 if let Some(letter) = letter_pick
                     .resolve(char_code.len())

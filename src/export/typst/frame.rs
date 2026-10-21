@@ -190,7 +190,10 @@ fn count_units(text: &str) -> u32 {
     if text.trim().is_empty() {
         return 0;
     }
-    1 + text.matches('，').count() as u32 + text.matches('、').count() as u32
+    // 单位个数不会大到溢出 u32；真溢出就按 u32::MAX 封顶，不做静默截断。
+    let count =
+        u64::try_from(text.matches('，').count() + text.matches('、').count()).unwrap_or(u64::MAX);
+    u32::try_from(1u64.saturating_add(count)).unwrap_or(u32::MAX)
 }
 
 /// 联合发文模式 1 的成文日期压在主发文单位那一列下。

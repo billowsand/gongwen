@@ -35,13 +35,9 @@ pub fn research_anchor_notes(input: &DraftInput, markdown: &str) -> Vec<ReviewNo
     if !input.kind.is_research() {
         return Vec::new();
     }
-    // 报告题名那一行在全文里的位置（`research_report_titles` 返回的是原文切片）。
-    let title = export::research_report_titles(markdown)
-        .first()
-        .map(|title| {
-            let start = title.as_ptr() as usize - markdown.as_ptr() as usize;
-            start..start + title.len()
-        });
+    // 报告题名那一行在全文里的位置（`research_report_titles` 返回的是原文切片，
+    // 位置另由 `research_report_title_span` 给出，不用切片首地址相减）。
+    let title = export::research_report_title_span(markdown);
     let line_of = |offset: usize| markdown[..offset].matches('\n').count() + 1;
     let mut first_seen: Vec<(&str, usize)> = Vec::new();
     let mut notes = Vec::new();
@@ -234,7 +230,9 @@ fn research_section_warnings(text: &str, warnings: &mut Vec<String>) {
         if level == 0 || !line[level..].starts_with(' ') {
             continue;
         }
-        let (section, chapters) = spans.last_mut().expect("至少有正文一段");
+        let Some((section, chapters)) = spans.last_mut() else {
+            continue;
+        };
         match section {
             Section::Appendix => {
                 saw_h1 |= level == 1;

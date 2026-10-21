@@ -228,7 +228,8 @@ impl Ime {
                 ctx.data_mut(|data| data.insert_temp(egui::Id::new("ime-lookup"), slot.text));
                 return;
             }
-            Pick::Commit => unreachable!(),
+            // 提交在上面已经处理过；真走到这里也不该崩，按「无动作」收场。
+            Pick::Commit => return,
         };
         self.notice = Some(match (result, pick) {
             (Ok(()), Pick::Block) => {

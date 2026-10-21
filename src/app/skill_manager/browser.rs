@@ -396,7 +396,9 @@ impl SkillsPage {
                 );
             }
             for key in keys {
-                let buffer = self.buffers.get_mut(&key).expect("编辑缓冲");
+                let Some(buffer) = self.buffers.get_mut(&key) else {
+                    continue;
+                };
                 package::save_file(id, &key.1, &buffer.text)?;
                 buffer.saved.clone_from(&buffer.text);
                 files.files.insert(key.1, buffer.text.as_bytes().to_vec());
@@ -442,7 +444,9 @@ impl SkillsPage {
                     .add_enabled(path.is_ok(), egui::Button::new("创建并编辑"))
                     .clicked()
                 {
-                    let name = path.expect("已校验路径");
+                    let Ok(name) = path else {
+                        return;
+                    };
                     let result = (|| -> anyhow::Result<()> {
                         anyhow::ensure!(
                             !package::load(id)?

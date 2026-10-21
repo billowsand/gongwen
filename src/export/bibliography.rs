@@ -177,7 +177,10 @@ fn format_all(bibliography: &Bibliography) -> Result<HashMap<String, String>, Pe
         }
     })?;
     let Style::Independent(style) = ArchivedStyle::Gb77142015Numeric.get() else {
-        unreachable!("GB/T 7714 是独立样式");
+        return Err(Pending {
+            offset: 0,
+            message: "GB/T 7714 样式不可用，参考文献排不出来".to_string(),
+        });
     };
     let locales = hayagriva::archive::locales();
     // 研究报告模板 `#set text(lang: "zh", region: "cn")`，Typst 据此给 hayagriva

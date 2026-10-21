@@ -1,4 +1,15 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+// 安全门禁（见 docs/security-hardening.md）：
+// - 全 crate 默认禁止 `unsafe`（`unsafe_code`）；只有确实做 FFI 的模块在声明处
+//   单独 `#[allow(unsafe_code)]`，新加的模块自动受门禁约束；
+// - `unsafe fn` 内部必须显式写 `unsafe` 块（`unsafe_op_in_unsafe_fn`），且必须写
+//   「# Safety」契约（`clippy::missing_safety_doc`）；
+// - 每个 `unsafe` 块上面都要有 SAFETY 注释说明为什么这么写是安全的
+//   （`clippy::undocumented_unsafe_blocks`）。
+#![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
+#![warn(clippy::missing_safety_doc)]
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 mod agent;
 mod ai_guard;
@@ -15,7 +26,10 @@ mod document_reference;
 mod draft_page;
 mod element_fields;
 mod export;
+// FFI 模块：Win32 / AppKit 剪贴板调用，每个 unsafe 块都带 SAFETY 注释。
+#[allow(unsafe_code)]
 mod file_clipboard;
+mod file_limits;
 mod font_cmap;
 mod help;
 mod highlight;
@@ -28,6 +42,8 @@ mod lexicon;
 mod lexicon_ui;
 mod linux_desktop;
 mod lmstudio;
+// FFI 模块：AppKit 窗口调用，每个 unsafe 块都带 SAFETY 注释。
+#[allow(unsafe_code)]
 mod macos_window;
 mod manuscript;
 mod manuscript_io;
@@ -42,6 +58,8 @@ mod pdf_text;
 mod pdf_viewer;
 mod portable_runtime;
 mod preview;
+// FFI 模块：Win32 打印调用，每个 unsafe 块都带 SAFETY 注释。
+#[allow(unsafe_code)]
 mod print_pdf;
 mod prompt;
 mod proofread;

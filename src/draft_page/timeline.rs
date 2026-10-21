@@ -120,12 +120,10 @@ pub(crate) fn timeline_rows(
             fixed_baseline_adjusted,
         });
     }
-    let selected_row = rows
-        .iter()
-        .find(|row| row.target == selected)
-        .expect("工作区行始终存在");
-    let selected_old_version = selected_row.old_version;
-    let fixed_baseline_adjusted = selected_row.fixed_baseline_adjusted;
+    // 选中行理论上总在列表里；找不到就按「没有旧版本」处理，不让界面崩掉。
+    let selected_row = rows.iter().find(|row| row.target == selected);
+    let selected_old_version = selected_row.and_then(|row| row.old_version);
+    let fixed_baseline_adjusted = selected_row.is_some_and(|row| row.fixed_baseline_adjusted);
     let effective_fixed_baseline = (comparison == TimelineComparison::FixedBaseline)
         .then_some(selected_old_version)
         .flatten();

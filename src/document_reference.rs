@@ -197,15 +197,19 @@ fn plain_segments(markdown: &str) -> Vec<Range<usize>> {
             };
             while index < line.len() {
                 let rest = &line[index..];
-                let ch = rest.chars().next().unwrap();
+                let Some(ch) = rest.chars().next() else {
+                    break;
+                };
                 let plain = code.is_none() && math.is_none();
                 if ch == '\\' {
                     if plain {
                         cut(start, index);
                     }
                     index += 1;
-                    if index < line.len() {
-                        index += line[index..].chars().next().unwrap().len_utf8();
+                    if index < line.len()
+                        && let Some(next) = line[index..].chars().next()
+                    {
+                        index += next.len_utf8();
                     }
                     if plain {
                         start = index;
@@ -275,7 +279,7 @@ pub(crate) fn masked(markdown: &str) -> Cow<'_, str> {
     for citation in citations {
         bytes[citation.range].fill(b' ');
     }
-    Cow::Owned(String::from_utf8(bytes).expect("只把完整 UTF-8 范围换成空格"))
+    Cow::Owned(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// AI 与规则修订可以挪动引用、改周围的话，但不能改动、增删有文号的引用；

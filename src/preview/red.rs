@@ -1303,7 +1303,11 @@ pub(crate) fn paint_red_approval_overlay(
             let (text, pt) = if column == 1 && chars == 2 {
                 let mut it = row[column].chars();
                 (
-                    format!("{}\u{2003}{}", it.next().unwrap(), it.next().unwrap()),
+                    format!(
+                        "{}\u{2003}{}",
+                        it.next().unwrap_or(' '),
+                        it.next().unwrap_or(' ')
+                    ),
                     BODY_PT,
                 )
             } else if column == 1 && chars == 4 {

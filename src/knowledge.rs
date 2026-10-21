@@ -277,7 +277,13 @@ fn index_one(
 
 /// 拼出用于检索的复合文本：标题 / 小节 / 正文。小节与标题重复时不重复拼。
 fn index_text(title: &str, section: &str, text: &str) -> String {
-    let mut out = String::with_capacity(title.len() + section.len() + text.len() + 8);
+    let mut out = String::with_capacity(
+        title
+            .len()
+            .saturating_add(section.len())
+            .saturating_add(text.len())
+            .saturating_add(8),
+    );
     out.push_str(title);
     let section = section.trim();
     if !section.is_empty() && section != title {

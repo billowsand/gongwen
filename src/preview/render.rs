@@ -99,11 +99,13 @@ pub(crate) fn body_blocks(
                         if matches!(&next.block, MarkdownBlock::Paragraph(text)
                             if is_renderable_paragraph(text))) =>
             {
+                // 守卫已确认下一块是可排的正文段落；真对不上就跳过这一段，
+                // 不让预览崩在用户正文上。
                 let Some(next) = body.get(index) else {
-                    unreachable!("已在守卫里确认过后面还有块")
+                    continue;
                 };
                 let MarkdownBlock::Paragraph(text) = &next.block else {
-                    unreachable!("已在守卫里确认过是正文段落")
+                    continue;
                 };
                 index += 1;
                 let range = located.range.start..next.range.end;

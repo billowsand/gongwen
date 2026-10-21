@@ -20,7 +20,10 @@ use std::path::Path;
 /// 读一个文本文件并转成 UTF-8 字符串。读文件失败时返回原始 I/O 错误；
 /// 解码本身不会失败，个别无法映射的字节会变成 U+FFFD。
 pub fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
-    std::fs::read(path).map(|bytes| decode(&bytes).0)
+    let path = path.as_ref();
+    // 文本文件同样有上限：几 GB 的日志不该把界面拖死。
+    crate::file_limits::read_bytes(path, crate::file_limits::MAX_TEXT_BYTES, "文本文件")
+        .map(|bytes| decode(&bytes).0)
 }
 
 /// 把字节解码成 UTF-8，同时返回判定出的编码，供需要提示用户的地方使用。

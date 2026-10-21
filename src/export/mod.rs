@@ -53,8 +53,9 @@ pub(crate) use parse::{
     parse_markdown_with_lines, parse_markdown_with_lines_and_prefixes,
     parse_markdown_with_lines_with_numbering, parse_markdown_with_numbering,
     parse_numbered_table_marker, parse_ordered_item, parse_research_marker, parse_section_marker,
-    parse_table_cells, parse_unnumbered_marker, renumber_ordered_groups, research_report_titles,
-    research_unnumbered_headings, source_lines, table_span_at,
+    parse_table_cells, parse_unnumbered_marker, renumber_ordered_groups,
+    research_report_title_span, research_report_titles, research_unnumbered_headings, source_lines,
+    table_span_at,
 };
 pub(crate) use red::{
     RED_APPROVAL_GUTTER_TWIPS, RED_APPROVAL_NARROW_MM, RED_APPROVAL_RULE_MM,
@@ -556,10 +557,26 @@ pub fn safe_filename(value: &str) -> String {
         name = name.chars().take(80).collect();
     }
     if name.is_empty() {
-        "未命名公文".into()
-    } else {
-        name
+        return "未命名公文".into();
     }
+    // Windows 的保留设备名（CON、PRN、NUL、COM1…）不能当文件名：带扩展名也不行
+    // （CON.pdf 照样打不开），加个前缀避开。
+    if is_reserved_windows_name(&name) {
+        name = format!("_{name}");
+    }
+    name
+}
+
+/// Windows 保留设备名：主干（第一个点之前）与保留名相同即算。
+fn is_reserved_windows_name(name: &str) -> bool {
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = name.split('.').next().unwrap_or(name);
+    RESERVED
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
 }
 
 fn unique_directory_stem(dir: &Path, stem: &str) -> String {

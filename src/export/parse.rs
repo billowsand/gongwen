@@ -1192,6 +1192,12 @@ struct SourceOrderedLine<'a> {
     indent: usize,
     number: usize,
     content: &'a str,
+    /// `content` 在该行（去行尾 `\r` 后）里的起始字节偏移。
+    ///
+    /// 分组时就算好：内容是行尾的一段（只去掉了行首缩进与序号），但行尾可能
+    /// 还有空白，直接用长度差会把偏移算大，所以在这里按去掉行尾空白后的行
+    /// 来算，存下来给调用方用。
+    content_start: usize,
 }
 
 /// 按行切开的源码里，每组连续有序列表行，连同这一组是否紧贴在正文后面
@@ -1204,8 +1210,8 @@ fn source_ordered_groups<'a>(lines: &[&'a str]) -> Vec<(bool, Vec<SourceOrderedL
         let first = index;
         let mut group = Vec::new();
         while index < lines.len() {
-            let Some((indent, number, content)) =
-                parse_indented_ordered_item(strip(lines[index]).trim_end())
+            let line = strip(lines[index]);
+            let Some((indent, number, content)) = parse_indented_ordered_item(line.trim_end())
             else {
                 break;
             };
@@ -1214,6 +1220,7 @@ fn source_ordered_groups<'a>(lines: &[&'a str]) -> Vec<(bool, Vec<SourceOrderedL
                 indent,
                 number,
                 content,
+                content_start: line.trim_end().len() - content.len(),
             });
             index += 1;
         }
@@ -1284,7 +1291,9 @@ pub(crate) fn normalize_ordered_list_punctuation(markdown: &str) -> String {
             let raw = lines[item.line];
             let crlf = raw.ends_with('\r');
             let raw = raw.strip_suffix('\r').unwrap_or(raw);
-            let content_start = item.content.as_ptr() as usize - raw.as_ptr() as usize;
+            // 内容起点在分组时就记好了（见 `SourceOrderedLine::content_start`），
+            // 不用切片首地址相减。
+            let content_start = item.content_start;
             output[item.line] = format!(
                 "{}{text}{}",
                 &raw[..content_start],
@@ -1923,6 +1932,38 @@ pub(crate) fn research_report_titles(text: &str) -> Vec<&str> {
         }
     }
     titles
+}
+
+/// 研究报告正文区题名（`# ` 之后那段）在原文里的字节范围。
+///
+/// 与 [`research_report_titles`] 同一个口径：正文区段的 `#` 才是报告题名，
+/// 取的是去掉首尾空白后的题名本身。这里额外给出它在原文里的位置，供校验
+/// 与排版按字节定位——扫描时就把偏移记下来，不靠「子切片首地址减原文首地址」
+/// 去反推（那要求子切片必须借自同一个原文，一旦上游改成返回拷贝或裁剪过
+/// 的串，减出来就是错的偏移，或在 debug 下直接溢出 panic）。
+pub(crate) fn research_report_title_span(text: &str) -> Option<std::ops::Range<usize>> {
+    let mut section = ResearchSection::Body;
+    let mut offset = 0usize;
+    // `split_inclusive` 保留换行，便于累加真实字节偏移；行内容与 `lines()`
+    // 口径一致（去掉行尾的 `\n` 与 `\r`）。
+    for chunk in text.split_inclusive('\n') {
+        let start = offset;
+        offset += chunk.len();
+        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if let Some(next) = parse_research_marker(line) {
+            section = next;
+        } else if section == ResearchSection::Body
+            && let Some(title) = line.strip_prefix("# ")
+        {
+            let trimmed = title.trim();
+            // `# ` 占两个字节，其后是题名前的首行空白。
+            let lead = title.len() - title.trim_start().len();
+            let from = start + 2 + lead;
+            return Some(from..from + trimmed.len());
+        }
+    }
+    None
 }
 
 /// 正文区最大标题层级（# 号最多的那一级），紧缩风格（规格 §4.2）据此把该级标题与正文合并。

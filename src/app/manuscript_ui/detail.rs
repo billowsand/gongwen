@@ -50,7 +50,7 @@ impl GongwenApp {
             .unwrap_or_default();
         let mut pending_to_open: Option<String> = None;
 
-        let detail = self.manuscript_detail.as_ref().unwrap();
+        let detail = self.manuscript_detail.as_ref()?;
         ui.horizontal(|ui| {
             if single_page && ui.button("← 返回列表").clicked() {
                 clear_selection = true;
@@ -681,7 +681,9 @@ impl GongwenApp {
             dialog.error = Some(format!("{error:#}"));
             return;
         }
-        let dialog = self.manuscript_zip_password.take().unwrap();
+        let Some(dialog) = self.manuscript_zip_password.take() else {
+            return;
+        };
         self.run_zip_password_action(
             dialog.purpose,
             dialog.password,

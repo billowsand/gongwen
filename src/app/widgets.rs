@@ -973,11 +973,14 @@ pub(crate) fn back_to_select_button(
 
 /// 用系统默认程序打开文件或文件夹。
 pub(crate) fn open_in_os(path: &Path) -> Result<(), String> {
+    // 传给外部程序的是绝对路径：以 `-` 开头的相对路径会被当成选项，
+    // 绝对路径没有这个歧义。
+    let path = std::fs::canonicalize(path).map_err(|error| format!("无法解析路径：{error}"))?;
     #[cfg(target_os = "windows")]
     {
         // explorer 成功时也可能返回非 0 退出码，只看能否启动。
         std::process::Command::new("explorer")
-            .arg(path)
+            .arg(&path)
             .spawn()
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -985,7 +988,8 @@ pub(crate) fn open_in_os(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .arg(path)
+            .arg("--")
+            .arg(&path)
             .spawn()
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -993,7 +997,8 @@ pub(crate) fn open_in_os(path: &Path) -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         std::process::Command::new("xdg-open")
-            .arg(path)
+            .arg("--")
+            .arg(&path)
             .spawn()
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -1005,18 +1010,27 @@ pub(crate) fn reveal_in_os(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        // explorer 的 /select 参数不接受常规转义，必须整体作为原始命令行传入。
+        // explorer 的 /select 参数不吃常规转义，必须整体作为原始命令行传入；
+        // 路径里的引号会把命令行拆开，只能拒绝这种路径。
+        let path = std::fs::canonicalize(path).map_err(|error| format!("无法解析路径：{error}"))?;
+        let text = path.to_string_lossy();
+        if text.contains('"') {
+            return Err("路径里有引号，无法在资源管理器中定位".to_string());
+        }
+        // explorer 成功时也可能返回非 0 退出码，只看能否启动。
         std::process::Command::new("explorer")
-            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .raw_arg(format!("/select,\"{text}\""))
             .spawn()
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
     #[cfg(target_os = "macos")]
     {
+        let path = std::fs::canonicalize(path).map_err(|error| format!("无法解析路径：{error}"))?;
         std::process::Command::new("open")
             .arg("-R")
-            .arg(path)
+            .arg("--")
+            .arg(&path)
             .spawn()
             .map(|_| ())
             .map_err(|error| error.to_string())

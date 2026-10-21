@@ -1006,7 +1006,9 @@ impl ManuscriptStore {
         let result = (|| -> Result<()> {
             if let Some(preview) = &preview {
                 for (index, entry) in preview.entries.iter().enumerate() {
-                    let pin = entry.pin(choice).expect("上面已拦下");
+                    let Some(pin) = entry.pin(choice) else {
+                        bail!("送批材料里有拿不到版本的件");
+                    };
                     if index == 0 {
                         self.conn.execute(
                             "INSERT OR REPLACE INTO send_package_owner_pins (owner_id, revision_uuid)

@@ -1135,7 +1135,9 @@ impl GongwenApp {
         }
         if !shown.contains(&self.active_tab) && self.active_tab < self.tabs.len() {
             while used + desired[self.active_tab] > usable && shown.len() > 1 {
-                used -= desired[shown.pop().expect("shown 非空")];
+                if let Some(last) = shown.pop() {
+                    used -= desired[last];
+                }
             }
             shown.push(self.active_tab);
             shown.sort_unstable();

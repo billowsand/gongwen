@@ -78,7 +78,9 @@ pub(crate) fn body_text(markdown: &str) -> String {
     }
     // 保持掩码的 UTF-8 合法性：每个被保护字符的全部字节一起换为空格。
     let mut stack: Vec<(char, usize)> = Vec::new();
-    let text = String::from_utf8(bytes).expect("整块屏蔽保留 UTF-8");
+    // 掩码只把整块字符换成等长空格，UTF-8 仍然合法；万一有意外字节，用
+    // 替换字符兜底，不让校审崩在用户文本上。
+    let text = String::from_utf8_lossy(&bytes).into_owned();
     let mut bytes = text.as_bytes().to_vec();
     for (index, ch) in text.char_indices() {
         let closing = match ch {
@@ -91,11 +93,13 @@ pub(crate) fn body_text(markdown: &str) -> String {
         if let Some(closing) = closing {
             stack.push((closing, index));
         } else if stack.last().is_some_and(|(closing, _)| *closing == ch) {
-            let (_, start) = stack.pop().expect("有对应开引号");
+            let Some((_, start)) = stack.pop() else {
+                continue;
+            };
             blank(&mut bytes, start..index + ch.len_utf8());
         }
     }
-    String::from_utf8(bytes).expect("引文屏蔽保留 UTF-8")
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 #[cfg(test)]

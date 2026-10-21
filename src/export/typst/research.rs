@@ -38,9 +38,9 @@ type Prepared = (String, HashMap<String, Vec<u8>>, Vec<String>);
 
 /// 标题按原稿顺序、转换器的实际片段匹配；重复题名分别定位，不靠排版后的行号猜。
 fn attach_heading_lines(data: &mut Value, markdown: &str) {
-    let cover_offset = crate::export::research_report_titles(markdown)
-        .first()
-        .map(|title| title.as_ptr() as usize - markdown.as_ptr() as usize);
+    // 封面题名在原文里的字节位置：排版时那一行不当作正文标题排第二遍。
+    // 位置由解析器给出，不用切片首地址相减反推。
+    let cover_offset = crate::export::research_report_title_span(markdown).map(|span| span.start);
     let mut headings = Vec::new();
     let mut code = false;
     let mut math = false;

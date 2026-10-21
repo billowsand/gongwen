@@ -101,7 +101,8 @@ fn load_font_file(path: &Path) -> Result<Arc<Vec<Font>>> {
         return Ok(fonts.clone());
     }
     let bytes =
-        std::fs::read(path).with_context(|| format!("无法读取字体文件：{}", path.display()))?;
+        crate::file_limits::read_bytes(path, crate::file_limits::MAX_FONT_BYTES, "字体文件")
+            .with_context(|| format!("无法读取字体文件：{}", path.display()))?;
     let fonts: Vec<Font> = Font::iter(Bytes::new(bytes)).collect();
     if fonts.is_empty() {
         bail!("字体文件无法解析：{}", path.display());
