@@ -35,6 +35,9 @@ const MAX_ZOOM: f32 = 4.0;
 const ZOOM_STEP: f32 = 0.25;
 /// 本机有没有打印能力。探测要扫一遍 PATH，不能每帧都做，进程内只算一次。
 static PRINTING_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+/// PDF 标签里打开打印对话框。
+const PRINT_SHORTCUT: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::P);
 /// 单页光栅化宽度上限。再往上收益全被显存吃掉：2400px 宽的 A4 单页纹理已经
 /// 33MiB，8192px 是 380MiB。超出部分交给 GPU 放大采样更划算。
 const MAX_RENDER_WIDTH: u16 = 2400;
@@ -82,8 +85,8 @@ pub(crate) enum PdfMessage {
 pub(crate) enum PdfAction {
     OpenExternal(PathBuf),
     Reveal(PathBuf),
-    /// 打印这份 PDF。份号不同的多份成品必须由导出阶段生成，不能靠打印机份数。
-    Print(PathBuf),
+    /// 打开打印对话框。份号不同的多份成品必须由导出阶段生成，不能靠打印机份数。
+    Print(crate::print::PrintRequest),
 }
 
 /// 浏览方式。
@@ -549,19 +552,31 @@ impl PdfSession {
 
             ui.separator();
             // 打印能力每帧探测一次代价太高（Unix 要扫 PATH），进程内只算一次。
-            let can_print = *PRINTING_AVAILABLE.get_or_init(crate::print_pdf::printing_available);
+            let can_print = *PRINTING_AVAILABLE.get_or_init(crate::print::printing_available);
             let print_button = ui.add_enabled(
                 can_print,
                 theme::icon_text_button(theme::Icon::Print, "打印"),
             );
             let print_button = if can_print {
-                print_button.on_hover_text("打印这份 PDF")
+                print_button.on_hover_text(format!(
+                    "打印这份 PDF（{}）",
+                    ui.ctx().format_shortcut(&PRINT_SHORTCUT)
+                ))
             } else {
                 print_button
                     .on_disabled_hover_text("未检测到打印服务，请用「系统打开」后从阅读器打印")
             };
-            if print_button.clicked() {
-                actions.push(PdfAction::Print(self.path.clone()));
+            // 有模态盖着时快捷键归模态（打印对话框自己也是模态，不会重复打开）。
+            let shortcut = can_print
+                && crate::modal::takes_keys(ui)
+                && ui.input_mut(|input| input.consume_shortcut(&PRINT_SHORTCUT));
+            if print_button.clicked() || shortcut {
+                actions.push(PdfAction::Print(crate::print::PrintRequest {
+                    path: self.path.clone(),
+                    title: self.title.clone(),
+                    page_count: self.page_count(),
+                    current_page: self.current_page,
+                }));
             }
 
             if ui

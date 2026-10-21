@@ -3,7 +3,7 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::tabs`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
-use crate::app::{DraftAction, GongwenApp, WorkerResult, open_in_os, reveal_in_os};
+use crate::app::{DraftAction, GongwenApp, open_in_os, reveal_in_os};
 use crate::draft_page::{DocKey, DraftPage, DraftSession};
 use crate::models::ManuscriptStatus;
 use crate::pdf_viewer::{PdfAction as PdfViewerAction, PdfKey, PdfSession};
@@ -219,19 +219,7 @@ impl GongwenApp {
                     Ok(()) => self.status = format!("已定位 {}。", path.display()),
                     Err(error) => self.status = format!("定位 PDF 失败：{error}"),
                 },
-                // 打印要弹系统对话框并逐页光栅化，可能花几秒，放后台线程，
-                // 主界面照常可用；结果经 WorkerResult 回状态栏。
-                PdfViewerAction::Print(path) => {
-                    self.status = format!("正在准备打印 {}…", path.display());
-                    let tx = self.sender.clone();
-                    let ctx = ctx.clone();
-                    std::thread::spawn(move || {
-                        let result = crate::print_pdf::print_pdf(&path);
-                        let _ = tx.send(WorkerResult::PdfPrinted { path, result });
-                        // 主线程可能正闲着睡着，主动敲醒它。
-                        ctx.request_repaint();
-                    });
-                }
+                PdfViewerAction::Print(request) => self.open_print_dialog(request, ctx),
             }
         }
     }

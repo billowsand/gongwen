@@ -28,6 +28,7 @@ pub(crate) use draft::ExportSelection;
 pub(crate) use draft::GeneratedDraft;
 pub(crate) use draft::ManuscriptStatus;
 pub(crate) use draft::PhoneRecordMetadata;
+pub(crate) use draft::PrintConfig;
 pub(crate) use draft::ResearchMetadata;
 pub(crate) use draft::ResearchPalette;
 pub(crate) use draft::ResearchTemplate;

@@ -273,6 +273,14 @@ pub struct ExportSelection {
     pub overwrite: bool,
 }
 
+/// 打印对话框记住的选择。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrintConfig {
+    /// 上次用的打印机；清单里没有它（被删了、换了机器）就退回系统默认。
+    pub last_printer: String,
+}
+
 impl Default for ExportSelection {
     fn default() -> Self {
         Self {

@@ -85,10 +85,12 @@ zip = "8.6"
 [target.'cfg(windows)'.dependencies]
 # 应用内打印走原生 GDI：不依赖任何第三方 PDF 软件注册 print 谓词。
 # 该 crate 已随 winit 在依赖树中，这里只是声明直接引用。
+# Graphics_Printing 用于打印对话框列打印机、查状态、改 DEVMODE。
 # DataExchange / Memory 用于把导出成品以 CF_HDROP 放进剪贴板（复制文件）。
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Printing",
     "Win32_Storage_Xps",
     "Win32_System_DataExchange",
     "Win32_System_Memory",

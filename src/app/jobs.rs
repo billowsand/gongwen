@@ -85,10 +85,23 @@ pub(crate) enum WorkerResult {
         key: PdfKey,
         message: pdf_viewer::PdfMessage,
     },
-    /// PDF 打印任务（后台线程跑系统打印对话框与逐页光栅化）的结果。
+    /// 打印对话框的打印机清单（后台线程查好）。`dialog` 对不上的是已关掉的对话框的。
+    PrintersListed {
+        dialog: u64,
+        result: Result<Vec<crate::print::PrinterInfo>, String>,
+    },
+    /// 打印对话框里某台打印机的状态。
+    PrinterStateChecked {
+        dialog: u64,
+        name: String,
+        state: crate::print::PrinterState,
+    },
+    /// PDF 打印任务（后台线程逐页光栅化或交给 `lp`）的结果。
     PdfPrinted {
         path: PathBuf,
-        result: Result<crate::print_pdf::PrintOutcome, String>,
+        /// 送到哪台打印机；`None` 是系统默认或系统对话框里选的。
+        printer: Option<String>,
+        result: Result<crate::print::PrintOutcome, String>,
     },
 }
 
@@ -517,12 +530,27 @@ impl GongwenApp {
                         self.pdfs[index].apply_message(ctx, message);
                     }
                 }
-                WorkerResult::PdfPrinted { path, result } => {
+                WorkerResult::PrintersListed { dialog, result } => {
+                    self.apply_printers_listed(dialog, result);
+                }
+                WorkerResult::PrinterStateChecked {
+                    dialog,
+                    name,
+                    state,
+                } => self.apply_printer_state(dialog, &name, state),
+                WorkerResult::PdfPrinted {
+                    path,
+                    printer,
+                    result,
+                } => {
                     self.status = match result {
-                        Ok(crate::print_pdf::PrintOutcome::Printed) => {
-                            format!("已送打印机：{}。", path.display())
-                        }
-                        Ok(crate::print_pdf::PrintOutcome::Cancelled) => "已取消打印。".into(),
+                        Ok(crate::print::PrintOutcome::Printed) => match printer {
+                            Some(printer) => {
+                                format!("已送打印机「{printer}」：{}。", path.display())
+                            }
+                            None => format!("已送打印机：{}。", path.display()),
+                        },
+                        Ok(crate::print::PrintOutcome::Cancelled) => "已取消打印。".into(),
                         Err(error) => format!("打印失败：{error}"),
                     };
                 }

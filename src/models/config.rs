@@ -6,9 +6,10 @@
 use crate::models::{
     AiPrompt, DiagramTheme, EditorFontScheme, ExportSelection, FontConfig, ImeConfig,
     LmStudioConfig, ModelRef, ModelRefError, NumberingConfig, PROVIDER_PRESETS, PaperMode,
-    ProofreadConfig, ProviderConfig, ProxyConfig, RagConfig, ReasoningEffort, ReasoningFormat,
-    RerankMode, ReviseModelConfig, RibbonTab, SecurityRules, TemplateKind, TemplateProfile,
-    ThemeName, VocabularyEntry, VocabularySetupStatus, builtin_ai_prompts, preset_for_url,
+    PrintConfig, ProofreadConfig, ProviderConfig, ProxyConfig, RagConfig, ReasoningEffort,
+    ReasoningFormat, RerankMode, ReviseModelConfig, RibbonTab, SecurityRules, TemplateKind,
+    TemplateProfile, ThemeName, VocabularyEntry, VocabularySetupStatus, builtin_ai_prompts,
+    preset_for_url,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,8 @@ pub struct AppConfig {
     pub profiles: Vec<TemplateProfile>,
     pub last_template: TemplateKind,
     pub export: ExportSelection,
+    /// 打印对话框记住的选择（上次用的打印机）。
+    pub print: PrintConfig,
     /// AI 起草或优化完成后是否立即按勾选格式导出一次。
     pub auto_export: bool,
     /// 定时与切标签时把改动静默写回稿件库。关掉就只认主快捷键+S。
@@ -122,6 +125,7 @@ impl Default for AppConfig {
                 .collect(),
             last_template: TemplateKind::OfficialLetter,
             export: ExportSelection::default(),
+            print: PrintConfig::default(),
             auto_export: false,
             auto_save: true,
             auto_save_interval_secs: DEFAULT_AUTO_SAVE_INTERVAL_SECS,

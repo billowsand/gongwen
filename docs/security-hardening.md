@@ -10,7 +10,7 @@
 
 | 类别 | 审计前 | 审计后 |
 |---|---|---|
-| `unsafe` 块 / `unsafe fn` | 16 处，集中在 4 个文件 | 不再有 `unsafe fn`；`unsafe` 块全部收敛在 4 个 FFI 模块（`print_pdf`、`file_clipboard`、`macos_window`、`theme/icons`），每块只包一个调用并带 SAFETY 注释 |
+| `unsafe` 块 / `unsafe fn` | 16 处，集中在 4 个文件 | 不再有 `unsafe fn`；`unsafe` 块全部收敛在 4 个 FFI 模块（`print::win`（原 `print_pdf`）、`file_clipboard`、`macos_window`、`theme/icons`），每块只包一个调用并带 SAFETY 注释 |
 | 用切片首地址相减反推偏移 | 5 处（`as_ptr() as usize` 地址相减） | 0 处 |
 | 纯 Rust 模块的 `unsafe` 门禁 | 无 | 全 crate `#![deny(unsafe_code)]`，只有 4 个 FFI 模块在声明处 `#[allow(unsafe_code)]` |
 | 用户数据可触发的 panic | 40 余处 | 逐条改成错误返回 / 降级 / 安全兜底 |
@@ -45,7 +45,7 @@
   `&OpenedClipboard` 参数在类型上保证「剪贴板已打开」；`DROPFILES` 头改为逐字段
   小端写出，不再把 `repr(C)` 结构按字节重新解释（少一个 `unsafe` 块）；宽字符与
   `DROPEFFECT` 改用显式小端。macOS 一侧的整段 `unsafe` 拆成逐调用的小块。
-- `src/print_pdf.rs`：原来一整段 `unsafe { ... }` 包住几十行 Win32 调用，拆成
+- `src/print_pdf.rs`（现 `src/print/win/`）：原来一整段 `unsafe { ... }` 包住几十行 Win32 调用，拆成
   若干小块，每块一句 SAFETY；`DC` 与打印对话框交回的全局内存改用 RAII 守卫
   （`DcGuard`、`GlobalMemory`），中途早退也归还；`size_of as u32`、`count as u16`
   之类的截断改成 `try_from`。
@@ -54,8 +54,8 @@
 - `src/theme/icons.rs`：SAFETY 注释保留并说明「主线程 + 图像由 `Retained` 持有」。
 - 全局门禁：`src/main.rs` 加 `#![deny(unsafe_code)]`、`#![deny(unsafe_op_in_unsafe_fn)]`、
   `#![warn(clippy::missing_safety_doc)]`、`#![warn(clippy::undocumented_unsafe_blocks)]`；
-  只有 `file_clipboard`、`macos_window`、`print_pdf`（`src/main.rs`）与 `theme::icons`
-  （`src/theme.rs`）在 `mod` 声明处 `#[allow(unsafe_code)]`。门禁是「默认禁止、
+  只有 `file_clipboard`、`macos_window`（`src/main.rs`）、`print::win`（`src/print/mod.rs`）
+  与 `theme::icons`（`src/theme.rs`）在 `mod` 声明处 `#[allow(unsafe_code)]`。门禁是「默认禁止、
   逐个放行」，新加的模块不用记得加任何东西就受约束。
 
 ### C 类：崩溃面
@@ -109,7 +109,7 @@
 ### E 类：数值
 
 - `src/export/typst/frame.rs`：单位计数不再 `count() as u32` 截断。
-- `src/print_pdf.rs`：`fit_rect` 的浮点转整数显式夹到 `[1, i32::MAX]`、NaN 当 1。
+- `src/print_pdf.rs`（现 `src/print/raster.rs`）：`fit_rect` 的浮点转整数显式夹到 `[1, i32::MAX]`、NaN 当 1。
   （Rust 的 `as` 浮点转整数本来就是饱和转换，不是未定义行为；这里是为了极端
   比例下也至少画出一个像素，并让意图写在代码里。）
 
@@ -119,7 +119,8 @@
   （`canonicalize`），以 `-` 开头的相对路径不会被当成选项；macOS 与 Linux 的
   调用加 `--`；Windows 的 `explorer /select,` 拒绝含引号的路径（那会拆开命令行）。
 - `src/theme/fonts.rs`：`fc-match` 的模式串来自用户填的字体名，去掉控制字符并限长。
-- `src/print_pdf.rs`：`lp` 本来就有 `--`，保持。
+- `src/print/cups.rs`：`lp` 本来就有 `--`，保持；打印机名、任务名、页码都作为独立参数
+  交给 `lpstat` / `lpoptions` / `lp`，页码先解析成区间再格式化，不原样透传。
 
 ### G 类：文件与路径
 

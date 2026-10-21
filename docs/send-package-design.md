@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS send_package_export_items (
    成功后改名到目标路径（沿用 `export_selected_pdfs` 的做法）。
    默认文件名「<主件标题>（送批材料）.pdf」。
 6. **记录与打印**：成功后写一条导出记录；完成提示里提供「打印」「系统打开」，
-   打印复用 `print_pdf`。
+   打印复用 `print`（原 `print_pdf`）。
 
 ### 6. 归档钉版
 

@@ -58,9 +58,8 @@ mod pdf_text;
 mod pdf_viewer;
 mod portable_runtime;
 mod preview;
-// FFI 模块：Win32 打印调用，每个 unsafe 块都带 SAFETY 注释。
-#[allow(unsafe_code)]
-mod print_pdf;
+// 打印：Win32 那一半是 FFI，在 `print` 内部的 `win` 模块声明处单独放行 unsafe。
+mod print;
 mod prompt;
 mod proofread;
 mod proofread_rules;

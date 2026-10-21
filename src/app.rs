@@ -37,6 +37,7 @@ mod data_safety;
 mod jobs;
 mod lexicon_jobs;
 mod manuscript_ui;
+mod printing;
 mod proofread_ui;
 mod provider_settings;
 mod quick_find;
@@ -152,6 +153,10 @@ pub struct GongwenApp {
     pub(crate) model_picker_show_all: std::collections::HashSet<String>,
     /// 检查器埋点，只留在本机。单独存文件，不进 config.json。
     metrics: crate::metrics::Metrics,
+    /// 打印对话框；None 表示未打开。
+    print_dialog: Option<crate::print::PrintDialog>,
+    /// 下一个打印对话框的编号，只增不减；后台查打印机的结果凭它认领。
+    next_print_dialog: u64,
     /// 送批材料面板；None 表示未打开。
     send_package: Option<SendPackagePanel>,
     /// 正在后台进行的送批材料合并导出；同一时间只跑一个。
@@ -504,6 +509,8 @@ impl GongwenApp {
             config,
             ime,
             metrics: crate::metrics::load(),
+            print_dialog: None,
+            next_print_dialog: 1,
             send_package: None,
             send_package_export: None,
             macos_titlebar_metrics,
@@ -845,6 +852,7 @@ impl eframe::App for GongwenApp {
         // 任何标签页都渲染。
         self.ai_proposal_window(&ctx);
         self.send_package_window(&ctx);
+        self.print_dialog_window(&ctx);
         self.version_commit_window(&ctx);
         self.version_switch_window(&ctx);
         self.revert_confirm_window(&ctx);
