@@ -95,10 +95,12 @@ impl DraftPage<'_> {
             typst: false,
             overwrite: self.config.export.overwrite,
         };
+        // `start_export_with` 会拦「正在忙 / 没有内容」；只有这一下真把导出开起来了才记
+        // 标记。只看调用后的 `busy` 不够：别的任务本来就在跑时它也是真，标记会挂到
+        // 那个任务后面的某次导出上。
+        let was_busy = self.doc.busy;
         self.start_export_with(selection);
-        // `start_export_with` 会拦「正在导出 / 没有内容」；真开跑了才记标记，
-        // 否则标记会留到下一次无关的导出上。
-        if self.doc.busy {
+        if !was_busy && self.doc.busy {
             self.doc.request_print_after_export();
             *self.status = "正在导出 PDF，排好后打开打印对话框…".into();
         }

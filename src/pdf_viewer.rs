@@ -1918,9 +1918,10 @@ mod tests {
         assert!(session.take_print_when_ready().is_none());
     }
 
-    /// 预览页在纸上按真实尺寸摆：A4 页 + A4 纸填满，横页落竖纸时转向。
+    /// 预览取页：纹理还没渲好时也要带回页面点尺寸，对话框才能按真实尺寸画占位。
+    /// （摆放与转向的几何在 `print::dialog::preview` 的单测里。）
     #[test]
-    fn preview_pages_are_placed_at_their_real_size() {
+    fn preview_page_reports_its_size_before_the_texture_arrives() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut session = PdfSession::new(1, PathBuf::from("a.pdf"), None, tx);
         session.page_sizes = vec![(595.0, 842.0), (842.0, 595.0)];

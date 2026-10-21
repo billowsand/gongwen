@@ -39,7 +39,9 @@ impl DraftPage<'_> {
         let print_button = if can_print {
             print_button.on_hover_text("先按覆盖策略导出一份 PDF，再打开打印对话框")
         } else {
-            print_button.on_disabled_hover_text("未检测到打印服务，请用「系统打开」后从阅读器打印")
+            print_button.on_disabled_hover_text(
+                "未检测到打印服务（CUPS），请导出 PDF 后用系统程序打开再打印",
+            )
         };
         if print_button.clicked() {
             self.start_export_for_print();

@@ -214,7 +214,16 @@ impl GongwenApp {
     }
 
     /// 导出后直接打印：打开 PDF（带上打印提示），等它打开完自动弹一次打印对话框。
+    ///
+    /// 同一路径已经开着时先关掉旧标签再重开：「覆盖同名」策略下刚导出的文件就写在
+    /// 原处，旧标签里是上一版的页面与页数，切过去会预览旧内容、按旧页数校验页码。
     pub(crate) fn open_pdf_for_printing(&mut self, path: PathBuf, hints: crate::print::PrintHints) {
+        if let Some(tab) = self.tabs.iter().position(|item| {
+            matches!(item, TabRef::Pdf(key)
+                if self.pdfs.iter().any(|pdf| pdf.key == *key && pdf.path() == path))
+        }) {
+            self.close_tab(tab);
+        }
         self.open_pdf_with_hints(path.clone(), None, hints);
         if let Some(pdf) = self.pdfs.iter_mut().find(|pdf| pdf.path() == path) {
             pdf.request_print_when_ready();
