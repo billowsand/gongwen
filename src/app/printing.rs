@@ -148,18 +148,32 @@ impl GongwenApp {
 
     pub(crate) fn print_dialog_window(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.print_dialog.as_mut() else {
+            // 对话框关了：不再钉住预览页，PDF 标签的纹理淘汰照常回收。
+            for pdf in &mut self.pdfs {
+                pdf.stop_preview();
+            }
             return;
         };
         let dialog_id = dialog.id();
-        // 预览从 PDF 标签已经渲染好的纹理来，不为预览另起渲染线程。
+        // 预览从 PDF 标签已经渲染好的纹理来，不为预览另起渲染线程。PDF 标签不在
+        // 前台时它的 `ui` 不跑，这里把对话框想看的那一页塞进它已有的渲染队列。
         let pdf_key = dialog.pdf_key();
+        if let Some(pdf) = pdf_key.and_then(|key| self.pdfs.iter_mut().find(|pdf| pdf.key == key)) {
+            match dialog.wanted_preview() {
+                Some(index) => pdf.want_preview(index),
+                None => pdf.stop_preview(),
+            }
+            pdf.pump_preview(ctx);
+        }
         let outcome = {
-            let pdfs = &self.pdfs;
-            let textures = |index: usize| -> Option<(egui::TextureId, egui::Vec2)> {
+            let pdfs = &mut self.pdfs;
+            let mut textures = |index: usize| -> Option<crate::print::PreviewPage> {
                 let key = pdf_key?;
-                pdfs.iter().find(|pdf| pdf.key == key)?.page_texture(index)
+                pdfs.iter_mut()
+                    .find(|pdf| pdf.key == key)?
+                    .preview_page(index)
             };
-            dialog.ui(ctx, &textures)
+            dialog.ui(ctx, &mut textures)
         };
         // 对话框只提出「要查这台」「要弹首选项」，线程由外壳起：UI 线程不碰打印接口。
         let caps_request = dialog.take_caps_request().map(|name| (dialog_id, name));

@@ -15,6 +15,7 @@
 
 use crate::app::WorkerResult;
 use crate::pdf_text::{self, PageText};
+use crate::print::PreviewPage;
 use crate::theme;
 use eframe::egui;
 use hayro::{
@@ -266,6 +267,9 @@ pub(crate) struct PdfSession {
     frame: u64,
     selection: TextSelection,
     error: Option<String>,
+    /// 打印对话框的预览想看的页（从 0 起）。下一帧算「要哪些页」时把它放在最前面；
+    /// 纹理到了就清掉。`ui` 不跑时由 [`Self::pump_preview`] 直接交给队列。
+    preview_wanted: Option<usize>,
     /// 打开这份 PDF 的调用方知道的打印提示（稿件按双面排、送批材料合并件）。
     print_hints: crate::print::PrintHints,
 }
@@ -314,6 +318,7 @@ impl PdfSession {
             frame: 0,
             selection: TextSelection::default(),
             error: None,
+            preview_wanted: None,
             print_hints: crate::print::PrintHints::default(),
         }
     }
@@ -333,6 +338,73 @@ impl PdfSession {
     pub(crate) fn page_texture(&self, index: usize) -> Option<(egui::TextureId, egui::Vec2)> {
         let texture = self.slots.get(index)?.texture.as_ref()?;
         Some((texture.id(), texture.size_vec2()))
+    }
+
+    /// 某一页的点尺寸（宽, 高）。打印预览按真实尺寸摆页面用。
+    pub(crate) fn page_size_pt(&self, index: usize) -> Option<(f32, f32)> {
+        self.page_sizes.get(index).copied()
+    }
+
+    /// 打印预览取一页：纹理（还没渲好是 `None`）与页面点尺寸。
+    /// 被预览取用的页记一次使用，纹理超预算时不会把它挑走。
+    pub(crate) fn preview_page(&mut self, index: usize) -> Option<PreviewPage> {
+        let page_pt = self.page_size_pt(index);
+        let texture = self.page_texture(index).map(|(texture, _)| texture);
+        if texture.is_some() {
+            let frame = self.frame;
+            if let Some(slot) = self.slots.get_mut(index) {
+                slot.last_used = frame;
+            }
+        }
+        Some(PreviewPage { texture, page_pt })
+    }
+
+    /// 打印对话框的预览现在想看第 `index` 页（从 0 起）。外壳每帧调一次。
+    pub(crate) fn want_preview(&mut self, index: usize) {
+        self.preview_wanted = Some(index);
+    }
+
+    /// 预览页不再需要（对话框关了或页码无效）：不再钉住它，纹理淘汰照常回收。
+    pub(crate) fn stop_preview(&mut self) {
+        self.preview_wanted = None;
+    }
+
+    /// PDF 标签不在前台时 [`Self::ui`] 不会跑，`request` 也就不会跑。这里只做一件事：
+    /// 把预览想看的那一页交给已有的渲染队列，必要时启动渲染线程；不做别的渲染逻辑。
+    pub(crate) fn pump_preview(&mut self, ctx: &egui::Context) {
+        let Some(index) = self.preview_wanted else {
+            return;
+        };
+        // 还没开始渲染（宽度未知）：等标签真正画过一帧、宽度定下来再说。
+        if self.render_width == 0 {
+            return;
+        }
+        self.ensure_worker(ctx);
+        if !self.needs_preview(index) {
+            // 已经是当前宽度的纹理，不用再交给队列。
+            self.preview_wanted = None;
+            return;
+        }
+        let job = (index, self.render_width);
+        if self.sent.contains(&job) {
+            return;
+        }
+        // 放在队首：预览页不参与滚动排序，别排在整屏可见页后面。
+        let mut wanted = Vec::with_capacity(self.sent.len() + 1);
+        wanted.push(job);
+        wanted.extend_from_slice(&self.sent);
+        self.request(wanted);
+    }
+
+    /// 预览页在当前渲染宽度上还没有纹理（或只有旧宽度的）。
+    fn needs_preview(&self, index: usize) -> bool {
+        let Some(slot) = self.slots.get(index) else {
+            return false;
+        };
+        match &slot.texture {
+            None => true,
+            Some(_) => slot.width.abs_diff(self.render_width) >= RERENDER_WIDTH_DELTA,
+        }
     }
 
     pub(crate) fn title(&self) -> &str {
@@ -384,6 +456,10 @@ impl PdfSession {
                     image,
                     egui::TextureOptions::LINEAR,
                 ));
+                // 预览页到了：不用再每帧排在队首。
+                if self.preview_wanted == Some(index) {
+                    self.preview_wanted = None;
+                }
             }
             PdfMessage::Text { index, text } => {
                 if let Some(slot) = self.slots.get_mut(index)
@@ -676,10 +752,18 @@ impl PdfSession {
 
         // 离视口越近越先渲；同样近的按页序。
         wanted.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-        let wanted = wanted
+        let mut wanted: Vec<(usize, u16)> = wanted
             .into_iter()
             .map(|(_, index, width)| (index, width))
             .collect();
+        // 打印对话框的预览页不在视口里也要渲：放在最前面，别排在整屏之后。
+        if let Some(index) = self.preview_wanted
+            && self.render_width > 0
+            && self.needs_preview(index)
+            && !wanted.iter().any(|&(queued, _)| queued == index)
+        {
+            wanted.insert(0, (index, self.render_width));
+        }
         self.evict();
         self.request(wanted);
     }
@@ -1071,7 +1155,12 @@ impl PdfSession {
             .slots
             .iter()
             .enumerate()
-            .filter(|(_, slot)| slot.texture.is_some() && slot.last_used != self.frame)
+            .filter(|&(index, slot)| {
+                // 预览页这一帧可能还没被对话框取用（它后画），不按 last_used 淘汰。
+                Some(index) != self.preview_wanted
+                    && slot.texture.is_some()
+                    && slot.last_used != self.frame
+            })
             .map(|(index, _)| index)
             .collect();
         order.sort_by_key(|&index| self.slots[index].last_used);
@@ -1739,6 +1828,51 @@ mod tests {
             _ => false,
         }));
         assert!(error.contains("无法读取"));
+    }
+
+    /// 打印对话框开着、PDF 标签不在前台时：预览页也要进队列，而且排在可见页前面；
+    /// 纹理到了以后不再每帧请求。
+    #[test]
+    fn pump_preview_queues_the_wanted_page_first() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut session = PdfSession::new(1, PathBuf::from("a.pdf"), None, tx);
+        session.page_sizes = vec![(595.0, 842.0); 4];
+        session.slots = (0..4).map(|_| PageSlot::default()).collect();
+        session.render_width = 800;
+        let queue = Arc::new(RenderQueue::default());
+        session.renderer = Some(RenderHandle(Arc::clone(&queue)));
+        session.sent = vec![(1, 800)];
+        session.want_preview(3);
+        session.pump_preview(&egui::Context::default());
+        {
+            let state = queue.lock();
+            assert_eq!(state.jobs.front(), Some(&(3, 800)));
+            assert_eq!(state.jobs.len(), 2);
+        }
+        // 这一页渲好了：不用再挂在队首。
+        session.apply_message(
+            &egui::Context::default(),
+            PdfMessage::Page {
+                generation: 0,
+                index: 3,
+                width: 800,
+                image: egui::ColorImage::from_rgba_premultiplied([2, 2], &[255; 16]),
+            },
+        );
+        assert_eq!(session.preview_wanted, None);
+    }
+
+    /// 预览页在纸上按真实尺寸摆：A4 页 + A4 纸填满，横页落竖纸时转向。
+    #[test]
+    fn preview_pages_are_placed_at_their_real_size() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut session = PdfSession::new(1, PathBuf::from("a.pdf"), None, tx);
+        session.page_sizes = vec![(595.0, 842.0), (842.0, 595.0)];
+        session.slots = (0..2).map(|_| PageSlot::default()).collect();
+        assert_eq!(session.page_size_pt(0), Some((595.0, 842.0)));
+        let page = session.preview_page(0).expect("有这一页");
+        assert!(page.texture.is_none());
+        assert_eq!(page.page_pt, Some((595.0, 842.0)));
     }
 
     /// 手工回归入口：给出真实导出件即可验证复杂中文公文，不把本机产物写死进测试。

@@ -4,6 +4,10 @@
 //! 经 [`PrintDialog::printers_loaded`] / [`PrintDialog::printer_state`] 送进来，
 //! 点「打印」交回一个 [`PrintJob`]，同样由外壳放后台线程执行。
 
+mod preview;
+
+pub(crate) use preview::PreviewPage;
+
 use super::pages::{self, PageSpan};
 use super::{
     ColorMode, Duplex, HAS_DRIVER_PREFERENCES, MAX_COPIES, PdfFacts, PrintJob, PrintOutcome,
@@ -13,6 +17,7 @@ use crate::modal::{self, Dismiss};
 use crate::models::PrinterPrefs;
 use crate::theme;
 use eframe::egui;
+use preview::{paint_page, preview_rect, preview_turns};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -329,12 +334,13 @@ impl PrintDialog {
         }
     }
 
-    /// 画对话框。`textures` 按页号（从 0 起）取 PDF 标签里已经渲染好的纹理，
-    /// 没有就返回 `None`；预览不为这一页另起渲染线程。
+    /// 画对话框。`textures` 按页号（从 0 起）取 PDF 标签里已经渲染好的纹理与页面
+    /// 点尺寸；没有纹理时返回 `PreviewPage { texture: None, .. }`，预览不为这一页
+    /// 另起渲染线程——外壳按 [`Self::wanted_preview`] 把它塞进 PDF 标签已有的队列。
     pub(crate) fn ui(
         &mut self,
         ctx: &egui::Context,
-        textures: &dyn Fn(usize) -> Option<(egui::TextureId, egui::Vec2)>,
+        textures: &mut dyn FnMut(usize) -> Option<PreviewPage>,
     ) -> Option<DialogOutcome> {
         // 打印进行中不认 Esc 和遮罩，免得一不小心把正在送纸的对话框关掉。
         let dismiss = match self.stage {
@@ -358,7 +364,7 @@ impl PrintDialog {
     fn contents(
         &mut self,
         ui: &mut egui::Ui,
-        textures: &dyn Fn(usize) -> Option<(egui::TextureId, egui::Vec2)>,
+        textures: &mut dyn FnMut(usize) -> Option<PreviewPage>,
     ) -> Option<DialogOutcome> {
         ui.add(
             egui::Label::new(egui::RichText::new(&self.request.title).color(theme::text_soft()))
@@ -417,7 +423,7 @@ impl PrintDialog {
     fn preview_column(
         &mut self,
         ui: &mut egui::Ui,
-        textures: &dyn Fn(usize) -> Option<(egui::TextureId, egui::Vec2)>,
+        textures: &mut dyn FnMut(usize) -> Option<PreviewPage>,
     ) {
         let numbers = print_page_numbers(&self.pages(), self.request.page_count);
         let total = numbers.len();
@@ -454,43 +460,50 @@ impl PrintDialog {
             egui::Stroke::new(1.0, theme::border_strong()),
             egui::StrokeKind::Inside,
         );
-        // 「适合纸张」按可打印区缩一点，「实际大小」填满纸面。
-        let content = match self.scaling {
-            Scaling::Actual => paper,
-            Scaling::Fit => paper.shrink(paper.width() * 0.05),
-        };
-        if let Some(page) = numbers.get(self.preview_index) {
-            // 页号从 1 起，纹理槽从 0 起。
-            match textures(page.saturating_sub(1) as usize) {
-                Some((texture, size)) => {
-                    let image = fit_inside(content.size(), size.y / size.x.max(1.0));
-                    let rect = egui::Rect::from_center_size(content.center(), image);
-                    painter.image(
+        if let Some(index) = self.preview_page_index() {
+            let page = textures(index);
+            // 页面点尺寸在 PDF 打开完就有；实在拿不到（标签已关）按 A4 画。
+            let page_pt = page
+                .as_ref()
+                .and_then(|page| page.page_pt)
+                .unwrap_or((595.28, 841.89));
+            // 按真实尺寸算页面在纸上的位置，再按纸张轮廓的像素宽高放大。
+            let rect = preview_rect(page_pt, (paper_w, paper_h), self.scaling);
+            let page_rect = egui::Rect::from_min_size(
+                paper.min + egui::vec2(rect.min.x * paper.width(), rect.min.y * paper.width()),
+                egui::vec2(rect.width() * paper.width(), rect.height() * paper.width()),
+            );
+            match page.and_then(|page| page.texture) {
+                Some(texture) => {
+                    // 横页落竖纸：纹理逆时针转 90°，与 `raster::rotate_ccw` 同向。
+                    paint_page(
+                        &painter,
                         texture,
-                        rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        page_rect,
+                        preview_turns(page_pt, (paper_w, paper_h)),
                         egui::Color32::WHITE,
                     );
                 }
                 None => {
-                    // 占位底色取纸张与文字之间的灰：浅色主题浅灰、深色主题深灰。
+                    // 已经把这一页交给 PDF 标签的渲染队列、还没渲好：占位画在它该在的位置。
+                    // 底色取纸张与文字之间的灰：浅色主题浅灰、深色主题深灰。
                     let placeholder = if theme::current().dark {
                         egui::Color32::from_gray(58)
                     } else {
                         egui::Color32::from_gray(236)
                     };
-                    painter.rect_filled(content, 1.0, placeholder);
+                    painter.rect_filled(page_rect, 1.0, placeholder);
                     // 用不占位的子 Ui 画在纸面上：`scope_builder` 会把父 Ui 的光标推到
                     // 纸面中间，下面的翻页按钮就叠到纸上去了。
                     let mut text_ui = ui.new_child(
                         egui::UiBuilder::new()
-                            .max_rect(content.shrink(8.0))
+                            .max_rect(page_rect.shrink(6.0))
                             .layout(egui::Layout::top_down(egui::Align::Center)),
                     );
-                    text_ui.add_space(content.height() * 0.28);
+                    text_ui.add_space((page_rect.height() * 0.28).max(0.0));
                     text_ui.add(
                         egui::Label::new(
-                            egui::RichText::new("这一页还没渲染，滚动到该页后可预览")
+                            egui::RichText::new("正在渲染…")
                                 .small()
                                 .color(theme::text_muted()),
                         )
@@ -548,6 +561,24 @@ impl PrintDialog {
                     .color(theme::text_muted()),
             );
         }
+    }
+
+    /// 预览现在想看 PDF 的第几页（从 0 起）：按「要打的页」算，页码无效时 `None`。
+    fn preview_page_index(&self) -> Option<usize> {
+        let numbers = print_page_numbers(&self.pages(), self.request.page_count);
+        let index = if numbers.is_empty() {
+            0
+        } else {
+            self.preview_index.min(numbers.len() - 1)
+        };
+        numbers
+            .get(index)
+            .map(|page| page.saturating_sub(1) as usize)
+    }
+
+    /// 外壳据此让 PDF 标签按需渲染预览页（不另起线程）。
+    pub(crate) fn wanted_preview(&self) -> Option<usize> {
+        self.preview_page_index()
     }
 
     fn double_sided(&self) -> bool {
@@ -1441,13 +1472,6 @@ fn paper_size_mm(id: &str, label: &str) -> Option<(f32, f32)> {
     table
         .iter()
         .find_map(|(needle, size)| text.contains(needle).then_some(*size))
-}
-
-/// 按纵横比（高 / 宽）把页面放进容器并等比缩小。
-fn fit_inside(size: egui::Vec2, aspect: f32) -> egui::Vec2 {
-    let aspect = aspect.max(0.01);
-    let width = size.x.min(size.y / aspect);
-    egui::vec2(width, width * aspect)
 }
 
 fn duplex_label(duplex: Option<Duplex>) -> String {

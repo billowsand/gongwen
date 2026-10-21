@@ -23,7 +23,7 @@ mod raster;
 #[allow(unsafe_code)]
 mod win;
 
-pub(crate) use dialog::{DialogOutcome, PrintDialog};
+pub(crate) use dialog::{DialogOutcome, PreviewPage, PrintDialog};
 pub(crate) use inspect::{PdfFacts, inspect_pdf};
 pub(crate) use pages::PageSpan;
 

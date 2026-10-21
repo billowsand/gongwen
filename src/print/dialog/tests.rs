@@ -594,8 +594,23 @@ fn a_failed_preferences_window_shows_the_reason() {
 }
 
 fn snapshot(dialog: &mut PrintDialog, name: &str) {
+    snapshot_with(dialog, name, crate::models::ThemeName::Mdex, None);
+}
+
+/// 带一页假页面纹理的样张：`page_pt` 是这一页的点尺寸，用来核对真实尺寸摆放
+/// 与横页转向。纹理是「浅灰纸 + 深灰边」，不依赖任何真 PDF。
+fn snapshot_with_page(dialog: &mut PrintDialog, name: &str, page_pt: (f32, f32)) {
+    snapshot_with(dialog, name, crate::models::ThemeName::Mdex, Some(page_pt));
+}
+
+fn snapshot_with(
+    dialog: &mut PrintDialog,
+    name: &str,
+    theme_name: crate::models::ThemeName,
+    page: Option<(f32, f32)>,
+) {
     use crate::theme;
-    theme::set_current(crate::models::ThemeName::Mdex);
+    theme::set_current(theme_name);
     let ctx = egui::Context::default();
     theme::configure_icons(&ctx);
     theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
@@ -603,6 +618,30 @@ fn snapshot(dialog: &mut PrintDialog, name: &str) {
     // 对话框 500 宽，加上边距与五行选项后高度也要留够。
     let size = egui::vec2(820.0, 780.0);
     let mut canvas = crate::ui_snapshot::Canvas::default();
+    let texture = page.map(|_| {
+        let (width, height) = (120, 170);
+        let mut rgba = Vec::with_capacity(width * height * 4);
+        for y in 0..height {
+            for x in 0..width {
+                let edge = x < 4 || y < 4 || x >= width - 4 || y >= height - 4;
+                // 左上角一块深色，横页转向后应跑到左下角，样张据此看 UV 转得对不对。
+                let corner = !edge && x < 30 && y < 30;
+                let value = if edge {
+                    150
+                } else if corner {
+                    60
+                } else {
+                    235
+                };
+                rgba.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        ctx.load_texture(
+            "print-preview-sample",
+            egui::ColorImage::from_rgba_premultiplied([width, height], &rgba),
+            egui::TextureOptions::LINEAR,
+        )
+    });
     let mut frame = || {
         ctx.run_ui(
             egui::RawInput {
@@ -610,8 +649,13 @@ fn snapshot(dialog: &mut PrintDialog, name: &str) {
                 ..Default::default()
             },
             |ui| {
-                // 样张里没有页面纹理：预览显示灰色占位。
-                let _ = dialog.ui(ui.ctx(), &|_index| None);
+                let mut textures = |_index: usize| {
+                    page.map(|page_pt| crate::print::PreviewPage {
+                        texture: texture.as_ref().map(|texture| texture.id()),
+                        page_pt: Some(page_pt),
+                    })
+                };
+                let _ = dialog.ui(ui.ctx(), &mut textures);
             },
         )
     };
@@ -660,6 +704,17 @@ fn print_dialog_samples() {
     preview.printers_loaded(Ok(vec![printer("Office", true)]));
     preview.caps_loaded("Office", caps(true, true));
     snapshot(&mut preview, "preview-placeholder");
+
+    // 页面纹理到了：A4 页按真实尺寸填满 A4 纸。
+    preview.preview_index = 0;
+    snapshot_with_page(&mut preview, "preview-page", (595.28, 841.89));
+
+    // 横页（/Rotate 90 显示成 842 × 595）落竖纸：转成竖的再摆。
+    let mut landscape = dialog(12);
+    landscape.printers_loaded(Ok(vec![printer("Office", true)]));
+    landscape.caps_loaded("Office", caps(true, true));
+    landscape.preview_index = 0;
+    snapshot_with_page(&mut landscape, "preview-landscape", (841.89, 595.28));
 
     // 手动双面等翻面（奇数页）：翻面说明、「继续打印反面」与倒序复选框。
     let mut flip = dialog(5);

@@ -85,8 +85,8 @@ pub(crate) struct DeviceGeometry {
 }
 
 /// 纸张尺寸允许的误差：A4 的 PDF（595.28 × 841.89 pt）与驱动报的 A4 纸差一两个像素
-/// 很常见，不能因此判成「放不下」而改成缩印。
-const PAPER_TOLERANCE: f64 = 1.02;
+/// 很常见，不能因此判成「放不下」而改成缩印。打印预览的「实际大小」也用它。
+pub(crate) const PAPER_TOLERANCE: f64 = 1.02;
 
 /// 页面（点，已转成纸张方向）在设备上的目标矩形 (x, y, w, h)，坐标相对可打印区原点。
 ///
