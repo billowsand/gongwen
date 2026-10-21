@@ -170,6 +170,9 @@ pub(crate) struct PrintJob {
     /// 纸盒的驱动编号 / CUPS 关键字；`None` 表示自动选择。
     pub(crate) tray: Option<String>,
     pub(crate) scaling: Scaling,
+    /// Windows「打印机首选项」改过的整块 DEVMODE；有它时双面、颜色、纸张、纸盒
+    /// 都以首选项为准。Unix 恒为 `None`。
+    pub(crate) devmode: Option<Vec<u8>>,
 }
 
 /// 打印任务的结果。「打完了」和「用户取消」是两回事，状态栏文案要分开。
@@ -286,6 +289,16 @@ pub(crate) fn printer_caps(name: &str) -> PrinterCaps {
     {
         cups::printer_caps(name)
     }
+}
+
+/// 弹驱动自己的「打印机首选项」窗口（只有 Windows 有）。会弹窗等用户操作，
+/// 阻塞调用，必须在后台线程调。返回改过的整块 DEVMODE；取消是 `Ok(None)`。
+#[cfg(windows)]
+pub(crate) fn edit_preferences(
+    name: &str,
+    current: Option<&[u8]>,
+) -> Result<Option<Vec<u8>>, String> {
+    win::edit_preferences(name, current)
 }
 
 /// 查一台打印机的状态。阻塞调用。
@@ -420,6 +433,7 @@ mod tests {
             paper: None,
             tray: None,
             scaling: Scaling::Actual,
+            devmode: None,
         }
     }
 

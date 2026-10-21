@@ -505,6 +505,7 @@ PageSize/Media Size: *A4 Letter";
             paper: None,
             tray: None,
             scaling: Scaling::Actual,
+            devmode: None,
         }
     }
 

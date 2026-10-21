@@ -79,6 +79,44 @@ impl GongwenApp {
         }
     }
 
+    /// 弹驱动自己的首选项窗口：会阻塞等用户操作，只能在后台线程。
+    #[cfg(windows)]
+    fn start_preferences_edit(
+        &mut self,
+        dialog: u64,
+        printer: String,
+        current: Option<Vec<u8>>,
+        ctx: &egui::Context,
+    ) {
+        let tx = self.sender.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::print::edit_preferences(&printer, current.as_deref());
+            let _ = tx.send(WorkerResult::PreferencesEdited {
+                dialog,
+                printer,
+                result,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn apply_preferences_edited(
+        &mut self,
+        dialog: u64,
+        printer: &str,
+        result: Result<Option<Vec<u8>>, String>,
+    ) {
+        if let Some(open) = self
+            .print_dialog
+            .as_mut()
+            .filter(|open| open.id() == dialog)
+        {
+            open.preferences_edited(printer, result);
+        }
+    }
+
     pub(crate) fn apply_pdf_inspected(
         &mut self,
         dialog: u64,
@@ -107,12 +145,21 @@ impl GongwenApp {
         let Some(dialog) = self.print_dialog.as_mut() else {
             return;
         };
+        let dialog_id = dialog.id();
         let outcome = dialog.ui(ctx);
-        // 对话框只提出「要查这台」，线程由外壳起：UI 线程不碰打印接口。
-        let caps_request = dialog.take_caps_request().map(|name| (dialog.id(), name));
+        // 对话框只提出「要查这台」「要弹首选项」，线程由外壳起：UI 线程不碰打印接口。
+        let caps_request = dialog.take_caps_request().map(|name| (dialog_id, name));
+        #[cfg(windows)]
+        let preferences_request = dialog
+            .take_preferences_request()
+            .map(|(name, devmode)| (dialog_id, name, devmode));
         let path = dialog.path().to_path_buf();
         if let Some((id, name)) = caps_request {
             self.start_caps_query(id, name, ctx);
+        }
+        #[cfg(windows)]
+        if let Some((id, name, devmode)) = preferences_request {
+            self.start_preferences_edit(id, name, devmode, ctx);
         }
         let Some(outcome) = outcome else {
             return;

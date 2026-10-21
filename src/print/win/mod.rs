@@ -4,7 +4,7 @@
 mod gdi;
 mod printers;
 
-pub(super) use printers::{list_printers, printer_caps, printer_state};
+pub(super) use printers::{edit_preferences, list_printers, printer_caps, printer_state};
 
 use super::pages::{self, PageSpan};
 use super::{PrintJob, PrintOutcome, Scaling};

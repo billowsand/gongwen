@@ -9,8 +9,8 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateDCW, DEVMODEW, DM_COLLATE, DM_COLOR, DM_COPIES, DM_DEFAULTSOURCE, DM_DUPLEX,
-    DM_IN_BUFFER, DM_OUT_BUFFER, DM_PAPERSIZE, DMCOLLATE_FALSE, DMCOLLATE_TRUE, DMCOLOR_COLOR,
-    DMCOLOR_MONOCHROME, DMDUP_HORIZONTAL, DMDUP_SIMPLEX, DMDUP_VERTICAL,
+    DM_IN_BUFFER, DM_IN_PROMPT, DM_OUT_BUFFER, DM_PAPERSIZE, DMCOLLATE_FALSE, DMCOLLATE_TRUE,
+    DMCOLOR_COLOR, DMCOLOR_MONOCHROME, DMDUP_HORIZONTAL, DMDUP_SIMPLEX, DMDUP_VERTICAL,
 };
 use windows_sys::Win32::Graphics::Printing::{
     ClosePrinter, DocumentPropertiesW, EnumPrintersW, GetDefaultPrinterW, GetPrinterW,
@@ -50,6 +50,45 @@ impl Buffer {
 
     fn as_ptr(&self) -> *const u8 {
         self.0.as_ptr().cast()
+    }
+
+    /// 从外部字节（打印机首选项交回的 DEVMODE）造 8 字节对齐的缓冲区。Windows 是
+    /// 小端，按小端拼成 u64：既满足驱动要求的对齐，也不用非对齐读写。
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let mut words = vec![0u64; bytes.len().div_ceil(8).max(1)];
+        for (index, chunk) in bytes.chunks(8).enumerate() {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            words[index] = u64::from_le_bytes(word);
+        }
+        Self(words)
+    }
+
+    /// 首选项交回的字节先过一遍校验：长度要够一个 DEVMODE，`dmSize + dmDriverExtra`
+    /// 不能超出数据本身。坏数据不能整块交给驱动（读私有区会越界）。
+    fn from_devmode(bytes: &[u8]) -> Result<Self, String> {
+        const INVALID: &str = "打印机首选项数据无效，请重新设置";
+        if bytes.len() < size_of::<DEVMODEW>() {
+            return Err(INVALID.to_string());
+        }
+        let buffer = Self::from_bytes(bytes);
+        // SAFETY: 已核对长度不小于 `DEVMODEW`，缓冲区 8 字节对齐，内容来自首选项
+        // 对话框；只按值读公共部分。
+        let head = unsafe { buffer.as_ptr().cast::<DEVMODEW>().read() };
+        let declared = usize::from(head.dmSize) + usize::from(head.dmDriverExtra);
+        if declared > bytes.len() {
+            return Err(INVALID.to_string());
+        }
+        Ok(buffer)
+    }
+
+    /// 原样写回字节流（末尾不足 8 字节的补零一并带上）。
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.0.len() * 8);
+        for word in &self.0 {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        out
     }
 
     /// 读缓冲区里一个以 NUL 结尾的宽字符串。winspool 把结构体里的字符串放在同一块
@@ -385,14 +424,22 @@ pub(super) fn open_device(name: &str, job: &PrintJob) -> Result<Device, String> 
     let wide_name = wide(name);
     let printer = PrinterHandle::open(&wide_name)
         .ok_or_else(|| format!("无法打开打印机「{name}」，它可能已被删除或无权访问"))?;
-    let mut buffer = default_devmode(&printer, &wide_name)
-        .ok_or_else(|| format!("无法读取打印机「{name}」的默认设置"))?;
+    // 用户改过「打印机首选项」：整块 DEVMODE（含驱动私有区）优先，双面 / 颜色 /
+    // 纸张 / 纸盒都以首选项为准，本次只再写份数与逐份。否则从驱动默认值出发，
+    // 把对话框里的选择写进去。
+    let from_preferences = job.devmode.is_some();
+    let mut buffer = match &job.devmode {
+        Some(bytes) => Buffer::from_devmode(bytes)?,
+        None => default_devmode(&printer, &wide_name)
+            .ok_or_else(|| format!("无法读取打印机「{name}」的默认设置"))?,
+    };
     let devmode = buffer.as_mut_ptr().cast::<DEVMODEW>();
 
     let driver_copies =
         job.copies > 1 && driver_handles_copies(&wide_name, job.copies, job.collate);
     let mut changed = false;
-    // SAFETY: `devmode` 指向上面已由驱动填好的完整 `DEVMODEW`，缓冲区归本函数独占。
+    // SAFETY: `devmode` 指向上面由驱动填好（或首选项交回并校验过）的完整
+    // `DEVMODEW`，缓冲区归本函数独占。
     let mut head = unsafe { devmode.read() };
     if driver_copies {
         head.dmFields |= DM_COPIES | DM_COLLATE;
@@ -404,35 +451,37 @@ pub(super) fn open_device(name: &str, job: &PrintJob) -> Result<Device, String> 
         };
         changed = true;
     }
-    if let Some(duplex) = job.duplex {
-        head.dmFields |= DM_DUPLEX;
-        // 我们总是按竖向纸张出图，所以长边翻转 = 竖向翻转、短边 = 横向翻转。
-        head.dmDuplex = match duplex {
-            Duplex::Simplex => DMDUP_SIMPLEX,
-            Duplex::LongEdge => DMDUP_VERTICAL,
-            Duplex::ShortEdge => DMDUP_HORIZONTAL,
-        };
-        changed = true;
-    }
-    if let Some(color) = job.color {
-        head.dmFields |= DM_COLOR;
-        head.dmColor = match color {
-            ColorMode::Color => DMCOLOR_COLOR,
-            ColorMode::Mono => DMCOLOR_MONOCHROME,
-        };
-        changed = true;
-    }
-    // 纸张与纸盒的 id 是 `DeviceCapabilitiesW` 给的十进制编号；解析不了就不设，
-    // 由驱动按自己的默认值处理，不让一个坏编号毁掉整次打印。
-    if let Some(size) = job.paper.as_deref().and_then(|id| id.parse::<i16>().ok()) {
-        head.dmFields |= DM_PAPERSIZE;
-        head.Anonymous1.Anonymous1.dmPaperSize = size;
-        changed = true;
-    }
-    if let Some(source) = job.tray.as_deref().and_then(|id| id.parse::<i16>().ok()) {
-        head.dmFields |= DM_DEFAULTSOURCE;
-        head.Anonymous1.Anonymous1.dmDefaultSource = source;
-        changed = true;
+    if !from_preferences {
+        if let Some(duplex) = job.duplex {
+            head.dmFields |= DM_DUPLEX;
+            // 我们总是按竖向纸张出图，所以长边翻转 = 竖向翻转、短边 = 横向翻转。
+            head.dmDuplex = match duplex {
+                Duplex::Simplex => DMDUP_SIMPLEX,
+                Duplex::LongEdge => DMDUP_VERTICAL,
+                Duplex::ShortEdge => DMDUP_HORIZONTAL,
+            };
+            changed = true;
+        }
+        if let Some(color) = job.color {
+            head.dmFields |= DM_COLOR;
+            head.dmColor = match color {
+                ColorMode::Color => DMCOLOR_COLOR,
+                ColorMode::Mono => DMCOLOR_MONOCHROME,
+            };
+            changed = true;
+        }
+        // 纸张与纸盒的 id 是 `DeviceCapabilitiesW` 给的十进制编号；解析不了就不设，
+        // 由驱动按自己的默认值处理，不让一个坏编号毁掉整次打印。
+        if let Some(size) = job.paper.as_deref().and_then(|id| id.parse::<i16>().ok()) {
+            head.dmFields |= DM_PAPERSIZE;
+            head.Anonymous1.Anonymous1.dmPaperSize = size;
+            changed = true;
+        }
+        if let Some(source) = job.tray.as_deref().and_then(|id| id.parse::<i16>().ok()) {
+            head.dmFields |= DM_DEFAULTSOURCE;
+            head.Anonymous1.Anonymous1.dmDefaultSource = source;
+            changed = true;
+        }
     }
     if changed {
         // SAFETY: 同上；只写回公共部分，紧随其后的驱动私有区不动。
@@ -465,6 +514,48 @@ pub(super) fn open_device(name: &str, job: &PrintJob) -> Result<Device, String> 
         dc: DcGuard(dc),
         driver_copies,
     })
+}
+
+/// 弹驱动自己的「打印机首选项」窗口。用户点确定就返回改过的整块 DEVMODE
+/// （含驱动私有区），取消返回 `None`。会弹窗并等用户操作，必须在后台线程调。
+pub(in crate::print) fn edit_preferences(
+    name: &str,
+    current: Option<&[u8]>,
+) -> Result<Option<Vec<u8>>, String> {
+    // IDOK / IDCANCEL，见 winuser.h；`DocumentPropertiesW` 只回这两个或负数。
+    const IDOK: i32 = 1;
+    const IDCANCEL: i32 = 2;
+    let wide_name = wide(name);
+    let printer = PrinterHandle::open(&wide_name)
+        .ok_or_else(|| format!("无法打开打印机「{name}」，它可能已被删除或无权访问"))?;
+    // 输入：优先用上次改过的，其次驱动默认值。长度不够的旧数据当没有。
+    let base = current
+        .filter(|bytes| bytes.len() >= size_of::<DEVMODEW>())
+        .map(Buffer::from_bytes)
+        .or_else(|| default_devmode(&printer, &wide_name))
+        .ok_or_else(|| format!("无法读取打印机「{name}」的默认设置"))?;
+    // 输出缓冲区不小于输入：驱动会把输入连同自己改的私有区写到输出。
+    let size = u32::try_from(base.len_bytes()).map_err(|_| "打印机首选项数据过大".to_string())?;
+    let mut output = Buffer::new(size);
+    // SAFETY: hwnd 传空（对话框独立出现，不归档到主窗口）；打印机句柄有效；名字以
+    // NUL 结尾；输入输出都是 8 字节对齐、长度不小于 DEVMODE 的缓冲区。
+    let code = unsafe {
+        DocumentPropertiesW(
+            null_mut(),
+            printer.0,
+            wide_name.as_ptr(),
+            output.as_mut_ptr().cast(),
+            base.as_ptr().cast(),
+            DM_IN_PROMPT | DM_IN_BUFFER | DM_OUT_BUFFER,
+        )
+    };
+    if code == IDOK {
+        return Ok(Some(output.to_bytes()));
+    }
+    if code == IDCANCEL {
+        return Ok(None);
+    }
+    Err(format!("无法打开打印机「{name}」的首选项（错误码 {code}）"))
 }
 
 /// 驱动能不能自己印这么多份（以及逐份）。不能就由程序逐份重复出纸。

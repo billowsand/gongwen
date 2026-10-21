@@ -64,6 +64,17 @@ pub(crate) struct PrintDialog {
     scaling: Scaling,
     /// 从 PDF 自身测得的事实（整份横排、有红色）。外壳在后台测好送进来。
     facts: Option<PdfFacts>,
+    /// Windows「打印机首选项」改过的整块 DEVMODE。换打印机时清掉。
+    #[cfg(windows)]
+    devmode: Option<Vec<u8>>,
+    /// 要外壳去弹首选项窗口的打印机。
+    #[cfg(windows)]
+    preferences_request: Option<String>,
+    /// 已经交给外壳、还在等用户操作，别重复弹窗口。
+    #[cfg(windows)]
+    preferences_pending: bool,
+    #[cfg(windows)]
+    preferences_error: Option<String>,
     /// 用户动过哪几项。没动过的，在能力 / 文档默认到达时才可以被预填覆盖。
     duplex_touched: bool,
     color_touched: bool,
@@ -87,6 +98,14 @@ impl PrintDialog {
             caps_request: None,
             caps_in_flight: HashSet::new(),
             facts: None,
+            #[cfg(windows)]
+            devmode: None,
+            #[cfg(windows)]
+            preferences_request: None,
+            #[cfg(windows)]
+            preferences_pending: false,
+            #[cfg(windows)]
+            preferences_error: None,
             duplex: None,
             color: None,
             paper: None,
@@ -131,6 +150,38 @@ impl PrintDialog {
         self.caps_in_flight.remove(name);
         self.caps.insert(name.to_string(), caps);
         self.recompute_defaults();
+    }
+
+    /// 外壳该去弹哪台打印机的首选项窗口了；带上上次改过的 DEVMODE 当输入。
+    #[cfg(windows)]
+    pub(crate) fn take_preferences_request(&mut self) -> Option<(String, Option<Vec<u8>>)> {
+        if self.preferences_pending {
+            return None;
+        }
+        let name = self.preferences_request.take()?;
+        self.preferences_pending = true;
+        Some((name, self.devmode.clone()))
+    }
+
+    /// 首选项窗口的结果。用户取消是 `Ok(None)`；换了打印机的话旧结果丢掉。
+    #[cfg(windows)]
+    pub(crate) fn preferences_edited(
+        &mut self,
+        printer: &str,
+        result: Result<Option<Vec<u8>>, String>,
+    ) {
+        self.preferences_pending = false;
+        if self.selected.as_deref() != Some(printer) {
+            return;
+        }
+        match result {
+            Ok(Some(devmode)) => {
+                self.devmode = Some(devmode);
+                self.preferences_error = None;
+            }
+            Ok(None) => {}
+            Err(error) => self.preferences_error = Some(error),
+        }
     }
 
     /// PDF 自身的版式事实测回来了。读不出来（`None`）就当不知道。
@@ -261,6 +312,18 @@ impl PrintDialog {
                             );
                         }
                     });
+                // 驱动独有的选项（装订、打孔、水印）只能从驱动自己的窗口设。
+                #[cfg(windows)]
+                {
+                    let can_open = self.selected.is_some() && !self.preferences_pending;
+                    if ui
+                        .add_enabled(can_open, egui::Button::new("打印机首选项…"))
+                        .on_hover_text("打开驱动自己的设置窗口，可设装订、打孔等驱动独有选项")
+                        .clicked()
+                    {
+                        self.preferences_request = self.selected.clone();
+                    }
+                }
                 if let Some(printer) = self
                     .selected
                     .as_deref()
@@ -283,6 +346,12 @@ impl PrintDialog {
         self.tray = None;
         self.paper_touched = false;
         self.tray_touched = false;
+        // 首选项是每台打印机、每个驱动自己的，换机器就没了。
+        #[cfg(windows)]
+        {
+            self.devmode = None;
+            self.preferences_error = None;
+        }
         // 新打印机的能力可能已经在缓存里（换回来过），默认值当场重算；没缓存就等
         // `caps_loaded`。
         self.recompute_defaults();
@@ -291,6 +360,7 @@ impl PrintDialog {
     /// 在「页码」之后画双面、颜色、纸张、纸盒、缩放。能力查回来之前只画一个
     /// 提示，不画五个空控件；没有选中打印机（清单列不出来）时整栏不画。
     fn capability_rows(&mut self, ui: &mut egui::Ui) {
+        let locked = self.preferences_locked();
         let caps = self.gated_caps();
         match caps {
             None => {}
@@ -304,21 +374,49 @@ impl PrintDialog {
             }
             Some(Some(caps)) => {
                 ui.label("双面");
-                self.duplex_row(ui, &caps);
+                self.duplex_row(ui, &caps, locked);
                 ui.end_row();
                 ui.label("颜色");
-                self.color_row(ui, &caps);
+                self.color_row(ui, &caps, locked);
                 ui.end_row();
                 ui.label("纸张");
-                self.paper_row(ui, &caps);
+                self.paper_row(ui, &caps, locked);
                 ui.end_row();
                 ui.label("纸盒");
-                self.tray_row(ui, &caps);
+                self.tray_row(ui, &caps, locked);
                 ui.end_row();
+                if locked {
+                    ui.label("");
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("双面、颜色、纸张与纸盒已按打印机首选项设置。")
+                                .color(theme::text_soft()),
+                        );
+                        if ui.small_button("恢复").clicked() {
+                            #[cfg(windows)]
+                            {
+                                self.devmode = None;
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
                 ui.label("缩放");
                 self.scaling_row(ui);
                 ui.end_row();
             }
+        }
+    }
+
+    /// 首选项改过时，双面、颜色、纸张、纸盒四行置灰：以驱动的设置为准。
+    fn preferences_locked(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.devmode.is_some()
+        }
+        #[cfg(not(windows))]
+        {
+            false
         }
     }
 
@@ -328,10 +426,10 @@ impl PrintDialog {
         Some(self.caps.get(name).cloned())
     }
 
-    fn duplex_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps) {
+    fn duplex_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps, locked: bool) {
         let text = duplex_label(self.duplex);
         let row = ui.horizontal(|ui| {
-            ui.add_enabled_ui(caps.duplex, |ui| {
+            ui.add_enabled_ui(caps.duplex && !locked, |ui| {
                 egui::ComboBox::from_id_salt("print_dialog_duplex")
                     .width(180.0)
                     .selected_text(text)
@@ -353,7 +451,7 @@ impl PrintDialog {
         }
     }
 
-    fn color_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps) {
+    fn color_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps, locked: bool) {
         // 单色机固定显示「黑白」：这一下拉只是告知，选了也没用。
         let text = if caps.color {
             color_label(self.color)
@@ -361,7 +459,7 @@ impl PrintDialog {
             "黑白".to_string()
         };
         ui.horizontal(|ui| {
-            ui.add_enabled_ui(caps.color, |ui| {
+            ui.add_enabled_ui(caps.color && !locked, |ui| {
                 egui::ComboBox::from_id_salt("print_dialog_color")
                     .width(180.0)
                     .selected_text(text)
@@ -379,29 +477,31 @@ impl PrintDialog {
         });
     }
 
-    fn paper_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps) {
+    fn paper_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps, locked: bool) {
         let text = paper_label(self.paper.as_deref(), caps);
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("print_dialog_paper")
-                .width(180.0)
-                .selected_text(text)
-                .show_ui(ui, |ui| {
-                    let mut chosen = self.paper.clone();
-                    ui.selectable_value(&mut chosen, None, default_paper_text(caps));
-                    for paper in &caps.papers {
-                        ui.selectable_value(&mut chosen, Some(paper.id.clone()), &paper.label);
-                    }
-                    if chosen != self.paper {
-                        self.paper = chosen;
-                        self.paper_touched = true;
-                    }
-                });
+            ui.add_enabled_ui(!locked, |ui| {
+                egui::ComboBox::from_id_salt("print_dialog_paper")
+                    .width(180.0)
+                    .selected_text(text)
+                    .show_ui(ui, |ui| {
+                        let mut chosen = self.paper.clone();
+                        ui.selectable_value(&mut chosen, None, default_paper_text(caps));
+                        for paper in &caps.papers {
+                            ui.selectable_value(&mut chosen, Some(paper.id.clone()), &paper.label);
+                        }
+                        if chosen != self.paper {
+                            self.paper = chosen;
+                            self.paper_touched = true;
+                        }
+                    });
+            });
         });
     }
 
-    fn tray_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps) {
+    fn tray_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps, locked: bool) {
         let text = tray_label(self.tray.as_deref(), caps);
-        let enabled = !caps.trays.is_empty();
+        let enabled = !caps.trays.is_empty() && !locked;
         let row = ui.horizontal(|ui| {
             ui.add_enabled_ui(enabled, |ui| {
                 egui::ComboBox::from_id_salt("print_dialog_tray")
@@ -529,6 +629,10 @@ impl PrintDialog {
                 "打印机份数只是把同一份重复打出；份号不同的多份请在导出时生成。",
             );
         }
+        #[cfg(windows)]
+        if let Some(error) = &self.preferences_error {
+            ui.colored_label(theme::warn(), error);
+        }
         // 公文场景的提醒：只提醒，不拦打印。
         if let Some(caps) = self.gated_caps().flatten()
             && let Some(job) = self.job(pages)
@@ -620,6 +724,10 @@ impl PrintDialog {
             paper: self.paper.clone(),
             tray: self.tray.clone(),
             scaling: self.scaling,
+            #[cfg(windows)]
+            devmode: self.devmode.clone(),
+            #[cfg(not(windows))]
+            devmode: None,
         })
     }
 

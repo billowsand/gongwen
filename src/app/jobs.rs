@@ -96,6 +96,13 @@ pub(crate) enum WorkerResult {
         name: String,
         state: crate::print::PrinterState,
     },
+    /// Windows「打印机首选项」窗口的结果：改过的整块 DEVMODE；取消是 `Ok(None)`。
+    #[cfg(windows)]
+    PreferencesEdited {
+        dialog: u64,
+        printer: String,
+        result: Result<Option<Vec<u8>>, String>,
+    },
     /// 打印对话框打开时从 PDF 自身测得的版式事实。读不出来是 `None`。
     PdfInspected {
         dialog: u64,
@@ -555,6 +562,12 @@ impl GongwenApp {
                 WorkerResult::PdfInspected { dialog, facts } => {
                     self.apply_pdf_inspected(dialog, facts)
                 }
+                #[cfg(windows)]
+                WorkerResult::PreferencesEdited {
+                    dialog,
+                    printer,
+                    result,
+                } => self.apply_preferences_edited(dialog, &printer, result),
                 WorkerResult::PdfPrinted {
                     path,
                     printer,
