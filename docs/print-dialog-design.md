@@ -1,6 +1,6 @@
 # 应用内打印对话框设计
 
-> 状态：第一期已实现（2026-10-21），**待真机验收**；第二、三期未开始。
+> 状态：第一、二期已实现（2026-10-21），**待真机验收**；第三期未开始。
 > 进度、与方案的出入、已知坑见文末第十一节。
 
 ## 一、现状与问题
@@ -278,3 +278,53 @@ UI 线程从不调用打印 API 或外部命令；后台任务带 `egui::Context
 5. 麒麟 V10 / macOS：清单、默认标记、状态（关掉打印机看是否显示脱机）；
    自定义页码、份数是否被 CUPS 接受。
 6. 上次用的打印机下次打开是否默认选中；该打印机被删后是否退回系统默认。
+
+### 第二期（2026-10-21 完成，待真机验收）
+
+代码：
+
+| 文件 | 内容 |
+|---|---|
+| `src/print/mod.rs` | `Duplex` / `ColorMode` / `Scaling` / `MediaOption` / `PrinterCaps`、`PrintHints`、`default_duplex` 与 `print_warnings` 纯函数、`edit_preferences` 平台分派、定长宽字符名字截取 |
+| `src/print/cups.rs` | `lpoptions -l` 能力解析（`parse_caps`）；`lp` 的 `-o sides` / `print-color-mode` / `PageSize` / `InputSlot` / `print-scaling` |
+| `src/print/inspect.rs` | 用 hayro 测「整份横排」与「第 1 页有红色」；手写最小 PDF 的单测（不提交二进制样本） |
+| `src/print/win/printers.rs` | `DeviceCapabilitiesW` 查双面、颜色、纸张、纸盒；默认 DEVMODE 抽成共用函数；`open_device` 收 `&PrintJob` 一次合并；`edit_preferences`（`DM_IN_PROMPT`） |
+| `src/print/win/gdi.rs`、`src/print/raster.rs` | `place_page` 加 `force_fit`，「适合纸张」直接走 `fit_rect` |
+| `src/print/dialog.rs` | 双面 / 颜色 / 纸张 / 纸盒 / 缩放五行、能力按打印机缓存、张数按双面折算、提醒区、Windows 首选项按钮与四行置灰 |
+| `src/app/printing.rs` | 后台查能力、弹首选项、测 PDF 自身事实；样张扩为能力未到 / 有双面 / 无双面 / 提醒四种 |
+| `src/pdf_viewer.rs`、`src/app/tabs.rs`、`src/app/send_package_ui.rs`、`src/draft_page/tasks.rs` | `PrintHints` 随 PDF 标签带上：起草页导出按 `profile.duplex_printing`，送批材料打开合并件时标 `send_package` |
+| `docs/help/11-export.md` | 「打印」一节补选项、提醒、首选项与默认值 |
+
+与方案的出入：
+
+- 双面、颜色下拉各多一项「打印机默认」，对应 `PrintJob` 里的 `None`。规格只列了三个 / 两个取值，但「没动过」的状态要能显示、也要能改回默认；纸张与纸盒的第一项同理。
+- 能力没回来时是一行「选项 + spinner」，不是五行各画一个 spinner：五行各一个观感很乱，规格的本意是别画空控件。
+- 能力按需查：清单到达默认选中、用户换打印机各查一次，按打印机名缓存、换回不重查。没有预查整张清单——网络打印机逐台查会把对话框拖住。
+- 换打印机时清掉纸张与纸盒（编号是每台打印机自己的）；双面、颜色保留但提交时按新打印机能力过滤。
+- 提醒要等能力回来才算：判断单色机、纸张名字都要 `PrinterCaps`。
+- 纸张 / 纸盒默认值：Windows 读驱动默认 DEVMODE 的 `dmPaperSize` / `dmDefaultSource`；默认值不在能力列表里就当没有（不显示选不中的默认纸型）。
+- 样张画布从 760 × 560 加大到 820 × 780（多出五行，原尺寸会截断）；对话框宽度按规格从 460 加到 500。
+- 首选项交回的 DEVMODE 存整块缓冲区字节（末尾不足 8 字节有补零），`open_device` 按 `dmSize + dmDriverExtra` 校验，驱动只读声明的长度。
+- 第一期「缩放没有做成选项」的出入在这一期补上；`Scaling::Actual` 沿用第一期的实际大小逻辑。
+
+已知坑：
+
+- 仓库外小 crate 的 Windows 交叉检查只覆盖 `src/print/` 里平台无关的文件与 `win/`，覆盖不到 `dialog.rs` 与 `app/printing.rs` 的 Windows 分支；首选项按钮那条链路只能 Windows 真机或 CI 验。
+- `DC_PAPERNAMES` 每项定长 64 个宽字符、`DC_BINNAMES` 24 个；名字占满时没有 NUL，按定长取（`fixed_wide_name`）。
+- `DC_PAPERS` / `DC_PAPERNAMES`（以及 `DC_BINS` / `DC_BINNAMES`）两次调用的个数对不上就整组丢弃：宁可置灰，也不给对不上的编号。
+- CUPS 没有 `ColorModel` 键时按「能选彩色」处理（CUPS 不支持会忽略 `-o` 参数），彩色能力判断偏乐观；只有明确列出灰度类时才判成单色机。
+- `DM_IN_PROMPT` 的输入 / 输出缓冲区都要 8 字节对齐；首选项交回的字节按小端拼进 `Vec<u64>`，不写非对齐读写。
+- 首选项与能力查询可能不一致（首选项里开了双面，`DC_DUPLEX` 仍报 1）：界面按首选项置灰，不再参考能力。
+- 红色提醒是启发式：36 DPI 下 50 个红像素（`inspect.rs` 有注释），扫描件偏色、彩色插图边沿可能误报；只是提醒，不拦打印。
+- 能力缓存只在本次打开期间有效，不落盘（第三期按打印机记偏好时再考虑持久化）。
+- `inspect_pdf` 打不开、超体积上限都返回 `None`：事实只用于默认值与提醒，不能因为读不出来就拦住打印对话框。
+- 横页默认短边、双面默认长边都要求 `caps.duplex` 为真；无双面单元的机器不会预置一个提交不出去的值。
+
+真机验收清单（第二期）：
+
+1. Windows：双面长边 / 短边在真机上翻转方向正确（竖纸装订边在左）；单色机彩色项置灰；纸张换 A4 / A3 / Letter、纸盒换 Tray1 / Tray2，实际出纸按所选。
+2. Windows：「实际大小」打 A4 公文版心仍是 156 × 225 mm（缩放不回归）；「适合纸张」把 A3 稿缩进 A4、满页可用。
+3. Windows 首选项：设装订 / 双面后打印，四行置灰并显示说明；「恢复」清掉；换打印机自动清掉；点取消不改状态；驱动不认 DEVMODE 时是否如实反映。
+4. 默认值与提醒：按双面排的稿件打开默认长边；整份横排默认短边并提示；有红色版头选黑白有提示；送批材料合并件默认双面、选单面提示；非 A4 用实际大小提示。
+5. macOS / 麒麟：本机 `lpoptions -l` 输出下纸张、纸盒、双面、颜色能选，实际出纸按所选（重点看没有 `Duplex` 键的机器、纸盒键名的厂商差异）。
+6. 「使用系统对话框…」仍能正常打印、取消。
