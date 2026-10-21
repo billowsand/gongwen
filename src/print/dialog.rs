@@ -542,8 +542,14 @@ impl PrintDialog {
                 }
             });
         } else {
+            // 页码框里输错了，或 PDF 还没打开完：没有「要打的页」可翻。
+            let message = if self.pages().is_err() {
+                "页码无效"
+            } else {
+                "页数未知"
+            };
             ui.label(
-                egui::RichText::new("页数未知")
+                egui::RichText::new(message)
                     .small()
                     .color(theme::text_muted()),
             );
@@ -601,7 +607,9 @@ impl PrintDialog {
 
     fn printer_row(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
-        ui.horizontal(|ui| match &self.printers {
+        // 预览栏占了左边以后右栏变窄；Windows 上还有「打印机首选项…」按钮，
+        // 放不下就换行，不挤进预览栏。
+        ui.horizontal_wrapped(|ui| match &self.printers {
             Printers::Loading => {
                 ui.spinner();
                 ui.label(egui::RichText::new("正在查找打印机…").color(theme::text_muted()));
@@ -621,7 +629,7 @@ impl PrintDialog {
                     .map(display_name)
                     .unwrap_or_else(|| "请选择打印机".to_string());
                 egui::ComboBox::from_id_salt("print_dialog_printer")
-                    .width(250.0)
+                    .width(200.0)
                     .truncate()
                     .selected_text(selected_text)
                     .show_ui(ui, |ui| {
