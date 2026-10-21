@@ -85,6 +85,7 @@ impl GongwenApp {
     }
 
     /// 弹驱动自己的首选项窗口：会阻塞等用户操作，只能在后台线程。
+    /// 只有 Windows 真去弹；非 Windows 上对话框不画这个按钮。
     #[cfg(windows)]
     fn start_preferences_edit(
         &mut self,
@@ -106,7 +107,6 @@ impl GongwenApp {
         });
     }
 
-    #[cfg(windows)]
     pub(crate) fn apply_preferences_edited(
         &mut self,
         dialog: u64,
@@ -163,7 +163,6 @@ impl GongwenApp {
         };
         // 对话框只提出「要查这台」「要弹首选项」，线程由外壳起：UI 线程不碰打印接口。
         let caps_request = dialog.take_caps_request().map(|name| (dialog_id, name));
-        #[cfg(windows)]
         let preferences_request = dialog
             .take_preferences_request()
             .map(|(name, devmode)| (dialog_id, name, devmode));
@@ -178,6 +177,17 @@ impl GongwenApp {
         #[cfg(windows)]
         if let Some((id, name, devmode)) = preferences_request {
             self.start_preferences_edit(id, name, devmode, ctx);
+        }
+        // 非 Windows 上对话框不画「打印机首选项…」按钮（`HAS_DRIVER_PREFERENCES`），
+        // 这里收不到请求。万一收到，当作用户取消走同一条结果通道：对话框把挂起标志
+        // 复位，不弹窗口，也不改动任何设置。
+        #[cfg(not(windows))]
+        if let Some((dialog, printer, _devmode)) = preferences_request {
+            let _ = self.sender.send(WorkerResult::PreferencesEdited {
+                dialog,
+                printer,
+                result: Ok(None),
+            });
         }
         if let Some((printer, prefs)) = prefs_update {
             self.config.print.printers.insert(printer, prefs);

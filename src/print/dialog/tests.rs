@@ -510,6 +510,89 @@ fn unknown_page_count_only_allows_printing_everything() {
     assert!(dialog.pages().is_err());
 }
 
+#[test]
+fn editing_preferences_locks_the_option_rows_and_carries_the_devmode() {
+    let mut dialog = ready_dialog();
+    assert!(!dialog.preferences_locked());
+    dialog.duplex = Some(Duplex::LongEdge);
+    dialog.paper = Some("8".to_string());
+    dialog.preferences_edited("Office", Ok(Some(vec![0x0c, 0x00, 0x00, 0x00])));
+    assert!(dialog.preferences_locked());
+    assert!(dialog.preferences_error.is_none());
+    let job = dialog.job(&dialog.pages()).expect("全部");
+    // 首选项的整块 DEVMODE 带上；双面、纸张仍按对话框的值生成，后端见到 devmode
+    // 会以驱动设置为准（这里只断言确实带上了）。
+    assert_eq!(job.devmode.as_deref(), Some(&[0x0c, 0x00, 0x00, 0x00][..]));
+    assert_eq!(job.duplex, Some(Duplex::LongEdge));
+    assert_eq!(job.paper.as_deref(), Some("8"));
+}
+
+#[test]
+fn resetting_preferences_unlocks_the_rows_and_drops_the_devmode() {
+    let mut dialog = ready_dialog();
+    dialog.preferences_edited("Office", Ok(Some(vec![1, 2, 3])));
+    dialog.reset_preferences();
+    assert!(!dialog.preferences_locked());
+    assert!(dialog.devmode.is_none());
+    assert!(dialog.job(&dialog.pages()).expect("全部").devmode.is_none());
+}
+
+#[test]
+fn switching_printers_drops_the_driver_preferences() {
+    let mut dialog = ready_dialog();
+    dialog.preferences_edited("Office", Ok(Some(vec![1, 2, 3])));
+    dialog.preferences_edited("Office", Err("驱动窗口打不开".to_string()));
+    assert!(dialog.preferences_error.is_some());
+    dialog.selected = Some("HP".to_string());
+    dialog.printer_changed();
+    assert!(dialog.devmode.is_none());
+    assert!(dialog.preferences_error.is_none());
+}
+
+#[test]
+fn a_late_preferences_result_from_the_old_printer_is_dropped() {
+    let mut dialog = ready_dialog();
+    dialog.selected = Some("HP".to_string());
+    dialog.preferences_edited("Office", Ok(Some(vec![7])));
+    assert!(dialog.devmode.is_none());
+    assert!(!dialog.preferences_pending);
+    // 错误同理，不能挂到新打印机头上。
+    dialog.preferences_edited("Office", Err("旧打印机的错误".to_string()));
+    assert!(dialog.preferences_error.is_none());
+}
+
+#[test]
+fn only_one_preferences_request_is_pending_at_a_time() {
+    let mut dialog = ready_dialog();
+    dialog.preferences_request = Some("Office".to_string());
+    assert_eq!(
+        dialog
+            .take_preferences_request()
+            .map(|(name, _)| name)
+            .as_deref(),
+        Some("Office")
+    );
+    // 窗口还开着，再点一次不能又开一个。
+    dialog.preferences_request = Some("Office".to_string());
+    assert!(dialog.take_preferences_request().is_none());
+    // 结果回来（用户取消也是结果）才允许再请求。
+    dialog.preferences_edited("Office", Ok(None));
+    dialog.preferences_request = Some("Office".to_string());
+    assert!(dialog.take_preferences_request().is_some());
+}
+
+#[test]
+fn a_failed_preferences_window_shows_the_reason() {
+    let mut dialog = ready_dialog();
+    dialog.preferences_edited("Office", Err("无法打开打印机首选项".to_string()));
+    assert_eq!(
+        dialog.preferences_error.as_deref(),
+        Some("无法打开打印机首选项")
+    );
+    // 失败不清掉已有设置，也不锁四行：仍按对话框选项出纸。
+    assert!(!dialog.preferences_locked());
+}
+
 fn snapshot(dialog: &mut PrintDialog, name: &str) {
     use crate::theme;
     theme::set_current(crate::models::ThemeName::Mdex);
@@ -632,6 +715,13 @@ fn print_dialog_samples() {
     no_unit.printers_loaded(Ok(vec![printer("HP_DeskJet", true)]));
     no_unit.caps_loaded("HP_DeskJet", caps(false, true));
     snapshot(&mut no_unit, "no-duplex-unit");
+
+    // 驱动首选项改过：四行置灰，首选项窗口的失败原因显示在提醒区。
+    // 「打印机首选项…」与「恢复」按钮只在 Windows 上画，样张里看不到。
+    let mut locked = ready_dialog();
+    locked.preferences_edited("Office", Ok(Some(vec![0x0c, 0x00])));
+    locked.preferences_error = Some("无法打开打印机首选项：驱动没有响应".to_string());
+    snapshot(&mut locked, "preferences-locked");
 
     let mut empty = dialog(12);
     empty.printers_loaded(Ok(Vec::new()));

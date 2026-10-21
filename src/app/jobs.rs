@@ -96,8 +96,8 @@ pub(crate) enum WorkerResult {
         name: String,
         state: crate::print::PrinterState,
     },
-    /// Windows「打印机首选项」窗口的结果：改过的整块 DEVMODE；取消是 `Ok(None)`。
-    #[cfg(windows)]
+    /// 驱动「打印机首选项」窗口的结果：改过的整块 DEVMODE；取消是 `Ok(None)`。
+    /// 只有 Windows 会发出这条消息，但变体在所有平台都编译——对话框的逻辑不再分平台。
     PreferencesEdited {
         dialog: u64,
         printer: String,
@@ -571,7 +571,6 @@ impl GongwenApp {
                     done,
                     total,
                 } => self.apply_print_progress(dialog, done, total),
-                #[cfg(windows)]
                 WorkerResult::PreferencesEdited {
                     dialog,
                     printer,

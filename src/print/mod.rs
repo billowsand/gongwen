@@ -33,6 +33,12 @@ use std::path::{Path, PathBuf};
 /// 份数上限。再多就该去印刷厂了，也免得手滑输入一个天文数字把打印队列塞满。
 pub(crate) const MAX_COPIES: u32 = 999;
 
+/// 驱动自己的「打印机首选项」窗口只有 Windows 有：DEVMODE 与 `DocumentPropertiesW`
+/// 都是 Win32 的东西，CUPS 没有对应的弹窗。界面据此决定画不画「打印机首选项…」
+/// 「恢复」「使用系统对话框…」三个按钮；对话框里的状态与逻辑本身不分平台，
+/// 这样 macOS 上也能给首选项的锁定、恢复、晚到结果写单测。
+pub(crate) const HAS_DRIVER_PREFERENCES: bool = cfg!(windows);
+
 /// 双面方式。`None` 表示沿用打印机自己的设置，所以选项用 `Option<Duplex>`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

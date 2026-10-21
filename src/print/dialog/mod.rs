@@ -6,8 +6,8 @@
 
 use super::pages::{self, PageSpan};
 use super::{
-    ColorMode, Duplex, MAX_COPIES, PdfFacts, PrintJob, PrintOutcome, PrintRequest, PrinterCaps,
-    PrinterInfo, PrinterState, Scaling,
+    ColorMode, Duplex, HAS_DRIVER_PREFERENCES, MAX_COPIES, PdfFacts, PrintJob, PrintOutcome,
+    PrintRequest, PrinterCaps, PrinterInfo, PrinterState, Scaling,
 };
 use crate::modal::{self, Dismiss};
 use crate::models::PrinterPrefs;
@@ -28,7 +28,6 @@ pub(crate) enum DialogOutcome {
     /// 开始打印；对话框留在屏幕上显示进度，打完（或失败）由外壳转回结果。
     Print(PrintJob),
     /// 改用系统自带的打印对话框（只有 Windows 有这个按钮）。
-    #[cfg_attr(not(windows), allow(dead_code))]
     SystemDialog,
     Cancel,
 }
@@ -102,15 +101,12 @@ pub(crate) struct PrintDialog {
     /// 从 PDF 自身测得的事实（整份横排、有红色）。外壳在后台测好送进来。
     facts: Option<PdfFacts>,
     /// Windows「打印机首选项」改过的整块 DEVMODE。换打印机时清掉。
-    #[cfg(windows)]
+    /// 非 Windows 上没人会设它（没有首选项窗口），但字段与逻辑照常编译、可测。
     devmode: Option<Vec<u8>>,
     /// 要外壳去弹首选项窗口的打印机。
-    #[cfg(windows)]
     preferences_request: Option<String>,
     /// 已经交给外壳、还在等用户操作，别重复弹窗口。
-    #[cfg(windows)]
     preferences_pending: bool,
-    #[cfg(windows)]
     preferences_error: Option<String>,
     /// 用户动过哪几项。没动过的，在能力 / 文档默认到达时才可以被预填覆盖。
     duplex_touched: bool,
@@ -159,13 +155,9 @@ impl PrintDialog {
             caps_request: None,
             caps_in_flight: HashSet::new(),
             facts: None,
-            #[cfg(windows)]
             devmode: None,
-            #[cfg(windows)]
             preferences_request: None,
-            #[cfg(windows)]
             preferences_pending: false,
-            #[cfg(windows)]
             preferences_error: None,
             duplex: None,
             color: None,
@@ -224,7 +216,7 @@ impl PrintDialog {
     }
 
     /// 外壳该去弹哪台打印机的首选项窗口了；带上上次改过的 DEVMODE 当输入。
-    #[cfg(windows)]
+    /// 非 Windows 上不会有请求（界面不画那个按钮），外壳收到时复位挂起标志。
     pub(crate) fn take_preferences_request(&mut self) -> Option<(String, Option<Vec<u8>>)> {
         if self.preferences_pending {
             return None;
@@ -235,7 +227,6 @@ impl PrintDialog {
     }
 
     /// 首选项窗口的结果。用户取消是 `Ok(None)`；换了打印机的话旧结果丢掉。
-    #[cfg(windows)]
     pub(crate) fn preferences_edited(
         &mut self,
         printer: &str,
@@ -253,6 +244,12 @@ impl PrintDialog {
             Ok(None) => {}
             Err(error) => self.preferences_error = Some(error),
         }
+    }
+
+    /// 丢掉驱动首选项，回到按对话框选项出纸（「恢复」按钮）。
+    fn reset_preferences(&mut self) {
+        self.devmode = None;
+        self.preferences_error = None;
     }
 
     /// PDF 自身的版式事实测回来了。读不出来（`None`）就当不知道。
@@ -639,8 +636,7 @@ impl PrintDialog {
                         }
                     });
                 // 驱动独有的选项（装订、打孔、水印）只能从驱动自己的窗口设。
-                #[cfg(windows)]
-                {
+                if HAS_DRIVER_PREFERENCES {
                     let can_open = self.selected.is_some() && !self.preferences_pending;
                     if ui
                         .add_enabled(can_open, egui::Button::new("打印机首选项…"))
@@ -673,11 +669,8 @@ impl PrintDialog {
         self.paper_touched = false;
         self.tray_touched = false;
         // 首选项是每台打印机、每个驱动自己的，换机器就没了。
-        #[cfg(windows)]
-        {
-            self.devmode = None;
-            self.preferences_error = None;
-        }
+        self.devmode = None;
+        self.preferences_error = None;
         // 新打印机的能力可能已经在缓存里（换回来过），默认值当场重算；没缓存就等
         // `caps_loaded`。
         self.apply_defaults();
@@ -718,11 +711,9 @@ impl PrintDialog {
                             egui::RichText::new("双面、颜色、纸张与纸盒已按打印机首选项设置。")
                                 .color(theme::text_soft()),
                         );
-                        if ui.small_button("恢复").clicked() {
-                            #[cfg(windows)]
-                            {
-                                self.devmode = None;
-                            }
+                        // 首选项窗口只有 Windows 有，非 Windows 上这个状态走不到。
+                        if HAS_DRIVER_PREFERENCES && ui.small_button("恢复").clicked() {
+                            self.reset_preferences();
                         }
                     });
                     ui.end_row();
@@ -736,14 +727,7 @@ impl PrintDialog {
 
     /// 首选项改过时，双面、颜色、纸张、纸盒四行置灰：以驱动的设置为准。
     fn preferences_locked(&self) -> bool {
-        #[cfg(windows)]
-        {
-            self.devmode.is_some()
-        }
-        #[cfg(not(windows))]
-        {
-            false
-        }
+        self.devmode.is_some()
     }
 
     /// 选中打印机的能力缓存。`None` 是没选中打印机；内层 `None` 是还没查回来。
@@ -983,7 +967,7 @@ impl PrintDialog {
                 "打印机份数只是把同一份重复打出；份号不同的多份请在导出时生成。",
             );
         }
-        #[cfg(windows)]
+        // 首选项窗口打不开或设置失败：不拦打印，说清楚以哪套设置为准。
         if let Some(error) = &self.preferences_error {
             ui.colored_label(theme::warn(), error);
         }
@@ -1035,13 +1019,15 @@ impl PrintDialog {
         let can_print = pages.is_ok() && !no_printer;
         let mut outcome = None;
         ui.horizontal(|ui| {
-            #[cfg(windows)]
-            if ui
-                .button("使用系统对话框…")
-                .on_hover_text(
-                    "改用 Windows 自带的打印对话框，可设置驱动独有的选项（装订、打孔等）",
-                )
-                .clicked()
+            // 系统对话框只有 Windows 有；非 Windows 上不画，但这段代码照常编译
+            // （`HAS_DRIVER_PREFERENCES` 是常量，`DialogOutcome::SystemDialog` 因此不算死代码）。
+            if HAS_DRIVER_PREFERENCES
+                && ui
+                    .button("使用系统对话框…")
+                    .on_hover_text(
+                        "改用 Windows 自带的打印对话框，可设置驱动独有的选项（装订、打孔等）",
+                    )
+                    .clicked()
             {
                 outcome = Some(DialogOutcome::SystemDialog);
             }
@@ -1356,10 +1342,7 @@ impl PrintDialog {
             paper: self.paper.clone(),
             tray: self.tray.clone(),
             scaling: self.scaling,
-            #[cfg(windows)]
             devmode: self.devmode.clone(),
-            #[cfg(not(windows))]
-            devmode: None,
             reverse: false,
         }
     }
