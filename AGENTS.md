@@ -132,15 +132,18 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
   方案与包结构见 `docs/typst-engine.md`「导出 Typst 包」一节。模板的字体角色同时接受
   字符串与数组，改 `fam()` / `chain()` 前先读那一节。
 - **应用内打印对话框**（取代 Windows 老式 `PrintDlg` 与 Unix 上直冲默认打印机的 `lp`，
-  三平台同一个对话框，分三期）：**第一、二期已完成，待真机验收**。第一期是选打印机与状态、
+  三平台同一个对话框，分三期）：**三期均已实现，待真机验收**。第一期是选打印机与状态、
   份数、逐份、页码范围、记住上次的打印机；Windows 改用 DEVMODE + `CreateDCW`，按实际大小与
   纸张方向出图，修掉缩印约 4% 与横页缩到七成的问题。第二期是双面、颜色、纸张、纸盒、缩放
   五项（能力查询 `printer_caps`、CUPS `lpoptions -l` 解析、Windows `DeviceCapabilitiesW`）、
   按稿件给双面默认值与五条公文提醒（`PrintHints` + `src/print/inspect.rs` 从 PDF 自身测横排
-  与红色）、Windows「打印机首选项…」（`edit_preferences` 的整块 DEVMODE）。第三期（手动双面、
-  进度与取消、页面预览）未开始。代码在 `src/print/`，外壳在 `src/app/printing.rs`。
-  Windows 代码在 macOS 上没法随整个项目交叉编译，交叉检查办法（仓库外小 crate 软链
-  `src/print/`）、方案、进度与已知坑见 `docs/print-dialog-design.md`（单文件，第十一节是交接）。
+  与红色）、Windows「打印机首选项…」（`edit_preferences` 的整块 DEVMODE）。第三期是
+  按打印机记偏好（`PrintConfig.printers`）、手动双面（`pages::manual_duplex_passes` 与
+  对话框状态机）、打印进度与取消（`print(job, progress, cancel)`、CUPS 任务号回读）、
+  页面预览（`PdfSession::page_texture`，不为预览另起渲染线程）。代码在 `src/print/`，
+  外壳在 `src/app/printing.rs`。Windows 代码在 macOS 上没法随整个项目交叉编译，交叉检查
+  办法（仓库外小 crate 软链 `src/print/`）、方案、进度与已知坑见 `docs/print-dialog-design.md`
+  （单文件，第十一节是交接）。
 - **AI 智能体内核加固**（2026-10-07 重排为五期：工具契约（复用 `apidef::tooling` 的校验与
   两级访问）→ 提案逐块接受 → 用量 / 提案卡留痕 / 备用模型 → 每步检查点与崩溃续跑 → 全流程
   预算与算子内只读并行；控制流 `goto` / `loop` 与子图暂缓）：**第 1 期（工具契约）、第 2 期
