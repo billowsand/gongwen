@@ -141,6 +141,10 @@ impl DraftPage<'_> {
     /// 收起功能区的箭头——这三样都不属于任何一个分区，切分区卡时必须一直在。
     pub(crate) fn ribbon_tabs(&mut self, ui: &mut egui::Ui) -> Option<egui::Rect> {
         ui.scope(|ui| {
+            let compact = theme::smartisan::active() && ui.available_width() < 960.0;
+            if compact {
+                ui.spacing_mut().button_padding.x = 4.0;
+            }
             ui.spacing_mut().interact_size.y = 26.0;
             ui.spacing_mut().item_spacing.x = 2.0;
             let mut selected_rect = None;
@@ -164,7 +168,7 @@ impl DraftPage<'_> {
                 toolbar_separator(ui);
 
                 // 分区卡的悬停底色要与相邻的选中轮廓留出清晰间隔。
-                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.spacing_mut().item_spacing.x = if compact { 2.0 } else { 10.0 };
                 let current = self.config.ribbon_tab;
                 let mut picked = None;
                 let mut toggle_collapse = false;
@@ -177,8 +181,9 @@ impl DraftPage<'_> {
                     } else {
                         tab.hint().to_string()
                     };
-                    let response = theme::ribbon_tab_button(ui, current == tab, tab.label())
-                        .on_hover_text(tip);
+                    let response =
+                        theme::ribbon_tab_button(ui, current == tab, tab.label(), compact)
+                            .on_hover_text(tip);
                     if current == tab {
                         selected_rect = Some(response.rect);
                     }

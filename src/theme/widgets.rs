@@ -207,7 +207,12 @@ pub(crate) fn nav_button(
 
 /// 功能区分区卡：选中项的底色属于外层闭合 Ribbon 轮廓，这里只负责文字与交互，
 /// 避免按钮自己再画一个矩形，把连接曲线切断。
-pub(crate) fn ribbon_tab_button(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
+pub(crate) fn ribbon_tab_button(
+    ui: &mut egui::Ui,
+    selected: bool,
+    label: &str,
+    compact: bool,
+) -> egui::Response {
     let text = if selected {
         egui::RichText::new(label).color(accent()).strong()
     } else {
@@ -215,7 +220,7 @@ pub(crate) fn ribbon_tab_button(ui: &mut egui::Ui, selected: bool, label: &str) 
     };
     let button = egui::Button::new(text)
         .corner_radius(chrome_radius(6))
-        .min_size(egui::vec2(52.0, 24.0));
+        .min_size(egui::vec2(if compact { 38.0 } else { 52.0 }, 24.0));
     ui.add(if selected {
         button.frame(false)
     } else {

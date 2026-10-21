@@ -281,7 +281,11 @@ impl GongwenApp {
     /// Windows 与传统 Linux 桌面使用右侧三枚自绘窗口按钮；Hyprland 平铺会话
     /// 只保留关闭按钮，避免显示 compositor 不采用的最小化/最大化语义。
     pub(crate) fn window_titlebar(&mut self, ui: &mut egui::Ui) {
-        const HEIGHT: f32 = 34.0;
+        let height = if theme::smartisan::active() && self.macos_titlebar_metrics.is_none() {
+            30.0
+        } else {
+            34.0
+        };
         const BTN_W: f32 = 46.0;
 
         let ctx = ui.ctx().clone();
@@ -299,7 +303,7 @@ impl GongwenApp {
         };
 
         let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), HEIGHT),
+            egui::vec2(ui.available_width(), height),
             egui::Sense::hover(),
         );
 
@@ -349,9 +353,10 @@ impl GongwenApp {
         let mut quick_rect: Option<egui::Rect> = None;
         if self.showing_doc() {
             let left = text_right + 8.0;
+            let inset = if theme::smartisan::active() { 3.0 } else { 4.0 };
             let available = egui::Rect::from_min_max(
-                egui::pos2(left, rect.top() + 4.0),
-                egui::pos2(title_rect.right() - 8.0, rect.bottom() - 4.0),
+                egui::pos2(left, rect.top() + inset),
+                egui::pos2(title_rect.right() - 8.0, rect.bottom() - inset),
             );
             if available.width() > 120.0 {
                 let mut quick = ui.new_child(
@@ -405,7 +410,7 @@ impl GongwenApp {
                     rect.right() - (titlebar_buttons.len() - index) as f32 * BTN_W,
                     rect.top(),
                 ),
-                egui::vec2(BTN_W, HEIGHT),
+                egui::vec2(BTN_W, height),
             );
             let response = ui
                 .interact(
@@ -539,7 +544,7 @@ impl GongwenApp {
         }
     }
 
-    /// 在标题栏正中写当前标签的标题（带状态标记）。
+    /// 顶栏正中显示当前标签标题；稿纸主题显示应用身份，稿名留在纸签里。
     ///
     /// 按窗口整体的几何中心摆，不因左右控件宽度不对称而偏移；剪裁区以中心
     /// 对称收进 `[left, right]`，窄窗口时不会压到窗口按钮或快速访问。
@@ -557,7 +562,10 @@ impl GongwenApp {
             return;
         }
         let (mark, active_title) = self.tab_label(self.active_tab);
-        let active_title = if active_title.is_empty() {
+        // 稿纸主题由纸签承载稿名，顶栏只保留应用身份，避免上下重复争夺重心。
+        let active_title = if theme::smartisan::active() {
+            format!("{} · 离线写作", version::APP_TITLE)
+        } else if active_title.is_empty() {
             version::APP_TITLE.to_string()
         } else if mark.is_empty() {
             active_title
@@ -572,7 +580,11 @@ impl GongwenApp {
             rect.center(),
             egui::Align2::CENTER_CENTER,
             truncate_middle(&active_title, 42),
-            egui::TextStyle::Body.resolve(ui.style()),
+            if theme::smartisan::active() {
+                egui::TextStyle::Small.resolve(ui.style())
+            } else {
+                egui::TextStyle::Body.resolve(ui.style())
+            },
             color,
         );
     }
@@ -760,6 +772,9 @@ impl GongwenApp {
     /// 快捷查找与换肤两枚图标按钮。稿件和导航页共用这一条，界面纵向只让出一行。
     pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
         let background = ui.painter().add(egui::Shape::Noop);
+        if theme::smartisan::active() {
+            ui.spacing_mut().item_spacing.x = 4.0;
+        }
         ui.horizontal(|ui| {
             self.app_menu_button(ui);
             toolbar_separator(ui);
@@ -1249,13 +1264,30 @@ impl GongwenApp {
         let text = ui
             .painter()
             .layout_no_wrap(
-                truncate_middle(&title, DOC_TAB_TITLE_CHARS),
+                truncate_middle(&title, self.tab_title_chars(tab)),
                 font,
                 theme::text(),
             )
             .size()
             .x;
-        (text + DOC_TAB_CHROME_WIDTH).clamp(DOC_TAB_MIN_WIDTH, DOC_TAB_MAX_WIDTH)
+        let max_width = if self.paper_document_tab(tab) {
+            370.0
+        } else {
+            DOC_TAB_MAX_WIDTH
+        };
+        (text + DOC_TAB_CHROME_WIDTH).clamp(DOC_TAB_MIN_WIDTH, max_width)
+    }
+
+    fn paper_document_tab(&self, tab: usize) -> bool {
+        theme::smartisan::active() && matches!(self.tabs.get(tab), Some(TabRef::Doc(_)))
+    }
+
+    fn tab_title_chars(&self, tab: usize) -> usize {
+        if self.paper_document_tab(tab) {
+            22
+        } else {
+            DOC_TAB_TITLE_CHARS
+        }
     }
 
     /// 画一格标签，返回（是否点了标签体, 是否点了关闭, 实际标签区域）。
@@ -1413,7 +1445,19 @@ impl GongwenApp {
         let mut closed = false;
 
         // 内容区：图标/脏标记在左，关闭按钮钉死在右端，标题吃掉中间。
-        let inner = rect.shrink2(egui::vec2(8.0, 4.0));
+        let mut inner = rect.shrink2(egui::vec2(8.0, 4.0));
+        if selected && self.paper_document_tab(tab) {
+            // 纸签左侧的短色签比整格强调底更安静，文字与色签保持间距。
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(
+                    rect.min + egui::vec2(3.0, 6.0),
+                    egui::pos2(rect.left() + 6.0, rect.bottom() - 5.0),
+                ),
+                1,
+                theme::smartisan::INDEX_MARK,
+            );
+            inner.min.x += 3.0;
+        }
         let mut content = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(inner)
@@ -1445,8 +1489,8 @@ impl GongwenApp {
             );
         }
         let label_width = (content.available_width() - CLOSE_HIT - CLOSE_GAP).max(24.0);
-        let label_text =
-            egui::RichText::new(truncate_middle(&title, DOC_TAB_TITLE_CHARS)).color(text_color);
+        let label_text = egui::RichText::new(truncate_middle(&title, self.tab_title_chars(tab)))
+            .color(text_color);
         let label_response = content.add_sized(
             [label_width, TOOLBAR_CONTROL_HEIGHT - 8.0],
             egui::Label::new(label_text)

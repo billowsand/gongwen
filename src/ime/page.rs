@@ -155,7 +155,8 @@ impl Ime {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             for tab in Tab::ALL {
-                if theme::ribbon_tab_button(ui, self.page.tab == tab, tab.label()).clicked() {
+                if theme::ribbon_tab_button(ui, self.page.tab == tab, tab.label(), false).clicked()
+                {
                     self.page.tab = tab;
                 }
             }

@@ -374,17 +374,32 @@ fn smartisan_document_chrome_samples() {
     theme::configure_icons(&ctx);
     theme::configure_style(&ctx);
     let mut app = fixture();
-    app.tabs = vec![
-        TabRef::Page(NavPage::Manuscript),
-        TabRef::Doc(0),
-        TabRef::Page(NavPage::Vocabulary),
-    ];
+    app.tabs = vec![TabRef::Page(NavPage::Manuscript), TabRef::Doc(0)];
     app.active_tab = 1;
-    app.tabs.push(TabRef::Page(NavPage::Knowledge));
-    app.tabs.push(TabRef::Page(NavPage::Proofread));
-    let size = egui::vec2(1280.0, 130.0);
+    app.docs[0].draft.title_hint = "认知战前沿理论：概念之争、本体论转向与可计算化".into();
+    app.docs[0].draft.kind = TemplateKind::ResearchReport;
+    app.docs[0].generated_markdown =
+        "# 认知战前沿理论：概念之争、本体论转向与可计算化\n\n研究材料样张。".into();
+    app.config.ribbon_tab = crate::models::RibbonTab::Output;
     let mut canvas = crate::ui_snapshot::Canvas::default();
-    for scale in [1.0, 1.25, 1.5, 2.0] {
+    for (width, scale, crowded) in [
+        (1280.0, 1.0, false),
+        (2048.0, 1.0, false),
+        (760.0, 1.0, true),
+        (900.0, 1.0, true),
+        (1280.0, 1.25, true),
+        (1280.0, 1.5, false),
+        (1280.0, 2.0, false),
+    ] {
+        app.tabs.truncate(2);
+        if crowded {
+            app.tabs.extend([
+                TabRef::Page(NavPage::Vocabulary),
+                TabRef::Page(NavPage::Knowledge),
+                TabRef::Page(NavPage::Proofread),
+            ]);
+        }
+        let size = egui::vec2(width, 185.0);
         ctx.set_pixels_per_point(scale);
         for frame in 0..3 {
             let mut output = ctx.run_ui(
@@ -401,6 +416,10 @@ fn smartisan_document_chrome_samples() {
                         .show_separator_line(false)
                         .frame(theme::panel(theme::surface(), 12))
                         .show(ui, |ui| app.top_bar(ui));
+                    egui::Panel::top("chrome_ribbon")
+                        .show_separator_line(false)
+                        .frame(theme::panel(theme::surface(), 10))
+                        .show(ui, |ui| app.draft_page().ribbon(ui));
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE.fill(theme::surface()))
                         .show(ui, |_| {});
@@ -417,7 +436,7 @@ fn smartisan_document_chrome_samples() {
                     size,
                     theme::canvas(),
                     std::path::Path::new(&format!(
-                        "tmp/smartisan-chrome-{}.png",
+                        "tmp/smartisan-chrome-{width}-{}.png",
                         (scale * 100.0) as u32
                     )),
                 );

@@ -176,7 +176,7 @@ pub(crate) fn panel(fill: Color32, margin: i8) -> egui::Frame {
 /// 功能区第二行只负责留出内容边距；底色和轮廓等上下两行完成排版后统一绘制。
 pub(crate) fn ribbon_tray_layout() -> egui::Frame {
     if smartisan::active() {
-        return egui::Frame::new().inner_margin(Margin::symmetric(2, 6));
+        return egui::Frame::new().inner_margin(Margin::symmetric(2, 4));
     }
     egui::Frame::new()
         .inner_margin(Margin::symmetric(7, 2))

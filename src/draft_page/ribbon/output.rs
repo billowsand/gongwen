@@ -8,6 +8,16 @@ use eframe::egui;
 impl DraftPage<'_> {
     pub(crate) fn ribbon_output(&mut self, ui: &mut egui::Ui) {
         self.ribbon_export_formats(ui);
+        if theme::smartisan::active() && ui.available_width() >= 320.0 {
+            // 宽窗左侧负责生成，右侧负责找到成品；窄窗仍连续排布并沿用横向滚动。
+            // 预留目录按钮、三个成品按钮与分隔线的完整宽度，避免向左溢出覆盖格式组。
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.export_open_buttons(ui);
+                toolbar_separator(ui);
+                self.ribbon_output_directory(ui);
+            });
+            return;
+        }
         toolbar_separator(ui);
         self.ribbon_output_directory(ui);
         if theme::smartisan::active() {
@@ -19,10 +29,14 @@ impl DraftPage<'_> {
     fn ribbon_export_formats(&mut self, ui: &mut egui::Ui) {
         let has_draft = !self.doc.generated_markdown.trim().is_empty();
         let ready = !self.doc.busy && has_draft;
-        let export_button = ui.add_enabled(
-            ready,
-            theme::secondary_icon_button(theme::Icon::FileDown, "导出"),
-        );
+        let export_button = if theme::smartisan::active() {
+            theme::primary_icon_button_enabled(ui, ready, theme::Icon::FileDown, "导出")
+        } else {
+            ui.add_enabled(
+                ready,
+                theme::secondary_icon_button(theme::Icon::FileDown, "导出"),
+            )
+        };
         if export_button
             .on_hover_text("按设置里勾选的格式导出当前审校稿，可反复导出")
             .clicked()
@@ -49,6 +63,7 @@ impl DraftPage<'_> {
         let overwrite = self.config.export.overwrite;
         let mut only: Option<(ExportSelection, &'static str)> = None;
         ui.add_enabled_ui(ready, |ui| {
+            let background = ui.painter().add(egui::Shape::Noop);
             for (icon, label, selection, tip) in [
                 (
                     theme::Icon::FileTypeDoc,
@@ -99,13 +114,24 @@ impl DraftPage<'_> {
                     "这一次只出 Typst 包：模板、数据与插图打成 zip，装有常用中文字体的机器可用 typst 命令行编译",
                 ),
             ] {
+                let mut button = theme::icon_text_button(icon, label);
+                if theme::smartisan::active() {
+                    button = button.frame_when_inactive(false);
+                }
                 if ui
-                    .add(theme::icon_text_button(icon, label))
+                    .add(button)
                     .on_hover_text(tip)
                     .clicked()
                 {
                     only = Some((selection, label));
                 }
+            }
+            if theme::smartisan::active() {
+                // 四种临时格式共用一个浅凹托盘，和左侧的主导出动作分出主次。
+                ui.painter().set(
+                    background,
+                    egui::Shape::rect_filled(ui.min_rect(), 4, theme::surface_sunk()),
+                );
             }
         });
         if let Some((selection, label)) = only {

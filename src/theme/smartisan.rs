@@ -9,6 +9,8 @@ pub(super) const LABEL: &str = "锤子稿纸";
 pub const PAPER: Color32 = Color32::from_rgb(251, 247, 236);
 pub const OUTLINE_PAPER: Color32 = Color32::from_rgb(242, 235, 221);
 pub const MINIMAP_PAPER: Color32 = Color32::from_rgb(248, 242, 230);
+/// 纸签短标记采用低饱和赭色，不改变全局正文与按钮的墨色。
+pub const INDEX_MARK: Color32 = Color32::from_rgb(182, 139, 79);
 
 pub(super) const fn palette() -> Theme {
     let mut theme = Theme::claude();
@@ -92,8 +94,8 @@ pub fn tab_background(painter: &egui::Painter, slot: egui::layers::ShapeIdx, rec
             egui::Shape::Vec(vec![
                 gradient_shape(
                     Rect::from_min_max(rect.min, egui::pos2(rect.right(), base)),
-                    Color32::from_rgb(119, 102, 86),
-                    Color32::from_rgb(115, 98, 82),
+                    Color32::from_rgb(142, 123, 103),
+                    Color32::from_rgb(133, 114, 95),
                 ),
                 egui::Shape::rect_filled(
                     Rect::from_min_max(egui::pos2(rect.left(), base), rect.max),

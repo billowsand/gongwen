@@ -175,6 +175,12 @@ pub fn document_tab_to(
             1.0 / painter.ctx().pixels_per_point(),
             Some(base),
         )));
+        // 顶边高光把纸签从底板上提起，纸脚仍与功能区连成一张纸。
+        painter.hline(
+            (tab.left() + TOP_RADIUS)..=(tab.right() - TOP_RADIUS),
+            tab.top() + 0.5,
+            Stroke::new(1.0, Color32::from_white_alpha(110)),
+        );
     } else {
         // 常态直接露出栏底材质，只在操作时给一层轻薄反馈。
         if hovered || pressed {
