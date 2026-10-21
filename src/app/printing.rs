@@ -2,7 +2,9 @@
 //! 对话框本身在 `crate::print::dialog`，它只收集选择、不碰打印接口。
 
 use crate::app::{GongwenApp, WorkerResult};
-use crate::print::{DialogOutcome, PrintDialog, PrintJob, PrintRequest, PrinterInfo, PrinterState};
+use crate::print::{
+    DialogOutcome, PrintDialog, PrintJob, PrintRequest, PrinterCaps, PrinterInfo, PrinterState,
+};
 use eframe::egui;
 
 impl GongwenApp {
@@ -72,20 +74,48 @@ impl GongwenApp {
         }
     }
 
+    pub(crate) fn apply_printer_caps(&mut self, dialog: u64, name: &str, caps: PrinterCaps) {
+        if let Some(open) = self
+            .print_dialog
+            .as_mut()
+            .filter(|open| open.id() == dialog)
+        {
+            open.caps_loaded(name, caps);
+        }
+    }
+
     pub(crate) fn print_dialog_window(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.print_dialog.as_mut() else {
             return;
         };
-        let Some(outcome) = dialog.ui(ctx) else {
+        let outcome = dialog.ui(ctx);
+        // 对话框只提出「要查这台」，线程由外壳起：UI 线程不碰打印接口。
+        let caps_request = dialog.take_caps_request().map(|name| (dialog.id(), name));
+        let path = dialog.path().to_path_buf();
+        if let Some((id, name)) = caps_request {
+            self.start_caps_query(id, name, ctx);
+        }
+        let Some(outcome) = outcome else {
             return;
         };
-        let path = dialog.path().to_path_buf();
         self.print_dialog = None;
         match outcome {
             DialogOutcome::Cancel => {}
             DialogOutcome::Print(job) => self.start_print(job, ctx),
             DialogOutcome::SystemDialog => self.start_system_dialog_print(path, ctx),
         }
+    }
+
+    /// 查一台打印机支持的双面、颜色、纸张与纸盒。查一次可能几百毫秒
+    /// （网络打印机更久），放后台线程，对话框先画「正在读取打印机能力…」。
+    fn start_caps_query(&mut self, dialog: u64, name: String, ctx: &egui::Context) {
+        let tx = self.sender.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let caps = crate::print::printer_caps(&name);
+            let _ = tx.send(WorkerResult::PrinterCapsChecked { dialog, name, caps });
+            ctx.request_repaint();
+        });
     }
 
     /// 出纸可能要几秒（逐页光栅化或等 `lp`），放后台线程，主界面照常可用。

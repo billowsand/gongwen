@@ -96,6 +96,12 @@ pub(crate) enum WorkerResult {
         name: String,
         state: crate::print::PrinterState,
     },
+    /// 打印对话框里某台打印机的能力（双面、颜色、纸张、纸盒）。
+    PrinterCapsChecked {
+        dialog: u64,
+        name: String,
+        caps: crate::print::PrinterCaps,
+    },
     /// PDF 打印任务（后台线程逐页光栅化或交给 `lp`）的结果。
     PdfPrinted {
         path: PathBuf,
@@ -538,6 +544,9 @@ impl GongwenApp {
                     name,
                     state,
                 } => self.apply_printer_state(dialog, &name, state),
+                WorkerResult::PrinterCapsChecked { dialog, name, caps } => {
+                    self.apply_printer_caps(dialog, &name, caps)
+                }
                 WorkerResult::PdfPrinted {
                     path,
                     printer,

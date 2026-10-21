@@ -5,10 +5,14 @@
 //! 点「打印」交回一个 [`PrintJob`]，同样由外壳放后台线程执行。
 
 use super::pages::{self, PageSpan};
-use super::{MAX_COPIES, PrintJob, PrintRequest, PrinterInfo, PrinterState};
+use super::{
+    ColorMode, Duplex, MAX_COPIES, PrintJob, PrintRequest, PrinterCaps, PrinterInfo, PrinterState,
+    Scaling,
+};
 use crate::modal::{self, Dismiss};
 use crate::theme;
 use eframe::egui;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// 对话框的结果。
@@ -47,6 +51,22 @@ pub(crate) struct PrintDialog {
     collate: bool,
     range: Range,
     custom: String,
+    /// 按打印机名缓存的能力。换回来不重查。
+    caps: HashMap<String, PrinterCaps>,
+    /// 要外壳去查能力的打印机。对话框自己不起线程。
+    caps_request: Option<String>,
+    /// 已经交给外壳、还没查回来的打印机。免得能力回来之前每帧都起一个线程。
+    caps_in_flight: HashSet<String>,
+    duplex: Option<Duplex>,
+    color: Option<ColorMode>,
+    paper: Option<String>,
+    tray: Option<String>,
+    scaling: Scaling,
+    /// 用户动过哪几项。没动过的，在能力 / 文档默认到达时才可以被预填覆盖。
+    duplex_touched: bool,
+    color_touched: bool,
+    paper_touched: bool,
+    tray_touched: bool,
 }
 
 impl PrintDialog {
@@ -61,6 +81,18 @@ impl PrintDialog {
             collate: true,
             range: Range::All,
             custom: String::new(),
+            caps: HashMap::new(),
+            caps_request: None,
+            caps_in_flight: HashSet::new(),
+            duplex: None,
+            color: None,
+            paper: None,
+            tray: None,
+            scaling: Scaling::Actual,
+            duplex_touched: false,
+            color_touched: false,
+            paper_touched: false,
+            tray_touched: false,
         }
     }
 
@@ -91,6 +123,20 @@ impl PrintDialog {
         }
     }
 
+    /// 某台打印机的能力查回来了。换回这台时不再重查。
+    pub(crate) fn caps_loaded(&mut self, name: &str, caps: PrinterCaps) {
+        self.caps_in_flight.remove(name);
+        self.caps.insert(name.to_string(), caps);
+    }
+
+    /// 外壳该去查哪台打印机的能力了。交出去之后在能力回来之前（或换回来之前）
+    /// 不会再要，免得每帧起一个线程。
+    pub(crate) fn take_caps_request(&mut self) -> Option<String> {
+        let name = self.caps_request.take()?;
+        self.caps_in_flight.insert(name.clone());
+        Some(name)
+    }
+
     pub(crate) fn printer_state(&mut self, name: &str, state: PrinterState) {
         if let Printers::Loaded(printers) = &mut self.printers
             && let Some(printer) = printers.iter_mut().find(|printer| printer.name == name)
@@ -105,7 +151,7 @@ impl PrintDialog {
             ctx,
             egui::Id::new("print_dialog"),
             "打印",
-            460.0,
+            500.0,
             Dismiss::EscOnly,
             |ui| self.contents(ui),
         );
@@ -139,14 +185,30 @@ impl PrintDialog {
                 });
                 self.range_rows(ui, &pages);
                 ui.end_row();
+                self.capability_rows(ui);
             });
         ui.add_space(8.0);
         self.notes(ui, &pages);
         ui.add_space(12.0);
-        self.buttons(ui, &pages)
+        let outcome = self.buttons(ui, &pages);
+        self.request_caps();
+        outcome
+    }
+
+    /// 选中的打印机没查过能力就记下来，外壳每帧取走一次、在后台查。
+    /// 对话框自己不起线程，也不等结果。
+    fn request_caps(&mut self) {
+        if let Some(name) = &self.selected
+            && !self.caps.contains_key(name)
+            && !self.caps_in_flight.contains(name)
+            && self.caps_request.as_deref() != Some(name)
+        {
+            self.caps_request = Some(name.clone());
+        }
     }
 
     fn printer_row(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
         ui.horizontal(|ui| match &self.printers {
             Printers::Loading => {
                 ui.spinner();
@@ -159,6 +221,7 @@ impl PrintDialog {
                 ui.colored_label(theme::warn(), "未找到打印机");
             }
             Printers::Loaded(printers) => {
+                let before = self.selected.clone();
                 let selected_text = self
                     .selected
                     .as_deref()
@@ -185,7 +248,172 @@ impl PrintDialog {
                 {
                     state_badge(ui, &printer.state);
                 }
+                changed = self.selected != before;
             }
+        });
+        if changed {
+            self.printer_changed();
+        }
+    }
+
+    /// 换了打印机：纸张与纸盒的编号是每台打印机自己的，不能沿用。
+    /// 双面、颜色是通用取值，由 [`Self::job`] 按新打印机的能力过滤。
+    fn printer_changed(&mut self) {
+        self.paper = None;
+        self.tray = None;
+        self.paper_touched = false;
+        self.tray_touched = false;
+    }
+
+    /// 在「页码」之后画双面、颜色、纸张、纸盒、缩放。能力查回来之前只画一个
+    /// 提示，不画五个空控件；没有选中打印机（清单列不出来）时整栏不画。
+    fn capability_rows(&mut self, ui: &mut egui::Ui) {
+        let caps = self.gated_caps();
+        match caps {
+            None => {}
+            Some(None) => {
+                ui.label("选项");
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(egui::RichText::new("正在读取打印机能力…").color(theme::text_muted()));
+                });
+                ui.end_row();
+            }
+            Some(Some(caps)) => {
+                ui.label("双面");
+                self.duplex_row(ui, &caps);
+                ui.end_row();
+                ui.label("颜色");
+                self.color_row(ui, &caps);
+                ui.end_row();
+                ui.label("纸张");
+                self.paper_row(ui, &caps);
+                ui.end_row();
+                ui.label("纸盒");
+                self.tray_row(ui, &caps);
+                ui.end_row();
+                ui.label("缩放");
+                self.scaling_row(ui);
+                ui.end_row();
+            }
+        }
+    }
+
+    /// 选中打印机的能力缓存。`None` 是没选中打印机；内层 `None` 是还没查回来。
+    fn gated_caps(&self) -> Option<Option<PrinterCaps>> {
+        let name = self.selected.as_deref()?;
+        Some(self.caps.get(name).cloned())
+    }
+
+    fn duplex_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps) {
+        let text = duplex_label(self.duplex);
+        let row = ui.horizontal(|ui| {
+            ui.add_enabled_ui(caps.duplex, |ui| {
+                egui::ComboBox::from_id_salt("print_dialog_duplex")
+                    .width(180.0)
+                    .selected_text(text)
+                    .show_ui(ui, |ui| {
+                        let mut chosen = self.duplex;
+                        ui.selectable_value(&mut chosen, None, "打印机默认");
+                        ui.selectable_value(&mut chosen, Some(Duplex::Simplex), "单面");
+                        ui.selectable_value(&mut chosen, Some(Duplex::LongEdge), "长边翻转");
+                        ui.selectable_value(&mut chosen, Some(Duplex::ShortEdge), "短边翻转");
+                        if chosen != self.duplex {
+                            self.duplex = chosen;
+                            self.duplex_touched = true;
+                        }
+                    });
+            });
+        });
+        if !caps.duplex {
+            row.response.on_hover_text("这台打印机没有双面单元");
+        }
+    }
+
+    fn color_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps) {
+        // 单色机固定显示「黑白」：这一下拉只是告知，选了也没用。
+        let text = if caps.color {
+            color_label(self.color)
+        } else {
+            "黑白".to_string()
+        };
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(caps.color, |ui| {
+                egui::ComboBox::from_id_salt("print_dialog_color")
+                    .width(180.0)
+                    .selected_text(text)
+                    .show_ui(ui, |ui| {
+                        let mut chosen = self.color;
+                        ui.selectable_value(&mut chosen, None, "打印机默认");
+                        ui.selectable_value(&mut chosen, Some(ColorMode::Color), "彩色");
+                        ui.selectable_value(&mut chosen, Some(ColorMode::Mono), "黑白");
+                        if chosen != self.color {
+                            self.color = chosen;
+                            self.color_touched = true;
+                        }
+                    });
+            });
+        });
+    }
+
+    fn paper_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps) {
+        let text = paper_label(self.paper.as_deref(), caps);
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("print_dialog_paper")
+                .width(180.0)
+                .selected_text(text)
+                .show_ui(ui, |ui| {
+                    let mut chosen = self.paper.clone();
+                    ui.selectable_value(&mut chosen, None, default_paper_text(caps));
+                    for paper in &caps.papers {
+                        ui.selectable_value(&mut chosen, Some(paper.id.clone()), &paper.label);
+                    }
+                    if chosen != self.paper {
+                        self.paper = chosen;
+                        self.paper_touched = true;
+                    }
+                });
+        });
+    }
+
+    fn tray_row(&mut self, ui: &mut egui::Ui, caps: &PrinterCaps) {
+        let text = tray_label(self.tray.as_deref(), caps);
+        let enabled = !caps.trays.is_empty();
+        let row = ui.horizontal(|ui| {
+            ui.add_enabled_ui(enabled, |ui| {
+                egui::ComboBox::from_id_salt("print_dialog_tray")
+                    .width(180.0)
+                    .selected_text(text)
+                    .show_ui(ui, |ui| {
+                        let mut chosen = self.tray.clone();
+                        ui.selectable_value(&mut chosen, None, "自动选择");
+                        for tray in &caps.trays {
+                            ui.selectable_value(&mut chosen, Some(tray.id.clone()), &tray.label);
+                        }
+                        if chosen != self.tray {
+                            self.tray = chosen;
+                            self.tray_touched = true;
+                        }
+                    });
+            });
+        });
+        // 「自动选择」对应 PrintJob.tray = None；默认纸盒只在悬停里说明。
+        if let Some(default) = caps
+            .default_tray
+            .as_deref()
+            .and_then(|id| caps.trays.iter().find(|tray| tray.id == id))
+        {
+            row.response
+                .on_hover_text(format!("打印机默认纸盒：{}", default.label));
+        }
+    }
+
+    fn scaling_row(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut self.scaling, Scaling::Actual, "实际大小（公文推荐）")
+                .on_hover_text("按纸张实际大小出图；页面放不下时自动缩小");
+            ui.radio_value(&mut self.scaling, Scaling::Fit, "适合纸张")
+                .on_hover_text("按可打印区等比缩放，适合纸型与版面不一致的 PDF");
         });
     }
 
@@ -249,13 +477,23 @@ impl PrintDialog {
 
     fn notes(&self, ui: &mut egui::Ui, pages: &Result<Selection, String>) {
         if let Ok(selection) = pages {
+            let double_sided = matches!(
+                self.effective_duplex(),
+                Some(Duplex::LongEdge | Duplex::ShortEdge)
+            );
             let summary = match selection.page_total {
                 Some(total) => {
-                    let sheets = total * u64::from(self.copies);
-                    if self.copies > 1 {
-                        format!("共 {total} 页 × {} 份，单面约 {sheets} 张纸", self.copies)
+                    let per_copy = if double_sided {
+                        total.div_ceil(2)
                     } else {
-                        format!("共 {total} 页，单面约 {sheets} 张纸")
+                        total
+                    };
+                    let sheets = per_copy * u64::from(self.copies);
+                    let mode = if double_sided { "双面" } else { "单面" };
+                    if self.copies > 1 {
+                        format!("共 {total} 页 × {} 份，{mode}约 {sheets} 张纸", self.copies)
+                    } else {
+                        format!("共 {total} 页，{mode}约 {sheets} 张纸")
                     }
                 }
                 None => format!("全部页面 × {} 份", self.copies),
@@ -346,13 +584,33 @@ impl PrintDialog {
             copies: self.copies.clamp(1, MAX_COPIES),
             collate: self.copies > 1 && self.collate,
             pages: selection.spans.clone(),
-            // 第二期才在对话框里给这几项；现在先按「沿用打印机默认」提交。
-            duplex: None,
-            color: None,
-            paper: None,
-            tray: None,
-            scaling: super::Scaling::Actual,
+            duplex: self.effective_duplex(),
+            color: self.effective_color(),
+            paper: self.paper.clone(),
+            tray: self.tray.clone(),
+            scaling: self.scaling,
         })
+    }
+
+    /// 这台打印机不支持双面时，即使状态里留着长边也不提交：新选的打印机可能
+    /// 没有双面单元（换机前留下的选择、或从偏好里预填的）。
+    fn effective_duplex(&self) -> Option<Duplex> {
+        let supported = self
+            .selected
+            .as_deref()
+            .and_then(|name| self.caps.get(name))
+            .is_none_or(|caps| caps.duplex);
+        self.duplex.filter(|_| supported)
+    }
+
+    /// 同上，单色机不提交彩色或黑白选择，交给打印机默认。
+    fn effective_color(&self) -> Option<ColorMode> {
+        let supported = self
+            .selected
+            .as_deref()
+            .and_then(|name| self.caps.get(name))
+            .is_none_or(|caps| caps.color);
+        self.color.filter(|_| supported)
     }
 
     /// 当前页码选择解析出的结果。
@@ -396,6 +654,56 @@ struct Selection {
     /// 要打的页数；全部页而总页数未知时为 `None`。
     page_total: Option<u64>,
     truncated: bool,
+}
+
+fn duplex_label(duplex: Option<Duplex>) -> String {
+    match duplex {
+        None => "打印机默认".to_string(),
+        Some(Duplex::Simplex) => "单面".to_string(),
+        Some(Duplex::LongEdge) => "长边翻转".to_string(),
+        Some(Duplex::ShortEdge) => "短边翻转".to_string(),
+    }
+}
+
+fn color_label(color: Option<ColorMode>) -> String {
+    match color {
+        None => "打印机默认".to_string(),
+        Some(ColorMode::Color) => "彩色".to_string(),
+        Some(ColorMode::Mono) => "黑白".to_string(),
+    }
+}
+
+/// 纸张下拉第一项的文字：「打印机默认（A4）」，没有默认纸张就不写括号。
+fn default_paper_text(caps: &PrinterCaps) -> String {
+    caps.default_paper
+        .as_deref()
+        .and_then(|id| caps.papers.iter().find(|paper| paper.id == id))
+        .map(|paper| format!("打印机默认（{}）", paper.label))
+        .unwrap_or_else(|| "打印机默认".to_string())
+}
+
+fn paper_label(paper: Option<&str>, caps: &PrinterCaps) -> String {
+    match paper {
+        Some(id) => caps
+            .papers
+            .iter()
+            .find(|paper| paper.id == id)
+            .map(|paper| paper.label.clone())
+            .unwrap_or_else(|| id.to_string()),
+        None => default_paper_text(caps),
+    }
+}
+
+fn tray_label(tray: Option<&str>, caps: &PrinterCaps) -> String {
+    match tray {
+        Some(id) => caps
+            .trays
+            .iter()
+            .find(|tray| tray.id == id)
+            .map(|tray| tray.label.clone())
+            .unwrap_or_else(|| id.to_string()),
+        None => "自动选择".to_string(),
+    }
 }
 
 fn display_name(printer: &PrinterInfo) -> String {
@@ -513,6 +821,106 @@ mod tests {
         assert_eq!((job.copies, job.collate), (1, false));
     }
 
+    fn caps(duplex: bool, color: bool) -> PrinterCaps {
+        use super::super::MediaOption;
+        PrinterCaps {
+            duplex,
+            color,
+            papers: vec![
+                MediaOption {
+                    id: "9".to_string(),
+                    label: "A4".to_string(),
+                },
+                MediaOption {
+                    id: "8".to_string(),
+                    label: "A3".to_string(),
+                },
+            ],
+            default_paper: Some("9".to_string()),
+            trays: vec![MediaOption {
+                id: "7".to_string(),
+                label: "纸盒 1".to_string(),
+            }],
+            default_tray: Some("7".to_string()),
+        }
+    }
+
+    fn ready_dialog() -> PrintDialog {
+        let mut dialog = dialog(12);
+        dialog.printers_loaded(Ok(vec![printer("Office", true)]));
+        dialog.caps_loaded("Office", caps(true, true));
+        dialog
+    }
+
+    #[test]
+    fn capability_choices_become_job_fields() {
+        let mut dialog = ready_dialog();
+        dialog.duplex = Some(Duplex::ShortEdge);
+        dialog.color = Some(ColorMode::Mono);
+        dialog.paper = Some("8".to_string());
+        dialog.tray = Some("7".to_string());
+        dialog.scaling = Scaling::Fit;
+        let job = dialog.job(&dialog.pages()).expect("全部");
+        assert_eq!(job.duplex, Some(Duplex::ShortEdge));
+        assert_eq!(job.color, Some(ColorMode::Mono));
+        assert_eq!(job.paper.as_deref(), Some("8"));
+        assert_eq!(job.tray.as_deref(), Some("7"));
+        assert_eq!(job.scaling, Scaling::Fit);
+    }
+
+    #[test]
+    fn untouched_options_are_left_to_the_printer() {
+        let dialog = ready_dialog();
+        let job = dialog.job(&dialog.pages()).expect("全部");
+        assert_eq!(job.duplex, None);
+        assert_eq!(job.color, None);
+        assert_eq!(job.paper, None);
+        assert_eq!(job.tray, None);
+        assert_eq!(job.scaling, Scaling::Actual);
+    }
+
+    #[test]
+    fn a_printer_without_duplex_never_gets_a_duplex_choice() {
+        let mut dialog = dialog(12);
+        dialog.printers_loaded(Ok(vec![printer("Office", true)]));
+        dialog.caps_loaded("Office", caps(false, false));
+        // 换打印机前留下的长边选择、以及单色机上的彩色选择，都不提交。
+        dialog.duplex = Some(Duplex::LongEdge);
+        dialog.color = Some(ColorMode::Color);
+        let job = dialog.job(&dialog.pages()).expect("全部");
+        assert_eq!(job.duplex, None);
+        assert_eq!(job.color, None);
+    }
+
+    #[test]
+    fn caps_are_requested_once_per_printer() {
+        let mut dialog = dialog(12);
+        assert_eq!(dialog.take_caps_request(), None, "还没选中打印机");
+        dialog.printers_loaded(Ok(vec![printer("HP", true), printer("Office", false)]));
+        // 记住的是 Office（构造对话框时传入的「上次用的」）。
+        dialog.request_caps();
+        assert_eq!(dialog.take_caps_request().as_deref(), Some("Office"));
+        // 交出去以后、能力回来之前不再要，否则每帧都会起一个线程。
+        dialog.request_caps();
+        assert_eq!(dialog.take_caps_request(), None);
+        dialog.caps_loaded("Office", caps(false, true));
+        dialog.request_caps();
+        assert_eq!(dialog.take_caps_request(), None, "有了缓存就不再查");
+    }
+
+    #[test]
+    fn switching_printers_drops_printer_specific_choices_and_queries_the_new_one() {
+        let mut dialog = ready_dialog();
+        dialog.paper = Some("8".to_string());
+        dialog.tray = Some("7".to_string());
+        dialog.selected = Some("HP".to_string());
+        dialog.printer_changed();
+        assert_eq!(dialog.paper, None);
+        assert_eq!(dialog.tray, None);
+        dialog.request_caps();
+        assert_eq!(dialog.take_caps_request().as_deref(), Some("HP"));
+    }
+
     #[test]
     fn unknown_page_count_only_allows_printing_everything() {
         let mut dialog = dialog(0);
@@ -528,7 +936,8 @@ mod tests {
         theme::configure_icons(&ctx);
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         theme::configure_style(&ctx);
-        let size = egui::vec2(760.0, 560.0);
+        // 对话框 500 宽，加上边距与五行选项后高度也要留够。
+        let size = egui::vec2(820.0, 780.0);
         let mut canvas = crate::ui_snapshot::Canvas::default();
         let mut frame = || {
             ctx.run_ui(
@@ -562,7 +971,30 @@ mod tests {
             printer("Office", false),
         ]));
         ready.printer_state("Office", PrinterState::Ready);
+        ready.caps_loaded("Office", caps(true, true));
         snapshot(&mut ready, "ready");
+
+        // 能力还没回来：five 行只剩一个 spinner。
+        let mut loading_caps = dialog(12);
+        loading_caps.printers_loaded(Ok(vec![printer("Office", true)]));
+        snapshot(&mut loading_caps, "caps-loading");
+
+        // 没有双面单元的打印机：双面置灰，纸盒列表为空也置灰。
+        let mut single = dialog(12);
+        single.printers_loaded(Ok(vec![printer("HP_DeskJet_4900", true)]));
+        single.caps_loaded(
+            "HP_DeskJet_4900",
+            PrinterCaps {
+                color: true,
+                papers: vec![super::super::MediaOption {
+                    id: "9".to_string(),
+                    label: "A4".to_string(),
+                }],
+                default_paper: Some("9".to_string()),
+                ..Default::default()
+            },
+        );
+        snapshot(&mut single, "caps-single-sided");
 
         ready.printer_state("Office", PrinterState::Offline);
         ready.copies = 2;

@@ -61,8 +61,6 @@ pub(crate) enum Scaling {
 }
 
 /// 纸张或纸盒的一个可选项。`id` 交给驱动 / CUPS，`label` 给人看。
-// 第二步（对话框）才用上这些字段；先按步骤单独提交，免得把界面和查询揉在一起。
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MediaOption {
     pub(crate) id: String,
@@ -71,8 +69,7 @@ pub(crate) struct MediaOption {
 
 /// 一台打印机支持哪些选项。查不到就用 [`Default`]：双面、彩色都当不支持，
 /// 纸张与纸盒列表为空，界面据此置灰而不是报错。
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct PrinterCaps {
     /// 有双面单元。
     pub(crate) duplex: bool,
@@ -206,8 +203,6 @@ pub(crate) fn list_printers() -> Result<Vec<PrinterInfo>, String> {
 
 /// 查一台打印机支持的双面、颜色、纸张与纸盒。阻塞调用，调用方放后台线程。
 /// 查不到返回默认值（什么都不支持），不报错：能力只用来置灰选项，不该拦住打印。
-// 第二步的对话框接上后就有调用方，届时去掉这行。
-#[allow(dead_code)]
 pub(crate) fn printer_caps(name: &str) -> PrinterCaps {
     #[cfg(windows)]
     {
