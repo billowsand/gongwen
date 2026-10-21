@@ -8,6 +8,8 @@ use crate::print::{
     PrinterState,
 };
 use eframe::egui;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 impl GongwenApp {
     /// 打开打印对话框，同时在后台列打印机、逐台查状态。已开着的对话框换成新的。
@@ -177,13 +179,15 @@ impl GongwenApp {
         };
         match outcome {
             DialogOutcome::Cancel => self.print_dialog = None,
+            // 打印中对话框不关：显示进度与「取消」，结果按 dialog 编号转回来
+            // （手动双面第一轮还会停在「等待翻面」）。
             DialogOutcome::Print(job) => {
-                self.print_dialog = None;
-                self.start_print(job, printer_prefs, None, ctx);
-            }
-            // 手动双面的一轮：对话框留在屏幕上，结果按 dialog 编号转回来。
-            DialogOutcome::PrintKeepOpen(job) => {
-                self.start_print(job, printer_prefs, Some(dialog_id), ctx);
+                let cancel = self
+                    .print_dialog
+                    .as_ref()
+                    .map(PrintDialog::cancel_token)
+                    .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+                self.start_print(job, printer_prefs, Some(dialog_id), cancel, ctx);
             }
             DialogOutcome::SystemDialog => {
                 self.print_dialog = None;
@@ -201,9 +205,16 @@ impl GongwenApp {
         result: Result<PrintOutcome, String>,
     ) {
         self.status = match &result {
-            Ok(PrintOutcome::Printed) => match &printer {
-                Some(printer) => format!("已送打印机「{printer}」：{}。", path.display()),
-                None => format!("已送打印机：{}。", path.display()),
+            Ok(PrintOutcome::Printed { job }) => match (printer, job) {
+                (Some(printer), Some(job)) => format!(
+                    "已送打印机「{printer}」（任务 {job}）：{}。",
+                    path.display()
+                ),
+                (Some(printer), None) => format!("已送打印机「{printer}」：{}。", path.display()),
+                (None, Some(job)) => {
+                    format!("已送打印机（任务 {job}）：{}。", path.display())
+                }
+                (None, None) => format!("已送打印机：{}。", path.display()),
             },
             Ok(PrintOutcome::Cancelled) => "已取消打印。".into(),
             Err(error) => format!("打印失败：{error}"),
@@ -234,11 +245,23 @@ impl GongwenApp {
     }
 
     /// 出纸可能要几秒（逐页光栅化或等 `lp`），放后台线程，主界面照常可用。
+    /// 后台报来的打印进度。对话框已经关了就丢掉。
+    pub(crate) fn apply_print_progress(&mut self, dialog: u64, done: u32, total: u32) {
+        if let Some(open) = self
+            .print_dialog
+            .as_mut()
+            .filter(|open| open.id() == dialog)
+        {
+            open.progress(done, total);
+        }
+    }
+
     fn start_print(
         &mut self,
         job: PrintJob,
         prefs: Option<(String, PrinterPrefs)>,
         dialog: Option<u64>,
+        cancel: Arc<AtomicBool>,
         ctx: &egui::Context,
     ) {
         let mut changed = false;
@@ -259,8 +282,18 @@ impl GongwenApp {
         self.status = format!("正在打印 {}…", job.path.display());
         let tx = self.sender.clone();
         let ctx = ctx.clone();
+        let progress_tx = self.sender.clone();
+        let progress_ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = crate::print::print(&job);
+            let progress = move |done: u32, total: u32| {
+                let _ = progress_tx.send(WorkerResult::PrintProgress {
+                    dialog: dialog.unwrap_or(0),
+                    done,
+                    total,
+                });
+                progress_ctx.request_repaint();
+            };
+            let result = crate::print::print(&job, &progress, &cancel);
             let _ = tx.send(WorkerResult::PdfPrinted {
                 path: job.path,
                 printer: job.printer,
@@ -282,6 +315,7 @@ impl GongwenApp {
             let _ = tx.send(WorkerResult::PdfPrinted {
                 path,
                 printer: None,
+                dialog: None,
                 result,
             });
             ctx.request_repaint();

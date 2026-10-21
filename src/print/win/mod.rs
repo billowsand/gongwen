@@ -10,12 +10,17 @@ use super::pages::{self, PageSpan};
 use super::{PrintJob, PrintOutcome, Scaling};
 use gdi::{DcGuard, Document, GlobalMemory};
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use windows_sys::Win32::UI::Controls::Dialogs::{
     CommDlgExtendedError, PD_PAGENUMS, PD_RETURNDC, PD_USEDEVMODECOPIESANDCOLLATE, PRINTDLGW,
     PrintDlgW,
 };
 
-pub(super) fn print(job: &PrintJob) -> Result<PrintOutcome, String> {
+pub(super) fn print(
+    job: &PrintJob,
+    progress: &dyn Fn(u32, u32),
+    cancel: &AtomicBool,
+) -> Result<PrintOutcome, String> {
     let document = Document::open(&job.path)?;
     let page_count = u32::try_from(document.page_count()).unwrap_or(u32::MAX);
     let spans = clip_spans(job.pages.as_deref(), page_count);
@@ -37,13 +42,18 @@ pub(super) fn print(job: &PrintJob) -> Result<PrintOutcome, String> {
     if job.reverse {
         sequence.reverse();
     }
-    document.print(
+    let status = document.print(
         &device.dc,
         &job.title,
         &sequence,
         job.scaling == Scaling::Fit,
+        progress,
+        cancel,
     )?;
-    Ok(PrintOutcome::Printed)
+    Ok(match status {
+        gdi::PrintStatus::Done => PrintOutcome::Printed { job: None },
+        gdi::PrintStatus::Cancelled => PrintOutcome::Cancelled,
+    })
 }
 
 /// 页码区间截到文档实际页数；`None` 是全部页。
@@ -120,7 +130,12 @@ pub(super) fn print_with_system_dialog(path: &Path) -> Result<PrintOutcome, Stri
         .unwrap_or_else(|| "PDF".to_string());
     let spans = [(u32::from(from), u32::from(to))];
     let sequence: Vec<u32> = pages::print_sequence(&spans, copies, true).collect();
+    // 系统对话框自己就是入口，这里不报进度、也不取消。
+    let cancel = AtomicBool::new(false);
     // 系统对话框里驱动自己的设置说了算，程序只按实际大小出图。
-    document.print(&dc, &title, &sequence, false)?;
-    Ok(PrintOutcome::Printed)
+    let status = document.print(&dc, &title, &sequence, false, &|_, _| {}, &cancel)?;
+    Ok(match status {
+        gdi::PrintStatus::Done => PrintOutcome::Printed { job: None },
+        gdi::PrintStatus::Cancelled => PrintOutcome::Cancelled,
+    })
 }

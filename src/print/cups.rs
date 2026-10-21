@@ -55,7 +55,17 @@ pub(super) fn printer_caps(name: &str) -> PrinterCaps {
 
 /// 交给 `lp`，成败看退出码。`lp` 自己的报错（没有默认打印机之类）比我们编的话
 /// 准确，所以原样转出去；这里不改语言环境，报错跟随系统语言。
-pub(super) fn print(job: &PrintJob) -> Result<PrintOutcome, String> {
+///
+/// `lp` 是一次把整份 PDF 交出去，没法逐页报进度；取消也只在交给它之前看一次
+/// （之后任务已经在 CUPS 队列里，该由打印队列管理去取消，不在本程序范围）。
+pub(super) fn print(
+    job: &PrintJob,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<PrintOutcome, String> {
+    use std::sync::atomic::Ordering;
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(PrintOutcome::Cancelled);
+    }
     let program = program("lp")
         .ok_or_else(|| "未找到 lp 命令，本机可能没有安装 CUPS 打印服务".to_string())?;
     let output = Command::new(program)
@@ -63,7 +73,12 @@ pub(super) fn print(job: &PrintJob) -> Result<PrintOutcome, String> {
         .output()
         .map_err(|error| format!("无法启动打印：{error}"))?;
     if output.status.success() {
-        return Ok(PrintOutcome::Printed);
+        // `lp` 的成功提示会翻译成系统语言，只从里面找「打印机名-数字」这个词。
+        let job_id = parse_job_id(
+            &String::from_utf8_lossy(&output.stdout),
+            job.printer.as_deref(),
+        );
+        return Ok(PrintOutcome::Printed { job: job_id });
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     let detail = stderr.trim();
@@ -131,6 +146,42 @@ pub(super) fn lp_args(job: &PrintJob) -> Vec<OsString> {
     args.push("--".into());
     args.push(job.path.as_os_str().to_owned());
     args
+}
+
+/// 从 `lp` 的标准输出里取任务号。CUPS 的提示句会随系统语言翻译，所以不按句子
+/// 解析：已知打印机名时找「名字-数字」；不知道名字（交给系统默认）时退回找第一
+/// 个「非空词-数字」的词。
+pub(super) fn parse_job_id(output: &str, printer: Option<&str>) -> Option<String> {
+    if let Some(printer) = printer {
+        let prefix = format!("{printer}-");
+        for (start, _) in output.match_indices(&prefix) {
+            // 前缀左边必须是词边界，免得把别的名字（如 BA-3）里的尾巴当前缀。
+            let boundary = start == 0
+                || !output[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|ch| ch.is_alphanumeric() || ch == '_');
+            if !boundary {
+                continue;
+            }
+            let digits: String = output[start + prefix.len()..]
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                return Some(format!("{prefix}{digits}"));
+            }
+        }
+    }
+    output.split_whitespace().find_map(|token| {
+        let (name, tail) = token.rsplit_once('-')?;
+        let digits: String = tail.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+        if name.is_empty() || digits.is_empty() {
+            None
+        } else {
+            Some(format!("{name}-{digits}"))
+        }
+    })
 }
 
 fn push_option(args: &mut Vec<OsString>, value: String) {
@@ -611,6 +662,40 @@ PageSize/Media Size: *A4 Letter";
         );
         // 手动双面每一轮按单面交给 CUPS。
         assert_eq!(duplex_option(Duplex::Manual), "sides=one-sided");
+    }
+
+    #[test]
+    fn job_id_is_read_in_any_language() {
+        // 英文与中文的 lp 成功提示，只取「打印机名-数字」。
+        assert_eq!(
+            parse_job_id(
+                "request id is HP_Deskjet_4900-12 (1 file(s))\n",
+                Some("HP_Deskjet_4900")
+            )
+            .as_deref(),
+            Some("HP_Deskjet_4900-12")
+        );
+        assert_eq!(
+            parse_job_id(
+                "请求 ID 为 HP_Deskjet_4900-12（1 个文件）\n",
+                Some("HP_Deskjet_4900")
+            )
+            .as_deref(),
+            Some("HP_Deskjet_4900-12")
+        );
+        // 交给系统默认打印机：名字未知，退回第一个「词-数字」。
+        assert_eq!(
+            parse_job_id("request id is Office-3F-7 (1 file(s))\n", None).as_deref(),
+            Some("Office-3F-7")
+        );
+        // 不是任务号的输出。
+        assert_eq!(parse_job_id("lp: 打印机不存在\n", Some("Office")), None);
+    }
+
+    #[test]
+    fn a_cancelled_job_is_not_handed_to_lp() {
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        assert_eq!(print(&job(), &cancel), Ok(PrintOutcome::Cancelled));
     }
 
     /// 用假 `lp` 跑一遍真实的进程调用：参数原样到达，退出码与报错如实回传。

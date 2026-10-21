@@ -103,6 +103,8 @@ pub(crate) enum WorkerResult {
         printer: String,
         result: Result<Option<Vec<u8>>, String>,
     },
+    /// 打印进度：已送页数 / 总页数（Windows 每页一次，CUPS 不报）。
+    PrintProgress { dialog: u64, done: u32, total: u32 },
     /// 打印对话框打开时从 PDF 自身测得的版式事实。读不出来是 `None`。
     PdfInspected {
         dialog: u64,
@@ -564,6 +566,11 @@ impl GongwenApp {
                 WorkerResult::PdfInspected { dialog, facts } => {
                     self.apply_pdf_inspected(dialog, facts)
                 }
+                WorkerResult::PrintProgress {
+                    dialog,
+                    done,
+                    total,
+                } => self.apply_print_progress(dialog, done, total),
                 #[cfg(windows)]
                 WorkerResult::PreferencesEdited {
                     dialog,

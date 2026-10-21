@@ -8,6 +8,7 @@ use hayro::{
     vello_cpu::color::palette::css::WHITE,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows_sys::Win32::Foundation::{GlobalFree, HGLOBAL};
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteDC, GDI_ERROR, GetDeviceCaps, HDC,
@@ -76,6 +77,12 @@ impl Drop for DocGuard {
     }
 }
 
+/// 一轮打印是打完了还是被用户取消。
+pub(super) enum PrintStatus {
+    Done,
+    Cancelled,
+}
+
 /// 读进内存、解析好的 PDF。
 pub(super) struct Document {
     pdf: Pdf,
@@ -105,7 +112,9 @@ impl Document {
         title: &str,
         sequence: &[u32],
         force_fit: bool,
-    ) -> Result<(), String> {
+        progress: &dyn Fn(u32, u32),
+        cancel: &AtomicBool,
+    ) -> Result<PrintStatus, String> {
         let device = geometry(dc)?;
         let raster_dpi = device.dpi_x.clamp(96, MAX_PRINT_DPI);
         let paper_landscape = device.paper_w > device.paper_h;
@@ -132,7 +141,13 @@ impl Document {
         let cache = RenderCache::new();
         // 不逐份打印时同一页连着出好几张，光栅化一次就够。
         let mut last: Option<(u32, PageBitmap)> = None;
+        let total = u32::try_from(sequence.len()).unwrap_or(u32::MAX);
+        let mut sent = 0u32;
         for &page_number in sequence {
+            // 取消只在页与页之间检查：画到一半的页交给 GDI 画完，任务整体作废。
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(PrintStatus::Cancelled);
+            }
             let Some(page) = page_number
                 .checked_sub(1)
                 .and_then(|index| pages.get(usize::try_from(index).ok()?))
@@ -152,13 +167,19 @@ impl Document {
             if let Err(reason) = bitmap.draw(dc, &device, force_fit) {
                 return Err(doc.abort(reason));
             }
+            sent = sent.saturating_add(1);
+            progress(sent.min(total), total);
+        }
+        // 取消检查在每个循环开头；这里再确认一次，免得用户在最后一页之后才点。
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(PrintStatus::Cancelled);
         }
         // SAFETY: `dc.0` 有效，文档任务已由 `StartDocW` 开启。
         if unsafe { EndDoc(dc.0) } <= 0 {
             return Err(doc.abort("收尾打印任务失败"));
         }
         doc.finished = true;
-        Ok(())
+        Ok(PrintStatus::Done)
     }
 }
 

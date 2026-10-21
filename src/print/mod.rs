@@ -184,11 +184,12 @@ pub(crate) struct PrintJob {
 
 /// 打印任务的结果。「打完了」和「用户取消」是两回事，状态栏文案要分开。
 #[cfg_attr(not(windows), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PrintOutcome {
-    /// 打印数据已完整交给系统。
-    Printed,
-    /// 用户在系统打印对话框里点了取消。不是错误，不该报红。
+    /// 打印数据已完整交给系统。`job` 是 CUPS 的任务号（`X-12`），
+    /// Windows 从 GDI 拿不到，是 `None`。
+    Printed { job: Option<String> },
+    /// 用户取消。不是错误，不该报红。
     Cancelled,
 }
 
@@ -321,15 +322,24 @@ pub(crate) fn printer_state(name: &str) -> PrinterState {
 }
 
 /// 执行打印任务。阻塞调用（逐页光栅化或等 `lp` 返回），调用方必须放后台线程。
-pub(crate) fn print(job: &PrintJob) -> Result<PrintOutcome, String> {
+///
+/// `progress` 报「已送页数 / 总页数」；Windows 每画完一页调一次并检查 `cancel`，
+/// CUPS 不报进度（`lp` 是一次交出整份），只在调用 `lp` 之前看一次取消。
+pub(crate) fn print(
+    job: &PrintJob,
+    progress: &dyn Fn(u32, u32),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<PrintOutcome, String> {
     check_size(&job.path)?;
     #[cfg(windows)]
     {
-        win::print(job)
+        win::print(job, progress, cancel)
     }
     #[cfg(unix)]
     {
-        cups::print(job)
+        // CUPS 不报进度：`lp` 是一次交出整份。
+        let _ = progress;
+        cups::print(job, cancel)
     }
 }
 
