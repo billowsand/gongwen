@@ -22,7 +22,7 @@ use crate::units;
 use crate::validator;
 use crate::vocabulary_xlsx;
 use eframe::egui;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -232,6 +232,11 @@ pub struct GongwenApp {
     manuscript_detail: Option<ManuscriptRecord>,
     manuscript_detail_delete_pdf: Option<i64>,
     manuscript_import_preview: Option<ImportPreview>,
+    /// 等着导入的稿件包（暂存目录里的副本）：按钮、启动参数、拖放进来的都排在这里，
+    /// 前一个的口令框 / 导入预览关掉后再弹下一个。
+    pending_imports: VecDeque<PathBuf>,
+    /// 正在口令框或导入预览里处理的那个副本，处理完删掉。
+    active_import: Option<PathBuf>,
     pending_merge: Option<PendingMergeDialog>,
     /// 提交版本对话框（稿件版或配置版）。
     version_commit: Option<VersionCommitDraft>,
@@ -404,7 +409,8 @@ pub(crate) struct KnowledgeImportDraft {
 }
 
 impl GongwenApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    /// `startup_imports`：命令行带进来的稿件包，首帧起依次弹出导入流程。
+    pub fn new(cc: &eframe::CreationContext<'_>, startup_imports: Vec<PathBuf>) -> Self {
         // 配置文件内容坏了就带着默认配置启动，并把留底路径交给首帧的提示窗；
         // 读取失败（权限、路径不是文件）仍按默认配置启动，但状态栏如实说明。
         let (mut config, config_recovered_from, config_load_error) = match storage::load() {
@@ -570,6 +576,8 @@ impl GongwenApp {
             manuscript_detail: None,
             manuscript_detail_delete_pdf: None,
             manuscript_import_preview: None,
+            pending_imports: VecDeque::new(),
+            active_import: None,
             pending_merge: None,
             version_commit: None,
             version_diff: None,
@@ -657,6 +665,7 @@ impl GongwenApp {
         if app.config.vocabulary_setup == VocabularySetupStatus::Pending {
             app.open_page(NavPage::Vocabulary);
         }
+        app.receive_startup_imports(startup_imports);
         app
     }
 
@@ -735,6 +744,8 @@ impl eframe::App for GongwenApp {
         crate::net::set_proxy(&self.config.proxy);
         self.handle_shortcuts(&ctx);
         self.poll_worker(&ctx);
+        self.receive_dropped_packages(&ctx);
+        self.pump_pending_imports();
         if let Some(elapsed) = crate::rag::take_retrieval_elapsed() {
             self.knowledge_retrieval_elapsed = Some(elapsed);
         }

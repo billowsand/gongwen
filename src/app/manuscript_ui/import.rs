@@ -270,11 +270,21 @@ pub(crate) fn zip_password_form(
     dialog: &mut ZipPasswordDialog,
     importing: bool,
 ) -> bool {
-    ui.label(if importing {
-        "必须输入正确密码后才能读取和导入稿件包。"
-    } else {
-        "本次导出的 ZIP 将使用 AES-256 加密，所有文件均受密码保护。"
-    });
+    match &dialog.purpose {
+        ZipPasswordPurpose::Import(path) => {
+            // 路径是暂存副本，文件名与用户双击 / 选中的那个相同。
+            if let Some(name) = path.file_name() {
+                ui.label(egui::RichText::new(name.to_string_lossy()).strong());
+            }
+            ui.label("必须输入正确密码后才能读取和导入稿件包。");
+        }
+        ZipPasswordPurpose::PdfExport(..) => {
+            ui.label("本次导出的 PDF 压缩包将使用 AES-256 加密，所有文件均受密码保护。");
+        }
+        _ => {
+            ui.label("本次导出的稿件包将使用 AES-256 加密，所有文件均受密码保护。");
+        }
+    }
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("密码");

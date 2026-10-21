@@ -92,6 +92,8 @@ pub(super) fn fixture() -> GongwenApp {
         manuscript_detail: None,
         manuscript_detail_delete_pdf: None,
         manuscript_import_preview: None,
+        pending_imports: Default::default(),
+        active_import: None,
         pending_merge: None,
         version_commit: None,
         version_diff: None,

@@ -6,12 +6,14 @@
 use crate::app::manuscript_ui::{
     ImportPreview, PendingMergeDialog, ZipPasswordDialog, ZipPasswordPurpose,
 };
-use crate::app::{GongwenApp, WorkerResult};
+use crate::app::{GongwenApp, NavPage, WorkerResult};
 use crate::draft_page::DraftSession;
 use crate::manuscript::{ManuscriptFilter, ManuscriptStore, ManuscriptUpdate};
 use crate::manuscript_io;
 use crate::models::ManuscriptStatus;
+use crate::package_file;
 use crate::storage;
+use crate::theme;
 use crate::units;
 use crate::vocabulary_xlsx;
 use anyhow::Context;
@@ -126,12 +128,8 @@ impl GongwenApp {
         include_send_package: bool,
     ) -> bool {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
-        let default_name = format!("公文稿件-{stamp}.zip");
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("ZIP 稿件包", &["zip"])
-            .set_file_name(&default_name)
-            .save_file()
-        else {
+        let default_name = format!("公文稿件-{stamp}.{}", package_file::EXTENSION);
+        let Some(path) = save_package_dialog(&default_name) else {
             return false;
         };
         if let Err(error) = self.save_open_manuscripts_for_zip(None) {
@@ -187,12 +185,8 @@ impl GongwenApp {
         include_send_package: bool,
     ) -> bool {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
-        let default_name = format!("所选公文稿件-{stamp}.zip");
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("ZIP 稿件包", &["zip"])
-            .set_file_name(&default_name)
-            .save_file()
-        else {
+        let default_name = format!("所选公文稿件-{stamp}.{}", package_file::EXTENSION);
+        let Some(path) = save_package_dialog(&default_name) else {
             return false;
         };
         // 随行件也要进包时，它们在起草页里开着的工作稿同样先存一下。
@@ -292,12 +286,105 @@ impl GongwenApp {
 
     pub(crate) fn start_import_manuscript(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("ZIP 稿件包", &["zip"])
+            .add_filter(package_file::FILTER_NAME, package_file::IMPORT_EXTENSIONS)
             .pick_file()
         else {
             return;
         };
-        self.open_zip_password_dialog(ZipPasswordPurpose::Import(path));
+        self.receive_import_package(path);
+    }
+
+    /// 收到一个要导入的稿件包：按钮选的、双击启动带进来的、拖进窗口的都走这里。
+    /// 先复制到暂存目录再排队，真正弹口令框在 [`Self::pump_pending_imports`]。
+    pub(crate) fn receive_import_package(&mut self, path: PathBuf) {
+        if !package_file::is_package_path(&path) {
+            self.status = format!("{} 不是公文稿件包（.gwx / .zip）。", path.display());
+            return;
+        }
+        let staged =
+            package_file::staging_root().and_then(|root| package_file::stage(&path, &root));
+        match staged {
+            Ok(staged) => {
+                self.pending_imports.push_back(staged);
+                if self.import_dialog_open() {
+                    self.status = format!(
+                        "已收到稿件包，当前导入处理完后接着导入（还有 {} 个等待）。",
+                        self.pending_imports.len()
+                    );
+                }
+            }
+            Err(error) => self.status = format!("无法导入稿件包：{error:#}"),
+        }
+    }
+
+    /// 启动时调用一次：清掉上次留下的暂存副本，再收下命令行带进来的稿件包
+    /// （双击 `.gwx` 启动时系统把路径作为参数传进来）。
+    pub(crate) fn receive_startup_imports(&mut self, paths: Vec<PathBuf>) {
+        if let Ok(root) = package_file::staging_root() {
+            package_file::clear_staging(&root);
+        }
+        for path in paths {
+            self.receive_import_package(path);
+        }
+    }
+
+    /// 每帧调用：把拖进窗口的稿件包收进导入队列；拖着稿件包悬停在窗口上时盖一层提示。
+    /// 别的文件类型不处理（目前窗口没有别的拖放入口）。
+    pub(crate) fn receive_dropped_packages(&mut self, ctx: &egui::Context) {
+        let (hovering, dropped) = ctx.input(|input| {
+            let hovering = input.raw.hovered_files.iter().any(|file| {
+                file.path
+                    .as_deref()
+                    .is_some_and(package_file::is_package_path)
+            });
+            let dropped = input
+                .raw
+                .dropped_files
+                .iter()
+                .map(|file| file.path())
+                .filter(|path| package_file::is_package_path(path))
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            (hovering, dropped)
+        });
+        if hovering {
+            paint_drop_hint(ctx);
+        }
+        for path in dropped {
+            self.receive_import_package(path);
+        }
+    }
+
+    /// 口令框、导入预览或待处理分支合并框是否开着。开着时新来的包先排队。
+    fn import_dialog_open(&self) -> bool {
+        self.manuscript_zip_password.is_some()
+            || self.manuscript_import_preview.is_some()
+            || self.pending_merge.is_some()
+    }
+
+    /// 每帧调用：上一个包处理完（确认、取消或出错关框）就删掉它的副本，
+    /// 再把队列里的下一个切到稿件管理页、弹出口令框。
+    pub(crate) fn pump_pending_imports(&mut self) {
+        if self.import_dialog_open() {
+            return;
+        }
+        if let Some(done) = self.active_import.take()
+            && let Ok(root) = package_file::staging_root()
+        {
+            package_file::discard(&done, &root);
+        }
+        let Some(next) = self.pending_imports.pop_front() else {
+            return;
+        };
+        self.open_page(NavPage::Manuscript);
+        self.active_import = Some(next.clone());
+        self.open_zip_password_dialog(ZipPasswordPurpose::Import(next));
+        if !self.pending_imports.is_empty() {
+            self.status = format!(
+                "这个稿件包处理完后还有 {} 个等待导入。",
+                self.pending_imports.len()
+            );
+        }
     }
 
     pub(crate) fn prepare_import_manuscript(&mut self, path: PathBuf, password: &str) -> bool {
@@ -703,4 +790,38 @@ impl GongwenApp {
             .join("temp")
             .join(format!("manuscript_{manuscript_id}_{attachment_id}.pdf"))
     }
+}
+
+/// 拖着稿件包悬停在窗口上时的整窗提示：半透明遮罩 + 居中一句话。
+fn paint_drop_hint(ctx: &egui::Context) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("gw-package-drop-hint"),
+    ));
+    let screen = ctx.content_rect();
+    painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(96));
+    let text = painter.layout_no_wrap(
+        "松开即导入稿件包".to_owned(),
+        egui::FontId::proportional(18.0),
+        theme::text(),
+    );
+    let card = egui::Rect::from_center_size(screen.center(), text.size() + egui::vec2(48.0, 28.0));
+    painter.rect_filled(card, 8.0, theme::surface());
+    painter.rect_stroke(
+        card,
+        8.0,
+        egui::Stroke::new(1.5, theme::accent()),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(card.center() - text.size() / 2.0, text, theme::text());
+}
+
+/// 稿件包的保存框。过滤器只列 `.gwx`；用户删掉后缀时补上，明确写 `.zip` 的保留
+/// （发给还没升级的旧版程序时用）。
+fn save_package_dialog(default_name: &str) -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter(package_file::FILTER_NAME, &[package_file::EXTENSION])
+        .set_file_name(default_name)
+        .save_file()
+        .map(package_file::with_package_extension)
 }

@@ -671,7 +671,7 @@ impl GongwenApp {
         let validation = if dialog.purpose.is_import() {
             (!dialog.password.is_empty())
                 .then_some(())
-                .ok_or_else(|| anyhow::anyhow!("请输入 ZIP 密码"))
+                .ok_or_else(|| anyhow::anyhow!("请输入稿件包密码"))
         } else if dialog.password != dialog.confirmation {
             Err(anyhow::anyhow!("两次输入的密码不一致"))
         } else {

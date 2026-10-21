@@ -63,8 +63,10 @@ impl GongwenApp {
         if !single_page_detail {
             self.manuscript_filter_bar(ui);
             self.refresh_manuscript_rows();
-            self.manuscript_confirm_groups(ui, &mut action);
         }
+        // 都是模态框，与布局无关：窄屏单页详情时也要画，否则双击稿件包进来的
+        // 口令框、详情页打开的待处理分支合并框都看不到。
+        self.manuscript_confirm_groups(ui, &mut action);
 
         // 详情优先取得稳定宽度，列表使用剩余区域。双栏不再依赖 Panel 的隐式
         // 分配顺序，而是显式切成两个带独立 clip_rect 的子 Ui：表格先画、详情
@@ -329,9 +331,9 @@ impl GongwenApp {
                 if ui
                     .add(theme::icon_text_button(
                         theme::Icon::PackageOpen,
-                        "导入 ZIP",
+                        "导入稿件包",
                     ))
-                    .on_hover_text("从 ZIP 稿件包导入，先预览后确认")
+                    .on_hover_text("从稿件包（.gwx，也认旧版的 .zip）导入，先预览后确认；双击 .gwx 文件效果相同")
                     .clicked()
                 {
                     self.start_import_manuscript();
@@ -461,9 +463,9 @@ impl GongwenApp {
                 ui.ctx(),
                 egui::Id::new("manuscript_zip_password"),
                 if importing {
-                    "输入 ZIP 密码"
+                    "输入稿件包密码"
                 } else {
-                    "设置 ZIP 加密密码"
+                    "设置加密密码"
                 },
                 420.0,
                 Dismiss::EscOnly,

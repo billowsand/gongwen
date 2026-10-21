@@ -54,6 +54,7 @@ mod modal;
 mod models;
 mod net;
 mod orphan_probe;
+mod package_file;
 mod pdf_text;
 mod pdf_viewer;
 mod portable_runtime;
@@ -102,6 +103,11 @@ use app::GongwenApp;
 fn main() -> eframe::Result {
     // 最先装：之后读配置、装字体、建窗口任何一步 panic 都要留下日志。
     crash_log::install();
+    // 双击 .gwx 时系统把文件路径作为参数传进来。
+    let startup_imports = package_file::startup_paths(
+        std::env::args_os().skip(1),
+        &std::env::current_dir().unwrap_or_default(),
+    );
     let app_icon = theme::app_icon(storage::peek_theme());
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
@@ -144,7 +150,7 @@ fn main() -> eframe::Result {
                 cc.egui_ctx
                     .send_viewport_cmd(egui::ViewportCommand::Maximized(true));
             }
-            Ok(Box::new(GongwenApp::new(cc)))
+            Ok(Box::new(GongwenApp::new(cc, startup_imports)))
         }),
     );
     if let Err(error) = &result {
