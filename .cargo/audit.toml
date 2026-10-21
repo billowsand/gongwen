@@ -1,0 +1,18 @@
+# cargo audit 的忽略清单：只放「本项目调用不到」的公告，每条写明理由与解除条件。
+# CI 的依赖漏洞扫描（.github/workflows/ci.yml 的 dependency-audit）与本机
+# `cargo audit` 都读这份文件。
+
+[advisories]
+ignore = [
+    # zip 8.x：三条都只影响 `ZipArchive::extract` / `ZipStreamReader::extract`
+    # 整包解压（SUID 位、软链接目标、经软链接改权限）。本项目所有 ZIP 都逐个条目
+    # 读取、自行校验路径，从不调用 extract（anydoc、calamine、docx-rs、
+    # rust_xlsxwriter 也只读写条目）。升到 zip 9 要等这四个依赖一起跟上，届时删掉。
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+    # quick-xml 0.38：只经 hayagriva → citationberg 解析编进程序的 CSL 样式，
+    # 用户输入（BibLaTeX 文献库）不走 XML。hayagriva 升级 quick-xml 后删掉。
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

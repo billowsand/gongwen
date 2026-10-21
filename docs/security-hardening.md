@@ -98,6 +98,10 @@
   读到的字节**累加——ZIP 里声明的大小可以造假，只能当作提前拒绝的依据。
   稿件 PDF 附件同样改成限量读，实际超限就跳过。
 - `src/images.rs`：插图入库读文件走 `file_limits::read_bytes`。
+- `src/net.rs` 新增 `read_body` / `read_error_body`：模型服务、embedding、rerank
+  的响应体上限 32 MB，出错时的响应体只读 64 KB 给人看；流式响应单行（一个 SSE
+  事件）上限 16 MB，超了明确报错（`src/lmstudio/{stream,converse}.rs`）。数据接口
+  原本就有 4 MB 上限（`src/agent/api.rs`）。
 - `with_capacity` 的乘法改成饱和运算（`src/manuscript/sync.rs`、
   `src/rag_client.rs`、`src/knowledge.rs`、`src/font_cmap.rs`、
   `src/file_clipboard.rs`）。
@@ -124,6 +128,11 @@
 - `src/agent/api.rs`：接口密钥 `api-secrets.json` 改成原子写（`storage::atomic_write`），
   Unix 下权限 0600——写一半的密钥文件比写失败更难查。
 - `src/storage.rs`：`atomic_write` 提升为 `pub(crate)` 供复用。
+- 临时目录不用可预测的名字：单篇 PDF 编译（`src/manuscript_io.rs`）改用
+  `tempfile::Builder` 随机、独占创建、仅本用户可访问，析构即删；花脸稿打印预览
+  （`src/draft_page/version_diff.rs`）原来是系统临时目录下的固定目录名，改放本用户
+  缓存目录（`storage::cache_dir`）。在共享 `/tmp` 的 Linux 多用户机器上，可预测的
+  目录能被别的用户抢先建好或换成软链接。
 - 递归删除的目标校验已复核：`src/agent/skill_files/package.rs` 有
   `canonicalize` + 前缀校验；其余 `remove_dir_all` 都在临时目录或受控目录内。
 
@@ -133,8 +142,15 @@
   测试——正文里的 `#let … read("/etc/passwd")` 原样进 JSON，模板源码里没有它；
   `latex-rust` 解析 `\input` 必然失败（纯排版器，没有文件 IO）。
 - `src/manuscript.rs`：`PRAGMA table_info` 的表名进不了参数化查询，改成白名单。
+- `src/agent/api.rs`：数据接口地址路径里的变量不许是 `.` / `..` 路径段（值里夹
+  `/`、`\` 的按段检查）。`percent_encode` 不转义点号，`..` 会被规范化成上一级，
+  请求落到同一主机的别的路径上、还带着本接口的密钥——模型被材料里的提示词诱导
+  时，能借此绕开「只调配好的接口」。
 - `.github/workflows/ci.yml`：新增 `dependency-audit` 作业（`rustsec/audit-check`），
-  每周一与每次推送都跑。
+  每周一与每次推送都跑；作业要 `checks: write` 才能写回结果。
+- 依赖：rustls、rustls-webpki、webpki-roots、quinn-proto 小版本升级，修掉 11 条
+  公告；zip 8 的 3 条（只影响 `extract` 整包解压）与 quick-xml 0.38 的 2 条（只
+  解析内置 CSL 样式）本项目调用不到，登记在 `.cargo/audit.toml` 并写明解除条件。
 
 ## 三、约定（改动时照着做）
 
@@ -160,6 +176,11 @@
   要更严格，可以把 `read` 换成只允许 `images/` 前缀的受限读取器。
 - **`anydoc` / `docx-rs` / `emf-core` 等第三方解析器**解析不可信文档时可能
   panic；本项目只能在调用前后兜底（出错提示），不能改它们的内部。
-- **`cargo audit` 目前只报告不阻断**：等依赖升级窗口确定后再考虑设为必需检查。
+- **`cargo audit` 只在 `ci.yml` 里跑**：发布用的 `release.yml` 不依赖它，新公告
+  不会挡住发版，但会让 main 的 CI 变红。`.cargo/audit.toml` 里忽略的公告每条都
+  写了解除条件，依赖升级后要回头删。停止维护的依赖（bincode、paste、yaml-rust、
+  unsafe-libyaml 等 9 个）只是告警，等依赖升级窗口再换。
+- **外部命令按 PATH 查找**（`lp`、`fc-match`、`xdg-open`、`wl-copy` / `xclip`）：
+  桌面程序的通行做法，未改成绝对路径。
 - **加密 ZIP 的密码**仍以明文存在配置目录（权限 0600）。要更强得靠系统钥匙串，
   涉及跨平台依赖，未在本轮做。

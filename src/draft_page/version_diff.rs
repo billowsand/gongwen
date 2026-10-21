@@ -1103,16 +1103,24 @@ impl DraftPage<'_> {
             *self.status = "当前修订与基准版一致，没有可出的花脸稿。".into();
             return;
         }
+        // 打印预览放在本用户的缓存目录：共享的系统临时目录里用固定目录名，
+        // 同机的其他用户可以抢先建好它或放个软链接。
+        let output_dir = if print_preview {
+            match crate::storage::cache_dir() {
+                Ok(dir) => dir.join("redline-preview"),
+                Err(error) => {
+                    *self.status = format!("无法确定缓存目录，花脸稿打印预览没有生成：{error:#}");
+                    return;
+                }
+            }
+        } else {
+            PathBuf::from(&self.config.output_dir)
+        };
         let (key, seq) = self.begin_job();
         *self.status = if print_preview {
             "正在排版花脸稿打印预览…".into()
         } else {
             "正在生成花脸稿…".into()
-        };
-        let output_dir = if print_preview {
-            std::env::temp_dir().join("gongwen-redline-preview")
-        } else {
-            PathBuf::from(&self.config.output_dir)
         };
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();

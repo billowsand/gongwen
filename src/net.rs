@@ -20,6 +20,42 @@ static PROXY: LazyLock<RwLock<ProxyConfig>> = LazyLock::new(Default::default);
 /// 支持的代理协议。`socks5h` 让代理端解析域名，本机 DNS 不可信时用它。
 const SCHEMES: [&str; 6] = ["http", "https", "socks4", "socks4a", "socks5", "socks5h"];
 
+/// 模型服务、检索服务一次响应体的上限。
+///
+/// 这些服务地址由用户配置，但内网中转、代理出错时可能吐出没完没了的数据；
+/// 不设上限，整段读进内存会把界面拖死。正常的 Chat Completions、embedding
+/// 批次都远小于它。
+pub(crate) const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
+/// 流式响应单行（一个 SSE 事件）的上限：没有换行的「一行」不能无限长。
+pub(crate) const MAX_STREAM_LINE_BYTES: u64 = 16 * 1024 * 1024;
+/// 出错时的响应体只用来给人看，截到这么长就够了。
+const MAX_ERROR_BODY_BYTES: u64 = 64 * 1024;
+
+/// 读响应体，超过 [`MAX_RESPONSE_BYTES`] 就报错，不整段读进内存。
+pub(crate) fn read_body(response: reqwest::blocking::Response) -> Result<String> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("读取响应失败")?;
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
+        bail!(
+            "响应超过 {} MB 上限，已停止读取",
+            MAX_RESPONSE_BYTES / 1024 / 1024
+        );
+    }
+    String::from_utf8(bytes).context("响应不是 UTF-8 文本")
+}
+
+/// 读出错时的响应体：最多读 [`MAX_ERROR_BODY_BYTES`]，读不到就给空串。
+pub(crate) fn read_error_body(response: reqwest::blocking::Response) -> String {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    let _ = response.take(MAX_ERROR_BODY_BYTES).read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// 换上新的代理配置，此后新建的客户端按它走。界面每帧调一次，没变时只读
 /// 不写，不跟后台线程抢写锁。
 pub fn set_proxy(config: &ProxyConfig) {

@@ -890,6 +890,34 @@ fn fill(
     }
 }
 
+/// 地址路径里的变量不许是 `.` / `..` 这样的路径段。
+///
+/// `percent_encode` 不转义点号（它是 URL 的非保留字符），`..` 会原样进路径，
+/// 发请求前被规范化成「上一级」，请求就落到同一主机的别的路径上，还带着本接口
+/// 的密钥——模型被材料里的提示词诱导时，能借此绕开「只调配好的接口」。值里夹着
+/// `/`、`\` 的也按段检查：服务端若把 `%2F` 解码回斜杠，同样会穿越。
+fn reject_dot_segments(base: &str, values: &BTreeMap<String, Value>) -> Result<(), String> {
+    for caps in PLACEHOLDER.captures_iter(base) {
+        if caps.get(1).is_some() {
+            continue;
+        }
+        let name = &caps[2];
+        let Some(value) = values.get(name).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let text = plain_text(value);
+        if text
+            .split(['/', '\\'])
+            .any(|segment| matches!(segment.trim(), "." | ".."))
+        {
+            return Err(format!(
+                "参数 {name} 的值「{text}」含有 . 或 .. 路径段，不能用在接口地址里"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 整段模板就是一个输入变量（`{region}`，不是密钥）时返回变量名。
 pub(crate) fn sole_input(template: &str) -> Option<&str> {
     let caps = PLACEHOLDER.captures(template)?;
@@ -937,6 +965,7 @@ fn fill_url(
         Some((base, query)) => (base, Some(query)),
         None => (template, None),
     };
+    reject_dot_segments(base, values)?;
     let mut url = fill(base, values, secrets, true, used)?;
     let mut pairs = Vec::new();
     for pair in query.unwrap_or_default().split('&') {
@@ -1652,6 +1681,24 @@ mod tests {
         ApiSecrets {
             secrets: [("stat_token".to_string(), "s3cr3t".to_string())].into(),
         }
+    }
+
+    #[test]
+    fn path_inputs_cannot_climb_out_of_the_endpoint() {
+        let mut endpoint = stat_endpoint("http://10.0.0.8");
+        endpoint.url = "http://10.0.0.8/api/region/{region}/stat?year={year}".into();
+        for value in ["..", ".", "../admin", "a/../../b", "..\\x", " .. "] {
+            let args = json!({ "region": value });
+            let error = prepare(&endpoint, args.as_object().unwrap(), &secrets()).unwrap_err();
+            assert!(error.contains("路径段"), "{value}: {error}");
+        }
+        // 普通的点号仍可用：版本号、文件名里的点不是路径段。
+        let args = json!({ "region": "v1.2", "year": 2025 });
+        let prepared = prepare(&endpoint, args.as_object().unwrap(), &secrets()).unwrap();
+        assert_eq!(
+            prepared.url,
+            "http://10.0.0.8/api/region/v1.2/stat?year=2025"
+        );
     }
 
     #[test]

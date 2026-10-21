@@ -164,7 +164,7 @@ fn stream_once(
         .map_err(ChatError::Other)?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().unwrap_or_default();
+        let body = crate::net::read_error_body(response);
         return Err(ChatError::from_status(status, &body));
     }
     let is_json = response
@@ -176,8 +176,7 @@ fn stream_once(
     let mut collector = Collector::new(on_delta);
     if is_json {
         // 服务端没理 `stream: true`，整段回来了：按非流式解析，一次喂完。
-        let body = response
-            .text()
+        let body = crate::net::read_body(response)
             .context("读取模型服务响应失败")
             .map_err(ChatError::Other)?;
         let parsed: ChatResponse = serde_json::from_str(&body)
@@ -205,10 +204,17 @@ fn stream_once(
                 break;
             }
             line.clear();
-            let read = reader
+            // 单行限长：服务端不换行地一直吐数据，也不会把内存吃光。
+            let read = std::io::Read::take(&mut reader, crate::net::MAX_STREAM_LINE_BYTES)
                 .read_line(&mut line)
                 .context("读取模型服务的流式响应失败")
                 .map_err(ChatError::Other)?;
+            if read as u64 >= crate::net::MAX_STREAM_LINE_BYTES && !line.ends_with('\n') {
+                return Err(ChatError::Other(anyhow!(
+                    "模型服务的流式响应有一行超过 {} MB，已停止读取",
+                    crate::net::MAX_STREAM_LINE_BYTES / 1024 / 1024
+                )));
+            }
             if read == 0 {
                 // 接受仅用 finish_reason 收尾的服务；没有任何结束标记的断流不能当成完整稿。
                 if !collector.finished {

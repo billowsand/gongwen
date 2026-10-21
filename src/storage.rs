@@ -30,6 +30,14 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(dirs.config_dir().to_path_buf())
 }
 
+/// 本用户的缓存目录（预览之类可以随时重建的文件）。与系统临时目录不同，
+/// 它只有当前用户能写，不会被同机其他用户抢先占用。
+pub fn cache_dir() -> Result<PathBuf> {
+    let dirs = ProjectDirs::from("cn", "LocalTools", "GongwenAssistant")
+        .context("无法确定用户缓存目录")?;
+    Ok(dirs.cache_dir().to_path_buf())
+}
+
 pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.json"))
 }

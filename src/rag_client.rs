@@ -50,10 +50,11 @@ pub fn embed(config: &EmbeddingConfig, texts: &[String]) -> Result<Vec<Vec<f32>>
     }
     let response = request.send().context("调用 embedding 服务失败")?;
     let status = response.status();
-    let body = response.text().context("读取 embedding 响应失败")?;
     if !status.is_success() {
+        let body = crate::net::read_error_body(response);
         bail!("embedding 服务返回 HTTP {}：{}", status, body);
     }
+    let body = crate::net::read_body(response).context("读取 embedding 响应失败")?;
     let mut parsed: EmbeddingResponse =
         serde_json::from_str(&body).context("embedding 响应不是兼容格式")?;
     parsed.data.sort_by_key(|item| item.index);
@@ -98,10 +99,11 @@ pub fn rerank(
     }
     let response = request.send().context("调用 rerank 服务失败")?;
     let status = response.status();
-    let body = response.text().context("读取 rerank 响应失败")?;
     if !status.is_success() {
+        let body = crate::net::read_error_body(response);
         bail!("rerank 服务返回 HTTP {}：{}", status, body);
     }
+    let body = crate::net::read_body(response).context("读取 rerank 响应失败")?;
     parse_rerank_response(config, &body)
 }
 

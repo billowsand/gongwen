@@ -248,6 +248,10 @@ jobs:
   dependency-audit:
     name: 依赖漏洞扫描（RustSec）
     runs-on: ubuntu-latest
+    # audit-check 把结果写成一条检查记录，需要 checks: write；忽略清单见 .cargo/audit.toml。
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
 

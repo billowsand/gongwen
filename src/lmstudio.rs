@@ -133,8 +133,7 @@ pub fn list_models_at(base_url: &str, api_key: &str, timeout_seconds: u64) -> Re
     if !response.status().is_success() {
         bail!("模型服务返回 HTTP {}", response.status());
     }
-    let data = response
-        .json::<ModelsResponse>()
+    let data = serde_json::from_str::<ModelsResponse>(&crate::net::read_body(response)?)
         .context("模型列表格式无法解析")?
         .data;
     // 顺手记下各模型的上下文窗口，自动模式按它算。
@@ -180,7 +179,9 @@ pub fn native_model_kinds(
     if !response.status().is_success() {
         return None;
     }
-    let data = response.json::<NativeModels>().ok()?.data;
+    let data = serde_json::from_str::<NativeModels>(&crate::net::read_body(response).ok()?)
+        .ok()?
+        .data;
     let kinds = data
         .into_iter()
         .map(|model| {
@@ -443,13 +444,13 @@ fn complete_once(
         .context("调用模型服务失败")
         .map_err(ChatError::Other)?;
     let status = response.status();
-    let body = response
-        .text()
-        .context("读取模型服务响应失败")
-        .map_err(ChatError::Other)?;
     if !status.is_success() {
+        let body = crate::net::read_error_body(response);
         return Err(ChatError::from_status(status, &body));
     }
+    let body = crate::net::read_body(response)
+        .context("读取模型服务响应失败")
+        .map_err(ChatError::Other)?;
 
     let parsed: ChatResponse = serde_json::from_str(&body)
         .context("模型服务响应不是兼容的 Chat Completions 格式")

@@ -493,9 +493,6 @@ pub fn export_selected_pdfs(
     result
 }
 
-/// 临时工作目录计数器：与进程号组合，避免同一毫秒内并发调用碰撞。
-static PDF_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 /// 在临时工作目录编译单篇稿件，返回生成的 PDF 字节；目录用后即删。
 /// 排版失败时视为该篇失败（原因写入汇总，不阻断整批）。
 fn compile_record_pdf(
@@ -525,18 +522,15 @@ pub(crate) fn compile_snapshot_pdf(
     numbering: &NumberingConfig,
     stem: &str,
 ) -> Result<Vec<u8>> {
-    let counter = PDF_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "gongwen_pdf_export_{}_{}_{}",
-        std::process::id(),
-        counter,
-        chrono::Local::now().timestamp_millis()
-    ));
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("无法创建临时工作目录 {}", dir.display()))?;
+    // 目录名随机、独占创建（已存在就换一个名字），权限只给本用户；`TempDir`
+    // 析构时整个删掉。可预测的名字在共享的 /tmp 里会被别的用户抢先占用。
+    let dir = tempfile::Builder::new()
+        .prefix("gongwen_pdf_export_")
+        .tempdir()
+        .context("无法创建临时工作目录")?;
     let result = (|| {
         let pdf_path = crate::export::write_pdf_for_kind(
-            &dir,
+            dir.path(),
             stem,
             snapshot,
             markdown,
@@ -548,7 +542,7 @@ pub(crate) fn compile_snapshot_pdf(
         std::fs::read(&pdf_path).with_context(|| format!("无法读取编译产物 {}", pdf_path.display()))
     })();
     // 清理临时目录；清理失败不掩盖编译结果。
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = dir.close();
     result
 }
 
