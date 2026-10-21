@@ -10,9 +10,10 @@ use super::{
     PrinterState, Scaling,
 };
 use crate::modal::{self, Dismiss};
+use crate::models::PrinterPrefs;
 use crate::theme;
 use eframe::egui;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 /// 对话框的结果。
@@ -47,6 +48,8 @@ pub(crate) struct PrintDialog {
     selected: Option<String>,
     /// 上次用的打印机，清单到了以后优先选它。
     remembered: String,
+    /// 按打印机名记住的偏好，用来预填控件（不算「用户动过」）。
+    prefs: BTreeMap<String, PrinterPrefs>,
     copies: u32,
     collate: bool,
     range: Range,
@@ -80,16 +83,26 @@ pub(crate) struct PrintDialog {
     color_touched: bool,
     paper_touched: bool,
     tray_touched: bool,
+    /// 缩放没有文档默认值，同样记「用户动过」才好用记住的偏好预填。
+    scaling_touched: bool,
+    /// 手动双面第二轮是否倒序出纸（逐台记住）。
+    manual_reverse: bool,
 }
 
 impl PrintDialog {
-    pub(crate) fn new(id: u64, request: PrintRequest, remembered: &str) -> Self {
+    pub(crate) fn new(
+        id: u64,
+        request: PrintRequest,
+        remembered: &str,
+        prefs: BTreeMap<String, PrinterPrefs>,
+    ) -> Self {
         Self {
             id,
             request,
             printers: Printers::Loading,
             selected: None,
             remembered: remembered.to_string(),
+            prefs,
             copies: 1,
             collate: true,
             range: Range::All,
@@ -115,6 +128,8 @@ impl PrintDialog {
             color_touched: false,
             paper_touched: false,
             tray_touched: false,
+            scaling_touched: false,
+            manual_reverse: false,
         }
     }
 
@@ -143,13 +158,14 @@ impl PrintDialog {
                 self.printers = Printers::Failed(error);
             }
         }
+        self.apply_defaults();
     }
 
     /// 某台打印机的能力查回来了。换回这台时不再重查。
     pub(crate) fn caps_loaded(&mut self, name: &str, caps: PrinterCaps) {
         self.caps_in_flight.remove(name);
         self.caps.insert(name.to_string(), caps);
-        self.recompute_defaults();
+        self.apply_defaults();
     }
 
     /// 外壳该去弹哪台打印机的首选项窗口了；带上上次改过的 DEVMODE 当输入。
@@ -187,17 +203,59 @@ impl PrintDialog {
     /// PDF 自身的版式事实测回来了。读不出来（`None`）就当不知道。
     pub(crate) fn facts_loaded(&mut self, facts: Option<PdfFacts>) {
         self.facts = facts;
-        self.recompute_defaults();
+        self.apply_defaults();
     }
 
-    /// 文档默认值只填用户没动过的控件；能力与事实各到达一次，各重算一次。
-    fn recompute_defaults(&mut self) {
-        if self.duplex_touched {
-            return;
+    /// 重新算一遍预填值。优先级：用户动过 > 文档默认值 > 这台打印机记住的偏好 >
+    /// 打印机默认。能力、事实、选中打印机每到达一次就重算一次。
+    fn apply_defaults(&mut self) {
+        let caps = self.gated_caps().flatten();
+        let prefs = self
+            .selected
+            .as_deref()
+            .and_then(|name| self.prefs.get(name))
+            .cloned();
+        if !self.duplex_touched {
+            let from_document = caps
+                .as_ref()
+                .and_then(|caps| super::default_duplex(self.request.hints, self.facts, caps));
+            self.duplex = from_document.or_else(|| {
+                let remembered = prefs.as_ref().and_then(|prefs| prefs.duplex);
+                // 新选的打印机可能没有双面单元：记着的双面方式要按能力过滤。
+                remembered.filter(|_| caps.as_ref().is_none_or(|caps| caps.duplex))
+            });
         }
-        if let Some(caps) = self.gated_caps().flatten() {
-            self.duplex = super::default_duplex(self.request.hints, self.facts, &caps);
+        if !self.color_touched {
+            self.color = prefs.as_ref().and_then(|prefs| prefs.color);
         }
+        if !self.paper_touched {
+            self.paper = prefs.as_ref().and_then(|prefs| prefs.paper.clone());
+        }
+        if !self.tray_touched {
+            self.tray = prefs.as_ref().and_then(|prefs| prefs.tray.clone());
+        }
+        if !self.scaling_touched {
+            self.scaling = prefs
+                .as_ref()
+                .map_or(Scaling::Actual, |prefs| prefs.scaling);
+        }
+        self.manual_reverse = prefs.as_ref().is_some_and(|prefs| prefs.manual_reverse);
+    }
+
+    /// 这台打印机当前的完整选择，点打印时写回配置（和「上次用的打印机」一起）。
+    pub(crate) fn preferences(&self) -> Option<(String, PrinterPrefs)> {
+        let name = self.selected.clone()?;
+        Some((
+            name,
+            PrinterPrefs {
+                duplex: self.duplex,
+                color: self.color,
+                paper: self.paper.clone(),
+                tray: self.tray.clone(),
+                scaling: self.scaling,
+                manual_reverse: self.manual_reverse,
+            },
+        ))
     }
 
     /// 外壳该去查哪台打印机的能力了。交出去之后在能力回来之前（或换回来之前）
@@ -354,7 +412,7 @@ impl PrintDialog {
         }
         // 新打印机的能力可能已经在缓存里（换回来过），默认值当场重算；没缓存就等
         // `caps_loaded`。
-        self.recompute_defaults();
+        self.apply_defaults();
     }
 
     /// 在「页码」之后画双面、颜色、纸张、纸盒、缩放。能力查回来之前只画一个
@@ -532,12 +590,16 @@ impl PrintDialog {
     }
 
     fn scaling_row(&mut self, ui: &mut egui::Ui) {
+        let before = self.scaling;
         ui.horizontal(|ui| {
             ui.radio_value(&mut self.scaling, Scaling::Actual, "实际大小（公文推荐）")
                 .on_hover_text("按纸张实际大小出图；页面放不下时自动缩小");
             ui.radio_value(&mut self.scaling, Scaling::Fit, "适合纸张")
                 .on_hover_text("按可打印区等比缩放，适合纸型与版面不一致的 PDF");
         });
+        if self.scaling != before {
+            self.scaling_touched = true;
+        }
     }
 
     fn copies_row(&mut self, ui: &mut egui::Ui) {
@@ -885,6 +947,7 @@ mod tests {
                 hints: super::super::PrintHints::default(),
             },
             "Office",
+            BTreeMap::new(),
         )
     }
 
@@ -902,7 +965,8 @@ mod tests {
         dialog.printers_loaded(Ok(vec![printer("HP", true), printer("Office", false)]));
         assert_eq!(dialog.selected.as_deref(), Some("Office"));
 
-        let mut dialog = PrintDialog::new(2, dialog.request.clone(), "已删除的打印机");
+        let mut dialog =
+            PrintDialog::new(2, dialog.request.clone(), "已删除的打印机", BTreeMap::new());
         dialog.printers_loaded(Ok(vec![printer("HP", false), printer("Canon", true)]));
         assert_eq!(dialog.selected.as_deref(), Some("Canon"));
 
@@ -959,6 +1023,114 @@ mod tests {
         let dialog = dialog(3);
         let job = dialog.job(&dialog.pages()).expect("全部");
         assert_eq!((job.copies, job.collate), (1, false));
+    }
+
+    fn prefs(duplex: Option<Duplex>, scaling: Scaling) -> PrinterPrefs {
+        PrinterPrefs {
+            duplex,
+            color: Some(ColorMode::Mono),
+            paper: Some("8".to_string()),
+            tray: Some("7".to_string()),
+            scaling,
+            manual_reverse: true,
+        }
+    }
+
+    fn dialog_with_prefs(prefs: BTreeMap<String, PrinterPrefs>) -> PrintDialog {
+        PrintDialog::new(
+            1,
+            PrintRequest {
+                path: PathBuf::from("/tmp/请示.pdf"),
+                title: "关于××的请示".to_string(),
+                page_count: 12,
+                current_page: 2,
+                hints: super::super::PrintHints::default(),
+            },
+            "Office",
+            prefs,
+        )
+    }
+
+    fn office_prefs(prefs: PrinterPrefs) -> BTreeMap<String, PrinterPrefs> {
+        BTreeMap::from([("Office".to_string(), prefs)])
+    }
+
+    #[test]
+    fn remembered_preferences_fill_the_controls_when_nothing_else_does() {
+        let mut dialog =
+            dialog_with_prefs(office_prefs(prefs(Some(Duplex::ShortEdge), Scaling::Fit)));
+        dialog.printers_loaded(Ok(vec![printer("Office", true)]));
+        dialog.caps_loaded("Office", caps(true, true));
+        assert_eq!(dialog.duplex, Some(Duplex::ShortEdge));
+        assert_eq!(dialog.color, Some(ColorMode::Mono));
+        assert_eq!(dialog.paper.as_deref(), Some("8"));
+        assert_eq!(dialog.tray.as_deref(), Some("7"));
+        assert_eq!(dialog.scaling, Scaling::Fit);
+        assert!(dialog.manual_reverse);
+        // 预填不算「用户动过」，所以能力重算时还能被文档默认值盖掉。
+        assert!(!dialog.duplex_touched);
+    }
+
+    #[test]
+    fn a_choice_the_user_made_wins_over_remembered_preferences() {
+        let mut dialog =
+            dialog_with_prefs(office_prefs(prefs(Some(Duplex::ShortEdge), Scaling::Fit)));
+        dialog.printers_loaded(Ok(vec![printer("Office", true)]));
+        dialog.caps_loaded("Office", caps(true, true));
+        dialog.duplex = Some(Duplex::Simplex);
+        dialog.duplex_touched = true;
+        dialog.scaling = Scaling::Actual;
+        dialog.scaling_touched = true;
+        dialog.request.hints = super::super::PrintHints {
+            duplex_typeset: true,
+            send_package: false,
+        };
+        dialog.facts_loaded(None);
+        assert_eq!(dialog.duplex, Some(Duplex::Simplex));
+        assert_eq!(dialog.scaling, Scaling::Actual);
+    }
+
+    #[test]
+    fn the_document_default_wins_over_remembered_preferences() {
+        let mut dialog = dialog_with_prefs(office_prefs(prefs(
+            Some(Duplex::ShortEdge),
+            Scaling::Actual,
+        )));
+        dialog.request.hints = super::super::PrintHints {
+            duplex_typeset: true,
+            send_package: false,
+        };
+        dialog.printers_loaded(Ok(vec![printer("Office", true)]));
+        dialog.caps_loaded("Office", caps(true, true));
+        assert_eq!(dialog.duplex, Some(Duplex::LongEdge));
+        // 整份横排再盖一次：短边。
+        dialog.facts_loaded(Some(PdfFacts {
+            all_rotated: true,
+            has_red: false,
+        }));
+        assert_eq!(dialog.duplex, Some(Duplex::ShortEdge));
+    }
+
+    #[test]
+    fn without_preferences_the_printer_default_stays() {
+        let mut dialog = dialog(12);
+        dialog.printers_loaded(Ok(vec![printer("Office", true)]));
+        dialog.caps_loaded("Office", caps(true, true));
+        assert_eq!(dialog.duplex, None);
+        assert_eq!(dialog.color, None);
+        assert_eq!(dialog.paper, None);
+        assert_eq!(dialog.tray, None);
+        assert_eq!(dialog.scaling, Scaling::Actual);
+        assert!(!dialog.manual_reverse);
+    }
+
+    #[test]
+    fn remembered_duplex_is_dropped_on_a_printer_without_the_unit() {
+        let mut dialog =
+            dialog_with_prefs(office_prefs(prefs(Some(Duplex::LongEdge), Scaling::Actual)));
+        dialog.printers_loaded(Ok(vec![printer("Office", true)]));
+        dialog.caps_loaded("Office", caps(false, true));
+        assert_eq!(dialog.duplex, None);
     }
 
     fn caps(duplex: bool, color: bool) -> PrinterCaps {

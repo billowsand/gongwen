@@ -53,10 +53,11 @@ pub(crate) enum ColorMode {
 }
 
 /// 缩放方式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Scaling {
     /// 实际大小：放不下时自动缩小（第一期的行为，公文按毫米打准靠它）。
+    #[default]
     Actual,
     /// 适合纸张：按可打印区等比缩放，给非 A4 来源的 PDF 用。
     Fit,

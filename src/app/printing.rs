@@ -2,6 +2,7 @@
 //! 对话框本身在 `crate::print::dialog`，它只收集选择、不碰打印接口。
 
 use crate::app::{GongwenApp, WorkerResult};
+use crate::models::PrinterPrefs;
 use crate::print::{
     DialogOutcome, PrintDialog, PrintJob, PrintRequest, PrinterCaps, PrinterInfo, PrinterState,
 };
@@ -17,6 +18,7 @@ impl GongwenApp {
             id,
             request,
             &self.config.print.last_printer,
+            self.config.print.printers.clone(),
         ));
         let tx = self.sender.clone();
         let ctx = ctx.clone();
@@ -154,6 +156,8 @@ impl GongwenApp {
             .take_preferences_request()
             .map(|(name, devmode)| (dialog_id, name, devmode));
         let path = dialog.path().to_path_buf();
+        // 点「打印」时的选择要写回配置（和「上次用的打印机」同处保存）。
+        let printer_prefs = dialog.preferences();
         if let Some((id, name)) = caps_request {
             self.start_caps_query(id, name, ctx);
         }
@@ -167,7 +171,7 @@ impl GongwenApp {
         self.print_dialog = None;
         match outcome {
             DialogOutcome::Cancel => {}
-            DialogOutcome::Print(job) => self.start_print(job, ctx),
+            DialogOutcome::Print(job) => self.start_print(job, printer_prefs, ctx),
             DialogOutcome::SystemDialog => self.start_system_dialog_print(path, ctx),
         }
     }
@@ -185,12 +189,25 @@ impl GongwenApp {
     }
 
     /// 出纸可能要几秒（逐页光栅化或等 `lp`），放后台线程，主界面照常可用。
-    fn start_print(&mut self, job: PrintJob, ctx: &egui::Context) {
+    fn start_print(
+        &mut self,
+        job: PrintJob,
+        prefs: Option<(String, PrinterPrefs)>,
+        ctx: &egui::Context,
+    ) {
+        let mut changed = false;
         if let Some(printer) = &job.printer
             && *printer != self.config.print.last_printer
         {
             self.config.print.last_printer = printer.clone();
-            // 记不住上次的打印机不影响这次打印，失败了也不打扰。
+            changed = true;
+        }
+        if let Some((printer, prefs)) = prefs {
+            self.config.print.printers.insert(printer, prefs);
+            changed = true;
+        }
+        if changed {
+            // 记不住偏好不影响这次打印，失败了也不打扰。
             let _ = crate::storage::save(&self.config);
         }
         self.status = format!("正在打印 {}…", job.path.display());

@@ -4,8 +4,10 @@
 //! `models` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::models::{CorrespondenceScope, TemplateKind, TemplateProfile};
+use crate::print::{ColorMode, Duplex, Scaling};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// 正文排版风格。全局紧缩在整个正文区选最深标题；节内紧缩则以
 /// `##` 为边界，分别选出每节最深的标题。被选中的标题与紧随正文合并为一行。
@@ -279,6 +281,23 @@ pub struct ExportSelection {
 pub struct PrintConfig {
     /// 上次用的打印机；清单里没有它（被删了、换了机器）就退回系统默认。
     pub last_printer: String,
+    /// 按打印机名记住的双面、颜色、纸张等偏好。打印机被删或改名时自然失效，
+    /// 不报错；旧配置没有这一项时按空表读。
+    pub printers: BTreeMap<String, PrinterPrefs>,
+}
+
+/// 一台打印机记住的打印偏好。选中这台打印机时用来预填对话框（不算「用户动过」）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrinterPrefs {
+    pub duplex: Option<Duplex>,
+    pub color: Option<ColorMode>,
+    /// 纸张 / 纸盒的驱动编号或 CUPS 关键字，逐台打印机自己的。
+    pub paper: Option<String>,
+    pub tray: Option<String>,
+    pub scaling: Scaling,
+    /// 手动双面第二轮（打反面）是否倒序出纸。出纸面朝下 / 朝上的机器不一样。
+    pub manual_reverse: bool,
 }
 
 impl Default for ExportSelection {
@@ -337,4 +356,43 @@ pub struct GeneratedDraft {
     /// 和“没编译”，前者要压住粗估提示，后者不能压。
     pub proof_measured: bool,
     pub files: Vec<std::path::PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_print_config_without_printer_preferences_still_loads() {
+        let config: PrintConfig =
+            serde_json::from_str(r#"{"last_printer":"Office"}"#).expect("旧配置应能读");
+        assert_eq!(config.last_printer, "Office");
+        assert!(config.printers.is_empty());
+    }
+
+    #[test]
+    fn printer_preferences_round_trip() {
+        let config = PrintConfig {
+            last_printer: "Office".to_string(),
+            printers: BTreeMap::from([(
+                "Office".to_string(),
+                PrinterPrefs {
+                    duplex: Some(Duplex::ShortEdge),
+                    color: Some(ColorMode::Mono),
+                    paper: Some("9".to_string()),
+                    tray: Some("7".to_string()),
+                    scaling: Scaling::Fit,
+                    manual_reverse: true,
+                },
+            )]),
+        };
+        let json = serde_json::to_string(&config).expect("序列化");
+        let back: PrintConfig = serde_json::from_str(&json).expect("反序列化");
+        let prefs = &back.printers["Office"];
+        assert_eq!(prefs.duplex, Some(Duplex::ShortEdge));
+        assert_eq!(prefs.color, Some(ColorMode::Mono));
+        assert_eq!(prefs.paper.as_deref(), Some("9"));
+        assert!(prefs.manual_reverse);
+        assert_eq!(prefs.scaling, Scaling::Fit);
+    }
 }
