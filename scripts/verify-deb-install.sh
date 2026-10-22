@@ -54,4 +54,14 @@ for bin in /opt/gongwen-assistant/gongwen-assistant; do
     fi
 done
 test -L /usr/bin/gongwen-assistant
+
+# 稿件包 .gwx 的登记：MIME 定义、desktop 声明、文档图标都要装到位。
+# 只装 Depends 的容器里未必有 shared-mime-info，装了才顺带核对数据库里的解析结果。
+test -f /usr/share/mime/packages/cn.localtools.GongwenAssistant.xml
+grep -qx 'MimeType=application/x-gongwen-package;'     /usr/share/applications/cn.localtools.GongwenAssistant.desktop
+test -f /usr/share/icons/hicolor/48x48/mimetypes/application-x-gongwen-package.png
+if command -v update-mime-database >/dev/null 2>&1; then
+    update-mime-database /usr/share/mime
+    test -f /usr/share/mime/application/x-gongwen-package.xml
+fi
 exit "$failed"

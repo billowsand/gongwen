@@ -186,7 +186,7 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
         "19-manuscripts",
         Part::Ops,
         "稿件管理",
-        "状态机、盖章附件与 ZIP 迁移"
+        "状态机、盖章附件与稿件包迁移"
     ),
     chapter!("20-settings", Part::Ops, "设置全解", "十个分区逐项说明"),
     chapter!(

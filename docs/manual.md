@@ -46,7 +46,7 @@
 
 | 章 | 内容 |
 |---|---|
-| [19 稿件管理](help/19-manuscripts.md) | 状态机、盖章附件与 ZIP 迁移 |
+| [19 稿件管理](help/19-manuscripts.md) | 状态机、盖章附件与稿件包迁移 |
 | [20 设置全解](help/20-settings.md) | 十个分区逐项说明 |
 | [21 数据、备份与迁移](help/21-data.md) | 数据存放路径与备份建议 |
 | [22 送批材料](help/22-send-package.md) | 呈批件挂随行件、合并 PDF 与归档钉版 |

@@ -223,6 +223,8 @@ Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "README.md")) -D
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "THIRD_PARTY_NOTICES.md")) -Destination $OutputDir
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "LICENSE")) -Destination $OutputDir
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "config.example.json")) -Destination $OutputDir
+# 稿件包 .gwx 的文档图标：安装包在注册表里登记它（gongwen-assistant.iss 的 [Registry]）。
+Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "assets/doc-icon/gwx-document.ico")) -Destination $OutputDir
 # AI 技能包：把 skills/gongwen-markdown/ 打成 skills/gongwen-markdown.skill 随包分发。
 # .skill 就是 zip，顶层一个 gongwen-markdown/ 文件夹。条目名手工拼成正斜杠——
 # Compress-Archive 在 PowerShell 5.1 上会写反斜杠，别的工具解压会得到一个怪文件名。

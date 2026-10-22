@@ -164,7 +164,8 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 - **稿件包专用后缀 `.gwx`**（同步 ZIP 换成 `.gwx`，双击 / 拖放 / 启动参数直接进现有导入流程，
   包内格式不变、旧 `.zip` 照常导入，分三步）：**第一步（后缀与统一入口 `receive_import_package`、
   暂存副本与排队、启动参数、拖放）、第二步（已开窗口转交：`src/single_instance.rs` 锁文件 + 收件目录）
-  已实现，待真机验收**；第三步（安装登记与文档图标）未做。方案、进度与已知坑见 `docs/gwx-package-design.md`（单文件，第十一节是进度）。
+  、第三步（Inno 注册表登记、Linux MIME / desktop、
+  `assets/doc-icon/` 文档图标）均已实现，待真机验收**。方案、进度与已知坑见 `docs/gwx-package-design.md`（单文件，第十一节是进度）。
 
 - **人机决策模块**（把「问用户」从算子里抽成可组合的决策：决策形态随挂起交给界面、通用清单确认
   与修订、待决事项、自主步骤提问，分四期）：方案、分期、进度与已知坑见 `docs/decision-modules.md`

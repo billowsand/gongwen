@@ -1,6 +1,6 @@
 # 稿件包专用后缀 .gwx：方案
 
-> 状态：第一步（后缀与统一入口）、第二步（已开窗口转交）已实现（2026-10-22），第三步未做。进度见第十一节。
+> 状态：三步均已实现（2026-10-22），待真机验收。进度见第十一节。
 
 ## 一、要做的事
 
@@ -108,7 +108,7 @@ ChangesAssociations=yes
 
 [Registry]
 Root: HKA; Subkey: "Software\Classes\.gwx"; ValueType: string; ValueName: ""; ValueData: "GongwenAssistant.Package"; Flags: uninsdeletevalue
-Root: HKA; Subkey: "Software\Classes\.gwx\OpenWithProgids"; ValueType: string; ValueName: "GongwenAssistant.Package"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\.gwx\OpenWithProgids"; ValueType: none; ValueName: "GongwenAssistant.Package"; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package"; ValueType: string; ValueName: ""; ValueData: "公文助手稿件包"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\gwx-document.ico"
 Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
@@ -139,9 +139,9 @@ Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\shell\open\command
 - 文档图标按尺寸装到 `/usr/share/icons/hicolor/<尺寸>/mimetypes/application-x-gongwen-package.png`。
 - `update-mime-database`、`update-desktop-database`、`gtk-update-icon-cache` 都由 dpkg 触发器
   自动跑（shared-mime-info、desktop-file-utils、hicolor 主题包自带），不必写 postinst。
-  要在 `scripts/smoke-launch-linux.sh` / `verify-deb-install.sh` 里加一条检查：
-  `xdg-mime query filetype x.gwx` 应返回 `application/x-gongwen-package`，
-  `xdg-mime query default application/x-gongwen-package` 应是本程序的 desktop 文件。
+  `verify-deb-install.sh` 核对三样文件装到位（MIME 定义、desktop 的 `MimeType`、48 px 文档图标）；
+  容器里有 `update-mime-database` 时再跑一遍，核对数据库里生成了 `application/x-gongwen-package`。
+  （原计划用 `xdg-mime query`，但只装 Depends 的干净容器里没有 xdg-utils，改为按文件核对。）
 
 ### macOS
 
@@ -153,7 +153,7 @@ Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\shell\open\command
 和程序图标区分开，但一眼能看出是公文助手的东西：
 
 - 造型：白色纸页 + 右上角折角，纸页下半部放缩小的品牌标（`assets/icons/brand-mark.svg` 的几何），
-  底部一条强调色色带写 `GWX`（16、24 两个小尺寸去掉文字，只留纸页和色带）。
+  底部一条强调色色带写 `GWX`（48 px 及以下去掉文字、程序图标放大、页边描线加粗，只留纸页和色带）。
 - 颜色：取默认主题的强调色（`generate-brand-icons.py` 里 `claude` 主题的 `accent`），不随主题切换——
   系统里登记的图标只有一套。
 - 生成：在 `scripts/generate-brand-icons.py` 里加一个 `document_icon()`，复用现有几何与绘制函数，
@@ -284,3 +284,34 @@ Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\shell\open\command
 - 口令框开着时再转交两个包：状态栏提示排队，依次弹出。
 - 结束主进程后再运行：正常启动新窗口。
 - `--new-window` 能另开窗口。
+
+### 第三步：系统登记与文档图标（2026-10-22，已实现，待真机验收）
+
+- 文档图标：`scripts/generate-brand-icons.py` 新增 `render_document_icon` / `write_document_icons`，
+  复用程序图标的 `render_icon` 放在纸页中央；输出 `assets/doc-icon/gwx-document.ico`
+  （16–256 共 7 档，每档用各自尺寸的底图，不是一张缩放）与 `gwx-document-<尺寸>.png`。
+  脚本重跑时程序图标逐字节不变。色带上的「GWX」按 `LABEL_FONTS` 找本机粗体西文字体。
+- Windows：`gongwen-assistant.iss` 加 `ChangesAssociations=yes` 与五条 `[Registry]`（`HKA`，
+  不受升级模式开关限制）；`package-portable.ps1` 把 `gwx-document.ico` 放到程序目录根。
+  本机用 ISCC 以替身源目录编译过完整包与升级包两种模式（未安装，没动注册表）。
+- Linux：`assets/linux/cn.localtools.GongwenAssistant.xml`（MIME 定义）；desktop 加
+  `MimeType=application/x-gongwen-package;`、`Exec=gongwen-assistant %F`；deb 与 tar 装 MIME 定义和
+  `hicolor/<尺寸>/mimetypes/application-x-gongwen-package.png`（Arch 的 PKGBUILD 整个拷 `share/`，自动带上）；
+  `verify-deb-install.sh` 加核对。
+- `package_file::tests::system_registrations_agree_with_the_extension` 核对代码后缀、MIME 定义、
+  desktop、安装脚本与图标文件彼此一致。
+- 使用帮助（`assets/help/` 与 `docs/help/` 两份）、`docs/manual.md`、README：「ZIP 稿件包」改称
+  「稿件包（.gwx）」，写明双击 / 拖放 / 已开窗口转交、旧 `.zip` 互传办法；备份 ZIP、批量 PDF 压缩包、
+  源码包、Typst 包仍叫 ZIP。
+
+与方案的出入：
+
+1. 文档图标的无字版用到 48 px（方案写 16、24）：48 px 时「GWX」只有几个像素高，认不出来。
+2. deb 校验改为按文件核对（见第五节）。
+
+真机验收（第三步）：
+
+- Windows 用完整安装包装一遍：`.gwx` 显示文档图标，类型名「公文助手稿件包」；双击启动并弹口令框；
+  程序开着时双击转交给已开窗口。卸载后关联与图标消失。
+- 用增量升级包从上一版升上来：关联同样生效（`gwx-document.ico` 随增量包带上）。
+- Linux ARM64 装 deb：文件管理器里 `.gwx` 显示文档图标、默认用公文助手打开。

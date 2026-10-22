@@ -187,6 +187,26 @@ mod tests {
         assert!(!root.exists());
     }
 
+    /// 系统登记（Windows 安装包、Linux 的 MIME 定义与 desktop）与代码里的后缀要对得上，
+    /// 文档图标也得在：改了一处忘了另一处，双击就不再打开本程序。
+    #[test]
+    fn system_registrations_agree_with_the_extension() {
+        let mime_type = "application/x-gongwen-package";
+        let mime = include_str!("../assets/linux/cn.localtools.GongwenAssistant.xml");
+        assert!(mime.contains(&format!(r#"<mime-type type="{mime_type}">"#)));
+        assert!(mime.contains(&format!(r#"<glob pattern="*.{EXTENSION}"/>"#)));
+
+        let desktop = include_str!("../assets/linux/cn.localtools.GongwenAssistant.desktop");
+        assert!(desktop.contains(&format!("\nMimeType={mime_type};\n")));
+        assert!(desktop.contains("\nExec=gongwen-assistant %F\n"));
+
+        let iss = include_str!("../scripts/gongwen-assistant.iss");
+        assert!(iss.contains(&format!(r#"Subkey: "Software\Classes\.{EXTENSION}""#)));
+        assert!(iss.contains(r#"ValueData: "{app}\gwx-document.ico""#));
+        assert!(iss.contains(r#"""{app}\{#MyAppExeName}"" ""%1"""#));
+        assert!(!include_bytes!("../assets/doc-icon/gwx-document.ico").is_empty());
+    }
+
     #[test]
     fn stage_rejects_missing_file_and_directories() {
         let temp = tempfile::tempdir().unwrap();

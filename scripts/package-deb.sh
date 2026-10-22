@@ -72,6 +72,15 @@ for size in 16 24 32 48 64 128 256 512; do
         cp "$src" "$dest/cn.localtools.GongwenAssistant.png"
     fi
 done
+# 稿件包 .gwx：MIME 类型定义与文档图标。update-mime-database、gtk-update-icon-cache
+# 由 shared-mime-info、hicolor-icon-theme 的 dpkg 触发器自动跑，不必写 postinst。
+mkdir -p "$PKG_ROOT/usr/share/mime/packages"
+cp "$PROJECT_ROOT/assets/linux/cn.localtools.GongwenAssistant.xml"     "$PKG_ROOT/usr/share/mime/packages/cn.localtools.GongwenAssistant.xml"
+for size in 16 24 32 48 64 128 256 512; do
+    dest="$PKG_ROOT/usr/share/icons/hicolor/${size}x${size}/mimetypes"
+    mkdir -p "$dest"
+    cp "$PROJECT_ROOT/assets/doc-icon/gwx-document-$size.png"         "$dest/application-x-gongwen-package.png"
+done
 if [ -f "$PROJECT_ROOT/assets/app-icon/app-icon.png" ]; then
     mkdir -p "$PKG_ROOT/usr/share/pixmaps"
     cp "$PROJECT_ROOT/assets/app-icon/app-icon.png" \

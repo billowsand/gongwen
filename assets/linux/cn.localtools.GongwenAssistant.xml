@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 公文助手稿件包（.gwx）的 MIME 类型。装到 /usr/share/mime/packages/，
+     由 shared-mime-info 的 dpkg 触发器自动跑 update-mime-database。
+     包内是加密 ZIP，故 sub-class-of zip；按后缀匹配优先，桌面不会把它当普通压缩包打开。 -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-gongwen-package">
+    <comment>Gongwen Assistant package</comment>
+    <comment xml:lang="zh_CN">公文助手稿件包</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.gwx"/>
+    <icon name="application-x-gongwen-package"/>
+  </mime-type>
+</mime-info>

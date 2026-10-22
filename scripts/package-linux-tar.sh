@@ -48,6 +48,15 @@ for size in 16 24 32 48 64 128 256 512; do
     fi
 done
 
+# 稿件包 .gwx 的 MIME 类型与文档图标，与 deb 同样的位置（share/ 解到 /usr/share 或 ~/.local/share）。
+mkdir -p "$SHARE_ROOT/mime/packages"
+cp "$PROJECT_ROOT/assets/linux/cn.localtools.GongwenAssistant.xml" "$SHARE_ROOT/mime/packages/"
+for size in 16 24 32 48 64 128 256 512; do
+    dest="$SHARE_ROOT/icons/hicolor/${size}x${size}/mimetypes"
+    mkdir -p "$dest"
+    cp "$PROJECT_ROOT/assets/doc-icon/gwx-document-$size.png"         "$dest/application-x-gongwen-package.png"
+done
+
 mkdir -p "$OUTPUT_DIR"
 ARCHIVE_NAME="gongwen-assistant-$VERSION-linux-$ARCH-omarchy.tar.gz"
 tar -C "$BUILD_ROOT" -czf "$OUTPUT_DIR/$ARCHIVE_NAME" "gongwen-assistant-$VERSION"

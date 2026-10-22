@@ -74,6 +74,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
+; 登记了 .gwx 文件类型（见 [Registry]），装完 / 卸完通知资源管理器刷新图标与打开方式。
+ChangesAssociations=yes
 #if MyUpgradeMode == "1"
 ; 升级包覆盖的是同一份安装，沿用上一版的目录与显示名，只更新版本号
 UsePreviousAppDir=yes
@@ -104,6 +106,18 @@ Type: filesandordirs; Name: "{app}\licenses"
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 #endif
+
+; 稿件包 .gwx：双击用公文助手打开（进入导入流程），资源管理器里显示文档图标。
+; 低权限安装下 HKA 即 HKCU\Software\Classes，只登记给当前用户。
+; 不放进 #if MyUpgradeMode：从旧版本用增量升级包升上来的用户也要拿到关联；
+; gwx-document.ico 第一次出现时是新文件，增量包会自动带上。
+; 卸载时 ProgId 整键删除；.gwx 下只删我们写的值，别的程序也可能挂在那里。
+[Registry]
+Root: HKA; Subkey: "Software\Classes\.gwx"; ValueType: string; ValueName: ""; ValueData: "GongwenAssistant.Package"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\.gwx\OpenWithProgids"; ValueType: none; ValueName: "GongwenAssistant.Package"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package"; ValueType: string; ValueName: ""; ValueData: "公文助手稿件包"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\gwx-document.ico"
+Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent

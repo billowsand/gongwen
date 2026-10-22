@@ -6,12 +6,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "assets" / "app-icon"
+DOC_OUT = ROOT / "assets" / "doc-icon"
 SIZES = (16, 24, 32, 48, 64, 128, 256, 512, 1024)
+DOC_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
+# 小于等于这个尺寸的文档图标不写「GWX」字样，字在任务栏尺寸下只会糊成一团。
+DOC_COMPACT_MAX = 48
+# 文档图标色带上的字：按顺序找第一个存在的粗体西文字体。
+LABEL_FONTS = (
+    "C:/Windows/Fonts/segoeuib.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+)
 THEMES = {
     "claude": {
         "tile_top": "#2A2927",
@@ -158,6 +169,114 @@ def render_icon(theme: dict[str, str], size: int = 1024) -> Image.Image:
     return image
 
 
+def label_font(size: int) -> ImageFont.FreeTypeFont:
+    for path in LABEL_FONTS:
+        if Path(path).exists():
+            return ImageFont.truetype(path, size)
+    raise SystemExit("找不到粗体西文字体，请在 LABEL_FONTS 里补一个本机路径")
+
+
+def render_document_icon(theme: dict[str, str], compact: bool, size: int = 1024) -> Image.Image:
+    """`.gwx` 稿件包的文档图标：折角白纸 + 居中的程序图标 + 底部强调色色带。
+
+    compact 版给 48 px 及以下用：不写字，程序图标和色带放大、页边描线加粗，
+    任务栏和资源管理器小图标尺寸下也认得出纸的轮廓。
+    """
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    left, top, right, bottom = 176, 48, 848, 976
+    fold = 220
+    radius = 56
+
+    page_mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(page_mask)
+    draw.rounded_rectangle((left, top, right, bottom), radius=radius, fill=255)
+    # 右上角切掉一个三角，留给折角。
+    draw.polygon([(right - fold, top - 1), (right + 1, top - 1), (right + 1, top + fold)], fill=0)
+
+    shadow_mask = page_mask.filter(ImageFilter.GaussianBlur(20))
+    shadow = Image.new("RGBA", (size, size), (0, 0, 0, 70))
+    image.alpha_composite(
+        Image.composite(shadow, Image.new("RGBA", (size, size)), shadow_mask),
+        dest=(0, 14),
+    )
+    page_fill = vertical_gradient(size, "#FFFFFF", "#F1F2F6")
+    image.alpha_composite(Image.composite(page_fill, Image.new("RGBA", (size, size)), page_mask))
+
+    # 页边一圈灰描线：白底资源管理器里也能看出纸的轮廓。
+    outline_width = 44 if compact else 10
+    outline_color = hex_rgb("#A9AFBB" if compact else "#C9CDD6")
+    outline = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(outline).rounded_rectangle(
+        (left, top, right, bottom), radius=radius, outline=255, width=outline_width
+    )
+    outline = Image.composite(outline, Image.new("L", (size, size), 0), page_mask)
+    image.alpha_composite(
+        Image.composite(Image.new("RGBA", (size, size), (*outline_color, 255)), Image.new("RGBA", (size, size)), outline)
+    )
+    edge = ImageDraw.Draw(image)
+    edge.line([(right - fold, top), (right, top + fold)], fill=(*outline_color, 255), width=outline_width)
+
+    # 折角：一块略深的三角，带圆角的那一侧朝里。
+    edge.polygon(
+        [(right - fold, top), (right - fold, top + fold - 36), (right - 36, top + fold)],
+        fill=(*hex_rgb("#DDE0E7"), 255),
+    )
+    edge.rounded_rectangle(
+        (right - fold, top + fold - 72, right - fold + 72, top + fold),
+        radius=36,
+        fill=(*hex_rgb("#DDE0E7"), 255),
+    )
+
+    band_top = 700 if compact else 744
+    band_bottom = 920 if compact else 892
+    band_mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(band_mask).rectangle((left, band_top, right, band_bottom), fill=255)
+    band_mask = Image.composite(band_mask, Image.new("L", (size, size), 0), page_mask)
+    band = diagonal_gradient(size, theme["accent"], theme["accent_light"])
+    image.alpha_composite(Image.composite(band, Image.new("RGBA", (size, size)), band_mask))
+
+    mark_size = 560 if compact else 470
+    mark_top = 150 if compact else 230
+    mark = render_icon(theme).resize((mark_size, mark_size), Image.Resampling.LANCZOS)
+    image.alpha_composite(mark, dest=((left + right - mark_size) // 2, mark_top))
+
+    if not compact:
+        font = label_font(118)
+        text = "GWX"
+        box = edge.textbbox((0, 0), text, font=font)
+        width, height = box[2] - box[0], box[3] - box[1]
+        x = (left + right - width) // 2 - box[0]
+        y = (band_top + band_bottom - height) // 2 - box[1]
+        edge.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+    return image
+
+
+def write_document_icons(resampling: Image.Resampling) -> None:
+    """稿件包文档图标：Windows 安装包登记用 ico，Linux 的 hicolor mimetypes 用 png。
+
+    主题切换不影响系统里登记的图标，只出默认（claude）主题一套。
+    """
+    DOC_OUT.mkdir(parents=True, exist_ok=True)
+    theme = THEMES["claude"]
+    full = render_document_icon(theme, compact=False)
+    compact = render_document_icon(theme, compact=True)
+    icons = {
+        size: (compact if size <= DOC_COMPACT_MAX else full).resize((size, size), resampling)
+        for size in DOC_SIZES
+    }
+    for size, icon in icons.items():
+        icon.save(DOC_OUT / f"gwx-document-{size}.png", optimize=True)
+    icons[512].save(DOC_OUT / "gwx-document.png", optimize=True)
+    ico_sizes = [16, 24, 32, 48, 64, 128, 256]
+    # Pillow 的 ICO 按 sizes 从一张底图缩放；不同尺寸用不同底图要走 append_images。
+    icons[256].save(
+        DOC_OUT / "gwx-document.ico",
+        format="ICO",
+        sizes=[(size, size) for size in ico_sizes],
+        append_images=[icons[size] for size in ico_sizes if size != 256],
+    )
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     resampling = Image.Resampling.LANCZOS
@@ -181,6 +300,7 @@ def main() -> None:
         format="ICO",
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
+    write_document_icons(resampling)
 
 
 if __name__ == "__main__":
