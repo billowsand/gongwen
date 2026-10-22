@@ -4,6 +4,10 @@
 
 GitHub Releases 只提供两种发布包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）与 Linux ARM64 Debian 包（`gongwen-assistant_<版本>_arm64.deb`，按 GLIBC 2.28 构建，兼容 Ubuntu 20.04 / 麒麟 V10 及更新的系统）。macOS、Linux AMD64 与 Arch/Omarchy 不再提供发布包，需要时请按下文从源码构建。两种发布包都内含应用与字体（PDF 由程序内置的 Typst 引擎排版），安装后即可离线导出 Markdown、DOCX 与 PDF。
 
+安装后稿件包（`.gwx`）已与本程序关联：双击直接打开导入流程，Linux 装了 deb 或 tar
+包也会注册对应的 MIME 类型与文档图标。程序已开着时，双击的稿件包交给已开的窗口
+处理，不再另开一个窗口（需要独立窗口时用启动参数 `--new-window`）。
+
 发布流水线从 `gongwen-runtime` 仓库下载平台 runtime，与 `scripts/package-portable.ps1` 一起组装为完整安装包：Windows 用 Inno Setup 打成安装程序，Debian Linux 用 `scripts/package-deb.sh` 打成 deb（安装到 `/opt/gongwen-assistant`）。相关资产受授权和体积限制，不进入源码仓库。
 
 本地打 Windows 安装包（`scripts/package-dev.ps1` / `scripts/package-installer.ps1`）需要
@@ -22,7 +26,8 @@ cargo build --release --locked --no-default-features --features linux-portal-dia
 ```
 
 文件选择依赖 `xdg-desktop-portal-gtk`；应用内直接打印还需要可提供 `lp` 命令的 CUPS
-（Windows 与 macOS 无此依赖：Windows 由应用自行光栅化页面走原生 GDI 打印，macOS 自带 `lp`）。
+（Windows 与 macOS 无此依赖）。三平台用同一个应用内打印对话框：Windows 由应用自行
+光栅化页面走原生 GDI 打印（DEVMODE），macOS 自带 `lp`。
 
 ### 输入法（fcitx5）候选窗定位
 
