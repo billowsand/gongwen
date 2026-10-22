@@ -233,7 +233,8 @@ pub enum QuoteLine {
 #[derive(Debug, Serialize)]
 pub struct Table {
     pub caption: Option<Vec<Run>>,
-    pub number: String,
+    /// 只有带表题的表编号，与 Word 版、公文助手预览一致；没有表题的表不占表号。
+    pub number: Option<String>,
     pub label: Option<String>,
     pub cols: Vec<Column>,
     /// 网格：被合并掉的格子为 `None`。
@@ -971,7 +972,7 @@ impl Builder {
                     .collect()
             })
             .collect();
-        let number = self.step_table();
+        let number = caption.is_some().then(|| self.step_table());
         self.push(Item::Table(Table {
             caption: caption.map(heading_runs),
             number,

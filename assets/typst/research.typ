@@ -58,6 +58,11 @@
 // 标题类文字：西文落到 Termes Bold（中文字体只有常规字重，不受影响）。
 #let heavy(font, ..args, body) = text(font: font, weight: "bold", ..args, body)
 #let mono = (..latin-families(F.mono), ..chain(if terminal { F.hei } else { F.kai }), ..chain(F.fallback))
+// 代码（行内代码与代码块）：等宽字体管全部 ASCII——`latin-in-cjk` 会把 `[`、`<` 这类
+// 标点让给中文字体，代码里的方括号就成了全角宽；关掉 JetBrains Mono 的编程连字，
+// `<!--`、`-->` 原样印出，不变成箭头。中文仍回退到楷体（终端主题黑体）。
+#let code-font = (..chain(F.mono), ..chain(if terminal { F.hei } else { F.kai }), ..chain(F.fallback))
+#let code-text(..args, body) = text(font: code-font, features: (calt: 0), ligatures: false, ..args, body)
 
 // ---------------- 行内片段 ----------------
 // 加粗：西文换 Termes Bold，汉字描边伪粗（xeCJK AutoFakeBold，只作用于中文字体）。
@@ -120,7 +125,7 @@
     else if r.t == "list-label" { box(generated-list-label(r.v) + h(0.25em)) + "\u{2060}" }
     else if r.t == "b" { fake-bold-cjk(runs(r.c)) }
     else if r.t == "i" { text(font: kai, style: "italic", runs(r.c)) }
-    else if r.t == "code" { text(font: mono, r.v) }
+    else if r.t == "code" { code-text(r.v) }
     else if r.t == "link" { link(r.url, text(fill: if terminal { cyan } else { blue }, r.v)) }
     else if r.t == "img" {
       box(local-image(r.src, width: text-w, ..if r.page != none { (page: r.page) }))
@@ -525,7 +530,8 @@
         columns: widths,
         inset: (x: col-sep, y: 2 * texpt + rule-w / 2),
         stroke: rule-w + if terminal { rule } else { black },
-        table.header(caption, ..t.rows.at(0).map(c => cell-or-skip(c, true)).flatten()),
+        // 没有表题的表不编号（与 Word、预览一致），表头里也就没有表题这一行。
+        table.header(..if t.number != none { (caption,) }, ..t.rows.at(0).map(c => cell-or-skip(c, true)).flatten()),
         ..t.rows.slice(1).map(r => r.map(c => cell-or-skip(c, false)).flatten()).flatten(),
         // 续表提示（tabularray 的 contfoot）：只在表格还没结束的页上有内容。
         table.footer(repeat: true, table.cell(colspan: n, stroke: none, inset: 0pt, align: right,
@@ -565,7 +571,7 @@
   block(above: 10 * texpt, below: 10 * texpt, width: 100%, inset: (left: 5 * texpt, right: 10 * texpt),
     block(width: 100%, fill: if terminal { panel } else { rgb(248, 248, 248) }, stroke: 0.4pt + if terminal { rule } else { rgb(220, 220, 220) }, radius: if terminal { 0pt } else { 2pt },
       inset: (left: 15 * texpt, right: 3pt, y: 6 * texpt), {
-      set text(font: mono, size: 11pt, top-edge: 0.7 * 16 * texpt, bottom-edge: -0.3 * 16 * texpt)
+      set text(font: code-font, features: (calt: 0), ligatures: false, size: 11pt, top-edge: 0.7 * 16 * texpt, bottom-edge: -0.3 * 16 * texpt)
       set par(first-line-indent: 0pt, justify: false, leading: 0pt, spacing: 0pt)
       grid(columns: (0pt, 1fr), row-gutter: 0pt,
         ..lines.enumerate().map(((i, l)) => (

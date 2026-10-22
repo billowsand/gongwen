@@ -527,8 +527,9 @@ mod tests {
         let doc = build_str(concat!(
             "---\n文件名称: 测试\n---\n\n",
             "## 背景\n\n### 一节\n\n#### 小节\n\n表：甲\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n",
-            "## 现状\n\n### 二节\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n",
-            "<!-- [附录] -->\n\n## 附一\n\n### 附节\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+            "## 现状\n\n### 二节\n\n表：乙\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n",
+            "正文。\n\n| 无题 | 表 |\n| --- | --- |\n| 1 | 2 |\n\n",
+            "<!-- [附录] -->\n\n## 附一\n\n### 附节\n\n表：丙\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n",
         ));
         let json = serde_json::to_string(&doc.blocks).unwrap();
         for expected in [
@@ -549,17 +550,26 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(tables, ["1.1", "2.1", "A.1"]);
+        // 没有表题的表不编号、不占表号，与 Word 版和预览一致。
+        assert_eq!(
+            tables,
+            [
+                Some("1.1".to_string()),
+                Some("2.1".to_string()),
+                None,
+                Some("A.1".to_string())
+            ]
+        );
     }
 
     #[test]
     fn unnumbered_chapters_use_running_numbers_and_parts_count_in_chinese() {
         let doc = build_str(concat!(
-            "<!-- [不编号] -->\n## 前言\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n",
+            "<!-- [不编号] -->\n## 前言\n\n表：甲\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n",
             "> [!专栏] 甲\n\n",
-            "<!-- [部分] -->\n\n# 现状 {#part:a}\n\n## 背景\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n",
+            "<!-- [部分] -->\n\n# 现状 {#part:a}\n\n## 背景\n\n表：乙\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n",
             "> [!专栏] 乙\n\n> [!案例] 丙\n\n# 对策\n\n## 思路\n\n",
-            "<!-- [不编号] -->\n## 结语\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+            "<!-- [不编号] -->\n## 结语\n\n表：丙\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n",
         ));
         let json = serde_json::to_string(&doc.blocks).unwrap();
         assert!(json.contains(r#""k":"part","number":"一""#), "{json}");
@@ -572,7 +582,7 @@ mod tests {
             .blocks
             .iter()
             .filter_map(|b| match b {
-                Item::Table(t) => Some(t.number.clone()),
+                Item::Table(t) => t.number.clone(),
                 Item::Box { number, .. } => Some(number.clone()),
                 _ => None,
             })
