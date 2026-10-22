@@ -1,309 +1,115 @@
-//! 帮助中心的静态内容：章节正文与配图都用 `include_*` 打进二进制，离线可读。
+//! 帮助正文：`assets/help/` 下的一组研究报告 Markdown，按文件名升序拼成一篇。
 //!
-//! 正文以 `assets/help/` 为准；`docs/help/` 下另有一份同名副本，配图也重复了
-//! 一整套（6.4 MB）。新增或改动章节时三处都要同步：`assets/help/*.md`、本文件的
-//! [`CHAPTERS`]、`docs/help/`——副本靠手工维护，漏一处两边就不一致了。
+//! 这一组文件就是一篇普通的研究报告，写法与起草页的研究报告完全一样（见技能包
+//! `research-report.md`）：`00-front.md` 放报告题名、目录与摘要，其后每章一个文件，
+//! 部分用 `# 部分名`、章用 `## 章名 {#chap:…}`，附录前写 `<!-- [附录] -->`，跨章引用写
+//! `第{@chap:…}章`。示意图一律写成 Mermaid 围栏；只有界面截图是位图，放在
+//! `assets/help/images/`，以 `help-` 打头。整个文件夹也能用「从文件夹新建研究报告」
+//! 原样导入成稿件，在起草页边看预览边改。
 //!
-//! 图的可编辑源在 `docs/help/diagrams/`（drawio + 生成脚本），改图从那里出。
+//! 正文与截图都编译进二进制，离线可读。新增一章：在 `assets/help/` 放好文件，再在
+//! [`FILES`] 里按文件名顺序补一行——测试会核对两边一致。
 
-/// 章节所属的部分。顺序即手册的阅读顺序。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Part {
-    /// 走进公文助手。
-    Intro,
-    /// 写一篇公文。
-    Writing,
-    /// AI 能力。
-    Ai,
-    /// 词表与知识。
-    Lexicon,
-    /// 稿件与设置。
-    Ops,
-    /// 附录。
-    Appendix,
-}
+use crate::models::{DraftInput, ResearchMetadata, TemplateKind};
+use anyhow::{Context, Result};
+use std::sync::OnceLock;
 
-impl Part {
-    pub(crate) const ALL: [Part; 6] = [
-        Part::Intro,
-        Part::Writing,
-        Part::Ai,
-        Part::Lexicon,
-        Part::Ops,
-        Part::Appendix,
-    ];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Part::Intro => "第一部分 走进公文助手",
-            Part::Writing => "第二部分 写一篇公文",
-            Part::Ai => "第三部分 AI 能力",
-            Part::Lexicon => "第四部分 词表与知识",
-            Part::Ops => "第五部分 稿件与设置",
-            Part::Appendix => "附录",
-        }
-    }
-}
-
-/// 一章帮助正文。`id` 同时是文件名主干，跨章链接用它寻址。
-pub(crate) struct Chapter {
-    pub(crate) id: &'static str,
-    pub(crate) part: Part,
-    pub(crate) title: &'static str,
-    /// 目录里标题下的一句话摘要。
-    pub(crate) summary: &'static str,
-    pub(crate) body: &'static str,
-}
-
-/// 配图：markdown 里写 `![图注](images/xxx.png)`，`key` 带 `images/` 前缀。
-pub(crate) struct HelpImage {
-    pub(crate) key: &'static str,
-    pub(crate) bytes: &'static [u8],
-}
-
-macro_rules! chapter {
-    ($id:literal, $part:expr, $title:literal, $summary:literal) => {
-        Chapter {
-            id: $id,
-            part: $part,
-            title: $title,
-            summary: $summary,
-            body: include_str!(concat!("../../assets/help/", $id, ".md")),
-        }
+macro_rules! help_file {
+    ($name:literal) => {
+        ($name, include_str!(concat!("../../assets/help/", $name)))
     };
 }
 
-pub(crate) const CHAPTERS: &[Chapter] = &[
-    chapter!(
-        "01-intro",
-        Part::Intro,
-        "公文助手是什么",
-        "定位、设计理念与 AI 三条红线"
-    ),
-    chapter!(
-        "02-ui",
-        Part::Intro,
-        "界面总览",
-        "五区布局、标签模型与六套主题"
-    ),
-    chapter!(
-        "03-quickstart",
-        Part::Intro,
-        "五分钟出第一份稿子",
-        "从接模型到导出签发稿的最短路径"
-    ),
-    chapter!(
-        "04-workflow",
-        Part::Intro,
-        "办文全流程",
-        "六步办文、稿件状态与版本留痕"
-    ),
-    chapter!(
-        "05-profiles",
-        Part::Writing,
-        "立稿与要素填报",
-        "八种文种、版头主体版记与密级规则"
-    ),
-    chapter!(
-        "06-editor",
-        Part::Writing,
-        "拟稿：源码编辑与四种视图",
-        "编辑器、视图模式与查找替换"
-    ),
-    chapter!(
-        "07-ribbon",
-        Part::Writing,
-        "功能区与插入构件",
-        "八个分区与公文构件的插入"
-    ),
-    chapter!(
-        "08-research",
-        Part::Writing,
-        "研究报告专章",
-        "区段、交叉引用、文献与数学公式"
-    ),
-    chapter!(
-        "09-proofread",
-        Part::Writing,
-        "核稿：审校与校验",
-        "三档提示、要素校验与存疑清零"
-    ),
-    chapter!(
-        "10-versions",
-        Part::Writing,
-        "版本、对照与花脸稿",
-        "提交版本、两版对照与改稿痕迹"
-    ),
-    chapter!(
-        "11-export",
-        Part::Writing,
-        "导出、打印与文件命名",
-        "三种格式、PDF 编译与成品入口"
-    ),
-    chapter!(
-        "12-ai-guard",
-        Part::Ai,
-        "AI 的边界与保障",
-        "三条红线、事实闸门与采纳自检"
-    ),
-    chapter!(
-        "13-ai-workbench",
-        Part::Ai,
-        "AI 侧栏与技能",
-        "一体化输入框、/ 技能、@ 引用、要素建议卡与十五个内置技能"
-    ),
-    chapter!(
-        "14-ai-polish",
-        Part::Ai,
-        "AI 管理：模型、技能与润色预设",
-        "AI 相关设置的八个分区与小模型逐句复核"
-    ),
-    chapter!(
-        "15-vocabulary",
-        Part::Lexicon,
-        "标准词库",
-        "单位树、人员与 Excel 导入导出"
-    ),
-    chapter!(
-        "16-proofread-table",
-        Part::Lexicon,
-        "校对词表",
-        "六组分类、三级判定与命中条件"
-    ),
-    chapter!(
-        "17-lexicon",
-        Part::Lexicon,
-        "公文词表与输入法",
-        "扫描收词、省键数与公文四码词表"
-    ),
-    chapter!(
-        "18-knowledge",
-        Part::Lexicon,
-        "知识库与问答",
-        "导入、索引、检索测试与知识库问答"
-    ),
-    chapter!(
-        "19-manuscripts",
-        Part::Ops,
-        "稿件管理",
-        "状态机、盖章附件与稿件包迁移"
-    ),
-    chapter!("20-settings", Part::Ops, "设置全解", "十个分区逐项说明"),
-    chapter!(
-        "21-data",
-        Part::Ops,
-        "数据、备份与迁移",
-        "数据存放路径与备份建议"
-    ),
-    chapter!(
-        "22-send-package",
-        Part::Ops,
-        "送批材料",
-        "呈批件挂随行件、合并 PDF 与归档钉版"
-    ),
-    chapter!(
-        "a-shortcuts",
-        Part::Appendix,
-        "附录 A 快捷键一览",
-        "全部快捷键速查"
-    ),
-    chapter!(
-        "b-faq",
-        Part::Appendix,
-        "附录 B 常见问题",
-        "高频问题与排查思路"
-    ),
-    chapter!(
-        "c-glossary",
-        Part::Appendix,
-        "附录 C 术语表",
-        "文种与办文用语速查"
-    ),
+/// 帮助正文的各个文件，顺序即拼接顺序（文件名升序，与「从文件夹新建」一致）。
+pub(crate) const FILES: &[(&str, &str)] = &[
+    help_file!("00-front.md"),
+    help_file!("01-intro.md"),
+    help_file!("02-ui.md"),
+    help_file!("03-quickstart.md"),
+    help_file!("04-workflow.md"),
+    help_file!("05-profiles.md"),
+    help_file!("06-editor.md"),
+    help_file!("07-ribbon.md"),
+    help_file!("08-research.md"),
+    help_file!("09-proofread.md"),
+    help_file!("10-versions.md"),
+    help_file!("11-export.md"),
+    help_file!("12-ai-guard.md"),
+    help_file!("13-ai-workbench.md"),
+    help_file!("14-ai-polish.md"),
+    help_file!("15-vocabulary.md"),
+    help_file!("16-proofread-table.md"),
+    help_file!("17-lexicon.md"),
+    help_file!("18-knowledge.md"),
+    help_file!("19-manuscripts.md"),
+    help_file!("20-settings.md"),
+    help_file!("21-data.md"),
+    help_file!("22-send-package.md"),
+    help_file!("a-shortcuts.md"),
+    help_file!("b-faq.md"),
+    help_file!("c-glossary.md"),
 ];
 
-/// 配图清单。`include_bytes!` 不能进宏展开，只能逐条列出；新增配图时
-/// 在这里补一行，并保证文件已放在 `assets/help/images/`。
-pub(crate) const IMAGES: &[HelpImage] = &[
-    HelpImage {
-        key: "images/ui-hero.png",
-        bytes: include_bytes!("../../assets/help/images/ui-hero.png"),
-    },
-    HelpImage {
-        key: "images/ui-elements.png",
-        bytes: include_bytes!("../../assets/help/images/ui-elements.png"),
-    },
-    HelpImage {
-        key: "images/ui-revision.png",
-        bytes: include_bytes!("../../assets/help/images/ui-revision.png"),
-    },
-    HelpImage {
-        key: "images/ui-preview-nav.png",
-        bytes: include_bytes!("../../assets/help/images/ui-preview-nav.png"),
-    },
-    HelpImage {
-        key: "images/ui-versions.png",
-        bytes: include_bytes!("../../assets/help/images/ui-versions.png"),
-    },
-    HelpImage {
-        key: "images/ui-lexicon.png",
-        bytes: include_bytes!("../../assets/help/images/ui-lexicon.png"),
-    },
-    HelpImage {
-        key: "images/diag-concept.png",
-        bytes: include_bytes!("../../assets/help/images/diag-concept.png"),
-    },
-    HelpImage {
-        key: "images/diag-layout.png",
-        bytes: include_bytes!("../../assets/help/images/diag-layout.png"),
-    },
-    HelpImage {
-        key: "images/diag-quickstart.png",
-        bytes: include_bytes!("../../assets/help/images/diag-quickstart.png"),
-    },
-    HelpImage {
-        key: "images/diag-profile.png",
-        bytes: include_bytes!("../../assets/help/images/diag-profile.png"),
-    },
-    HelpImage {
-        key: "images/diag-ribbon.png",
-        bytes: include_bytes!("../../assets/help/images/diag-ribbon.png"),
-    },
-    HelpImage {
-        key: "images/diag-research.png",
-        bytes: include_bytes!("../../assets/help/images/diag-research.png"),
-    },
-    HelpImage {
-        key: "images/diag-export.png",
-        bytes: include_bytes!("../../assets/help/images/diag-export.png"),
-    },
-    HelpImage {
-        key: "images/diag-ai-flow.png",
-        bytes: include_bytes!("../../assets/help/images/diag-ai-flow.png"),
-    },
-    HelpImage {
-        key: "images/diag-manuscript.png",
-        bytes: include_bytes!("../../assets/help/images/diag-manuscript.png"),
-    },
-    HelpImage {
-        key: "images/diag-data.png",
-        bytes: include_bytes!("../../assets/help/images/diag-data.png"),
-    },
+macro_rules! help_image {
+    ($name:literal) => {
+        (
+            $name,
+            include_bytes!(concat!("../../assets/help/images/", $name)),
+        )
+    };
+}
+
+/// 界面截图。正文里写 `![图题](images/help-xxx.png)`；看帮助时先释放到用户配置目录的
+/// `images/` 下（[`install_images`]），预览与导出 PDF 就和普通稿件的插图同一条路。
+pub(crate) const IMAGES: &[(&str, &[u8])] = &[
+    help_image!("help-ui-elements.png"),
+    help_image!("help-ui-hero.png"),
+    help_image!("help-ui-lexicon.png"),
+    help_image!("help-ui-preview-nav.png"),
+    help_image!("help-ui-revision.png"),
+    help_image!("help-ui-versions.png"),
 ];
 
-/// 按 `key` 取配图字节。markdown 里的相对路径原样作 key。
-pub(crate) fn image_bytes(key: &str) -> Option<&'static [u8]> {
-    IMAGES
-        .iter()
-        .find(|img| img.key == key)
-        .map(|img| img.bytes)
+/// 拼好的整篇正文。文件之间空一行，免得前一篇末段与后一篇首行粘成一段。
+pub(crate) fn markdown() -> &'static str {
+    static TEXT: OnceLock<String> = OnceLock::new();
+    TEXT.get_or_init(|| {
+        FILES
+            .iter()
+            .map(|(_, text)| text.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+            + "\n"
+    })
 }
 
-/// 按章节 id 找下标。
-pub(crate) fn index_of(id: &str) -> Option<usize> {
-    CHAPTERS.iter().position(|ch| ch.id == id)
+/// 帮助这篇研究报告的文档要素：封面上印的那几样。题名取正文里的 `#`。
+pub(crate) fn draft() -> DraftInput {
+    DraftInput {
+        kind: TemplateKind::ResearchReport,
+        research: ResearchMetadata {
+            security: "公开".into(),
+            file_type: "使用手册".into(),
+            version: format!("V{}", env!("CARGO_PKG_VERSION")),
+            institution: "公文助手".into(),
+            ..ResearchMetadata::default()
+        },
+        ..DraftInput::default()
+    }
 }
 
-/// 按章节 id 取章名，供跨章链接的悬停提示用。
-pub(crate) fn title_of(id: &str) -> Option<&'static str> {
-    CHAPTERS.iter().find(|ch| ch.id == id).map(|ch| ch.title)
+/// 把截图写进用户配置目录的 `images/`。已有同样内容的文件就不动；升级后截图换了，
+/// 按字节比对会覆盖成新的。
+pub(crate) fn install_images() -> Result<()> {
+    let dir = crate::images::image_dir()?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("无法创建图片目录 {}", dir.display()))?;
+    for (name, bytes) in IMAGES {
+        let path = dir.join(name);
+        if std::fs::read(&path).is_ok_and(|existing| existing == *bytes) {
+            continue;
+        }
+        std::fs::write(&path, bytes)
+            .with_context(|| format!("无法写入帮助截图 {}", path.display()))?;
+    }
+    Ok(())
 }

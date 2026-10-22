@@ -877,6 +877,10 @@ impl eframe::App for GongwenApp {
         if std::mem::take(&mut self.help.request_open) {
             self.open_page(NavPage::Help);
         }
+        // 帮助页的「生成 PDF」同理：后台线程与 PDF 标签都归 app 管。
+        if std::mem::take(&mut self.help.request_pdf) {
+            self.start_help_pdf(&ctx);
+        }
         self.auto_create_touched_doc();
         self.autosave_tick();
         self.close_confirm_window(&ctx);

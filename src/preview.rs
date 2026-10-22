@@ -45,6 +45,7 @@ pub(crate) use layout::{
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};
 pub(crate) use research::outline as research_outline;
+pub(crate) use research::research_preview;
 pub(crate) use research::{LabelKind, LabelTarget, label_targets as research_label_targets};
 pub(crate) use research_anchor::{AnchorRefusal, suggest as suggest_research_anchor};
 
