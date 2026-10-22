@@ -182,6 +182,16 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   黑板与工作稿，授权类要素不出题；改 `clarify.rs`、`engine::apply_answers`、`ops/confirm.rs`、
   `ops/agent.rs` 的提问部分或侧栏题目卡片前先读它。
 
+- **富文本粘贴转 Markdown**（起草页 `Ctrl+V` 把 Word / WPS / 网页 / Excel 的富文本与多行纯文本
+  转成公文助手 Markdown，`Ctrl+Shift+V` 原样粘贴，智能粘贴后可「改为原样粘贴」，分三期）：方案与
+  分期见 `docs/rich-paste-design.md`（单文件，第十一节是交接）。**第一期已完成，待真机验收**
+  （Word / WPS / 浏览器 / Excel 的真实剪贴板、Windows `Shift+Insert` 限制）。代码在
+  `src/rich_paste/`（`html.rs` 容错解析与预清洗、`syntax.rs` 按文种裁语法、`pipeline.rs` 汇到
+  `clean` + `structure`、`clipboard.rs` 读剪贴板）与 `src/draft_page/paste.rs`（接管 `Event::Paste`、
+  `replace_with_undo` 写入、「改为原样粘贴」）；`vendor/anydoc` 新增 `anydoc::html` 公开入口（补丁二），
+  夹具与采样工具在 `tests/fixtures/paste/`。第二期（点分编号、按光标章节定级、行内格式）从
+  `structure.rs` 的编号规则改起，先读交接里的「已知坑」。
+
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 
 > 2026-10-03 按智能体工作台方案修订（`docs/ai-agent-workbench.md` 第二节 D1–D3）。

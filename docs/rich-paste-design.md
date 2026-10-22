@@ -155,4 +155,104 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
 ## 十一、进度与交接
 
 - 2026-10-23：方案定稿，四项决策见第一节。第一期提示词见 `docs/rich-paste-phase1-prompt.md`。
-  **第一期未开始。**
+- 2026-10-23：**第一期已完成**，待真机验收（Word / WPS / 浏览器 / Excel 的真实剪贴板）。
+  下文是交接。
+
+### 做了什么
+
+- 依赖：`arboard 3.6.1`（`default-features = false`，剪贴板 HTML）与 `scraper 0.29.0`
+  （`default-features = false`，容错 HTML 解析）。**选了 scraper 而不是直接用
+  html5ever**：html5ever 只给 HTML5 解析算法与 `TreeSink` trait，要么自己写一份 DOM
+  （一百多行、还要维护树构建的各种边界），要么引 `markup5ever_rcdom`（版本与 html5ever
+  不同步，停更快）。scraper 的 DOM（`Html::parse_document` + `ElementRef`）正是需要的
+  那层，代价只是多一个 `selectors` / `ego-tree`（`selectors` 项目里早已通过 `lol_html`
+  在用，没有新增许可类别）；许可证 ISC，与 GPL-3.0-or-later 兼容。
+- `vendor/anydoc` 补丁二：`pub mod html` 转出 `Node` / `Element` / `Attr` 与
+  `html::to_document(body, css)`，内部 `HtmlCtx` 让链接只留文字、图片一律不取。
+  `package/xml.rs` 加了四处 `#[allow(missing_docs)]`（公开后 `missing_docs` 会刷屏）。
+  见 `vendor/anydoc/README.md`。
+- 转换模块 `src/rich_paste/`：`mod.rs`（类型与入口）、`clipboard.rs`（读 HTML、线程内测试
+  替身）、`html.rs`（容错解析 + 预清洗 + 节点/深度上限）、`syntax.rs`（在文档模型上裁语法、
+  Markdown 判定与计数）、`pipeline.rs`（两条路汇到 `clean` + `structure`）、
+  `samples.rs`（夹具测试、导出、采样工具）、`tests.rs`（12 组样例测试）。
+- `structure::Options::paste(detect_title, lines_are_paragraphs, strip_layout)`：现有两个
+  构造函数没动，`tests/fixtures/import` 的期望输出逐字未变。
+- 起草页接入：`src/draft_page/paste.rs`。`markdown_editor` 里在 `TextEdit` 之前调
+  `smart_paste`（删掉本帧的 `Event::Paste`、用 `replace_with_undo` 写回、光标落到插入
+  内容末尾、`revalidate`），编辑区上方一行 `recent_paste_strip` 画「改为原样粘贴」。
+  `DraftSession::recent_paste` 保存插入范围 / 插入内容 / 原始纯文本 / 过期时间，
+  `reset_transient`（换稿）清掉。
+- `file_limits::MAX_CLIPBOARD_HTML_BYTES = 8 MiB`。
+- 夹具：`tests/fixtures/paste/` 五份合成样本（Word 片段、Word 整页、政府网站、微信公众
+  号、Excel）+ `expected.md` + README（采样与脱敏流程）；`capture_clipboard_html`
+  （ignored）读真实剪贴板，`GONGWEN_PASTE_SAMPLE=名字` 指定输出文件名。
+- 文档：使用帮助第 6 章加「从 Word、网页粘贴」一小节；`AGENTS.md`「进行中的工作」加一条。
+
+### 与方案的出入
+
+1. **`<br>` 与 Word 软回车在结构还原时被接回一行。** 方案第四节说 `<br>` → 段内换行，
+   anydoc 也确实渲染成 `\` + 换行的硬换行；但 `structure::strip_hard_break`（既有规则，
+   「公文正文没有行内换行」）会去掉行尾反斜杠并把两行接起来。没有改这条规则——它同时管
+   Word 另存文本的导入，改了会让 `tests/fixtures/import` 的样例输出变化。西文之间会补
+   一个空格，中文直接相接。
+2. **「改为原样粘贴」按钮的位置与失效条件。** 方案第七节说状态栏或编辑区上方、下一次
+   编辑 / 换稿 / 超时后消失。实际放在编辑区上方一行（状态栏那一行有「只许一个
+   horizontal、行高钉死」的布局约束，塞按钮容易把面板顶高），失效条件是「插入的那段
+   文字被改过」而不是「任何一次编辑」——在别处打字不影响还原，这比方案更精确。
+3. **Word 的「引用」样式**额外按类名 `MsoQuote` / `MsoIntenseQuote` 转成引用块（方案
+   表格里写了「Word 引用样式」，但没给实现路径；剪贴板片段里没有样式表，只能认类名）。
+4. **单格表格**在 `syntax.rs` 里就算成正文段落（`Table::is_single_cell`），没有留给
+   anydoc 的 `TableKind::Layout` 分支——剪贴板 HTML 里的 `<table>` 一律是 `Data`。
+5. **纯文本来源的判断顺序**：先看「已经是 Markdown」（有 `# ` 标题行、`<!-- [` 标记、
+   管道表分隔行、代码围栏）再看内容行数；单行的纯文本在 UI 层就不接管，所以
+   `convert` 对单行纯文本通常不会被调用。
+6. **`Options::paste` 的签名**取三个 bool（`detect_title`、`lines_are_paragraphs`、
+   `strip_layout`），由 `pipeline::restructure` 从 `Context` 算出来再传，保持
+   `structure.rs` 不依赖 `rich_paste` 的类型。
+
+### 已知坑（第二期接手前必读）
+
+- **`Event::Paste` 只有纯文本**，HTML 必须另外读剪贴板；读剪贴板与解析都可能失败，
+  失败一律退回原样粘贴，不能 panic、不能吞掉剪贴板内容。
+- **Ctrl+Shift+V 只能靠 `input.modifiers.shift` 区分**：egui-winit 0.36 把
+  `command && V` 直接换成 `Paste` 事件、不再发 V 的按键事件。Windows 的 `Shift+Insert`
+  因此也被当成原样粘贴（写进帮助的「已知限制」）。
+- **Windows 的剪贴板 HTML 是片段**（`StartFragment…EndFragment`，没有 `<head>`），
+  所以类名样式（`MsoTitle`、`MsoQuote`）要按类名认，不能指望样式表；macOS / Linux 的
+  整页有 `<style>`，已经喂给 `Stylesheet::add`，但只支持 tag / class / tag.class 三种选择器。
+- **`scraper` 的 `parse_document` 对片段也能用**（会自动补 `html` / `head` / `body`），
+  所以两条来源走同一条路。别改成 `parse_fragment`：整页输入时片段模式会丢 `<body>` 里
+  的块级结构。
+- **节点上限 200 000、深度 64、样式表 256 KiB**（`html.rs` 顶部常量）。上限测试用小额度走
+  `parse_with_limits`，业务代码走 `parse`。改上限要同时看 `MAX_CLIPBOARD_HTML_BYTES`。
+- **`arboard` 的 feature 会被 `egui-winit` 统一开关**：即使我们写
+  `default-features = false`，`egui-winit` 仍会打开 `image-data`（多编 `image`，本来就在
+  依赖树里）。这不影响行为，但 `Cargo.lock` 里别以为能省掉。
+- **数字与标题计数按最终 Markdown 数**（`syntax::count_markdown`），不是按模型块数：
+  `structure` 会把「一、」段落升成标题。改计数逻辑要两边一起看。
+- **`recent_paste` 的范围是字节范围**，替换前后都用 `text.get(range) == Some(inserted)`
+  核对；`layout`/`find` 的 `pending_source_jump` 是同一套光标机制，改一处要看另一处。
+- **测试不能碰真剪贴板**：`clipboard::set_test_html` 是线程内的替身，必须在同一个测试
+  线程里设置与清理（`clear_test_html`），否则并行跑的别的测试会读到假数据。
+- 预览/导出的解析器对管道表、嵌套列表的处理与「贴进去看着对」不完全一致（列表项之间
+  会留下空行，是 anydoc 的 loose list 写法）；第二期按文种压平列表时一并解决。
+
+### 第二期从哪接手
+
+第二期要做的（方案第五节与第十节第 2 条）：点分编号（1 / 1.1 / 1.1.1）、罗马数字与
+字母编号、跳号提醒、字体线索消歧、光标所在章节定级、光标在行中时只保留行内格式、按
+文种裁剪列表（白头件、呈批件）。
+
+- 编号与层级全在 `src/doc_import/structure.rs`：`parse_prefix`、`resolve_ambiguous_levels`、
+  `heading_level_map`、`classify`。**先改那里的规则并补它自己的测试**，粘贴这条路只是
+  传选项；不要为了迁就粘贴改 `lines_are_paragraphs` 的语义。
+- `enumerations_and_decimals_are_not_numbering` 这条测试是按方案第五节要重写的那条
+  （改成「孤立的 3.2.1 不是编号、成体系的点分编号是」），别直接删。
+- 光标在行中：`src/draft_page/paste.rs` 的接管条件（`markdown[line_start..cursor].trim().is_empty()`）
+  是唯一的入口；改成「只保留行内格式、压成一行」时，要把转换结果压成 inline 形态，
+  再走 `replace_with_undo`。
+- 按文种裁剪列表需要 `Context` 里加文种（现在只有 `research` 一个布尔）；`Context` 是
+  `pub(crate)` 结构体，加字段要同步 `pipeline.rs` 与 `paste.rs`。
+- 第三期（图片入库、Word 公式、文框建议、AI 侧栏粘贴）另开方案，不要在第二期顺手改
+  `syntax.rs` 里丢图片的那一行——那时要接 `src/doc_import/embedded.rs` 的入库路径与
+  `data:` / `clip_image*.png` 的临时文件处理。
