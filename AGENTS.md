@@ -66,6 +66,13 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 `model_api_test.md.txt` 或环境变量读），方法与最近一次实测数字见
 `docs/gongwen-skill-model-eval.md`。
 
+使用帮助（菜单「使用帮助」/ `F1`）是 `assets/help/` 下的**一篇研究报告**：按文件名升序拼接
+（`00-front.md` 是题名、目录与摘要，其后每章一个文件，章标题挂 `{#chap:…}`），应用内直接用
+研究报告预览排、「生成 PDF」走研究报告 Typst 链，帮助不再有自己的渲染器。示意图一律写
+Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改帮助就是改研究报告：写法
+见技能包 `research-report.md`，新增文件登记进 `src/help/content.rs` 的 `FILES` / `IMAGES`；
+`cargo test --locked help::` 核对清单、交叉引用与图，`help_pdf_sample`（ignored）整本出 PDF 目视检查。
+
 顶层模块清单在 `src/main.rs`。注意 `mod` 声明里 `outline`、`proofread_rules` 等
 并非全部集中在文件头部，改动前先 `grep -n "^mod " src/main.rs`。
 

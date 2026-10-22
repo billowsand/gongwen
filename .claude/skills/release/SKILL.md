@@ -17,7 +17,7 @@ description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与使�
 - **版本更新说明由工作流取仓库文件**：`release.yml` 的 `release` job 读 `docs/release-notes/${GITHUB_REF_NAME}.md`，有则 `gh release create --title "公文助手 vX.Y.Z" --notes-file <该文件>`；**缺文件才回退 `--generate-notes` 并打一条 `::warning::`**。所以说明必须在打 tag 前提交进仓库，不是发完再补。
 - **用户文档有三份，发版时都可能过期**（发版前必查，见步骤 3）：
   - `README.md`（根目录）：面向读者的宣发版，含成堆**会随版本漂移的硬数字**（文种 7 种、导入 24 种格式、校对词表 155 条、文档级规则 21 条、约 21.2 万行 Rust、1852 项自动化测试——括号里是 v0.9.1 的值，**每版都要重新数**，见步骤 3）。打包脚本会把它复制进发布包（`scripts/package-portable.ps1`、`scripts/package-dmg.sh`），所以它是**随包发行**的文档，不是仓库自留物。
-  - 使用帮助：应用内嵌正文 `assets/help/*.md`（`include_str!` 打进二进制）＋ 手工副本 `docs/help/*.md`；章节元数据在 `src/help/content.rs` 的 `CHAPTERS`（25 条 = 正文 22 章 + 附录 3 篇）。**改章节要三处同步**，`docs/help/diagrams/` 是可编辑图源，只在 docs 侧。
+  - 使用帮助：`assets/help/*.md` 是**一篇研究报告**（`00-front.md` 题名、目录、摘要，其后每章一个文件，按文件名升序拼接），应用内用研究报告预览排、「生成 PDF」走研究报告 Typst 链；示意图是正文里的 Mermaid 围栏，只有界面截图是位图（`assets/help/images/help-*.png`）。文件清单在 `src/help/content.rs` 的 `FILES` / `IMAGES`，测试会核对与目录一致。**只此一份，没有副本**。
   - `docs/install.md`（安装指南）与 `docs/manual.md`（手册目录页，分部表格列出全部章号章名）。
 - **Release 资产是 4 个**（v0.6.6 之后的口径；macOS、Linux AMD64、Arch/Omarchy 与 PKGBUILD 不再发布）：
   - `gongwen-assistant-X.Y.Z-win-x64-setup.exe` + `.sha256`
@@ -116,17 +116,18 @@ README 哪一节、手册哪一章、要不要重截截图。它能保证不漏�
 三道机械检查（能自动发现的不靠人眼）：
 
 ```bash
-# ① 手册两处副本必须逐字一致（docs/help/diagrams 是可编辑图源，只在 docs 侧，故排除）
-diff -rq assets/help docs/help --exclude=diagrams && echo "手册副本一致"
+# ① 手册自检：文件清单、截图、交叉引用、Mermaid 图都由测试把关
+cargo test --locked help::
 
-# ② 章节口径：CHAPTERS 25 条 = 正文 22 章 + 附录 3 篇，
+# ② 章节口径：正文 22 章 + 附录 3 篇（另有 00-front.md 是题名、目录与摘要），
 #    与 README「22 章 + 3 附录」、docs/manual.md 的分部表格一致
-#    （v0.7.0 增补「22 送批材料」一章后即为 25/22/3；若将来又加章，三处同步改这里）
-grep -c '^ *chapter!' src/help/content.rs     # 25
-ls assets/help/[0-9]*.md | wc -l              # 22
-ls assets/help/[a-c]-*.md | wc -l             # 3
+ls assets/help/[0-9][0-9]-*.md | grep -v 00-front | wc -l   # 22
+ls assets/help/[a-c]-*.md | wc -l                            # 3
 
-# ③ README「文种、导出与平台」表的硬数字，逐条重新数一遍
+# ③ 整本排一遍 PDF，目视检查（tmp/typst-samples/help/）
+cargo test --locked help_pdf_sample -- --ignored --nocapture
+
+# ④ README「文种、导出与平台」表的硬数字，逐条重新数一遍
 #    （下面是 v0.9.1 的实际值，仅作对照——每版都要重新数，别直接抄）
 grep -v '^#' proofread-lexicon.tsv | tail -n +2 | wc -l   # 校对词表条数（v0.9.1 时 155）
 find src -name '*.rs' | xargs wc -l | tail -1              # 代码行数（v0.9.1 时约 21.2 万行）
@@ -136,9 +137,9 @@ cargo test --locked --all-targets --no-fail-fast 2>&1 | grep -oE '[0-9]+ passed'
 
 人眼要过的一遍：
 
-- **新功能**：本版新增的界面、面板、快捷键、导出格式，在 `assets/help/` 里有没有对应章节或段落？没有就补；补完同步 `docs/help/` 副本（用上面 ① 验）。若新增**一整章**，还要在 `src/help/content.rs` 的 `CHAPTERS` 里加一条、把配图同时放进 `assets/help/images/` 与 `docs/help/images/`。
+- **新功能**：本版新增的界面、面板、快捷键、导出格式，在 `assets/help/` 里有没有对应章节或段落？没有就补（写法同研究报告，见技能包 `research-report.md`；画图写 Mermaid）。若新增**一整章**，在 `src/help/content.rs` 的 `FILES` 按文件名顺序加一行，章标题挂 `{#chap:…}` 锚点；新截图放进 `assets/help/images/help-*.png` 并登记到 `IMAGES`。
 - **改动的功能**：README 的「为什么是公文助手」「核稿保障」「排版」「开箱即用」「文稿管理」「AI」「文种、导出与平台」各节，以及手册对应章节的描述、示例、截图，是否还是现在这个样子。
-- **界面截图**：界面有可见变化时，`docs/images/readme/`（README 用）与 `docs/help/images/`（手册用）里的过期截图要重截，别挂着旧界面发版。
+- **界面截图**：界面有可见变化时，`docs/images/readme/`（README 用）与 `assets/help/images/`（手册用）里的过期截图要重截，别挂着旧界面发版。
 - **版本相关表述**：`docs/install.md` 的平台 / 产物清单、README 末尾的 CI 与发布说明，是否仍与 `release.yml` 的实际行为一致。
 
 有改动就提交（可单独 `docs:` 提交，也可并入本版 `chore: release vX.Y.Z`）：

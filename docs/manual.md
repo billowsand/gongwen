@@ -2,62 +2,64 @@
 
 公文助手的完整用户手册共 25 章，按「走进公文助手 → 写一篇公文 → AI 能力 → 词表与知识 → 稿件与设置」五部分组织，另附快捷键、常见问题与术语表三篇附录。
 
-**应用内也能读**：菜单 →「使用帮助」，或按 `F1`。它在标签栏里单开一格，和稿件、设置并排，随时点回去；正文配了界面截图与流程示意图，点图可放大看细节。
+**应用内也能读**：菜单 →「使用帮助」，或按 `F1`。它在标签栏里单开一格，和稿件、设置并排，随时点回去。手册本身就是一篇研究报告：应用内用研究报告的纸面预览排，左侧是大纲与搜索，示意图用 Mermaid 写成；点「生成 PDF」按研究报告版式排成 PDF，可打印。
+
+正文源文件在 [`assets/help/`](../assets/help/)，按文件名顺序拼成一篇（`00-front.md` 是题名、目录与摘要）。整个文件夹也能用「从文件夹新建研究报告」导入成稿件。
 
 ## 第一部分 走进公文助手
 
 | 章 | 内容 |
 |---|---|
-| [01 公文助手是什么](help/01-intro.md) | 定位、设计理念与 AI 三条红线 |
-| [02 界面总览](help/02-ui.md) | 五区布局、标签模型与六套主题 |
-| [03 五分钟出第一份稿子](help/03-quickstart.md) | 从接模型到导出签发稿的最短路径 |
-| [04 办文全流程](help/04-workflow.md) | 六步办文、稿件状态与版本留痕 |
+| [01 公文助手是什么](../assets/help/01-intro.md) | 定位、设计理念与 AI 三条红线 |
+| [02 界面总览](../assets/help/02-ui.md) | 五区布局、标签模型与六套主题 |
+| [03 五分钟出第一份稿子](../assets/help/03-quickstart.md) | 从接模型到导出签发稿的最短路径 |
+| [04 办文全流程](../assets/help/04-workflow.md) | 六步办文、稿件状态与版本留痕 |
 
 ## 第二部分 写一篇公文
 
 | 章 | 内容 |
 |---|---|
-| [05 立稿与要素填报](help/05-profiles.md) | 八种文种、版头主体版记与密级规则 |
-| [06 拟稿：源码编辑与四种视图](help/06-editor.md) | 编辑器、视图模式与查找替换 |
-| [07 功能区与插入构件](help/07-ribbon.md) | 七个分区与公文构件的插入 |
-| [08 研究报告专章](help/08-research.md) | 区段、交叉引用、文献与数学公式 |
-| [09 核稿：审校与校验](help/09-proofread.md) | 三档提示、要素校验与存疑清零 |
-| [10 版本、对照与花脸稿](help/10-versions.md) | 提交版本、两版对照与改稿痕迹 |
-| [11 导出、打印与文件命名](help/11-export.md) | 三种格式、PDF 编译与成品入口 |
+| [05 立稿与要素填报](../assets/help/05-profiles.md) | 八种文种、版头主体版记与密级规则 |
+| [06 拟稿：源码编辑与四种视图](../assets/help/06-editor.md) | 编辑器、视图模式与查找替换 |
+| [07 功能区与插入构件](../assets/help/07-ribbon.md) | 七个分区与公文构件的插入 |
+| [08 研究报告专章](../assets/help/08-research.md) | 区段、交叉引用、文献与数学公式 |
+| [09 核稿：审校与校验](../assets/help/09-proofread.md) | 三档提示、要素校验与存疑清零 |
+| [10 版本、对照与花脸稿](../assets/help/10-versions.md) | 提交版本、两版对照与改稿痕迹 |
+| [11 导出、打印与文件命名](../assets/help/11-export.md) | 三种格式、PDF 编译与成品入口 |
 
 ## 第三部分 AI 能力
 
 | 章 | 内容 |
 |---|---|
-| [12 AI 的边界与保障](help/12-ai-guard.md) | 三条红线、事实闸门与采纳自检 |
-| [13 AI 侧栏与技能](help/13-ai-workbench.md) | 一体化输入框、/ 技能、@ 引用、要素建议卡与十五个内置技能 |
-| [14 AI 管理：模型、技能与润色预设](help/14-ai-polish.md) | AI 相关设置的八个分区与小模型逐句复核 |
+| [12 AI 的边界与保障](../assets/help/12-ai-guard.md) | 三条红线、事实闸门与采纳自检 |
+| [13 AI 侧栏与技能](../assets/help/13-ai-workbench.md) | 一体化输入框、/ 技能、@ 引用、要素建议卡与十五个内置技能 |
+| [14 AI 管理：模型、技能与润色预设](../assets/help/14-ai-polish.md) | AI 相关设置的八个分区与小模型逐句复核 |
 
 ## 第四部分 词表与知识
 
 | 章 | 内容 |
 |---|---|
-| [15 标准词库](help/15-vocabulary.md) | 单位树、人员与 Excel 导入导出 |
-| [16 校对词表](help/16-proofread-table.md) | 六组分类、三级判定与命中条件 |
-| [17 公文词表与输入法](help/17-lexicon.md) | 扫描收词、省键数与公文四码词表 |
-| [18 知识库与问答](help/18-knowledge.md) | 导入、索引、检索测试与知识库问答 |
+| [15 标准词库](../assets/help/15-vocabulary.md) | 单位树、人员与 Excel 导入导出 |
+| [16 校对词表](../assets/help/16-proofread-table.md) | 六组分类、三级判定与命中条件 |
+| [17 公文词表与输入法](../assets/help/17-lexicon.md) | 扫描收词、省键数与公文四码词表 |
+| [18 知识库与问答](../assets/help/18-knowledge.md) | 导入、索引、检索测试与知识库问答 |
 
 ## 第五部分 稿件与设置
 
 | 章 | 内容 |
 |---|---|
-| [19 稿件管理](help/19-manuscripts.md) | 状态机、盖章附件与稿件包迁移 |
-| [20 设置全解](help/20-settings.md) | 十个分区逐项说明 |
-| [21 数据、备份与迁移](help/21-data.md) | 数据存放路径与备份建议 |
-| [22 送批材料](help/22-send-package.md) | 呈批件挂随行件、合并 PDF 与归档钉版 |
+| [19 稿件管理](../assets/help/19-manuscripts.md) | 状态机、盖章附件与稿件包迁移 |
+| [20 设置全解](../assets/help/20-settings.md) | 十个分区逐项说明 |
+| [21 数据、备份与迁移](../assets/help/21-data.md) | 数据存放路径与备份建议 |
+| [22 送批材料](../assets/help/22-send-package.md) | 呈批件挂随行件、合并 PDF 与归档钉版 |
 
 ## 附录
 
 | 篇 | 内容 |
 |---|---|
-| [附录 A 快捷键一览](help/a-shortcuts.md) | 全部快捷键速查 |
-| [附录 B 常见问题](help/b-faq.md) | 高频问题与排查思路 |
-| [附录 C 术语表](help/c-glossary.md) | 文种与办文用语速查 |
+| [附录 A 快捷键一览](../assets/help/a-shortcuts.md) | 全部快捷键速查 |
+| [附录 B 常见问题](../assets/help/b-faq.md) | 高频问题与排查思路 |
+| [附录 C 术语表](../assets/help/c-glossary.md) | 文种与办文用语速查 |
 
 ## 其他文档
 
@@ -68,4 +70,4 @@
 
 本目录与应用内帮助中心同源：正文以 `assets/help/*.md` 为准，配图在 `assets/help/images/`。新增或修改章节后同步两边，并在 `src/help/content.rs` 的 `CHAPTERS` 里登记。
 
-流程示意图的源文件在 [`help/diagrams/`](help/diagrams/)：`gen.py` 批量生成 10 个 `.drawio`，再用 draw.io 桌面版导出 PNG 到 `assets/help/images/`。改图改 `gen.py` 后重跑即可。
+流程示意图的源文件在 [`help/diagrams/`](../assets/help/diagrams/)：`gen.py` 批量生成 10 个 `.drawio`，再用 draw.io 桌面版导出 PNG 到 `assets/help/images/`。改图改 `gen.py` 后重跑即可。
