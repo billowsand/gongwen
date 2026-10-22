@@ -52,12 +52,17 @@ pub mod ns {
     pub const MATHML: &str = "http://www.w3.org/1998/Math/MathML";
 }
 
+// gongwen patch: these three types are re-exported by the public `anydoc::html`
+// module (see lib.rs), so `missing_docs` now applies to API upstream never
+// documented. Vendored sources stay byte-identical to upstream otherwise.
+#[allow(missing_docs)]
 #[derive(Debug)]
 pub enum Node {
     Elem(Element),
     Text(String),
 }
 
+#[allow(missing_docs)]
 #[derive(Debug)]
 pub struct Element {
     /// Resolved namespace URI (interned); `None` for unqualified names.
@@ -67,6 +72,7 @@ pub struct Element {
     pub children: Vec<Node>,
 }
 
+#[allow(missing_docs)]
 #[derive(Debug)]
 pub struct Attr {
     pub ns: Option<Rc<str>>,
@@ -74,6 +80,7 @@ pub struct Attr {
     pub value: String,
 }
 
+#[allow(missing_docs)]
 impl Element {
     pub fn is(&self, ns: &str, local: &str) -> bool {
         self.local == local && self.ns.as_deref() == Some(ns)

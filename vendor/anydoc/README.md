@@ -1,7 +1,8 @@
 # vendor/anydoc
 
-文档转 Markdown 库 `anydoc` 的一份副本，带一处补丁，经根 `Cargo.toml` 的
-`[patch.crates-io]` 接入。导入代码见 `src/doc_import.rs` 与 `src/doc_import/embedded.rs`。
+文档转 Markdown 库 `anydoc` 的一份副本，带两处补丁，经根 `Cargo.toml` 的
+`[patch.crates-io]` 接入。导入代码见 `src/doc_import.rs` 与 `src/doc_import/embedded.rs`，
+剪贴板粘贴见 `src/rich_paste/`。
 
 ## 来源
 
@@ -31,10 +32,41 @@ src/lib.rs   document_to_markdown（新增公开函数；删掉了原来的同�
 这处补丁适合提给上游（公开渲染函数，或给 `to_markdown` 加一个处理内嵌图片的回调）；
 上游合入后可以撤掉这份副本，改回 crates.io 依赖。
 
+## 补丁二：公开 HTML 元素树入口
+
+起草页粘贴时，剪贴板里的 HTML 由 gongwen 自己容错解析成元素树（见
+`src/rich_paste/html.rs`），需要交给 anydoc 已有的 HTML 前端走成文档模型，但
+`package`、`shared` 都是私有模块，`to_blocks` 只有 EPUB 用得到。
+
+改法：`src/lib.rs` 新增 `pub mod html`，转出 `package::xml` 的 `Node` / `Element` /
+`Attr` 三个类型，并新增 `html::to_document(&Element, css) -> Result<Document>`：
+
+- 内部实现一个 `HtmlCtx`：`link_target` 返回 `None`（只留链接文字）、`image_source`
+  返回 `Ok(None)`（图片一律不取，也不联网）、`anchor_id` 原样构造；
+- 收集到的样式表文本交给 `Stylesheet::add` 后再调 `to_blocks`；
+- **不改 `to_blocks` 本身的行为**，EPUB 的输出因此逐字不变。
+
+`package/xml.rs` 里给 `Node`、`Element`、`Attr` 及其 `impl` 加了
+`#[allow(missing_docs)]`：这些类型现在是对外 API，上游没写过文档，`#![warn(missing_docs)]`
+会在依赖构建里刷一屏警告。
+
+改动处：
+
+```text
+src/lib.rs           pub mod html { … }（新增公开入口）
+src/package/xml.rs   四处 #[allow(missing_docs)]（Node / Element / Attr / impl Element）
+```
+
+这处补丁同样适合提给上游（公开 HTML 前端入口，或者把 `to_blocks` 挂到一个公开的
+`html` 模块上）。
+
 ## 升级
 
 1. 把新版本的 `anydoc` 源码替换进来（`src/`、`LICENSE`、`Cargo.toml`，保留本 README，
    照旧删掉 `[[example]]` 一节）；
-2. 按上面清单重新打补丁；
+2. 按上面两份清单重新打补丁（渲染函数、HTML 入口；`to_blocks` / `Stylesheet` / `HtmlCtx`
+   的签名可能变，先看 `src/shared/html.rs`）；
 3. 跑 `cargo test --locked doc_import`：`draft_import_stores_embedded_word_images` 核对
-   图片入库，`realistic_import_samples_match_expected_markdown` 核对真实样例输出没变。
+   图片入库，`realistic_import_samples_match_expected_markdown` 核对真实样例输出没变；
+4. 跑 `cargo test --locked rich_paste`：粘贴的夹具测试（`tests/fixtures/paste/`）核对
+   HTML 前端的输出没变。

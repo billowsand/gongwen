@@ -146,6 +146,51 @@ pub fn to_document(
     formats::parse(bytes, resolve_format(bytes, format.into())?)
 }
 
+/// gongwen patch: HTML element tree -> document model, for clipboard paste.
+///
+/// The EPUB frontend uses the same tree walker, but it lives in a private
+/// module and is only reachable through a package parser. Pasting HTML from a
+/// browser or Word needs the body element the caller already built, plus the
+/// page's stylesheet text when the source kept it.
+///
+/// Links keep their label but lose the target (the paste pipeline renders
+/// plain text only), and images are never fetched: `image_source` reports
+/// "no source", so a fragment carrying `src` URLs cannot reach the network.
+pub mod html {
+    pub use crate::package::xml::{Attr, Element, Node};
+
+    use crate::model::{AnchorId, Document, ImageSource, LinkTarget};
+    use crate::shared::html::{HtmlCtx, Stylesheet};
+
+    /// Walk `body`'s children into a [`Document`]. `css` is the stylesheet text
+    /// collected from the page (may be empty). The result carries no notes or
+    /// assets: clipboard fragments never come with them.
+    pub fn to_document(body: &Element, css: &str) -> Result<Document, crate::ConvertError> {
+        let mut sheet = Stylesheet::default();
+        sheet.add(css);
+        let blocks = crate::shared::html::to_blocks(body, &sheet, &PasteCtx)?;
+        Ok(Document { blocks, ..Document::default() })
+    }
+
+    /// Clipboard fragments have no document to resolve hrefs, image parts, or
+    /// anchor ids against.
+    struct PasteCtx;
+
+    impl HtmlCtx for PasteCtx {
+        fn link_target(&self, _href: &str) -> Option<LinkTarget> {
+            None
+        }
+
+        fn image_source(&self, _src: &str) -> Result<Option<ImageSource>, crate::ConvertError> {
+            Ok(None)
+        }
+
+        fn anchor_id(&self, raw: &str) -> AnchorId {
+            raw.to_string()
+        }
+    }
+}
+
 fn resolve_format(bytes: &[u8], format: Option<Format>) -> Result<Format, ConvertError> {
     format.or_else(|| Format::from_bytes(bytes)).ok_or_else(|| {
         ConvertError::Unsupported("unrecognized file content: name the format explicitly".into())

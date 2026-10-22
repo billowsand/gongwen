@@ -33,6 +33,9 @@ docx-rs = "0.4.22"
 # Word 里的 EMF / WMF 矢量图转 SVG（再经 resvg 出 PNG），见 src/metafile.rs。
 emf-core = { version = "0.1.1", default-features = false, features = ["svg"] }
 eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland", "x11"] }
+# 剪贴板 HTML：起草页粘贴时读富文本片段（见 src/rich_paste/）。egui-winit 已经
+# 间接引入 3.6.1，这里只是声明直接引用；关掉默认的 image-data，不新增系统依赖。
+arboard = { version = "3.6.1", default-features = false }
 egui = "0.36.2"
 egui_dnd = "0.17.0"
 egui_extras = { version = "0.36.2", features = ["image", "svg"] }
@@ -72,6 +75,9 @@ serde_json = "1.0"
 # 技能文件（SKILL.md）的 YAML 开头。已经是 hayagriva 的依赖，不新增下载。
 serde_yaml = "0.9"
 sha2 = "0.11"
+# 剪贴板里的 HTML 容错解析：内部是 html5ever（HTML5 解析算法），不闭合、
+# 乱嵌套的片段也能得到可用的元素树。只用到 DOM，不需要选择器与 CLI。
+scraper = { version = "0.29.0", default-features = false }
 similar = { version = "3.2.0", default-features = false, features = ["std", "text"] }
 svg2pdf = "0.13"
 tempfile = "3.20"

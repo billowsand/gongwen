@@ -34,9 +34,10 @@ executable; the upstream notice is preserved at `vendor/mdx/LICENSE`.
 
 Imported documents (Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, CSV and
 text-layer PDF) are converted to Markdown by anydoc, distributed under the MIT
-License. A source copy is vendored in `vendor/anydoc` with a documented patch
-(the document-model Markdown renderer is made public so embedded images can be
-stored before rendering, see the README there); the upstream license text is
+License. A source copy is vendored in `vendor/anydoc` with two documented
+patches (the document-model Markdown renderer is made public so embedded images
+can be stored before rendering, and the HTML element tree plus its walker are
+exposed for clipboard paste; see the README there). The upstream license text is
 preserved at `vendor/anydoc/LICENSE`.
 
 - Project: <https://github.com/firecrawl/anydoc>
@@ -212,3 +213,15 @@ distributed under the MIT License.
 - 上游项目：<https://github.com/helix-editor/nucleo>
 - 发布源码包：<https://crates.io/crates/nucleo-matcher/0.3.1>
 - 用途：原文、拼音和首字母候选的模糊匹配；不参与正文自动修改。
+
+## 剪贴板粘贴（arboard 与 scraper）
+
+起草页粘贴时读取剪贴板里的 HTML：`arboard` 3.6.1（MIT OR Apache-2.0）负责跨平台的
+剪贴板访问，`scraper` 0.29.0（ISC）用 HTML5 解析算法把片段或整页解析成容错的 DOM。
+`scraper` 内部使用 `html5ever`（MIT OR Apache-2.0）与 `selectors` / `cssparser`
+（MPL-2.0，未修改，项目里原有的 `lol_html` 已经是同一份依赖）。三者的许可都与
+GPL-3.0-or-later 兼容，且都不新增系统库依赖。
+
+- arboard：<https://github.com/1Password/arboard>
+- scraper：<https://github.com/rust-scraper/scraper>
+- html5ever：<https://github.com/servo/html5ever>
