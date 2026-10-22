@@ -814,6 +814,11 @@ impl DraftPage<'_> {
         // 是无穷大，拿进去算会得到 usize::MAX 行，整个界面将无法布局。
         let rows = visible_rows(ui);
         let editable = !self.doc.read_only();
+        // 智能粘贴要在编辑框绘制之前：把本帧的 `Event::Paste` 换成转换结果，
+        // 否则 TextEdit 会再插一遍纯文本。Shift 按着时这里不接管，原样粘贴。
+        self.smart_paste(ui, editable);
+        // 「改为原样粘贴」只在刚粘贴完的一小会儿出现，放在编辑区上方。
+        self.recent_paste_strip(ui);
         // TextEdit 本身只会插入普通换行；在焦点确实位于有序列表、且没有选区时，
         // 抢在它之前消费 Enter，完成 Markdown 编辑器惯用的续号/空项退出行为。
         let ordered_enter = if editable
