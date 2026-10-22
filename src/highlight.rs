@@ -50,7 +50,7 @@ struct Cached {
     job: LayoutJob,
     /// epaint 上一次给出的 galley，仅用于指针判等。
     raw: Arc<egui::Galley>,
-    /// 后处理（标题居中）之后真正交给 `TextEdit` 的成品。
+    /// 后处理（稿纸字面贴线）之后真正交给 `TextEdit` 的成品。
     galley: Arc<egui::Galley>,
 }
 
@@ -147,26 +147,25 @@ impl MarkdownHighlighter {
     }
 }
 
-/// 加宽行距留在字面上方，字形、下划线与逻辑基线一起贴近稿纸横线。
+/// 加宽行距留在字面上方，字形与逻辑基线一起贴近稿纸横线。
 fn align_manuscript_text(galley: &mut Arc<egui::Galley>) {
     let galley = Arc::make_mut(galley);
     for placed in &mut galley.rows {
         let row = Arc::make_mut(&mut placed.row);
-        let font_height = row
-            .glyphs
-            .iter()
-            .map(|glyph| glyph.font_height)
-            .fold(0.0, f32::max);
-        if font_height == 0.0 {
-            continue;
-        }
-        let offset = (row.size.y - font_height - 2.0).max(0.0);
         for glyph in &mut row.glyphs {
+            // egui 已按各段的 line_height 将字形底对齐到行框；这里只补各自
+            // 行高内部的留白。不能取整行最大的 font_height：标题字面与 # 的
+            // 编辑器字体度量不同，会让较矮的标题少下移一截；软换行后还会跳动。
+            let offset = (glyph.line_height - glyph.font_height - 2.0).max(0.0);
             glyph.pos.y += offset;
-        }
-        // 行底色仍覆盖原行框；只移动字形及其后的下划线。
-        for vertex in &mut row.visuals.mesh.vertices[row.visuals.glyph_vertex_range.start..] {
-            vertex.pos.y += offset;
+            // 每个可见字形由四个顶点组成；空格没有网格。同步移动逻辑基线
+            // 与可见字形，行框及查找 / 锚点底色仍保持原位。
+            if !glyph.uv_rect.is_nothing() {
+                let start = glyph.first_vertex as usize;
+                for vertex in &mut row.visuals.mesh.vertices[start..start + 4] {
+                    vertex.pos.y += offset;
+                }
+            }
         }
         row.visuals.mesh_bounds = row.visuals.mesh.calc_bounds();
     }
@@ -829,6 +828,109 @@ mod tests {
         let sections = sections("## 一级标题");
         assert_eq!(sections[0], ("## ".to_string(), theme::md::marker()));
         assert_eq!(sections[1], ("一级标题".to_string(), theme::md::heading()));
+    }
+
+    /// 标记与公文标题混用字体，窄栏换行后也应保持相同的贴线距离。
+    #[test]
+    fn manuscript_mixed_fonts_keep_their_bottom_margin_after_wrapping() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
+            for size in [18.0, 30.0] {
+                for width in [160.0, 600.0] {
+                    let mut job = manuscript_sample_job(size, width);
+                    // 查找底色也要保留整行高度。
+                    job.sections[1].format.background = Color32::YELLOW;
+                    let raw = ui.fonts_mut(|fonts| fonts.layout_job(job));
+                    let mut aligned = raw.clone();
+                    align_manuscript_text(&mut aligned);
+                    assert_eq!(raw.rect, aligned.rect);
+                    let mut margins = Vec::new();
+                    for (before, after) in raw.rows.iter().zip(&aligned.rows) {
+                        assert_eq!(before.pos, after.pos);
+                        assert_eq!(before.size, after.size);
+                        let backgrounds = before.visuals.glyph_vertex_range.start;
+                        assert_eq!(
+                            before.visuals.mesh.vertices[..backgrounds],
+                            after.visuals.mesh.vertices[..backgrounds]
+                        );
+                        for (old, glyph) in before.glyphs.iter().zip(&after.glyphs) {
+                            assert_eq!(old.pos.x, glyph.pos.x);
+                            // 与 egui 一致：子字体在字体族度量内居中；排除像素取整
+                            // 后，每个字形的字体框底部都离横线 2 点。
+                            if glyph.line_height > glyph.font_height + 2.0 {
+                                let bottom = glyph.pos.y
+                                    - glyph.font_face_ascent
+                                    - 0.5 * (glyph.font_height - glyph.font_face_height)
+                                    + glyph.font_height;
+                                let margin = after.size.y - bottom;
+                                assert!((margin - 2.0).abs() <= 0.6, "{}: {margin}", glyph.chr);
+                                margins.push(margin);
+                            }
+                            if !glyph.uv_rect.is_nothing() {
+                                let start = glyph.first_vertex as usize;
+                                for index in start..start + 4 {
+                                    let delta = after.visuals.mesh.vertices[index].pos
+                                        - before.visuals.mesh.vertices[index].pos;
+                                    assert!((delta.y - (glyph.pos.y - old.pos.y)).abs() < 0.001);
+                                    assert_eq!(delta.x, 0.0);
+                                }
+                            }
+                        }
+                    }
+                    assert!(!margins.is_empty());
+                }
+            }
+        });
+    }
+
+    fn manuscript_sample_job(size: f32, width: f32) -> LayoutJob {
+        let mut job = highlight(
+            "# 关于开展工作的通知\n## 什么是推理框架\n正文与 DeepInfer 混排。\n### 同样的算力多干活\n#### 主要特点\n##### 工作安排\n###### 注意事项",
+            width,
+            size,
+            None,
+            &[],
+            &crate::models::EditorFontPreset::Official.scheme(),
+            false,
+        );
+        // 不切全局主题，避免并行测试相互影响。
+        for section in &mut job.sections {
+            section.format.line_height = Some(section.format.font_id.size * 1.8);
+        }
+        job
+    }
+
+    #[test]
+    #[ignore = "生成标题与稿纸横线对齐的目视样张"]
+    fn manuscript_heading_sample() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let size = egui::vec2(760.0, 470.0);
+        let mut canvas = crate::ui_snapshot::Canvas::default();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            },
+            |ui| {
+                let mut galley =
+                    ui.fonts_mut(|fonts| fonts.layout_job(manuscript_sample_job(30.0, 700.0)));
+                align_manuscript_text(&mut galley);
+                let origin = egui::pos2(20.0, 20.0);
+                for row in &galley.rows {
+                    let y = origin.y + row.pos.y + row.size.y;
+                    ui.painter().line_segment(
+                        [egui::pos2(10.0, y), egui::pos2(750.0, y)],
+                        egui::Stroke::new(0.6, Color32::from_rgb(237, 227, 214)),
+                    );
+                }
+                ui.painter().galley(origin, galley, theme::text());
+            },
+        );
+        let path = std::path::Path::new("tmp/manuscript-headings.png");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        canvas.render(&ctx, output, size, theme::smartisan::PAPER, path);
     }
 
     #[test]
