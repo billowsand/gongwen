@@ -75,6 +75,7 @@ mod redline;
 mod revise_cases;
 mod revise_model;
 mod revision;
+mod rich_paste;
 mod samples;
 mod single_instance;
 mod skill_pack;

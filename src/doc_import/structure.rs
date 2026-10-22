@@ -136,6 +136,27 @@ impl Options {
             repair_merged_paragraphs: false,
         }
     }
+
+    /// 从剪贴板粘贴一段内容时的选项（见 `crate::rich_paste`）。
+    ///
+    /// `detect_title` 与 `strip_layout` 由调用方按稿子现状决定：稿子里已经有
+    /// `# ` 标题时不认标题，稿子不为空时不剥版头版记——粘贴是往现有稿子里插一段，
+    /// 不是整篇导入。`lines_are_paragraphs` 对纯文本来源打开（即时通讯、记事本里
+    /// 一行就是一段），HTML 来源关掉（段落由标签划好）。
+    pub(crate) fn paste(
+        detect_title: bool,
+        lines_are_paragraphs: bool,
+        strip_layout: bool,
+    ) -> Self {
+        Self {
+            detect_title,
+            lines_are_paragraphs,
+            strip_layout,
+            bold_unnumbered: true,
+            inline_enumeration: true,
+            repair_merged_paragraphs: false,
+        }
+    }
 }
 
 /// 按公文版式还原标题、列表、文档标题与附件标记。输入是归一化过的 markdown。
