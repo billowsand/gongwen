@@ -302,6 +302,7 @@ pub(crate) fn body_stats(markdown: &str) -> (usize, usize) {
                 .join(""),
             export::MarkdownBlock::Image { .. }
             | export::MarkdownBlock::Diagram { .. }
+            | export::MarkdownBlock::Code { .. }
             | export::MarkdownBlock::Marker(_)
             | export::MarkdownBlock::Html(_) => continue,
         };

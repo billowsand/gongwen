@@ -42,7 +42,26 @@ pub fn restrict(data: &[u8], keep: impl Fn(char) -> bool) -> Option<Vec<u8>> {
         });
     }
     let cmap = format12_cmap(&map);
+    rebuild(data, |tag, body| {
+        Some(if tag == b"cmap" {
+            cmap.clone()
+        } else {
+            body.to_vec()
+        })
+    })
+}
 
+/// 去掉 `drop` 里列出的表，其余逐字节照抄。代码字体用它摘掉 GSUB：egui 会照 GSUB
+/// 排编程连字，`-->` 就成了一支箭头。字体集合（TTC）与解析不了的文件返回 `None`。
+pub fn without_tables(data: &[u8], drop: &[[u8; 4]]) -> Option<Vec<u8>> {
+    ttf_parser::Face::parse(data, 0).ok()?;
+    rebuild(data, |tag, body| {
+        (!drop.contains(tag)).then(|| body.to_vec())
+    })
+}
+
+/// 逐张表过一遍 `table`（返回 `None` 的表丢掉），按标签排好重新拼成字体文件。
+fn rebuild(data: &[u8], table: impl Fn(&[u8; 4], &[u8]) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
     let read_u16 = |at: usize| -> Option<u16> {
         Some(u16::from_be_bytes(data.get(at..at + 2)?.try_into().ok()?))
     };
@@ -60,12 +79,9 @@ pub fn restrict(data: &[u8], keep: impl Fn(char) -> bool) -> Option<Vec<u8>> {
         let tag: [u8; 4] = data.get(record..record + 4)?.try_into().ok()?;
         let offset = read_u32(record + 8)? as usize;
         let length = read_u32(record + 12)? as usize;
-        let body = if &tag == b"cmap" {
-            cmap.clone()
-        } else {
-            data.get(offset..offset.checked_add(length)?)?.to_vec()
-        };
-        tables.push((tag, body));
+        if let Some(body) = table(&tag, data.get(offset..offset.checked_add(length)?)?) {
+            tables.push((tag, body));
+        }
     }
     tables.sort_by_key(|(tag, _)| *tag);
     Some(assemble(version, &mut tables))
@@ -185,5 +201,23 @@ mod tests {
         assert_eq!(face.number_of_glyphs(), original.number_of_glyphs());
         let a = original.glyph_index('A').unwrap();
         assert_eq!(face.glyph_hor_advance(a), original.glyph_hor_advance(a));
+    }
+
+    #[test]
+    fn code_font_drops_ligature_table_only() {
+        let Some(dir) = crate::portable_runtime::find_font_dir() else {
+            return; // 精简检出没有 runtime 字体，跳过。
+        };
+        let Ok(data) = std::fs::read(dir.join("JetBrainsMono-Regular.ttf")) else {
+            return;
+        };
+        let original = ttf_parser::Face::parse(&data, 0).expect("JetBrains Mono 应能解析");
+        assert!(original.tables().gsub.is_some(), "原字体带连字表");
+        let stripped = without_tables(&data, &[*b"GSUB"]).expect("应能去掉 GSUB");
+        let face = ttf_parser::Face::parse(&stripped, 0).expect("改写后的字体应能解析");
+        assert!(face.tables().gsub.is_none());
+        for ch in "<!-->[]".chars() {
+            assert_eq!(face.glyph_index(ch), original.glyph_index(ch), "{ch}");
+        }
     }
 }

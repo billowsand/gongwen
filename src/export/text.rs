@@ -60,7 +60,9 @@ pub(crate) fn number_to_chinese(number: usize) -> String {
 ///
 /// 词法与 mdx 的行内解析一致：`\$` 是字面 `$`；结对要求内容非空、不含换行、
 /// 不含 `$`；行内的 `$$` 不结对，两个字符都算普通文字（mdx 里 `$$` 只有整行
-/// 才是独立公式）。`$` 与 `\` 都是 ASCII，按字节扫不会切进 UTF-8 序列内部。
+/// 才是独立公式）。行内代码与 mdx 一样按最左匹配先占住位置，里面的 `$` 是字面
+/// ——讲写法时写的 `` `$E=mc^2$` `` 不排成公式。`$`、`\`、反引号都是 ASCII，
+/// 按字节扫不会切进 UTF-8 序列内部。
 pub(crate) fn inline_math_spans(text: &str) -> Vec<std::ops::Range<usize>> {
     let bytes = text.as_bytes();
     let mut spans = Vec::new();
@@ -68,6 +70,14 @@ pub(crate) fn inline_math_spans(text: &str) -> Vec<std::ops::Range<usize>> {
     while i < bytes.len() {
         if bytes[i] == b'\\' && bytes.get(i + 1) == Some(&b'$') {
             i += 2;
+            continue;
+        }
+        if bytes[i] == b'`'
+            && let Some(len) = text[i + 1..]
+                .find(['`', '\n'])
+                .filter(|&len| len > 0 && bytes[i + 1 + len] == b'`')
+        {
+            i += len + 2;
             continue;
         }
         if bytes[i] != b'$' {
@@ -638,6 +648,17 @@ pub(crate) fn chinese_date_parts(value: &str) -> Option<(&str, &str, &str)> {
 #[cfg(test)]
 mod source_mapping_tests {
     use super::*;
+
+    /// 行内代码里的 `$` 是字面，与 mdx 的最左匹配一致；代码外的公式照常认。
+    #[test]
+    fn inline_code_hides_dollar_signs_from_math() {
+        let text = "写成 `$E=mc^2$`，排出来是 $E=mc^2$。";
+        let spans = inline_math_spans(text);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(&text[spans[0].clone()], "$E=mc^2$");
+        // 没有闭合的反引号不算代码。
+        assert_eq!(inline_math_spans("`未闭合 $x$").len(), 1);
+    }
 
     #[test]
     fn visible_index_ignores_inline_markers_before_a_source_boundary() {

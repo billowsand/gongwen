@@ -243,9 +243,11 @@ pub(crate) fn sections(
                     src: crate::images::normalize_ref(src),
                 });
             }
-            // 引用块已由 `flatten_quotes` 拆成段落；Mermaid 已在调用方物化成图片引用。
+            // 引用块已由 `flatten_quotes` 拆成段落；Mermaid 已在调用方物化成图片引用；
+            // 代码块只有研究报告的解析出。
             MarkdownBlock::Html(_)
             | MarkdownBlock::Diagram { .. }
+            | MarkdownBlock::Code { .. }
             | MarkdownBlock::Quote { .. } => {}
         }
         index += 1;

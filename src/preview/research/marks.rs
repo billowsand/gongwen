@@ -22,6 +22,7 @@ pub(crate) fn anchor_of<'a>(markdown: &'a str, located: &LocatedBlock) -> Option
     let raw = match located.block {
         MarkdownBlock::Quote { .. } => raw.lines().next()?,
         MarkdownBlock::Diagram { .. } => raw.lines().last()?,
+        MarkdownBlock::Code { .. } => return None,
         _ => raw,
     };
     crossref::split_label(raw).1
@@ -281,7 +282,7 @@ pub(crate) struct LabelTarget {
 /// 交叉引用下拉展开时才调它。挂在不编号标题或普通段落上的锚点没有号可引，
 /// 不在其列——引了也只会印成 `??`。
 pub(crate) fn label_targets(markdown: &str) -> Vec<LabelTarget> {
-    let blocks = export::parse_markdown_located(markdown);
+    let blocks = export::parse_markdown_located_report(markdown, &NumberingConfig::default());
     let mut targets: Vec<LabelTarget> = Vec::new();
     // 菜单只要题名，不看文献库：叙述式 `@key` 不登记，题名里原样留着。
     let marks = collect_marks_with(&blocks, markdown, &|_| false, |id, target| {
@@ -312,7 +313,12 @@ pub(crate) fn label_targets(markdown: &str) -> Vec<LabelTarget> {
 /// 正文引过的文献：序号、引用处数，按序号排。与排版共用第一遍，序号就是纸上印的号
 /// （GB/T 7714 顺序编码制：按首次引用的先后）。
 pub(crate) fn citations(markdown: &str, bib: &str) -> Vec<crossref::CitedKey> {
-    collect_marks(&export::parse_markdown_located(markdown), markdown, bib).cited()
+    collect_marks(
+        &export::parse_markdown_located_report(markdown, &NumberingConfig::default()),
+        markdown,
+        bib,
+    )
+    .cited()
 }
 
 /// 导航大纲里的一条标题。
@@ -337,7 +343,11 @@ pub(crate) struct OutlineEntry {
 /// 扫一遍源码，按研究报告的规则取出全部标题与编号。
 pub(crate) fn outline(markdown: &str) -> Vec<OutlineEntry> {
     // 大纲只看标题，不看文献库。
-    let marks = collect_marks(&export::parse_markdown_located(markdown), markdown, "");
+    let marks = collect_marks(
+        &export::parse_markdown_located_report(markdown, &NumberingConfig::default()),
+        markdown,
+        "",
+    );
     // 大纲只看标题，序号表的分组编号样式无关紧要。
     let located =
         export::parse_markdown_located_research(markdown, &marks, &NumberingConfig::default());

@@ -83,6 +83,7 @@ impl TextCounts {
                 }
                 MarkdownBlock::Image { .. }
                 | MarkdownBlock::Diagram { .. }
+                | MarkdownBlock::Code { .. }
                 | MarkdownBlock::Marker(_)
                 | MarkdownBlock::Html(_)
                 | MarkdownBlock::Quote { .. } => {}

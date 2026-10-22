@@ -46,7 +46,8 @@ const SLUG_BYTES: usize = 18;
 /// 按光标位置 `cursor`（字节）给锚点定位置、起 id。
 pub(crate) fn suggest(markdown: &str, cursor: usize) -> Result<AnchorSuggestion, AnchorRefusal> {
     let cursor = cursor.min(markdown.len());
-    let blocks = export::parse_markdown_located(markdown);
+    let blocks =
+        export::parse_markdown_located_report(markdown, &crate::models::NumberingConfig::default());
     let mut found: Option<(Range<usize>, Target)> = None;
     walk(&blocks, markdown, |located, kind, _| {
         if found.is_some() {

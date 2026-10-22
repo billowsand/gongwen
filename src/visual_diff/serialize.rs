@@ -341,6 +341,8 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
                     raw.lines().map(str::to_string).collect()
                 }
             }
+            // 版本对照走公文的解析，出不了代码块；万一来了按原文整块写回。
+            MarkdownBlock::Code { .. } => raw.lines().map(str::to_string).collect(),
             MarkdownBlock::Table {
                 aligns, numbered, ..
             } => {

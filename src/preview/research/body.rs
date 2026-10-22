@@ -46,7 +46,11 @@ pub(crate) fn research_preview(
         "research-parse",
         crate::preview::memo::key((markdown, numbering, bib)),
         || {
-            let marks = collect_marks(&export::parse_markdown_located(markdown), markdown, bib);
+            let marks = collect_marks(
+                &export::parse_markdown_located_report(markdown, numbering),
+                markdown,
+                bib,
+            );
             export::parse_markdown_located_research(markdown, &marks, numbering)
         },
     );

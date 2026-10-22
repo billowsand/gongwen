@@ -72,6 +72,13 @@ pub(crate) enum MarkdownBlock {
         /// 块内各行：去掉 `>` 之后的非空行，一行一段，与 mdx 一致。
         lines: Vec<QuoteLine>,
     },
+    /// 普通代码围栏（```` ```text ```` 之类，Mermaid 除外）。只有研究报告的解析
+    /// 认它（见 [`parse_markdown_located_report`]），与 mdx 排成代码块一致；公文
+    /// 解析仍把围栏行当正文，行为与从前一样。`text` 是围栏内的原文，不换行内标记。
+    Code {
+        lang: String,
+        text: String,
+    },
 }
 
 /// 文框的首行 `> [!名称] 标题`。
@@ -501,7 +508,17 @@ pub(crate) fn parse_markdown_located_with_numbering(
     markdown: &str,
     numbering: &NumberingConfig,
 ) -> Vec<LocatedBlock> {
-    parse_located(markdown, numbering, None)
+    parse_located(markdown, numbering, None, false)
+}
+
+/// 研究报告的源码切块：与 [`parse_markdown_located_with_numbering`] 相同，另认
+/// 普通代码围栏（[`MarkdownBlock::Code`]）。研究报告这边凡是要看块结构的地方
+/// （锚点、大纲、序号表回写）都走它，围栏里写的 `## 标题`、`{#id}` 才不会被当真。
+pub(crate) fn parse_markdown_located_report(
+    markdown: &str,
+    numbering: &NumberingConfig,
+) -> Vec<LocatedBlock> {
+    parse_located(markdown, numbering, None, true)
 }
 
 /// 研究报告预览专用：切块之前先把每行里的 `{#id}`、`{@id}`、`[@key]` 换成纸面
@@ -517,7 +534,19 @@ pub(crate) fn parse_markdown_located_research(
     marks: &ResearchMarks,
     numbering: &NumberingConfig,
 ) -> Vec<LocatedBlock> {
-    parse_located(markdown, numbering, Some(marks))
+    parse_located(markdown, numbering, Some(marks), true)
+}
+
+/// 代码围栏的首行：```` ``` ```` 起头、不是 Mermaid，返回语言名（可为空）。
+/// 结束行与 mdx 同一判定：整行只有 ```` ``` ````（见 [`crate::mermaid::is_close`]）。
+fn code_fence_open(line: &str) -> Option<&str> {
+    let rest = line.trim().strip_prefix("```")?;
+    let lang = rest
+        .trim_start_matches('`')
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    (!crate::mermaid::is_open(line)).then_some(lang)
 }
 
 /// 源码里的一行：`len` 始终是原文的字节数，`text` 才可能被行内标记替换过。
@@ -548,6 +577,7 @@ fn parse_located(
     markdown: &str,
     numbering: &NumberingConfig,
     marks: Option<&ResearchMarks>,
+    code_fences: bool,
 ) -> Vec<LocatedBlock> {
     let mut blocks: Vec<LocatedBlock> = Vec::new();
     let mut paragraph: Vec<ParagraphPart> = Vec::new();
@@ -592,6 +622,32 @@ fn parse_located(
         }
         if line.is_empty() {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
+        } else if code_fences
+            && let Some(lang) = code_fence_open(line)
+            // 与 Mermaid 一样，没写结束围栏（正在输入）时不认，免得吞掉后文。
+            && let Some(close) = lines[index + 1..]
+                .iter()
+                .position(|next| crate::mermaid::is_close(&next.text))
+        {
+            flush(&mut paragraph, &mut paragraph_range, &mut blocks);
+            let close = index + 1 + close;
+            // 取原文：研究报告的行已换过 `{@id}` 之类的行内标记，代码里要原样。
+            let text = lines[index + 1..close]
+                .iter()
+                .map(|line| &markdown[line.start..line.start + line.len])
+                .collect::<Vec<_>>()
+                .join("\n");
+            blocks.push(LocatedBlock {
+                block: MarkdownBlock::Code {
+                    lang: lang.to_string(),
+                    text,
+                },
+                range: start..lines[close].start + lines[close].len,
+                source_segments: Vec::new(),
+                generated_prefixes: Vec::new(),
+            });
+            index = close + 1;
+            continue;
         } else if crate::mermaid::is_open(line)
             // 还没写结束围栏（正在输入）时不认成图：否则后文整段被吞进图里、
             // 从预览上消失。按普通段落显示，导出时由 `mermaid::materialize` 报行号。
@@ -2118,6 +2174,55 @@ mod ordered_list_tests {
                 .any(|block| matches!(block, MarkdownBlock::Diagram { .. }))
         );
         assert!(matches!(blocks.last(), Some(MarkdownBlock::Paragraph(text)) if text == "后文。"));
+    }
+
+    /// 研究报告认普通代码围栏：围栏里的 `## 标题`、`{#id}` 原样留作代码，不成标题、
+    /// 不换锚点；块的源码范围覆盖两道围栏。
+    #[test]
+    fn report_parse_keeps_code_fences_verbatim() {
+        let source = "前文。\n\n```markdown\n## 研究背景 {#sec:bg}\n\r\n| a | b |\n```\n后文。";
+        let blocks = parse_markdown_located_report(source, &NumberingConfig::default());
+        let code = blocks
+            .iter()
+            .find(|located| matches!(located.block, MarkdownBlock::Code { .. }))
+            .expect("应当认出代码块");
+        assert_eq!(
+            code.block,
+            MarkdownBlock::Code {
+                lang: "markdown".into(),
+                text: "## 研究背景 {#sec:bg}\n\n| a | b |".into(),
+            }
+        );
+        assert_eq!(
+            &source[code.range.clone()],
+            "```markdown\n## 研究背景 {#sec:bg}\n\r\n| a | b |\n```"
+        );
+        assert!(
+            !blocks
+                .iter()
+                .any(|located| matches!(located.block, MarkdownBlock::Heading(..)))
+        );
+        assert!(
+            matches!(&blocks.last().unwrap().block, MarkdownBlock::Paragraph(text) if text == "后文。")
+        );
+    }
+
+    /// 公文解析不认代码围栏，行为与从前一致；没写结束围栏时研究报告也不认。
+    #[test]
+    fn official_parse_and_unclosed_fences_stay_as_before() {
+        let source = "```text\n正文一行\n```";
+        assert!(
+            !parse_markdown(source)
+                .iter()
+                .any(|block| matches!(block, MarkdownBlock::Code { .. }))
+        );
+        let unclosed =
+            parse_markdown_located_report("```text\n正文\n\n后文。", &NumberingConfig::default());
+        assert!(
+            !unclosed
+                .iter()
+                .any(|located| matches!(located.block, MarkdownBlock::Code { .. }))
+        );
     }
 
     #[test]

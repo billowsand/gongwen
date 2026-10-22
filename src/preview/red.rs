@@ -795,10 +795,12 @@ pub(crate) fn red_build_print_layout(
     while index < body.len() {
         let located = body[index];
         match &located.block {
-            // 引用块已由 `OfficialParse` 拆成段落，到不了这里
+            // 引用块已由 `OfficialParse` 拆成段落；代码块只有研究报告的解析出，
+            // 都到不了这里
             MarkdownBlock::Title(_)
             | MarkdownBlock::Marker(_)
             | MarkdownBlock::Html(_)
+            | MarkdownBlock::Code { .. }
             | MarkdownBlock::Quote { .. } => {}
             MarkdownBlock::Heading(level, text) => {
                 if let Some(number) =

@@ -518,11 +518,13 @@ pub fn write_docx_with_numbering(
     } else {
         for block in &blocks {
             match block {
-                // 引用块已由 `flatten_quotes` 拆成段落，到不了这里
+                // 引用块已由 `flatten_quotes` 拆成段落；代码块只有研究报告的解析出，
+                // 都到不了这里
                 MarkdownBlock::Title(_)
                 | MarkdownBlock::Html(_)
                 | MarkdownBlock::Marker(_)
                 | MarkdownBlock::Diagram { .. }
+                | MarkdownBlock::Code { .. }
                 | MarkdownBlock::Quote { .. } => {}
                 MarkdownBlock::Image { alt, src } => {
                     if let Some(paragraph) = image_paragraph(alt, src, content_width) {

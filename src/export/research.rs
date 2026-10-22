@@ -86,7 +86,8 @@ pub(crate) fn markdown_with_frontmatter(
 fn write_numbered_tables(markdown: &str, numbering: &NumberingConfig) -> String {
     let mut output = String::with_capacity(markdown.len());
     let mut copied = 0;
-    for located in super::parse_markdown_located_with_numbering(markdown, numbering) {
+    // 认代码围栏：围栏里写的序号表示例是给人看的源码，不回写编号。
+    for located in super::parse_markdown_located_report(markdown, numbering) {
         let MarkdownBlock::Table {
             rows,
             spans,

@@ -840,6 +840,7 @@ pub(crate) fn content_block(
             }
         }
         MarkdownBlock::Aligned { align, text } => aligned_block(ui, metrics, text, *align),
+        MarkdownBlock::Code { text, .. } => code_block(ui, metrics, text),
         // 公文的引用块已由 `OfficialParse` 拆成段落；研究报告的引用块在
         // `preview::research` 里自己排，都不走这里
         MarkdownBlock::Title(_)
@@ -994,6 +995,83 @@ fn pdf_block(
             image_placeholder(ui, metrics, alt, file_name, &error);
         }
     }
+}
+
+/// 研究报告的代码块，照 `research.typ` 的 `code-block` 排：等宽 11 pt、行距
+/// 16 pt，浅灰底、细框、小圆角；行号小号灰色排在框内左侧留白里。长行在框内
+/// 折行，行号只标在首行。
+pub(crate) fn code_block(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
+    let outer_left = metrics.pt(5.0);
+    let outer_right = metrics.pt(10.0);
+    let inset_left = metrics.pt(15.0);
+    let inset_right = metrics.pt(3.0);
+    let inset_y = metrics.pt(6.0);
+    let line = metrics.pt(16.0);
+    let width = metrics.content - outer_left - outer_right;
+    let wrap = (width - inset_left - inset_right).max(metrics.pt(20.0));
+    let paper = theme::paper::bg();
+    let ink = theme::paper::ink();
+    let font = metrics.font(theme::FONT_RESEARCH_MONO, 11.0);
+    let number_font = metrics.font(theme::FONT_SONGTI, 6.5);
+    let galleys: Vec<_> = text
+        .split('\n')
+        .map(|row| {
+            let mut job = egui::text::LayoutJob::single_section(
+                row.to_string(),
+                egui::TextFormat {
+                    font_id: font.clone(),
+                    color: ink,
+                    line_height: Some(line),
+                    ..Default::default()
+                },
+            );
+            job.wrap.max_width = wrap;
+            ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
+        })
+        .collect();
+    let rows: usize = galleys.iter().map(|galley| galley.rows.len().max(1)).sum();
+    let height = rows as f32 * line + inset_y * 2.0;
+    ui.add_space(metrics.pt(10.0));
+    place(ui, metrics, height, |painter, rect| {
+        let frame = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + outer_left, rect.top()),
+            egui::vec2(width, height),
+        );
+        painter.rect(
+            frame,
+            egui::CornerRadius::same(metrics.pt(2.0).round().clamp(0.0, 255.0) as u8),
+            paper.lerp_to_gamma(ink, 0.03),
+            Stroke::new(metrics.pt(0.4).max(0.5), paper.lerp_to_gamma(ink, 0.14)),
+            egui::StrokeKind::Inside,
+        );
+        let mut y = frame.top() + inset_y;
+        for (index, galley) in galleys.into_iter().enumerate() {
+            let left = frame.left() + inset_left;
+            let number = painter.layout_no_wrap(
+                (index + 1).to_string(),
+                number_font.clone(),
+                paper.lerp_to_gamma(ink, 0.4),
+            );
+            let first = galley.rows.first();
+            let baseline = first.map_or(line * 0.75, |row| row.max_y() - row.height() * 0.25);
+            painter.galley(
+                egui::pos2(
+                    left - metrics.pt(10.0) - number.size().x,
+                    y + baseline - number.size().y * 0.8,
+                ),
+                number,
+                ink,
+            );
+            let size = egui::vec2(wrap, galley.rows.len().max(1) as f32 * line);
+            metrics.mark_sourced_row(
+                egui::Rect::from_min_size(egui::pos2(left, y), size),
+                y + baseline,
+            );
+            y += size.y;
+            painter.galley(egui::pos2(left, y - size.y), galley, ink);
+        }
+    });
+    ui.add_space(metrics.pt(10.0));
 }
 
 /// 图片占位卡片：细边框 + 文件名与说明，宽度=版心。

@@ -16,10 +16,12 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// 交叉引用 `{@id}`。
+/// 交叉引用 `{@id}`（第 1 组）。行内代码只为占住位置：mdx 把反引号里的东西当
+/// 字面排，`` `{@id}` `` 是在讲写法，不是引用。行内代码不跨行：全文扫描时，
+/// 代码围栏那三个反引号不该跟几行之外的反引号配成一对，把中间的引用藏起来。
 fn crossref_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\{@([A-Za-z][\w:.-]*)\}").expect("交叉引用正则"))
+    RE.get_or_init(|| Regex::new(r"`[^`\n]+`|\{@([A-Za-z][\w:.-]*)\}").expect("交叉引用正则"))
 }
 
 /// 文献引用的行内扫描，照 mdx `common::inline` 的最左匹配次序：脚注、行内代码、
@@ -234,7 +236,9 @@ pub(crate) fn label_ids(text: &str) -> Vec<&str> {
 pub(crate) fn crossref_ids(text: &str) -> Vec<&str> {
     let mut ids = Vec::new();
     for caps in crossref_re().captures_iter(text) {
-        let id = caps.get(1).expect("交叉引用 id").as_str();
+        let Some(id) = caps.get(1).map(|id| id.as_str()) else {
+            continue;
+        };
         if !ids.contains(&id) {
             ids.push(id);
         }
@@ -335,7 +339,10 @@ impl ResearchMarks {
             last = mark.range.end;
         }
         cited.push_str(&stripped[last..]);
-        let text = crossref_re().replace_all(&cited, |caps: &Captures| self.reference(&caps[1]));
+        let text = crossref_re().replace_all(&cited, |caps: &Captures| match caps.get(1) {
+            Some(id) => self.reference(id.as_str()),
+            None => caps[0].to_string(),
+        });
         // 脚注不参与编号，纸面是页下注；预览就地展开成可读形式。
         let text = footnote_re().replace_all(&text, |caps: &Captures| {
             let content = caps
@@ -620,5 +627,20 @@ mod tests {
         // 锚点定义 `{#id}` 不是交叉引用，不该被收进来。
         assert!(crossref_ids("## 研究背景 {#chap:a}").is_empty());
         assert!(crossref_ids("普通正文。").is_empty());
+        // 行内代码里的写法示例不是引用：与 mdx 一样当字面。
+        assert_eq!(
+            crossref_ids("写成 `{@sec:bg}` 即可，见{@chap:a}章"),
+            ["chap:a"]
+        );
+    }
+
+    #[test]
+    fn inline_code_keeps_crossref_syntax_verbatim() {
+        let mut marks = ResearchMarks::default();
+        marks.define("chap:a", "1");
+        assert_eq!(
+            marks.apply("引用写 `{@id}`，见第{@chap:a}章。"),
+            "引用写 `{@id}`，见第1章。"
+        );
     }
 }

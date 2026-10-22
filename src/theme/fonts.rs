@@ -44,6 +44,9 @@ pub const FONT_RESEARCH_HEI_PLAIN: &str = "gw-research-hei-plain";
 
 pub const FONT_RESEARCH_BIAOSONG: &str = "gw-research-biaosong";
 
+/// 研究报告代码块：西文 JetBrains Mono，中文楷体，与 PDF 模板的 `mono` 同一条链。
+pub const FONT_RESEARCH_MONO: &str = "gw-research-mono";
+
 /// 研究报告版面里公文族名对应的研究报告字体族；没有对应的原样返回。
 pub(crate) fn research_family(family: &str) -> &str {
     match family {
@@ -592,6 +595,17 @@ pub(crate) fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
     let termes_regular = termes(&mut fonts, "gw-termes-regular", "texgyretermes-regular.otf");
     let termes_bold = termes(&mut fonts, "gw-termes-bold", "texgyretermes-bold.otf");
     let terminal_mono = termes(&mut fonts, "gw-terminal-mono", "JetBrainsMono-Regular.ttf");
+    // 代码块的等宽字：同一支 JetBrains Mono，但摘掉 GSUB，与 PDF 一样不排编程连字。
+    let code_mono = (|| {
+        let data =
+            std::fs::read(bundled_fonts.as_deref()?.join("JetBrainsMono-Regular.ttf")).ok()?;
+        let data = crate::font_cmap::without_tables(&data, &[*b"GSUB"])?;
+        fonts.font_data.insert(
+            "gw-code-mono".to_owned(),
+            egui::FontData::from_owned(data).into(),
+        );
+        Some("gw-code-mono".to_owned())
+    })();
     for (family, base, bundled_file, latin) in [
         (
             FONT_RESEARCH_SONG,
@@ -600,6 +614,7 @@ pub(crate) fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
             &termes_regular,
         ),
         (FONT_RESEARCH_KAI, FONT_KAITI, "GWKai.ttf", &termes_regular),
+        (FONT_RESEARCH_MONO, FONT_KAITI, "GWKai.ttf", &code_mono),
         (
             FONT_RESEARCH_TERMINAL,
             FONT_HEITI,
