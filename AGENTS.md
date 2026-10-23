@@ -193,8 +193,8 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   `src/doc_import/structure/`（`numbering.rs` 的 `Numbering`、`mod.rs` 的
   `restructure_with_report`）；
   `vendor/anydoc` 新增 `anydoc::html` 公开入口（补丁二），夹具与采样工具在
-  `tests/fixtures/paste/`。第三期（图片入库、Word 公式、文框建议、AI 侧栏粘贴、字体线索）另开方案，
-  先读交接里第三期那一段。
+  `tests/fixtures/paste/`。第三期（图片入库、Word 公式、研究报告文框、AI 侧栏粘贴保留表格）提示词见
+  `docs/rich-paste-phase3-prompt.md`，开工前要先采真实剪贴板样本；字体线索消歧单列为待定。
 
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 
