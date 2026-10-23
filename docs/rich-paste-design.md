@@ -97,6 +97,7 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
   段内枚举。
 - 原文跳号（一、三、）时状态提示里说一句，因为编号由程序重新生成。
 - 字体线索（黑体一级、楷体二级、仿宋加粗三级）只在有编号但层级模糊时消歧，不单凭字体升标题。
+  **已挪到第三期**，原因见第十节。
 
 ## 六、粘贴和整篇导入的区别
 
@@ -148,9 +149,13 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
 1. **第一期**：读 HTML 剪贴板；HTML → anydoc Element（vendor 补丁公开 HTML 入口）；按文种裁剪语法；
    粘贴专用的 structure 选项；接管条件；纯文本多行识别；替换选区 + 单个撤销点；状态提示与「改为
    原样粘贴」；合成样本夹具 + 采集真实剪贴板样本的 ignored 测试；使用帮助加一小节。
-2. **第二期**：点分编号方案与小数区分；罗马数字与字母编号；跳号提醒；字体线索消歧；按光标所在
-   章节定层级；光标在行中时只保留行内格式；按文种裁剪列表（白头件、呈批件）。
-3. **第三期**：Word / 网页 `data:` 图片入库；Word 公式；`> [!文框]` 的半自动建议；AI 侧栏粘贴。
+2. **第二期**：点分编号方案与小数区分；罗马数字与字母编号；跳号提醒；按光标所在章节定层级
+   （只动没有编号的样式标题）；光标在行中时只保留行内格式；列表整形（紧凑、只留两级、白头件与
+   呈批件拆成段落）。提示词见 `docs/rich-paste-phase2-prompt.md`。
+3. **第三期**：Word / 网页 `data:` 图片入库；Word 公式；`> [!文框]` 的半自动建议；AI 侧栏粘贴；
+   字体线索消歧（原排第二期，挪到这里：`anydoc` 的文档模型不带字体，要从 `html.rs` 另开一条
+   通道传给 `structure`，而有编号时层级已经由编号样式决定，先拿真实样本看有没有字体能救的
+   情形再做）。
 
 ## 十一、进度与交接
 
@@ -165,8 +170,8 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
   html5ever**：html5ever 只给 HTML5 解析算法与 `TreeSink` trait，要么自己写一份 DOM
   （一百多行、还要维护树构建的各种边界），要么引 `markup5ever_rcdom`（版本与 html5ever
   不同步，停更快）。scraper 的 DOM（`Html::parse_document` + `ElementRef`）正是需要的
-  那层，代价只是多一个 `selectors` / `ego-tree`（`selectors` 项目里早已通过 `lol_html`
-  在用，没有新增许可类别）；许可证 ISC，与 GPL-3.0-or-later 兼容。
+  那层，代价是多一份 `selectors` 0.41 与 `ego-tree`（`lol_html` 用的是 `selectors` 0.37，
+  两份并存；许可类别 MPL-2.0 与原有依赖相同）；许可证 ISC，与 GPL-3.0-or-later 兼容。
 - `vendor/anydoc` 补丁二：`pub mod html` 转出 `Node` / `Element` / `Attr` 与
   `html::to_document(body, css)`，内部 `HtmlCtx` 让链接只留文字、图片一律不取。
   `package/xml.rs` 加了四处 `#[allow(missing_docs)]`（公开后 `missing_docs` 会刷屏）。
@@ -190,11 +195,9 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
 
 ### 与方案的出入
 
-1. **`<br>` 与 Word 软回车在结构还原时被接回一行。** 方案第四节说 `<br>` → 段内换行，
-   anydoc 也确实渲染成 `\` + 换行的硬换行；但 `structure::strip_hard_break`（既有规则，
-   「公文正文没有行内换行」）会去掉行尾反斜杠并把两行接起来。没有改这条规则——它同时管
-   Word 另存文本的导入，改了会让 `tests/fixtures/import` 的样例输出变化。西文之间会补
-   一个空格，中文直接相接。
+1. ~~`<br>` 与 Word 软回车在结构还原时被接回一行。~~ 验收时改掉了：接回一行会把
+   「联系人：张某<br>联系电话：」接成「张某联系电话」。现在 `syntax.rs` 在文档模型上把
+   段落里的换行拆成两段（标题里的换行仍接成一行），`structure` 的规则没动。见下文「验收记录」。
 2. **「改为原样粘贴」按钮的位置与失效条件。** 方案第七节说状态栏或编辑区上方、下一次
    编辑 / 换稿 / 超时后消失。实际放在编辑区上方一行（状态栏那一行有「只许一个
    horizontal、行高钉死」的布局约束，塞按钮容易把面板顶高），失效条件是「插入的那段
@@ -236,6 +239,46 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
   线程里设置与清理（`clear_test_html`），否则并行跑的别的测试会读到假数据。
 - 预览/导出的解析器对管道表、嵌套列表的处理与「贴进去看着对」不完全一致（列表项之间
   会留下空行，是 anydoc 的 loose list 写法）；第二期按文种压平列表时一并解决。
+- **`anydoc` 把只含行内内容的 `div` / `section` 当透明容器**，挨着的几个会接成一段。
+  `html.rs` 的 `is_leaf_container` 把它们改成 `p` 再交出去；别去改 anydoc，EPUB 的输出要保持不变。
+- **有序列表一律改成 `- `**（`syntax.rs`）：`1. ` 开头的行会被 `structure` 当成段首编号
+  重新定级，嵌套子项就压平了；公文助手里有序 / 无序列表编号效果相同。
+- **字段分隔空格**（`gaps.rs`）：占位符 U+FDD0 在 `html.rs` 逐个文本节点、`pipeline` 汇总前
+  各护一遍，所以 `protect` 必须能重复调用；最后统一换回一个全角空格。导入用的
+  `clean::normalize_spaces` 没改，导入同样的文字仍会删掉这个空格。
+- **复制的本来就是 Markdown 时原样粘贴**：VS Code 一类编辑器复制时也带一份 HTML，
+  `pipeline::convert` 先看纯文本像不像 Markdown，像就不走 HTML。
+
+### 验收记录（2026-10-23）
+
+审阅了四个提交，`fmt`、`clippy -D warnings`、全量测试都通过。又用探针输入跑了一遍，修了
+下面这些（随验收提交）：
+
+1. **VS Code / Typora 源码模式复制的 Markdown 被改坏**：剪贴板同时有 HTML，走 HTML 后
+   `## 标题` 被转义成 `\## 标题`，几行接成一行。修法：纯文本已像 Markdown 时整体不接管。
+2. **用 `div` 分段的网页、编辑器内容接成一段**：见上面「已知坑」的 `is_leaf_container`。
+3. **`<br>` 两边接成一串**：改成拆段（出入第 1 条）。
+4. **字段之间的全角空格被删**：政府网站夹具的期望输出里本来就是「张某联系电话」，属于
+   把错误结果写进了期望。新增 `gaps.rs`，夹具期望改成「张某　联系电话」。
+5. **嵌套有序列表被压平成同级**：有序列表改成 `- `。
+6. **选区从句子中间开始时也接管**：会把那句话从中间拆开。现在按选区起点判断，与「光标前
+   有字」同样不接管。
+7. `THIRD_PARTY_NOTICES.md` 里「`selectors` 与 `lol_html` 是同一份依赖」不对（0.41 与 0.37），已更正。
+
+还实测了 Windows 真剪贴板：按 CF_HTML 规范写入 UTF-8 的 `HTML Format`，
+`capture_clipboard_html` 用 arboard 读回来的正是 StartFragment…EndFragment 那一段。
+顺带发现：Windows PowerShell 5.1 的 `Set-Clipboard -AsHtml` 按 GBK 写入，arboard 按
+UTF-8 解码失败、返回 `None`，这时走纯文本兜底，行为正确。有的老程序可能也这样写剪贴板，
+真机验收时留意。
+
+**仍待真机验收**（GUI 由用户在本机做，本次未操作应用窗口）：
+
+- Word、WPS（含麒麟）、Chrome / Edge、Excel 各复制一段公文粘进起草页：标题层级、表格、
+  加粗、列表是否符合预期，状态栏计数是否正确；
+- `Ctrl+Shift+V` 原样粘贴，`Ctrl+Z` 一次撤回；
+- 「改为原样粘贴」那一行出现与消失时，编辑区会不会上下跳动、遮挡第一行；
+- 光标在行中间、选区从句中开始时，确实走普通粘贴；
+- 用 `capture_clipboard_html` 采几份真实样本，脱敏后补进 `tests/fixtures/paste/`。
 
 ### 第二期从哪接手
 
@@ -248,8 +291,8 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
   传选项；不要为了迁就粘贴改 `lines_are_paragraphs` 的语义。
 - `enumerations_and_decimals_are_not_numbering` 这条测试是按方案第五节要重写的那条
   （改成「孤立的 3.2.1 不是编号、成体系的点分编号是」），别直接删。
-- 光标在行中：`src/draft_page/paste.rs` 的接管条件（`markdown[line_start..cursor].trim().is_empty()`）
-  是唯一的入口；改成「只保留行内格式、压成一行」时，要把转换结果压成 inline 形态，
+- 光标在行中：`src/draft_page/paste.rs` 的接管条件（`markdown[line_start..anchor].trim().is_empty()`，
+  `anchor` 是光标或选区起点）是唯一的入口；改成「只保留行内格式、压成一行」时，要把转换结果压成 inline 形态，
   再走 `replace_with_undo`。
 - 按文种裁剪列表需要 `Context` 里加文种（现在只有 `research` 一个布尔）；`Context` 是
   `pub(crate)` 结构体，加字段要同步 `pipeline.rs` 与 `paste.rs`。

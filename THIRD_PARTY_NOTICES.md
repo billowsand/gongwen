@@ -219,8 +219,8 @@ distributed under the MIT License.
 起草页粘贴时读取剪贴板里的 HTML：`arboard` 3.6.1（MIT OR Apache-2.0）负责跨平台的
 剪贴板访问，`scraper` 0.29.0（ISC）用 HTML5 解析算法把片段或整页解析成容错的 DOM。
 `scraper` 内部使用 `html5ever`（MIT OR Apache-2.0）与 `selectors` / `cssparser`
-（MPL-2.0，未修改，项目里原有的 `lol_html` 已经是同一份依赖）。三者的许可都与
-GPL-3.0-or-later 兼容，且都不新增系统库依赖。
+（MPL-2.0，未修改；`selectors` 是 0.41，与 `lol_html` 用的 0.37 并存，许可类别
+与原有依赖相同）。三者的许可都与 GPL-3.0-or-later 兼容，且都不新增系统库依赖。
 
 - arboard：<https://github.com/1Password/arboard>
 - scraper：<https://github.com/rust-scraper/scraper>
