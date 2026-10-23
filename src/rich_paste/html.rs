@@ -180,6 +180,13 @@ impl Walker {
                     // 张数仍在这里数。anydoc 对「没有字节也没有 alt」的图整张丢掉，
                     // 正文里连位置都不留，所以缺 alt 时补一个：网络图因此还能留下
                     // 「图片未导入」注释，入库成功的图 embedded 会把 alt 清空。
+                    // 藏起来的图（`display:none`、Word 的 `mso-hide:all`）与网页上的
+                    // 跟踪像素、小图标都不是正文配图：不计数、不留「图片未导入」注释。
+                    if matches!(child.value().name(), "img" | "image")
+                        && (should_skip(&child) || decorative_network_image(&child))
+                    {
+                        continue;
+                    }
                     if matches!(child.value().name(), "img" | "image") {
                         self.images += 1;
                         let mut converted = self.element(child, depth + 1)?;
@@ -219,6 +226,29 @@ impl Walker {
         }
         Ok(out)
     }
+}
+
+/// 装饰用的网络小图：跟踪像素、行内小图标。宽高属性都写明、都不超过这个像素数就算。
+const DECORATIVE_IMAGE_MAX: u32 = 32;
+
+/// 网页上的 1×1 跟踪像素与小图标。它们本来就不会入库（网络图不下载），再各留一行
+/// 「图片未导入」注释只会把正文弄乱；只复制一个词时，旁边的像素还会让它被当成块级
+/// 内容粘贴。`data:` 与 `file:` 的小图仍照常入库（可能是 Word 里的小插图）。
+fn decorative_network_image(element: &ElementRef<'_>) -> bool {
+    let value = element.value();
+    let src = value.attr("src").unwrap_or("").trim().to_ascii_lowercase();
+    if src.starts_with("data:") || src.starts_with("file:") {
+        return false;
+    }
+    let dimension = |name: &str| {
+        value
+            .attr(name)
+            .and_then(|raw| raw.trim().trim_end_matches("px").trim().parse::<u32>().ok())
+    };
+    matches!(
+        (dimension("width"), dimension("height")),
+        (Some(width), Some(height)) if width <= DECORATIVE_IMAGE_MAX && height <= DECORATIVE_IMAGE_MAX
+    )
 }
 
 /// anydoc 只收「有图片字节或有 alt」的图：网络图取不到字节，没有 alt 就整张消失，

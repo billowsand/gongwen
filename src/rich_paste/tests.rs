@@ -616,6 +616,24 @@ fn material_text_keeps_no_images() {
     assert!(!text.contains("图片未导入"), "{text}");
 }
 
+/// 跟踪像素、小图标、藏起来的图都不是正文配图：不计数、不留「图片未导入」注释。
+#[test]
+fn decorative_and_hidden_images_leave_no_marker() {
+    let markdown = markdown_of(
+        "<html><body>\
+         <p>一、总体要求<img src='https://stat.example.com/p.gif' width='1' height='1'></p>\
+         <p>各单位加强巡查。<img src='https://x.example.com/icon.png' width='16px' height='16'></p>\
+         <p>说明。<img src='https://x.example.com/a.png' style='display:none'></p>\
+         </body></html>",
+    );
+    assert!(!markdown.contains("图片未导入"), "{markdown}");
+    // 写了宽高、但比图标大的网络图仍要留位置。
+    let markdown = markdown_of(
+        "<html><body><p>正文。</p><p><img src='https://x.example.com/chart.png' width='600' height='400'></p></body></html>",
+    );
+    assert!(markdown.contains("图片未导入"), "{markdown}");
+}
+
 /// 手动量一下 10 张常见尺寸图片随粘贴入库在界面线程上的耗时（第四期交接记录用）。
 #[test]
 #[ignore = "手动量耗时，不进常规测试"]

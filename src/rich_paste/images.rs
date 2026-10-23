@@ -11,6 +11,9 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
+
+use regex::Regex;
 
 use anydoc::html::PastedImage;
 
@@ -142,6 +145,19 @@ impl State {
 }
 
 /// 按地址读出图片字节：data: 只解码、file: 只读本机文件，别的一概不碰。
+/// 剪贴板 HTML 里有没有**能入库**的图（`data:` 或本机 `file:` 地址）。
+///
+/// 起草页只粘一行时据此决定接不接管：网络图反正不下载，旁边一个跟踪像素就让「复制
+/// 一个词」变成块级粘贴、外加一行「图片未导入」注释，得不偿失。
+pub(crate) fn has_importable_image(html: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?i)<img\b[^>]*?\bsrc\s*=\s*["']?\s*(?:data|file):"#)
+            .expect("valid image pattern")
+    })
+    .is_match(html)
+}
+
 fn read_image(src: &str, max_bytes: u64) -> Result<PastedImage, String> {
     if src.starts_with("data:") {
         return read_data_url(src, max_bytes);
@@ -446,5 +462,20 @@ mod tests {
             report.skipped,
             vec!["网络图片不下载".to_string(), "不是图片格式".to_string()]
         );
+    }
+
+    /// 只有 `data:` 与 `file:` 的图算「能入库」；网络图、没有 src 的不算。
+    #[test]
+    fn importable_images_are_data_or_file_urls() {
+        assert!(has_importable_image(
+            "<p>见下图<IMG width=10 SRC='data:image/png;base64,AAAA'></p>"
+        ));
+        assert!(has_importable_image(
+            r#"<img src="file:///C:/Temp/msohtmlclip1/01/clip_image001.png">"#
+        ));
+        assert!(!has_importable_image(
+            r#"<p>通知<img src="https://stat.example.com/p.gif" width=1 height=1></p>"#
+        ));
+        assert!(!has_importable_image("<p>通知</p>"));
     }
 }

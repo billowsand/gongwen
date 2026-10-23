@@ -30,6 +30,7 @@ mod samples;
 mod syntax;
 
 pub(crate) use clipboard::read_html;
+pub(crate) use images::has_importable_image;
 
 /// 这次粘贴的内容从哪来。
 pub(crate) enum Source {

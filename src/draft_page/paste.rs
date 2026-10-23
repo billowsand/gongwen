@@ -59,7 +59,11 @@ impl DraftPage<'_> {
         // 只粘贴一行（复制一个词、一个数字）不接管。带图的段落例外：Word 里那张图
         // 常常单独一段、纯文本是空的，只按行数判断就永远粘不进图片。
         let single_line = !text.trim_end_matches(['\r', '\n']).contains('\n');
-        if single_line && !html.as_deref().is_some_and(contains_image_tag) {
+        if single_line
+            && !html
+                .as_deref()
+                .is_some_and(rich_paste::has_importable_image)
+        {
             return;
         }
         let markdown = &self.doc.generated_markdown;
@@ -217,13 +221,6 @@ impl DraftPage<'_> {
         self.revalidate();
         *self.status = "已改为原样粘贴。".into();
     }
-}
-
-/// HTML 片段里有没有 `<img>`（`<image>` 不算：VML 的图片数据解析时已经丢了）。
-fn contains_image_tag(html: &str) -> bool {
-    html.as_bytes()
-        .windows(4)
-        .any(|window| window.eq_ignore_ascii_case(b"<img"))
 }
 
 /// 插入点上方最近一个标题的级数（`# ` = 1）。附件区的附件标题同样是 `# `，
@@ -640,6 +637,18 @@ mod ui_tests {
         harness.paste("见下图。");
         assert_eq!(harness.doc.generated_markdown, "某某单位：见下图。");
         assert!(!harness.doc.generated_markdown.contains("images/"));
+        clipboard::clear_test_html();
+    }
+
+    /// 只复制一个词，旁边带着网页的跟踪像素：照样原样粘贴，不当块级内容。
+    #[test]
+    fn single_line_paste_next_to_a_tracking_pixel_stays_verbatim() {
+        clipboard::set_test_html(Some(
+            r#"<html><body><p>通知<img src="https://stat.example.com/p.gif" width=1 height=1></p></body></html>"#,
+        ));
+        let mut harness = Harness::new("");
+        harness.paste("通知");
+        assert_eq!(harness.doc.generated_markdown, "通知");
         clipboard::clear_test_html();
     }
 }
