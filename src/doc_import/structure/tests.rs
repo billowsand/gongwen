@@ -1,6 +1,6 @@
 //! `structure` 的单元测试：编号定级、结构还原、版头版记与段内枚举。
 //!
-//! 从 `mod.rs` 拆出来（只移动，不改行为）。
+//! 从 `mod.rs` 拆出来（只移动，不改行为），免得一个文件又长回两千行。
 
 use super::*;
 
@@ -133,10 +133,116 @@ fn enumerations_and_decimals_are_not_numbering() {
         "一、二季度全市经济运行平稳。",
         "2、3月份降水偏多。",
         "1.5亿元资金已下达。",
+        "1.1倍增长。",
+        "2.3万元支出。",
+        // 孤立的点分编号不认：没有第二处，谈不上体系。
         "3.2.1 技术路线",
     ] {
         assert_eq!(clean(raw), raw, "{raw}");
     }
+}
+
+#[test]
+fn dotted_numbering_scheme_sets_levels_and_strips_numbers() {
+    let raw = "1 总体要求\n\n正文。\n\n1.1 指导思想\n\n正文。\n\n\
+               1.1.1 基本原则\n\n正文。\n\n1.2 工作目标\n\n正文。\n\n\
+               2 主要任务\n\n正文。\n\n2.1 排查隐患\n\n正文。";
+    assert_eq!(
+        clean(raw),
+        "## 总体要求\n\n正文。\n\n### 指导思想\n\n正文。\n\n\
+         #### 基本原则\n\n正文。\n\n### 工作目标\n\n正文。\n\n\
+         ## 主要任务\n\n正文。\n\n### 排查隐患\n\n正文。"
+    );
+    // 点分方案下标题同样拆「标题。正文」，编号由程序重编。
+    assert_eq!(
+        clean("1.1 加强组织领导。各单位要高度重视，明确责任分工。\n\n1.2 强化督导检查。"),
+        "### 加强组织领导\n各单位要高度重视，明确责任分工。\n\n### 强化督导检查"
+    );
+}
+
+#[test]
+fn roman_and_letter_numbering_follow_their_levels() {
+    // 全角罗马数字是最浅一层，与「第X章」同级。
+    assert_eq!(
+        clean("Ⅰ、总体要求\n\n正文。\n\nⅡ、主要任务\n\n正文。"),
+        "## 总体要求\n\n正文。\n\n## 主要任务\n\n正文。"
+    );
+    // ASCII 罗马数字要成组出现才认。
+    assert_eq!(
+        clean("I. 总体要求\n\n正文。\n\nII. 主要任务\n\n正文。"),
+        "## 总体要求\n\n正文。\n\n## 主要任务\n\n正文。"
+    );
+    let lone = "I. 这是一句英文。";
+    assert_eq!(clean(lone), lone);
+    // 字母编号在第六层，压不进 `#####` 就当列表。
+    assert_eq!(
+        clean("A. 制度建设\n\nB. 台账管理"),
+        "1. 制度建设\n2. 台账管理"
+    );
+    // 只有 `A.` 一行也不认（要成组）。
+    let lone = "A. 一家单位的情况。";
+    assert_eq!(clean(lone), lone);
+}
+
+#[test]
+fn inline_enumeration_recognizes_diyi_and_shouxian() {
+    assert_eq!(
+        clean(
+            "会议强调，第一，加强组织领导，明确责任分工；\
+             第二，强化督导检查，确保任务落实；第三，严格考核问责，倒逼工作落地。"
+        ),
+        "会议强调，\n\n**第一**，加强组织领导，明确责任分工；\n\n\
+         **第二**，强化督导检查，确保任务落实；\n\n\
+         **第三**，严格考核问责，倒逼工作落地。"
+    );
+    assert_eq!(
+        clean("会议要求，首先，压实责任；其次，加强督导；最后，严格问责。"),
+        "会议要求，\n\n**首先**，压实责任；\n\n**其次**，加强督导；\n\n\
+         **最后**，严格问责。"
+    );
+    // 单独的「最后，」与「第一条」「第一章」都不拆段。
+    let alone = "最后，请各单位抓好落实。";
+    assert_eq!(clean(alone), alone);
+    assert_eq!(
+        clean("第一条　为规范管理，制定本办法。"),
+        "**第一条**　为规范管理，制定本办法。"
+    );
+}
+
+#[test]
+fn number_jumps_are_reported() {
+    let (markdown, report) = restructure_with_report(
+        "一、总体要求\n\n正文。\n\n三、主要任务\n\n正文。",
+        &Options::import(true, false),
+    );
+    assert_eq!(markdown, "## 总体要求\n\n正文。\n\n## 主要任务\n\n正文。");
+    assert_eq!(
+        report.jumps().to_vec(),
+        [NumberJump {
+            from: "一、".into(),
+            to: "三、".into()
+        }]
+    );
+
+    // 点分编号只在同一个父前缀下比。
+    let (_, report) = restructure_with_report(
+        "1.1 背景\n\n正文。\n\n1.2 现状\n\n正文。\n\n1.4 方法\n\n正文。",
+        &Options::import(false, false),
+    );
+    assert_eq!(
+        report.jumps().to_vec(),
+        [NumberJump {
+            from: "1.2".into(),
+            to: "1.4".into()
+        }]
+    );
+
+    // 顺着写的没有跳号。
+    let (_, report) = restructure_with_report(
+        "一、总体要求\n\n正文。\n\n二、主要任务\n\n正文。",
+        &Options::import(true, false),
+    );
+    assert!(report.jumps().is_empty(), "{:?}", report.jumps());
 }
 
 #[test]
@@ -250,18 +356,18 @@ fn chapter_headings_are_recognized() {
 #[test]
 fn full_width_digits_and_half_paren_numbering_are_recognized() {
     assert_eq!(
-        parse_prefix("１．总体要求", false).map(|prefix| prefix.level),
+        parse_prefix("１．总体要求", false, Numbering::default()).map(|prefix| prefix.level),
         Some(3)
     );
     assert_eq!(
-        parse_prefix("1)具体事项", false).map(|prefix| prefix.level),
+        parse_prefix("1)具体事项", false, Numbering::default()).map(|prefix| prefix.level),
         Some(4)
     );
     assert_eq!(
-        parse_prefix("第一章　总则", false).map(|prefix| prefix.level),
+        parse_prefix("第一章　总则", false, Numbering::default()).map(|prefix| prefix.level),
         Some(0)
     );
-    assert!(parse_prefix("第一条　为规范管理", false).is_none());
+    assert!(parse_prefix("第一条　为规范管理", false, Numbering::default()).is_none());
 }
 
 #[test]

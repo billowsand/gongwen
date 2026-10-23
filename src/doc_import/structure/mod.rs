@@ -32,7 +32,7 @@ use std::sync::OnceLock;
 
 mod numbering;
 
-use numbering::parse_prefix;
+use numbering::{Numbering, parse_prefix};
 
 /// 句号前的标题最多这么多字；再长就是段首带编号的正文段。
 pub(super) const TITLE_MAX: usize = 40;
@@ -165,6 +165,34 @@ impl Options {
 
 /// 按公文版式还原标题、列表、文档标题与附件标记。输入是归一化过的 markdown。
 pub(crate) fn restructure(markdown: &str, options: &Options) -> String {
+    restructure_with_report(markdown, options).0
+}
+
+/// 结构还原发现的问题：原文同级编号跳了号（「一、」后面直接「三、」）。
+///
+/// 编号一律由程序按顺序重新生成，跳号不影响输出，只是要提醒一句——作者可能漏了
+/// 一节，也可能手打编号时数错了。
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Report {
+    jumps: Vec<NumberJump>,
+}
+
+impl Report {
+    /// 同级跳号的位置，按出现顺序。
+    pub(crate) fn jumps(&self) -> &[NumberJump] {
+        &self.jumps
+    }
+}
+
+/// 一处跳号：从哪个原文编号直接跳到了哪个。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NumberJump {
+    pub(crate) from: String,
+    pub(crate) to: String,
+}
+
+/// 同 [`restructure`]，另外报告跳号。
+pub(crate) fn restructure_with_report(markdown: &str, options: &Options) -> (String, Report) {
     let repaired;
     let markdown = if options.repair_merged_paragraphs {
         repaired = repair_merged_paragraphs(markdown);
@@ -189,7 +217,8 @@ pub(crate) fn restructure(markdown: &str, options: &Options) -> String {
     }
     bold_article_labels(&mut blocks);
     let roles = classify(&blocks);
-    render(&blocks, &roles)
+    let report = report_number_jumps(&blocks);
+    (render(&blocks, &roles), report)
 }
 
 /// 切出来的一块。
@@ -209,12 +238,18 @@ enum Block {
 
 #[derive(Debug)]
 struct Item {
-    /// 编号样式从浅到深：0 = `第X章/节/部分`，1 = `一、`，2 = `（一）`，
-    /// 3 = `1.`，4 = `（1）`，5 = `①`。定级先按样式，输出时再按全篇实际
-    /// 用到的层级压紧，避免跳级。
+    /// 编号样式从浅到深：0 = `第X章/节/部分`、罗马数字，1 = `一、`，2 = `（一）`，
+    /// 3 = `1.`，4 = `（1）`，5 = `①`，6 = `A.` 字母编号。定级先按样式，输出时
+    /// 再按全篇实际用到的层级压紧，避免跳级；压到 `#####` 以下就当列表（见 `render`）。
     level: u8,
-    /// 阿拉伯数字与圈号的序号，用来判断是不是同一组；汉字序号不需要，记 0。
+    /// 同一层里判断连续用的序号：阿拉伯数字、圈号、字母，以及汉字序号与罗马数字
+    /// （跳号提示要用）。认不出序号的记 0。
     number: u32,
+    /// 原文编号文字（「一、」「（一）」「1.1」），跳号提示按原文报。
+    marker: String,
+    /// 点分编号的完整前缀（`1.1` → `[1, 1]`），同级跳号只在同一个父前缀下比；
+    /// 其它编号方案为空。
+    dotted: Option<Vec<u32>>,
     /// 原文各行，既不当标题也不当列表时原样输出。
     source: Vec<String>,
     /// 去掉编号与加粗记号后的文字，按原行分开。
@@ -247,7 +282,12 @@ enum Role {
 // ---------------------------------------------------------------- 切块
 
 fn parse_blocks(markdown: &str, lines_are_paragraphs: bool) -> Vec<Block> {
-    let mut parser = Parser::default();
+    // 编号方案先看整段文字：`1.1` 这类点分编号在不在、罗马数字与字母是不是成组。
+    let numbering = Numbering::detect(markdown);
+    let mut parser = Parser {
+        numbering,
+        ..Parser::default()
+    };
     for line in markdown.lines() {
         parser.line(line, lines_are_paragraphs);
     }
@@ -265,6 +305,8 @@ struct Parser {
     raw: Vec<String>,
     /// 正在代码块或公式块里，记着收尾记号。
     fence: Option<&'static str>,
+    /// 整段文字定下来的编号方案。
+    numbering: Numbering,
 }
 
 impl Parser {
@@ -293,13 +335,14 @@ impl Parser {
         if let Some((level, text)) = markdown_heading(trimmed) {
             self.flush_para();
             self.flush_raw();
-            self.blocks.push(heading_block(level, text, trimmed));
+            self.blocks
+                .push(heading_block(level, text, trimmed, self.numbering));
             return;
         }
         let text = unescape_number(trimmed);
         if let Some(content) = strip_list_marker(&text) {
             self.flush_para();
-            if parse_prefix(&strip_bold(content), true).is_some() {
+            if parse_prefix(&strip_bold(content), true, self.numbering).is_some() {
                 // Word 自动编号转出来的 `- 1、 内容`：编号是版式，不是列表。
                 self.flush_raw();
                 self.para.push(strip_hard_break(content).to_string());
@@ -318,7 +361,9 @@ impl Parser {
         self.flush_raw();
         let piece = strip_hard_break(&text).to_string();
         // 段中间冒出一行编号，多半是 PDF 没切开的新段。
-        if !self.para.is_empty() && parse_prefix(&strip_bold(&piece), false).is_some() {
+        if !self.para.is_empty()
+            && parse_prefix(&strip_bold(&piece), false, self.numbering).is_some()
+        {
             self.flush_para();
         }
         self.para.push(piece);
@@ -333,7 +378,8 @@ impl Parser {
         }
         let lines = std::mem::take(&mut self.para);
         let from_list = std::mem::take(&mut self.para_from_list);
-        self.blocks.push(paragraph_block(lines, from_list));
+        self.blocks
+            .push(paragraph_block(lines, from_list, self.numbering));
     }
 
     fn flush_raw(&mut self) {
@@ -370,15 +416,17 @@ pub(super) fn markdown_heading(trimmed: &str) -> Option<(usize, &str)> {
 }
 
 /// 原有的 Markdown 标题：文字带编号就按编号重排层级，否则原样保留。
-fn heading_block(level: usize, text: &str, source: &str) -> Block {
+fn heading_block(level: usize, text: &str, source: &str, numbering: Numbering) -> Block {
     let plain = strip_bold(text);
-    let Some(prefix) = parse_prefix(&plain, false) else {
+    let Some(prefix) = parse_prefix(&plain, false, numbering) else {
         return Block::Heading(level, text.to_string());
     };
     let title = strip_leading_punct(&plain[prefix.len..]).to_string();
     Block::Item(Item {
         level: prefix.level,
         number: prefix.number,
+        marker: plain[..prefix.len].trim().to_string(),
+        dotted: prefix.dotted,
         source: vec![source.to_string()],
         rest: vec![title.clone()],
         split: Some(Split {
@@ -446,7 +494,7 @@ pub(super) fn strip_bold(text: &str) -> String {
 }
 
 /// 段落收尾：段首认得出编号就成编号段，否则是普通段落。
-fn paragraph_block(lines: Vec<String>, from_list: bool) -> Block {
+fn paragraph_block(lines: Vec<String>, from_list: bool, numbering: Numbering) -> Block {
     let first = &lines[0];
     // 段首加粗的一截（`**一、总体要求。**各单位……`）就是作者标出来的标题。
     let (bold, after_bold) = leading_bold(first);
@@ -454,7 +502,7 @@ fn paragraph_block(lines: Vec<String>, from_list: bool) -> Block {
         Some(inner) => format!("{inner}{after_bold}"),
         None => strip_bold(first),
     };
-    let Some(prefix) = parse_prefix(&plain_first, from_list) else {
+    let Some(prefix) = parse_prefix(&plain_first, from_list, numbering) else {
         return Block::Para(lines);
     };
     // 「（一）、加强领导」这种编号后多打一个顿号的，顿号不算标题内容。
@@ -474,6 +522,8 @@ fn paragraph_block(lines: Vec<String>, from_list: bool) -> Block {
     Block::Item(Item {
         level: prefix.level,
         number: prefix.number,
+        marker: plain_first[..prefix.len].trim().to_string(),
+        dotted: prefix.dotted,
         source: lines,
         rest,
         split,
@@ -968,7 +1018,9 @@ fn split_inline_headings(line: &str) -> Vec<String> {
 
 fn is_inline_heading(inner: &str) -> bool {
     let inner = inner.trim();
-    !inner.is_empty() && chars(inner) <= TITLE_MAX && parse_prefix(inner, false).is_some()
+    !inner.is_empty()
+        && chars(inner) <= TITLE_MAX
+        && parse_prefix(inner, false, Numbering::default()).is_some()
 }
 
 /// 主送机关与正文并在一行：「各区县人民政府：为切实做好……」。
@@ -1253,26 +1305,7 @@ fn split_inline_enumerations(blocks: &mut Vec<Block>) {
 
 fn split_enumeration(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
-    let mut starts = Vec::new();
-    for index in 0..chars.len() {
-        if !matches!(
-            chars[index],
-            '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十'
-        ) {
-            continue;
-        }
-        if chars.get(index + 1) != Some(&'是') {
-            continue;
-        }
-        let at_sentence_start = index == 0
-            || matches!(
-                chars[index - 1],
-                '。' | '；' | '！' | '？' | '：' | '，' | ',' | '\n' | ' '
-            );
-        if at_sentence_start {
-            starts.push(index);
-        }
-    }
+    let starts = enumeration_starts(&chars);
     if starts.len() < 2 {
         return vec![text.to_string()];
     }
@@ -1292,19 +1325,77 @@ fn split_enumeration(text: &str) -> Vec<String> {
     parts
 }
 
+/// 段内枚举的引子：`一是`、`第一，`、`首先，`。`第一章`、`第一条` 不算。
+///
+/// 返回每一处引子起始的字符下标。只认句首（或开头）出现的引子，且至少要两处，
+/// 由调用方判断——单独一个「最后，」不拆段。
+fn enumeration_starts(chars: &[char]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let at_sentence_start = index == 0
+            || matches!(
+                chars[index - 1],
+                '。' | '；' | '！' | '？' | '：' | '，' | ',' | '\n' | ' '
+            );
+        if at_sentence_start && let Some(len) = enumeration_lead_len(chars, index) {
+            starts.push(index);
+            index += len;
+            continue;
+        }
+        index += 1;
+    }
+    starts
+}
+
+/// 从 `index` 起是不是段内枚举的引子，是就返回它占几个字（不含后面的逗号）。
+///
+/// 三种写法：`一是`、`第X，`（X 是汉字序号）、`首先，` / `其次，` / `再次，` /
+/// `最后，`。`第一条`、`第一章` 走条文加粗与章节编号，不在这里认。
+fn enumeration_lead_len(chars: &[char], index: usize) -> Option<usize> {
+    let first = *chars.get(index)?;
+    if matches!(
+        first,
+        '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十'
+    ) && chars.get(index + 1) == Some(&'是')
+    {
+        return Some(2);
+    }
+    if first == '第' {
+        let mut end = index + 1;
+        let mut numerals = 0usize;
+        while chars
+            .get(end)
+            .is_some_and(|ch| is_numeral_char(*ch) && !matches!(ch, '0'..='9' | '０'..='９'))
+        {
+            end += 1;
+            numerals += 1;
+        }
+        if numerals > 0 && matches!(chars.get(end), Some('，' | ',')) {
+            return Some(end - index);
+        }
+        return None;
+    }
+    for word in ["首先", "其次", "再次", "最后"] {
+        let word: Vec<char> = word.chars().collect();
+        if chars.get(index..index + word.len()) == Some(word.as_slice())
+            && matches!(chars.get(index + word.len()), Some('，' | ','))
+        {
+            return Some(word.len());
+        }
+    }
+    None
+}
+
 /// 「一是加强组织领导，……」→「**一是加强组织领导**，……」。
 fn bold_enumeration_lead(segment: &str) -> String {
-    const MARKER: usize = 2; // 「一是」「二是」这类引子都是两个汉字。
     let segment = segment.trim();
-    let marker_bytes: usize = segment
-        .chars()
-        .take(MARKER)
-        .map(char::len_utf8)
-        .sum::<usize>();
-    if marker_bytes == 0 {
+    let chars: Vec<char> = segment.chars().collect();
+    let Some(marker) = enumeration_lead_len(&chars, 0) else {
         return segment.to_string();
-    }
-    let body = &segment[marker_bytes.min(segment.len())..];
+    };
+    let marker_bytes: usize = chars[..marker].iter().map(|ch| ch.len_utf8()).sum();
+    let body = &segment[marker_bytes..];
     let stop = body
         .char_indices()
         .find(|(_, ch)| matches!(ch, '，' | ',' | '。' | '；' | ';' | '：' | ':' | '、'))
@@ -1438,7 +1529,7 @@ fn classify(blocks: &[Block]) -> Vec<Role> {
     let mut roles = vec![Role::Literal; blocks.len()];
     let mut groups: Vec<Vec<usize>> = Vec::new();
     // 下标是层级：记着该级正在进行的那一组与上一个序号。
-    let mut open: [Option<(usize, u32)>; 7] = [None; 7];
+    let mut open: [Option<(usize, u32)>; 8] = [None; 8];
     for (index, block) in blocks.iter().enumerate() {
         match block {
             Block::Item(item) => {
@@ -1447,8 +1538,11 @@ fn classify(blocks: &[Block]) -> Vec<Role> {
                     *slot = None;
                 }
                 match item.level {
+                    // 0–2 层只要拆得出标题就直接当标题；字母编号（6）与 `1.`（3）、
+                    // `（1）`（4）一样要看整组定性，压到 `#####` 以下时 `render` 会
+                    // 把它降成列表。
                     0..=2 if item.split.is_some() => roles[index] = Role::Heading,
-                    3 | 4 => match open[level] {
+                    3 | 4 | 6 => match open[level] {
                         Some((group, last)) if item.number == last + 1 => {
                             groups[group].push(index);
                             open[level] = Some((group, item.number));
@@ -1462,7 +1556,7 @@ fn classify(blocks: &[Block]) -> Vec<Role> {
                     _ => {}
                 }
             }
-            Block::Heading(..) | Block::Attachment(_) => open = [None; 7],
+            Block::Heading(..) | Block::Attachment(_) => open = [None; 8],
             _ => {}
         }
     }
@@ -1528,6 +1622,42 @@ fn has_content_after(blocks: &[Block], index: usize) -> bool {
     }
 }
 
+/// 同一级编号跳号（「一、」后面直接「三、」）。点分编号只在同一个父前缀下比
+/// （`1.1` 后面直接 `1.3`），其余按层级比。编号重排之后不存在「跳号」，这里只是
+/// 把原文里的跳号报给调用方，用来提醒作者。
+fn report_number_jumps(blocks: &[Block]) -> Report {
+    use std::collections::HashMap;
+    let mut jumps = Vec::new();
+    // (层级, 点分父前缀) → (上一个序号, 上一个原文编号)
+    let mut previous: HashMap<(u8, Vec<u32>), (u32, String)> = HashMap::new();
+    for block in blocks {
+        let Block::Item(item) = block else {
+            continue;
+        };
+        // 圈号一律当列表，序号不参与标题编号；认不出序号的（`number == 0`）也跳过。
+        if item.level == 5 || item.number == 0 {
+            continue;
+        }
+        let parent = item
+            .dotted
+            .as_ref()
+            .map_or_else(Vec::new, |parts| parts[..parts.len() - 1].to_vec());
+        let key = (item.level, parent);
+        if let Some((last, marker)) = previous.get(&key)
+            && item.number > last + 1
+            && !marker.is_empty()
+            && !item.marker.is_empty()
+        {
+            jumps.push(NumberJump {
+                from: marker.clone(),
+                to: item.marker.clone(),
+            });
+        }
+        previous.insert(key, (item.number, item.marker.clone()));
+    }
+    Report { jumps }
+}
+
 // ---------------------------------------------------------------- 输出
 
 fn render(blocks: &[Block], roles: &[Role]) -> String {
@@ -1543,23 +1673,27 @@ fn render(blocks: &[Block], roles: &[Role]) -> String {
             Block::Raw(lines) => lines.join("\n"),
             Block::Heading(level, text) => format!("{} {text}", "#".repeat(*level)),
             Block::Attachment(title) => format!("<!-- [附件] -->\n\n# {title}"),
-            Block::Item(item) => match (role, &item.split) {
-                (Role::Heading, Some(split)) => {
-                    let level = heading_levels.get(&item.level).copied().unwrap_or(2);
-                    let hashes = "#".repeat(level as usize);
-                    let body = join_pieces(&split.body);
-                    if body.is_empty() {
-                        format!("{hashes} {}", split.title)
-                    } else {
-                        format!("{hashes} {}\n{body}", split.title)
+            Block::Item(item) => {
+                let level = heading_levels.get(&item.level).copied().unwrap_or(2);
+                match (role, &item.split) {
+                    // 字母编号是第六层：压不到 `#####` 以内就当列表，不能排出
+                    // `######`——公文助手的 Markdown 只认到五级标题。
+                    (Role::Heading, Some(split)) if level <= 5 => {
+                        let hashes = "#".repeat(level as usize);
+                        let body = join_pieces(&split.body);
+                        if body.is_empty() {
+                            format!("{hashes} {}", split.title)
+                        } else {
+                            format!("{hashes} {}\n{body}", split.title)
+                        }
                     }
+                    (Role::Heading, _) | (Role::List, _) => {
+                        list_level = Some(item.level);
+                        format!("{}. {}", item.number.max(1), join_pieces(&item.rest))
+                    }
+                    _ => item.source.join("\n"),
                 }
-                (Role::List, _) => {
-                    list_level = Some(item.level);
-                    format!("{}. {}", item.number.max(1), join_pieces(&item.rest))
-                }
-                _ => item.source.join("\n"),
-            },
+            }
         };
         match units.last_mut() {
             Some(last) if list_level.is_some() && list_level == previous_list => {
@@ -1591,9 +1725,11 @@ fn heading_level_map(blocks: &[Block], roles: &[Role]) -> BTreeMap<u8, u8> {
                 0 | 1 => 2,
                 2 => 3,
                 3 => 4,
-                _ => 5,
+                4 => 5,
+                // 字母编号是第六层，`render` 见到超过 5 就降成列表。
+                _ => 6,
             },
-            Some(previous) => (previous + 1).min(5),
+            Some(previous) => previous + 1,
         };
         map.insert(rank, level);
         previous = Some(level);
