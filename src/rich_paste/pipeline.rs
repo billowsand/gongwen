@@ -130,13 +130,20 @@ pub(crate) fn to_material(source: &str) -> Option<String> {
     let parsed = html::parse(source, false).ok()?;
     let document = anydoc::html::to_document(&parsed.body, &parsed.css).ok()?;
     let document = syntax::prune(document, true, &mut Stats::default());
-    let markdown = html::restore_boxes(&anydoc::document_to_markdown(&document));
+    // `html.rs` 在文本节点里护过字段分隔空格，这里要换回来，否则非字符 U+FDD0 会进材料。
+    let markdown = gaps::restore(&html::restore_boxes(&anydoc::document_to_markdown(
+        &document,
+    )));
     (!markdown.trim().is_empty()).then_some(markdown)
 }
 
 /// 大段粘贴作为侧栏材料时的正文：有 HTML 就用它转出来的 Markdown（表格是管道表），
 /// 没有或转换失败就用剪贴板里的纯文本。与起草页一致，读失败一律退回原文。
 pub(crate) fn material_text(plain: &str) -> String {
+    // 复制的本来就是 Markdown（VS Code 一类编辑器同时给一份 HTML）：走 HTML 会转义成 `\## `。
+    if looks_like_markdown(plain) {
+        return plain.to_string();
+    }
     super::clipboard::read_html()
         .and_then(|html| to_material(&html))
         .unwrap_or_else(|| plain.to_string())
@@ -465,6 +472,51 @@ mod tests {
         let text = material_text("甲\t乙");
         assert!(text.contains("| 甲 | 乙 |"), "{text}");
         crate::rich_paste::clipboard::clear_test_html();
+    }
+
+    /// 材料里不能有占位符，复制的现成 Markdown 不能被转义。
+    #[test]
+    fn material_keeps_field_gaps_and_verbatim_markdown() {
+        let markdown =
+            to_material("<p>联系人：张某　联系电话：123</p><p>二段</p>").expect("材料应能转换");
+        assert!(!markdown.contains('\u{FDD0}'), "{markdown:?}");
+        assert!(
+            markdown.contains("联系人：张某　联系电话：123"),
+            "{markdown}"
+        );
+
+        crate::rich_paste::clipboard::set_test_html(Some(
+            "<div><div><span>## 标题</span></div><div><span>正文**加粗**</span></div></div>",
+        ));
+        assert_eq!(
+            material_text("## 标题\n正文**加粗**"),
+            "## 标题\n正文**加粗**"
+        );
+        crate::rich_paste::clipboard::clear_test_html();
+    }
+
+    /// 微信公众号白底 `section` 里的「一、总体要求」是章节，不是文框。
+    #[test]
+    fn white_sections_with_numbered_titles_are_not_boxes() {
+        let outcome = convert(
+            &Source::Html {
+                html: "<section style=\"background-color: rgb(255, 255, 255)\">\
+                       <p><strong>一、总体要求</strong></p><p>各单位细化措施。</p></section>\
+                       <div style=\"background: #f2f2f2\">\
+                       <p><strong>（一）指导思想</strong></p><p>坚持问题导向。</p></div>"
+                    .to_string(),
+                plain: String::new(),
+            },
+            &research_context(),
+        )
+        .expect("研究报告应能转换");
+        assert!(!outcome.markdown.contains("[!"), "{}", outcome.markdown);
+        assert!(
+            outcome.markdown.contains("## 总体要求"),
+            "{}",
+            outcome.markdown
+        );
+        assert_eq!(outcome.stats.boxes, 0);
     }
 
     #[test]

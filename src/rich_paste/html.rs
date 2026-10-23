@@ -249,14 +249,61 @@ fn single_cell(element: &DocElement) -> bool {
     count_cells(element) == 1
 }
 
-/// 行内样式里有边框或底纹：网页与 WPS 用它画「框」。
+/// 行内样式里有**看得见的**边框或底纹：网页与 WPS 用它画「框」。
+///
+/// 只写了 `border` / `background` 不算：微信公众号几乎每个 `section` 都带
+/// `background-color: rgb(255, 255, 255)`，`border: none`、`background: transparent`
+/// 更是常见的重置写法，按字面认会把整篇文章的小节都当成文框。
 fn styled_box(style: &str) -> bool {
-    let compact: String = style
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    compact.contains("border") || compact.contains("background")
+    style.split(';').any(|decl| {
+        let Some((name, value)) = decl.split_once(':') else {
+            return false;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value: String = value
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if name.starts_with("border") {
+            visible_border(&value)
+        } else if name == "background" || name == "background-color" {
+            visible_background(&value)
+        } else {
+            false
+        }
+    })
+}
+
+/// 边框要有线型（`solid` 之类），且不是 `none` / `hidden` / 零宽。
+fn visible_border(value: &str) -> bool {
+    let styled = [
+        "solid", "dashed", "dotted", "double", "groove", "ridge", "inset", "outset",
+    ]
+    .iter()
+    .any(|style| value.contains(style));
+    styled && !value.contains("none") && !value.contains("hidden") && !value.starts_with('0')
+}
+
+/// 底纹要是有颜色的：白色、透明、`none` 与继承都不算。
+fn visible_background(value: &str) -> bool {
+    const PLAIN: &[&str] = &[
+        "none",
+        "transparent",
+        "initial",
+        "inherit",
+        "unset",
+        "white",
+        "#fff",
+        "#ffffff",
+        "windowbackground",
+        "rgb(255,255,255)",
+        "rgba(0,0,0,0)",
+    ];
+    !value.is_empty()
+        && !PLAIN.contains(&value)
+        && !value.starts_with("rgba(255,255,255,")
+        && !value.ends_with(",0)")
 }
 
 /// 改写结果：名称用了默认值时要提示一句。
@@ -333,30 +380,52 @@ fn box_heading(head: &DocElement) -> Option<(String, String, bool)> {
     if length == 0 || length > crate::doc_import::structure::TITLE_MAX {
         return None;
     }
+    // 「一、总体要求」「1.1 背景」这类带编号的加粗行是章节标题，不是文框标题：
+    // 网页常把一节正文包在一个带底纹的容器里。
+    let scheme = crate::doc_import::structure::marker_scheme(&title);
+    if crate::doc_import::structure::marker_level(scheme, &title).is_some() {
+        return None;
+    }
     Some(box_name(&title))
 }
 
-/// 标题以「案例」「专栏」这类词开头就当名称，其余用默认的「专栏」。
+/// 标题以「案例」「专栏」这类词开头、后面跟着编号或分隔符时当名称，其余用默认的「专栏」。
+/// 「案例分析的三点启示」「做法创新」里的「案例」「做法」是标题的一部分，不能拆。
 fn box_name(title: &str) -> (String, String, bool) {
     for name in BOX_NAMES {
-        if let Some(rest) = title.strip_prefix(name) {
-            return (name.to_string(), strip_box_label(rest), false);
+        if let Some(rest) = title.strip_prefix(name)
+            && let Some(title) = box_label_rest(rest)
+        {
+            return (name.to_string(), title, false);
         }
     }
     ("专栏".to_string(), title.to_string(), true)
 }
 
-/// 名称后面的编号与冒号：「案例1：××」→「××」。
-fn strip_box_label(rest: &str) -> String {
-    let rest = rest.trim_start();
-    let rest = rest.trim_start_matches(|ch: char| {
+/// 名称后面的部分像不像「编号 + 分隔符 + 标题」：「1：××」「一 ××」「：××」「 ××」，或者
+/// 什么都没有。像就返回去掉编号与分隔符后的标题，不像返回 `None`。
+fn box_label_rest(rest: &str) -> Option<String> {
+    const SEPARATORS: [char; 10] = [':', '：', '、', '.', '．', ',', '，', ' ', '\u{3000}', '\t'];
+    if rest.trim().is_empty() {
+        return Some(String::new());
+    }
+    let after_space = rest.trim_start_matches([' ', '\u{3000}', '\t']);
+    let spaced = after_space.len() != rest.len();
+    let after_number = after_space.trim_start_matches(|ch: char| {
         ch.is_ascii_digit()
             || ('０'..='９').contains(&ch)
-            || matches!(ch, '一'..='十' | '百' | '零' | '〇')
+            || "一二三四五六七八九十百零〇".contains(ch)
     });
-    rest.trim_start_matches([':', '：', '、', '.', '．', ',', '，', ' ', '\u{3000}'])
-        .trim()
-        .to_string()
+    let numbered = after_number.len() != after_space.len();
+    let arabic = after_space
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_digit() || ('０'..='９').contains(&ch));
+    let after_separator = after_number.trim_start_matches(SEPARATORS);
+    let separated = after_separator.len() != after_number.len();
+    // 汉字序号（「专栏一」）后面必须有分隔符，否则「专栏一些做法」会被拆开。
+    let accepted = spaced || separated || (numbered && arabic) || after_separator.is_empty();
+    accepted.then(|| after_separator.trim().to_string())
 }
 
 /// 这一段是不是整段加粗：所有非空白文字都落在 `<b>` / `<strong>` / 标题里，或外层
@@ -746,5 +815,47 @@ mod tests {
         assert_eq!(restore_boxes("> \u{FDD1}专栏\n"), "> [!专栏]\n");
         // 普通正文不动。
         assert_eq!(restore_boxes("正文\n"), "正文\n");
+    }
+
+    /// 名称只在后面跟着编号或分隔符时才拆；标题里的字一个都不能丢。
+    #[test]
+    fn box_names_never_eat_title_characters() {
+        // 「中」曾被当成汉字数字剥掉。
+        assert_eq!(
+            box_name("专栏 中国经验"),
+            ("专栏".to_string(), "中国经验".to_string(), false)
+        );
+        assert_eq!(
+            box_name("专栏二：国际比较"),
+            ("专栏".to_string(), "国际比较".to_string(), false)
+        );
+        // 「案例」「做法」是标题的一部分：用默认名称，标题原样。
+        for title in ["案例分析的三点启示", "做法创新值得推广", "专栏一些做法"]
+        {
+            assert_eq!(
+                box_name(title),
+                ("专栏".to_string(), title.to_string(), true),
+                "{title}"
+            );
+        }
+    }
+
+    /// 只有看得见的边框、有颜色的底纹才算「框」。
+    #[test]
+    fn only_visible_borders_and_backgrounds_make_a_box() {
+        assert!(styled_box("border: solid windowtext 1.0pt"));
+        assert!(styled_box("border-left: 3px solid #c00"));
+        assert!(styled_box("background: #f2f2f2"));
+        assert!(styled_box("background-color: rgb(242, 242, 242)"));
+        for style in [
+            "background-color: rgb(255, 255, 255); margin: 0px",
+            "background: transparent",
+            "background-color: rgba(0, 0, 0, 0)",
+            "border: none",
+            "border: 0px solid black",
+            "border-image: none",
+        ] {
+            assert!(!styled_box(style), "{style}");
+        }
     }
 }
