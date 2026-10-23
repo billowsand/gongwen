@@ -162,8 +162,11 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
    呈批件拆成段落）。提示词见 `docs/rich-paste-phase2-prompt.md`。
 3. **第三期**：Word / 网页图片入库（本机临时文件与 `data:`，网络图片不下载）；Word 公式；研究报告
    文框的半自动识别；AI 侧栏粘贴保留表格。提示词见 `docs/rich-paste-phase3-prompt.md`，开工前要
-   先采几份真实剪贴板样本（提示词第 0 节）。
-4. **待定（要真实样本）**：字体线索消歧。原排第二期、再挪到第三期，现在单列：`anydoc` 的文档模型
+   先采几份真实剪贴板样本（提示词第 0 节）。实际只做了文框与侧栏材料，图片与公式因缺样本挪到第四期。
+4. **第四期**：图片随粘贴入库（A 块：`data:`、本机 `file:`、网络图片不下载、单行带图也接管，合成样本
+   就能做完）与 Word 公式（B 块：只在有 `real-word-equation.html` 时做）。提示词见
+   `docs/rich-paste-phase4-prompt.md`。
+5. **待定（要真实样本）**：字体线索消歧。原排第二期、再挪到第三期，现在单列：`anydoc` 的文档模型
    不带字体，要从 `html.rs` 另开一条通道传给 `structure`，而有编号时层级已经由编号样式决定。等真实
    样本里出现字体能救、编号救不了的情形再做。
 
@@ -488,4 +491,27 @@ UTF-8 解码失败、返回 `None`，这时走纯文本兜底，行为正确。�
 1. 图片随粘贴入库（等 `real-word-image.html`、`real-web-image.html`；WPS 有更好）。
 2. Word 公式（等 `real-word-equation.html`）。
 3. 只复制一张图时的粘贴（egui-winit 不发事件，属平台限制，写进帮助即可）。
-4. 字体线索消歧（待真实样本，见第十节第 4 条）。
+4. 字体线索消歧（待真实样本，见第十节第 5 条）。
+
+#### 第三期验收记录（2026-10-23）
+
+审阅了三个富文本粘贴提交（同期另有两个排版提交 `31eec78`、`97a89be`，不在本次查验范围）。`fmt`、
+`clippy -D warnings`、全量测试（2298 个）都通过。探针实测后修了下面几处（随验收提交）：
+
+1. **文框名称吃掉标题里的字**：`strip_box_label` 用 `'一'..='十'` 当汉字数字，这个区间覆盖上千个常用字，
+   「专栏 中国经验」成了「国经验」。改成只认「一二三四五六七八九十百零〇」。
+2. **「案例」「做法」开头的标题被拆开**：「案例分析的三点启示」成了名称「案例」+ 标题「析的三点启示」，
+   「做法创新值得推广」同理。现在名称后面要跟着编号、冒号或空格（汉字序号必须再跟分隔符）才拆，
+   否则用默认名称、标题原样。新函数 `box_label_rest`。
+3. **微信公众号的小节被认成文框**：`styled_box` 只要样式里出现 `border` / `background` 就算，而公众号
+   几乎每个 `section` 都写着 `background-color: rgb(255, 255, 255)`，`border: none`、`background: transparent`
+   也算进去了。现在要有线型的可见边框或有颜色的底纹；另外首段带「一、」「1.1」这类章节编号的不当文框标题
+   （`structure::marker_level`）。
+4. **侧栏材料里漏进占位符 U+FDD0**：`to_material` 没有 `gaps::restore`。
+5. **从 VS Code 复制 Markdown 粘进侧栏被转义成 `\## `**：`material_text` 先看纯文本像不像 Markdown，与起草页一致。
+6. 使用帮助的文框说法补上名称前缀的条件与不认的几种情形。
+
+新增测试：`box_names_never_eat_title_characters`、`only_visible_borders_and_backgrounds_make_a_box`、
+`material_keeps_field_gaps_and_verbatim_markdown`、`white_sections_with_numbered_titles_are_not_boxes`。
+
+**仍待真机验收**：研究报告里从网页 / Word 粘贴带框的段落；AI 侧栏粘贴网页表格。图片与公式见第四期。
