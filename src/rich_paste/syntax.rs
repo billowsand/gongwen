@@ -8,7 +8,8 @@
 //! 规则见 `docs/rich-paste-design.md` 第四节：
 //!
 //! - 斜体去标记留文字；删除线（Word 修订的删除、网页划掉的旧内容）连文字丢；
-//! - 链接、`ins`、`mark` 等行内包裹只留文字；图片丢掉并计数；
+//! - 链接、`ins`、`mark` 等行内包裹只留文字；图片丢不丢看调用方：块级粘贴保留
+//!   （随后入库，见 images.rs），行内粘贴与 AI 侧栏材料入口丢掉；
 //! - 引用块：研究报告保留，其余文种拆成普通段落；
 //! - 代码块拆成普通段落；公式：研究报告保留，其余丢；
 //! - 只有一格的表格（Word 文本框表格、网页排版表格）拆回段落；
@@ -24,16 +25,32 @@ use anydoc::model::{
 use super::Stats;
 
 /// 裁剪整篇文档，返回可以直接渲染的块。
-pub(crate) fn prune(document: Document, research: bool, stats: &mut Stats) -> Document {
-    let Document { blocks, .. } = document;
-    let blocks = split_line_breaks(prune_blocks(blocks, research, stats));
+///
+/// `keep_images` 为真时在模型里留下图片（块级粘贴随后让 embedded 入库）；为假时
+/// 图片直接丢掉，行内粘贴与 AI 侧栏材料都走这条路。
+pub(crate) fn prune(
+    document: Document,
+    research: bool,
+    keep_images: bool,
+    stats: &mut Stats,
+) -> Document {
+    let Document { blocks, assets, .. } = document;
+    let blocks = split_line_breaks(prune_blocks(blocks, research, keep_images, stats));
+    // 图片字节挂在 Document::assets 上：块级粘贴要在这一步之后由 embedded 按
+    // AssetId 取字节入库，必须原样带过去（脚注引用已被裁掉，notes 不必带）。
     Document {
         blocks,
+        assets,
         ..Document::default()
     }
 }
 
-fn prune_blocks(blocks: Vec<Block>, research: bool, stats: &mut Stats) -> Vec<Block> {
+fn prune_blocks(
+    blocks: Vec<Block>,
+    research: bool,
+    keep_images: bool,
+    stats: &mut Stats,
+) -> Vec<Block> {
     let mut out = Vec::with_capacity(blocks.len());
     for block in blocks {
         match block {
@@ -44,7 +61,7 @@ fn prune_blocks(blocks: Vec<Block>, research: bool, stats: &mut Stats) -> Vec<Bl
             } => {
                 // 标题折成两行（「关于做好冬季<br>森林防火工作的通知」）接成一行；
                 // 汉字之间的空格由后面的清洗删掉，西文之间留着。
-                let content = prune_inlines(content, research)
+                let content = prune_inlines(content, research, keep_images)
                     .into_iter()
                     .map(|inline| match inline {
                         Inline::LineBreak => Inline::plain(" "),
@@ -57,7 +74,7 @@ fn prune_blocks(blocks: Vec<Block>, research: bool, stats: &mut Stats) -> Vec<Bl
                 }
             }
             Block::Paragraph(inlines) => {
-                let inlines = prune_inlines(inlines, research);
+                let inlines = prune_inlines(inlines, research, keep_images);
                 if !inlines_are_empty(&inlines) {
                     out.push(Block::Paragraph(inlines));
                 }
@@ -65,7 +82,7 @@ fn prune_blocks(blocks: Vec<Block>, research: bool, stats: &mut Stats) -> Vec<Bl
             Block::List(list) => {
                 let mut items = Vec::with_capacity(list.items.len());
                 for item in list.items {
-                    let blocks = prune_blocks(item.blocks, research, stats);
+                    let blocks = prune_blocks(item.blocks, research, keep_images, stats);
                     if blocks.is_empty() {
                         continue;
                     }
@@ -93,6 +110,7 @@ fn prune_blocks(blocks: Vec<Block>, research: bool, stats: &mut Stats) -> Vec<Bl
                         out.extend(prune_blocks(
                             std::mem::take(&mut cell.blocks),
                             research,
+                            keep_images,
                             stats,
                         ));
                     }
@@ -101,7 +119,7 @@ fn prune_blocks(blocks: Vec<Block>, research: bool, stats: &mut Stats) -> Vec<Bl
                         for slot in row {
                             if let CellSlot::Origin(cell) = slot {
                                 let blocks = std::mem::take(&mut cell.blocks);
-                                cell.blocks = prune_blocks(blocks, research, stats);
+                                cell.blocks = prune_blocks(blocks, research, keep_images, stats);
                             }
                         }
                     }
@@ -110,7 +128,7 @@ fn prune_blocks(blocks: Vec<Block>, research: bool, stats: &mut Stats) -> Vec<Bl
                 }
             }
             Block::BlockQuote(inner) => {
-                let inner = prune_blocks(inner, research, stats);
+                let inner = prune_blocks(inner, research, keep_images, stats);
                 if inner.is_empty() {
                     continue;
                 }
@@ -184,7 +202,7 @@ fn push_piece(out: &mut Vec<Block>, mut piece: Vec<Inline>) {
     }
 }
 
-fn prune_inlines(inlines: Vec<Inline>, research: bool) -> Vec<Inline> {
+fn prune_inlines(inlines: Vec<Inline>, research: bool, keep_images: bool) -> Vec<Inline> {
     let mut out = Vec::with_capacity(inlines.len());
     for inline in inlines {
         match inline {
@@ -203,9 +221,15 @@ fn prune_inlines(inlines: Vec<Inline>, research: bool) -> Vec<Inline> {
                 }
             }
             // 公文不收链接：留文字，丢目标。
-            Inline::Link { content, .. } => out.extend(prune_inlines(content, research)),
-            // 图片由 `html.rs` 数张数，第一、二期不随粘贴带入。
-            Inline::Image { .. } => {}
+            Inline::Link { content, .. } => {
+                out.extend(prune_inlines(content, research, keep_images));
+            }
+            // 块级粘贴保留图片，由 embedded 入库；行内粘贴与材料入口丢掉。
+            Inline::Image { .. } => {
+                if keep_images {
+                    out.push(inline);
+                }
+            }
             Inline::Math(tex) => {
                 if research {
                     out.push(Inline::Math(tex));

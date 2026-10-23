@@ -28,8 +28,12 @@ const SKIPPED_SENTINEL: &str = "gongwen-skipped-image:";
 /// 文件名里取原文件名的前多少个字，免得路径过长。
 const STEM_CHARS: usize = 30;
 
+/// 渲染器只说得出「这处没有图片数据」，拿不到字节的具体原因由调用方补。
+/// 粘贴入口知道得更细（网络图片、格式不对、文件读不到），渲染后按这个串换回本地原因。
+pub(crate) const MISSING_DATA_REASON: &str = "源文件里缺少图片数据";
+
 /// 一次导入的图片结果。
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct ImageReport {
     /// 入库并在正文里引用的图片处数（同一张图出现两次算两处）。
     pub(crate) imported: usize,
@@ -166,7 +170,7 @@ pub(crate) fn render(
 
 /// 原因文字（可能带着错误信息）放进单行注释标记前的净化：换行、方括号与 `-->`
 /// 都会把标记行截断。
-fn marker_text(reason: &str) -> String {
+pub(crate) fn marker_text(reason: &str) -> String {
     reason
         .replace("-->", "")
         .chars()
@@ -447,10 +451,10 @@ impl Rewriter<'_> {
                     None => self.store_error.unwrap_or("写入图片目录失败").to_string(),
                 },
                 Some(Err(reason)) => reason.clone(),
-                None => "源文件里缺少图片数据".to_string(),
+                None => MISSING_DATA_REASON.to_string(),
             },
             ImageSource::External(_) => "链接到外部的图片".to_string(),
-            ImageSource::Unavailable => "源文件里缺少图片数据".to_string(),
+            ImageSource::Unavailable => MISSING_DATA_REASON.to_string(),
         };
         self.report.skipped.push(reason.clone());
         self.placeholders.push(reason);

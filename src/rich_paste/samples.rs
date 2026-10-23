@@ -45,6 +45,15 @@ fn actual_path(path: &Path) -> PathBuf {
         .join(format!("{stem}.actual.md"))
 }
 
+/// 样本里的图片不写真实资源库：给一个确定性的相对路径，期望文件里就能写
+/// `images/粘贴_图1.png` 这样的引用。
+fn sample_store(items: &[(String, Vec<u8>)]) -> anyhow::Result<Vec<String>> {
+    Ok(items
+        .iter()
+        .map(|(name, _)| format!("images/{name}"))
+        .collect())
+}
+
 /// HTML 样本 → 空稿、非研究报告下的 Markdown；`material-` 打头的走 AI 材料那条路。
 fn convert_sample(path: &Path) -> String {
     let html = std::fs::read_to_string(path)
@@ -58,12 +67,13 @@ fn convert_sample(path: &Path) -> String {
         return super::pipeline::to_material(&html)
             .unwrap_or_else(|| panic!("{} 没有材料输出", path.display()));
     }
-    convert(
+    super::pipeline::convert_with_store(
         &Source::Html {
             html,
             plain: String::new(),
         },
         &context(),
+        sample_store,
     )
     .unwrap_or_else(|| panic!("{} 没有转换结果", path.display()))
     .markdown

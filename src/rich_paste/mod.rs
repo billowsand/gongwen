@@ -22,6 +22,7 @@ pub(crate) mod clipboard;
 mod gaps;
 mod headings;
 mod html;
+mod images;
 mod lists;
 mod pipeline;
 #[cfg(test)]
@@ -80,8 +81,8 @@ pub(crate) struct Stats {
     pub(crate) headings: usize,
     pub(crate) tables: usize,
     pub(crate) list_items: usize,
-    /// 略过的图片张数（第一、二期不随粘贴带入图片）。
-    pub(crate) skipped_images: usize,
+    /// 图片去向：入库几张、哪些没导入及原因（块级粘贴的图片随文字入库，见 images.rs）。
+    pub(crate) images: crate::doc_import::embedded::ImageReport,
     /// 原文同级编号跳号的位置（原文编号对，例如「一、」→「三、」）。
     pub(crate) number_jumps: Vec<(String, String)>,
     /// 认出来的文框个数（研究报告）。
@@ -93,7 +94,9 @@ pub(crate) struct Stats {
 impl Stats {
     /// 状态栏文案，数量为 0 的项不写。
     ///
-    /// `已按格式粘贴：3 个标题、1 张表、5 个列表项（略过 2 张图片）。`
+    /// `已按格式粘贴：3 个标题、1 张表、5 个列表项。导入图片 2 张。`
+    /// 图片入库与未导入的原因接在句号后面，措辞沿用文档导入的状态栏（
+    /// [`crate::doc_import::embedded::ImageReport::notice`]）。
     pub(crate) fn notice(&self) -> String {
         let mut parts = Vec::new();
         if self.headings > 0 {
@@ -110,10 +113,8 @@ impl Stats {
             notice.push('：');
             notice.push_str(&parts.join("、"));
         }
-        if self.skipped_images > 0 {
-            notice.push_str(&format!("（略过 {} 张图片）", self.skipped_images));
-        }
         notice.push('。');
+        notice.push_str(self.images.notice().trim_start());
         if self.default_boxes > 0 {
             notice.push_str(&format!(
                 "识别出 {} 个文框，名称暂写「专栏」，请按需改成案例、做法等。",
@@ -126,13 +127,9 @@ impl Stats {
         notice
     }
 
-    /// 行内粘贴（粘在句子中间）的状态文案：只有图片张数值得说。
+    /// 行内粘贴（粘在句子中间）的状态文案。图与表格一样不接管行内粘贴，成功时不会有图。
     pub(crate) fn inline_notice(&self) -> String {
-        if self.skipped_images > 0 {
-            format!("已按行内格式粘贴（略过 {} 张图片）。", self.skipped_images)
-        } else {
-            "已按行内格式粘贴。".to_string()
-        }
+        "已按行内格式粘贴。".to_string()
     }
 }
 

@@ -28,6 +28,10 @@ biblatex = "0.12"
 calamine = "0.36.1"
 chardetng = "1.0.0"
 chrono = { version = "0.4", features = ["serde"] }
+# 粘贴时的图片：内联 data: 图片用 data-url 解析（只认 image/*，解码后按体积上限收），
+# 本机 file: 路径用 url 解析并还原百分号编码（中文用户名）。两个 crate 本来就在
+# 依赖树里（arboard / reqwest 带进来），这里只是声明直接引用，不新增下载。
+data-url = "0.3.2"
 directories = "6.0"
 docx-rs = "0.4.22"
 # Word 里的 EMF / WMF 矢量图转 SVG（再经 resvg 出 PNG），见 src/metafile.rs。
@@ -85,6 +89,7 @@ ttf-parser = "0.25.1"
 typst = "0.15.1"
 typst-layout = "0.15.1"
 typst-pdf = "0.15.1"
+url = "2.5"
 uuid = { version = "1.24", features = ["v4"] }
 zip = "8.6"
 

@@ -1,0 +1,4 @@
+<html xmlns:v="urn:schemas-microsoft-com:vml"><body>
+<p class=MsoNormal><span style='mso-no-proof:yes'><img width=160 height=90 src="@@FILE_URL@@" alt="Word 里粘贴的图"></span></p>
+<p class=MsoNormal>图为本次检查的现场照片。</p>
+</body></html>

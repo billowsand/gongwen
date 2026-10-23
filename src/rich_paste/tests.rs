@@ -192,7 +192,16 @@ fn inline_syntax_follows_the_rules() {
         outcome.markdown
     );
     assert!(!outcome.markdown.contains("配图"), "{}", outcome.markdown);
-    assert_eq!(outcome.stats.skipped_images, 2);
+    // 图片现在随粘贴保留：取不到字节的（这里是相对地址）留「图片未导入」注释。
+    assert_eq!(outcome.stats.images.imported, 0);
+    assert_eq!(outcome.stats.images.skipped.len(), 2);
+    assert!(
+        outcome
+            .markdown
+            .contains("<!-- [图片未导入：图片路径无法识别] -->"),
+        "{}",
+        outcome.markdown
+    );
 }
 
 /// 7. 嵌套列表与段内换行（`<br>`）。
@@ -436,3 +445,215 @@ fn paste_options_follow_the_draft_state() {
 /// 节点与深度的测试额度（业务代码用 `html.rs` 里的常量）。
 const MAX_TEST_NODES: usize = 3;
 const MAX_TEST_DEPTH: usize = 64;
+
+/// 最小可用的 PNG 签名（embedded 按文件头认格式，不需要完整图片解码）。
+const DATA_PNG: &str = "data:image/png;base64,iVBORw0KGgo=";
+
+/// 图片入库的测试目录：只用临时目录，绝不碰用户的资源库。
+fn test_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("gongwen-paste-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("建临时目录");
+    dir
+}
+
+/// 带图片的 HTML → Markdown：图片写进临时目录，返回结果与 store 收到的文件名。
+fn convert_html_with_images(markup: &str, pictures: &std::path::Path) -> (Outcome, Vec<String>) {
+    let mut stored = Vec::new();
+    let outcome = super::pipeline::convert_with_store(
+        &Source::Html {
+            html: markup.to_string(),
+            plain: String::new(),
+        },
+        &notice(),
+        |items| {
+            stored.extend(items.iter().map(|(name, _)| name.clone()));
+            crate::images::import_bytes_into(pictures, items)
+        },
+    )
+    .expect("带图 HTML 应能转换");
+    (outcome, stored)
+}
+
+/// 12. 图片随粘贴入库：同一张图出现两次只存一份，两处引用同一条路径。
+#[test]
+fn pasted_images_are_imported_once_and_referenced_in_place() {
+    let dir = test_dir("paste-import-once");
+    let markup = format!(
+        "<html><body><p>见下图。</p><p><img src='{DATA_PNG}'></p><p>复述：<img src='{DATA_PNG}'></p></body></html>"
+    );
+    let (outcome, stored) = convert_html_with_images(&markup, &dir);
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(outcome.stats.images.imported, 2);
+    assert!(
+        outcome.stats.images.skipped.is_empty(),
+        "{:?}",
+        outcome.stats.images.skipped
+    );
+    // 入库文件名带时间戳前缀，这里只数引用处。
+    assert_eq!(
+        outcome.markdown.matches("![](images/").count(),
+        2,
+        "{}",
+        outcome.markdown
+    );
+    assert_eq!(std::fs::read_dir(&dir).expect("读临时目录").count(), 1);
+    assert!(
+        outcome.stats.notice().contains("导入图片 2 张"),
+        "{}",
+        outcome.stats.notice()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 13. 网络图片不下载：留「图片未导入」注释并按原因计数。
+#[test]
+fn network_images_are_not_downloaded_and_leave_a_note() {
+    let dir = test_dir("paste-network");
+    let markup =
+        "<html><body><p>网页上的图：<img src='https://example.com/a.png'></p></body></html>";
+    let (outcome, stored) = convert_html_with_images(markup, &dir);
+    assert!(stored.is_empty(), "{stored:?}");
+    assert_eq!(outcome.stats.images.imported, 0);
+    assert_eq!(
+        outcome.stats.images.skipped,
+        vec!["网络图片不下载".to_string()]
+    );
+    assert!(
+        outcome
+            .markdown
+            .contains("<!-- [图片未导入：网络图片不下载] -->"),
+        "{}",
+        outcome.markdown
+    );
+    assert!(
+        outcome.stats.notice().contains("1 张图片未导入"),
+        "{}",
+        outcome.stats.notice()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // data: 里不是图片：同样是「未导入」，原因不同。
+    let dir = test_dir("paste-not-an-image");
+    let markup = "<html><body><p><img src='data:text/plain;base64,aGk='></p></body></html>";
+    let (outcome, stored) = convert_html_with_images(markup, &dir);
+    assert!(stored.is_empty(), "{stored:?}");
+    assert_eq!(
+        outcome.stats.images.skipped,
+        vec!["不是图片格式".to_string()]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 14. Word 的 VML 图片数据已被解析器丢掉，只留 img 元素：一张图只入库一次。
+#[test]
+fn word_vml_picture_data_is_ignored_and_the_img_is_stored_once() {
+    let dir = test_dir("paste-vml");
+    let markup = format!(
+        "<html xmlns:v='urn:schemas-microsoft-com:vml'><body><p><v:shape><v:imagedata src='file:///C:/tmp/clip_image001.png'/></v:shape></p><p><img src='{DATA_PNG}'></p></body></html>"
+    );
+    let (outcome, stored) = convert_html_with_images(&markup, &dir);
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(outcome.stats.images.imported, 1);
+    assert!(
+        outcome.stats.images.skipped.is_empty(),
+        "{:?}",
+        outcome.stats.images.skipped
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 15. WPS 有时给 file: URL：转本机路径读盘，中文与空格按百分号解码。
+#[test]
+fn word_file_url_images_are_read_from_this_machine() {
+    let dir = test_dir("paste-file-url");
+    let pictures = test_dir("paste-file-url-source");
+    let source = pictures.join("现场 照片.png");
+    std::fs::write(&source, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).expect("写图片文件");
+    let file_url = url::Url::from_file_path(&source).expect("临时路径能转成 file: URL");
+    assert!(
+        file_url.as_str().contains('%'),
+        "路径应带百分号编码：{file_url}"
+    );
+    let fixture = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/paste/word-image-file.html.txt"),
+    )
+    .expect("读 Word 图片夹具");
+    let markup = fixture.replace("@@FILE_URL@@", file_url.as_str());
+    let (outcome, stored) = convert_html_with_images(&markup, &dir);
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(outcome.stats.images.imported, 1);
+    assert!(
+        outcome.markdown.contains("![](images/"),
+        "{}",
+        outcome.markdown
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&pictures);
+}
+
+/// 16. 句中粘贴遇图不接管：与表格一样退回纯文本行内粘贴（图不进正文）。
+#[test]
+fn inline_paste_with_an_image_falls_back_to_the_plain_text() {
+    let source = Source::Html {
+        html: format!("<html><body><p>见<img src='{DATA_PNG}'></p></body></html>"),
+        plain: "见图".to_string(),
+    };
+    let outcome = convert_inline(&source, &notice()).expect("应退回纯文本行内粘贴");
+    assert_eq!(outcome.markdown, "见图");
+    assert_eq!(outcome.stats.images.imported, 0);
+}
+
+/// 17. AI 侧栏材料照旧不随粘贴入库：图片直接丢，正文与状态都不提图片。
+#[test]
+fn material_text_keeps_no_images() {
+    let markup =
+        format!("<html><body><p>材料正文。</p><p><img src='{DATA_PNG}'></p></body></html>");
+    let text = super::pipeline::to_material(&markup).expect("应有材料输出");
+    assert!(text.contains("材料正文。"), "{text}");
+    assert!(!text.contains("images/"), "{text}");
+    assert!(!text.contains("图片未导入"), "{text}");
+}
+
+/// 手动量一下 10 张常见尺寸图片随粘贴入库在界面线程上的耗时（第四期交接记录用）。
+#[test]
+#[ignore = "手动量耗时，不进常规测试"]
+fn ten_images_paste_timing_is_measured() {
+    let dir = test_dir("paste-ten-timing");
+    let pictures = test_dir("paste-ten-timing-source");
+    let mut markup = String::from("<html><body>");
+    let mut kilobytes = 1024usize;
+    for index in 0..10 {
+        let mut bytes = vec![0u8; kilobytes * 1024];
+        bytes[..8].copy_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        let path = pictures.join(format!("clip_image{index}.png"));
+        std::fs::write(&path, &bytes).expect("写图片文件");
+        let file_url = url::Url::from_file_path(&path).expect("临时路径能转成 file: URL");
+        markup.push_str(&format!(
+            "<p>第{index}段文字。</p><p><img src='{}'></p>",
+            file_url
+        ));
+        kilobytes = 100 + (index * 37) % 400;
+    }
+    markup.push_str("</body></html>");
+    let source = Source::Html {
+        html: markup,
+        plain: String::new(),
+    };
+    let started = std::time::Instant::now();
+    let outcome = super::pipeline::convert_with_store(&source, &notice(), |items| {
+        crate::images::import_bytes_into(&dir, items)
+    })
+    .expect("应能转换");
+    let elapsed = started.elapsed();
+    eprintln!(
+        "粘贴 10 张图耗时：{:?}（入库 {} 张，未导入 {} 张）",
+        elapsed,
+        outcome.stats.images.imported,
+        outcome.stats.images.skipped.len()
+    );
+    assert_eq!(outcome.stats.images.imported, 10);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&pictures);
+}

@@ -176,9 +176,16 @@ impl Walker {
                     let Some(child) = ElementRef::wrap(child) else {
                         continue;
                     };
-                    // 图片一律不取（第一、二期），只数张数写进状态提示。
+                    // 图片保留成元素，字节交给 anydoc 的图片回调去取（见 images.rs）；
+                    // 张数仍在这里数。anydoc 对「没有字节也没有 alt」的图整张丢掉，
+                    // 正文里连位置都不留，所以缺 alt 时补一个：网络图因此还能留下
+                    // 「图片未导入」注释，入库成功的图 embedded 会把 alt 清空。
                     if matches!(child.value().name(), "img" | "image") {
                         self.images += 1;
+                        let mut converted = self.element(child, depth + 1)?;
+                        ensure_image_alt(&mut converted);
+                        has_content = true;
+                        out.children.push(DocNode::Elem(converted));
                         continue;
                     }
                     if should_skip(&child) {
@@ -211,6 +218,27 @@ impl Walker {
             out.local = "p".to_string();
         }
         Ok(out)
+    }
+}
+
+/// anydoc 只收「有图片字节或有 alt」的图：网络图取不到字节，没有 alt 就整张消失，
+/// 连未导入的注释都没处放。补一个占位 alt；入库后 embedded 一律把 alt 清空（研究报告
+/// 把非空 alt 当图题编号）。
+fn ensure_image_alt(element: &mut DocElement) {
+    let has_alt = element
+        .attrs
+        .iter()
+        .any(|attr| attr.local == "alt" && !attr.value.trim().is_empty());
+    if has_alt {
+        return;
+    }
+    match element.attrs.iter_mut().find(|attr| attr.local == "alt") {
+        Some(attr) => attr.value = "图片".to_string(),
+        None => element.attrs.push(Attr {
+            ns: None,
+            local: "alt".to_string(),
+            value: "图片".to_string(),
+        }),
     }
 }
 

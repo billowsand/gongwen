@@ -16,19 +16,37 @@
 //! 粘在句子中间时走 [`convert_inline`]：多行内容压成一行行内文字，不建结构。
 //! AI 侧栏的材料走 [`to_material`]：只要 HTML → Markdown 与语法裁剪，不做结构还原。
 
-use crate::doc_import::{clean, structure};
+use anyhow::Result;
 
+use crate::doc_import::{clean, embedded, structure};
+
+use super::images::ClipboardImages;
 use super::syntax::{self, count_markdown, looks_like_markdown, same_ignoring_whitespace};
 use super::{Context, Outcome, Source, Stats, gaps, headings, html, lists};
 
+/// 粘贴入库图片的文件名前缀：资源库里会叫「粘贴_图1.png」。
+const PASTE_IMAGE_STEM: &str = "粘贴";
+
 pub(crate) fn convert(source: &Source, ctx: &Context) -> Option<Outcome> {
+    convert_with_store(source, ctx, crate::images::import_bytes)
+}
+
+/// 同 [`convert`]，但图片入库用调用方给的 store。
+///
+/// 文档导入与粘贴共用 embedded::render，这里留一个可注入的入口，测试才能把图片写进
+/// 临时目录而不碰用户的资源库。
+pub(crate) fn convert_with_store(
+    source: &Source,
+    ctx: &Context,
+    store: impl FnOnce(&[(String, Vec<u8>)]) -> Result<Vec<String>>,
+) -> Option<Outcome> {
     // 复制的本来就是 Markdown（VS Code、Typora 源码模式这类编辑器同时给一份 HTML）：
     // 走 HTML 会把 `## ` 转义、几行并成一段。纯文本像 Markdown 就原样粘贴。
     if looks_like_markdown(source.plain_text()) {
         return None;
     }
     match source {
-        Source::Html { html, plain } => convert_html(html, ctx)
+        Source::Html { html, plain } => convert_html(html, ctx, store)
             .filter(|outcome| !outcome.markdown.trim().is_empty())
             .or_else(|| convert_plain(plain, ctx)),
         Source::Plain(text) => convert_plain(text, ctx),
@@ -36,22 +54,35 @@ pub(crate) fn convert(source: &Source, ctx: &Context) -> Option<Outcome> {
 }
 
 /// HTML 这条路：富文本里有格式线索，优先它。
-fn convert_html(source: &str, ctx: &Context) -> Option<Outcome> {
+///
+/// 图片在这里就入库（data: 与本机 file: 解码读盘，网络图片不下载），正文里留下图片
+/// 引用或「图片未导入」注释，然后才走结构还原。
+fn convert_html(
+    source: &str,
+    ctx: &Context,
+    store: impl FnOnce(&[(String, Vec<u8>)]) -> Result<Vec<String>>,
+) -> Option<Outcome> {
     let parsed = html::parse(source, ctx.research()).ok()?;
-    let document = anydoc::html::to_document(&parsed.body, &parsed.css).ok()?;
+    let resolver = ClipboardImages::default();
+    let document = anydoc::html::to_document_with_images(&parsed.body, &parsed.css, &|src| {
+        resolver.resolve(src)
+    })
+    .ok()?;
     let mut stats = Stats {
-        skipped_images: parsed.images,
         boxes: parsed.boxes,
         default_boxes: parsed.default_boxes,
         ..Stats::default()
     };
-    let document = syntax::prune(document, ctx.research(), &mut stats);
-    let markdown = anydoc::document_to_markdown(&document);
-    let (markdown, jumps) = restructure(&markdown, ctx, false);
+    let document = syntax::prune(document, ctx.research(), true, &mut stats);
+    let rendered = embedded::render(document, PASTE_IMAGE_STEM, store);
+    let mut images = rendered.images;
+    let (markdown, jumps) = restructure(&rendered.markdown, ctx, false);
+    let markdown = resolver.explain(markdown, &mut images);
     if markdown.trim().is_empty() {
         return None;
     }
     stats.number_jumps = jumps;
+    stats.images = images;
     fill_counts(&markdown, &mut stats);
     Some(Outcome { markdown, stats })
 }
@@ -89,12 +120,13 @@ pub(crate) fn convert_inline(source: &Source, ctx: &Context) -> Option<Outcome> 
 
 fn inline_html(source: &str, ctx: &Context) -> Option<Outcome> {
     let parsed = html::parse(source, false).ok()?;
+    // 图片塞不进一行行内文字：和表格一样交还编辑框原样粘贴。
+    if parsed.images > 0 {
+        return None;
+    }
     let document = anydoc::html::to_document(&parsed.body, &parsed.css).ok()?;
-    let mut stats = Stats {
-        skipped_images: parsed.images,
-        ..Stats::default()
-    };
-    let document = syntax::prune(document, ctx.research(), &mut stats);
+    let mut stats = Stats::default();
+    let document = syntax::prune(document, ctx.research(), false, &mut stats);
     // 表格没法塞进一行：交给编辑框原样粘贴。
     if syntax::has_table(&document) {
         return None;
@@ -129,7 +161,7 @@ fn inline_plain(text: &str) -> Option<Outcome> {
 pub(crate) fn to_material(source: &str) -> Option<String> {
     let parsed = html::parse(source, false).ok()?;
     let document = anydoc::html::to_document(&parsed.body, &parsed.css).ok()?;
-    let document = syntax::prune(document, true, &mut Stats::default());
+    let document = syntax::prune(document, true, false, &mut Stats::default());
     // `html.rs` 在文本节点里护过字段分隔空格，这里要换回来，否则非字符 U+FDD0 会进材料。
     let markdown = gaps::restore(&html::restore_boxes(&anydoc::document_to_markdown(
         &document,

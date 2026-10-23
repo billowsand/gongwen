@@ -14,15 +14,18 @@
 保留表格，不重排编号），其余走起草页的 `convert`（会做结构还原）。研究报告的文框只有
 研究报告上下文才会出现，`research-box.html` 另有一条按研究报告上下文跑的测试。
 
-## 第三期待补的真实样本
+## 第四期待补的真实样本
 
-图片入库与 Word 公式两项目前**停下等样本**（没有样本就无法确定 Word 的 `file:` 临时路径、
-VML 与 `<img>` 双份、条件注释里的 OMML 写法）。按下面的名字采：
+图片入库已用合成样本做完（见下），**只剩 Word 公式等真实样本**：
 
-- `real-word-image.html`：Word 里一段文字 + 一张插入的图片，一起复制；
-- `real-word-equation.html`：Word 里一段文字 + 一个公式编辑器写的公式（行内或独立一行）；
-- `real-web-image.html`：浏览器里一段带图片的网页正文；
-- `real-wps-image.html`：WPS 文字里带图片的一段（有就用，没有不阻塞）。
+- `real-word-equation.html`：Word 里一段文字 + 一个公式编辑器写的公式（行内或独立一行）。
+  采到之后按 `src/rich_paste/html.rs` 里 OMML 的写法接。
+
+图片这边不阻塞：`web-image.html` 是网页 `data:` 图（走逐份比对）；`word-image-file.html.txt`
+是 Word 的 `file:` 写法，路径由测试替换 `@@FILE_URL@@` 生成，所以用 `.txt` 后缀避开
+`*.html` 的逐份比对，也不写死本机路径。夹具走 `samples.rs` 的 `sample_store`，路径是
+`images/{名字}`，不会写进真实资源库。真实 Word / WPS / 网页的带图样本仍欢迎（采到后人工
+目视核对一遍即可），但不再阻塞这一期。
 
 ## 加一份真实样本
 

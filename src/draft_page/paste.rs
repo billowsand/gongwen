@@ -6,7 +6,8 @@
 //! - Ctrl+Shift+V（macOS 为 ⌘⇧V）原样粘贴：egui-winit 把 `command && V` 直接换成
 //!   `Event::Paste`、不再发 V 的按键事件，只能看同一帧的 `input.modifiers.shift`
 //!   来区分。Windows 的 Shift+Insert 因此也会走原样，这是已知限制；
-//! - 内容只有一行、或光标前有非空白字符时不接管（复制一个词就粘贴一个词）；
+//! - 内容只有一行且 HTML 里没有图片、或光标前有非空白字符时不接管（复制一个词就
+//!   粘贴一个词；粘进带图的一段时哪怕纯文本只有一行也要接管）；
 //! - 接管时把 `Event::Paste` 从本帧的事件里删掉，用转换结果替换选区（没有选区就插在
 //!   光标处），前后按 `blank_line_padding` 补空行，经 `replace_with_undo` 写回——
 //!   只占一个撤销点，Ctrl+Z 一次回到粘贴前。
@@ -53,8 +54,12 @@ impl DraftPage<'_> {
         let Some((index, text)) = paste_event(ui) else {
             return;
         };
-        // 只粘贴一行（复制一个词、一个数字）不接管。
-        if !text.trim_end_matches(['\r', '\n']).contains('\n') {
+        // 剪贴板 HTML 在这里读一次：单行内容要不要接管得看它有没有图。
+        let html = rich_paste::read_html();
+        // 只粘贴一行（复制一个词、一个数字）不接管。带图的段落例外：Word 里那张图
+        // 常常单独一段、纯文本是空的，只按行数判断就永远粘不进图片。
+        let single_line = !text.trim_end_matches(['\r', '\n']).contains('\n');
+        if single_line && !html.as_deref().is_some_and(contains_image_tag) {
             return;
         }
         let markdown = &self.doc.generated_markdown;
@@ -66,7 +71,7 @@ impl DraftPage<'_> {
         let anchor = selection.as_ref().map_or(cursor, |range| range.start);
         let line_start = markdown[..anchor].rfind('\n').map_or(0, |index| index + 1);
         let block = markdown[line_start..anchor].trim().is_empty();
-        let source = match rich_paste::read_html() {
+        let source = match html {
             Some(html) => Source::Html {
                 html,
                 plain: text.clone(),
@@ -212,6 +217,13 @@ impl DraftPage<'_> {
         self.revalidate();
         *self.status = "已改为原样粘贴。".into();
     }
+}
+
+/// HTML 片段里有没有 `<img>`（`<image>` 不算：VML 的图片数据解析时已经丢了）。
+fn contains_image_tag(html: &str) -> bool {
+    html.as_bytes()
+        .windows(4)
+        .any(|window| window.eq_ignore_ascii_case(b"<img"))
 }
 
 /// 插入点上方最近一个标题的级数（`# ` = 1）。附件区的附件标题同样是 `# `，
@@ -574,6 +586,60 @@ mod ui_tests {
         let texts = harness.frame(Vec::new(), egui::Modifiers::NONE);
         assert!(!texts.iter().any(|text| text.contains("改为原样粘贴")));
         assert!(harness.doc.recent_paste.is_none());
+        clipboard::clear_test_html();
+    }
+
+    /// 单行带图也接管：图片写进临时配置目录的资源库，正文留引用，一次 Ctrl+Z 撤回。
+    #[test]
+    fn single_line_paste_with_an_image_takes_over_and_stores_the_picture() {
+        let dir = std::env::temp_dir().join(format!("gongwen-paste-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::storage::set_test_config_dir(Some(dir.clone()));
+        clipboard::set_test_html(Some(
+            "<html><body><p>见下图。<img src='data:image/png;base64,iVBORw0KGgo='></p></body></html>",
+        ));
+        let mut harness = Harness::new("");
+        harness.paste("见下图。");
+        let text = harness.doc.generated_markdown.clone();
+        assert!(text.contains("![](images/"), "{text}");
+        assert!(text.contains("见下图。"), "{text}");
+        assert!(!text.contains("图片未导入"), "{text}");
+        assert!(
+            harness.status.contains("导入图片 1 张"),
+            "{}",
+            harness.status
+        );
+        let stored: Vec<_> = std::fs::read_dir(dir.join("images"))
+            .expect("应把图片写进临时资源库")
+            .collect();
+        assert_eq!(stored.len(), 1);
+
+        // 一次 Ctrl+Z 回到粘贴前（图片文件留在资源库，这是已知的遗留）。
+        let undo = egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        harness.frame(vec![undo], egui::Modifiers::COMMAND);
+        assert_eq!(harness.doc.generated_markdown, "");
+
+        clipboard::clear_test_html();
+        crate::storage::set_test_config_dir(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 粘在句子中间遇图不接管：行内这条路退回纯文本，不把图塞进句子，也不入库。
+    #[test]
+    fn mid_line_paste_with_an_image_stays_verbatim() {
+        clipboard::set_test_html(Some(
+            "<html><body><p>见下图。<img src='data:image/png;base64,iVBORw0KGgo='></p></body></html>",
+        ));
+        let mut harness = Harness::new("某某单位：");
+        harness.paste("见下图。");
+        assert_eq!(harness.doc.generated_markdown, "某某单位：见下图。");
+        assert!(!harness.doc.generated_markdown.contains("images/"));
         clipboard::clear_test_html();
     }
 }
