@@ -184,17 +184,19 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 
 - **富文本粘贴转 Markdown**（起草页 `Ctrl+V` 把 Word / WPS / 网页 / Excel 的富文本与多行纯文本
   转成公文助手 Markdown，`Ctrl+Shift+V` 原样粘贴，智能粘贴后可「改为原样粘贴」，分三期）：方案与
-  分期见 `docs/rich-paste-design.md`（单文件，第十一节是交接）。**第一、二期已完成，待真机验收**
-  （Word / WPS / 浏览器 / Excel 的真实剪贴板、Windows `Shift+Insert` 限制）。代码在
-  `src/rich_paste/`（`html.rs` 容错解析与预清洗、`syntax.rs` 按文种裁语法、`headings.rs` 按所在章节
-  平移样式标题、`lists.rs` 列表整形、`pipeline.rs` 汇到 `clean` + `structure` + 行内粘贴、
-  `clipboard.rs` 读剪贴板）与 `src/draft_page/paste.rs`（接管 `Event::Paste`、块级 / 行内分流、
+  分期见 `docs/rich-paste-design.md`（单文件，第十一节是交接）。**第一、二期已完成；第三期只做了
+  研究报告文框与 AI 侧栏材料，图片入库与 Word 公式按提示词先停下、等真实剪贴板样本**（`real-word-image` /
+  `real-word-equation` / `real-web-image`，采样命令见 `tests/fixtures/paste/README.md`），均待真机验收。
+  代码在
+  `src/rich_paste/`（`html.rs` 容错解析、预清洗与文框识别、`syntax.rs` 按文种裁语法、`headings.rs`
+  按所在章节平移样式标题、`lists.rs` 列表整形、`pipeline.rs` 汇到 `clean` + `structure` + 行内粘贴 +
+  侧栏材料、`clipboard.rs` 读剪贴板）与 `src/draft_page/paste.rs`（接管 `Event::Paste`、块级 / 行内分流、
   `replace_with_undo` 写入、「改为原样粘贴」）；编号规则（点分 / 罗马 / 字母 / 跳号报告）在
   `src/doc_import/structure/`（`numbering.rs` 的 `Numbering`、`mod.rs` 的
   `restructure_with_report`）；
   `vendor/anydoc` 新增 `anydoc::html` 公开入口（补丁二），夹具与采样工具在
-  `tests/fixtures/paste/`。第三期（图片入库、Word 公式、研究报告文框、AI 侧栏粘贴保留表格）提示词见
-  `docs/rich-paste-phase3-prompt.md`，开工前要先采真实剪贴板样本；字体线索消歧单列为待定。
+  `tests/fixtures/paste/`。补做图片 / 公式前先读交接里第三期那一段（`html::parse` 的 `boxes`
+  参数、`<img>` 分支、`embedded::render`、单行接管的门槛）；字体线索消歧单列为待定。
 
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 

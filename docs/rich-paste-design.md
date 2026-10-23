@@ -64,12 +64,13 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
 | `i` / `em` | 去掉标记留文字 | 公文和研究报告都不识别斜体（技能包 markdown-syntax 第 4 节） |
 | `del` / `s` / `strike` | 连文字一起丢 | Word 修订的删除、网页划掉的旧内容 |
 | `ins` | 留文字 | |
-| `blockquote`、Word「引用」样式 | 研究报告 `> `；其余文种拆成普通段落 | 公文不收引用块；`> [!案例]` 文框认不准，不自动生成 |
+| `blockquote`、Word「引用」样式 | 研究报告 `> `；其余文种拆成普通段落 | 公文不收引用块 |
+| 文框候选：`<aside>`、只有一格的 `<table>`（Word「文本框表格」）、带边框或底纹的 `div` / `section` | 研究报告 `> [!名称] 标题`；其余文种不处理 | 只认第一段是**整段加粗的短标题**（≤ `TITLE_MAX`）且后面还有正文的；名称取标题前缀（专栏 / 案例 / 例子 / 做法 / 延伸阅读 / 知识链接，可带编号与冒号），取不到写「专栏」并在状态栏提示（第三期） |
 | `table` | 管道表 | 复用跨行跨列网格；只有一格的表格（Word「文本框表格」、网页排版用表格）拆回段落 |
 | `a` | 只留文字 | 公文不收链接 |
-| `img` | 第一、二期略过并计数 | 远程图片永不下载；第三期 Word 的 `clip_image*.png` 本机临时文件走 `embedded.rs` 入库 |
+| `img` | 第一、二期略过并计数 | **第三期的图片入库待真实样本后做**（`file:` / `data:` 走 `embedded.rs` 入库、网络图片永不下载）；缺样本时按现状略过并计数 |
 | `pre` / `code` 围栏 | 拆成普通段落 | 技能包规定正文不写代码围栏 |
-| `math`（MathML） | 研究报告 `$…$`；其余文种丢 | 第三期再管 Word 公式 |
+| `math`（MathML） | 研究报告 `$…$`；其余文种丢 | **Word 公式（OMML）待真实样本后做**；网页的 MathML 已认，公文一律丢 |
 | `br` | 段内换行 | structure 按「硬换行」处理 |
 | 噪音 | 删除 | `script` / `style` / `head` / `noscript` / `template` / `iframe` / 注释、`<o:p>`、`mso-hide:all`、零宽字符、段首 `&nbsp;` 与全角空格缩进「　　」 |
 
@@ -120,12 +121,14 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
 
 ## 七、交互
 
-- 智能粘贴后：状态栏写「已按格式粘贴：N 个标题、M 张表、K 个列表项（略过 J 张图片）」，并给一个
-  「改为原样粘贴」按钮。按钮在下一次编辑、换稿件或超时后消失；点它时先核对插入的那段原文还在原处
+- 智能粘贴后：状态栏写「已按格式粘贴：N 个标题、M 张表、K 个列表项（略过 J 张图片）」；研究报告里
+  认出文框而名称是默认值时，再补一句「识别出 N 个文框，名称暂写「专栏」，请按需改成案例、做法等」；
+  原文编号跳号时补一句跳号提示。同时给一个「改为原样粘贴」按钮。按钮在下一次编辑、换稿件或超时后消失；点它时先核对插入的那段原文还在原处
   （同 `PreviewAnchor::range_in` 的做法），再用纯文本替换，同样只占一个撤销点。
 - Ctrl+Z 一次回到粘贴前。
 - 已知限制：Windows 上 `Shift+Insert` 带着 Shift，会被当成原样粘贴。
-- AI 侧栏输入框的粘贴（材料里的表格不散）放第三期。
+- AI 侧栏输入框的粘贴：大段内容成为临时材料；剪贴板里有 HTML 时材料用转换后的 Markdown，
+  表格是管道表（第三期）。
 
 ## 八、安全与限制
 
@@ -413,3 +416,76 @@ UTF-8 解码失败、返回 `None`，这时走纯文本兜底，行为正确。�
   可以复用 `rich_paste::convert`（材料是纯文本，需要另一条 ToString 的出口）。
 - 字体线索消歧：需要从 `html.rs` 另开一条通道把字体传给 `structure`，前面两期已经把
   编号与层级定了，先拿真实样本看有没有字体能救的情形再做（已从第三期单列为「待定」，见第十节）。
+
+### 第三期（图片、公式、文框、侧栏材料）
+
+- 2026-10-23：**第三期部分完成**。文框识别与 AI 侧栏材料已实现、待真机验收；**图片入库与 Word
+  公式按提示词第 0 节先停下**——仓库里没有 `real-word-image.html`、`real-word-equation.html`、
+  `real-web-image.html` 这三份真实剪贴板样本，输入格式（Word 图片的 `file:` 临时路径与 VML 双份、
+  WPS 的写法、Word 公式的条件注释与 OMML 写法）只能看真样本，凭印象写解析会错。采样命令见
+  `tests/fixtures/paste/README.md`：
+
+  ```bash
+  GONGWEN_PASTE_SAMPLE=real-word-image cargo test --locked capture_clipboard_html -- --ignored --nocapture
+  GONGWEN_PASTE_SAMPLE=real-word-equation cargo test --locked capture_clipboard_html -- --ignored --nocapture
+  GONGWEN_PASTE_SAMPLE=real-web-image cargo test --locked capture_clipboard_html -- --ignored --nocapture
+  ```
+
+  采样后脱敏（单位、人名、图片内容）再补 `.expected.md`，然后按第十节第 3 条接着做。
+
+#### 做了什么
+
+- `html.rs`：`parse(source, boxes)` 多一个「要不要认文框」的开关（只有研究报告为真）。
+  文框候选三类——`<aside>`、只有一格的 `<table>`、`style` 里有 `border` / `background` 的
+  `div` / `section`；判定「第一段是整段加粗的短标题」后，把候选改写成 `blockquote`，首段换成
+  `\u{FDD1}名称\u{FDD2}标题` 占位。`Parsed` 带回文框个数与其中默认名称的个数。
+- 文框首行最后才成形：anydoc 渲染会转义 `[`，`clean` 又会把半角 `!` 转成全角 `！`，所以模型里
+  只放非字符占位，`html::restore_boxes` 在整条管线**最末尾**（结构还原、列表整形之后）换回
+  `> [!名称] 标题`。行内粘贴遇到文框只留标题。
+- `syntax.rs` 不用改：研究报告本来就保留引用块，其余文种照旧拆成段落。
+- `Stats` 加 `boxes` / `default_boxes`；`notice` 在用了默认名称时补一句「识别出 N 个文框…」。
+- AI 侧栏：`rich_paste::material_text(plain)` 有 HTML 就用 `pipeline::to_material` 转出来的
+  Markdown（表格是管道表），没有或失败就退回纯文本；`composer_ui.rs` 的大段粘贴改调它。
+  `to_material` 只做 HTML → Markdown 与语法裁剪（研究报告规则），不做编号重排、剥版头版记、
+  认标题、列表整形、图片入库。`src/agent/` 一行没动，三条红线不受影响（材料仍是全文，闸门照常核对）。
+- 夹具：`research-box.html`（四种来源 + 两个反例，另有研究报告上下文的测试）、
+  `material-table.html`（`material-` 前缀走材料那条路）。单测覆盖名称前缀、默认名称与提示、
+  非研究报告不出文框、材料保留表格且不重排编号、`file:`/`data:` 之外不读（后者随图片一项待做）。
+- 使用帮助与 `AGENTS.md` 都按「文框、侧栏材料已做；图片与公式待采样」写。
+
+#### 与方案的出入
+
+1. **图片与公式没做**（缺真实样本，见上）。方案第四节那两行按现状标注为「待样本」。
+2. **文框候选的判定放在 `html.rs`**（DOM 层），不在 `syntax.rs`（模型层）：模型里候选与真正的
+   `<blockquote>` 都是 `Block::BlockQuote`，分不出「这一段网页旁注」与「作者写的引文」；DOM 层
+   才知道来源，也才知道名字前缀要剥到哪儿。
+3. **单格表格当文框时不再留表格结构**：把单元格里的块提上来直接做引用块内容，避免
+   `tbody/tr/td` 在引用块里被 anydoc 当行内容器走。
+4. **文框首行用非字符占位**（`U+FDD1`/`U+FDD2`）而不是直接写 `[!名称]`：渲染器的转义规则
+   （`[` 后面有 `]` 就转义）与清洗的半角标点归一都会把它改坏。占位最后一步才换回来。
+5. **`to_material` 用研究报告的语法规则**（保留引用块与公式、单格表格拆段），材料不分文种；
+   图片在材料里照旧按未导入跳过。
+6. **`TITLE_MAX` 从 `structure` 公开成 `pub(crate)`**，文框短标题的长度口径与结构还原一致。
+
+#### 已知坑（补做图片 / 公式时必读）
+
+- **`html::parse` 的 `boxes` 参数**：只有研究报告为真；材料与行内粘贴都为假。别把
+  「要不要认文框」塞进 `Context` 的别处。
+- **文框占位不能提前换回来**：`clean::normalize_punctuation` 会把 `[!` 里的 `!` 变全角，
+  `structure`/`lists` 之前换回来都会坏；`pipeline::restructure` 的返回值是唯一正确的位置。
+- **`entirely_bold` 的口径**：只看文字节点，`<br>` 这类空元素不算内容；`font-weight`
+  小于 600 或 `normal` 会把外层的粗体取消（网页常见的 `<b style="font-weight:normal">`）。
+- **图片那一期要注意**：`html.rs` 现在一遇到 `<img>` 就 `continue`（只计数）；接 `file:` /
+  `data:` 时要在同一个分支里取字节，并记住 Word 的 VML `<v:imagedata>` 已经在 `should_skip`
+  里按「带冒号」丢掉，只留 `<img>` 那一份，别重复入库。入库走 `embedded::render`（它已经处理
+  格式识别、去重、图元文件转换、独占一行、未导入注释、alt 置空）。
+- **单行带图的接管**：`paste.rs` 的「只有一行不接管」在图片那一期要改成「先读 HTML，有 `<img>`
+  才接管」；egui-winit 在剪贴板里没有文字时不发 `Event::Paste`，只复制一张图做不到，别改它。
+- **材料入口不做结构还原**：`to_material` 要的就是原文，任何「顺手整理一下」都会改变材料。
+
+#### 还剩什么
+
+1. 图片随粘贴入库（等 `real-word-image.html`、`real-web-image.html`；WPS 有更好）。
+2. Word 公式（等 `real-word-equation.html`）。
+3. 只复制一张图时的粘贴（egui-winit 不发事件，属平台限制，写进帮助即可）。
+4. 字体线索消歧（待真实样本，见第十节第 4 条）。

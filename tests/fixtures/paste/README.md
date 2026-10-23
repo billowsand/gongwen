@@ -10,6 +10,20 @@
 `cargo test --locked rich_paste::samples` 会逐个比对；不一致时实际输出写到
 `target/paste-samples/<名字>.actual.md`，看一眼就知道差在哪。
 
+文件名以 **`material-`** 打头的样本走 AI 侧栏那条路（`pipeline::to_material`：材料是原文、
+保留表格，不重排编号），其余走起草页的 `convert`（会做结构还原）。研究报告的文框只有
+研究报告上下文才会出现，`research-box.html` 另有一条按研究报告上下文跑的测试。
+
+## 第三期待补的真实样本
+
+图片入库与 Word 公式两项目前**停下等样本**（没有样本就无法确定 Word 的 `file:` 临时路径、
+VML 与 `<img>` 双份、条件注释里的 OMML 写法）。按下面的名字采：
+
+- `real-word-image.html`：Word 里一段文字 + 一张插入的图片，一起复制；
+- `real-word-equation.html`：Word 里一段文字 + 一个公式编辑器写的公式（行内或独立一行）；
+- `real-web-image.html`：浏览器里一段带图片的网页正文；
+- `real-wps-image.html`：WPS 文字里带图片的一段（有就用，没有不阻塞）。
+
 ## 加一份真实样本
 
 1. 在真机上复制要采样的内容（Word 一段公文、政府网站一页、微信公众号一篇、Excel 一块
