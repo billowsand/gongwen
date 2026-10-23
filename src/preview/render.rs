@@ -308,6 +308,9 @@ struct OfficialParse {
     body: Vec<usize>,
     /// 各份附件的块，每份附件从新纸开始。
     attachments: Vec<Vec<usize>>,
+    /// 每份附件是否「自动横页」：任一表格在竖版心内过密即整份转横，
+    /// 与导出 `body::attachment_landscape_flags` 同一判定、同一结果。
+    attachment_landscape: Vec<bool>,
     /// 附件概要里列出的附件名。
     names: Vec<String>,
     /// 正文区每个块是否与后文合成紧缩标题，下标与 `body` 对应。
@@ -331,6 +334,9 @@ impl OfficialParse {
             .map(|block| block.block.clone())
             .collect::<Vec<_>>();
         let names = export::attachment_names(&blocks);
+        // 与导出同一条判定（`body::attachment_landscape_flags`）：预览和 PDF 对
+        // 「哪份附件转横」不可能分叉。整份横排时导出不逐个判定，渲染处会忽略它。
+        let attachment_landscape = crate::export::typst::body::attachment_landscape_flags(&blocks);
 
         // 先按正文/附件切分。红头呈批件正文还会在专用分页器里继续拆成真实页；
         // 每份附件仍从新纸开始。
@@ -376,11 +382,105 @@ impl OfficialParse {
             located,
             body,
             attachments,
+            attachment_landscape,
             names,
             compact_headings,
             title,
         }
     }
+}
+
+/// 一份附件画在一张纸上（`preview::sheet`）；`landscape` 与否由调用方在画之前
+/// 切换纸面几何（`Metrics::enter_attachment_landscape`），这里只按当前几何排。
+/// `footer_record` 为真时把版记排在这张纸末尾（正文区没有附件时的最后一张纸
+/// 由 `official_preview` 自己排）；红头呈批件的版记在打印分页器里，传 `false`。
+/// 附件里远离视野的块只占位（见 `preview::cull`），号栏、锚点与点击回源码照旧。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attachment_sheet(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    attachment: &[&LocatedBlock],
+    sheet_index: usize,
+    attachment_count: usize,
+    footer_record_on_last: bool,
+    input: &DraftInput,
+    display: &UnitDisplay,
+    elements: &ElementMarks,
+    anchor: Option<&Range<usize>>,
+    scroll_to_anchor: &mut bool,
+    clicked: &mut Option<Range<usize>>,
+    numbering: &NumberingConfig,
+    markdown: &str,
+) {
+    // 纸面几何（竖页 / 横向附件页）可能逐份不同，裁剪器跟着当前几何重建：
+    // 键里含版心宽，横纸上的表格不会误用竖页量到的高度。
+    let cull = Cull::new(ui, metrics, "official");
+    let numbered = true;
+    sheet(ui, metrics, |ui| {
+        let mut counters = [0usize; 4];
+        let label = if attachment_count == 1 {
+            "附件".to_string()
+        } else {
+            format!("附件{}", sheet_index + 1)
+        };
+        line_block(ui, metrics, &label, theme::FONT_HEITI, BODY_PT, Align::LEFT);
+        for located in attachment {
+            // 附件正式标题与正文标题使用同一层级编码。
+            if let MarkdownBlock::Title(text) = &located.block {
+                counters.fill(0);
+                let range = located.range.clone();
+                clickable(
+                    ui,
+                    metrics,
+                    &range,
+                    anchor,
+                    scroll_to_anchor,
+                    clicked,
+                    |ui| {
+                        crate::preview::fit::title_block(
+                            ui,
+                            metrics,
+                            &marks::plain_keep_marks(text),
+                        );
+                        ui.add_space(metrics.pt(18.0));
+                    },
+                );
+                continue;
+            }
+            let key = block_key(located, &counters, numbered, numbering);
+            let heading =
+                matches!(located.block, MarkdownBlock::Heading(..)).then_some(&located.range);
+            let drawn = cull.block(
+                ui,
+                metrics,
+                key,
+                &located.range,
+                anchored(anchor, &located.range),
+                heading,
+                |ui| {
+                    clickable_content_block(
+                        ui,
+                        metrics,
+                        located,
+                        markdown,
+                        &mut counters,
+                        numbered,
+                        numbering,
+                        anchor,
+                        scroll_to_anchor,
+                        clicked,
+                    )
+                },
+            );
+            // 跳过排版的标题照样占号，后面的编号才接得上。
+            if !drawn && let MarkdownBlock::Heading(level, _) = &located.block {
+                let _ = export::official_heading_prefix(*level, &mut counters, numbering);
+            }
+        }
+        if footer_record_on_last {
+            footer_record(ui, metrics, input, display, elements);
+        }
+    });
 }
 
 /// 把 Markdown 连同表单锁定的行文要素按公文版式画在 `ui` 里；调用方负责套滚动区。
@@ -431,7 +531,7 @@ pub(crate) fn official_preview(
         .clip_rect()
         .intersect(ui.ctx().input(|input| input.content_rect()));
     // 居中用的宽度优先取调用方给的真实宽度（见 `PreviewScale::viewport`）。
-    let metrics = Metrics::official(
+    let mut metrics = Metrics::official(
         scale.viewport.unwrap_or(visible.width()),
         scale.zoom,
         input.landscape(),
@@ -483,11 +583,12 @@ pub(crate) fn official_preview(
     if input.kind == TemplateKind::RedHeadApproval {
         red_approval_print_preview(
             ui,
-            &metrics,
+            &mut metrics,
             input,
             display,
             &body,
             &attachments,
+            &parsed.attachment_landscape,
             &(title, title_range),
             names,
             anchor,
@@ -567,78 +668,35 @@ pub(crate) fn official_preview(
     let attachment_count = attachments.len();
     for (sheet_index, attachment) in attachments.into_iter().enumerate() {
         ui.add_space(14.0);
-        sheet(ui, &metrics, |ui| {
-            let mut counters = [0usize; 4];
-            let label = if attachment_count == 1 {
-                "附件".to_string()
-            } else {
-                format!("附件{}", sheet_index + 1)
-            };
-            line_block(
-                ui,
-                &metrics,
-                &label,
-                theme::FONT_HEITI,
-                BODY_PT,
-                Align::LEFT,
-            );
-            for located in attachment {
-                // 附件正式标题与正文标题使用同一层级编码。
-                if let MarkdownBlock::Title(text) = &located.block {
-                    counters.fill(0);
-                    let range = located.range.clone();
-                    clickable(
-                        ui,
-                        &metrics,
-                        &range,
-                        anchor,
-                        &mut scroll_to_anchor,
-                        &mut clicked,
-                        |ui| {
-                            crate::preview::fit::title_block(
-                                ui,
-                                &metrics,
-                                &marks::plain_keep_marks(text),
-                            );
-                            ui.add_space(metrics.pt(18.0));
-                        },
-                    );
-                    continue;
-                }
-                let key = block_key(located, &counters, numbered, numbering);
-                let heading =
-                    matches!(located.block, MarkdownBlock::Heading(..)).then_some(&located.range);
-                let drawn = cull.block(
-                    ui,
-                    &metrics,
-                    key,
-                    &located.range,
-                    anchored(anchor, &located.range),
-                    heading,
-                    |ui| {
-                        clickable_content_block(
-                            ui,
-                            &metrics,
-                            located,
-                            markdown,
-                            &mut counters,
-                            numbered,
-                            numbering,
-                            anchor,
-                            &mut scroll_to_anchor,
-                            &mut clicked,
-                        )
-                    },
-                );
-                // 跳过排版的标题照样占号，后面的编号才接得上。
-                if !drawn && let MarkdownBlock::Heading(level, _) = &located.block {
-                    let _ = export::official_heading_prefix(*level, &mut counters, numbering);
-                }
-            }
-            if sheet_index == last_attachment {
-                footer_record(ui, &metrics, input, display, elements);
-            }
-        });
+        // 附件自动横页：整张纸切成横向 A4（225mm 版心），表格按横版心列宽重排，
+        // 与导出 `page(flipped: true, …)` 一致。整份横排时附件纸本来就是横的，
+        // 导出也不再逐个判定，这里照抄。
+        let landscape_sheet = !input.landscape()
+            && parsed
+                .attachment_landscape
+                .get(sheet_index)
+                .copied()
+                .unwrap_or(false);
+        let saved = landscape_sheet.then(|| metrics.enter_attachment_landscape());
+        attachment_sheet(
+            ui,
+            &metrics,
+            &attachment,
+            sheet_index,
+            attachment_count,
+            sheet_index == last_attachment,
+            input,
+            display,
+            elements,
+            anchor,
+            &mut scroll_to_anchor,
+            &mut clicked,
+            numbering,
+            markdown,
+        );
+        if let Some(saved) = saved {
+            metrics.leave_attachment_landscape(saved);
+        }
     }
     // 行号压在纸面留白上，等纸和附件都画完再标：晚画才不会被纸底盖住。
     // 点中的号与点中的正文块是同一件事——都是「把光标带到这一行」。

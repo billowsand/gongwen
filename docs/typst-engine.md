@@ -122,7 +122,14 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
   不收敛；裸 metadata 紧挨分页会被带到下一页，所以要包进零高的块。
 - **横向附件**：Typst 先按横页排，`typst_engine::rotate_landscape_pages` 再改成竖向纸张 +
   内容逆时针转 90° + `/Rotate 90`（pdflscape 的结构），双面打印时装订边不因打印机的自动
-  旋转方向而错位。页码仍在竖页时的位置（横页左缘，旋转 90°）。
+  旋转方向而错位。页码仍在竖页时的位置（横页左缘，旋转 90°）。预览同步：纸面预览对每份
+  附件调用同一个判定（`body::attachment_landscape_flags`，`OfficialParse` 里算好），判定为
+  真的附件整张纸切成横页几何（225mm 版心、左边距 35mm、上边距 28mm，见
+  `Metrics::enter_attachment_landscape`），表格按横版心列宽重排；同时按 210/297 等比压缩到
+  与竖页同宽（横纸只是更矮），整篇预览共用一个缩放级别——只影响预览显示，导出的 PDF 仍是
+  正常尺寸的横页。附件标题断行仍按竖版心判定，与导出的
+  `main_title(text, landscape_document=false)` 一致。整份横排时附件不再逐个判定，预览照抄。
+  DOCX 导出没有附件横页（仍只处理整份横排），Word 侧宽表附件仍按竖页网格排。
 - **整份横排**（普通公文的「横页排版」，`doc.landscape`）：模板开头按它换整套版式常量——
   横向 A4，版心 225×156mm，上下 28 / 26mm，订口（左）37mm、翻口 35mm，双面时左右镜像；
   页码照常在版心下 30texpt（单面居中、双面奇右偶左）。附件直接换页接排，不再逐个判定

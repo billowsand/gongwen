@@ -124,6 +124,14 @@ const LANDSCAPE_PAGE_PT: f32 = PAGE_HEIGHT_PT;
 const LANDSCAPE_PAGE_HEIGHT_PT: f32 = PAGE_PT;
 const LANDSCAPE_MARGIN_LEFT_MM: f32 = 37.0;
 const LANDSCAPE_CONTENT_MM: f32 = 225.0;
+// 附件自动横页（模板 `page(flipped: true, …)`，单面 / 奇数页）：A4 横放，
+// 版心是竖页版心转过来（225mm × 156mm），左边距 297 − 37 − 225 = 35mm，
+// 上边距取竖页订口 28mm。与「整份横排」是两套几何，不能混用。
+const ATTACH_LANDSCAPE_MARGIN_LEFT_MM: f32 = 35.0;
+const ATTACH_LANDSCAPE_MARGIN_TOP_MM: f32 = 28.0;
+/// 预览里横页附件的压缩系数：横纸等比缩到与竖页同宽（210/297），整篇预览
+/// 共用一个缩放级别。只影响预览显示，导出的 PDF 仍是正常尺寸的横页。
+const ATTACH_LANDSCAPE_FIT: f32 = PAGE_PT / LANDSCAPE_PAGE_PT;
 
 // 研究报告版心取自 mdx 的 md2tex.cls：
 // `\geometry{a4paper, left=28mm, top=37mm, width=156mm, height=225mm}`。
@@ -274,6 +282,56 @@ impl Metrics {
             gutter: RefCell::default(),
             tints: RefCell::default(),
         }
+    }
+}
+
+/// 纸面几何的暂存：[`Metrics::enter_attachment_landscape`] 切走几何之前的样子，
+/// 画完横向附件纸交给 [`Metrics::leave_attachment_landscape`] 还原。
+/// 只含纸面几何与缩放，不含字面、号栏这些整篇共享的状态。
+pub(crate) struct SheetGeometry {
+    page: f32,
+    page_height: f32,
+    content: f32,
+    margin_left: f32,
+    margin_top: f32,
+    scale: f32,
+}
+
+impl Metrics {
+    /// 把纸面几何切成「附件自动横页」（横向 A4、225mm 版心），返回切之前的几何。
+    /// 横页纸按 `PAGE_PT / LANDSCAPE_PAGE_PT`（210/297）等比压缩到与竖页同宽：
+    /// 整篇预览共用一个缩放级别，横纸只是更矮，不会出现比视口还宽的纸；版心、
+    /// 字号、列宽一起缩，纸上每个元素的相对位置与导出的 PDF 完全一致
+    /// （PDF 本身走正常横页路线，不加这个压缩）。
+    /// `landscape` 标志仍表示「整份横排」——附件标题的断行宽度导出走竖版心判定
+    /// （`body::main_title(text, landscape_document)`），这里照抄，标题行宽才与
+    /// 导出的 PDF 一致。调用方画完必须配对 `leave_attachment_landscape`。
+    pub(crate) fn enter_attachment_landscape(&mut self) -> SheetGeometry {
+        let saved = SheetGeometry {
+            page: self.page,
+            page_height: self.page_height,
+            content: self.content,
+            margin_left: self.margin_left,
+            margin_top: self.margin_top,
+            scale: self.scale,
+        };
+        self.scale *= ATTACH_LANDSCAPE_FIT;
+        self.page = LANDSCAPE_PAGE_PT * PT * self.scale;
+        self.page_height = LANDSCAPE_PAGE_HEIGHT_PT * PT * self.scale;
+        self.content = LANDSCAPE_CONTENT_MM * MM * PT * self.scale;
+        self.margin_left = ATTACH_LANDSCAPE_MARGIN_LEFT_MM * MM * PT * self.scale;
+        self.margin_top = ATTACH_LANDSCAPE_MARGIN_TOP_MM * MM * PT * self.scale;
+        saved
+    }
+
+    /// 还原 [`Metrics::enter_attachment_landscape`] 切走的纸面几何与缩放。
+    pub(crate) fn leave_attachment_landscape(&mut self, saved: SheetGeometry) {
+        self.page = saved.page;
+        self.page_height = saved.page_height;
+        self.content = saved.content;
+        self.margin_left = saved.margin_left;
+        self.margin_top = saved.margin_top;
+        self.scale = saved.scale;
     }
 
     /// 研究报告的版心与公文完全不同：页边距、版心宽度、字号和行距都取自
@@ -2204,6 +2262,179 @@ mod tests {
                 .iter()
                 .any(|s| s.contains(":finite_tex_rects=") && !s.ends_with("finite_tex_rects=0")),
             "图片应绘制尺寸有限的带纹理矩形：{states:?}"
+        );
+    }
+
+    /// 判定「需要横页」的宽表（与 `export::table` 的单测同一夹具）。
+    fn wide_table_markdown_row() -> String {
+        "| 序号 | 事项类别 | 事项名称 | 存在问题 | 整改措施 | 责任部门 | 完成时限 | 当前状态 |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- |\n\
+         | 1 | 线上办理 | 行政备案事项 | 移动端部分页面显示不完整，申请人无法正常上传附件。 | 优化移动端页面适配，增加格式和大小提示并开展测试。 | 技术保障部门 | 2026年8月12日 | 已完成 |"
+            .to_string()
+    }
+
+    /// 纸面几何切入横向附件页再还原：横纸按 210/297 压缩到与竖页同宽（更矮），
+    /// 版心、边距、字号随缩放一起缩；`landscape`（整份横排）标志不动。
+    #[test]
+    fn attachment_landscape_geometry_swaps_and_restores() {
+        let mut metrics = Metrics::new(1000.0, Some(1.0));
+        let portrait_content = metrics.content;
+        let portrait_page = metrics.page;
+        let portrait_scale = metrics.scale;
+        let saved = metrics.enter_attachment_landscape();
+        let mm = |value: f32| value * 72.0 / 25.4 * PT;
+        // 横纸（297mm 宽）压缩后应与竖页（210mm 宽）同宽。
+        assert!(
+            (metrics.page - portrait_page).abs() < mm(1.0),
+            "横页附件纸应压缩到与竖页同宽"
+        );
+        assert!(
+            metrics.page_height < portrait_page * 0.75,
+            "横页附件纸应更矮：{}",
+            metrics.page_height / (72.0 / 25.4 * PT)
+        );
+        assert!(
+            (metrics.content - mm(225.0 * 210.0 / 297.0)).abs() < mm(1.0),
+            "横页附件版心应随压缩等比缩小"
+        );
+        assert!(
+            (metrics.margin_left - mm(35.0 * 210.0 / 297.0)).abs() < mm(1.0),
+            "横页附件左边距应随压缩等比缩小"
+        );
+        assert!(
+            (metrics.margin_top - mm(28.0 * 210.0 / 297.0)).abs() < mm(1.0),
+            "横页附件上边距应随压缩等比缩小"
+        );
+        assert!(
+            (metrics.scale - portrait_scale * 210.0 / 297.0).abs() < 1e-4,
+            "横页附件缩放应乘 210/297"
+        );
+        assert!(
+            !metrics.landscape,
+            "`landscape` 仍表示整份横排，不应被附件切换"
+        );
+        metrics.leave_attachment_landscape(saved);
+        assert!(
+            (metrics.content - portrait_content).abs() < 0.01,
+            "还原后版心应回到竖页值"
+        );
+        assert!(
+            (metrics.scale - portrait_scale).abs() < 1e-6,
+            "还原后缩放应复原"
+        );
+        assert!(metrics.page < metrics.page_height, "还原后纸应回到竖放");
+    }
+
+    /// 渲染一帧公文预览，返回所有纸面（白底矩形）的宽高（毫米）。
+    fn paper_sizes_mm(input: &DraftInput, markdown: &str) -> Vec<(f32, f32)> {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let output = crate::test_support::run_ui(
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 4000.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                official_preview(
+                    ui,
+                    input,
+                    &UnitDisplay::new(&[]),
+                    markdown,
+                    PreviewScale::zoom(Some(1.0)),
+                    None,
+                    false,
+                    &crate::models::NumberingConfig::default(),
+                    false,
+                    &crate::visual_diff::ElementMarks::default(),
+                );
+            },
+        );
+        let to_mm = |px: f32| px / (72.0 / 25.4 * PT);
+        fn collect(
+            shape: &egui::epaint::Shape,
+            out: &mut Vec<(f32, f32)>,
+            to_mm: &impl Fn(f32) -> f32,
+        ) {
+            match shape {
+                egui::epaint::Shape::Rect(rect)
+                    if rect.fill == theme::paper::bg() && rect.rect.is_positive() =>
+                {
+                    out.push((to_mm(rect.rect.width()), to_mm(rect.rect.height())));
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, out, to_mm);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut sizes = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut sizes, &to_mm);
+        }
+        sizes
+    }
+
+    /// 宽表附件：预览里这份附件应画成横纸但压缩到与竖页同宽、高度等比变矮
+    /// （210/297），整篇预览一个缩放级别；窄表附件与正文仍是普通竖页。
+    #[test]
+    fn wide_table_attachment_renders_on_a_compressed_landscape_sheet() {
+        let input = draft(TemplateKind::OfficialLetter);
+        let wide = format!(
+            "# 关于报送整改情况的函\n\n<!-- [正文] -->\n\n现将整改情况函告如下。\n\n<!-- [附件] -->\n\n# 问题整改清单\n\n{}",
+            wide_table_markdown_row()
+        );
+        let sizes = paper_sizes_mm(&input, &wide);
+        // 横纸压缩后与竖页同宽（210mm），高度 210×210/297 ≈ 148.5mm，明显更矮。
+        assert!(
+            sizes
+                .iter()
+                .any(|(width, height)| (width - 210.0).abs() < 2.0
+                    && (height - 210.0 * 210.0 / 297.0).abs() < 5.0),
+            "宽表附件应是压缩后的横纸（同宽、更矮）：{sizes:?}"
+        );
+        assert!(
+            sizes
+                .iter()
+                .any(|(width, height)| (width - 210.0).abs() < 2.0 && *height > 200.0),
+            "正文纸应是与横页同宽的竖纸：{sizes:?}"
+        );
+        assert!(
+            sizes.iter().all(|(width, _)| (width - 210.0).abs() < 2.0),
+            "整篇预览的纸应统一宽度：{sizes:?}"
+        );
+
+        // 对照：窄表附件不转横，两张纸同宽同高。
+        let narrow = "# 关于报送整改情况的函\n\n<!-- [正文] -->\n\n现将整改情况函告如下。\n\n<!-- [附件] -->\n\n# 问题整改清单\n\n| 序号 | 状态 |\n| --- | --- |\n| 1 | 已完成 |";
+        let sizes = paper_sizes_mm(&input, narrow);
+        assert!(
+            sizes
+                .iter()
+                .all(|(width, height)| (width - 210.0).abs() < 2.0 && *height > 200.0),
+            "窄表附件不应转横：{sizes:?}"
+        );
+    }
+
+    /// 整份横排时导出不逐个判定附件转横（附件直接接排在横页上），预览照抄：
+    /// 所有纸都是横的，不因附件里的宽表再切一次几何。
+    #[test]
+    fn landscape_document_keeps_attachments_on_its_own_sheets() {
+        let mut input = draft(TemplateKind::PlainDocument);
+        input.profile.landscape = true;
+        let wide = format!(
+            "# 关于报送整改情况的函\n\n<!-- [正文] -->\n\n现将整改情况函告如下。\n\n<!-- [附件] -->\n\n# 问题整改清单\n\n{}",
+            wide_table_markdown_row()
+        );
+        let sizes = paper_sizes_mm(&input, &wide);
+        assert!(!sizes.is_empty());
+        assert!(
+            sizes.iter().all(|(width, _)| (width - 297.0).abs() < 2.0),
+            "整份横排时全部纸都应是横向 A4：{sizes:?}"
         );
     }
 }

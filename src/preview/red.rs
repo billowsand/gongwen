@@ -7,16 +7,14 @@ use crate::export;
 use crate::export::RedlineKind;
 use crate::export::{LocatedBlock, MarkdownBlock};
 use crate::models::{DraftInput, NumberingConfig};
-use crate::preview::cull::Cull;
 use crate::preview::gutter;
 use crate::preview::layout::{MeasuredTable, measure_table};
 use crate::preview::marks;
-use crate::preview::render::{anchored, block_key};
 use crate::preview::{
-    BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT, clickable,
-    clickable_content_block, document_number, first_ink, header_unit, heading_family, indent,
-    is_renderable_paragraph, job, justified_rows, layout, line_block, row_tint_offset,
-    scroll_preview_to_rect, sheet, signature_date, single_line, text_format,
+    BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT,
+    document_number, first_ink, header_unit, heading_family, indent, is_renderable_paragraph, job,
+    justified_rows, layout, row_tint_offset, scroll_preview_to_rect, signature_date, single_line,
+    text_format,
 };
 use crate::theme;
 use crate::units::UnitDisplay;
@@ -1714,11 +1712,12 @@ pub(crate) fn paint_red_print_pages(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn red_approval_print_preview(
     ui: &mut egui::Ui,
-    metrics: &Metrics,
+    metrics: &mut Metrics,
     input: &DraftInput,
     display: &UnitDisplay,
     body: &[&LocatedBlock],
     attachments: &[Vec<&LocatedBlock>],
+    attachment_landscape: &[bool],
     title: &(String, Range<usize>),
     attachment_names: &[String],
     anchor: Option<&Range<usize>>,
@@ -1774,75 +1773,32 @@ pub(crate) fn red_approval_print_preview(
         elements,
     );
 
-    // 附件仍沿用现有的逐份分页渲染；正文和附件概要已经由上面的打印分页器处理。
-    // 附件里远离视野的块同样只占位（见 `preview::cull`）。
-    let cull = Cull::new(ui, metrics, "official");
+    // 附件仍沿用现有的逐份分页渲染；正文和附件概要已经由上面的打印分页器处理
+    // （版记也在里面，附件纸末尾不再排）。宽表附件与白头件同一套：整张纸切成
+    // 横向 A4，判定与导出 `body::attachment_landscape_flags` 一致。
     for (index, attachment) in attachments.iter().enumerate() {
         ui.add_space(14.0);
-        sheet(ui, metrics, |ui| {
-            let mut counters = [0usize; 4];
-            line_block(
-                ui,
-                metrics,
-                if attachments.len() == 1 {
-                    "附件".to_string()
-                } else {
-                    format!("附件{}", index + 1)
-                }
-                .as_str(),
-                theme::FONT_HEITI,
-                BODY_PT,
-                Align::LEFT,
-            );
-            for located in attachment {
-                // 附件正式标题与正文标题使用同一层级编码，与白头件一致。
-                if let MarkdownBlock::Title(text) = &located.block {
-                    counters.fill(0);
-                    let range = located.range.clone();
-                    clickable(
-                        ui,
-                        metrics,
-                        &range,
-                        anchor,
-                        scroll_to_anchor,
-                        clicked,
-                        |ui| {
-                            super::fit::title_block(ui, metrics, &marks::plain_keep_marks(text));
-                            ui.add_space(metrics.pt(18.0));
-                        },
-                    );
-                    continue;
-                }
-                let key = block_key(located, &counters, true, numbering);
-                let heading =
-                    matches!(located.block, MarkdownBlock::Heading(..)).then_some(&located.range);
-                let drawn = cull.block(
-                    ui,
-                    metrics,
-                    key,
-                    &located.range,
-                    anchored(anchor, &located.range),
-                    heading,
-                    |ui| {
-                        clickable_content_block(
-                            ui,
-                            metrics,
-                            located,
-                            markdown,
-                            &mut counters,
-                            true,
-                            numbering,
-                            anchor,
-                            scroll_to_anchor,
-                            clicked,
-                        )
-                    },
-                );
-                // 跳过排版的标题照样占号，后面的编号才接得上。
-                if !drawn && let MarkdownBlock::Heading(level, _) = &located.block {
-                    let _ = export::official_heading_prefix(*level, &mut counters, numbering);
-                }
-            }
-        });
+        let landscape_sheet =
+            !input.landscape() && attachment_landscape.get(index).copied().unwrap_or(false);
+        let saved = landscape_sheet.then(|| metrics.enter_attachment_landscape());
+        super::render::attachment_sheet(
+            ui,
+            metrics,
+            attachment,
+            index,
+            attachments.len(),
+            false,
+            input,
+            display,
+            elements,
+            anchor,
+            scroll_to_anchor,
+            clicked,
+            numbering,
+            markdown,
+        );
+        if let Some(saved) = saved {
+            metrics.leave_attachment_landscape(saved);
+        }
     }
 }
