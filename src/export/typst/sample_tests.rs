@@ -137,6 +137,22 @@ fn cases() -> Vec<Case> {
             tweak: |_| {},
         },
         Case {
+            name: "letter-record-note-wrap",
+            kind: TemplateKind::OfficialLetter,
+            markdown: SHORT.into(),
+            tweak: |input| {
+                input.profile.copies_to = "市财政局、市发展和改革委员会、市卫生健康委员会".into();
+            },
+        },
+        Case {
+            name: "letter-record-copies-wrap",
+            kind: TemplateKind::OfficialLetter,
+            markdown: SHORT.into(),
+            tweak: |input| {
+                input.profile.copies_to = "市财政局、市发展和改革委员会、市卫生健康委员会、市人力资源和社会保障局、市住房和城乡建设局".into();
+            },
+        },
+        Case {
             name: "letter-preview-duplex",
             kind: TemplateKind::OfficialLetter,
             markdown: format!("{BODY}\n{}", BODY.lines().skip(4).collect::<Vec<_>>().join("\n")),
@@ -861,6 +877,56 @@ fn text_fonts(
     )
     .unwrap();
     (items, set)
+}
+
+/// 版记按真实折行向上扩展，印数始终整块靠右且不压住承办行。
+#[test]
+fn letter_record_wrapping_keeps_note_above_contact_row() {
+    if crate::portable_runtime::find_font_dir().is_none() {
+        return;
+    }
+    let mut last_note = 0.0;
+    for copies in [
+        "",
+        "市财政局",
+        "市财政局、市发展和改革委员会、市卫生健康委员会",
+        "市财政局、市发展和改革委员会、市卫生健康委员会、市人力资源和社会保障局、市住房和城乡建设局",
+    ] {
+        let mut input = base_input(TemplateKind::OfficialLetter);
+        input.profile.copies_to = copies.into();
+        let (items, _) = text_fonts(&input, SHORT, &NumberingConfig::default());
+        let note = items.iter().find(|t| t.text.contains("共印")).unwrap();
+        let end = items.iter().find(|t| t.text.contains("份）")).unwrap();
+        let contact = items.iter().find(|t| t.text.contains("承办单位")).unwrap();
+        if !copies.is_empty() {
+            let head = items.iter().find(|t| t.text.contains("抄送")).unwrap();
+            let lines = if copies == "市财政局" { 0.0 } else { 1.0 };
+            assert!(
+                (note.baseline_pt - head.baseline_pt - lines * 22.56).abs() < 0.1,
+                "印数应在末行，且行距为 22.56pt：{items:?}"
+            );
+        }
+        assert_eq!(note.page, contact.page);
+        assert!(
+            (note.baseline_pt - end.baseline_pt).abs() < 0.01,
+            "印数不能折开"
+        );
+        assert!(
+            (end.right_pt - 184.0 / 25.4 * 72.0).abs() < 0.1,
+            "印数应贴版心右侧：{end:?}"
+        );
+        assert!(
+            contact.baseline_pt - note.baseline_pt > 20.0,
+            "印数与承办行重叠：{items:?}"
+        );
+        if last_note != 0.0 {
+            assert!(
+                (note.baseline_pt - last_note).abs() < 0.1,
+                "版记向上扩展，末行保持原位"
+            );
+        }
+        last_note = note.baseline_pt;
+    }
 }
 
 /// 段内列表默认的圈号「①②」：出自正文的合成仿宋，即仿宋_GB2312 的字形。

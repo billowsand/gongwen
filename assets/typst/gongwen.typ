@@ -390,35 +390,43 @@
 //   联合发文（\arraystretch=1.15，承办逐行列出）：顶线 0.30、抄送 6.41、中线 9.24、首行 15.20、
 //     其后每行 +6.81、末行到底线 2.99。
 // 块底贴版心底，底线比版心底再低 1.46mm，与 TeX 一致。
+#let copies-note(r) = [（共印#r.print-copies;份）]
+#let copies-par(r) = {
+  set text(size: 14pt, tracking: 0pt, top-edge: "baseline", bottom-edge: "baseline")
+  // 首末边界都取基线，所以这里直接给基线间距，不再扣字身高度。
+  set par(first-line-indent: 0pt, justify: false, hanging-indent: 3em, leading: 22.56pt)
+  let note = text(size: 14pt, tracking: 0pt, top-edge: "baseline", bottom-edge: "baseline", box(copies-note(r)))
+  // 用不可拆的隐形印数预留末行空间，再把可见印数放到该行右端。
+  // 自动折行会丢掉行首的弹性间距，不能依赖 h(1fr) 将换行后的印数推到右边。
+  let body = if r.copies-to != none {
+    box(width: 3em, [抄送：]) + runs(r.copies-to) + h(2em, weak: true) + hide(note)
+  } else { hide(note) }
+  // measure 在返回内容套上局部 set 规则之前执行，量尺必须显式携带字号、边界和行距。
+  let para = block(width: text-w, above: 0pt, below: 0pt,
+    text(size: 14pt, tracking: 0pt, top-edge: "baseline", bottom-edge: "baseline",
+      par(first-line-indent: 0pt, justify: false, hanging-indent: 3em, leading: 22.56pt, body)))
+  let height = measure(para).height
+  block(width: text-w, height: height, above: 0pt, below: 0pt, {
+    place(top + left, para)
+    place(top + right, dy: height, note)
+  })
+}
 #let record-geometry(r) = {
   let k = calc.max(r.rows.len(), 1)
+  // 量实际段落的首末基线距离，单行时为零；折行后所有下方横线和承办行同步下移。
+  let extra = measure(copies-par(r)).height / 1mm
   if r.joint {
     let last = 15.20 + (k - 1) * 6.81
-    (copies: 6.41, mid: 9.24, first: 15.20, step: 6.81, bottom: last + 2.99)
+    (copies: 6.41, mid: 9.24 + extra, first: 15.20 + extra, step: 6.81, bottom: last + 2.99 + extra)
   } else {
-    (copies: 5.84, mid: 8.41, first: 13.80, step: 6.81, bottom: 16.52)
+    (copies: 5.84, mid: 8.41 + extra, first: 13.80 + extra, step: 6.81, bottom: 16.52 + extra)
   }
 }
 #let record-height(r) = (record-geometry(r).bottom - 1.46) * 1mm
 // TeX 量版记（\gwa@closingneed）用的是整个 vbox：顶线上缘到底线下缘，再加 2pt 余量
 // （\ClosingMeasureSlack）。决定落款空几行时按这个算，才与 TeX 的取舍一致。
 #let record-need(r) = (record-geometry(r).bottom + 0.3) * 1mm + 2 * texpt
-#let copies-note(r) = [（共印#r.print-copies;份）]
-#let copies-line(r) = {
-  if r.copies-to != none {
-    // 抄送单位悬挂缩进 3 字；「（共印 N 份）」钉在最后一行右端，放不下就换行贴右。
-    context {
-      let note = copies-note(r)
-      let head = box(width: 3em, [抄送：])
-      let body = head + runs(r.copies-to)
-      let w = measure(body).width
-      let room = text-w - w
-      if room >= (measure(note).width + 2em).to-absolute() { body + h(1fr) + note }
-      else { body + linebreak() + h(1fr) + note }
-    }
-  } else { h(1fr) + copies-note(r) }
-}
-#let record-block(r) = {
+#let record-block(r) = context {
   let g = record-geometry(r)
   block(width: text-w, height: record-height(r), breakable: false, above: 0pt, below: 0pt, {
     set text(size: 14pt, tracking: 0pt)
@@ -427,7 +435,7 @@
     let at(y, body) = place(top + left, dy: y * 1mm, box(width: text-w,
       text(top-edge: "baseline", bottom-edge: "baseline", body)))
     rule(0.30, 0.6mm)
-    at(g.copies, copies-line(r))
+    at(g.copies, copies-par(r))
     rule(g.mid, 0.3mm)
     for (i, row) in r.rows.enumerate() {
       let (lu, lc, lp) = if i == 0 { ([承办单位：], [联系人：], [联系电话：]) }
@@ -682,8 +690,10 @@
     let closing = signature-of(doc.closing)
     if kind == "letter" and doc.attachments.len() == 0 and doc.record != none {
       // 无附件时版记与落款同页：落款之下至少留 1cm 再放版记。
-      place-closing(closing, extra: record-need(doc.record) + 1cm,
-        first-gap: if doc.closing.k == "joint" { 0mm } else { 3.32mm })
+      context {
+        place-closing(closing, extra: record-need(doc.record) + 1cm,
+          first-gap: if doc.closing.k == "joint" { 0mm } else { 3.32mm })
+      }
     } else if kind == "whitepaper" {
       place-closing(closing, notice-base: 30.67mm, notice-gap: 40.74mm, first-gap: -0.22mm)
     } else {

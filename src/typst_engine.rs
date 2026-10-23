@@ -632,10 +632,16 @@ mod tests {
 /// Typst 逐字回退时一段文字按字体切开，查字体配方就看这个。
 #[cfg(test)]
 pub(crate) fn text_fonts_for_test(job: &TypstJob, set: &FontSet) -> Result<Vec<TextFont>> {
-    fn walk(frame: &typst::layout::Frame, page: usize, out: &mut Vec<TextFont>) {
-        for (_, item) in frame.items() {
+    fn walk(
+        frame: &typst::layout::Frame,
+        page: usize,
+        origin: typst::layout::Point,
+        out: &mut Vec<TextFont>,
+    ) {
+        for (pos, item) in frame.items() {
+            let pos = origin + *pos;
             match item {
-                typst::layout::FrameItem::Group(group) => walk(&group.frame, page, out),
+                typst::layout::FrameItem::Group(group) => walk(&group.frame, page, pos, out),
                 typst::layout::FrameItem::Text(text) => {
                     let info = text.font.font().info();
                     out.push(TextFont {
@@ -644,6 +650,8 @@ pub(crate) fn text_fonts_for_test(job: &TypstJob, set: &FontSet) -> Result<Vec<T
                         weight: info.variant.weight.to_number(),
                         page,
                         missing_glyphs: text.glyphs.iter().filter(|glyph| glyph.id == 0).count(),
+                        baseline_pt: pos.y.to_pt(),
+                        right_pt: (pos.x + text.width()).to_pt(),
                     });
                 }
                 _ => {}
@@ -660,7 +668,7 @@ pub(crate) fn text_fonts_for_test(job: &TypstJob, set: &FontSet) -> Result<Vec<T
     let (document, _) = layout(&world)?;
     let mut out = Vec::new();
     for (i, page) in document.pages().iter().enumerate() {
-        walk(&page.frame, i + 1, &mut out);
+        walk(&page.frame, i + 1, typst::layout::Point::zero(), &mut out);
     }
     Ok(out)
 }
@@ -674,6 +682,9 @@ pub(crate) struct TextFont {
     pub weight: u16,
     pub page: usize,
     pub missing_glyphs: usize,
+    /// 未旋转、未缩放的公文文字落点，供版记折行回归检查。
+    pub baseline_pt: f64,
+    pub right_pt: f64,
 }
 
 /// 测试用：用自定义源码代替模板排版（字体同随包），返回 PDF。
