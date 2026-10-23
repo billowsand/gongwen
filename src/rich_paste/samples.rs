@@ -86,6 +86,29 @@ fn web_headings_shift_under_the_draft_section() {
     assert!(!markdown.contains("\n# "), "{markdown}");
 }
 
+/// 白头件里粘贴列表：列表项转成各自独立的普通段落，不自动补「一是二是」。
+#[test]
+fn whitepaper_paste_turns_lists_into_paragraphs() {
+    let markdown = convert(
+        &Source::Html {
+            html: read_sample("whitepaper-list.html"),
+            plain: String::new(),
+        },
+        &Context {
+            kind: crate::models::TemplateKind::WhitePaper,
+            draft_empty: false,
+            has_title: true,
+            section_level: Some(2),
+        },
+    )
+    .expect("白头件内容应能转换")
+    .markdown;
+    assert!(!markdown.contains("- "), "{markdown}");
+    assert!(markdown.contains("第一项工作：完善制度"), "{markdown}");
+    assert!(markdown.contains("每月通报一次进展"), "{markdown}");
+    assert!(markdown.contains("第三项工作：严格问责"), "{markdown}");
+}
+
 /// 合成样本（Word 片段、Word 整页、政府网站、微信公众号、Excel、点分编号、跳号、
 /// 网页文章、白头件列表）逐个比对期望输出。
 #[test]

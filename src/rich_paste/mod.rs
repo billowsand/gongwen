@@ -22,6 +22,7 @@ pub(crate) mod clipboard;
 mod gaps;
 mod headings;
 mod html;
+mod lists;
 mod pipeline;
 #[cfg(test)]
 mod samples;

@@ -18,7 +18,7 @@
 use crate::doc_import::{clean, structure};
 
 use super::syntax::{self, count_markdown, looks_like_markdown, same_ignoring_whitespace};
-use super::{Context, Outcome, Source, Stats, gaps, headings, html};
+use super::{Context, Outcome, Source, Stats, gaps, headings, html, lists};
 
 pub(crate) fn convert(source: &Source, ctx: &Context) -> Option<Outcome> {
     // 复制的本来就是 Markdown（VS Code、Typora 源码模式这类编辑器同时给一份 HTML）：
@@ -198,13 +198,13 @@ fn restructure(
     let cleaned = clean::clean_before_structure(&protected);
     let options = structure::Options::paste(!ctx.has_title, lines_are_paragraphs, ctx.draft_empty);
     let (restructured, report) = structure::restructure_with_report(&cleaned, &options);
-    let tidied = clean::tidy(&restructured);
+    let shaped = lists::shape(&clean::tidy(&restructured), ctx.kind);
     let jumps = report
         .jumps()
         .iter()
         .map(|jump| (jump.from.clone(), jump.to.clone()))
         .collect();
-    (gaps::restore(&tidied), jumps)
+    (gaps::restore(&shaped), jumps)
 }
 
 /// 标题与列表项按最终结果数：结构还原会把「一、」这类编号段落升成标题，
