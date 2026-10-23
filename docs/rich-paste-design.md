@@ -530,7 +530,7 @@ UTF-8 解码失败、返回 `None`，这时走纯文本兜底，行为正确。�
 
 #### 做了什么
 
-- `vendor/anydoc` 补丁三（提交 `948f26d`）：`pub mod html` 加
+- `vendor/anydoc` 补丁三（提交 `4a4bac6`）：`pub mod html` 加
   `PastedImage { media_type, bytes }` 与 `to_document_with_images(body, css, resolve)`；
   `resolve` 返回字节就让图片进 `Document::assets` + `ImageSource::Asset`，返回 `None` 与
   `to_document` 行为相同（`Unavailable`）。库自己不联网、不读盘，EPUB 不受影响。
@@ -602,4 +602,45 @@ UTF-8 解码失败、返回 `None`，这时走纯文本兜底，行为正确。�
 
 **仍待真机验收**：Word / WPS / 网页的真实剪贴板带图粘贴（`data:`、`file:`、网络图三种）、
 10 张以上图片的实际手感、研究报告里图片与文框混排。
+
+#### 第四期验收记录（2026-10-23）
+
+审阅了三个提交，`fmt`、`clippy -D warnings`、全量测试（2322 个）都通过，导入样例输出未变。探针实测后修了
+下面几处（随验收提交）：
+
+1. **网页上的跟踪像素让「复制一个词」变成块级粘贴**：单行门槛原来是「HTML 里有 `<img` 就接管」，网页选区
+   旁边一个 1×1 统计像素，就让粘贴「通知」两个字变成一段正文加一行「图片未导入」注释。现在单行只在有
+   **能入库**的图（`data:` / `file:`，`images::has_importable_image`）时接管。
+2. **跟踪像素、小图标、藏起来的图各留一行「图片未导入」**：网络图里宽高属性都写明、都不超过 32 像素的
+   （`html::decorative_network_image`）直接略过；`display:none` / `mso-hide:all` 的图原来排在隐藏判断前面，
+   也会计数、留注释，现在先判断隐藏。`data:` / `file:` 的小图照常入库。没写宽高的网络图标仍会留注释（认不出
+   是不是配图，宁可留位置）。
+3. 使用帮助：正文里是 `![](images/…)`（alt 置空）不是 `![图](…)`；单行接管的条件；略过小图。
+4. 交接里补丁三的提交号写成了改写前的 `948f26d`，改成 `4a4bac6`。
+
+新增测试：`importable_images_are_data_or_file_urls`、`decorative_and_hidden_images_leave_no_marker`、
+`single_line_paste_next_to_a_tracking_pixel_stays_verbatim`。
+
+## 十二、收尾（2026-10-23）
+
+四期开发到此结束，转入真机验收。没有再需要交给模型开发的项，剩下的都卡在外部条件上：
+
+| 项 | 状态 | 什么时候再动 |
+|---|---|---|
+| Word 公式（第四期 B 块） | 未做 | 拿到 `real-word-equation.html` 真实样本后，照 `docs/rich-paste-phase4-prompt.md` 第 3 节单独开一次 |
+| 字体线索消歧 | 待定 | 真机验收里出现「编号救不了、字体能救」的样本再议，大概率不做 |
+| 只复制一张图的粘贴 | 做不到 | egui-winit 剪贴板没有文字时不发事件；要做得改 egui-winit 或另接系统剪贴板监听，不值 |
+| 撤回后资源库里留下的图片文件 | 已知遗留 | 与整篇导入一致；要清理应做成资源库的「清理未引用图片」，不在粘贴里做 |
+
+**真机验收清单**（汇总四期，在装有 Word / WPS 的机器上做）：
+
+1. Word、WPS（含麒麟）、Chrome / Edge、Excel、微信公众号各复制一段公文粘进起草页：标题层级、表格、加粗、
+   列表、状态栏计数；
+2. `Ctrl+Shift+V` 原样粘贴；`Ctrl+Z` 一次撤回；「改为原样粘贴」那一行出现与消失时编辑区会不会跳；
+3. 光标在句子中间粘多行内容（压成一行）；粘在 `##` 一节下面的网页文章（层级下移）；
+4. 白头件、会议议程里粘列表；带跳号的原文（状态栏提示）；研究报告里粘点分编号的报告与带框的段落；
+5. Word / WPS 带图粘贴（图进资源库、正文出现 `![](images/…)`），网页带图粘贴（留「图片未导入」注释），
+   十张以上图片的手感；
+6. AI 侧栏粘贴一张网页表格（材料里是管道表）；
+7. 用 `capture_clipboard_html` 采几份真实样本，脱敏后补进 `tests/fixtures/paste/`，以后改规则时有真样本兜底。
 

@@ -184,10 +184,9 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 
 - **富文本粘贴转 Markdown**（起草页 `Ctrl+V` 把 Word / WPS / 网页 / Excel 的富文本与多行纯文本
   转成公文助手 Markdown，`Ctrl+Shift+V` 原样粘贴，智能粘贴后可「改为原样粘贴」，分四期）：方案与
-  分期见 `docs/rich-paste-design.md`（单文件，第十一节是交接）。**第一、二、三期已完成；第四期
-  A 块（图片随粘贴入库：`data:`、本机 `file:`、网络图片不下载、单行带图也接管）已完成，B 块
-  （Word 公式）等 `real-word-equation` 真实样本**（采样命令见 `tests/fixtures/paste/README.md`），
-  均待真机验收。
+  分期见 `docs/rich-paste-design.md`（单文件，第十一节是交接，第十二节是收尾与真机验收清单）。
+  **开发已收尾，待真机验收**：四期都已完成，只有第四期 B 块（Word 公式）等 `real-word-equation`
+  真实样本再单独做（采样命令见 `tests/fixtures/paste/README.md`）。
   代码在
   `src/rich_paste/`（`html.rs` 容错解析、预清洗与文框识别、`syntax.rs` 按文种裁语法、
   `images.rs` 剪贴板图片解析与未导入原因、`headings.rs` 按所在章节平移样式标题、`lists.rs` 列表整形、
