@@ -14,9 +14,14 @@
 use crate::doc_import::{clean, structure};
 
 use super::syntax::{self, count_markdown, looks_like_markdown, same_ignoring_whitespace};
-use super::{Context, Outcome, Source, Stats, html};
+use super::{Context, Outcome, Source, Stats, gaps, html};
 
 pub(crate) fn convert(source: &Source, ctx: &Context) -> Option<Outcome> {
+    // 复制的本来就是 Markdown（VS Code、Typora 源码模式这类编辑器同时给一份 HTML）：
+    // 走 HTML 会把 `## ` 转义、几行并成一段。纯文本像 Markdown 就原样粘贴。
+    if looks_like_markdown(source.plain_text()) {
+        return None;
+    }
     match source {
         Source::Html { html, plain } => convert_html(html, ctx)
             .filter(|outcome| !outcome.markdown.trim().is_empty())
@@ -64,10 +69,14 @@ fn convert_plain(text: &str, ctx: &Context) -> Option<Outcome> {
 }
 
 /// 共用的结构还原：清洗 → 按公文版式还原标题与列表 → 收拾空行。
+///
+/// 字段之间的分隔空格（「张某　联系电话：」）先护住、最后换回来，见 `gaps`。HTML 那条路
+/// 在 `html.rs` 逐个文本节点护过了，这里再护一遍对它没有影响。
 fn restructure(markdown: &str, ctx: &Context, lines_are_paragraphs: bool) -> String {
-    let cleaned = clean::clean_before_structure(markdown);
+    let protected = gaps::protect(markdown);
+    let cleaned = clean::clean_before_structure(&protected);
     let options = structure::Options::paste(!ctx.has_title, lines_are_paragraphs, ctx.draft_empty);
-    clean::tidy(&structure::restructure(&cleaned, &options))
+    gaps::restore(&clean::tidy(&structure::restructure(&cleaned, &options)))
 }
 
 /// 标题与列表项按最终结果数：结构还原会把「一、」这类编号段落升成标题，

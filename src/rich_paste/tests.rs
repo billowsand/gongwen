@@ -193,11 +193,70 @@ fn nested_lists_and_line_breaks() {
         </body></html>";
     let markdown = markdown_of(html);
     assert!(markdown.contains("- 第一项"), "{markdown}");
-    assert!(markdown.contains("- 子项"), "{markdown}");
+    // 子项保持缩进，没被压平成同级。
+    assert!(markdown.contains("\n  - 子项"), "{markdown}");
     assert!(markdown.contains("- 第二项"), "{markdown}");
-    // `<br>` 是段内换行；`structure` 的既有规则把行尾硬换行接回一行
-    // （与 Word 软回车同一条规则），这里按这个结果断言。
-    assert!(markdown.contains("上一行下一行"), "{markdown}");
+    // `<br>` 拆成两段：接回一行会把「张某<br>联系电话」接成「张某联系电话」。
+    assert!(markdown.contains("上一行\n\n下一行"), "{markdown}");
+}
+
+/// 有序列表嵌套：改成 `- ` 列表，子项不被结构还原当成段首编号压平。
+#[test]
+fn ordered_lists_keep_their_nesting() {
+    let markdown =
+        markdown_of("<ol><li>甲项<ol><li>子项一</li><li>子项二</li></ol></li><li>乙项</li></ol>");
+    assert!(markdown.contains("- 甲项"), "{markdown}");
+    assert!(markdown.contains("\n  - 子项一"), "{markdown}");
+    assert!(markdown.contains("\n  - 子项二"), "{markdown}");
+    assert!(markdown.contains("- 乙项"), "{markdown}");
+}
+
+/// 只装着行内内容的 `div` 各自成段（网页与编辑器常这样分段）。
+#[test]
+fn inline_only_divs_are_separate_paragraphs() {
+    let markdown =
+        markdown_of("<div><div><span>第一段。</span></div><div><span>第二段。</span></div></div>");
+    assert_eq!(markdown.trim(), "第一段。\n\n第二段。");
+    let markdown = markdown_of("<div>引子文字<div>第二段。</div></div>");
+    assert_eq!(markdown.trim(), "引子文字\n\n第二段。");
+}
+
+/// 字段之间的全角空格与 `<br>` 都不能让两个字段接成一串。
+#[test]
+fn field_separators_survive() {
+    for html in [
+        "<p>联系人：张某　联系电话：12345678</p>",
+        "<p>联系人：张某&nbsp;&nbsp;联系电话：12345678</p>",
+    ] {
+        let markdown = markdown_of(html);
+        assert_eq!(
+            markdown.trim(),
+            "联系人：张某　联系电话：12345678",
+            "{html}"
+        );
+    }
+    let markdown = markdown_of("<p>联系人：张某<br>联系电话：12345678</p>");
+    assert_eq!(markdown.trim(), "联系人：张某\n\n联系电话：12345678");
+    // 标题里的换行接成一行。
+    let markdown = markdown_of("<h1>关于做好冬季<br>森林防火工作的通知</h1><p>正文。</p>");
+    assert!(
+        markdown.starts_with("# 关于做好冬季森林防火工作的通知"),
+        "{markdown}"
+    );
+}
+
+/// 从 VS Code 这类编辑器复制的 Markdown 带着一份 HTML，不能走 HTML 转换。
+#[test]
+fn markdown_copied_with_html_is_pasted_verbatim() {
+    let outcome = convert(
+        &Source::Html {
+            html: "<div><div><span>## 一级标题</span></div><div><span>正文**加粗**。</span></div></div>"
+                .to_string(),
+            plain: "## 一级标题\n正文**加粗**。".to_string(),
+        },
+        &context(false),
+    );
+    assert!(outcome.is_none());
 }
 
 /// 8. 微信公众号的层层 `section` / `span`，以及 Excel 的表格 HTML。

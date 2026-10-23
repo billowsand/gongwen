@@ -172,6 +172,12 @@ impl Walker {
                 _ => {}
             }
         }
+        // 只装着行内内容的 `div` / `section`：浏览器里每个都自成一段，`anydoc` 却把它们
+        // 当透明容器，几个挨着的就接成一段（网页、编辑器复制的内容常这样分段）。
+        // 改成 `p` 交给它，就是一段一段的。
+        if is_leaf_container(&out) {
+            out.local = "p".to_string();
+        }
         Ok(out)
     }
 }
@@ -254,6 +260,29 @@ fn style_is_hidden(style: &str) -> bool {
     compact.contains("mso-hide:all") || compact.contains("display:none")
 }
 
+/// 只装着行内内容、要改成段落的容器。`li`、`dt`、`dd` 有自己的含义，`body` 是根，
+/// 都不动；判据与 `anydoc` 的 `is_container_tag` / `has_block_children` 对应。
+fn is_leaf_container(element: &DocElement) -> bool {
+    matches!(
+        element.local.as_str(),
+        "div"
+            | "section"
+            | "article"
+            | "aside"
+            | "main"
+            | "nav"
+            | "header"
+            | "footer"
+            | "figure"
+            | "figcaption"
+            | "center"
+            | "details"
+            | "summary"
+    ) && !element.children.iter().any(|child| {
+        matches!(child, DocNode::Elem(child) if is_block(&child.local) || child.local == "hr")
+    })
+}
+
 /// 块级元素：它的第一个文本节点若是段首缩进，可以安全去掉。
 fn is_block(name: &str) -> bool {
     matches!(
@@ -302,6 +331,8 @@ fn is_block(name: &str) -> bool {
 ///
 /// 换行与制表符保留：`<pre>` 靠它们分行，普通段落里的空白由 `anydoc` 自己折叠。
 fn normalize_text(raw: &str, trim_leading: bool) -> String {
+    // 「张某　联系电话：」里的分隔空格先护住，下面再把别的全角空格当普通空格。
+    let raw = super::gaps::protect(raw);
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
         match ch {

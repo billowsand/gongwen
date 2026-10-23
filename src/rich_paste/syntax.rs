@@ -11,16 +11,22 @@
 //! - 链接、`ins`、`mark` 等行内包裹只留文字；图片丢掉并计数；
 //! - 引用块：研究报告保留，其余文种拆成普通段落；
 //! - 代码块拆成普通段落；公式：研究报告保留，其余丢；
-//! - 只有一格的表格（Word 文本框表格、网页排版表格）拆回段落。
+//! - 只有一格的表格（Word 文本框表格、网页排版表格）拆回段落；
+//! - 有序列表改成 `- ` 列表：公文助手里两种列表编号效果相同，而 `1. ` 开头的行会被
+//!   结构还原当成段首编号重新定级，嵌套的子项就压平了；
+//! - 段内换行（`<br>`、Word 软回车）拆成两段：结构还原会把硬换行接回一行，
+//!   「联系人：张某<br>联系电话：……」就成了「张某联系电话」。标题里的换行接成一行。
 
-use anydoc::model::{Block, CellSlot, Document, Inline, List, Style, inlines_are_empty};
+use anydoc::model::{
+    Block, CellSlot, Document, Inline, List, MarkerKind, Style, inlines_are_empty,
+};
 
 use super::Stats;
 
 /// 裁剪整篇文档，返回可以直接渲染的块。
 pub(crate) fn prune(document: Document, research: bool, stats: &mut Stats) -> Document {
     let Document { blocks, .. } = document;
-    let blocks = prune_blocks(blocks, research, stats);
+    let blocks = split_line_breaks(prune_blocks(blocks, research, stats));
     Document {
         blocks,
         ..Document::default()
@@ -36,7 +42,15 @@ fn prune_blocks(blocks: Vec<Block>, research: bool, stats: &mut Stats) -> Vec<Bl
                 anchor: _,
                 content,
             } => {
-                let content = prune_inlines(content, research);
+                // 标题折成两行（「关于做好冬季<br>森林防火工作的通知」）接成一行；
+                // 汉字之间的空格由后面的清洗删掉，西文之间留着。
+                let content = prune_inlines(content, research)
+                    .into_iter()
+                    .map(|inline| match inline {
+                        Inline::LineBreak => Inline::plain(" "),
+                        inline => inline,
+                    })
+                    .collect::<Vec<_>>();
                 if !inlines_are_empty(&content) {
                     // 标题层级原样保留：段首带编号的由 `structure` 按编号重定层级。
                     out.push(Block::heading(level, content));
@@ -63,7 +77,7 @@ fn prune_blocks(blocks: Vec<Block>, research: bool, stats: &mut Stats) -> Vec<Bl
                 }
                 if !items.is_empty() {
                     out.push(Block::List(List {
-                        marker: list.marker,
+                        marker: MarkerKind::Bullet,
                         start: list.start,
                         items,
                     }));
@@ -125,6 +139,49 @@ fn prune_blocks(blocks: Vec<Block>, research: bool, stats: &mut Stats) -> Vec<Bl
         }
     }
     out
+}
+
+/// 段落里的换行拆成几段。表格单元格不拆（管道表一格只能一行，由 `clean` 处理）；
+/// 引用块与列表项里的段落一样拆。
+fn split_line_breaks(blocks: Vec<Block>) -> Vec<Block> {
+    let mut out = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match block {
+            Block::Paragraph(inlines) => {
+                let mut piece = Vec::new();
+                for inline in inlines {
+                    if matches!(inline, Inline::LineBreak) {
+                        push_piece(&mut out, std::mem::take(&mut piece));
+                    } else {
+                        piece.push(inline);
+                    }
+                }
+                push_piece(&mut out, piece);
+            }
+            Block::BlockQuote(inner) => out.push(Block::BlockQuote(split_line_breaks(inner))),
+            Block::List(mut list) => {
+                for item in &mut list.items {
+                    item.blocks = split_line_breaks(std::mem::take(&mut item.blocks));
+                }
+                out.push(Block::List(list));
+            }
+            block => out.push(block),
+        }
+    }
+    out
+}
+
+/// 拆出来的一段：去掉首尾空白（`<br>` 前后常带空格或缩进），空的不要。
+fn push_piece(out: &mut Vec<Block>, mut piece: Vec<Inline>) {
+    if let Some(Inline::Text { text, .. }) = piece.first_mut() {
+        *text = text.trim_start().to_string();
+    }
+    if let Some(Inline::Text { text, .. }) = piece.last_mut() {
+        *text = text.trim_end().to_string();
+    }
+    if !inlines_are_empty(&piece) {
+        out.push(Block::Paragraph(piece));
+    }
 }
 
 fn prune_inlines(inlines: Vec<Inline>, research: bool) -> Vec<Inline> {

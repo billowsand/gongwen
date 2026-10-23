@@ -60,9 +60,11 @@ impl DraftPage<'_> {
         let markdown = &self.doc.generated_markdown;
         let cursor = editor_cursor(ctx, markdown).unwrap_or(markdown.len());
         let selection = editor_selection(ctx, markdown).filter(|range| !range.is_empty());
-        // 没有选区时，光标前必须只有空白：插在句子中间要等到第二期（只保留行内格式）。
-        let line_start = markdown[..cursor].rfind('\n').map_or(0, |index| index + 1);
-        if selection.is_none() && !markdown[line_start..cursor].trim().is_empty() {
+        // 插入点（有选区时是选区起点）前面必须只有空白：插在句子中间要等到第二期
+        // （只保留行内格式）。选区从句子中间选起也一样，否则块级内容会把那句话拆开。
+        let anchor = selection.as_ref().map_or(cursor, |range| range.start);
+        let line_start = markdown[..anchor].rfind('\n').map_or(0, |index| index + 1);
+        if !markdown[line_start..anchor].trim().is_empty() {
             return;
         }
         let source = match rich_paste::read_html() {
@@ -88,8 +90,8 @@ impl DraftPage<'_> {
                 input.events.remove(index);
             }
         });
-        // 没有选区时把光标所在行行首的空白一起去掉，免得留下两个缩进空格。
-        let range = selection.unwrap_or(line_start..cursor);
+        // 插入点所在行行首的空白一起换掉，免得留下两个缩进空格。
+        let range = line_start..selection.map_or(cursor, |range| range.end);
         let (start, end) = (range.start, range.end);
         let lead = blank_line_padding(markdown[..start].trim_end_matches(' '), true);
         let rest = markdown[end..].trim_start_matches(' ');
@@ -444,6 +446,16 @@ mod ui_tests {
         assert_eq!(
             harness.doc.generated_markdown,
             "某某单位：一、总体要求\n（一）指导思想\n各单位要压实责任，确保各项措施落地见效。\n"
+        );
+
+        // 选区从句子中间选起：同样不接管，不能把那句话拆开。
+        let mut harness = Harness::new("请各单位抓好落实。");
+        harness.select(3, 5);
+        harness.paste(PLAIN);
+        assert!(
+            !harness.doc.generated_markdown.contains("## 总体要求"),
+            "{}",
+            harness.doc.generated_markdown
         );
         clipboard::clear_test_html();
     }

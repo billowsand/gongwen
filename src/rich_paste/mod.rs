@@ -19,6 +19,7 @@
 //! 剪贴板内容。
 
 pub(crate) mod clipboard;
+mod gaps;
 mod html;
 mod pipeline;
 #[cfg(test)]
