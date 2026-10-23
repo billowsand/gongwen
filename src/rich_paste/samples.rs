@@ -1,8 +1,11 @@
 //! 剪贴板样本的夹具测试：`tests/fixtures/paste/<名字>.html` + `<名字>.expected.md`。
 //!
 //! 样本都是合成的（Word 片段、Word 整页、政府网站、微信公众号、Excel、点分编号、跳号、
-//! 网页文章、白头件列表、研究报告文框），不含真实单位与人名；采样真实剪贴板的工具与脱敏
-//! 流程见同目录的 README.md。
+//! 网页文章、白头件列表、研究报告文框、AI 材料里的表格），不含真实单位与人名；采样真实
+//! 剪贴板的工具与脱敏流程见同目录的 README.md。
+//!
+//! 文件名以 `material-` 打头的样本走 AI 侧栏那条路（`pipeline::to_material`），其余走
+//! 起草页的 `convert`。
 
 use super::*;
 use std::path::{Path, PathBuf};
@@ -42,10 +45,19 @@ fn actual_path(path: &Path) -> PathBuf {
         .join(format!("{stem}.actual.md"))
 }
 
-/// HTML 样本 → 空稿、非研究报告下的 Markdown。
+/// HTML 样本 → 空稿、非研究报告下的 Markdown；`material-` 打头的走 AI 材料那条路。
 fn convert_sample(path: &Path) -> String {
     let html = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("读不到 {}：{error}", path.display()));
+    let stem = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    if stem.starts_with("material-") {
+        return super::pipeline::to_material(&html)
+            .unwrap_or_else(|| panic!("{} 没有材料输出", path.display()));
+    }
     convert(
         &Source::Html {
             html,
@@ -158,7 +170,7 @@ fn research_boxes_come_from_aside_tables_and_styled_containers() {
 }
 
 /// 合成样本（Word 片段、Word 整页、政府网站、微信公众号、Excel、点分编号、跳号、
-/// 网页文章、白头件列表、研究报告文框）逐个比对期望输出。
+/// 网页文章、白头件列表）逐个比对期望输出。
 #[test]
 fn paste_samples_match_expected_markdown() {
     let paths = sample_paths();

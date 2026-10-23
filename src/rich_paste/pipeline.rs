@@ -14,6 +14,7 @@
 //! 一遍清洗反而会动用户的字。
 //!
 //! 粘在句子中间时走 [`convert_inline`]：多行内容压成一行行内文字，不建结构。
+//! AI 侧栏的材料走 [`to_material`]：只要 HTML → Markdown 与语法裁剪，不做结构还原。
 
 use crate::doc_import::{clean, structure};
 
@@ -119,6 +120,26 @@ fn inline_plain(text: &str) -> Option<Outcome> {
         markdown,
         stats: Stats::default(),
     })
+}
+
+/// AI 侧栏的材料：剪贴板 HTML → Markdown。
+///
+/// 材料要的是**原文**：只做格式转换与语法裁剪（研究报告那套规则即可，材料不分文种），
+/// 不做编号重排、不剥版头版记、不认文档标题、不整理列表；图片本版不入库，按未导入跳过。
+pub(crate) fn to_material(source: &str) -> Option<String> {
+    let parsed = html::parse(source, false).ok()?;
+    let document = anydoc::html::to_document(&parsed.body, &parsed.css).ok()?;
+    let document = syntax::prune(document, true, &mut Stats::default());
+    let markdown = html::restore_boxes(&anydoc::document_to_markdown(&document));
+    (!markdown.trim().is_empty()).then_some(markdown)
+}
+
+/// 大段粘贴作为侧栏材料时的正文：有 HTML 就用它转出来的 Markdown（表格是管道表），
+/// 没有或转换失败就用剪贴板里的纯文本。与起草页一致，读失败一律退回原文。
+pub(crate) fn material_text(plain: &str) -> String {
+    super::clipboard::read_html()
+        .and_then(|html| to_material(&html))
+        .unwrap_or_else(|| plain.to_string())
 }
 
 /// 多行 Markdown / 纯文本压成一行行内文字：去掉标题、列表、引用的记号，
@@ -417,6 +438,33 @@ mod tests {
         .expect("公文应能转换");
         assert!(!outcome.markdown.contains("[!"), "{}", outcome.markdown);
         assert_eq!(outcome.stats.boxes, 0);
+    }
+
+    #[test]
+    fn material_keeps_tables_and_leaves_numbering_alone() {
+        let markdown = to_material(
+            "<html><body><h3>一、基本情况</h3><p>说明。</p>\
+             <table><tr><th>序号</th><th>事项</th></tr>\
+             <tr><td>1</td><td>隐患排查</td></tr></table></body></html>",
+        )
+        .expect("材料应能转换");
+        assert!(markdown.contains("| 序号 | 事项 |"), "{markdown}");
+        // 材料是原文：不把「一、」升成标题。
+        assert!(markdown.contains("一、基本情况"), "{markdown}");
+        assert!(!markdown.contains("## 基本情况"), "{markdown}");
+    }
+
+    #[test]
+    fn material_text_falls_back_to_the_plain_clipboard() {
+        crate::rich_paste::clipboard::set_test_html(None);
+        assert_eq!(material_text("原文"), "原文");
+        crate::rich_paste::clipboard::set_test_html(Some(
+            "<html><body><table><tr><th>甲</th><th>乙</th></tr>\
+             <tr><td>1</td><td>2</td></tr></table></body></html>",
+        ));
+        let text = material_text("甲\t乙");
+        assert!(text.contains("| 甲 | 乙 |"), "{text}");
+        crate::rich_paste::clipboard::clear_test_html();
     }
 
     #[test]

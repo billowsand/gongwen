@@ -171,5 +171,10 @@ pub(crate) fn convert_inline(source: &Source, ctx: &Context) -> Option<Outcome> 
     pipeline::convert_inline(source, ctx)
 }
 
+/// 大段粘贴作为侧栏材料时的正文：有 HTML 就用它转出来的 Markdown，否则原文。
+pub(crate) fn material_text(plain: &str) -> String {
+    pipeline::material_text(plain)
+}
+
 #[cfg(test)]
 mod tests;

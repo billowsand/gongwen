@@ -95,7 +95,10 @@ impl DraftPage<'_> {
                     if let egui::Event::Paste(text) = event
                         && super::paste::is_large(text)
                     {
-                        match super::paste::PastedFile::new(text) {
+                        // 材料要的是原文：剪贴板里有 HTML 就用它转出来的 Markdown
+                        // （网页、Word 的表格不会散成制表符），没有就照旧用纯文本。
+                        let material = crate::rich_paste::material_text(text);
+                        match super::paste::PastedFile::new(&material) {
                             Ok(file) => {
                                 composer.materials.push(file);
                                 composer.error = None;

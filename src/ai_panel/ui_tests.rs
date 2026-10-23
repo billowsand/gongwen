@@ -215,6 +215,28 @@ fn large_paste_becomes_a_file_only_in_the_focused_composer() {
     assert!(!path.exists(), "移除引用后清理临时文件");
 }
 
+/// 带 HTML 的大段粘贴：材料用转出来的 Markdown，网页 / Word 的表格不会散成制表符。
+#[test]
+fn pasted_material_keeps_html_tables() {
+    crate::rich_paste::clipboard::set_test_html(Some(
+        "<html><body><table><tr><th>序号</th><th>事项</th></tr>\
+         <tr><td>1</td><td>隐患排查</td></tr></table></body></html>",
+    ));
+    let mut harness = Harness::new("原有正文");
+    harness.doc.ai_panel.open = true;
+    harness.frame_texts();
+    harness.focus_input();
+    let text = "序号\t事项\n1\t隐患排查\n".repeat(40);
+    harness.frame_with(vec![egui::Event::Paste(text)]);
+    assert!(harness.doc.ai_panel.composer.text.is_empty());
+    assert_eq!(harness.doc.ai_panel.composer.materials.len(), 1);
+    let material = &harness.doc.ai_panel.composer.materials[0].material.text;
+    assert!(material.contains("| 序号 | 事项 |"), "{material}");
+    assert!(!material.contains('\t'), "{material}");
+    harness.doc.ai_panel.composer.materials.clear();
+    crate::rich_paste::clipboard::clear_test_html();
+}
+
 #[test]
 fn pasted_material_survives_serialization_and_file_cleanup() {
     let mut harness = Harness::new("原有正文");
