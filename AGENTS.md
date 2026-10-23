@@ -183,21 +183,22 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   `ops/agent.rs` 的提问部分或侧栏题目卡片前先读它。
 
 - **富文本粘贴转 Markdown**（起草页 `Ctrl+V` 把 Word / WPS / 网页 / Excel 的富文本与多行纯文本
-  转成公文助手 Markdown，`Ctrl+Shift+V` 原样粘贴，智能粘贴后可「改为原样粘贴」，分三期）：方案与
-  分期见 `docs/rich-paste-design.md`（单文件，第十一节是交接）。**第一、二期已完成；第三期做了
-  研究报告文框与 AI 侧栏材料；图片入库与 Word 公式挪到第四期**（提示词 `docs/rich-paste-phase4-prompt.md`：
-  图片用合成样本就能做完，Word 公式等 `real-word-equation` 真实样本，采样命令见
-  `tests/fixtures/paste/README.md`），均待真机验收。
+  转成公文助手 Markdown，`Ctrl+Shift+V` 原样粘贴，智能粘贴后可「改为原样粘贴」，分四期）：方案与
+  分期见 `docs/rich-paste-design.md`（单文件，第十一节是交接）。**第一、二、三期已完成；第四期
+  A 块（图片随粘贴入库：`data:`、本机 `file:`、网络图片不下载、单行带图也接管）已完成，B 块
+  （Word 公式）等 `real-word-equation` 真实样本**（采样命令见 `tests/fixtures/paste/README.md`），
+  均待真机验收。
   代码在
-  `src/rich_paste/`（`html.rs` 容错解析、预清洗与文框识别、`syntax.rs` 按文种裁语法、`headings.rs`
-  按所在章节平移样式标题、`lists.rs` 列表整形、`pipeline.rs` 汇到 `clean` + `structure` + 行内粘贴 +
-  侧栏材料、`clipboard.rs` 读剪贴板）与 `src/draft_page/paste.rs`（接管 `Event::Paste`、块级 / 行内分流、
-  `replace_with_undo` 写入、「改为原样粘贴」）；编号规则（点分 / 罗马 / 字母 / 跳号报告）在
-  `src/doc_import/structure/`（`numbering.rs` 的 `Numbering`、`mod.rs` 的
-  `restructure_with_report`）；
-  `vendor/anydoc` 新增 `anydoc::html` 公开入口（补丁二），夹具与采样工具在
-  `tests/fixtures/paste/`。补做图片 / 公式前先读交接里第三期那一段（`html::parse` 的 `boxes`
-  参数、`<img>` 分支、`embedded::render`、单行接管的门槛）；字体线索消歧单列为待定。
+  `src/rich_paste/`（`html.rs` 容错解析、预清洗与文框识别、`syntax.rs` 按文种裁语法、
+  `images.rs` 剪贴板图片解析与未导入原因、`headings.rs` 按所在章节平移样式标题、`lists.rs` 列表整形、
+  `pipeline.rs` 汇到 `clean` + `structure` + 行内粘贴 + 侧栏材料 + 图片入库、`clipboard.rs` 读剪贴板）与
+  `src/draft_page/paste.rs`（接管 `Event::Paste`、块级 / 行内分流、`replace_with_undo` 写入、
+  「改为原样粘贴」）；编号规则（点分 / 罗马 / 字母 / 跳号报告）在 `src/doc_import/structure/`
+  （`numbering.rs` 的 `Numbering`、`mod.rs` 的 `restructure_with_report`）；
+  `vendor/anydoc` 新增 `anydoc::html` 公开入口（补丁二）与 `to_document_with_images`（补丁三：
+  回调给字节，库自己不联网不读盘），夹具与采样工具在 `tests/fixtures/paste/`。补做公式前先读交接里
+  第三、四期两段（`html::parse` 的 `boxes` 参数、`<img>` 分支、`embedded::render`、单行接管的
+  门槛、`prune` 要保留 `assets`）；字体线索消歧单列为待定。
 
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 

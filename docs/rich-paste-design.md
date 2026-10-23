@@ -68,9 +68,9 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
 | 文框候选：`<aside>`、只有一格的 `<table>`（Word「文本框表格」）、带边框或底纹的 `div` / `section` | 研究报告 `> [!名称] 标题`；其余文种不处理 | 只认第一段是**整段加粗的短标题**（≤ `TITLE_MAX`）且后面还有正文的；名称取标题前缀（专栏 / 案例 / 例子 / 做法 / 延伸阅读 / 知识链接，可带编号与冒号），取不到写「专栏」并在状态栏提示（第三期） |
 | `table` | 管道表 | 复用跨行跨列网格；只有一格的表格（Word「文本框表格」、网页排版用表格）拆回段落 |
 | `a` | 只留文字 | 公文不收链接 |
-| `img` | 第一、二期略过并计数 | **第三期的图片入库待真实样本后做**（`file:` / `data:` 走 `embedded.rs` 入库、网络图片永不下载）；缺样本时按现状略过并计数 |
+| `img` | 第四期起随文字入库（`data:` 与 `file:`）；网络图片不下载 | 入库走 `embedded.rs`：正文里是 `![](images/粘贴_图N.ext)`，独占一行、alt 置空；`file:` 带主机名（网络共享）、目录、读不到的文件、非图片格式都留「图片未导入」注释并在状态栏说明；一次粘贴最多 50 张、总量 256 MiB |
 | `pre` / `code` 围栏 | 拆成普通段落 | 技能包规定正文不写代码围栏 |
-| `math`（MathML） | 研究报告 `$…$`；其余文种丢 | **Word 公式（OMML）待真实样本后做**；网页的 MathML 已认，公文一律丢 |
+| `math`（MathML） | 研究报告 `$…$`；其余文种丢 | 网页的 MathML 已认，公文一律丢；**Word 公式（OMML）仍待真实样本**：`real-word-equation.html` 还没有，第四期 B 块未做 |
 | `br` | 段内换行 | structure 按「硬换行」处理 |
 | 噪音 | 删除 | `script` / `style` / `head` / `noscript` / `template` / `iframe` / 注释、`<o:p>`、`mso-hide:all`、零宽字符、段首 `&nbsp;` 与全角空格缩进「　　」 |
 
@@ -109,7 +109,7 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
 
 | 情况 | 处理 |
 |---|---|
-| 内容只有一行 | 不接管，原样粘贴（复制一个词就是一个词） |
+| 内容只有一行 | 不接管，原样粘贴（复制一个词就是一个词）；剪贴板 HTML 里含 `<img>` 时仍接管，图片随文字入库（第四期） |
 | 光标所在行光标前有非空白字符 | 压成一行行内文字插进去：去标题 / 列表记号，保留原文编号文字与加粗，段落直接相连；含表格时不接管 |
 | 有选区 | 块级粘贴时用转换结果替换选区；选区从句中开始时按行内粘贴 |
 | 认文档标题（`detect_title`） | 稿子里还没有 `# ` 行时才打开 |
@@ -165,7 +165,7 @@ Ctrl+V（起草页 Markdown 编辑框有焦点、可编辑）
    先采几份真实剪贴板样本（提示词第 0 节）。实际只做了文框与侧栏材料，图片与公式因缺样本挪到第四期。
 4. **第四期**：图片随粘贴入库（A 块：`data:`、本机 `file:`、网络图片不下载、单行带图也接管，合成样本
    就能做完）与 Word 公式（B 块：只在有 `real-word-equation.html` 时做）。提示词见
-   `docs/rich-paste-phase4-prompt.md`。
+   `docs/rich-paste-phase4-prompt.md`。**A 块已完成**；B 块因缺真实样本未做，见第十一节第四期。
 5. **待定（要真实样本）**：字体线索消歧。原排第二期、再挪到第三期，现在单列：`anydoc` 的文档模型
    不带字体，要从 `html.rs` 另开一条通道传给 `structure`，而有编号时层级已经由编号样式决定。等真实
    样本里出现字体能救、编号救不了的情形再做。
@@ -515,3 +515,91 @@ UTF-8 解码失败、返回 `None`，这时走纯文本兜底，行为正确。�
 `material_keeps_field_gaps_and_verbatim_markdown`、`white_sections_with_numbered_titles_are_not_boxes`。
 
 **仍待真机验收**：研究报告里从网页 / Word 粘贴带框的段落；AI 侧栏粘贴网页表格。图片与公式见第四期。
+
+### 第四期（图片随粘贴入库）
+
+- 2026-10-23：**A 块（图片随粘贴入库）完成、待真机验收；B 块（Word 公式）未做**。仓库里仍没有
+  `real-word-equation.html`，Word 公式的条件注释、`m:t` 命名空间与行内 / 独立写法只能看真样本，
+  凭印象写解析会错。采样命令与脱敏流程见 `tests/fixtures/paste/README.md`：
+
+  ```bash
+  GONGWEN_PASTE_SAMPLE=real-word-equation cargo test --locked capture_clipboard_html -- --ignored --nocapture
+  ```
+
+  图片这一项不依赖真实样本：Word 的 `data:` / `file:` 与网页的 `http(s):` 三种来源都有合成样本与单测。
+
+#### 做了什么
+
+- `vendor/anydoc` 补丁三（提交 `948f26d`）：`pub mod html` 加
+  `PastedImage { media_type, bytes }` 与 `to_document_with_images(body, css, resolve)`；
+  `resolve` 返回字节就让图片进 `Document::assets` + `ImageSource::Asset`，返回 `None` 与
+  `to_document` 行为相同（`Unavailable`）。库自己不联网、不读盘，EPUB 不受影响。
+  补丁记进 `vendor/anydoc/README.md` 与 `THIRD_PARTY_NOTICES.md`。
+- `src/rich_paste/images.rs`（新）：`ClipboardImages` 解析 `data:` 与本机 `file:`，缓存去重，
+  按处记失败原因（网络图片不下载 / 不是图片格式 / 图片路径无法识别 / 网络共享路径的图片 /
+  图片文件读不到 / 图片路径不是文件 / 图片过大 / 一次粘贴的图片超过 50 张 /
+  一批图片的总量超过 256 MB）。`data:` 用 `data-url`（MIME 必须是 `image/*`，解码前按 HTML
+  体积粗卡、解码后再按 `MAX_IMAGE_BYTES` 卡）；`file:` 用 `url`（带主机名且不是 localhost
+  一律拒；`symlink_metadata` 确认普通文件；先看大小再 `file_limits::read_bytes`）；
+  `http(s)` 与其它 scheme 一律不下载。
+- `html.rs`：`img` / `image` 分支不再 `continue`，保留元素并计数；新增 `ensure_image_alt`
+  给缺失或空白的 `alt` 补「图片」——anydoc 对「没有字节且 `alt` 为空」的图整张丢，不补就
+  连「图片未导入」的位置都没有。
+- `syntax.rs`：`prune(document, research, keep_images, stats)`，块级粘贴 `true`、行内与材料
+  `false`；**`prune` 必须保留 `Document.assets`**（改成 `let Document { blocks, assets, .. }`），
+  否则 `embedded` 取不到字节、全部报「源文件里缺少图片数据」。
+- `pipeline.rs`：`convert_with_store(source, ctx, store)` 让测试与夹具注入临时目录，`convert`
+  用 `crate::images::import_bytes`。块级：`parse` → `to_document_with_images` →
+  `prune(keep_images=true)` → `embedded::render(document, "粘贴", store)` → `restructure` →
+  `ClipboardImages::explain` 把渲染器的通用原因「源文件里缺少图片数据」换成本地原因
+  （正文注释与状态栏一起换）；行内：`parsed.images > 0` 直接退回纯文本（与表格同理）；
+  `to_material` 照旧丢图（材料不入库）。
+- `Stats.skipped_images` 换成 `images: ImageReport`（导入与粘贴共用一个报告类型）；
+  `notice` 追加「导入图片 N 张。」/「M 张图片未导入（…）」。
+- `paste.rs`：单行不接管的门槛改成「单行也读一次 HTML，含 `<img>` 才接管」
+  （`contains_image_tag` 只认 `<img`，不认 `<image`：Word VML 的 `<v:imagedata>` 已按带冒号丢掉）；
+  粘在句子中间仍退回纯文本行内粘贴。
+- `embedded.rs`：公开 `MISSING_DATA_REASON` 与 `marker_text`；`ImageReport` 补
+  `Clone/PartialEq/Eq`；`items` 为空时不调用 `store`，所以整篇导入的样本输出逐字未变。
+- 测试：`rich_paste` 78 个（含 `images.rs` 单测：`data:` 解析、非图片 MIME、坏 base64、
+  体积上限、50 张上限、`file:` 中文空格百分号解码、网络共享拒收、localhost、目录、不存在；
+  VML 与 `<img>` 只入库一次；网络图不下载；单行带图接管；句中遇图不接管；材料不入库）。
+  `draft_page::paste` UI 测试 8 个（带图粘贴后正文出现图片引用、一次 `Ctrl+Z` 撤回、
+  临时资源库）。夹具 `web-image.html`（`data:` 图）+ `web-image.expected.md`、
+  `word-image-file.html.txt`（`file:` 路径在测试里生成、替换 `@@FILE_URL@@`，不写死本机路径）。
+- 夹具确定性：`samples.rs` 用 `sample_store` 把路径写成 `images/{name}`，不写真实资源库；
+  `gov-website` / `word-notice` / `wechat-sections` 的 `expected.md` 各加一条
+  「图片未导入」注释（图片从「略过」改成「留位置」，属预期变更）。
+
+#### 与方案的出入
+
+1. **anydoc 回调返回 `Option<PastedImage>`**（带 `media_type`），不是提示词里的
+   `Option<Vec<u8>>`：`embedded` 要按 MIME 区分 SVG / TIFF，只说字节认不出来。
+2. **除 50 张上限外另加 256 MiB 总量上限**（方案外加固）：50 × 100 MiB 会直接打满内存。
+3. **`prune` 保留 `assets`**（方案只说保留 `Inline::Image`）：字节挂在文档的 `assets` 里，
+   删了图就没有可入库的内容。
+4. **单行接管的实现是「先读 HTML、扫 `<img`」**，不重新解析单行内容；只有一屏长文才会
+   多读一次剪贴板 HTML，代价可忽略。
+
+#### 已知坑
+
+- 正文里「图片未导入」注释的顺序与图片出现顺序一致；被 `embedded` 挪到表格 / 标题后面的图
+  偶尔让两种原因互换位置，只影响措辞，不影响入库。
+- 入库文件名带时间戳前缀（`images::import_bytes_into` 的行为），测试只能数
+  `![](images/`，不能断言完整文件名。
+- 撤回或「改为原样粘贴」后，已入库的图片文件留在资源库（与整篇导入一致），本期不清理。
+- **只复制一张图粘不进来**：egui-winit 在剪贴板里没有文字时不发 `Event::Paste`，属平台行为，
+  已写进使用帮助；别为它改 egui-winit。
+- 图片读取与 EMF → PNG 都在界面线程：实测 10 张、合计约 3 MB 的 PNG 在 debug 构建下整条粘贴
+  约 **36 ms**（含解析、入库写盘，只跑一次；release 更快），远低于 300 ms，所以不做后台。
+  真实 Word 若给 EMF / WMF，走 `metafile::to_png`，单张代价更高，真机验收时留意手感。
+
+#### 还剩什么
+
+1. Word 公式（等 `real-word-equation.html`）。
+2. 真实 Word / WPS / 网页剪贴板带图验收（合成样本只覆盖格式，不覆盖来源的怪写法）。
+3. 字体线索消歧（待定，见第十节第 5 条）。
+
+**仍待真机验收**：Word / WPS / 网页的真实剪贴板带图粘贴（`data:`、`file:`、网络图三种）、
+10 张以上图片的实际手感、研究报告里图片与文框混排。
+
