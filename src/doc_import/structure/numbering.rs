@@ -11,7 +11,7 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-use super::{TITLE_MAX, chars, markdown_heading};
+use super::{TITLE_MAX, chars, markdown_heading, strip_bold};
 
 // ---------------------------------------------------------------- 编号
 
@@ -611,4 +611,18 @@ fn is_enumeration(rest: &str) -> bool {
             .expect("valid enumeration pattern")
     })
     .is_match(rest)
+}
+/// 编号方案：「这一行有没有编号」要看整段文字定下来的是哪套（点分编号只看单行
+/// 认不出来）。粘贴时给样式标题平移层级用，见 `rich_paste::headings`。
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Scheme(Numbering);
+
+/// 按整段文字定编号方案。
+pub(crate) fn marker_scheme(markdown: &str) -> Scheme {
+    Scheme(Numbering::detect(markdown))
+}
+
+/// 这一行段首编号的层级；没有编号返回 `None`。
+pub(crate) fn marker_level(scheme: Scheme, text: &str) -> Option<u8> {
+    parse_prefix(&strip_bold(text), false, scheme.0).map(|prefix| prefix.level)
 }

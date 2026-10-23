@@ -4,17 +4,21 @@
 //! HTML：容错解析 → anydoc 文档模型 → 按文种裁剪语法 → Markdown
 //! 纯文本：先看是不是已经是 Markdown，不是才往下走
 //!        ↓
-//! 两者都：clean_before_structure → structure::restructure（粘贴专用选项）→ clean::tidy
+//! 两者都：按所在章节平移样式标题 → clean_before_structure
+//!        → structure::restructure_with_report（粘贴专用选项）→ clean::tidy
+//!        → 列表整形
 //! ```
 //!
 //! 任何一步失败都返回 `None`，调用方把事件交还编辑框原样粘贴。纯文本这条路还要
 //! 多一道判断：转换结果与原文只差空白时同样返回 `None`——没有任何结构可还原时再走
 //! 一遍清洗反而会动用户的字。
+//!
+//! 粘在句子中间时走 [`convert_inline`]：多行内容压成一行行内文字，不建结构。
 
 use crate::doc_import::{clean, structure};
 
 use super::syntax::{self, count_markdown, looks_like_markdown, same_ignoring_whitespace};
-use super::{Context, Outcome, Source, Stats, gaps, html};
+use super::{Context, Outcome, Source, Stats, gaps, headings, html};
 
 pub(crate) fn convert(source: &Source, ctx: &Context) -> Option<Outcome> {
     // 复制的本来就是 Markdown（VS Code、Typora 源码模式这类编辑器同时给一份 HTML）：
@@ -38,12 +42,13 @@ fn convert_html(source: &str, ctx: &Context) -> Option<Outcome> {
         skipped_images: parsed.images,
         ..Stats::default()
     };
-    let document = syntax::prune(document, ctx.research, &mut stats);
+    let document = syntax::prune(document, ctx.research(), &mut stats);
     let markdown = anydoc::document_to_markdown(&document);
-    let markdown = restructure(&markdown, ctx, false);
+    let (markdown, jumps) = restructure(&markdown, ctx, false);
     if markdown.trim().is_empty() {
         return None;
     }
+    stats.number_jumps = jumps;
     fill_counts(&markdown, &mut stats);
     Some(Outcome { markdown, stats })
 }
@@ -55,7 +60,7 @@ fn convert_plain(text: &str, ctx: &Context) -> Option<Outcome> {
     if looks_like_markdown(text) {
         return None;
     }
-    let markdown = restructure(text, ctx, true);
+    let (markdown, jumps) = restructure(text, ctx, true);
     if markdown.trim().is_empty() {
         return None;
     }
@@ -63,20 +68,143 @@ fn convert_plain(text: &str, ctx: &Context) -> Option<Outcome> {
     if same_ignoring_whitespace(&markdown, text) {
         return None;
     }
-    let mut stats = Stats::default();
+    let mut stats = Stats {
+        number_jumps: jumps,
+        ..Stats::default()
+    };
     fill_counts(&markdown, &mut stats);
     Some(Outcome { markdown, stats })
 }
 
-/// 共用的结构还原：清洗 → 按公文版式还原标题与列表 → 收拾空行。
+/// 粘在句子中间：转成一行行内文字。
+pub(crate) fn convert_inline(source: &Source, ctx: &Context) -> Option<Outcome> {
+    match source {
+        Source::Html { html, plain } => inline_html(html, ctx).or_else(|| inline_plain(plain)),
+        Source::Plain(text) => inline_plain(text),
+    }
+}
+
+fn inline_html(source: &str, ctx: &Context) -> Option<Outcome> {
+    let parsed = html::parse(source).ok()?;
+    let document = anydoc::html::to_document(&parsed.body, &parsed.css).ok()?;
+    let mut stats = Stats {
+        skipped_images: parsed.images,
+        ..Stats::default()
+    };
+    let document = syntax::prune(document, ctx.research(), &mut stats);
+    // 表格没法塞进一行：交给编辑框原样粘贴。
+    if syntax::has_table(&document) {
+        return None;
+    }
+    let markdown = inline_text(&anydoc::document_to_markdown(&document));
+    if markdown.is_empty() {
+        return None;
+    }
+    Some(Outcome { markdown, stats })
+}
+
+fn inline_plain(text: &str) -> Option<Outcome> {
+    if looks_like_markdown(text) {
+        return None;
+    }
+    let markdown = inline_text(text);
+    if markdown.is_empty() {
+        return None;
+    }
+    Some(Outcome {
+        markdown,
+        stats: Stats::default(),
+    })
+}
+
+/// 多行 Markdown / 纯文本压成一行行内文字：去掉标题、列表、引用的记号，
+/// **保留**原文编号文字（「一、」这时是正文的一部分）与加粗；段落之间直接相连，
+/// 中文不加空格、西文之间一个空格。
+fn inline_text(text: &str) -> String {
+    let mut pieces: Vec<String> = Vec::new();
+    let mut fenced = false;
+    for raw in text.lines() {
+        let trimmed = raw.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        let line = strip_inline_marker(trimmed).trim();
+        if line.is_empty() {
+            continue;
+        }
+        pieces.push(line.to_string());
+    }
+    let joined = join_inline(&pieces);
+    clean::normalize_spaces(&joined).trim().to_string()
+}
+
+/// 去掉标题（`#`）、无序列表（`- `）与引用（`> `）的记号；有序列表开头的数字就是
+/// 原文编号，留着。
+fn strip_inline_marker(line: &str) -> &str {
+    if let Some(rest) = line.strip_prefix("> ") {
+        return rest;
+    }
+    let hashes = line.bytes().take_while(|&byte| byte == b'#').count();
+    if (1..=6).contains(&hashes) && line[hashes..].starts_with(' ') {
+        return &line[hashes..];
+    }
+    if let Some(rest) = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .or_else(|| line.strip_prefix("+ "))
+    {
+        return rest;
+    }
+    if line.starts_with("<!--") && line.ends_with("-->") {
+        return "";
+    }
+    line
+}
+
+fn join_inline(pieces: &[String]) -> String {
+    let mut out = String::new();
+    for piece in pieces {
+        let needs_space = out
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric())
+            && piece.starts_with(|ch: char| ch.is_ascii_alphanumeric());
+        if needs_space {
+            out.push(' ');
+        }
+        out.push_str(piece);
+    }
+    out
+}
+
+/// 共用的结构还原：平移样式标题 → 清洗 → 按公文版式还原标题与列表 → 收拾空行 →
+/// 列表整形。
 ///
-/// 字段之间的分隔空格（「张某　联系电话：」）先护住、最后换回来，见 `gaps`。HTML 那条路
-/// 在 `html.rs` 逐个文本节点护过了，这里再护一遍对它没有影响。
-fn restructure(markdown: &str, ctx: &Context, lines_are_paragraphs: bool) -> String {
-    let protected = gaps::protect(markdown);
+/// 字段之间的分隔空格（「张某　联系电话：」）先护住、最后换回来，见 `gaps`。HTML 那条
+/// 路在 `html.rs` 逐个文本节点护过了，这里再护一遍对它没有影响。
+///
+/// 返回整理好的 Markdown 与原文编号跳号（原文编号对）。
+fn restructure(
+    markdown: &str,
+    ctx: &Context,
+    lines_are_paragraphs: bool,
+) -> (String, Vec<(String, String)>) {
+    let shifted = headings::shift(markdown, ctx);
+    let protected = gaps::protect(&shifted);
     let cleaned = clean::clean_before_structure(&protected);
     let options = structure::Options::paste(!ctx.has_title, lines_are_paragraphs, ctx.draft_empty);
-    gaps::restore(&clean::tidy(&structure::restructure(&cleaned, &options)))
+    let (restructured, report) = structure::restructure_with_report(&cleaned, &options);
+    let tidied = clean::tidy(&restructured);
+    let jumps = report
+        .jumps()
+        .iter()
+        .map(|jump| (jump.from.clone(), jump.to.clone()))
+        .collect();
+    (gaps::restore(&tidied), jumps)
 }
 
 /// 标题与列表项按最终结果数：结构还原会把「一、」这类编号段落升成标题，
@@ -90,12 +218,14 @@ fn fill_counts(markdown: &str, stats: &mut Stats) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::TemplateKind;
 
     fn context() -> Context {
         Context {
-            research: false,
+            kind: TemplateKind::OfficialLetter,
             draft_empty: true,
             has_title: false,
+            section_level: None,
         }
     }
 
@@ -170,5 +300,80 @@ mod tests {
         assert!(markdown.contains("# 关于X的通知"), "{markdown}");
         assert!(markdown.contains("## 总体要求"), "{markdown}");
         assert!(markdown.contains("| 序号 | 事项 |"), "{markdown}");
+    }
+
+    #[test]
+    fn dotted_headings_keep_their_levels() {
+        let markdown = html(
+            "<html><body><h2>1 总体要求</h2><p>正文。</p>\
+             <h2>1.1 指导思想</h2><p>正文。</p>\
+             <h2>1.1.1 基本原则</h2><p>正文。</p></body></html>",
+        );
+        assert!(markdown.contains("## 总体要求"), "{markdown}");
+        assert!(markdown.contains("### 指导思想"), "{markdown}");
+        assert!(markdown.contains("#### 基本原则"), "{markdown}");
+    }
+
+    #[test]
+    fn number_jumps_are_reported_in_the_status() {
+        let outcome = convert(
+            &Source::Plain("一、总体要求\n正文。\n三、主要任务\n正文。".to_string()),
+            &context(),
+        )
+        .expect("纯文本应被识别");
+        assert_eq!(
+            outcome.stats.number_jumps,
+            [("一、".to_string(), "三、".to_string())]
+        );
+        let notice = outcome.stats.notice();
+        assert!(notice.contains("原文编号有跳号（一、→三、）"), "{notice}");
+    }
+
+    #[test]
+    fn inline_conversion_flattens_markup_but_keeps_numbering() {
+        let outcome = convert_inline(
+            &Source::Html {
+                html: "<html><body><h2>一、总体要求</h2><p>各单位加强巡查。</p>\
+                       <ul><li>第一项</li><li>第二项</li></ul></body></html>"
+                    .to_string(),
+                plain: String::new(),
+            },
+            &context(),
+        )
+        .expect("行内内容应能转换");
+        assert_eq!(outcome.markdown, "一、总体要求各单位加强巡查。第一项第二项");
+        assert!(
+            outcome
+                .stats
+                .inline_notice()
+                .starts_with("已按行内格式粘贴")
+        );
+    }
+
+    #[test]
+    fn inline_conversion_gives_up_on_tables() {
+        assert!(
+            convert_inline(
+                &Source::Html {
+                    html: "<html><body><p>甲</p>\
+                           <table><tr><th>序号</th><th>事项</th></tr>\
+                           <tr><td>1</td><td>报送</td></tr></table></body></html>"
+                        .to_string(),
+                    plain: String::new(),
+                },
+                &context(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn inline_plain_text_joins_lines() {
+        let outcome = convert_inline(
+            &Source::Plain("各有关单位：\n一、总体要求\n（一）指导思想".to_string()),
+            &context(),
+        )
+        .expect("多行纯文本应能压成一行");
+        assert_eq!(outcome.markdown, "各有关单位：一、总体要求（一）指导思想");
     }
 }

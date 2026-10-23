@@ -32,6 +32,8 @@ use std::sync::OnceLock;
 
 mod numbering;
 
+pub(crate) use numbering::{Scheme, marker_level, marker_scheme};
+
 use numbering::{Numbering, parse_prefix};
 
 /// 句号前的标题最多这么多字；再长就是段首带编号的正文段。

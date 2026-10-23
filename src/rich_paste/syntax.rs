@@ -219,6 +219,25 @@ fn prune_inlines(inlines: Vec<Inline>, research: bool) -> Vec<Inline> {
     out
 }
 
+/// 文档里还有没有表格（单格排版表格已经拆成段落，不算）。
+///
+/// 粘在句子中间时用：表格没法塞进一行，有表格就不接管、原样粘贴。
+pub(crate) fn has_table(document: &Document) -> bool {
+    document.blocks.iter().any(block_has_table)
+}
+
+fn block_has_table(block: &Block) -> bool {
+    match block {
+        Block::Table(_) => true,
+        Block::BlockQuote(inner) => inner.iter().any(block_has_table),
+        Block::List(list) => list
+            .items
+            .iter()
+            .any(|item| item.blocks.iter().any(block_has_table)),
+        _ => false,
+    }
+}
+
 /// 纯文本行里已经有 Markdown 的样子时不必再转换。
 ///
 /// 判据与设计第六节一致：有 `#` 标题行、`<!-- [` 标记、管道表的分隔行，或者有

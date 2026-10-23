@@ -7,12 +7,18 @@
 use super::html::{self, HtmlError};
 use super::*;
 
-fn context(research: bool) -> Context {
+fn context(kind: crate::models::TemplateKind) -> Context {
     Context {
-        research,
+        kind,
         draft_empty: true,
         has_title: false,
+        section_level: None,
     }
+}
+
+/// 公文（非研究报告）的常见上下文。
+fn notice() -> Context {
+    context(crate::models::TemplateKind::OfficialLetter)
 }
 
 fn convert_html(markup: &str, ctx: &Context) -> Outcome {
@@ -27,11 +33,16 @@ fn convert_html(markup: &str, ctx: &Context) -> Outcome {
 }
 
 fn markdown_of(markup: &str) -> String {
-    convert_html(markup, &context(false)).markdown
+    convert_html(markup, &notice()).markdown
 }
 
 fn markdown_for(markup: &str, research: bool) -> String {
-    convert_html(markup, &context(research)).markdown
+    let kind = if research {
+        crate::models::TemplateKind::ResearchReport
+    } else {
+        crate::models::TemplateKind::OfficialLetter
+    };
+    convert_html(markup, &context(kind)).markdown
 }
 
 /// Word 列表段落：编号在 `mso-list:Ignore` 的 span 里，外面套着条件注释。
@@ -95,7 +106,7 @@ fn tables_keep_spans_and_single_cell_tables_become_paragraphs() {
         <tr><td>1</td><td rowspan=2>材料报送</td><td>甲</td></tr>\
         <tr><td>2</td><td>乙</td></tr>\
         </table></body></html>";
-    let outcome = convert_html(html, &context(false));
+    let outcome = convert_html(html, &notice());
     assert!(
         outcome.markdown.contains("| 序号 | 事项 |"),
         "{}",
@@ -117,7 +128,7 @@ fn tables_keep_spans_and_single_cell_tables_become_paragraphs() {
     let html = "<html><body><table><tr><td>\
         <p>一、总体要求</p><p>各单位加强巡查。</p>\
         </td></tr></table></body></html>";
-    let outcome = convert_html(html, &context(false));
+    let outcome = convert_html(html, &notice());
     assert!(!outcome.markdown.contains('|'), "{}", outcome.markdown);
     assert!(
         outcome.markdown.contains("## 总体要求"),
@@ -161,7 +172,7 @@ fn inline_syntax_follows_the_rules() {
     let html = "<html><body><p>详见<a href='http://example.com'>这里的说明</a>，\
         <i>斜体</i>不该留，<del>删掉的旧内容</del>连字一起丢。\
         <img src='a.png'><img src='b.png' alt='配图'></p></body></html>";
-    let outcome = convert_html(html, &context(false));
+    let outcome = convert_html(html, &notice());
     assert!(
         outcome
             .markdown
@@ -254,7 +265,7 @@ fn markdown_copied_with_html_is_pasted_verbatim() {
                 .to_string(),
             plain: "## 一级标题\n正文**加粗**。".to_string(),
         },
-        &context(false),
+        &notice(),
     );
     assert!(outcome.is_none());
 }
@@ -276,7 +287,7 @@ fn wechat_sections_and_spreadsheet_tables() {
         <tr><td class=xl65>序号</td><td class=xl65>事项</td><td class=xl65>备注</td></tr>\
         <tr><td class=xl65>1</td><td class=xl65 colspan=2>材料报送</td></tr>\
         </table></body></html>";
-    let outcome = convert_html(html, &context(false));
+    let outcome = convert_html(html, &notice());
     assert!(
         outcome.markdown.contains("| 序号 | 事项 | 备注 |"),
         "{}",
@@ -338,7 +349,7 @@ fn malformed_html_is_repaired_and_limits_fall_back_to_plain_text() {
             html: deep,
             plain: "一、总体要求\n（一）指导思想\n各单位加强巡查。\n".to_string(),
         },
-        &context(false),
+        &notice(),
     )
     .expect("HTML 超限时应退回纯文本");
     assert!(
@@ -353,7 +364,7 @@ fn malformed_html_is_repaired_and_limits_fall_back_to_plain_text() {
 fn plain_text_numbering_and_markdown_detection() {
     let wechat = "　　一、总体要求\n　　（一）指导思想\n　　各单位加强巡查。\n";
     let outcome =
-        convert(&Source::Plain(wechat.to_string()), &context(false)).expect("多行纯文本应被识别");
+        convert(&Source::Plain(wechat.to_string()), &notice()).expect("多行纯文本应被识别");
     assert!(
         outcome.markdown.contains("## 总体要求"),
         "{}",
@@ -365,11 +376,11 @@ fn plain_text_numbering_and_markdown_detection() {
         outcome.markdown
     );
 
-    assert!(convert(&Source::Plain("# 标题\n\n正文".into()), &context(false)).is_none());
+    assert!(convert(&Source::Plain("# 标题\n\n正文".into()), &notice()).is_none());
     assert!(
         convert(
             &Source::Plain("各单位加强巡查。\n\n确保安全。".into()),
-            &context(false)
+            &notice()
         )
         .is_none()
     );
@@ -385,9 +396,10 @@ fn paste_options_follow_the_draft_state() {
 
     // 稿子里已经有 `# ` 标题：不能再来一个。
     let ctx = Context {
-        research: false,
+        kind: crate::models::TemplateKind::OfficialLetter,
         draft_empty: false,
         has_title: true,
+        section_level: None,
     };
     let markdown = convert_html(html, &ctx).markdown;
     assert!(!markdown.starts_with("# "), "{markdown}");
@@ -403,9 +415,10 @@ fn paste_options_follow_the_draft_state() {
         convert_html(
             html,
             &Context {
-                research: false,
+                kind: crate::models::TemplateKind::OfficialLetter,
                 draft_empty,
                 has_title: true,
+                section_level: None,
             },
         )
         .markdown

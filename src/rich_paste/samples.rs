@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 
 fn context() -> Context {
     Context {
-        research: false,
+        kind: crate::models::TemplateKind::OfficialLetter,
         draft_empty: true,
         has_title: false,
+        section_level: None,
     }
 }
 
@@ -55,7 +56,38 @@ fn convert_sample(path: &Path) -> String {
     .markdown
 }
 
-/// 合成样本（Word 片段、Word 整页、政府网站、微信公众号、Excel）逐个比对期望输出。
+/// 读一份样本的 HTML。
+fn read_sample(name: &str) -> String {
+    let path = root().join(name);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("读不到 {}：{error}", path.display()))
+}
+
+/// 同一份网页文章粘到稿子 `##` 一节下面：样式标题整体往下平移，不再出现 `# `。
+#[test]
+fn web_headings_shift_under_the_draft_section() {
+    let markdown = convert(
+        &Source::Html {
+            html: read_sample("web-headings.html"),
+            plain: String::new(),
+        },
+        &Context {
+            kind: crate::models::TemplateKind::OfficialLetter,
+            draft_empty: false,
+            has_title: true,
+            section_level: Some(2),
+        },
+    )
+    .expect("网页文章应能转换")
+    .markdown;
+    assert!(markdown.contains("### 背景"), "{markdown}");
+    assert!(markdown.contains("#### 现状"), "{markdown}");
+    assert!(markdown.contains("### 建议"), "{markdown}");
+    assert!(!markdown.contains("\n# "), "{markdown}");
+}
+
+/// 合成样本（Word 片段、Word 整页、政府网站、微信公众号、Excel、点分编号、跳号、
+/// 网页文章、白头件列表）逐个比对期望输出。
 #[test]
 fn paste_samples_match_expected_markdown() {
     let paths = sample_paths();

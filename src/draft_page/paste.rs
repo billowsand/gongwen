@@ -60,13 +60,12 @@ impl DraftPage<'_> {
         let markdown = &self.doc.generated_markdown;
         let cursor = editor_cursor(ctx, markdown).unwrap_or(markdown.len());
         let selection = editor_selection(ctx, markdown).filter(|range| !range.is_empty());
-        // 插入点（有选区时是选区起点）前面必须只有空白：插在句子中间要等到第二期
-        // （只保留行内格式）。选区从句子中间选起也一样，否则块级内容会把那句话拆开。
+        // 插入点（有选区时是选区起点）前面只有空白：按块级内容粘，前后补空行。
+        // 前面已经有字、或选区从句子中间选起：压成一行行内文字插进去，不能把原来
+        // 那句话从中间拆成两段。
         let anchor = selection.as_ref().map_or(cursor, |range| range.start);
         let line_start = markdown[..anchor].rfind('\n').map_or(0, |index| index + 1);
-        if !markdown[line_start..anchor].trim().is_empty() {
-            return;
-        }
+        let block = markdown[line_start..anchor].trim().is_empty();
         let source = match rich_paste::read_html() {
             Some(html) => Source::Html {
                 html,
@@ -75,13 +74,19 @@ impl DraftPage<'_> {
             None => Source::Plain(text.clone()),
         };
         let context = Context {
-            research: self.doc.draft.kind.is_research(),
+            kind: self.doc.draft.kind,
             draft_empty: markdown.trim().is_empty(),
             has_title: markdown
                 .lines()
                 .any(|line| line.trim_start().starts_with("# ")),
+            section_level: section_level(markdown, anchor),
         };
-        let Some(outcome) = rich_paste::convert(&source, &context) else {
+        let outcome = if block {
+            rich_paste::convert(&source, &context)
+        } else {
+            rich_paste::convert_inline(&source, &context)
+        };
+        let Some(outcome) = outcome else {
             return;
         };
         // 接管：把这个事件从本帧删掉，编辑框就不会再插一遍纯文本。
@@ -90,6 +95,31 @@ impl DraftPage<'_> {
                 input.events.remove(index);
             }
         });
+        if !block {
+            // 行内粘贴：替换选区或插在光标处，不补空行。
+            let range = selection.unwrap_or(cursor..cursor);
+            let body = outcome.markdown.as_str();
+            let mut updated = String::with_capacity(markdown.len() + body.len());
+            updated.push_str(&markdown[..range.start]);
+            updated.push_str(body);
+            updated.push_str(&markdown[range.end..]);
+            let start = range.start;
+            let end = start + body.len();
+            replace_with_undo(ctx, &mut self.doc.generated_markdown, updated, end);
+            self.doc.pending_source_jump = Some(end);
+            self.doc.recent_paste = Some(RecentPaste {
+                range: start..end,
+                inserted: body.to_string(),
+                plain: source.plain_text().to_string(),
+                expires_at: ctx.input(|input| input.time) + RECENT_PASTE_SECONDS,
+            });
+            self.revalidate();
+            *self.status = outcome.stats.inline_notice();
+            if !self.doc.warnings.is_empty() || !self.doc.revisions.is_empty() {
+                self.open_result_drawer();
+            }
+            return;
+        }
         // 插入点所在行行首的空白一起换掉，免得留下两个缩进空格。
         let range = line_start..selection.map_or(cursor, |range| range.end);
         let (start, end) = (range.start, range.end);
@@ -182,6 +212,20 @@ impl DraftPage<'_> {
         self.revalidate();
         *self.status = "已改为原样粘贴。".into();
     }
+}
+
+/// 插入点上方最近一个标题的级数（`# ` = 1）。附件区的附件标题同样是 `# `，
+/// 粘进附件正文时以它为上下文。
+fn section_level(markdown: &str, at: usize) -> Option<u8> {
+    let head = &markdown[..at.min(markdown.len())];
+    for line in head.lines().rev() {
+        let trimmed = line.trim_start();
+        let hashes = trimmed.bytes().take_while(|&byte| byte == b'#').count();
+        if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
+            return Some(hashes as u8);
+        }
+    }
+    None
 }
 
 /// 本帧第一个 `Event::Paste` 的下标与内容。
@@ -437,26 +481,71 @@ mod ui_tests {
         harness.paste("一、总体要求");
         assert_eq!(harness.doc.generated_markdown, "一、总体要求");
 
-        // 光标前有非空白字符：不接管。
+        clipboard::clear_test_html();
+    }
+
+    /// 粘在句子中间：不建结构，压成一行行内文字，原文编号文字留着。
+    #[test]
+    fn mid_line_paste_becomes_one_line_of_inline_text() {
+        clipboard::set_test_html(None);
         let mut harness = Harness::new("某某单位：");
-        harness.frame(
-            vec![egui::Event::Paste(PLAIN.to_string())],
-            egui::Modifiers::NONE,
-        );
+        harness.paste(PLAIN);
         assert_eq!(
             harness.doc.generated_markdown,
-            "某某单位：一、总体要求\n（一）指导思想\n各单位要压实责任，确保各项措施落地见效。\n"
+            "某某单位：一、总体要求（一）指导思想各单位要压实责任，确保各项措施落地见效。"
+        );
+        assert!(
+            harness.status.starts_with("已按行内格式粘贴"),
+            "{}",
+            harness.status
         );
 
-        // 选区从句子中间选起：同样不接管，不能把那句话拆开。
+        // 选区从句子中间选起：同样压成一行替换选区，不能把那句话拆成两段。
         let mut harness = Harness::new("请各单位抓好落实。");
         harness.select(3, 5);
         harness.paste(PLAIN);
+        assert_eq!(
+            harness.doc.generated_markdown,
+            "请各单一、总体要求（一）指导思想各单位要压实责任，确保各项措施落地见效。好落实。"
+        );
+        assert!(!harness.doc.generated_markdown.contains("## 总体要求"));
+
+        // 含表格时塞不进一行：交还编辑框原样粘贴。
+        let mut harness = Harness::new("某某单位：");
+        clipboard::set_test_html(Some(
+            "<html><body><p>甲</p><table><tr><th>序号</th><th>事项</th></tr>\
+             <tr><td>1</td><td>报送</td></tr></table></body></html>",
+        ));
+        harness.frame(
+            vec![egui::Event::Paste("甲\t序号\t事项".to_string())],
+            egui::Modifiers::NONE,
+        );
         assert!(
-            !harness.doc.generated_markdown.contains("## 总体要求"),
+            harness.doc.generated_markdown.contains("甲\t序号\t事项"),
             "{}",
             harness.doc.generated_markdown
         );
+        clipboard::clear_test_html();
+    }
+
+    /// 粘在 `##` 一节的下面：粘贴内容里的样式标题整体往下平移。
+    #[test]
+    fn style_headings_shift_under_the_current_section() {
+        clipboard::set_test_html(Some(
+            "<html><body><h2>背景</h2><p>各单位加强巡查。</p><h3>现状</h3></body></html>",
+        ));
+        let mut harness = Harness::new("# 关于X的通知\n\n## 一、总体要求\n\n");
+        // 光标放在文末空行上，上文最近的标题是 `## 一、总体要求`。
+        harness.set_cursor(harness.doc.generated_markdown.chars().count());
+        harness.frame(
+            vec![egui::Event::Paste(
+                "背景\n各单位加强巡查。\n现状".to_string(),
+            )],
+            egui::Modifiers::NONE,
+        );
+        let text = &harness.doc.generated_markdown;
+        assert!(text.contains("### 背景"), "{text}");
+        assert!(text.contains("#### 现状"), "{text}");
         clipboard::clear_test_html();
     }
 

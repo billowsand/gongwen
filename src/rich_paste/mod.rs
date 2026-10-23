@@ -20,6 +20,7 @@
 
 pub(crate) mod clipboard;
 mod gaps;
+mod headings;
 mod html;
 mod pipeline;
 #[cfg(test)]
@@ -47,14 +48,23 @@ impl Source {
     }
 }
 
-/// 粘贴发生时的稿子状态，决定结构还原的几个开关。
+/// 粘贴发生时的稿子状态，决定结构还原、标题定级与列表整形。
 pub(crate) struct Context {
-    /// 研究报告：保留引用块与公式，其余文种拆成普通段落 / 丢掉。
-    pub(crate) research: bool,
+    /// 文种：研究报告保留引用块与公式，白头件与呈批件不收列表。
+    pub(crate) kind: crate::models::TemplateKind,
     /// 稿子是空的：相当于整篇复制一份公文，可以剥掉版头版记。
     pub(crate) draft_empty: bool,
-    /// 稿子里已经有 `# ` 标题：粘贴的段落不再认成文档标题。
+    /// 稿子里已经有 `# ` 标题：粘贴的段落不再认成文档标题，也不再出现 `# ` 级标题。
     pub(crate) has_title: bool,
+    /// 插入点上方最近一个标题的级数（`# ` = 1）；附件标题也算。没有标题时为 `None`。
+    pub(crate) section_level: Option<u8>,
+}
+
+impl Context {
+    /// 研究报告：保留引用块与公式。由文种推出来，不另存一份状态。
+    pub(crate) fn research(&self) -> bool {
+        self.kind.is_research()
+    }
 }
 
 /// 转换成功的结果。
@@ -64,13 +74,15 @@ pub(crate) struct Outcome {
 }
 
 /// 这次转换都得到了什么，用来写状态提示。
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Stats {
     pub(crate) headings: usize,
     pub(crate) tables: usize,
     pub(crate) list_items: usize,
     /// 略过的图片张数（第一、二期不随粘贴带入图片）。
     pub(crate) skipped_images: usize,
+    /// 原文同级编号跳号的位置（原文编号对，例如「一、」→「三、」）。
+    pub(crate) number_jumps: Vec<(String, String)>,
 }
 
 impl Stats {
@@ -97,8 +109,36 @@ impl Stats {
             notice.push_str(&format!("（略过 {} 张图片）", self.skipped_images));
         }
         notice.push('。');
+        if !self.number_jumps.is_empty() {
+            notice.push_str(&jump_notice(&self.number_jumps));
+        }
         notice
     }
+
+    /// 行内粘贴（粘在句子中间）的状态文案：只有图片张数值得说。
+    pub(crate) fn inline_notice(&self) -> String {
+        if self.skipped_images > 0 {
+            format!("已按行内格式粘贴（略过 {} 张图片）。", self.skipped_images)
+        } else {
+            "已按行内格式粘贴。".to_string()
+        }
+    }
+}
+
+/// 跳号提示，最多列三处；再多写「等 N 处」。
+fn jump_notice(jumps: &[(String, String)]) -> String {
+    const MAX_LISTED: usize = 3;
+    let listed: Vec<String> = jumps
+        .iter()
+        .take(MAX_LISTED)
+        .map(|(from, to)| format!("{from}→{to}"))
+        .collect();
+    let mut text = format!("原文编号有跳号（{}", listed.join("；"));
+    if jumps.len() > MAX_LISTED {
+        text.push_str(&format!("等 {} 处", jumps.len()));
+    }
+    text.push_str("），已按顺序重新编号。");
+    text
 }
 
 /// 把剪贴板内容转成可直接插进编辑框的 Markdown。
@@ -109,6 +149,15 @@ impl Stats {
 /// （起草页的粘贴拦截）判断，这里只管内容本身。
 pub(crate) fn convert(source: &Source, ctx: &Context) -> Option<Outcome> {
     pipeline::convert(source, ctx)
+}
+
+/// 粘在句子中间（插入点前面已经有字）时用的转换：多行内容压成**一行行内文字**。
+///
+/// 去掉标题与列表记号，但保留原文编号文字（这时不是在建结构，编号是正文的一部分）、
+/// 保留加粗，段落之间直接相连（中文不加空格、西文一个空格）。含表格时返回 `None`，
+/// 表格塞不进一行，调用方交还编辑框原样粘贴。
+pub(crate) fn convert_inline(source: &Source, ctx: &Context) -> Option<Outcome> {
+    pipeline::convert_inline(source, ctx)
 }
 
 #[cfg(test)]
