@@ -138,8 +138,10 @@ fn inline_text(text: &str) -> String {
         }
         pieces.push(line.to_string());
     }
-    let joined = join_inline(&pieces);
-    clean::normalize_spaces(&joined).trim().to_string()
+    // 字段之间的分隔空格同样护住再换回来：HTML 那条路的文字里已经带着占位符，
+    // 不换回来就会把非字符 U+FDD0 写进正文。
+    let joined = gaps::protect(&join_inline(&pieces));
+    gaps::restore(clean::normalize_spaces(&joined).trim())
 }
 
 /// 去掉标题（`#`）、无序列表（`- `）与引用（`> `）的记号；有序列表开头的数字就是
@@ -375,5 +377,26 @@ mod tests {
         )
         .expect("多行纯文本应能压成一行");
         assert_eq!(outcome.markdown, "各有关单位：一、总体要求（一）指导思想");
+    }
+
+    /// 行内粘贴也要保住字段分隔空格，而且占位符不能漏进正文。
+    #[test]
+    fn inline_conversion_keeps_field_gaps_without_placeholders() {
+        for source in [
+            Source::Html {
+                html: "<p>联系人：张某　联系电话：123</p><p>地址：某路</p>".to_string(),
+                plain: String::new(),
+            },
+            Source::Plain("联系人：张某　联系电话：123\n地址：某路".to_string()),
+        ] {
+            let markdown = convert_inline(&source, &context())
+                .expect("多行内容应能压成一行")
+                .markdown;
+            assert!(!markdown.contains('\u{FDD0}'), "{markdown:?}");
+            assert!(
+                markdown.starts_with("联系人：张某　联系电话：123"),
+                "{markdown}"
+            );
+        }
     }
 }

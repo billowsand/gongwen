@@ -108,6 +108,14 @@ fn push_list(out: &mut Vec<String>, items: &[(usize, String)], kind: TemplateKin
         }
         return;
     }
+    if kind == TemplateKind::MeetingAgenda {
+        // 会议议程的研讨内容只认「1. 事项」：从 1 起连续编号、每项一行、不分级
+        // （`validator` 会报项目符号与断号）。子项拉平进同一组。
+        for (index, (_, content)) in items.iter().enumerate() {
+            out.push(format!("{}. {content}", index + 1));
+        }
+        return;
+    }
     let base = items[0].0;
     for (indent, content) in items {
         // 只分两级：比组内首项深两列及以上的都是子项，再深也不再往下分。
@@ -180,6 +188,16 @@ mod tests {
         // 子项并进父项，按段内列表编号接在父项后面。
         assert!(items[1].1.contains("子项一"), "{:?}", items);
         assert!(items[1].1.contains("子项二"), "{:?}", items);
+    }
+
+    /// 会议议程只认「1. 事项」：拉平成一级、从 1 起连续编号。
+    #[test]
+    fn meeting_agenda_lists_become_numbered_items() {
+        let raw = "三、研讨内容：\n\n- 听取汇报\n\n- 审议方案\n\n  - 子项\n";
+        assert_eq!(
+            shape(raw, TemplateKind::MeetingAgenda),
+            "三、研讨内容：\n\n1. 听取汇报\n2. 审议方案\n3. 子项\n"
+        );
     }
 
     #[test]

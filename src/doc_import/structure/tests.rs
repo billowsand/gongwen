@@ -142,6 +142,26 @@ fn enumerations_and_decimals_are_not_numbering() {
     }
 }
 
+/// 认错点分编号会把数字删掉，这几种都得原样留着。
+#[test]
+fn dates_and_quantities_are_not_dotted_numbering() {
+    for raw in [
+        // 日期：只在一个顶层号下，顶层又不是 1。
+        "10.1 国庆假期安排如下。\n\n10.2 恢复正常上班。",
+        // 跳号不算衔接：1.2→1.5 只是两个数。
+        "1.2 个百分点的增长来自消费。\n\n1.5 个百分点来自投资。",
+        // 上级没有着落：从 3.2 起的片段（也可能是数量），不认。
+        "3.2 万人次参加活动。\n\n3.3 万人次参加培训。",
+    ] {
+        assert_eq!(clean(raw), raw, "{raw}");
+    }
+    // 有顶层编号行兜底时，从中间开始的点分编号照样认。
+    assert_eq!(
+        clean("3 下步打算\n\n3.2 加强统筹\n\n3.3 强化保障"),
+        "## 下步打算\n\n### 加强统筹\n\n### 强化保障"
+    );
+}
+
 #[test]
 fn dotted_numbering_scheme_sets_levels_and_strips_numbers() {
     let raw = "1 总体要求\n\n正文。\n\n1.1 指导思想\n\n正文。\n\n\

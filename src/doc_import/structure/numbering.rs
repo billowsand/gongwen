@@ -47,6 +47,7 @@ impl Numbering {
     /// [`roman_candidate`]、[`letter_candidate`]）。
     pub(super) fn detect(markdown: &str) -> Self {
         let mut dotted: Vec<Vec<u32>> = Vec::new();
+        let mut tops: Vec<u32> = Vec::new();
         let mut roman: Vec<u32> = Vec::new();
         let mut letters: Vec<u32> = Vec::new();
         for line in markdown.lines() {
@@ -55,6 +56,8 @@ impl Numbering {
             let text = markdown_heading(trimmed).map_or(trimmed, |(_, text)| text);
             if let Some(parts) = dotted_candidate(text) {
                 dotted.push(parts);
+            } else if let Some(top) = top_candidate(text) {
+                tops.push(top);
             }
             if let Some(value) = roman_candidate(text) {
                 roman.push(value);
@@ -64,18 +67,56 @@ impl Numbering {
             }
         }
         Self {
-            dotted: dotted_scheme(&dotted),
+            dotted: dotted_scheme(&dotted, &tops),
             roman: numbering_in_a_row(&roman),
             letters: numbering_in_a_row(&letters),
         }
     }
 }
 
-/// 点分编号是不是成体系的：至少两处，而且有相邻两处衔接得上。衔接有三种：
-/// 同一父级往后走（`1.1`→`1.2`，中间跳号也算——那正是要提醒的）、下一层
-/// （`1.1`→`1.1.1`）、父级进位、子级从头（`1.2`→`2.1`）。
-fn dotted_scheme(items: &[Vec<u32>]) -> bool {
-    items.len() >= 2 && items.windows(2).any(|pair| coherent(&pair[0], &pair[1]))
+/// 点分编号是不是成体系的。认错的代价是把数字删掉（「10.1 国庆假期安排」的日期、
+/// 「1.2 个百分点」的数量都会被当成编号剥掉），所以宁严勿宽，认不出来就原样留着：
+///
+/// - 至少两处，而且有相邻两处**严格**衔接：同一父级的下一号（`1.1`→`1.2`）、下一层
+///   从 1 起（`1.1`→`1.1.1`）、父级进位且子级从头（`1.2`→`2.1`）。跳号（`1.2`→`1.4`）
+///   不算衔接，只要别处有一对严格衔接，跳号照样由 `report_number_jumps` 报出来；
+/// - 第一处的上级要有着落：它是本级第一号（`x.1`），或者片段里有它的顶层编号行
+///   （`3 下步打算`）；
+/// - 顶层也要有着落：顶层是 1、片段里有那个顶层编号行，或者至少跨两个顶层号。
+///   「10.1」「10.2」这种只在一个顶层下、顶层又不是 1 的，多半是日期。
+fn dotted_scheme(items: &[Vec<u32>], tops: &[u32]) -> bool {
+    if items.len() < 2 || !items.windows(2).any(|pair| coherent(&pair[0], &pair[1])) {
+        return false;
+    }
+    let first = &items[0];
+    let has_top = tops.contains(&first[0]);
+    let parent_known = first.last() == Some(&1) || has_top;
+    let distinct_tops = items
+        .iter()
+        .map(|parts| parts[0])
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let top_known = first[0] == 1 || has_top || distinct_tops >= 2;
+    parent_known && top_known
+}
+
+/// 一行像不像点分方案里的顶层编号行：`3 下步打算`、`3. 下步打算`、`3、下步打算`。
+/// 只用来给点分编号找上级，不单独定方案。
+fn top_candidate(line: &str) -> Option<u32> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"^([0-9０-９]{1,3})[.．、]?\s*").expect("valid top-level pattern")
+    });
+    let caps = re.captures(line)?;
+    if chars(line) > TITLE_MAX {
+        return None;
+    }
+    let rest = &line[caps[0].len()..];
+    let first = rest.chars().next()?;
+    if !is_han(first) || starts_with_unit(rest) {
+        return None;
+    }
+    parse_number(&caps[1])
 }
 
 fn coherent(previous: &[u32], next: &[u32]) -> bool {
@@ -83,17 +124,29 @@ fn coherent(previous: &[u32], next: &[u32]) -> bool {
     if depth == 0 {
         return false;
     }
-    // 共享前缀（父级）相同，并且往后走：`1.2`→`1.3`，跳号的 `1.2`→`1.4` 也算
-    // （跳号由 `report_number_jumps` 单独报）。
-    if previous[..depth - 1] == next[..depth - 1] && next[depth - 1] > previous[depth - 1] {
+    // 同一父级的下一号：`1.2`→`1.3`。
+    if previous.len() == next.len()
+        && previous[..depth - 1] == next[..depth - 1]
+        && next[depth - 1] == previous[depth - 1] + 1
+    {
         return true;
     }
-    // 下一项是上一项的子级：`1.1`→`1.1.1`。
-    if next.len() > previous.len() && next[..previous.len()] == previous[..] {
+    // 从深一层回到浅一层的下一号：`1.1.2`→`1.2`。
+    if next.len() < previous.len()
+        && previous[..depth - 1] == next[..depth - 1]
+        && next[depth - 1] == previous[depth - 1] + 1
+    {
+        return true;
+    }
+    // 下一项是上一项的第一个子级：`1.1`→`1.1.1`。
+    if next.len() == previous.len() + 1
+        && next[..previous.len()] == previous[..]
+        && next[previous.len()] == 1
+    {
         return true;
     }
     // 父级进位、子级从头：`1.2`→`2.1`。
-    next.len() == previous.len() && next[0] == previous[0] + 1 && next[next.len() - 1] == 1
+    next.len() == previous.len() && next[0] == previous[0] + 1 && next[1..].iter().all(|&n| n == 1)
 }
 
 /// 一组编号里有没有「连续的下一号」。罗马数字与字母都要成组出现才认。
