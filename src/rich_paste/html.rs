@@ -12,7 +12,10 @@
 //!   后面 `structure` 靠它定级；
 //! - `class` 里有 `MsoTitle` 的段落当 `<h1>`，`MsoQuote` 当 `<blockquote>`（剪贴板片段
 //!   里没有样式表，只能认类名）；
-//! - 去掉零宽字符，`&nbsp;` 与全角空格按空格处理，段首缩进在块级元素开头去掉。
+//! - 去掉零宽字符，`&nbsp;` 与全角空格按空格处理，段首缩进在块级元素开头去掉；
+//! - 研究报告里把「文框候选」转成引用块：`<aside>`、只有一格的表格（Word 文本框表格）、
+//!   带边框或底纹的 `div` / `section`，只要第一段是整段加粗的短标题，就写成
+//!   `> [!名称] 标题` 的形式（见 [`rewrite_box`]；非研究报告不做这一步）。
 //!
 //! 节点数与嵌套深度都有上限：超了返回错误，上层退回纯文本粘贴（见 `pipeline`）。
 //! 解析本身不 panic——畸形 HTML 由 html5ever 按规范修复。
@@ -45,11 +48,18 @@ pub(crate) struct Parsed {
     pub(crate) css: String,
     /// 丢掉的图片张数（`<img>` 一个算一张）。
     pub(crate) images: usize,
+    /// 认出来的文框个数（只可能是研究报告那条路）。
+    pub(crate) boxes: usize,
+    /// 其中名称用了默认「专栏」的个数。
+    pub(crate) default_boxes: usize,
 }
 
 /// 解析剪贴板 HTML。整页与片段都认：没有 `<body>` 时把整棵树当 body。
-pub(crate) fn parse(source: &str) -> Result<Parsed, HtmlError> {
-    parse_with_limits(source, MAX_NODES, MAX_DEPTH)
+///
+/// `boxes` 为真时（研究报告）把文框候选转成 `> [!名称] 标题`；别的文种不做，单格
+/// 表格照旧由 `syntax` 拆成段落。
+pub(crate) fn parse(source: &str, boxes: bool) -> Result<Parsed, HtmlError> {
+    parse_with_limits(source, MAX_NODES, MAX_DEPTH, boxes)
 }
 
 /// 带上限的解析。测试用小额度验证「超限退回纯文本」，业务代码走 [`parse`]。
@@ -57,6 +67,7 @@ pub(super) fn parse_with_limits(
     source: &str,
     nodes: usize,
     depth: usize,
+    boxes: bool,
 ) -> Result<Parsed, HtmlError> {
     let document = Html::parse_document(source);
     let root = document.root_element();
@@ -69,12 +80,17 @@ pub(super) fn parse_with_limits(
         budget: nodes,
         max_depth: depth,
         images: 0,
+        boxes,
+        found_boxes: 0,
+        default_boxes: 0,
     };
     let body = walker.element(body, 0)?;
     Ok(Parsed {
         body,
         css,
         images: walker.images,
+        boxes: walker.found_boxes,
+        default_boxes: walker.default_boxes,
     })
 }
 
@@ -100,6 +116,11 @@ struct Walker {
     max_depth: usize,
     /// 丢掉的图片张数。
     images: usize,
+    /// 要不要把文框候选转成引用块（只有研究报告要）。
+    boxes: bool,
+    /// 认出来的文框个数与其中默认名称的个数。
+    found_boxes: usize,
+    default_boxes: usize,
 }
 
 impl Walker {
@@ -172,6 +193,17 @@ impl Walker {
                 _ => {}
             }
         }
+        // 研究报告的文框：第一段是整段加粗短标题的 aside / 单格表格 / 有框线的容器。
+        // 先试这个，再考虑把只装行内内容的容器改成段落。
+        if self.boxes
+            && is_box_candidate(&out)
+            && let Some(found) = rewrite_box(&mut out)
+        {
+            self.found_boxes += 1;
+            if found.default_named {
+                self.default_boxes += 1;
+            }
+        }
         // 只装着行内内容的 `div` / `section`：浏览器里每个都自成一段，`anydoc` 却把它们
         // 当透明容器，几个挨着的就接成一段（网页、编辑器复制的内容常这样分段）。
         // 改成 `p` 交给它，就是一段一段的。
@@ -179,6 +211,278 @@ impl Walker {
             out.local = "p".to_string();
         }
         Ok(out)
+    }
+}
+
+/// 文框首行在模型里的占位：`\u{FDD1}名称\u{FDD2}标题`。
+///
+/// anydoc 渲染时会转义 `[`（`\[!专栏]`），`mdx::quote` 就认不出文框首行了；所以模型里
+/// 先放非字符占位，渲染完再由 [`restore_boxes`] 换成 `[!名称] 标题`。
+const BOX_NAME_MARK: char = '\u{FDD1}';
+const BOX_TITLE_MARK: char = '\u{FDD2}';
+
+/// 文框名称：标题以这些词开头时用它，标题去掉前缀。其余情况统一写「专栏」。
+const BOX_NAMES: &[&str] = &["专栏", "案例", "例子", "做法", "延伸阅读", "知识链接"];
+
+/// 文框候选：网页的 `<aside>`、Word 的「文本框表格」（只有一格的表格）、带边框或
+/// 底纹的 `div` / `section`。
+fn is_box_candidate(element: &DocElement) -> bool {
+    match element.local.as_str() {
+        "aside" => true,
+        "table" => single_cell(element),
+        "div" | "section" => element.attr_any("style").is_some_and(styled_box),
+        _ => false,
+    }
+}
+
+/// 只有一格的表格：Word 的文本框常常是一个 `td` 的表格。
+fn single_cell(element: &DocElement) -> bool {
+    fn count_cells(element: &DocElement) -> usize {
+        let mut count = usize::from(matches!(element.local.as_str(), "td" | "th"));
+        for child in &element.children {
+            if let DocNode::Elem(child) = child {
+                count = count.saturating_add(count_cells(child));
+            }
+        }
+        count
+    }
+    count_cells(element) == 1
+}
+
+/// 行内样式里有边框或底纹：网页与 WPS 用它画「框」。
+fn styled_box(style: &str) -> bool {
+    let compact: String = style
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    compact.contains("border") || compact.contains("background")
+}
+
+/// 改写结果：名称用了默认值时要提示一句。
+struct BoxFound {
+    default_named: bool,
+}
+
+/// 满足条件就把候选改写成引用块，首段换成文框标记。
+///
+/// 条件：第一个子元素是块级元素、整段加粗、文字不长，而且后面还有正文。单格表格先
+/// 把单元格里的块取出来（表格本身不留结构）；其余容器直接用它的孩子。
+fn rewrite_box(element: &mut DocElement) -> Option<BoxFound> {
+    let mut children = if element.local == "table" {
+        take_cell_children(element)?
+    } else {
+        std::mem::take(&mut element.children)
+    };
+    let head_index = children
+        .iter()
+        .position(|node| matches!(node, DocNode::Elem(_)))?;
+    let DocNode::Elem(head) = &children[head_index] else {
+        return None;
+    };
+    let (name, title, default_named) = box_heading(head)?;
+    // 后面还得有正文，否则就是一个加粗段落，不算文框。
+    let has_body = children[head_index + 1..]
+        .iter()
+        .any(|node| node_text(node).trim().chars().count() > 0);
+    if !has_body {
+        return None;
+    }
+    children.remove(head_index);
+    let marker = if title.is_empty() {
+        format!("{BOX_NAME_MARK}{name}")
+    } else {
+        format!("{BOX_NAME_MARK}{name}{BOX_TITLE_MARK}{title}")
+    };
+    let mut body = Vec::with_capacity(children.len() + 1);
+    body.push(DocNode::Elem(DocElement {
+        ns: None,
+        local: "p".to_string(),
+        attrs: Vec::new(),
+        children: vec![DocNode::Text(marker)],
+    }));
+    body.append(&mut children);
+    element.local = "blockquote".to_string();
+    element.attrs.clear();
+    element.children = body;
+    Some(BoxFound { default_named })
+}
+
+/// 单格表格里那个单元格的块内容。
+fn take_cell_children(element: &mut DocElement) -> Option<Vec<DocNode>> {
+    if matches!(element.local.as_str(), "td" | "th") {
+        return Some(std::mem::take(&mut element.children));
+    }
+    for child in &mut element.children {
+        if let DocNode::Elem(child) = child
+            && let Some(children) = take_cell_children(child)
+        {
+            return Some(children);
+        }
+    }
+    None
+}
+
+/// 首段是不是「整段加粗的短标题」；是就给出文框名称、标题与是否用了默认名称。
+fn box_heading(head: &DocElement) -> Option<(String, String, bool)> {
+    if !is_block(&head.local) || !entirely_bold(head, false) {
+        return None;
+    }
+    let title = collapse(&text_of(head));
+    let length = title.chars().count();
+    if length == 0 || length > crate::doc_import::structure::TITLE_MAX {
+        return None;
+    }
+    Some(box_name(&title))
+}
+
+/// 标题以「案例」「专栏」这类词开头就当名称，其余用默认的「专栏」。
+fn box_name(title: &str) -> (String, String, bool) {
+    for name in BOX_NAMES {
+        if let Some(rest) = title.strip_prefix(name) {
+            return (name.to_string(), strip_box_label(rest), false);
+        }
+    }
+    ("专栏".to_string(), title.to_string(), true)
+}
+
+/// 名称后面的编号与冒号：「案例1：××」→「××」。
+fn strip_box_label(rest: &str) -> String {
+    let rest = rest.trim_start();
+    let rest = rest.trim_start_matches(|ch: char| {
+        ch.is_ascii_digit()
+            || ('０'..='９').contains(&ch)
+            || matches!(ch, '一'..='十' | '百' | '零' | '〇')
+    });
+    rest.trim_start_matches([':', '：', '、', '.', '．', ',', '，', ' ', '\u{3000}'])
+        .trim()
+        .to_string()
+}
+
+/// 这一段是不是整段加粗：所有非空白文字都落在 `<b>` / `<strong>` / 标题里，或外层
+/// 样式写着粗体。
+fn entirely_bold(element: &DocElement, inherited: bool) -> bool {
+    let mut bold = inherited
+        || matches!(
+            element.local.as_str(),
+            "b" | "strong" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+        );
+    if let Some(style) = element.attr_any("style")
+        && let Some(value) = styled_bold(style)
+    {
+        bold = value;
+    }
+    let mut seen = false;
+    for child in &element.children {
+        match child {
+            DocNode::Text(text) => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if !bold {
+                    return false;
+                }
+                seen = true;
+            }
+            DocNode::Elem(child) => {
+                // 空元素（`<br>`、只有图片的 span）不算文字，不影响判断。
+                if text_of(child).trim().is_empty() {
+                    continue;
+                }
+                if !entirely_bold(child, bold) {
+                    return false;
+                }
+                seen = true;
+            }
+        }
+    }
+    seen
+}
+
+/// 行内样式里的粗细：`font-weight:600` / `bold` 算粗，`normal` 与小于 600 的数值算不粗。
+fn styled_bold(style: &str) -> Option<bool> {
+    let compact: String = style
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let value = compact.split(';').find_map(|decl| {
+        decl.strip_prefix("font-weight:")
+            .map(|value| value.to_string())
+    })?;
+    if value.contains("bold") {
+        return Some(true);
+    }
+    if value.contains("normal") || value.contains("lighter") {
+        return Some(false);
+    }
+    value
+        .trim_end_matches(['!', 'i', 'm', 'p', 'o', 'r', 't', 'a', 'n', 't'])
+        .parse::<u32>()
+        .ok()
+        .map(|weight| weight >= 600)
+}
+
+/// 元素里的全部文字。
+fn text_of(element: &DocElement) -> String {
+    let mut out = String::new();
+    for child in &element.children {
+        match child {
+            DocNode::Text(text) => out.push_str(text),
+            DocNode::Elem(child) => out.push_str(&text_of(child)),
+        }
+    }
+    out
+}
+
+/// 节点的文字。
+fn node_text(node: &DocNode) -> String {
+    match node {
+        DocNode::Text(text) => text.clone(),
+        DocNode::Elem(element) => text_of(element),
+    }
+}
+
+/// 空白折成一个空格。
+fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 把渲染结果里的文框占位换回 `[!名称] 标题`。
+pub(crate) fn restore_boxes(markdown: &str) -> String {
+    if !markdown.contains(BOX_NAME_MARK) {
+        return markdown.to_string();
+    }
+    let mut out = String::with_capacity(markdown.len());
+    for (index, line) in markdown.lines().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(&restore_box_line(line));
+    }
+    if markdown.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn restore_box_line(line: &str) -> String {
+    let Some(start) = line.find(BOX_NAME_MARK) else {
+        return line.to_string();
+    };
+    let after = &line[start + BOX_NAME_MARK.len_utf8()..];
+    let (name, title) = match after.find(BOX_TITLE_MARK) {
+        Some(end) => (
+            &after[..end],
+            after[end + BOX_TITLE_MARK.len_utf8()..].trim_end(),
+        ),
+        None => (after.trim_end(), ""),
+    };
+    let prefix = &line[..start];
+    if title.is_empty() {
+        format!("{prefix}[!{name}]")
+    } else {
+        format!("{prefix}[!{name}] {title}")
     }
 }
 
@@ -347,5 +651,100 @@ fn normalize_text(raw: &str, trim_leading: bool) -> String {
         out.trim_start_matches([' ', '\n', '\t']).to_string()
     } else {
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn element(local: &str, attrs: Vec<(&str, &str)>, children: Vec<DocNode>) -> DocElement {
+        DocElement {
+            ns: None,
+            local: local.to_string(),
+            attrs: attrs
+                .into_iter()
+                .map(|(name, value)| Attr {
+                    ns: None,
+                    local: name.to_string(),
+                    value: value.to_string(),
+                })
+                .collect(),
+            children,
+        }
+    }
+
+    #[test]
+    fn box_names_come_from_the_title_prefix() {
+        assert_eq!(
+            box_name("案例1：某市做法"),
+            ("案例".to_string(), "某市做法".to_string(), false)
+        );
+        assert_eq!(
+            box_name("专栏 新加坡经验"),
+            ("专栏".to_string(), "新加坡经验".to_string(), false)
+        );
+        assert_eq!(
+            box_name("延伸阅读：三条路径"),
+            ("延伸阅读".to_string(), "三条路径".to_string(), false)
+        );
+        // 没有前缀：名称用默认「专栏」，标题原样。
+        assert_eq!(
+            box_name("某市做法"),
+            ("专栏".to_string(), "某市做法".to_string(), true)
+        );
+        // 只有名称没有标题。
+        assert_eq!(box_name("做法"), ("做法".to_string(), String::new(), false));
+    }
+
+    #[test]
+    fn font_weight_parsing_handles_numbers_and_keywords() {
+        assert_eq!(styled_bold("font-weight:700"), Some(true));
+        assert_eq!(styled_bold("font-weight: 600; color: red"), Some(true));
+        assert_eq!(styled_bold("font-weight:normal"), Some(false));
+        assert_eq!(styled_bold("font-weight:400"), Some(false));
+        assert_eq!(styled_bold("color:red"), None);
+        // `!important` 的尾巴不参与数字解析。
+        assert_eq!(styled_bold("font-weight:700 !important"), Some(true));
+    }
+
+    #[test]
+    fn containers_with_border_or_background_are_box_candidates() {
+        assert!(styled_box("border:1px solid #999"));
+        assert!(styled_box("background-color:#f2f2f2"));
+        assert!(!styled_box("color:red;padding:8px"));
+        assert!(!is_box_candidate(&element(
+            "div",
+            vec![("class", "note")],
+            vec![]
+        )));
+        assert!(is_box_candidate(&element(
+            "div",
+            vec![("style", "border:1px solid")],
+            vec![]
+        )));
+        assert!(is_box_candidate(&element("aside", vec![], vec![])));
+        // 两个单元格的表格不是候选。
+        let cell = || element("td", vec![], vec![]);
+        let row = || craft_row(cell(), cell());
+        assert!(!is_box_candidate(&element("table", vec![], vec![row()])));
+    }
+
+    fn craft_row(first: DocElement, second: DocElement) -> DocNode {
+        DocNode::Elem(element(
+            "tr",
+            vec![],
+            vec![DocNode::Elem(first), DocNode::Elem(second)],
+        ))
+    }
+
+    #[test]
+    fn box_placeholder_becomes_the_mdx_heading() {
+        let markdown = "> \u{FDD1}案例\u{FDD2}某市做法\n>\n> 正文\n";
+        assert_eq!(restore_boxes(markdown), "> [!案例] 某市做法\n>\n> 正文\n");
+        // 没有标题的文框。
+        assert_eq!(restore_boxes("> \u{FDD1}专栏\n"), "> [!专栏]\n");
+        // 普通正文不动。
+        assert_eq!(restore_boxes("正文\n"), "正文\n");
     }
 }

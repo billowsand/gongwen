@@ -1,7 +1,8 @@
 //! 剪贴板样本的夹具测试：`tests/fixtures/paste/<名字>.html` + `<名字>.expected.md`。
 //!
-//! 样本是合成的（Word 片段、Word 整页、政府网站、微信公众号、Excel），不含真实单位与
-//! 人名；采样真实剪贴板的工具与脱敏流程见同目录的 README.md。
+//! 样本都是合成的（Word 片段、Word 整页、政府网站、微信公众号、Excel、点分编号、跳号、
+//! 网页文章、白头件列表、研究报告文框），不含真实单位与人名；采样真实剪贴板的工具与脱敏
+//! 流程见同目录的 README.md。
 
 use super::*;
 use std::path::{Path, PathBuf};
@@ -53,6 +54,24 @@ fn convert_sample(path: &Path) -> String {
         &context(),
     )
     .unwrap_or_else(|| panic!("{} 没有转换结果", path.display()))
+    .markdown
+}
+
+/// 同一份样本按研究报告的上下文再转一遍：文框只在这条路上出现。
+fn convert_research(path: &Path) -> String {
+    convert(
+        &Source::Html {
+            html: std::fs::read_to_string(path).expect("读样本"),
+            plain: String::new(),
+        },
+        &Context {
+            kind: crate::models::TemplateKind::ResearchReport,
+            draft_empty: true,
+            has_title: false,
+            section_level: None,
+        },
+    )
+    .expect("研究报告上下文应能转换")
     .markdown
 }
 
@@ -109,8 +128,37 @@ fn whitepaper_paste_turns_lists_into_paragraphs() {
     assert!(markdown.contains("第三项工作：严格问责"), "{markdown}");
 }
 
+/// 研究报告里的文框：`<aside>`、单格表格、有框线或底纹的容器，只要第一段是整段加粗
+/// 的短标题就写成 `> [!名称] 标题`；名称从标题前缀里取，取不到写「专栏」。
+#[test]
+fn research_boxes_come_from_aside_tables_and_styled_containers() {
+    let markdown = convert_research(&root().join("research-box.html"));
+    assert!(
+        markdown.contains("> [!案例] 某市“场景牵引”授权运营做法"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("> [!专栏] 新加坡的数据治理经验"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("> [!做法]\n>\n> 先把台账建起来"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("> [!延伸阅读] 数据要素流通的三条路径"),
+        "{markdown}"
+    );
+    // 没有整段加粗短标题的候选不是文框。
+    assert!(
+        !markdown.contains("[!专栏] 这一段的标题没有加粗"),
+        "{markdown}"
+    );
+    assert!(!markdown.contains("这是加粗标题]"), "{markdown}");
+}
+
 /// 合成样本（Word 片段、Word 整页、政府网站、微信公众号、Excel、点分编号、跳号、
-/// 网页文章、白头件列表）逐个比对期望输出。
+/// 网页文章、白头件列表、研究报告文框）逐个比对期望输出。
 #[test]
 fn paste_samples_match_expected_markdown() {
     let paths = sample_paths();

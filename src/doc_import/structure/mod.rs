@@ -37,7 +37,7 @@ pub(crate) use numbering::{Scheme, marker_level, marker_scheme};
 use numbering::{Numbering, parse_prefix};
 
 /// 句号前的标题最多这么多字；再长就是段首带编号的正文段。
-pub(super) const TITLE_MAX: usize = 40;
+pub(crate) const TITLE_MAX: usize = 40;
 /// 冒号前的短语最多这么多字，且不能带逗号——「会议时间：」是标题，
 /// 「根据工作安排，现将有关事项通知如下：」不是。
 const LABEL_MAX: usize = 20;

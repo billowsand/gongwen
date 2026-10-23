@@ -329,11 +329,11 @@ fn malformed_html_is_repaired_and_limits_fall_back_to_plain_text() {
     // 上限：单元测试用小额度，业务代码用模块里的常量。
     let html = "<html><body><div><div><p>正文</p></div></div></body></html>";
     assert_eq!(
-        html::parse_with_limits(html, MAX_TEST_NODES, MAX_TEST_DEPTH).err(),
+        html::parse_with_limits(html, MAX_TEST_NODES, MAX_TEST_DEPTH, false).err(),
         Some(HtmlError::TooManyNodes)
     );
     assert_eq!(
-        html::parse_with_limits(html, 1000, 2).err(),
+        html::parse_with_limits(html, 1000, 2, false).err(),
         Some(HtmlError::TooDeep)
     );
 

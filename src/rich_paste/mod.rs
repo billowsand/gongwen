@@ -84,6 +84,10 @@ pub(crate) struct Stats {
     pub(crate) skipped_images: usize,
     /// 原文同级编号跳号的位置（原文编号对，例如「一、」→「三、」）。
     pub(crate) number_jumps: Vec<(String, String)>,
+    /// 认出来的文框个数（研究报告）。
+    pub(crate) boxes: usize,
+    /// 其中名称用了默认「专栏」的个数。
+    pub(crate) default_boxes: usize,
 }
 
 impl Stats {
@@ -110,6 +114,12 @@ impl Stats {
             notice.push_str(&format!("（略过 {} 张图片）", self.skipped_images));
         }
         notice.push('。');
+        if self.default_boxes > 0 {
+            notice.push_str(&format!(
+                "识别出 {} 个文框，名称暂写「专栏」，请按需改成案例、做法等。",
+                self.default_boxes
+            ));
+        }
         if !self.number_jumps.is_empty() {
             notice.push_str(&jump_notice(&self.number_jumps));
         }

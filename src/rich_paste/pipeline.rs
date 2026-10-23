@@ -36,10 +36,12 @@ pub(crate) fn convert(source: &Source, ctx: &Context) -> Option<Outcome> {
 
 /// HTML 这条路：富文本里有格式线索，优先它。
 fn convert_html(source: &str, ctx: &Context) -> Option<Outcome> {
-    let parsed = html::parse(source).ok()?;
+    let parsed = html::parse(source, ctx.research()).ok()?;
     let document = anydoc::html::to_document(&parsed.body, &parsed.css).ok()?;
     let mut stats = Stats {
         skipped_images: parsed.images,
+        boxes: parsed.boxes,
+        default_boxes: parsed.default_boxes,
         ..Stats::default()
     };
     let document = syntax::prune(document, ctx.research(), &mut stats);
@@ -85,7 +87,7 @@ pub(crate) fn convert_inline(source: &Source, ctx: &Context) -> Option<Outcome> 
 }
 
 fn inline_html(source: &str, ctx: &Context) -> Option<Outcome> {
-    let parsed = html::parse(source).ok()?;
+    let parsed = html::parse(source, false).ok()?;
     let document = anydoc::html::to_document(&parsed.body, &parsed.css).ok()?;
     let mut stats = Stats {
         skipped_images: parsed.images,
@@ -96,7 +98,9 @@ fn inline_html(source: &str, ctx: &Context) -> Option<Outcome> {
     if syntax::has_table(&document) {
         return None;
     }
-    let markdown = inline_text(&anydoc::document_to_markdown(&document));
+    let markdown = inline_text(&html::restore_boxes(&anydoc::document_to_markdown(
+        &document,
+    )));
     if markdown.is_empty() {
         return None;
     }
@@ -148,7 +152,13 @@ fn inline_text(text: &str) -> String {
 /// 原文编号，留着。
 fn strip_inline_marker(line: &str) -> &str {
     if let Some(rest) = line.strip_prefix("> ") {
-        return rest;
+        return strip_inline_marker(rest);
+    }
+    // 文框首行（`[!专栏] 标题`）：行内只要标题。
+    if let Some(rest) = line.strip_prefix("[!")
+        && let Some(end) = rest.find(']')
+    {
+        return rest[end + 1..].trim_start();
     }
     let hashes = line.bytes().take_while(|&byte| byte == b'#').count();
     if (1..=6).contains(&hashes) && line[hashes..].starts_with(' ') {
@@ -206,7 +216,8 @@ fn restructure(
         .iter()
         .map(|jump| (jump.from.clone(), jump.to.clone()))
         .collect();
-    (gaps::restore(&shaped), jumps)
+    // 文框首行的占位留到最后：清洗会把 `[!案例]` 的半角感叹号转成全角。
+    (html::restore_boxes(&gaps::restore(&shaped)), jumps)
 }
 
 /// 标题与列表项按最终结果数：结构还原会把「一、」这类编号段落升成标题，
@@ -329,6 +340,83 @@ mod tests {
         );
         let notice = outcome.stats.notice();
         assert!(notice.contains("原文编号有跳号（一、→三、）"), "{notice}");
+    }
+
+    fn research_context() -> Context {
+        Context {
+            kind: TemplateKind::ResearchReport,
+            draft_empty: true,
+            has_title: false,
+            section_level: None,
+        }
+    }
+
+    #[test]
+    fn research_boxes_default_to_column_name_and_warn() {
+        let outcome = convert(
+            &Source::Html {
+                html: "<html><body><aside><p><b>某市做法</b></p>\
+                       <p>先把台账建起来，再按季度核对。</p></aside></body></html>"
+                    .to_string(),
+                plain: String::new(),
+            },
+            &research_context(),
+        )
+        .expect("研究报告应能转换");
+        assert!(
+            outcome.markdown.contains("> [!专栏] 某市做法"),
+            "{}",
+            outcome.markdown
+        );
+        assert_eq!(outcome.stats.boxes, 1);
+        assert_eq!(outcome.stats.default_boxes, 1);
+        assert!(
+            outcome
+                .stats
+                .notice()
+                .contains("识别出 1 个文框，名称暂写「专栏」"),
+            "{}",
+            outcome.stats.notice()
+        );
+
+        // 名称从标题里认出来的，不再提示改名称。
+        let named = convert(
+            &Source::Html {
+                html: "<html><body><aside><p><b>案例2：某县做法</b></p>\
+                       <p>各县可结合实际借鉴。</p></aside></body></html>"
+                    .to_string(),
+                plain: String::new(),
+            },
+            &research_context(),
+        )
+        .expect("研究报告应能转换");
+        assert!(
+            named.markdown.contains("> [!案例] 某县做法"),
+            "{}",
+            named.markdown
+        );
+        assert_eq!(named.stats.default_boxes, 0);
+        assert!(
+            !named.stats.notice().contains("识别出"),
+            "{}",
+            named.stats.notice()
+        );
+    }
+
+    #[test]
+    fn non_research_documents_get_no_boxes() {
+        let outcome = convert(
+            &Source::Html {
+                html: "<html><body><aside><p><b>某市做法</b></p>\
+                       <p>先把台账建起来，再按季度核对。</p></aside></body></html>"
+                    .to_string(),
+                plain: String::new(),
+            },
+            &context(),
+        )
+        .expect("公文应能转换");
+        assert!(!outcome.markdown.contains("[!"), "{}", outcome.markdown);
+        assert_eq!(outcome.stats.boxes, 0);
     }
 
     #[test]
