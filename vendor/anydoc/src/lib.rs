@@ -159,30 +159,82 @@ pub fn to_document(
 pub mod html {
     pub use crate::package::xml::{Attr, Element, Node};
 
-    use crate::model::{AnchorId, Document, ImageSource, LinkTarget};
+    use crate::model::{AnchorId, Asset, AssetId, Document, ImageSource, LinkTarget};
     use crate::shared::html::{HtmlCtx, Stylesheet};
+    use std::cell::RefCell;
+
+    /// gongwen patch: image bytes a clipboard fragment brought along, together
+    /// with the media type declared for them (a data URL carries one; a local
+    /// file path usually leaves it empty). The type lets the caller sort out
+    /// unsupported formats (SVG, TIFF) without sniffing the bytes itself.
+    #[derive(Debug, Clone)]
+    pub struct PastedImage {
+        /// Declared media type such as image/png; may be empty.
+        pub media_type: String,
+        /// Raw image bytes.
+        pub bytes: Vec<u8>,
+    }
 
     /// Walk `body`'s children into a [`Document`]. `css` is the stylesheet text
     /// collected from the page (may be empty). The result carries no notes or
     /// assets: clipboard fragments never come with them.
     pub fn to_document(body: &Element, css: &str) -> Result<Document, crate::ConvertError> {
+        collect(body, css, &|_src: &str| None)
+    }
+
+    /// gongwen patch: like to_document, but resolve may hand back the bytes of
+    /// an image src (typically an inline data URL or a local file path the
+    /// caller read itself). Resolved images become entries in
+    /// Document::assets and are referenced with ImageSource::Asset;
+    /// unresolved ones stay ImageSource::Unavailable. Nothing here touches the
+    /// network or the filesystem: resolve owns that policy, and returning None
+    /// simply leaves the image without a source.
+    pub fn to_document_with_images(
+        body: &Element,
+        css: &str,
+        resolve: &dyn Fn(&str) -> Option<PastedImage>,
+    ) -> Result<Document, crate::ConvertError> {
+        collect(body, css, resolve)
+    }
+
+    fn collect(
+        body: &Element,
+        css: &str,
+        resolve: &dyn Fn(&str) -> Option<PastedImage>,
+    ) -> Result<Document, crate::ConvertError> {
         let mut sheet = Stylesheet::default();
         sheet.add(css);
-        let blocks = crate::shared::html::to_blocks(body, &sheet, &PasteCtx)?;
-        Ok(Document { blocks, ..Document::default() })
+        let assets = RefCell::new(Vec::new());
+        let ctx = PasteCtx { resolve, assets: &assets };
+        let blocks = crate::shared::html::to_blocks(body, &sheet, &ctx)?;
+        Ok(Document { blocks, assets: assets.into_inner(), ..Document::default() })
     }
 
     /// Clipboard fragments have no document to resolve hrefs, image parts, or
     /// anchor ids against.
-    struct PasteCtx;
+    struct PasteCtx<'a> {
+        resolve: &'a dyn Fn(&str) -> Option<PastedImage>,
+        assets: &'a RefCell<Vec<Asset>>,
+    }
 
-    impl HtmlCtx for PasteCtx {
+    impl HtmlCtx for PasteCtx<'_> {
         fn link_target(&self, _href: &str) -> Option<LinkTarget> {
             None
         }
 
-        fn image_source(&self, _src: &str) -> Result<Option<ImageSource>, crate::ConvertError> {
-            Ok(None)
+        fn image_source(&self, src: &str) -> Result<Option<ImageSource>, crate::ConvertError> {
+            let Some(image) = (self.resolve)(src) else {
+                return Ok(None);
+            };
+            let mut assets = self.assets.borrow_mut();
+            let id = AssetId(assets.len());
+            assets.push(Asset {
+                id,
+                media_type: image.media_type,
+                origin_part: "clipboard".to_string(),
+                bytes: image.bytes,
+            });
+            Ok(Some(ImageSource::Asset(id)))
         }
 
         fn anchor_id(&self, raw: &str) -> AnchorId {

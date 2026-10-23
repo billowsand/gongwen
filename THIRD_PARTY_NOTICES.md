@@ -34,11 +34,13 @@ executable; the upstream notice is preserved at `vendor/mdx/LICENSE`.
 
 Imported documents (Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, CSV and
 text-layer PDF) are converted to Markdown by anydoc, distributed under the MIT
-License. A source copy is vendored in `vendor/anydoc` with two documented
+License. A source copy is vendored in `vendor/anydoc` with three documented
 patches (the document-model Markdown renderer is made public so embedded images
-can be stored before rendering, and the HTML element tree plus its walker are
-exposed for clipboard paste; see the README there). The upstream license text is
-preserved at `vendor/anydoc/LICENSE`.
+can be stored before rendering; the HTML element tree plus its walker are exposed
+for clipboard paste; and that entry takes an image callback so pasted images can
+be stored, with the library itself never touching the network or the filesystem;
+see the README there). The upstream license text is preserved at
+`vendor/anydoc/LICENSE`.
 
 - Project: <https://github.com/firecrawl/anydoc>
 - Version: `anydoc@0.2.4`

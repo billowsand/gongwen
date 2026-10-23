@@ -1,6 +1,6 @@
 # vendor/anydoc
 
-文档转 Markdown 库 `anydoc` 的一份副本，带两处补丁，经根 `Cargo.toml` 的
+文档转 Markdown 库 `anydoc` 的一份副本，带三处补丁，经根 `Cargo.toml` 的
 `[patch.crates-io]` 接入。导入代码见 `src/doc_import.rs` 与 `src/doc_import/embedded.rs`，
 剪贴板粘贴见 `src/rich_paste/`。
 
@@ -60,12 +60,37 @@ src/package/xml.rs   四处 #[allow(missing_docs)]（Node / Element / Attr / imp
 这处补丁同样适合提给上游（公开 HTML 前端入口，或者把 `to_blocks` 挂到一个公开的
 `html` 模块上）。
 
+## 补丁三：HTML 前端的图片回调
+
+剪贴板里的图片有几种给法：Word 常给内联的 `data:` 图片，网页给 `http(s):`
+地址，WPS 有时给本机 `file:` 路径。补丁二的入口把 `image_source` 固定成
+`Ok(None)`，图片只剩 alt 文字（`src/rich_paste/html.rs` 给空 alt 的图补了占位
+alt，否则 anydoc 会把整张图丢掉、连「未导入」注释都没处放），拿不到字节也就没法
+写进图片资源库。
+
+改法：`src/lib.rs` 的 `pub mod html` 新增两样东西：
+
+- `pub struct PastedImage { pub media_type: String, pub bytes: Vec<u8> }`：调用方
+  解析出来的一小段图片，带上声明的媒体类型（`data:` 有，本地文件一般没有；
+  有了它，后面认 SVG / TIFF 不用自己嗅字节）；
+- `pub fn to_document_with_images(&Element, css, resolve: &dyn Fn(&str) -> Option<PastedImage>)`：
+  `resolve` 返回字节的图片 `push` 进 `Document::assets`（`origin_part` 写
+  `"clipboard"`），模型里换成 `ImageSource::Asset(id)`；返回 `None` 的仍是
+  `ImageSource::Unavailable`。**库本身不碰网络、不读本地文件**：下不下载、读不读
+  `file:` 由调用方（`src/rich_paste/images.rs`）自己定。`to_document` 行为不变
+  （内部回调恒返回 `None`），EPUB 的输出逐字不变。
+
+改动的函数都在同一处：`src/lib.rs` 的 `pub mod html`（新增类型与函数，`PasteCtx`
+改成带回调与 `RefCell<Vec<Asset>>`；`to_document` 转调同一个 `collect`）。
+
+这处补丁同样适合提给上游（公开入口上加一个图片解析回调）。
+
 ## 升级
 
 1. 把新版本的 `anydoc` 源码替换进来（`src/`、`LICENSE`、`Cargo.toml`，保留本 README，
    照旧删掉 `[[example]]` 一节）；
-2. 按上面两份清单重新打补丁（渲染函数、HTML 入口；`to_blocks` / `Stylesheet` / `HtmlCtx`
-   的签名可能变，先看 `src/shared/html.rs`）；
+2. 按上面三份清单重新打补丁（渲染函数、HTML 入口、图片回调；`to_blocks` /
+   `Stylesheet` / `HtmlCtx` 的签名可能变，先看 `src/shared/html.rs`）；
 3. 跑 `cargo test --locked doc_import`：`draft_import_stores_embedded_word_images` 核对
    图片入库，`realistic_import_samples_match_expected_markdown` 核对真实样例输出没变；
 4. 跑 `cargo test --locked rich_paste`：粘贴的夹具测试（`tests/fixtures/paste/`）核对
