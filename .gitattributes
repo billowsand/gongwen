@@ -28,3 +28,6 @@ scripts/git-hooks/* text eol=lf
 *.pdf binary
 *.zip binary
 *.skill binary
+
+# 初始基础词表是 UTF-16LE + CRLF 的二进制文本，按原样存取，不做行尾归一化
+assets/fuma/quan.txt -text -diff

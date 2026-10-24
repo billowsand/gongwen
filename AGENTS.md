@@ -23,7 +23,9 @@
   整句模型、自动调频或独立进程。代码在 `src/ime/`，设计与交接见 `docs/table-ime.md`。
   - 初始基础表：Windows / Linux 优先本机 `assets/fuma/quan.txt`，macOS 优先
     `assets/fuma/mabiao.txt`（互为后备）；打包时若存在，独立复制到
-    `runtime/ime/base.txt`，不嵌入二进制。源码中的本机资源不入库。
+    `runtime/ime/base.txt`，不嵌入二进制。`quan.txt` 自 2026-10-24 起纳入版本
+    管理（已清理口语词条，口径见 `docs/table-ime.md`）；`mabiao.txt` 权利归
+    方案作者、仍不入库，只能由使用者自行导入。
   - 用户基础表与个人词表：`config_dir()/ime/base.txt`、`tables.json`；基础表可动态
     修改，公文表可导入、停用与撤销。公文词表只加载已接受且为四码的词。
   - 旧 `dict.qj`、`lm.qj`、辅码与拼音学习数据不再使用，也不再随安装包分发。

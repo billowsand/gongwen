@@ -415,7 +415,7 @@ mod tests {
     fn real_base_table_is_complete_and_exact() {
         let path = crate::ime::data::development_base_path().expect("本机基础词表不存在");
         let parsed = parse(&crate::text_file::read_to_string(&path).unwrap(), false);
-        assert!(parsed.entries.len() >= 60_000);
+        assert!(parsed.entries.len() >= 55_000);
         let mut table = Table {
             base: parsed.entries,
             ..Default::default()

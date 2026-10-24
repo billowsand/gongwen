@@ -74,5 +74,7 @@ __pycache__/
 # 第三方输入法码表（小鹤音形等）：权利归方案作者、只限私人使用，只能由使用者导入本机，不入库
 /assets/fuma/*.txt
 !/assets/fuma/xiaohe.txt
+# 初始基础词表 quan.txt 自 2026-10-24 起纳入版本管理（已清理口语词条，见 docs/table-ime.md）
+!/assets/fuma/quan.txt
 model_api_test.md.txt
 paper-template/

@@ -881,7 +881,7 @@ vidc,1=指导",
         let rows = ime.filtered_rows();
         let health = ime.compute_health();
         let elapsed = started.elapsed();
-        assert!(rows.len() >= 60_000);
+        assert!(rows.len() >= 55_000);
         assert!(health.nonconforming.is_empty());
         println!("全表 {} 行与体检用时 {elapsed:?}", rows.len());
     }
