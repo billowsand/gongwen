@@ -1336,6 +1336,139 @@ fn every_number_sits_on_the_baseline_of_its_line() {
     }
 }
 
+/// 空稿时正文原点那句提示：每个主题、源码与对照两种模式都要画出来，而且要画成
+/// 正文的一行——同一处原点、同一副字面、同一个字号、同一条基线。
+///
+/// 从前走的是 `TextEdit::hint_text`：那行字只认界面默认字体与默认行高、贴着行框
+/// 顶端，调字号、换字面、换主题它都不动，而且只有锤子稿纸那一套才有。现在提示语
+/// 自己按正文的排版排一遍、落在正文原点，所以换哪套主题都该是同一副样子。
+#[test]
+fn every_theme_draws_the_empty_hint_on_the_body_baseline() {
+    use super::editor::EMPTY_HINT;
+
+    /// 摊平图形，收下编辑器字体的每段文字：正文、字面、首字基线与左缘（屏幕坐标）。
+    fn collect(
+        shape: &egui::epaint::Shape,
+        editor_family: &egui::FontFamily,
+        out: &mut Vec<(String, egui::FontId, f32, f32)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                let Some(row) = text.galley.rows.first() else {
+                    return;
+                };
+                let Some(glyph) = row.glyphs.first() else {
+                    return;
+                };
+                let Some(section) = text.galley.job.sections.first() else {
+                    return;
+                };
+                let font = section.format.font_id.clone();
+                if &font.family != editor_family {
+                    return;
+                }
+                out.push((
+                    text.galley.job.text.clone(),
+                    font,
+                    text.pos.y + row.pos.y + glyph.pos.y,
+                    text.pos.x + row.pos.x + glyph.pos.x,
+                ));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, editor_family, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut harness = Harness::new();
+    harness.ctx.set_pixels_per_point(1.0);
+    harness.config.show_source_outline = false;
+    harness.doc.form_collapsed = true;
+    // 字号与正文之外的字面都换成非默认值：提示语若退回界面默认排版，这里就量得出来。
+    harness.config.editor_font_size = 22.0;
+    harness.config.editor_fonts.body = crate::models::EditorFontFace::Biaosong;
+    let off_screen = egui::pos2(-1000.0, -1000.0);
+    let mut problems = Vec::new();
+    for name in crate::models::ThemeName::ALL {
+        theme::set_current(name);
+        theme::configure_style(&harness.ctx);
+        let editor_family = theme::editor_face_family(
+            harness
+                .config
+                .editor_fonts
+                .face(crate::models::EditorFontSlot::Body),
+        );
+        let font_size = harness.config.editor_font_size;
+        for mode in [PreviewMode::Source, PreviewMode::Split] {
+            harness.doc.preview_mode = mode;
+
+            // 空稿：只该有那句提示，量它的字面、基线、左缘。
+            harness.doc.generated_markdown.clear();
+            let empty_frame = harness.preview_frames(off_screen, 3);
+            let mut painted = Vec::new();
+            for clipped in &empty_frame.shapes {
+                collect(&clipped.shape, &editor_family, &mut painted);
+            }
+            let hint = painted
+                .iter()
+                .find(|(text, ..)| text == EMPTY_HINT)
+                .cloned();
+
+            // 换成一行业已写下的正文，量正文那一行的字面、基线、左缘来对比。
+            harness.doc.generated_markdown = "正文第一行".into();
+            let body_frame = harness.preview_frames(off_screen, 3);
+            let mut painted = Vec::new();
+            for clipped in &body_frame.shapes {
+                collect(&clipped.shape, &editor_family, &mut painted);
+            }
+            let body = painted
+                .iter()
+                .find(|(text, ..)| text == "正文第一行")
+                .cloned();
+
+            match (hint, body) {
+                (Some(hint), Some(body)) => {
+                    let place = format!("{name:?} 的 {mode:?} 模式");
+                    if hint.1.family != body.1.family || hint.1.size != body.1.size {
+                        problems.push(format!(
+                            "{place}：提示语用的是 {:?} / {}，正文用的是 {:?} / {}",
+                            hint.1.family, hint.1.size, body.1.family, body.1.size
+                        ));
+                    }
+                    if (hint.1.size - font_size).abs() > 0.01 {
+                        problems.push(format!(
+                            "{place}：提示语字号 {} 没有跟上设置的编辑字号 {font_size}",
+                            hint.1.size
+                        ));
+                    }
+                    if (hint.2 - body.2).abs() > 0.01 {
+                        problems.push(format!(
+                            "{place}：提示语基线 {} 与正文基线 {} 不在同一条线上",
+                            hint.2, body.2
+                        ));
+                    }
+                    if (hint.3 - body.3).abs() > 0.01 {
+                        problems.push(format!(
+                            "{place}：提示语左缘 {} 与正文左缘 {} 没有对齐",
+                            hint.3, body.3
+                        ));
+                    }
+                }
+                (None, _) => {
+                    problems.push(format!("{name:?} 的 {mode:?} 模式：空稿没有画出提示语"))
+                }
+                (_, None) => problems.push(format!("{name:?} 的 {mode:?} 模式：没找到正文那一行")),
+            }
+        }
+    }
+    theme::set_current(crate::models::ThemeName::default());
+    theme::set_current_paper(crate::models::PaperMode::default());
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
 /// 敲字的人光标停在哪一行，页边那个号就该亮起来——这是投屏对稿真正省下的
 /// 那一轮口舌：不必再念「我现在在第几行」，屏幕自己说了。亮的还必须正好是
 /// 那一行的号：错一行，两边说的就不是同一处。

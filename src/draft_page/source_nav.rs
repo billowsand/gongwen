@@ -656,7 +656,7 @@ impl DraftPage<'_> {
                     .tint(theme::text_muted())
                     .fit_to_exact_size(egui::vec2(18.0, 18.0)),
             )
-            .on_hover_text("输入 # 标题后，目录会自动出现");
+            .on_hover_text(crate::draft_page::editor::EMPTY_HINT);
             return;
         }
         let current_byte = self

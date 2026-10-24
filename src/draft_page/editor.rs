@@ -14,7 +14,7 @@ use crate::draft_page::{
     jump_to_source, markdown_matches_mode, select_source_range,
 };
 use crate::export;
-use crate::models::{EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN};
+use crate::models::{EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN, EditorFontScheme};
 use crate::preview;
 use crate::storage;
 use crate::theme;
@@ -23,6 +23,11 @@ use eframe::egui;
 use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::Arc;
+
+/// 正文还空着的时候，源码区画的那句提示。
+///
+/// 空目录面板的图标提示也用这一句，改口径时两处一起变。
+pub(crate) const EMPTY_HINT: &str = "输入 # 标题后，目录会自动出现";
 
 /// 当前帧 TextEdit 的实际选区；拖拽期间不能只读上一帧存下的光标状态。
 fn output_selection(text: &str, output: &egui::text_edit::TextEditOutput) -> Option<Range<usize>> {
@@ -619,6 +624,36 @@ pub(crate) fn paint_editor_line_numbers(
     }
 }
 
+/// 空稿时在正文原点画一句提示。
+///
+/// 不用 `TextEdit::hint_text`：那份提示固定按界面默认字体与行高排、贴行框顶端，
+/// 既不吃编辑器字体方案，也不吃主题行距，看着像别人正文里的一行字。这里按正文的
+/// 排版排一遍、落在同一个原点，所以调字号、换字面、切主题它都跟着正文走，各主题也
+/// 是同一句、同一副样子。
+///
+/// 提示占的是 `hint_slot` 这个先占下的绘制位：光标与输入法候选由后面绘制的编辑框
+/// 盖在上面，点进空稿时光标不会被提示语遮住。
+fn paint_editor_empty_hint(
+    ui: &egui::Ui,
+    hint_slot: egui::layers::ShapeIdx,
+    output: &egui::text_edit::TextEditOutput,
+    wrap_width: f32,
+    font_size: f32,
+    scheme: &EditorFontScheme,
+) {
+    let color = theme::text_muted();
+    let galley =
+        crate::highlight::placeholder_galley(ui, EMPTY_HINT, wrap_width, font_size, scheme, color);
+    ui.painter().set(
+        hint_slot,
+        egui::Shape::Text(egui::epaint::TextShape::new(
+            output.galley_pos,
+            galley,
+            color,
+        )),
+    );
+}
+
 impl DraftPage<'_> {
     pub(crate) fn open_result_drawer(&mut self) {
         self.doc.result_drawer_open = true;
@@ -908,11 +943,14 @@ impl DraftPage<'_> {
         let selection_before = candidates::selection_before_show(ui.ctx(), editor_id());
         let mut menu_action = None;
         let clean_galley = RefCell::new(None);
-        let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
+        // 空稿提示语按正文的换行宽度排，与真敲出来的字同一行宽。
+        let wrap_width = std::cell::Cell::new(f32::INFINITY);
+        let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, width: f32| {
+            wrap_width.set(width);
             let galley = highlighter.layout(
                 ui,
                 buffer.as_str(),
-                wrap_width,
+                width,
                 editor_font_size,
                 anchor.as_ref(),
                 &search_matches,
@@ -970,13 +1008,9 @@ impl DraftPage<'_> {
                                 ui.visuals_mut().selection.bg_fill = theme::md::selection_bg();
                                 ui.visuals_mut().selection.stroke.color = theme::text();
                             }
-                            show_with_glyph_caret(ui, editable, |ui| {
+                            let hint_slot = ui.painter().add(egui::Shape::Noop);
+                            let output = show_with_glyph_caret(ui, editable, |ui| {
                                 egui::TextEdit::multiline(text)
-                                    .hint_text(if theme::smartisan::active() && source_mode {
-                                        "输入 # 标题后，目录会自动出现"
-                                    } else {
-                                        ""
-                                    })
                                     .id(editor_id())
                                     .interactive(editable)
                                     .frame(egui::Frame::NONE)
@@ -985,7 +1019,18 @@ impl DraftPage<'_> {
                                     .desired_width(f32::INFINITY)
                                     .desired_rows(rows)
                                     .show(ui)
-                            })
+                            });
+                            if editable && text.is_empty() {
+                                paint_editor_empty_hint(
+                                    ui,
+                                    hint_slot,
+                                    &output,
+                                    wrap_width.get(),
+                                    editor_font_size,
+                                    &editor_fonts,
+                                );
+                            }
+                            output
                         })
                         .inner
                     };

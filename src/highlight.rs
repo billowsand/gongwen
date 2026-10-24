@@ -181,6 +181,39 @@ fn align_editor_text(galley: &mut Arc<egui::Galley>, manuscript: bool) {
     });
 }
 
+/// 空稿提示语的排版：与正文同一字面、同字号、同节距，只是整句一个颜色。
+///
+/// `TextEdit::hint_text` 那份提示固定按界面默认字体与行高排、贴行框顶端：既不吃
+/// 编辑器字体方案，也不吃主题行距。正文调到 30 磅时提示还是 14 磅，看着像别人的字。
+/// 这里借同一条 [`format`] 与 [`align_editor_text`]，排出来的提示语与真敲出来的
+/// 字踩同一条基线，调用方只要把它落在正文原点即可。
+pub(crate) fn placeholder_galley(
+    ui: &egui::Ui,
+    text: &str,
+    wrap_width: f32,
+    base_size: f32,
+    scheme: &EditorFontScheme,
+    color: Color32,
+) -> Arc<egui::Galley> {
+    let fonts = EditorFonts {
+        base_size,
+        scheme: *scheme,
+    };
+    let body = fonts.font(EditorFontSlot::Body, base_size);
+    let mut job = LayoutJob {
+        wrap: egui::text::TextWrapping {
+            max_width: wrap_width,
+            ..Default::default()
+        },
+        keep_trailing_whitespace: true,
+        ..Default::default()
+    };
+    job.append(text, 0.0, format(body, color));
+    let mut galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    align_editor_text(&mut galley, theme::smartisan::manuscript_active());
+    galley
+}
+
 /// 编辑区默认行高相对字号的倍数：字号拉平后各行高度接近，行距略微放宽一点
 /// 更透气，避免看着太挤。
 const LINE_HEIGHT_RATIO: f32 = 1.35;
