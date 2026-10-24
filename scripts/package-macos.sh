@@ -124,9 +124,10 @@ fi
 # runtime 是可选的：没有也能启动查看界面，PDF 排版需要其中的字体。
 RUNTIME_DIR="$STAGE/runtime"
 # 旧输入法资源不随包，但要保留新词表；不能把整个 ime/ 删完就直接打包。
-BASE_TABLE="$PROJECT_ROOT/assets/fuma/mabiao.txt"
+# 基础词表统一用项目自维护的 quan.txt，mabiao.txt 只作旧机后备。
+BASE_TABLE="$PROJECT_ROOT/assets/fuma/quan.txt"
 if [ ! -f "$BASE_TABLE" ]; then
-    BASE_TABLE="$PROJECT_ROOT/assets/fuma/quan.txt"
+    BASE_TABLE="$PROJECT_ROOT/assets/fuma/mabiao.txt"
 fi
 if [ ! -f "$BASE_TABLE" ] && [ -f "$RUNTIME_DIR/ime/base.txt" ]; then
     cp "$RUNTIME_DIR/ime/base.txt" "$WORK_DIR/ime-base.txt"

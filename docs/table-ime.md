@@ -5,7 +5,7 @@
 ## 定位与数据
 
 输入法只接受编码、查询词表、选词上屏，不区分全拼、双拼或任何输入方案。
-以本机 `assets/fuma/quan.txt` 或 `assets/fuma/mabiao.txt` 为初始基础表，完整保留单字、词组与简码。
+以本项目自维护的 `assets/fuma/quan.txt` 为初始基础表，完整保留单字、词组与简码。
 动态叠加稿件库中已接受的公文四码词、导入的四码表与个人词条。
 词条可以自己指定编码；公文词表原有编码建议与读音维护仍保留在维护侧。
 
@@ -78,8 +78,8 @@
 | `config_dir()/ime/history/` | 个人层最近 20 次修改前的文件与 `index.json` |
 
 首次基础表查找顺序：用户 `base.txt` → 环境指定的 runtime → 可执行文件旁
-`runtime/ime/base.txt` → 开发词表（Windows / Linux 优先 `assets/fuma/quan.txt`，macOS 优先
-`assets/fuma/mabiao.txt`，互为后备）→ 旧用户音形表。
+`runtime/ime/base.txt` → 开发词表（本项目自维护的 `assets/fuma/quan.txt`，
+`assets/fuma/mabiao.txt` 仅作旧机后备）→ 旧用户音形表。
 初始表只在用户没有当前基础表时复制，重新安装不会覆盖用户维护。
 
 ## 裁剪与打包
@@ -89,8 +89,8 @@
 保留项目 GPL-3.0-or-later 许可证；不变更其许可范围。
 
 所有平台打包排除旧 runtime 的 `ime/` 数据，不再携带 `dict.qj`、`lm.qj`。
-本机旧文件合计 47,943,072 字节（45.7 MiB）；初始 `quan.txt` 为 1,284,742 字节。
-便携打包在本机存在 `quan.txt` 或 `mabiao.txt` 时独立复制成 `runtime/ime/base.txt`，无需编译 feature。
+本机旧文件合计 47,943,072 字节（45.7 MiB）；初始 `quan.txt` 为 1,284,780 字节。
+便携打包在本机存在 `quan.txt` 时独立复制成 `runtime/ime/base.txt`，无需编译 feature。
 CI 中没有该本机资源时仍可构建和安装，使用者在设置中导入基础表。
 发布工作流保留 PDF runtime 冒烟检查，删除已无意义的拼音数据冒烟步骤。
 
@@ -120,11 +120,16 @@ UTF-16 LE + CRLF、BOM 与首尾格式不变。基础表只在用户没有当前
 `config_dir()/ime/base.txt` 时复制，已装机的旧副本要生效需手动替换或删除该文件。
 
 同日 `quan.txt` 纳入版本管理：`.gitignore` 对该文件放行，词表抬头补来源与清理
-说明，`assets/fuma/README.md` 写清入库范围与授权（码表权利归原作者，再分发以
-原作者授权为准）。随之而来的是发布链变化：`release.yml` 在 checkout 之后运行
-`package-portable.ps1`，此前 CI 上没有该文件，发布包不含初始基础表；现在
-Windows 安装包与 Linux ARM64 deb 会携带 `runtime/ime/base.txt`，用户装完即可
-直接启用内置输入法。`mabiao.txt` 仍不入库，只能由使用者自行导入。
+说明，`assets/fuma/README.md` 写清入库范围与维护约定。随之而来的是发布链变化：
+`release.yml` 在 checkout 之后运行 `package-portable.ps1`，此前 CI 上没有该文件，
+发布包不含初始基础表；现在 Windows 安装包与 Linux ARM64 deb 会携带
+`runtime/ime/base.txt`，用户装完即可直接启用内置输入法。
+
+同日基础词表统一到本项目自维护的 `quan.txt`：不再区分平台优先级，Windows、
+Linux 与 macOS 三条打包链（`package-portable.ps1`、`package-dmg.sh`、
+`package-macos.sh`）统一复制 `quan.txt`，发布版一律以此为准。开发态加载
+（`src/ime/data.rs`）同样以 `quan.txt` 优先，`mabiao.txt` 只留作旧机后备，
+不再随包分发。该表此后由本项目自行维护并纳入版本管理。
 
 2026-10-21：内置输入法切到英文后，对键入文字及系统输入法提交文字中的中文 / 全角
 标点统一转为英文符号，兼容 macOS 系统中文输入源仍送来中文标点的情况。支持逗号、句号、
@@ -138,6 +143,7 @@ macOS 开发加载和两条打包链优先 `mabiao.txt`，缺少首选时使用�
 输入法资源时误删 `runtime/ime/base.txt` 的问题，并让 `package-dmg.sh` 允许
 清单中的该文件；两者在本机存在基础词表时都补入，缺表则明确提示需安装后导入。
 没有有效基础表时，勾选“启用”仍会回退系统输入法，须先确认设置页的基础表条数。
+（此条的平台优先级与「不入库」口径已于 2026-10-24 变更，见上。）
 
 词表页结果不设上限，只在筛选条件或词表变化时重算（本机全表 6 万行加体检约 70 ms，开发构建）。
 公文表扫描是收词流程，待确认词不会自动进候选。基础表更新独立于个人屏蔽与排序。

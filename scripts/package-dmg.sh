@@ -174,11 +174,12 @@ else
     chmod 755 "$STAGE/gongwen-assistant"
 fi
 
-# 与 Windows 便携包一致：本机存在基础词表时独立随包，不嵌入二进制。
+# 与 Windows 便携包一致：项目自维护的 quan.txt 独立随包，不嵌入二进制；
+# mabiao.txt 只作旧机后备。
 # 使用现成 staging 时保留其中的 base.txt，不能因排除旧输入法而一并丢弃。
-BASE_TABLE="$PROJECT_ROOT/assets/fuma/mabiao.txt"
+BASE_TABLE="$PROJECT_ROOT/assets/fuma/quan.txt"
 if [ ! -f "$BASE_TABLE" ]; then
-    BASE_TABLE="$PROJECT_ROOT/assets/fuma/quan.txt"
+    BASE_TABLE="$PROJECT_ROOT/assets/fuma/mabiao.txt"
 fi
 if [ -f "$BASE_TABLE" ]; then
     mkdir -p "$STAGE/runtime/ime"

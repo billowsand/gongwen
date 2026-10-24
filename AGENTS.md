@@ -21,11 +21,11 @@
   EMF / WMF 矢量图经 `emf-core` 转 SVG 再由 resvg 出 PNG，见 `src/metafile.rs`）。
 - 输入法：应用内词表输入法，按完整编码查询基础表与公文四码表，不使用拼音、
   整句模型、自动调频或独立进程。代码在 `src/ime/`，设计与交接见 `docs/table-ime.md`。
-  - 初始基础表：Windows / Linux 优先本机 `assets/fuma/quan.txt`，macOS 优先
-    `assets/fuma/mabiao.txt`（互为后备）；打包时若存在，独立复制到
-    `runtime/ime/base.txt`，不嵌入二进制。`quan.txt` 自 2026-10-24 起纳入版本
-    管理（已清理口语词条，口径见 `docs/table-ime.md`）；`mabiao.txt` 权利归
-    方案作者、仍不入库，只能由使用者自行导入。
+  - 初始基础表：`assets/fuma/quan.txt`，由本项目自行维护并纳入版本管理；所有平台
+    （Windows 安装包、Linux ARM64 deb、macOS 应用包）统一随包携带，打包时复制为
+    `runtime/ime/base.txt`，不嵌入二进制。词表只收公文可用词，口语、方言、网络语、
+    表情符号与亲属口头称谓不入库，维护口径见 `docs/table-ime.md`。旧本机码表
+    `mabiao.txt` 只作旧机后备。
   - 用户基础表与个人词表：`config_dir()/ime/base.txt`、`tables.json`；基础表可动态
     修改，公文表可导入、停用与撤销。公文词表只加载已接受且为四码的词。
   - 旧 `dict.qj`、`lm.qj`、辅码与拼音学习数据不再使用，也不再随安装包分发。

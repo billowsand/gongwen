@@ -203,7 +203,8 @@ foreach ($entry in $runtimeEntries) {
     Copy-Item -LiteralPath $entry.Source -Destination $destination
 }
 
-# 初始基础词表独立随包，便于更新；缺少本机源文件时由使用者在设置页导入。
+# 初始基础词表独立随包，便于更新：项目自维护的 quan.txt 为唯一正式来源，
+# mabiao.txt 只作旧机后备；两者都没有时由使用者在设置页导入。
 $baseTableSource = Join-Path $projectRoot "assets/fuma/quan.txt"
 if (-not (Test-Path -LiteralPath $baseTableSource -PathType Leaf)) {
     $baseTableSource = Join-Path $projectRoot "assets/fuma/mabiao.txt"

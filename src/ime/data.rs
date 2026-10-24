@@ -24,15 +24,10 @@ pub(super) fn save_json(path: &Path, value: &impl Serialize) -> anyhow::Result<(
     save_bytes(path, &serde_json::to_vec_pretty(value)?)
 }
 
-/// 保留 Windows 的 quan.txt 与 macOS 的 mabiao.txt，两者均可作为后备来源。
+/// 基础词表来源：项目自维护的 `quan.txt`（所有平台统一随包），`mabiao.txt` 只作旧机后备。
 pub(super) fn development_base_path() -> Option<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fuma");
-    let names = if cfg!(target_os = "macos") {
-        ["mabiao.txt", "quan.txt"]
-    } else {
-        ["quan.txt", "mabiao.txt"]
-    };
-    names
+    ["quan.txt", "mabiao.txt"]
         .into_iter()
         .map(|name| root.join(name))
         .find(|path| path.is_file())
