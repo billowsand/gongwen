@@ -224,7 +224,7 @@
     <td width="50%"><img src="docs/images/readme/08-settings.png" alt="本地模型服务设置" /></td>
   </tr>
   <tr>
-    <td valign="top"><strong>词表越用越顺手</strong><br/>从标准词库、校对词表与语料收词，按篇数与省键数排序；人工确认后导出公文四码词表，直接喂给应用内输入法。</td>
+    <td valign="top"><strong>词表越用越顺手</strong><br/>从标准词库、校对词表与语料收词，按篇数与省键数排序；输入法已经能打的词自动跳过，不用重复确认。人工定夺后导出公文四码词表，直接喂给应用内输入法。</td>
     <td valign="top"><strong>模型服务留在本机</strong><br/>对话、文字复核、Embedding 与 Rerank 分开配置；不配置模型也不影响确定性功能。</td>
   </tr>
 </table>
@@ -264,7 +264,7 @@
 ## 项目结构与开发
 
 ```text
-src/                应用代码（约 25.1 万行 Rust，2325 项自动化测试）
+src/                应用代码（约 25.2 万行 Rust，2337 项自动化测试）
 assets/             图标与界面资源
 examples/           示例公文
 skills/             gongwen-markdown 技能包（Agent Skill，随安装包分发）
@@ -293,4 +293,4 @@ GitHub Actions：CI 在 Windows x64 与 Linux ARM64（GLIBC 2.28）两个平台�
 本项目继续以 [GPL-3.0-or-later](LICENSE) 协议开源。旧输入法内核已移除。
 第三方组件、随包数据与字体的许可与署名见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-应用内输入法是词表输入法：主菜单的「输入法词表」页管基础表、公文四码表与个人词条，支持导入预览、查码、重码排序、体检与修改记录；加词按基础表反推的构词规则自动出码。见 [词表输入法设计与交接](docs/table-ime.md)。
+应用内输入法是词表输入法：主菜单的「输入法词表」页管基础表、导入表与个人词条——搜索框认文字或编码，双击就地改，复选批量移除，检查页可一次改用建议码，最近一步操作能撤销；查码、来源启停、构词规则与修改记录收在「更多」里。加词按基础表反推的构词规则自动出码。初始基础表随安装包携带，只收公文可用词。见 [词表输入法设计与交接](docs/table-ime.md)。
