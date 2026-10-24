@@ -107,9 +107,13 @@ impl Ime {
             Err(error) => ime.load_error = Some(error.to_string()),
         }
         match data::directory().map(|dir| dir.join("tables.json")) {
-            Ok(path) if path.exists() => match std::fs::read(&path)
-                .map_err(anyhow::Error::from)
-                .and_then(|bytes| Ok(serde_json::from_slice::<Personal>(&bytes)?))
+            Ok(path) if path.exists() => match crate::file_limits::read_bytes(
+                &path,
+                crate::file_limits::MAX_TEXT_BYTES,
+                "个人词表",
+            )
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| Ok(serde_json::from_slice::<Personal>(&bytes)?))
             {
                 Ok(personal) => ime.table.personal = personal,
                 Err(error) => {
@@ -162,6 +166,15 @@ impl Ime {
     }
     pub(crate) fn available(&self) -> bool {
         !self.table.base.is_empty()
+    }
+
+    /// 公文词表审阅只排除其他来源已提供的词，避免自己同步后把自己藏掉。
+    pub(crate) fn covers_lexicon_word(&self, word: &str) -> bool {
+        self.table.review_contains(word)
+    }
+
+    pub(crate) fn table_revision(&self) -> u64 {
+        self.table.revision()
     }
     pub(crate) fn active(&self) -> bool {
         self.settings.enabled && self.available()

@@ -24,20 +24,35 @@ pub(crate) enum LexiconJob {
 }
 
 impl GongwenApp {
+    pub(crate) fn lexicon_review_needs_refresh(&self) -> bool {
+        self.lexicon_dirty || self.lexicon_review.ime_revision != Some(self.ime.table_revision())
+    }
     /// 重查概况与列表。`lexicon_dirty` 为真时由页面调用。
     pub(crate) fn refresh_lexicon(&mut self) {
         let Some(store) = self.lexicon_store.as_ref() else {
             return;
         };
-        match store.stats() {
-            Ok(stats) => self.lexicon_stats = stats,
+        let show_existing = self.lexicon_review.show_ime_existing;
+        match store.review_stats(show_existing, &|word| self.ime.covers_lexicon_word(word)) {
+            Ok((stats, existing)) => {
+                self.lexicon_stats = stats;
+                self.lexicon_review.ime_existing = existing;
+            }
             Err(error) => self.lexicon_error = Some(format!("读取词表概况失败：{error:#}")),
         }
-        match store.list(&self.lexicon_filter) {
+        let listed = if show_existing {
+            store.list(&self.lexicon_filter)
+        } else {
+            store.list_excluding(&self.lexicon_filter, &|word| {
+                self.ime.covers_lexicon_word(word)
+            })
+        };
+        match listed {
             Ok(terms) => self.lexicon_terms = terms,
             Err(error) => self.lexicon_error = Some(format!("读取词表失败：{error:#}")),
         }
         self.lexicon_dirty = false;
+        self.lexicon_review.ime_revision = Some(self.ime.table_revision());
     }
 
     /// 导出预览。算一次要给每个词出码（几千次拼音查表），所以按口径缓存：
@@ -99,6 +114,9 @@ impl GongwenApp {
     /// 接受当前列表里所有还没接受的词。一条条点是二期工作台之前的权宜之计，
     /// 但没有它，第一次面对几千个候选词根本无从下手。
     pub(crate) fn accept_listed_lexicon_terms(&mut self) {
+        if self.lexicon_review_needs_refresh() {
+            self.refresh_lexicon();
+        }
         let ids: Vec<i64> = self
             .lexicon_terms
             .iter()
@@ -335,5 +353,63 @@ impl GongwenApp {
         message.push_str("。在「设置 → 输入法」导入四码词表即可生效。");
         self.lexicon_export_result = Some(message.clone());
         self.status = message;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_and_bulk_accept_skip_existing_words_without_rejecting_them() {
+        let dir = tempfile::tempdir().unwrap();
+        storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        let ime_dir = dir.path().join("ime");
+        std::fs::create_dir(&ime_dir).unwrap();
+        std::fs::write(ime_dir.join("base.txt"), "aa,1=已有词").unwrap();
+        let mut app = crate::app::management_samples::fixture();
+        {
+            let store = app.lexicon_store.as_mut().unwrap();
+            store.clear_all().unwrap();
+            store.add_manual("已有词").unwrap();
+            store.add_manual("新增词").unwrap();
+            for term in store.list(&lexicon::TermFilter::default()).unwrap() {
+                store.set_state(term.id, TermState::Candidate).unwrap();
+            }
+        }
+        app.refresh_lexicon();
+        assert_eq!(app.lexicon_review.ime_existing, 1);
+        assert_eq!(app.lexicon_stats.candidate, 1);
+        assert_eq!(app.lexicon_terms.len(), 1);
+        assert_eq!(app.lexicon_terms[0].term, "新增词");
+        app.accept_listed_lexicon_terms();
+        let all = app
+            .lexicon_store
+            .as_ref()
+            .unwrap()
+            .list(&lexicon::TermFilter::default())
+            .unwrap();
+        assert_eq!(
+            all.iter().find(|t| t.term == "已有词").unwrap().state,
+            TermState::Candidate
+        );
+        assert_eq!(
+            all.iter().find(|t| t.term == "新增词").unwrap().state,
+            TermState::Accepted
+        );
+        // 已接受词同步给输入法后，仍可在公文词表管理自己的记录。
+        app.sync_lexicon_to_ime(false);
+        app.refresh_lexicon();
+        assert_eq!(app.lexicon_terms.len(), 1);
+        assert_eq!(app.lexicon_terms[0].term, "新增词");
+        app.lexicon_review.show_ime_existing = true;
+        app.lexicon_dirty = true;
+        app.refresh_lexicon();
+        assert_eq!(app.lexicon_terms.len(), 2);
+        assert_eq!(
+            (app.lexicon_stats.candidate, app.lexicon_stats.accepted),
+            (1, 1)
+        );
+        storage::set_test_config_dir(None);
     }
 }

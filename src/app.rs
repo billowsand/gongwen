@@ -336,6 +336,7 @@ pub struct GongwenApp {
     /// 当前过滤条件下的词条；列表页直接渲染它。
     pub(crate) lexicon_terms: Vec<lexicon::LexiconTerm>,
     pub(crate) lexicon_filter: lexicon::TermFilter,
+    pub(crate) lexicon_review: lexicon::ReviewView,
     /// 任何增删改后置 true，强制下次重查。
     pub(crate) lexicon_dirty: bool,
     pub(crate) lexicon_busy: bool,
@@ -647,6 +648,7 @@ impl GongwenApp {
             lexicon_stats: lexicon::LexiconStats::default(),
             lexicon_terms: Vec::new(),
             lexicon_filter: lexicon::TermFilter::default(),
+            lexicon_review: lexicon::ReviewView::default(),
             lexicon_dirty: true,
             lexicon_busy: false,
             lexicon_scan_options: lexicon::scan::ScanOptions::default(),

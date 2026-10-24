@@ -152,6 +152,7 @@ pub(super) fn fixture() -> GongwenApp {
         lexicon_stats: lexicon::LexiconStats::default(),
         lexicon_terms: Vec::new(),
         lexicon_filter: lexicon::TermFilter::default(),
+        lexicon_review: lexicon::ReviewView::default(),
         lexicon_dirty: true,
         lexicon_busy: false,
         lexicon_scan_options: lexicon::scan::ScanOptions::default(),

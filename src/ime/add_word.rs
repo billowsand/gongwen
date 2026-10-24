@@ -30,8 +30,10 @@ pub(super) struct AddWord {
     first: bool,
     message: String,
     focus_code: bool,
+    focus_text: bool,
     /// 打开前焦点所在的编辑框，保存或关闭后还回去。
     return_focus: Option<egui::Id>,
+    position: Option<egui::Pos2>,
 }
 
 impl Default for AddWord {
@@ -47,8 +49,16 @@ impl Default for AddWord {
             first: false,
             message: String::new(),
             focus_code: false,
+            focus_text: false,
             return_focus: None,
+            position: None,
         }
+    }
+}
+
+impl AddWord {
+    pub(super) fn is_open(&self) -> bool {
+        self.open
     }
 }
 
@@ -64,8 +74,15 @@ impl Ime {
         state.first = false;
         state.message.clear();
         state.recent = recent.filter(|r| r.chars().count() >= 2);
-        state.focus_code = true;
+        state.focus_code = !state.text.is_empty();
+        state.focus_text = state.text.is_empty();
         state.return_focus = self.focus_id;
+        state.position = Some(egui::Pos2::ZERO);
+    }
+
+    /// 从词表工具栏加词时，把小窗放在按钮附近。
+    pub(super) fn position_add_word(&mut self, position: egui::Pos2) {
+        self.add_word.position = Some(position);
     }
 
     /// 造词：取最近上屏的一段汉字，默认用整段（最多八个字）。
@@ -103,13 +120,29 @@ impl Ime {
         }
         let mut open = true;
         let mut close = false;
-        egui::Window::new("加入词表")
+        let mut window = egui::Window::new("加入词表")
             .id(egui::Id::new("ime-add-word-window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(360.0)
-            .show(ctx, |ui| close = self.add_word_body(ui));
+            .default_width(360.0);
+        if let Some(position) = self.add_word.position.take() {
+            let rect = ctx.content_rect();
+            let position = if position == egui::Pos2::ZERO {
+                rect.center() - egui::vec2(180.0, 110.0)
+            } else {
+                position
+            };
+            window = window.current_pos(egui::pos2(
+                position
+                    .x
+                    .clamp(rect.left(), (rect.right() - 380.0).max(rect.left())),
+                position
+                    .y
+                    .clamp(rect.top(), (rect.bottom() - 250.0).max(rect.top())),
+            ));
+        }
+        window.show(ctx, |ui| close = self.add_word_body(ui));
         if !open || close {
             self.add_word.open = false;
             if let Some(id) = self.add_word.return_focus.take() {
@@ -127,9 +160,20 @@ impl Ime {
             .show(ui, |ui| {
                 ui.label("文字");
                 ui.vertical(|ui| {
-                    ui.add(
+                    let response = ui.add(
                         egui::TextEdit::singleline(&mut self.add_word.text).desired_width(220.0),
                     );
+                    if self.add_word.focus_text {
+                        response.request_focus();
+                        self.add_word.focus_text = false;
+                    }
+                    if response.changed() {
+                        self.recompute_code();
+                    }
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        self.recompute_code();
+                        close = self.save_add_word(false);
+                    }
                     if let Some(recent) = self.add_word.recent.clone() {
                         self.recent_choices(ui, &recent);
                     }
@@ -141,8 +185,8 @@ impl Ime {
                     let response = super::exempt(
                         ui.add(
                             egui::TextEdit::singleline(&mut self.add_word.code)
-                                .hint_text("1–4 个小写字母")
-                                .desired_width(80.0)
+                                .hint_text("自动编码")
+                                .desired_width(110.0)
                                 .font(egui::TextStyle::Monospace),
                         ),
                     );
@@ -168,17 +212,18 @@ impl Ime {
                 });
                 ui.end_row();
             });
-        self.rule_hints(ui);
-        ui.separator();
-        self.code_occupants(ui);
-        ui.add_space(4.0);
-        ui.checkbox(&mut self.add_word.first, "设为该码首选");
+        ui.weak("编码自动生成，可直接修改。Enter 添加，Esc 关闭。");
+        ui.collapsing("候选与更多选项", |ui| {
+            self.rule_hints(ui);
+            self.code_occupants(ui);
+            ui.checkbox(&mut self.add_word.first, "设为该码首选");
+        });
         ui.horizontal(|ui| {
-            if ui.button("保存").clicked() {
+            if ui.button("添加").clicked() {
                 close = self.save_add_word(false);
             }
             if ui
-                .button("保存并继续")
+                .button("连续添加")
                 .on_hover_text("保存后清空，接着加下一个词")
                 .clicked()
             {
@@ -188,6 +233,7 @@ impl Ime {
         if !self.add_word.message.is_empty() {
             ui.label(&self.add_word.message);
         }
+        close |= ui.input(|i| i.key_pressed(egui::Key::Escape));
         close
     }
 
@@ -352,6 +398,7 @@ impl Ime {
                     self.add_word.recent = None;
                     self.add_word.message =
                         format!("已保存 {} {}，可以接着加。", entry.code, entry.text);
+                    self.add_word.focus_text = true;
                     false
                 } else {
                     true
@@ -381,7 +428,7 @@ mod tests {
     use egui_kittest::{Harness, kittest::Queryable};
 
     #[test]
-    fn window_fills_code_by_rule_and_lists_occupants() {
+    fn window_fills_code_and_keeps_extra_options_collapsed() {
         let mut ime = Ime::bare(ImeSettings::default());
         ime.table.base =
             table::parse("vifo,1=指\ndcsc,1=导\nyrdc,1=引导\nvidc,1=只读词", false).entries;
@@ -391,6 +438,9 @@ mod tests {
         let mut harness = Harness::new_ui_state(|ui, ime: &mut Ime| ime.windows_ui(ui.ctx()), ime);
         harness.run();
         assert_eq!(harness.state().add_word.code, "vidc");
+        harness.get_by_label("添加");
+        harness.get_by_label("候选与更多选项").click();
+        harness.run();
         harness.get_by_label("vidc 现有：1 只读词");
         harness.get_by_label("保存后新词排第 2 位。");
     }

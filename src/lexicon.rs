@@ -242,6 +242,14 @@ pub struct LexiconStats {
     pub last_scan_at: String,
 }
 
+/// 审阅视图的临时口径，不改词条状态，也不影响完整码表导出。
+#[derive(Debug, Default)]
+pub(crate) struct ReviewView {
+    pub show_ime_existing: bool,
+    pub ime_existing: i64,
+    pub ime_revision: Option<u64>,
+}
+
 /// 词表表结构。与稿件库、知识库同一个库文件，独立连接。
 ///
 /// `lexicon_source_terms` 记每个来源各贡献了哪些词、各多少次——聚合列
@@ -350,6 +358,15 @@ impl LexiconStore {
 
     /// 按过滤条件列词，权重高的在前。
     pub fn list(&self, filter: &TermFilter) -> Result<Vec<LexiconTerm>> {
+        self.list_excluding(filter, &|_| false)
+    }
+
+    /// 先排除已收录词再截断，避免前 500 条全是旧词时漏掉后面的新词。
+    pub fn list_excluding(
+        &self,
+        filter: &TermFilter,
+        exclude: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<LexiconTerm>> {
         // 权重要在 SQL 里排，否则 limit 截出来的就不是最该看的那一批。
         // length(term) 在 SQLite 里对 TEXT 按字符计，正好是字数。
         let mut sql = String::from(
@@ -375,18 +392,55 @@ impl LexiconStore {
             args.push(Box::new(filter.min_chars as i64));
             sql.push_str(&format!(" AND length(term) >= ?{}", args.len()));
         }
-        args.push(Box::new(filter.limit.max(1) as i64));
-        sql.push_str(&format!(
+        sql.push_str(
             " ORDER BY (MAX(length(term) * 2 - 4, 0) * MAX(doc_count, 1)) DESC,
-                       doc_count DESC, freq_total DESC, term ASC
-              LIMIT ?{}",
-            args.len()
-        ));
+                       doc_count DESC, freq_total DESC, term ASC",
+        );
 
         let mut stmt = self.conn.prepare(&sql)?;
         let params = rusqlite::params_from_iter(args.iter().map(|value| value.as_ref()));
         let rows = stmt.query_map(params, map_term)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut result = Vec::new();
+        for row in rows {
+            let term = row?;
+            if exclude(&term.term) {
+                continue;
+            }
+            result.push(term);
+            if result.len() >= filter.limit.max(1) {
+                break;
+            }
+        }
+        Ok(result)
+    }
+
+    /// 待确认等概况也按去重后的视图统计，不能仍把隐藏的词算作审阅工作量。
+    pub fn review_stats(
+        &self,
+        show_existing: bool,
+        covered: &dyn Fn(&str) -> bool,
+    ) -> Result<(LexiconStats, i64)> {
+        let mut stats = self.stats()?;
+        let mut existing = 0;
+        let mut stmt = self.conn.prepare("SELECT term, state FROM lexicon_terms")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let term: String = row.get(0)?;
+            if !covered(&term) {
+                continue;
+            }
+            existing += 1;
+            if show_existing {
+                continue;
+            }
+            stats.total -= 1;
+            match TermState::parse(&row.get::<_, String>(1)?) {
+                TermState::Candidate => stats.candidate -= 1,
+                TermState::Accepted => stats.accepted -= 1,
+                TermState::Rejected => stats.rejected -= 1,
+            }
+        }
+        Ok((stats, existing))
     }
 
     /// 导出用：取所有未被拒绝的词，不分页。过滤与预算交给 `export`。
@@ -749,6 +803,54 @@ pub fn source_hash(markdown: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_excludes_existing_before_limit_and_keeps_saved_states() {
+        let mut store = LexiconStore::open(Path::new(":memory:")).unwrap();
+        for word in ["已有词", "新词甲", "新词乙"] {
+            store.add_manual(word).unwrap();
+        }
+        let all = store.list(&TermFilter::default()).unwrap();
+        for term in &all {
+            store.set_state(term.id, TermState::Candidate).unwrap();
+        }
+        let filter = TermFilter {
+            limit: 1,
+            ..Default::default()
+        };
+        let first = store.list(&filter).unwrap().remove(0);
+        let shown = store
+            .list_excluding(&filter, &|word| word == first.term)
+            .unwrap();
+        assert_eq!(shown.len(), 1);
+        assert_ne!(shown[0].id, first.id);
+        let (stats, hidden) = store
+            .review_stats(false, &|word| word == first.term)
+            .unwrap();
+        assert_eq!((stats.total, stats.candidate, hidden), (2, 2, 1));
+        let (full, existing) = store
+            .review_stats(true, &|word| word == first.term)
+            .unwrap();
+        assert_eq!((full.total, full.candidate, existing), (3, 3, 1));
+        assert!(
+            store
+                .list(&TermFilter::default())
+                .unwrap()
+                .iter()
+                .all(|t| t.state == TermState::Candidate)
+        );
+        assert!(store.list_excluding(&filter, &|_| true).unwrap().is_empty());
+        let search = TermFilter {
+            search: first.term.clone(),
+            ..filter
+        };
+        assert!(
+            store
+                .list_excluding(&search, &|word| word == first.term)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     fn term(text: &str, doc_count: i64) -> LexiconTerm {
         LexiconTerm {

@@ -1,7 +1,7 @@
 //! 词表合并、精确查询与个人调整；不解析拼音，不生成候选。
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Entry {
@@ -82,7 +82,7 @@ pub(crate) fn parse(text: &str, four: bool) -> Parsed {
     result
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Batch {
     pub id: String,
     pub name: String,
@@ -90,7 +90,7 @@ pub(crate) struct Batch {
     pub entries: Vec<Entry>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Personal {
     pub batches: Vec<Batch>,
@@ -183,6 +183,9 @@ pub(crate) struct Table {
     index: BTreeMap<String, Vec<Candidate>>,
     /// 反查：文字 → 编码，短码在前。含已屏蔽的，查询时再过滤。
     by_text: HashMap<String, Vec<String>>,
+    /// 独立于公文词表、且当前未屏蔽的词，用于避免反复审阅。
+    review_words: HashSet<String>,
+    revision: u64,
 }
 
 impl Table {
@@ -199,6 +202,27 @@ impl Table {
     }
 
     pub fn rebuild(&mut self) {
+        let hidden: HashSet<_> = self
+            .personal
+            .hidden
+            .iter()
+            .map(|e| (e.code.as_str(), e.text.as_str()))
+            .collect();
+        self.review_words = self
+            .base
+            .iter()
+            .chain(self.personal.entries.iter())
+            .chain(
+                self.personal
+                    .batches
+                    .iter()
+                    .filter(|b| b.enabled)
+                    .flat_map(|b| b.entries.iter()),
+            )
+            .filter(|e| !hidden.contains(&(e.code.as_str(), e.text.as_str())))
+            .map(|e| e.text.clone())
+            .collect();
+        self.revision = self.revision.wrapping_add(1);
         let mut index: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
         let mut add = |entries: &[Entry], source: &str| {
             for entry in entries {
@@ -247,6 +271,14 @@ impl Table {
         }
         self.index = index;
         self.by_text = by_text;
+    }
+
+    pub fn review_contains(&self, word: &str) -> bool {
+        self.review_words.contains(word)
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// 一个词的全部有效编码：编码、在该码候选中的位置（从 1 起）与来源，短码在前。
@@ -410,6 +442,50 @@ impl Table {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_coverage_uses_visible_independent_sources_by_word() {
+        let mut table = Table::with(
+            parse("ab,1=已有词\nabcd,1=已屏蔽词", false).entries,
+            parse("efgh,1=自同步词\nijkl,1=已屏蔽词", false).entries,
+            Personal {
+                entries: parse("mn,1=个人词", false).entries,
+                hidden: parse("abcd,1=已屏蔽词", false).entries,
+                batches: vec![
+                    Batch {
+                        id: "on".into(),
+                        name: "公文词表".into(),
+                        enabled: true,
+                        entries: parse("opqr,1=导入词", true).entries,
+                    },
+                    Batch {
+                        id: "off".into(),
+                        name: "停用表".into(),
+                        enabled: false,
+                        entries: parse("stuv,1=停用词", true).entries,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        assert!(table.review_contains("已有词")); // 简码也算，不比较建议码。
+        assert!(table.review_contains("个人词"));
+        assert!(table.review_contains("导入词")); // 来源同名也不混淆身份。
+        assert!(!table.review_contains("停用词"));
+        assert!(!table.review_contains("自同步词"));
+        assert!(!table.review_contains("已屏蔽词")); // 公文层仍可输入，也不能算独立收录。
+        assert!(!table.review_contains("已有")); // 不做子串匹配。
+        let revision = table.revision();
+        table.personal.hidden.clear();
+        table.personal.batches[1].enabled = true;
+        table.rebuild();
+        assert_ne!(table.revision(), revision);
+        assert!(table.review_contains("已屏蔽词"));
+        assert!(table.review_contains("停用词"));
+        table.personal.hidden = parse("abcd,1=已屏蔽词", false).entries;
+        table.rebuild();
+        assert!(!table.review_contains("已屏蔽词"));
+    }
     #[test]
     #[ignore = "本机基础词表不入库"]
     fn real_base_table_is_complete_and_exact() {

@@ -1,17 +1,12 @@
-//! 「输入法词表」页：查询与维护、查码、导入与来源、体检、修改记录。
-//!
-//! 查询用两个框：编码框只收字母（不走输入法，支持前缀与 `?` 通配），文字框走输入法。
-//! 结果表虚拟滚动，不设条数上限；点一行在右侧看详情、改词、调序、屏蔽。
+//! 输入法词表页：整页表格快速增删改，检查结果直接处理，误操作可撤销。
+mod checks;
+mod quick;
 use super::{
     session::Ime,
     table::{Entry, PERSONAL},
 };
 use crate::theme;
 use eframe::egui;
-use egui_extras::{Column, TableBuilder};
-
-/// 体检里每类最多列几条。
-const MAX_HEALTH_ROWS: usize = 200;
 
 /// 重码多于这么多个才算「高重码组」。
 const CROWDED: usize = 4;
@@ -27,20 +22,12 @@ pub(crate) enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [
-        Tab::Browse,
-        Tab::Lookup,
-        Tab::Sources,
-        Tab::Health,
-        Tab::History,
-    ];
-
     fn label(self) -> &'static str {
         match self {
-            Tab::Browse => "查询与维护",
+            Tab::Browse => "词条",
             Tab::Lookup => "查码",
             Tab::Sources => "导入与来源",
-            Tab::Health => "体检",
+            Tab::Health => "检查",
             Tab::History => "修改记录",
         }
     }
@@ -92,6 +79,20 @@ struct Health {
 
 #[derive(Default)]
 pub(super) struct Page {
+    search: String,
+    filters_open: bool,
+    checked: std::collections::BTreeSet<(String, String)>,
+    editing: Option<Entry>,
+    edit_focus: bool,
+    edit_focus_code: bool,
+    details_open: bool,
+    search_focus: bool,
+    health_checked: std::collections::BTreeSet<(String, String)>,
+    health_ignored: std::collections::BTreeSet<(String, String, String)>,
+    health_filter: usize,
+    health_editing: Option<Entry>,
+    health_edit_code: String,
+    health_edit_focus: bool,
     pub tab: Tab,
     code: String,
     text: String,
@@ -125,62 +126,56 @@ impl Ime {
             self.page.stale = true;
             self.page.health = None;
         }
+        // 先消费旧标记：本帧的保存/撤销不能在帧尾被清掉。
+        self.manager.dirty = false;
+        let margin = if ui.available_width() < 900.0 { 20 } else { 28 };
         let mut action = None;
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.heading("输入法词表");
-            ui.add_space(6.0);
-            let brief = self.data_brief().unwrap_or_else(|| "未导入基础表".into());
-            theme::chip(ui, &brief, theme::text_muted(), theme::surface_sunk());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add(theme::icon_text_button(
-                        theme::Icon::Refresh,
-                        "同步公文词表",
-                    ))
-                    .on_hover_text("把公文词表里已接受且为四码的词交给输入法")
-                    .clicked()
-                {
-                    action = Some(PageAction::SyncLexicon);
-                }
-                if ui
-                    .add(theme::icon_text_button(theme::Icon::FilePlus, "加词"))
-                    .on_hover_text("按构词规则自动出码，也可用 Ctrl+Shift+A 从正文造词")
-                    .clicked()
-                {
-                    self.open_add_word("", None);
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(margin))
+            .show(ui, |ui| {
+                action = self.quick_header(ui);
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    for tab in [Tab::Browse, Tab::Health] {
+                        if theme::ribbon_tab_button(ui, self.page.tab == tab, tab.label(), false)
+                            .clicked()
+                        {
+                            self.page.tab = tab;
+                        }
+                    }
+                    ui.menu_button("更多", |ui| {
+                        for tab in [Tab::Lookup, Tab::Sources, Tab::History] {
+                            if ui.button(tab.label()).clicked() {
+                                self.page.tab = tab;
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("同步公文词表").clicked() {
+                            action = Some(PageAction::SyncLexicon);
+                            ui.close();
+                        }
+                    });
+                });
+                ui.separator();
+                self.quick_feedback(ui);
+                match self.page.tab {
+                    Tab::Browse => self.browse_tab(ui),
+                    Tab::Lookup => self.lookup_tab(ui),
+                    Tab::Sources => {
+                        egui::ScrollArea::vertical()
+                            .id_salt("ime_sources")
+                            .show(ui, |ui| {
+                                self.import_section(ui);
+                                self.batches_section(ui);
+                                self.rules_summary(ui);
+                            });
+                    }
+                    Tab::Health => self.health_tab(ui),
+                    Tab::History => self.history_section(ui),
                 }
             });
-        });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            for tab in Tab::ALL {
-                if theme::ribbon_tab_button(ui, self.page.tab == tab, tab.label(), false).clicked()
-                {
-                    self.page.tab = tab;
-                }
-            }
-        });
-        ui.separator();
-        self.message_ui(ui);
-        match self.page.tab {
-            Tab::Browse => self.browse_tab(ui),
-            Tab::Lookup => self.lookup_tab(ui),
-            Tab::Sources => {
-                egui::ScrollArea::vertical()
-                    .id_salt("ime_sources")
-                    .show(ui, |ui| {
-                        self.import_section(ui);
-                        self.batches_section(ui);
-                        ui.weak("公文词表中已接受且编码为四码的词自动加载，也可点右上角立即同步。");
-                        self.rules_summary(ui);
-                    });
-            }
-            Tab::Health => self.health_tab(ui),
-            Tab::History => self.history_section(ui),
-        }
-        // 管理分区与本页都看过了，词表变动的标记到这里清掉。
-        self.manager.dirty = false;
+        self.quick_details(ui.ctx());
         action
     }
 
@@ -192,28 +187,30 @@ impl Ime {
     }
 
     fn browse_tab(&mut self, ui: &mut egui::Ui) {
-        self.filter_bar(ui);
+        if self.page.filters_open {
+            self.filter_bar(ui);
+        }
         if self.page.stale || !self.page.ready {
             self.page.rows = self.filtered_rows();
             self.page.stale = false;
             self.page.ready = true;
+            let visible: std::collections::BTreeSet<_> = self
+                .page
+                .rows
+                .iter()
+                .map(|r| (r.code.clone(), r.text.clone()))
+                .collect();
+            self.page.checked.retain(|key| visible.contains(key));
+            if self
+                .page
+                .selected
+                .as_ref()
+                .is_some_and(|entry| !visible.contains(&(entry.code.clone(), entry.text.clone())))
+            {
+                self.page.selected = None;
+            }
         }
-        ui.add_space(4.0);
-        let detail_width = 330.0;
-        let table_width = (ui.available_width() - detail_width - 12.0).max(320.0);
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(table_width);
-                self.results_table(ui);
-            });
-            ui.separator();
-            ui.vertical(|ui| {
-                ui.set_width(detail_width);
-                egui::ScrollArea::vertical()
-                    .id_salt("ime_detail")
-                    .show(ui, |ui| self.detail_panel(ui));
-            });
-        });
+        self.quick_table(ui);
     }
 
     fn filter_bar(&mut self, ui: &mut egui::Ui) {
@@ -304,14 +301,26 @@ impl Ime {
     /// 按筛选条件扫一遍词表。只在条件或词表变化时调用。
     fn filtered_rows(&self) -> Vec<Row> {
         let page = &self.page;
-        let pattern = page.code.trim().to_ascii_lowercase();
+        let search = page.search.trim();
+        let code_search =
+            !search.is_empty() && search.bytes().all(|b| b.is_ascii_alphabetic() || b == b'?');
+        let pattern = if code_search {
+            search
+        } else {
+            page.code.trim()
+        }
+        .to_ascii_lowercase();
         let wildcard = pattern.contains('?');
         let prefix = if wildcard {
             pattern.split('?').next().unwrap_or_default().to_string()
         } else {
             pattern.clone()
         };
-        let text = page.text.trim();
+        let text = if !search.is_empty() && !code_search {
+            search
+        } else {
+            page.text.trim()
+        };
         let mut rows = Vec::new();
         for (code, candidates) in self.table.codes_from(&prefix) {
             if wildcard
@@ -339,6 +348,9 @@ impl Ime {
             let mut position = 0;
             for candidate in candidates {
                 let hidden = self.table.hidden(code, &candidate.text);
+                if hidden && page.source != Source::Hidden {
+                    continue;
+                }
                 if !hidden {
                     position += 1;
                 }
@@ -373,82 +385,6 @@ impl Ime {
             }
         }
         rows
-    }
-
-    fn results_table(&mut self, ui: &mut egui::Ui) {
-        const ROW_HEIGHT: f32 = 24.0;
-        ui.weak(format!("共 {} 条", self.page.rows.len()));
-        let rows = std::mem::take(&mut self.page.rows);
-        let mut clicked = None;
-        TableBuilder::new(ui)
-            .id_salt("ime_table_rows")
-            .striped(true)
-            .sense(egui::Sense::click())
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::initial(60.0).at_least(48.0))
-            .column(Column::initial(160.0).at_least(80.0))
-            .column(Column::initial(48.0).at_least(40.0))
-            .column(Column::remainder().at_least(100.0))
-            .header(ROW_HEIGHT, |mut header| {
-                for title in ["编码", "文字", "位次", "来源"] {
-                    header.col(|ui| {
-                        ui.strong(title);
-                    });
-                }
-            })
-            .body(|body| {
-                body.rows(ROW_HEIGHT, rows.len(), |mut row| {
-                    let data = &rows[row.index()];
-                    let selected = self
-                        .page
-                        .selected
-                        .as_ref()
-                        .is_some_and(|e| e.code == data.code && e.text == data.text);
-                    row.set_selected(selected);
-                    row.col(|ui| {
-                        ui.monospace(&data.code);
-                    });
-                    row.col(|ui| {
-                        let text = egui::RichText::new(&data.text);
-                        ui.add(
-                            egui::Label::new(if data.position.is_none() {
-                                text.strikethrough().weak()
-                            } else {
-                                text
-                            })
-                            .truncate()
-                            .selectable(false),
-                        );
-                    });
-                    row.col(|ui| match data.position {
-                        Some(position) => {
-                            ui.label(position.to_string());
-                        }
-                        None => {
-                            ui.weak("屏蔽");
-                        }
-                    });
-                    row.col(|ui| {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(data.sources.join("、")).weak())
-                                .truncate()
-                                .selectable(false),
-                        );
-                    });
-                    if row.response().clicked() {
-                        clicked = Some(Entry {
-                            code: data.code.clone(),
-                            text: data.text.clone(),
-                        });
-                    }
-                });
-            });
-        self.page.rows = rows;
-        if let Some(entry) = clicked {
-            self.page.edit_code = entry.code.clone();
-            self.page.edit_text = entry.text.clone();
-            self.page.selected = Some(entry);
-        }
     }
 
     /// 右侧详情：该码全部候选、该词全部编码、规则码与修改。
@@ -543,31 +479,6 @@ impl Ime {
         }
 
         ui.add_space(6.0);
-        ui.strong("修改");
-        ui.horizontal(|ui| {
-            super::exempt(
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.page.edit_code)
-                        .desired_width(60.0)
-                        .font(egui::TextStyle::Monospace),
-                ),
-            );
-            ui.add(egui::TextEdit::singleline(&mut self.page.edit_text).desired_width(150.0));
-            if ui.button("保存").clicked() {
-                let next = Entry {
-                    code: self.page.edit_code.trim().to_string(),
-                    text: self.page.edit_text.trim().to_string(),
-                };
-                let saved = self.edit_entry(&entry, &next);
-                if saved.is_ok() {
-                    self.page.selected = Some(next);
-                }
-                result = Some((saved, "词条已修改。"));
-            }
-        });
-        if current.sources.iter().any(|s| s != PERSONAL) {
-            ui.weak("这条词来自其他来源：修改会屏蔽原词、另存一条个人词条。");
-        }
         ui.horizontal_wrapped(|ui| {
             if ui.button(if hidden { "恢复" } else { "屏蔽" }).clicked() {
                 result = Some((
@@ -627,93 +538,6 @@ impl Ime {
                     ui.weak(
                         "输入字词看它的全部编码与逐字码；输入编码看该码全部候选与以它开头的编码。",
                     );
-                }
-            });
-    }
-
-    fn health_tab(&mut self, ui: &mut egui::Ui) {
-        if self.page.health.is_none() {
-            self.page.health = Some(self.compute_health());
-        }
-        let health = self.page.health.clone().unwrap_or_default();
-        egui::ScrollArea::vertical()
-            .id_salt("ime_health")
-            .show(ui, |ui| {
-                self.overlay_section(ui);
-                ui.add_space(8.0);
-                let mut fix = None;
-                egui::CollapsingHeader::new(format!(
-                    "编码与构词规则不符（{}）",
-                    health.nonconforming.len()
-                ))
-                .id_salt("health_nonconforming")
-                .default_open(!health.nonconforming.is_empty())
-                .show(ui, |ui| {
-                    ui.weak("公文词表、导入表与个人词条里的词组。可能是手填错了，也可能是多音字。");
-                    for (entry, suggestion, sources) in
-                        health.nonconforming.iter().take(MAX_HEALTH_ROWS)
-                    {
-                        ui.horizontal(|ui| {
-                            ui.monospace(&entry.code);
-                            ui.label(&entry.text);
-                            ui.weak(sources.join("、"));
-                            ui.label(format!("→ {suggestion}"));
-                            if ui.small_button("改为建议码").clicked() {
-                                fix = Some((entry.clone(), suggestion.clone()));
-                            }
-                        });
-                    }
-                });
-                egui::CollapsingHeader::new(format!("同词多个四码（{}）", health.multi_code.len()))
-                    .id_salt("health_multi")
-                    .show(ui, |ui| {
-                        ui.weak("至少一个编码不是基础表的；多半是旧码残留，留下常用的一个。");
-                        for (text, codes) in health.multi_code.iter().take(MAX_HEALTH_ROWS) {
-                            ui.horizontal(|ui| {
-                                ui.label(text);
-                                ui.monospace(codes.join("  "));
-                                if ui.small_button("查看").clicked() {
-                                    self.show_lookup_tab(text);
-                                }
-                            });
-                        }
-                    });
-                egui::CollapsingHeader::new(format!(
-                    "高重码编码（{} 个，候选多于 {CROWDED} 个）",
-                    health.crowded.len()
-                ))
-                .id_salt("health_crowded")
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for (code, count) in health.crowded.iter().take(MAX_HEALTH_ROWS) {
-                            if ui
-                                .small_button(format!("{code} ×{count}"))
-                                .on_hover_text("在查询与维护里看这个码")
-                                .clicked()
-                            {
-                                self.page.tab = Tab::Browse;
-                                self.page.code = code.clone();
-                                self.page.text.clear();
-                                self.page.stale = true;
-                            }
-                        }
-                    });
-                });
-                egui::CollapsingHeader::new(format!("没有字码的汉字（{}）", health.uncoded.len()))
-                    .id_salt("health_uncoded")
-                    .show(ui, |ui| {
-                        ui.weak(
-                            "这些字在基础表里没有两码以上的编码，含它们的词加词时无法自动出码。",
-                        );
-                        ui.label(health.uncoded.iter().collect::<String>());
-                    });
-                if let Some((entry, code)) = fix {
-                    let next = Entry {
-                        code,
-                        text: entry.text.clone(),
-                    };
-                    let result = self.edit_entry(&entry, &next);
-                    self.report(result, "已改为建议码。");
                 }
             });
     }
@@ -830,6 +654,48 @@ mod tests {
     }
 
     #[test]
+    fn quick_search_hides_removed_words_and_handles_code_prefixes() {
+        let mut ime = Ime::bare(super::super::ImeSettings::default());
+        ime.table.base =
+            table::parse("ab,1=甲\nabcd,1=工作\nabce,1=工作报告\nxy,1=乙", false).entries;
+        ime.table.personal.hidden = vec![Entry {
+            code: "abce".into(),
+            text: "工作报告".into(),
+        }];
+        ime.table.rebuild();
+        ime.page.search = "工作".into();
+        assert_eq!(ime.filtered_rows().len(), 1);
+        ime.page.search = "AB?D".into();
+        assert_eq!(ime.filtered_rows()[0].text, "工作");
+        ime.page.search = "ab".into();
+        assert_eq!(ime.filtered_rows().len(), 2);
+        ime.page.source = Source::Hidden;
+        assert_eq!(ime.filtered_rows()[0].text, "工作报告");
+    }
+
+    #[test]
+    fn delete_shortcut_never_removes_words_while_search_has_focus() {
+        use egui_kittest::Harness;
+        let mut ime = Ime::bare(super::super::ImeSettings::default());
+        ime.table.base = table::parse("ab,1=甲", false).entries;
+        ime.table.rebuild();
+        ime.page.checked.insert(("ab".into(), "甲".into()));
+        let mut harness = Harness::new_ui_state(
+            |ui, ime: &mut Ime| {
+                ime.page_ui(ui);
+            },
+            ime,
+        );
+        harness.run();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+        harness.run();
+        harness.key_press(egui::Key::Delete);
+        harness.run();
+        assert!(harness.state().table.personal.hidden.is_empty());
+        assert_eq!(harness.state().page.checked.len(), 1);
+    }
+
+    #[test]
     fn page_selects_rows_and_switches_tabs() {
         use egui_kittest::{Harness, kittest::Queryable};
         let mut ime = Ime::bare(super::super::ImeSettings::default());
@@ -860,7 +726,7 @@ vidc,1=指导",
                 text: "乙".into()
             })
         );
-        for tab in ["查码", "导入与来源", "体检", "修改记录", "查询与维护"] {
+        for tab in ["检查", "词条"] {
             // 详情面板里也有一个「查码」按钮，标签页按钮画在前面。
             harness.get_all_by_label(tab).next().unwrap().click();
             harness.run();

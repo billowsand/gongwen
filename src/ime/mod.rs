@@ -13,6 +13,7 @@ mod ops;
 mod page;
 mod session;
 mod table;
+mod undo;
 pub(crate) use cursor::follow_cursor;
 pub(crate) use exempt::exempt;
 pub(crate) use page::PageAction;

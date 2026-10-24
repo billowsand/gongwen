@@ -657,7 +657,14 @@ impl GongwenApp {
 
         let new_doc = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N);
         if ctx.input_mut(|input| input.consume_shortcut(&new_doc)) {
-            self.new_blank_manuscript();
+            if matches!(
+                self.tabs.get(self.active_tab),
+                Some(TabRef::Page(NavPage::ImeTable))
+            ) {
+                self.ime.open_add_word("", None);
+            } else {
+                self.new_blank_manuscript();
+            }
         }
 
         // F1 全局切到帮助标签。用 consume_key 而非 consume_shortcut：F1 不是
@@ -712,7 +719,7 @@ impl GongwenApp {
         }
 
         let find = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F);
-        if ctx.input_mut(|input| input.consume_shortcut(&find)) && self.showing_doc() {
+        if self.showing_doc() && ctx.input_mut(|input| input.consume_shortcut(&find)) {
             if !self.doc().markdown_find.open
                 && let Some(state) = egui::TextEdit::load_state(ctx, editor_id())
                 && let Some(range) = state.cursor.char_range()

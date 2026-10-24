@@ -21,7 +21,7 @@ pub(crate) fn lexicon_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
         );
         return;
     }
-    if app.lexicon_dirty {
+    if app.lexicon_review_needs_refresh() {
         app.refresh_lexicon();
     }
     ui.add_space(8.0);
@@ -394,7 +394,19 @@ fn filter_bar(app: &mut GongwenApp, ui: &mut egui::Ui) {
             app.lexicon_filter.search = search;
             app.lexicon_dirty = true;
         }
+        if ui.checkbox(&mut app.lexicon_review.show_ime_existing, "显示输入法已收录词")
+            .on_hover_text("默认隐藏基础表、个人词与已启用导入表中可输入的同名词；不按编码区分，不包括本公文词表同步的词。")
+            .changed()
+        {
+            app.lexicon_dirty = true;
+        }
     });
+    if app.lexicon_review.ime_existing > 0 && !app.lexicon_review.show_ime_existing {
+        ui.weak(format!(
+            "已隐藏输入法收录的 {} 个词，无需重复审阅。",
+            app.lexicon_review.ime_existing
+        ));
+    }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let mut term = app.lexicon_new_term.clone();
@@ -449,7 +461,9 @@ fn filter_bar(app: &mut GongwenApp, ui: &mut egui::Ui) {
 fn term_table(app: &mut GongwenApp, ui: &mut egui::Ui) {
     const ROW_HEIGHT: f32 = 26.0;
     if app.lexicon_terms.is_empty() {
-        ui.weak("还没有词条。先点右上角「扫描」，从已发布与已归档的稿件里累积。");
+        ui.weak(
+            "当前条件下没有需要列出的词。可调整筛选或勾选「显示输入法已收录词」，也可扫描新稿件。",
+        );
         return;
     }
     // 逐行动作先收集，循环里直接改会和表格借用打架。
@@ -495,7 +509,7 @@ fn term_table(app: &mut GongwenApp, ui: &mut egui::Ui) {
                     }
                     if term.in_base_dict {
                         ui.weak("·通")
-                            .on_hover_text("jieba 自带词典里就有这个词，输入法多半也有，收益存疑");
+                            .on_hover_text("jieba 自带词典已收录；是否可输入以输入法词表为准");
                     }
                 });
                 row.col(|ui| {
