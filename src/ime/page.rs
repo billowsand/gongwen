@@ -881,7 +881,8 @@ vidc,1=指导",
         let rows = ime.filtered_rows();
         let health = ime.compute_health();
         let elapsed = started.elapsed();
-        assert!(rows.len() >= 55_000);
+        // 2026-10-24 第二轮清理后全表 51,269 条（原 57,874 条），下限随实际规模下调。
+        assert!(rows.len() >= 50_000);
         assert!(health.nonconforming.is_empty());
         println!("全表 {} 行与体检用时 {elapsed:?}", rows.len());
     }
