@@ -3,9 +3,7 @@
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::tasks`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::app::{
-    DocJob, DraftAction, WorkerResult, accent, export_and_compile, open_in_os, reveal_in_os,
-};
+use crate::app::{DocJob, WorkerResult, accent, export_and_compile, open_in_os, reveal_in_os};
 use crate::doc_import;
 use crate::draft_page::{DocKey, DraftPage, ExportKind, FileAction};
 use crate::export;
@@ -88,22 +86,28 @@ impl DraftPage<'_> {
     /// 「打印…」：按覆盖策略只导一份 PDF，导完由外壳打开并弹打印对话框。
     /// 走的就是 [`Self::start_export_with`]，不另写一条导出路径。
     pub(crate) fn start_export_for_print(&mut self) {
-        let selection = ExportSelection {
-            markdown: false,
-            docx: false,
-            pdf: true,
-            typst: false,
-            overwrite: self.config.export.overwrite,
-        };
-        // `start_export_with` 会拦「正在忙 / 没有内容」；只有这一下真把导出开起来了才记
-        // 标记。只看调用后的 `busy` 不够：别的任务本来就在跑时它也是真，标记会挂到
-        // 那个任务后面的某次导出上。
-        let was_busy = self.doc.busy;
-        self.start_export_with(selection);
-        if !was_busy && self.doc.busy {
+        if self.start_export_only(ExportKind::Pdf) {
             self.doc.request_print_after_export();
             *self.status = "正在导出 PDF，排好后打开打印对话框…".into();
         }
+    }
+
+    /// 「输出」分区的 PDF / Word / Typst 包图标：只导这一种，导完由外壳打开
+    /// （PDF 在应用内、Word 用系统程序、Typst 包在文件管理器里定位）。
+    pub(crate) fn start_export_and_open(&mut self, kind: ExportKind) {
+        if self.start_export_only(kind) {
+            self.doc.open_after_export = Some(kind);
+            *self.status = format!("正在导出 {}，导完自动打开…", kind.label());
+        }
+    }
+
+    /// 只导一种格式；返回这一下是否真把导出开起来了。`start_export_with` 会拦
+    /// 「正在忙 / 没有内容」，只看调用后的 `busy` 不够：别的任务本来就在跑时它也是真，
+    /// 调用方的标记会挂到那个任务后面的某次导出上。
+    fn start_export_only(&mut self, kind: ExportKind) -> bool {
+        let was_busy = self.doc.busy;
+        self.start_export_with(kind.selection(self.config.export.overwrite));
+        !was_busy && self.doc.busy
     }
 
     /// 按给定格式导出。「输出」分区里的「仅 Word」等入口用它临时只出一种格式，
@@ -288,6 +292,30 @@ impl DraftPage<'_> {
         });
     }
 
+    /// 「输出目录」要定位的成品：本篇这次运行里最近一次导出的文件优先，
+    /// 其次是导出目录里扫到的本篇最近成品（PDF、Word、Typst 包依次取）。
+    pub(crate) fn latest_output_file(&self) -> Option<PathBuf> {
+        self.doc
+            .output_files
+            .iter()
+            .find(|file| file.is_file())
+            .cloned()
+            .or_else(|| {
+                ExportKind::ALL
+                    .into_iter()
+                    .find_map(|kind| self.export_links.path(kind))
+                    .map(Path::to_path_buf)
+            })
+    }
+
+    /// 在文件管理器里选中本篇最近导出的成品；还没导出过就打开输出目录本身。
+    pub(crate) fn reveal_latest_output(&mut self) {
+        match self.latest_output_file() {
+            Some(path) => self.run_file_action(FileAction::Reveal(path)),
+            None => self.open_output_dir(),
+        }
+    }
+
     pub(crate) fn open_output_dir(&mut self) {
         let dir = PathBuf::from(self.config.output_dir.trim());
         if dir.as_os_str().is_empty() {
@@ -304,9 +332,9 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 成品入口：PDF / Word / Typst 包，当前文稿的导出目录里有
-    /// 对应成品才点亮，点开的是当前文稿最近一次导出（属于它的子目录中修改时间
-    /// 最新）留下的那一份。右键可复制文件到剪贴板、另存到别处或在文件管理器里定位。
+    /// 成品入口：PDF / Word / Typst 包。单击按当前审校稿只导这一种并打开，
+    /// 不必先导出再另找按钮打开。右键对当前文稿最近一次导出（属于它的子目录中
+    /// 修改时间最新）留下的那一份操作：复制到剪贴板、另存到别处或在文件管理器里定位。
     pub(crate) fn export_open_buttons(&mut self, ui: &mut egui::Ui) {
         // 导出目录里同一文稿的文件夹都以“去掉时间戳的导出主干”为前缀，
         // 用它过滤出属于当前文稿的目录，避免打开别的文稿的成品。
@@ -316,25 +344,34 @@ impl DraftPage<'_> {
         );
         self.export_links
             .refresh(&self.config.output_dir, Some(&stem));
+        let ready = !self.doc.busy && !self.doc.generated_markdown.trim().is_empty();
         let mut action = None;
+        let mut export = None;
         for kind in ExportKind::ALL {
             let path = self.export_links.path(kind).map(Path::to_path_buf);
-            let lit = path.is_some();
             let label = kind.label();
-            let tint = if lit { accent() } else { theme::text_muted() };
+            let tint = if ready { accent() } else { theme::text_muted() };
             let response = ui.add_enabled(
-                lit,
+                ready,
                 egui::Button::image(kind.icon().image_sized(16.0).tint(tint))
                     .image_tint_follows_text_color(false)
                     .min_size(egui::vec2(34.0, 26.0))
                     .corner_radius(theme::chrome_radius(6)),
             );
+            let opens = match kind {
+                ExportKind::Typst => "在文件管理器里定位",
+                _ => "打开",
+            };
+            let tip = format!("按当前审校稿导出 {label} 并{opens}，不改设置里勾好的常用格式");
+            let response = response
+                .on_hover_text(tip.as_str())
+                .on_disabled_hover_text(tip.as_str());
+            if response.clicked() {
+                export = Some(kind);
+            }
             let Some(path) = path else {
-                response.on_hover_text(format!("导出目录里还没有 {label} 文件"));
                 continue;
             };
-            let response =
-                response.on_hover_text(format!("打开最近导出的 {label}：{}", path.display()));
             response.context_menu(|ui| {
                 if ui
                     .add(theme::menu_item(theme::Icon::Copy, "复制文件"))
@@ -358,35 +395,17 @@ impl DraftPage<'_> {
                     ui.close();
                 }
             });
-            if response.clicked() {
-                action = Some(FileAction::Open(path));
-            }
         }
         if let Some(action) = action {
             self.run_file_action(action);
         }
+        if let Some(kind) = export {
+            self.start_export_and_open(kind);
+        }
     }
 
     pub(crate) fn run_file_action(&mut self, action: FileAction) {
-        if let FileAction::Open(path) = &action
-            && path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
-        {
-            self.actions.push(DraftAction::OpenPdf {
-                path: path.clone(),
-                duplex_typeset: self.doc.draft.profile.duplex_printing,
-            });
-            *self.status = format!(
-                "已在应用内打开 {}。",
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("PDF")
-            );
-            return;
-        }
         let (result, path, verb) = match action {
-            FileAction::Open(path) => (open_in_os(&path), path, "打开"),
             FileAction::Reveal(path) => (reveal_in_os(&path), path, "定位"),
             FileAction::CopyToClipboard(path) => {
                 (file_clipboard::copy_file(&path), path, "复制到剪贴板")

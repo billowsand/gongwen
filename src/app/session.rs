@@ -13,7 +13,6 @@ use crate::modal::{self, Dismiss};
 use crate::storage;
 use crate::theme;
 use eframe::egui;
-use std::path::PathBuf;
 
 /// 退出前的汇总确认。上区必须处理，下区只是提醒。
 ///
@@ -50,8 +49,6 @@ pub(crate) enum DraftAction {
     },
     /// 把当前版式记进配置并落盘。
     Persist,
-    /// 在应用内打开最近导出的 PDF；`duplex_typeset` 是版式是否按双面排了页码。
-    OpenPdf { path: PathBuf, duplex_typeset: bool },
 }
 
 impl GongwenApp {

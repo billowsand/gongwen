@@ -1577,6 +1577,10 @@ impl GongwenApp {
                         None => self.status.push_str(" PDF 没有排出来，无法打印。"),
                     }
                 }
+                // 「输出」分区的成品图标：导完直接打开这份成品，不必再去翻目录。
+                if let Some(kind) = self.docs[index].take_open_after_export() {
+                    self.open_exported(index, kind);
+                }
             }
             DocJob::RedlineExported(Ok(files)) => {
                 let pdf = files
@@ -1623,7 +1627,35 @@ impl GongwenApp {
                 if doc.take_print_after_export() {
                     self.status.push_str(" PDF 没有排出来，无法打印。");
                 }
+                doc.take_open_after_export();
             }
+        }
+    }
+
+    /// 打开刚导出的一种成品：PDF 在应用内、Word 用系统程序、Typst 包在文件管理器里
+    /// 定位。结果缀在导出状态后面。
+    fn open_exported(&mut self, index: usize, kind: crate::draft_page::ExportKind) {
+        use crate::draft_page::ExportKind;
+        let Some(path) = kind.find_in(&self.docs[index].output_files).cloned() else {
+            self.status
+                .push_str(&format!(" 没有生成 {}，无法打开。", kind.label()));
+            return;
+        };
+        let result = match kind {
+            ExportKind::Pdf => {
+                let hints = crate::print::PrintHints {
+                    duplex_typeset: self.docs[index].draft.profile.duplex_printing,
+                    send_package: false,
+                };
+                self.reopen_exported_pdf(path, hints);
+                Ok("已在应用内打开。")
+            }
+            ExportKind::Word => crate::app::open_in_os(&path).map(|()| "已用系统程序打开。"),
+            ExportKind::Typst => crate::app::reveal_in_os(&path).map(|()| "已在文件管理器里定位。"),
+        };
+        match result {
+            Ok(done) => self.status.push_str(&format!(" {done}")),
+            Err(error) => self.status.push_str(&format!(" 打开失败：{error}")),
         }
     }
 }

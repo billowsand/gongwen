@@ -11,8 +11,8 @@ use crate::export;
 use crate::highlight::MarkdownHighlighter;
 use crate::manuscript::ManuscriptStore;
 use crate::models::{
-    AppConfig, DraftInput, GeneratedDraft, ManuscriptStatus, ResearchMetadata, ReviewNote,
-    TemplateKind, TemplateProfile,
+    AppConfig, DraftInput, ExportSelection, GeneratedDraft, ManuscriptStatus, ResearchMetadata,
+    ReviewNote, TemplateKind, TemplateProfile,
 };
 use crate::theme;
 use eframe::egui;
@@ -98,7 +98,7 @@ impl ExportKind {
     pub(crate) const ALL: [Self; 3] = [Self::Pdf, Self::Word, Self::Typst];
 
     /// 悬停说明里用的格式名。
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Pdf => "PDF",
             Self::Word => "WORD",
@@ -120,6 +120,36 @@ impl ExportKind {
             Self::Word => "docx",
             Self::Typst => "zip",
         }
+    }
+
+    /// 只出这一种格式的导出选项；覆盖策略沿用设置。
+    pub(crate) fn selection(self, overwrite: bool) -> ExportSelection {
+        ExportSelection {
+            markdown: false,
+            docx: self == Self::Word,
+            pdf: self == Self::Pdf,
+            typst: self == Self::Typst,
+            overwrite,
+        }
+    }
+
+    /// 文件是不是这种成品。zip 只认 Typst 包，源码包也是 zip，不能混进来。
+    fn matches_file(self, path: &Path) -> bool {
+        let extension_matches = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(self.extension()));
+        extension_matches
+            && (self != Self::Typst
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with("-Typst包.zip")))
+    }
+
+    /// 一次导出产出的文件里这种成品的那一份。
+    pub(crate) fn find_in(self, files: &[PathBuf]) -> Option<&PathBuf> {
+        files.iter().find(|file| self.matches_file(file))
     }
 }
 
@@ -255,21 +285,9 @@ impl ExportLinks {
         if !path.is_file() {
             return;
         }
-        let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        let Some(kind) = ExportKind::ALL.into_iter().find(|k| k.matches_file(path)) else {
             return;
         };
-        let ext = ext.to_ascii_lowercase();
-        let Some(kind) = ExportKind::ALL.into_iter().find(|k| k.extension() == ext) else {
-            return;
-        };
-        if kind == ExportKind::Typst
-            && !path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with("-Typst包.zip"))
-        {
-            return;
-        }
         let slot = match kind {
             ExportKind::Pdf => &mut self.pdf,
             ExportKind::Word => &mut self.docx,
@@ -345,6 +363,9 @@ pub(crate) struct DraftSession {
     /// 点了「打印…」：这次导出结束后打开 PDF 并弹打印对话框。导出失败、
     /// 排版失败或没导出 PDF 时由外壳清掉，不打印。
     pub(crate) print_after_export: bool,
+    /// 点了「输出」分区的 PDF / Word / Typst 包图标：这次导出结束后打开这份成品
+    /// （Typst 包在文件管理器里定位）。导出失败或没出这种成品时由外壳清掉。
+    pub(crate) open_after_export: Option<ExportKind>,
     /// 当前编辑内容来自的版本（起草页横幅）。
     pub(crate) loaded_version: Option<LoadedVersion>,
     /// 起草页“版本对照”模式的状态。
@@ -512,6 +533,7 @@ impl DraftSession {
             output_files: Vec::new(),
             export_error: None,
             print_after_export: false,
+            open_after_export: None,
             loaded_version: None,
             draft_diff: DraftDiffState::default(),
             manual_fields: BTreeSet::new(),
@@ -602,6 +624,11 @@ impl DraftSession {
     /// 取走「导出后打印」标记：取一次就清，免得下一次无关的导出又弹一次。
     pub(crate) fn take_print_after_export(&mut self) -> bool {
         std::mem::take(&mut self.print_after_export)
+    }
+
+    /// 取走「导出后打开」的成品种类：取一次就清。
+    pub(crate) fn take_open_after_export(&mut self) -> Option<ExportKind> {
+        self.open_after_export.take()
     }
 
     /// 相对稿件库里的记录有没有未写入的改动。尚未入库的稿子，只要动过就算脏。

@@ -218,16 +218,22 @@ impl GongwenApp {
     /// 同一路径已经开着时先关掉旧标签再重开：「覆盖同名」策略下刚导出的文件就写在
     /// 原处，旧标签里是上一版的页面与页数，切过去会预览旧内容、按旧页数校验页码。
     pub(crate) fn open_pdf_for_printing(&mut self, path: PathBuf, hints: crate::print::PrintHints) {
+        self.reopen_exported_pdf(path.clone(), hints);
+        if let Some(pdf) = self.pdfs.iter_mut().find(|pdf| pdf.path() == path) {
+            pdf.request_print_when_ready();
+        }
+    }
+
+    /// 打开刚导出的 PDF。同一路径已经开着时先关掉旧标签再重开：「覆盖同名」策略下
+    /// 新文件就写在原处，旧标签里还是上一版的页面。
+    pub(crate) fn reopen_exported_pdf(&mut self, path: PathBuf, hints: crate::print::PrintHints) {
         if let Some(tab) = self.tabs.iter().position(|item| {
             matches!(item, TabRef::Pdf(key)
                 if self.pdfs.iter().any(|pdf| pdf.key == *key && pdf.path() == path))
         }) {
             self.close_tab(tab);
         }
-        self.open_pdf_with_hints(path.clone(), None, hints);
-        if let Some(pdf) = self.pdfs.iter_mut().find(|pdf| pdf.path() == path) {
-            pdf.request_print_when_ready();
-        }
+        self.open_pdf_with_hints(path, None, hints);
     }
 
     pub(crate) fn pdf_ui(&mut self, key: PdfKey, ui: &mut egui::Ui) {
@@ -387,17 +393,6 @@ impl GongwenApp {
                     version_number,
                 } => self.load_manuscript_version(manuscript_id, version_number),
                 DraftAction::Persist => self.persist(),
-                DraftAction::OpenPdf {
-                    path,
-                    duplex_typeset,
-                } => self.open_pdf_with_hints(
-                    path,
-                    None,
-                    crate::print::PrintHints {
-                        duplex_typeset,
-                        send_package: false,
-                    },
-                ),
             }
         }
     }

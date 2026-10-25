@@ -60,95 +60,43 @@ impl DraftPage<'_> {
         if print_button.clicked() {
             self.start_export_for_print();
         }
-        let overwrite = self.config.export.overwrite;
-        let mut only: Option<(ExportSelection, &'static str)> = None;
-        ui.add_enabled_ui(ready, |ui| {
-            let background = ui.painter().add(egui::Shape::Noop);
-            for (icon, label, selection, tip) in [
-                (
-                    theme::Icon::FileTypeDoc,
-                    "仅 Word",
-                    ExportSelection {
-                        markdown: false,
-                        docx: true,
-                        pdf: false,
-                        typst: false,
-                        overwrite,
-                    },
-                    "这一次只出 docx，不改设置里勾好的常用格式",
-                ),
-                (
-                    theme::Icon::FileTypePdf,
-                    "仅 PDF",
-                    ExportSelection {
-                        markdown: false,
-                        docx: false,
-                        pdf: true,
-                        typst: false,
-                        overwrite,
-                    },
-                    "这一次只出 PDF，不改设置里勾好的常用格式",
-                ),
-                (
-                    theme::Icon::PencilLine,
-                    "仅 Markdown",
-                    ExportSelection {
-                        markdown: true,
-                        docx: false,
-                        pdf: false,
-                        typst: false,
-                        overwrite,
-                    },
-                    "这一次只出 Markdown 源码包：md 正文、稿中引用的图片，研究报告另含 references.bib",
-                ),
-                (
-                    theme::Icon::Package,
-                    "仅 Typst 包",
-                    ExportSelection {
-                        markdown: false,
-                        docx: false,
-                        pdf: false,
-                        typst: true,
-                        overwrite,
-                    },
-                    "这一次只出 Typst 包：模板、数据与插图打成 zip，装有常用中文字体的机器可用 typst 命令行编译",
-                ),
-            ] {
-                let mut button = theme::icon_text_button(icon, label);
-                if theme::smartisan::active() {
-                    button = button.frame_when_inactive(false);
-                }
-                if ui
-                    .add(button)
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    only = Some((selection, label));
-                }
-            }
-            if theme::smartisan::active() {
-                // 四种临时格式共用一个浅凹托盘，和左侧的主导出动作分出主次。
-                ui.painter().set(
-                    background,
-                    egui::Shape::rect_filled(ui.min_rect(), 4, theme::surface_sunk()),
-                );
-            }
-        });
-        if let Some((selection, label)) = only {
-            self.start_export_with(selection);
+        // PDF / Word / Typst 包由右侧的成品图标一键导出并打开；Markdown 源码包
+        // 没有可打开的单个成品，仍留一个临时导出入口。
+        let mut button = theme::icon_text_button(theme::Icon::PencilLine, "仅 Markdown");
+        if theme::smartisan::active() {
+            button = button.frame_when_inactive(false);
+        }
+        if ui
+            .add_enabled(ready, button)
+            .on_hover_text(
+                "这一次只出 Markdown 源码包：md 正文、稿中引用的图片，研究报告另含 references.bib",
+            )
+            .clicked()
+        {
+            self.start_export_with(ExportSelection {
+                markdown: true,
+                docx: false,
+                pdf: false,
+                typst: false,
+                overwrite: self.config.export.overwrite,
+            });
             if self.doc.busy {
-                *self.status = format!("正在按「{label}」导出…");
+                *self.status = "正在按「仅 Markdown」导出…".into();
             }
         }
     }
 
     fn ribbon_output_directory(&mut self, ui: &mut egui::Ui) {
+        let tip = match self.latest_output_file() {
+            Some(path) => format!("在文件管理器里定位最近导出的成品：{}", path.display()),
+            None => format!("还没有导出过，打开输出目录：{}", self.config.output_dir),
+        };
         if ui
             .add(theme::icon_text_button(theme::Icon::Folder, "输出目录"))
-            .on_hover_text(self.config.output_dir.clone())
+            .on_hover_text(tip)
             .clicked()
         {
-            self.open_output_dir();
+            self.reveal_latest_output();
         }
     }
 }

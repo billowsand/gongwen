@@ -14,7 +14,6 @@ use std::path::PathBuf;
 
 /// 文件按钮不能在借用 `self` 的过程中直接改 `self`，先记下来再执行。
 pub(crate) enum FileAction {
-    Open(PathBuf),
     Reveal(PathBuf),
     /// 把文件本身放进系统剪贴板，随后可在文件管理器等处直接粘贴。
     CopyToClipboard(PathBuf),
