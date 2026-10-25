@@ -1,6 +1,7 @@
 //! 表格即工作区：统一搜索、行内编辑、多选移除与即时撤销。
 use super::*;
 use egui_extras::{Column, TableBuilder};
+use std::path::Path;
 
 impl Ime {
     pub(super) fn quick_header(&mut self, ui: &mut egui::Ui) -> Option<PageAction> {
@@ -154,17 +155,13 @@ impl Ime {
         }
     }
 
+    /// 导出词表：文件对话框由应用层开，这里只登记请求。
     fn export_text(&mut self, filtered: bool) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_file_name(if filtered {
-                "词表输入法-筛选结果.txt"
-            } else {
-                "词表输入法-生效词表.txt"
-            })
-            .save_file()
-        else {
-            return;
-        };
+        self.page.request = Some(PageAction::ExportWordTable { filtered });
+    }
+
+    /// 把词表写到用户选定的位置。
+    pub(crate) fn export_text_to(&mut self, path: &Path, filtered: bool) {
         let text = if filtered {
             self.filtered_rows()
                 .into_iter()
@@ -173,18 +170,18 @@ impl Ime {
         } else {
             self.table.export()
         };
-        let result = super::super::data::save_bytes(&path, text.as_bytes());
+        let result = super::super::data::save_bytes(path, text.as_bytes());
         self.report(result, "词表已导出。");
     }
 
+    /// 导出个人设置：文件对话框由应用层开，这里只登记请求。
     fn export_personal(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_file_name("词表输入法-个人设置.json")
-            .save_file()
-        else {
-            return;
-        };
-        let result = super::super::data::save_json(&path, &self.table.personal);
+        self.page.request = Some(PageAction::ExportPersonalSettings);
+    }
+
+    /// 把个人设置写到用户选定的位置。
+    pub(crate) fn export_personal_to(&mut self, path: &Path) {
+        let result = super::super::data::save_json(path, &self.table.personal);
         self.report(
             result,
             "个人词条、导入表、屏蔽、排序与构词规则已备份；不含基础表。",

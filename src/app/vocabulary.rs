@@ -3,6 +3,7 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::vocabulary`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+use super::file_dialog::FileDialogSpec;
 use crate::app::{
     GongwenApp, VersionScope, VocabularyMoveDraft, unique_name, vocabulary_depths,
     vocabulary_matches, warn, wrapped_hint,
@@ -60,50 +61,84 @@ pub(crate) struct TreeRow {
 
 impl GongwenApp {
     pub(crate) fn import_vocabulary_xlsx(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Excel 词库", &["xlsx"])
-            .pick_file()
-        else {
-            return;
-        };
-        self.vocabulary_import_conflicts = None;
-        let result = (|| -> Result<(usize, vocabulary_xlsx::MergeReport), String> {
-            let existing_codes: Vec<String> = self
-                .config
-                .vocabulary
-                .iter()
-                .filter(|e| e.category == VocabularyCategory::Unit)
-                .map(|e| e.code.trim().to_string())
-                .filter(|c| !c.is_empty())
-                .collect();
-            let report =
-                vocabulary_xlsx::parse(&path, &existing_codes).map_err(|error| error.summary)?;
-            let parsed_count = report.entries.len();
-            let merge = vocabulary_xlsx::merge(&mut self.config.vocabulary, report.entries);
-            units::normalize(&mut self.config.vocabulary);
-            if !self.config.vocabulary.is_empty() {
-                self.config.vocabulary_setup = VocabularySetupStatus::Completed;
-            }
-            storage::save(&self.config).map_err(|error| format!("保存词库失败：{error:#}"))?;
-            Ok((parsed_count, merge))
-        })();
-        match result {
-            Ok((parsed, merge)) => {
-                self.vocabulary_dirty = false;
-                self.status = format!(
-                    "已从“{}”解析 {} 条：新增 {} 条、更新 {} 条、未变化 {} 条。",
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("Excel 词库"),
-                    parsed,
-                    merge.added,
-                    merge.updated,
-                    merge.unchanged
-                );
-            }
-            Err(summary) => {
-                // 重新解析 conflict 列表用于渲染。如要优化可把 conflicts 放在错误里。
-                let existing_codes: Vec<String> = self
+        self.request_file(
+            FileDialogSpec::pick_file().filter("Excel 词库", &["xlsx"]),
+            |app, path| {
+                let Some(path) = path else {
+                    return;
+                };
+                app.vocabulary_import_conflicts = None;
+                let result = (|| -> Result<(usize, vocabulary_xlsx::MergeReport), String> {
+                    let existing_codes: Vec<String> = app
+                        .config
+                        .vocabulary
+                        .iter()
+                        .filter(|e| e.category == VocabularyCategory::Unit)
+                        .map(|e| e.code.trim().to_string())
+                        .filter(|c| !c.is_empty())
+                        .collect();
+                    let report = vocabulary_xlsx::parse(&path, &existing_codes)
+                        .map_err(|error| error.summary)?;
+                    let parsed_count = report.entries.len();
+                    let merge = vocabulary_xlsx::merge(&mut app.config.vocabulary, report.entries);
+                    units::normalize(&mut app.config.vocabulary);
+                    if !app.config.vocabulary.is_empty() {
+                        app.config.vocabulary_setup = VocabularySetupStatus::Completed;
+                    }
+                    storage::save(&app.config)
+                        .map_err(|error| format!("保存词库失败：{error:#}"))?;
+                    Ok((parsed_count, merge))
+                })();
+                match result {
+                    Ok((parsed, merge)) => {
+                        app.vocabulary_dirty = false;
+                        app.status = format!(
+                            "已从“{}”解析 {} 条：新增 {} 条、更新 {} 条、未变化 {} 条。",
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("Excel 词库"),
+                            parsed,
+                            merge.added,
+                            merge.updated,
+                            merge.unchanged
+                        );
+                    }
+                    Err(summary) => {
+                        // 重新解析 conflict 列表用于渲染。如要优化可把 conflicts 放在错误里。
+                        let existing_codes: Vec<String> = app
+                            .config
+                            .vocabulary
+                            .iter()
+                            .filter(|e| e.category == VocabularyCategory::Unit)
+                            .map(|e| e.code.trim().to_string())
+                            .filter(|c| !c.is_empty())
+                            .collect();
+                        let conflicts = vocabulary_xlsx::parse(&path, &existing_codes)
+                            .err()
+                            .map(|e| e.conflicts)
+                            .unwrap_or_default();
+                        app.vocabulary_import_conflicts = if conflicts.is_empty() {
+                            None
+                        } else {
+                            Some(conflicts)
+                        };
+                        app.status = format!("词库导入失败：{summary}");
+                    }
+                }
+            },
+        );
+    }
+
+    pub(crate) fn export_vocabulary_xlsx(&mut self) {
+        self.request_file(
+            FileDialogSpec::save_file()
+                .filter("Excel", &["xlsx"])
+                .file_name("公文助手标准词库.xlsx"),
+            |app, path| {
+                let Some(path) = path else {
+                    return;
+                };
+                let existing_codes: Vec<String> = app
                     .config
                     .vocabulary
                     .iter()
@@ -111,64 +146,40 @@ impl GongwenApp {
                     .map(|e| e.code.trim().to_string())
                     .filter(|c| !c.is_empty())
                     .collect();
-                let conflicts = vocabulary_xlsx::parse(&path, &existing_codes)
-                    .err()
-                    .map(|e| e.conflicts)
-                    .unwrap_or_default();
-                self.vocabulary_import_conflicts = if conflicts.is_empty() {
-                    None
-                } else {
-                    Some(conflicts)
-                };
-                self.status = format!("词库导入失败：{summary}");
-            }
-        }
-    }
-
-    pub(crate) fn export_vocabulary_xlsx(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Excel", &["xlsx"])
-            .set_file_name("公文助手标准词库.xlsx")
-            .save_file()
-        else {
-            return;
-        };
-        let existing_codes: Vec<String> = self
-            .config
-            .vocabulary
-            .iter()
-            .filter(|e| e.category == VocabularyCategory::Unit)
-            .map(|e| e.code.trim().to_string())
-            .filter(|c| !c.is_empty())
-            .collect();
-        let result = vocabulary_xlsx::to_xlsx(&self.config.vocabulary, &path, &existing_codes);
-        match result {
-            Ok(()) => self.status = format!("词库已导出到 {}。", path.display()),
-            Err(error) => self.status = format!("词库导出失败：{error}"),
-        }
+                let result =
+                    vocabulary_xlsx::to_xlsx(&app.config.vocabulary, &path, &existing_codes);
+                match result {
+                    Ok(()) => app.status = format!("词库已导出到 {}。", path.display()),
+                    Err(error) => app.status = format!("词库导出失败：{error}"),
+                }
+            },
+        );
     }
 
     pub(crate) fn export_blank_vocabulary_template(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Excel", &["xlsx"])
-            .set_file_name("公文助手标准词库模板.xlsx")
-            .save_file()
-        else {
-            return;
-        };
-        let codes: Vec<String> = self
-            .config
-            .vocabulary
-            .iter()
-            .filter(|e| e.category == VocabularyCategory::Unit)
-            .map(|e| e.code.trim().to_string())
-            .filter(|c| !c.is_empty())
-            .collect();
-        let result = vocabulary_xlsx::to_xlsx(&[], &path, &codes);
-        match result {
-            Ok(()) => self.status = format!("空白词库模板已导出到 {}。", path.display()),
-            Err(error) => self.status = format!("模板导出失败：{error}"),
-        }
+        self.request_file(
+            FileDialogSpec::save_file()
+                .filter("Excel", &["xlsx"])
+                .file_name("公文助手标准词库模板.xlsx"),
+            |app, path| {
+                let Some(path) = path else {
+                    return;
+                };
+                let codes: Vec<String> = app
+                    .config
+                    .vocabulary
+                    .iter()
+                    .filter(|e| e.category == VocabularyCategory::Unit)
+                    .map(|e| e.code.trim().to_string())
+                    .filter(|c| !c.is_empty())
+                    .collect();
+                let result = vocabulary_xlsx::to_xlsx(&[], &path, &codes);
+                match result {
+                    Ok(()) => app.status = format!("空白词库模板已导出到 {}。", path.display()),
+                    Err(error) => app.status = format!("模板导出失败：{error}"),
+                }
+            },
+        );
     }
 
     pub(crate) fn renormalize_vocabulary(&mut self) {

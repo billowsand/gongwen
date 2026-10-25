@@ -363,7 +363,7 @@ impl GongwenApp {
     }
 
     /// 帧末执行起草页回传的动作。
-    pub(crate) fn apply_draft_actions(&mut self) {
+    pub(crate) fn apply_draft_actions(&mut self, ctx: &egui::Context) {
         for action in std::mem::take(&mut self.draft_actions) {
             match action {
                 DraftAction::SaveToLibrary => self.save_to_manuscript_library(),
@@ -398,6 +398,68 @@ impl GongwenApp {
                         send_package: false,
                     },
                 ),
+                DraftAction::ImportDocument { key } => {
+                    let ctx = ctx.clone();
+                    self.request_file(crate::doc_import::file_dialog_spec(), move |app, path| {
+                        let Some(path) = path else {
+                            return;
+                        };
+                        let Some(index) = app.doc_index_of_key(key) else {
+                            return;
+                        };
+                        app.draft_page_at(index).import_document_from(&ctx, &path);
+                    });
+                }
+                DraftAction::InsertImages { key } => {
+                    let ctx = ctx.clone();
+                    self.request_files(crate::images::pick_files_spec(), move |app, files| {
+                        let Some(files) = files else {
+                            return;
+                        };
+                        let Some(index) = app.doc_index_of_key(key) else {
+                            return;
+                        };
+                        app.draft_page_at(index).insert_images_from(&ctx, &files);
+                    });
+                }
+                DraftAction::SaveExportCopy { key, source } => {
+                    let file_name = source
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let mut spec =
+                        super::file_dialog::FileDialogSpec::save_file().file_name(file_name);
+                    if let Some(extension) =
+                        source.extension().and_then(|extension| extension.to_str())
+                    {
+                        let label = format!("{} 文件", extension.to_ascii_uppercase());
+                        spec = spec.filter(label, &[extension]);
+                    }
+                    self.request_file(spec, move |app, target| {
+                        let Some(target) = target else {
+                            return;
+                        };
+                        let Some(index) = app.doc_index_of_key(key) else {
+                            return;
+                        };
+                        app.draft_page_at(index).copy_export_to(&source, &target);
+                    });
+                }
+                DraftAction::ImportBibliography { key } => {
+                    self.request_file(
+                        super::file_dialog::FileDialogSpec::pick_file().filter("BibTeX", &["bib"]),
+                        move |app, path| {
+                            let Some(path) = path else {
+                                return;
+                            };
+                            let Some(index) = app.doc_index_of_key(key) else {
+                                return;
+                            };
+                            app.draft_page_at(index)
+                                .import_bibliography_from(path, false);
+                        },
+                    );
+                }
             }
         }
     }

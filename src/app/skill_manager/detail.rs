@@ -131,15 +131,9 @@ impl SkillsPage {
                 )
                 .on_disabled_hover_text("请先保存或放弃该技能的修改，再导出整个包")
                 .clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .set_file_name(format!("{}.skill", skill.id))
-                    .add_filter("技能包", &["skill"])
-                    .save_file()
             {
-                self.message = Some(match skill_files::export(&skill.id, &path) {
-                    Ok(path) => (true, format!("已导出整个技能包：{}", path.display())),
-                    Err(error) => (false, format!("导出失败：{error:#}")),
-                });
+                // 对话框在后台线程开：这里只记下意图，由上层发起请求。
+                self.dialog_request = Some(SkillDialog::Export(skill.id.clone()));
             }
             if editable {
                 ui.menu_button("更多", |ui| {
@@ -197,6 +191,14 @@ impl SkillsPage {
             }
         });
         ui.separator();
+    }
+
+    /// 导出整个技能包到用户选定的位置。保存位置由文件对话框给出。
+    pub(super) fn export_skill(&mut self, id: &str, path: &std::path::Path) {
+        self.message = Some(match skill_files::export(id, path) {
+            Ok(path) => (true, format!("已导出整个技能包：{}", path.display())),
+            Err(error) => (false, format!("导出失败：{error:#}")),
+        });
     }
 
     pub(super) fn validation_ui(&self, ui: &mut egui::Ui, skill: &Skill) {

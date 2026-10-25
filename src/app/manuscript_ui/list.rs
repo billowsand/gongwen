@@ -3,6 +3,7 @@
 //! 由 src/app/manuscript_ui.rs 拆分而来：本文件是模块 `app::manuscript_ui::list`，与其它子模块共享
 //! `app::manuscript_ui` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::app::file_dialog::FileDialogSpec;
 use crate::app::manuscript_ui::{
     ManuscriptAction, PdfExportDialog, ZipPasswordPurpose, archive_form, batch_delete_dialog,
     import_preview_form, large_dialog_size, pending_merge_form, row_delete_confirm,
@@ -478,6 +479,9 @@ impl GongwenApp {
             }
         }
 
+        // 「选择扫描盖章 PDF…」要开文件对话框，而对话框由请求式接口发起
+        // （后台线程开，主线程不阻塞）：表单只把意图记在这里。
+        let mut pick_pdfs = false;
         if let Some(pending) = self.manuscript_archive_pending.as_mut() {
             let manuscript_id = pending.manuscript_id;
             let title = self
@@ -493,7 +497,7 @@ impl GongwenApp {
                 "归档稿件",
                 460.0,
                 Dismiss::EscOnly,
-                |ui| archive_form(ui, pending, &title),
+                |ui| archive_form(ui, pending, &title, &mut pick_pdfs),
             );
             if dialog.inner {
                 // 保留 pending（含已选 PDF），由 Archive action 读取并执行归档。
@@ -501,6 +505,19 @@ impl GongwenApp {
             } else if dialog.dismissed {
                 self.manuscript_archive_pending = None;
             }
+        }
+        if pick_pdfs {
+            self.request_files(
+                FileDialogSpec::pick_files().filter("扫描盖章 PDF", &["pdf"]),
+                |app, paths| {
+                    let Some(paths) = paths else {
+                        return;
+                    };
+                    if let Some(pending) = app.manuscript_archive_pending.as_mut() {
+                        pending.pdf_paths.extend(paths);
+                    }
+                },
+            );
         }
 
         if let Some(preview) = self.manuscript_import_preview.as_mut() {

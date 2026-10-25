@@ -3,10 +3,12 @@
 //! 基础表只读，只能整体导入更新；日常修改都在个人层（见 `ops.rs`）。
 use super::{
     data, history,
+    page::PageAction,
     session::Ime,
     table::{self, BaseDiff, Entry, OverlayReport, Parsed},
 };
 use eframe::egui;
+use std::path::Path;
 
 enum RulesAction {
     Edit,
@@ -63,26 +65,11 @@ impl Ime {
             if ui.button("导入公文四码表").clicked() {
                 self.stage_import(true);
             }
-            if ui.button("导出最终词表").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .set_file_name("词表输入法-最终词表.txt")
-                    .save_file()
-            {
-                self.manager.message = match data::save_bytes(&path, self.table.export().as_bytes())
-                {
-                    Ok(()) => "最终词表已导出。".into(),
-                    Err(e) => e.to_string(),
-                };
+            if ui.button("导出最终词表").clicked() {
+                self.page.request = Some(PageAction::ExportFinalWordTable);
             }
-            if ui.button("导出个人备份").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .set_file_name("词表输入法-个人备份.json")
-                    .save_file()
-            {
-                self.manager.message = match data::save_json(&path, &self.table.personal) {
-                    Ok(()) => "公文导入表、个人词条、屏蔽、排序与构词规则已备份。".into(),
-                    Err(e) => e.to_string(),
-                };
+            if ui.button("导出个人备份").clicked() {
+                self.page.request = Some(PageAction::ExportPersonalBackup);
             }
             if ui.button("恢复个人备份").clicked() {
                 self.stage_backup();
@@ -357,14 +344,30 @@ impl Ime {
         }
     }
 
+    /// 导入词表：文件对话框由应用层开，这里只登记请求。
     pub(super) fn stage_import(&mut self, four: bool) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("词表", &["txt", "tsv"])
-            .pick_file()
-        else {
-            return;
+        self.page.request = Some(PageAction::ImportWordTable { four });
+    }
+
+    /// 把最终生效的词表写到用户选定的位置。
+    pub(crate) fn export_final_word_table_to(&mut self, path: &Path) {
+        self.manager.message = match data::save_bytes(path, self.table.export().as_bytes()) {
+            Ok(()) => "最终词表已导出。".into(),
+            Err(e) => e.to_string(),
         };
-        match crate::text_file::read_to_string(&path) {
+    }
+
+    /// 把个人层备份写到用户选定的位置。
+    pub(crate) fn export_personal_backup_to(&mut self, path: &Path) {
+        self.manager.message = match data::save_json(path, &self.table.personal) {
+            Ok(()) => "公文导入表、个人词条、屏蔽、排序与构词规则已备份。".into(),
+            Err(e) => e.to_string(),
+        };
+    }
+
+    /// 读取用户选中的词表，暂存待确认。
+    pub(crate) fn stage_import_from(&mut self, path: &Path, four: bool) {
+        match crate::text_file::read_to_string(path) {
             Ok(text) => {
                 let parsed = table::parse(&text, four);
                 let summary = self.table.preview(&parsed, !four);
@@ -422,15 +425,14 @@ impl Ime {
 
     /// 先展示备份覆盖范围，确认后才写入；取消文件选择不显示成功。
     pub(super) fn stage_backup(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("词表备份", &["json"])
-            .pick_file()
-        else {
-            return;
-        };
+        self.page.request = Some(PageAction::RestoreWordTableBackup);
+    }
+
+    /// 读取用户选中的备份，暂存待确认。
+    pub(crate) fn stage_backup_from(&mut self, path: &Path) {
         let result = (|| -> anyhow::Result<table::Personal> {
             let bytes = crate::file_limits::read_bytes(
-                &path,
+                path,
                 crate::file_limits::MAX_TEXT_BYTES,
                 "个人词表备份",
             )?;

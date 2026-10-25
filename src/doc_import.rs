@@ -11,6 +11,7 @@ pub(crate) mod clean;
 pub(crate) mod embedded;
 pub(crate) mod structure;
 
+use crate::app::file_dialog::FileDialogSpec;
 use crate::models::ResearchMetadata;
 use anyhow::{Context, Result, anyhow, bail};
 use regex::Regex;
@@ -48,32 +49,32 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
     ("PDF（电子版）", &["pdf"]),
 ];
 
-/// 打开"从文档导入"的文件选择框，返回用户选中的文件。
-pub(crate) fn pick_file() -> Option<std::path::PathBuf> {
-    file_dialog().pick_file()
+/// "从文档导入"的文件选择框参数。对话框由应用层在后台线程开，主线程不阻塞。
+pub(crate) fn file_dialog_spec() -> FileDialogSpec {
+    filtered_spec(FileDialogSpec::pick_file())
 }
 
-/// 打开知识库导入的文件选择框（可多选）。
-pub(crate) fn pick_knowledge_files() -> Option<Vec<PathBuf>> {
-    file_dialog().pick_files()
+/// 知识库导入的文件选择框参数（可多选）。
+pub(crate) fn knowledge_files_spec() -> FileDialogSpec {
+    filtered_spec(FileDialogSpec::pick_files())
 }
 
-/// 按 [`FILTER_GROUPS`] 拼文件对话框。
-fn file_dialog() -> rfd::FileDialog {
+/// 按 [`FILTER_GROUPS`] 拼文件对话框的过滤器。
+fn filtered_spec(spec: FileDialogSpec) -> FileDialogSpec {
     let all: Vec<&str> = FILTER_GROUPS
         .iter()
         .flat_map(|(_, extensions)| extensions.iter().copied())
         .collect();
-    let mut dialog = rfd::FileDialog::new().add_filter("所有支持的格式", &all);
+    let mut spec = spec.filter("所有支持的格式", &all);
     for (label, extensions) in FILTER_GROUPS {
-        dialog = dialog.add_filter(*label, extensions);
+        spec = spec.filter(*label, extensions);
     }
-    dialog
+    spec
 }
 
-/// 打开“从文件夹新建研究报告”的目录选择框。
-pub(crate) fn pick_folder() -> Option<PathBuf> {
-    rfd::FileDialog::new().pick_folder()
+/// "从文件夹新建研究报告"的目录选择框参数。
+pub(crate) fn folder_spec() -> FileDialogSpec {
+    FileDialogSpec::pick_folder()
 }
 
 #[derive(Debug)]

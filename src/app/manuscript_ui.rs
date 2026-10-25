@@ -255,13 +255,14 @@ mod dialog_snapshot_tests {
             pin_choice: PinChoice::default(),
         };
         snapshot("archive-dialog", egui::vec2(760.0, 480.0), |ui| {
+            let mut pick_pdfs = false;
             modal::dialog(
                 ui.ctx(),
                 egui::Id::new("manuscript_archive"),
                 "归档稿件",
                 460.0,
                 Dismiss::EscOnly,
-                |ui| archive_form(ui, &mut pending, "关于开展安全检查的通知"),
+                |ui| archive_form(ui, &mut pending, "关于开展安全检查的通知", &mut pick_pdfs),
             );
         });
     }

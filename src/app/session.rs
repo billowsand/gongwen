@@ -52,6 +52,14 @@ pub(crate) enum DraftAction {
     Persist,
     /// 在应用内打开最近导出的 PDF；`duplex_typeset` 是版式是否按双面排了页码。
     OpenPdf { path: PathBuf, duplex_typeset: bool },
+    /// 导入文档：应用层开文件框，选好后把正文插进这篇稿件。
+    ImportDocument { key: DocKey },
+    /// 插入图片：应用层开文件框，选好后把图片插进这篇稿件。
+    InsertImages { key: DocKey },
+    /// 另存导出成品：应用层开保存框，选好后复制过去。
+    SaveExportCopy { key: DocKey, source: PathBuf },
+    /// 导入 .bib 文献库：应用层开文件框，选好后读进这篇稿件。
+    ImportBibliography { key: DocKey },
 }
 
 impl GongwenApp {

@@ -7,6 +7,7 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::settings`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+use super::file_dialog::FileDialogSpec;
 use crate::app::{GongwenApp, warn};
 use crate::models::{
     BoldStyle, DiagramTheme, EditorFontFace, EditorFontPreset, EditorFontSlot, FontRole,
@@ -342,11 +343,46 @@ fn guide_section_ui(help: &mut crate::help::HelpState, ui: &mut egui::Ui) {
     });
 }
 
+/// 字体选择行对应的配置槽位：浏览字体文件的结果要写回这里。
+#[derive(Clone, Copy)]
+enum FontSlot {
+    /// 应用界面字体。
+    Ui,
+    /// Markdown 源码编辑器字体。
+    Editor,
+    /// 公文版式里的某个角色。
+    Role(FontRole),
+}
+
+impl FontSlot {
+    /// 槽位对应的字体选择。
+    fn slot_choice_mut(
+        self,
+        fonts: &mut crate::models::FontConfig,
+    ) -> &mut crate::models::FontChoice {
+        match self {
+            FontSlot::Ui => &mut fonts.ui_font,
+            FontSlot::Editor => &mut fonts.editor_font,
+            FontSlot::Role(role) => fonts.choice_mut(role),
+        }
+    }
+}
+
+/// 字体选择行这一帧的结果。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FontRowOutcome {
+    /// 这一帧没有要处理的事。
+    Idle,
+    /// 用户点了「浏览字体文件」，要开文件对话框。
+    Browse,
+}
+
 /// 一个位置的字体选择行：下拉选本机字体，或浏览一个字体文件。
-/// 返回需要显示在状态栏的提示（选了不支持的文件时给出）。
 ///
 /// `key` 只用于下拉框的 id，`label` 是行标题，`default_label` 是未选择时显示的
 /// 完整名称（例如“系统默认（微软雅黑）”或“内置（仿宋）”），`hint` 是悬停说明。
+/// 浏览字体文件要开系统对话框，由调用方拿着 `&mut GongwenApp` 去开：这一行自己
+/// 够不到应用状态，只能把「用户要浏览字体」这件事报回去。
 #[allow(clippy::too_many_arguments)] // Shared form helper; call sites keep these options explicit.
 fn font_choice_row(
     ui: &mut egui::Ui,
@@ -357,8 +393,8 @@ fn font_choice_row(
     choice: &mut crate::models::FontChoice,
     available: &[system_fonts::SystemFont],
     filter: &mut String,
-) -> Option<String> {
-    let mut message = None;
+) -> FontRowOutcome {
+    let mut outcome = FontRowOutcome::Idle;
     ui.horizontal(|ui| {
         setting_label(ui, label, None);
         let selected = if choice.is_set() {
@@ -432,22 +468,11 @@ fn font_choice_row(
                     }
                 });
             });
-        if theme::icon_button(ui, theme::Icon::Folder, "浏览字体文件").clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("字体文件", system_fonts::SUPPORTED_EXTENSIONS)
-                .pick_file()
-        {
-            match system_fonts::read_font(&path) {
-                Some(font) => *choice = font.to_choice(),
-                None => {
-                    message = Some(format!(
-                        "无法把「{}」用作{label}：只支持 ttf 与 otf，字体集合（ttc）需要额外指定字面序号，暂不支持。",
-                        path.display(),
-                    ));
-                }
-            }
+        if theme::icon_button(ui, theme::Icon::Folder, "浏览字体文件").clicked() {
+            outcome = FontRowOutcome::Browse;
         }
-        if choice.is_set() && theme::icon_button(ui, theme::Icon::RotateCcw, "恢复默认字体").clicked()
+        if choice.is_set()
+            && theme::icon_button(ui, theme::Icon::RotateCcw, "恢复默认字体").clicked()
         {
             *choice = crate::models::FontChoice::default();
         }
@@ -457,7 +482,7 @@ fn font_choice_row(
             ui.weak(choice.path.clone());
         });
     }
-    message
+    outcome
 }
 
 impl GongwenApp {
@@ -868,6 +893,28 @@ impl GongwenApp {
         }
     }
 
+    /// 打开字体文件对话框：用户挑完把字体写回对应槽位，挑到不支持的文件就提示一句。
+    fn browse_font_file(&mut self, slot: FontSlot, label: &str) {
+        let label = label.to_string();
+        self.request_file(
+            FileDialogSpec::pick_file().filter("字体文件", system_fonts::SUPPORTED_EXTENSIONS),
+            move |app, path| {
+                let Some(path) = path else {
+                    return;
+                };
+                match system_fonts::read_font(&path) {
+                    Some(font) => *slot.slot_choice_mut(&mut app.config.fonts) = font.to_choice(),
+                    None => {
+                        app.status = format!(
+                            "无法把「{}」用作{label}：只支持 ttf 与 otf，字体集合（ttc）需要额外指定字面序号，暂不支持。",
+                            path.display(),
+                        );
+                    }
+                }
+            },
+        );
+    }
+
     /// 字体设置：界面与 Markdown 源码编辑器字体可分别个性化，五个编译位置也可分别换成本机字体。
     pub(crate) fn font_settings_ui(&mut self, ui: &mut egui::Ui) {
         // 界面字体和编译字体共用本机字体列表；进入字体设置后只扫描一次。
@@ -884,7 +931,7 @@ impl GongwenApp {
             ),
         );
         let default_ui_label = format!("系统默认（{}）", theme::default_ui_font_label());
-        let mut message = {
+        let outcome = {
             let filter = self.font_filter.entry("ui").or_default();
             font_choice_row(
                 ui,
@@ -897,8 +944,11 @@ impl GongwenApp {
                 filter,
             )
         };
+        if outcome == FontRowOutcome::Browse {
+            self.browse_font_file(FontSlot::Ui, "界面字体");
+        }
         // Markdown 源码编辑器单独一项：留空即跟随界面字体。
-        if let Some(text) = {
+        let outcome = {
             let filter = self.font_filter.entry("editor").or_default();
             font_choice_row(
                 ui,
@@ -910,8 +960,9 @@ impl GongwenApp {
                 &self.system_fonts,
                 filter,
             )
-        } {
-            message = Some(text);
+        };
+        if outcome == FontRowOutcome::Browse {
+            self.browse_font_file(FontSlot::Editor, "编辑器字体");
         }
         // 字号紧挨着字体：同一件事（编辑器看着舒不舒服）不该拆到两个分区里找。
         setting_row(ui, "编辑器字号", None, |ui| {
@@ -972,21 +1023,24 @@ impl GongwenApp {
         // 兜底字体不受上面的本机字体开关约束：它只在别的字体排不出某个字时顶上，
         // 关掉不会换回另一种版式，只会让生僻字重新从纸面上消失。
         ui.add_space(4.0);
-        if let Some(text) = {
+        {
             let role = FontRole::Fallback;
-            let filter = self.font_filter.entry(role.key()).or_default();
-            font_choice_row(
-                ui,
-                role.key(),
-                role.label(),
-                &format!("内置（{}）", role.bundled_label()),
-                role.hint(),
-                self.config.fonts.choice_mut(role),
-                &self.system_fonts,
-                filter,
-            )
-        } {
-            message = Some(text);
+            let outcome = {
+                let filter = self.font_filter.entry(role.key()).or_default();
+                font_choice_row(
+                    ui,
+                    role.key(),
+                    role.label(),
+                    &format!("内置（{}）", role.bundled_label()),
+                    role.hint(),
+                    self.config.fonts.choice_mut(role),
+                    &self.system_fonts,
+                    filter,
+                )
+            };
+            if outcome == FontRowOutcome::Browse {
+                self.browse_font_file(FontSlot::Role(role), role.label());
+            }
         }
 
         if self.config.fonts.use_system_fonts {
@@ -994,7 +1048,7 @@ impl GongwenApp {
             for role in FontRole::TYPESETTING {
                 let filter = self.font_filter.entry(role.key()).or_default();
                 let default_label = format!("内置（{}）", role.bundled_label());
-                if let Some(text) = font_choice_row(
+                let outcome = font_choice_row(
                     ui,
                     role.key(),
                     role.label(),
@@ -1003,15 +1057,13 @@ impl GongwenApp {
                     self.config.fonts.choice_mut(role),
                     &self.system_fonts,
                     filter,
-                ) {
-                    message = Some(text);
+                );
+                if outcome == FontRowOutcome::Browse {
+                    self.browse_font_file(FontSlot::Role(role), role.label());
                 }
             }
         }
 
-        if let Some(text) = message {
-            self.status = text;
-        }
         if self.config.fonts != before {
             // 预览也跟着换，否则屏幕上的版式和编译出来的 PDF 对不上。
             theme::configure_fonts(ui.ctx(), &self.config.fonts);
@@ -1402,10 +1454,13 @@ impl GongwenApp {
     fn output_section_ui(&mut self, ui: &mut egui::Ui) {
         setting_row(ui, "输出目录", None, |ui| {
             ui.text_edit_singleline(&mut self.config.output_dir);
-            if theme::icon_button(ui, theme::Icon::Folder, "选择输出目录").clicked()
-                && let Some(path) = rfd::FileDialog::new().pick_folder()
-            {
-                self.config.output_dir = path.display().to_string();
+            if theme::icon_button(ui, theme::Icon::Folder, "选择输出目录").clicked() {
+                self.request_file(FileDialogSpec::pick_folder(), |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    app.config.output_dir = path.display().to_string();
+                });
             }
             if theme::icon_button(ui, theme::Icon::Open, "打开输出目录").clicked() {
                 self.draft_page().open_output_dir();
@@ -1506,32 +1561,41 @@ impl GongwenApp {
                 .color(theme::text_muted()),
         );
 
-        if export_archive
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("技能包", &["skill", "zip"])
-                .set_file_name(crate::skill_pack::ARCHIVE_FILE_NAME)
-                .save_file()
-        {
-            self.status = match crate::skill_pack::write_archive(&path) {
-                Ok(()) => {
-                    let _ = super::reveal_in_os(&path);
-                    format!("已导出 AI 技能包：{}", path.display())
-                }
-                Err(error) => format!("导出技能包失败：{error:#}"),
-            };
+        if export_archive {
+            self.request_file(
+                FileDialogSpec::save_file()
+                    .filter("技能包", &["skill", "zip"])
+                    .file_name(crate::skill_pack::ARCHIVE_FILE_NAME),
+                |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    app.status = match crate::skill_pack::write_archive(&path) {
+                        Ok(()) => {
+                            let _ = super::reveal_in_os(&path);
+                            format!("已导出 AI 技能包：{}", path.display())
+                        }
+                        Err(error) => format!("导出技能包失败：{error:#}"),
+                    };
+                },
+            );
         }
-        if export_folder
-            && let Some(parent) = rfd::FileDialog::new()
-                .set_title("选择要放技能的 skills 目录")
-                .pick_folder()
-        {
-            self.status = match crate::skill_pack::write_directory(&parent) {
-                Ok(root) => {
-                    let _ = super::reveal_in_os(&root);
-                    format!("已导出技能文件夹：{}", root.display())
-                }
-                Err(error) => format!("导出技能文件夹失败：{error:#}"),
-            };
+        if export_folder {
+            self.request_file(
+                FileDialogSpec::pick_folder().title("选择要放技能的 skills 目录"),
+                |app, parent| {
+                    let Some(parent) = parent else {
+                        return;
+                    };
+                    app.status = match crate::skill_pack::write_directory(&parent) {
+                        Ok(root) => {
+                            let _ = super::reveal_in_os(&root);
+                            format!("已导出技能文件夹：{}", root.display())
+                        }
+                        Err(error) => format!("导出技能文件夹失败：{error:#}"),
+                    };
+                },
+            );
         }
     }
 

@@ -755,15 +755,17 @@ impl GongwenApp {
 
     /// 打开外部文档选择框（Markdown / Word / 电子版 PDF 等），进入导入确认（选文种）。
     pub(crate) fn knowledge_pick_documents(&mut self) {
-        let Some(paths) = doc_import::pick_knowledge_files() else {
-            return;
-        };
-        if paths.is_empty() {
-            return;
-        }
-        self.knowledge_import = Some(KnowledgeImportDraft {
-            paths,
-            kind: self.config.last_template,
+        self.request_files(doc_import::knowledge_files_spec(), |app, paths| {
+            let Some(paths) = paths else {
+                return;
+            };
+            if paths.is_empty() {
+                return;
+            }
+            app.knowledge_import = Some(KnowledgeImportDraft {
+                paths,
+                kind: app.config.last_template,
+            });
         });
     }
 

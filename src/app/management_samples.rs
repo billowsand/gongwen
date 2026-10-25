@@ -39,6 +39,7 @@ pub(super) fn fixture() -> GongwenApp {
         metrics: crate::metrics::Metrics::default(),
         print_dialog: None,
         next_print_dialog: 1,
+        pending_file_dialogs: Vec::new(),
         send_package: None,
         send_package_export: None,
         macos_titlebar_metrics: None,

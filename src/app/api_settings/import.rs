@@ -49,6 +49,8 @@ pub(in crate::app) struct ImportFlow {
     error: Option<String>,
     /// 密钥工作副本：本机已有的 + 识别出来的。
     secrets: ApiSecrets,
+    /// 用户点了「选文件…」，等应用层开对话框。路径要等用户挑完才有。
+    want_file: bool,
 }
 
 struct Running {
@@ -472,17 +474,9 @@ fn input_ui(
             )
             .on_hover_text("文本、Markdown、JSON、YAML、Word、PDF 等")
             .clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter(
-                    "接口文档",
-                    &[
-                        "txt", "md", "json", "yaml", "yml", "docx", "doc", "pdf", "xlsx", "rtf",
-                    ],
-                )
-                .pick_file()
         {
-            flow.reading = Some(read_file(path));
-            flow.error = None;
+            // 文件对话框由应用层在后台线程开，这里只记下请求。
+            flow.want_file = true;
         }
         if let Some(file) = &flow.file {
             theme::caption(ui, &format!("已读入 {file}"));
@@ -512,6 +506,17 @@ fn input_ui(
     if let Some(error) = &flow.error {
         ui.colored_label(theme::danger(), error);
     }
+}
+
+/// 页面点了「选文件…」：取走这个请求，等应用层去开对话框。
+pub(super) fn take_file_request(flow: &mut ImportFlow) -> bool {
+    std::mem::take(&mut flow.want_file)
+}
+
+/// 用户挑完了文件：读进来。
+pub(super) fn apply_picked_file(flow: &mut ImportFlow, path: PathBuf) {
+    flow.reading = Some(read_file(path));
+    flow.error = None;
 }
 
 fn read_file(path: PathBuf) -> Receiver<Result<(String, String), String>> {

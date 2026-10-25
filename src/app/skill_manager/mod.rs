@@ -12,9 +12,24 @@ use crate::agent::api::ApiStore;
 use crate::agent::skill::{self, Skill};
 use crate::agent::skill_files::{self, package};
 use crate::app::GongwenApp;
+use crate::app::file_dialog::FileDialogSpec;
 use crate::theme;
 use eframe::egui;
 use std::collections::BTreeMap;
+
+/// 技能页要开的文件对话框。
+///
+/// 技能页自己的 `ui` 拿不到 `&mut GongwenApp`（它在 `agent_settings` 里），
+/// 所以按钮只记下请求，由上层用请求式对话框发起；挑完再回调做原来的动作。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SkillDialog {
+    /// 导入技能包文件。
+    ImportPackage,
+    /// 导入技能文件夹。
+    ImportFolder,
+    /// 导出某个技能包（技能 id）。
+    Export(String),
+}
 
 #[derive(Default)]
 pub(super) struct SkillsPage {
@@ -40,6 +55,8 @@ pub(super) struct SkillsPage {
     file_create_open: bool,
     confirm_remove: bool,
     message: Option<(bool, String)>,
+    /// 待发的文件对话框请求：技能页只记下意图，由上层发起。
+    dialog_request: Option<SkillDialog>,
     diagrams: workflow::DiagramCache,
 }
 
@@ -69,6 +86,49 @@ enum Category {
 impl GongwenApp {
     pub(super) fn skills_section_ui(&mut self, ui: &mut egui::Ui) {
         self.agent_settings.skills.ui(ui);
+        self.run_skill_dialog();
+    }
+
+    /// 技能页请求的文件对话框：对话框在后台线程开，主线程不阻塞。
+    fn run_skill_dialog(&mut self) {
+        let Some(request) = self.agent_settings.skills.dialog_request.take() else {
+            return;
+        };
+        match request {
+            SkillDialog::ImportPackage => {
+                self.request_file(
+                    FileDialogSpec::pick_file().filter("技能包", &["skill", "zip"]),
+                    |app, path| {
+                        let Some(path) = path else {
+                            return;
+                        };
+                        app.agent_settings.skills.import(&path);
+                    },
+                );
+            }
+            SkillDialog::ImportFolder => {
+                self.request_file(FileDialogSpec::pick_folder(), |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    app.agent_settings.skills.import(&path);
+                });
+            }
+            SkillDialog::Export(id) => {
+                let file_name = format!("{id}.skill");
+                self.request_file(
+                    FileDialogSpec::save_file()
+                        .file_name(file_name)
+                        .filter("技能包", &["skill"]),
+                    move |app, path| {
+                        let Some(path) = path else {
+                            return;
+                        };
+                        app.agent_settings.skills.export_skill(&id, &path);
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -111,18 +171,12 @@ impl SkillsPage {
                     ui.menu_button("导入技能", |ui| {
                         if ui.button("导入技能包…").clicked() {
                             ui.close();
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("技能包", &["skill", "zip"])
-                                .pick_file()
-                            {
-                                self.import(&path);
-                            }
+                            // 对话框在后台线程开：这里只记下意图，由上层发起请求。
+                            self.dialog_request = Some(SkillDialog::ImportPackage);
                         }
                         if ui.button("导入技能文件夹…").clicked() {
                             ui.close();
-                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                self.import(&path);
-                            }
+                            self.dialog_request = Some(SkillDialog::ImportFolder);
                         }
                     });
                 });

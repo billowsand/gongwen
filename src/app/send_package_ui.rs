@@ -7,6 +7,7 @@
 //! 合并导出分两步：点「导出合并 PDF…」先生成导出计划（每件用哪一版、哪件不能进包）
 //! 给人确认；确认后整份计划交给后台线程逐件编译、合并，确认之后再提交的版本不会混进来。
 
+use super::file_dialog::FileDialogSpec;
 use crate::app::{
     GongwenApp, VersionDiffState, VersionScope, WorkerResult, short_date, status_color, summarize,
 };
@@ -1479,22 +1480,25 @@ impl GongwenApp {
             "{}（送批材料）.pdf",
             crate::export::safe_filename(confirm.plan.owner_title())
         );
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PDF", &["pdf"])
-            .set_file_name(&default_name)
-            .save_file()
-        else {
-            return;
-        };
-        let path = if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-        {
-            path
-        } else {
-            path.with_extension("pdf")
-        };
-        self.run_send_package_export(path);
+        self.request_file(
+            FileDialogSpec::save_file()
+                .filter("PDF", &["pdf"])
+                .file_name(default_name),
+            |app, path| {
+                let Some(path) = path else {
+                    return;
+                };
+                let path = if path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+                {
+                    path
+                } else {
+                    path.with_extension("pdf")
+                };
+                app.run_send_package_export(path);
+            },
+        );
     }
 
     /// 把面板上已确认的计划交给后台线程，导出到 `path`。

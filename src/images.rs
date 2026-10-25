@@ -13,6 +13,7 @@
 //! - 图片必须独占一行（`![alt](src)` 一行），插入时自动在前后补空行保证；
 //! - 拒绝绝对路径与 `..` 穿越，防止 markdown 引用读取任意文件。
 
+use crate::app::file_dialog::FileDialogSpec;
 use crate::storage;
 use anyhow::{Context, Result, bail};
 use chrono::Local;
@@ -75,13 +76,13 @@ fn resolve_from(base: &Path, rel: &str) -> Result<PathBuf> {
     Ok(base.join(rel))
 }
 
-/// 打开"插入图片"的文件选择框（可多选），返回用户选中的文件；取消返回 None。
-pub(crate) fn pick_files() -> Option<Vec<PathBuf>> {
+/// "插入图片"的文件选择框参数（可多选）。对话框由应用层在后台线程开。
+pub(crate) fn pick_files_spec() -> FileDialogSpec {
     let bitmaps = ["png", "jpg", "jpeg", "webp", "bmp", "gif"];
-    let mut dialog = rfd::FileDialog::new().add_filter("图片 / PDF", SUPPORTED_EXTENSIONS);
-    dialog = dialog.add_filter("PNG / JPG / WebP / BMP / GIF", &bitmaps);
-    dialog = dialog.add_filter("PDF 附件", &["pdf"]);
-    dialog.pick_files()
+    FileDialogSpec::pick_files()
+        .filter("图片 / PDF", SUPPORTED_EXTENSIONS)
+        .filter("PNG / JPG / WebP / BMP / GIF", &bitmaps)
+        .filter("PDF 附件", &["pdf"])
 }
 
 /// 把选中文件复制入库，返回每个文件的相对路径与 markdown 片段。

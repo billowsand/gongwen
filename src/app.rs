@@ -34,6 +34,8 @@ mod ai_proposal;
 mod api_settings;
 mod chrome;
 mod data_safety;
+pub(crate) mod file_dialog;
+mod ime_page;
 mod jobs;
 mod lexicon_jobs;
 mod manuscript_ui;
@@ -161,6 +163,8 @@ pub struct GongwenApp {
     print_dialog: Option<crate::print::PrintDialog>,
     /// 下一个打印对话框的编号，只增不减；后台查打印机的结果凭它认领。
     next_print_dialog: u64,
+    /// 还没问完结果的系统文件对话框；后台线程开窗，主线程每帧问一次。
+    pending_file_dialogs: Vec<file_dialog::PendingFileDialog>,
     /// 送批材料面板；None 表示未打开。
     send_package: Option<SendPackagePanel>,
     /// 正在后台进行的送批材料合并导出；同一时间只跑一个。
@@ -533,6 +537,7 @@ impl GongwenApp {
             metrics: crate::metrics::load(),
             print_dialog: None,
             next_print_dialog: 1,
+            pending_file_dialogs: Vec::new(),
             send_package: None,
             send_package_export: None,
             macos_titlebar_metrics,
@@ -759,6 +764,8 @@ impl eframe::App for GongwenApp {
         crate::net::set_proxy(&self.config.proxy);
         self.handle_shortcuts(&ctx);
         self.poll_worker(&ctx);
+        // 系统文件对话框在后台线程开窗，这里问一次结果；用户挑完再接着做那件事。
+        self.poll_file_dialogs(&ctx);
         self.receive_forwarded_requests(&ctx);
         self.receive_dropped_packages(&ctx);
         self.pump_pending_imports();
@@ -849,10 +856,8 @@ impl eframe::App for GongwenApp {
                         })
                     }
                     TabRef::Page(NavPage::ImeTable) => {
-                        if let Some(crate::ime::PageAction::SyncLexicon) =
-                            self.ime.page_ui(&mut content_ui)
-                        {
-                            self.sync_lexicon_to_ime(true);
+                        if let Some(action) = self.ime.page_ui(&mut content_ui) {
+                            self.apply_ime_page_action(action);
                         }
                     }
                     TabRef::Page(NavPage::Manuscript) => {
@@ -874,7 +879,7 @@ impl eframe::App for GongwenApp {
                 }
             });
         // 起草页在借出会话的那一帧里做不了的事，到这里统一执行。
-        self.apply_draft_actions();
+        self.apply_draft_actions(&ctx);
         // 设置页的「打开完整图文手册」只置了个位——它拿不到标签栏，开标签在这儿。
         if std::mem::take(&mut self.help.request_open) {
             self.open_page(NavPage::Help);

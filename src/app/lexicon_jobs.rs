@@ -3,6 +3,7 @@
 //! 扫描要遍历整个稿件库并逐篇分词，放后台线程；确认、改读音、导出都在毫秒级，
 //! 直接在主线程做。
 
+use super::file_dialog::FileDialogSpec;
 use crate::app::{GongwenApp, LexiconPreview, WorkerResult};
 use crate::lexicon::{self, TermState, export, scan};
 use crate::storage;
@@ -326,33 +327,36 @@ impl GongwenApp {
             self.lexicon_error = Some("当前口径下没有可导出的词。".into());
             return;
         }
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("公文四码词表", &["txt"])
-            .set_file_name(export::suggested_file_name())
-            .save_file()
-        else {
-            return;
-        };
-        if let Err(error) = std::fs::write(&path, built.table.as_bytes()) {
-            self.lexicon_error = Some(format!("写入码表失败：{error}"));
-            return;
-        }
-        let mut message = format!("码表已导出到 {}：{}", path.display(), built.describe());
-        if !built.conflicts.is_empty() {
-            let report = path
-                .parent()
-                .map(|dir| dir.join(export::suggested_conflict_file_name()))
-                .unwrap_or_else(
-                    || std::path::PathBuf::from(export::suggested_conflict_file_name()),
-                );
-            match std::fs::write(&report, built.conflicts.as_bytes()) {
-                Ok(()) => message.push_str(&format!("；重码报告见 {}", report.display())),
-                Err(error) => message.push_str(&format!("；重码报告写入失败：{error}")),
-            }
-        }
-        message.push_str("。在「设置 → 输入法」导入四码词表即可生效。");
-        self.lexicon_export_result = Some(message.clone());
-        self.status = message;
+        self.request_file(
+            FileDialogSpec::save_file()
+                .filter("公文四码词表", &["txt"])
+                .file_name(export::suggested_file_name()),
+            move |app, path| {
+                let Some(path) = path else {
+                    return;
+                };
+                if let Err(error) = std::fs::write(&path, built.table.as_bytes()) {
+                    app.lexicon_error = Some(format!("写入码表失败：{error}"));
+                    return;
+                }
+                let mut message = format!("码表已导出到 {}：{}", path.display(), built.describe());
+                if !built.conflicts.is_empty() {
+                    let report = path
+                        .parent()
+                        .map(|dir| dir.join(export::suggested_conflict_file_name()))
+                        .unwrap_or_else(|| {
+                            std::path::PathBuf::from(export::suggested_conflict_file_name())
+                        });
+                    match std::fs::write(&report, built.conflicts.as_bytes()) {
+                        Ok(()) => message.push_str(&format!("；重码报告见 {}", report.display())),
+                        Err(error) => message.push_str(&format!("；重码报告写入失败：{error}")),
+                    }
+                }
+                message.push_str("。在「设置 → 输入法」导入四码词表即可生效。");
+                app.lexicon_export_result = Some(message.clone());
+                app.status = message;
+            },
+        );
     }
 }
 

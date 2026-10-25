@@ -410,19 +410,17 @@ impl DraftPage<'_> {
     }
 
     /// 右键“导出到…”：弹出保存框，把这份成品另存一份到用户选的位置。
+    ///
+    /// 保存框由应用层在后台线程开（主线程不能等），这里只把请求交出去。
     fn save_export_copy(&mut self, source: &Path) {
-        let file_name = source
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let mut dialog = rfd::FileDialog::new().set_file_name(&file_name);
-        if let Some(extension) = source.extension().and_then(|extension| extension.to_str()) {
-            let label = format!("{} 文件", extension.to_ascii_uppercase());
-            dialog = dialog.add_filter(label, &[extension]);
-        }
-        let Some(target) = dialog.save_file() else {
-            return;
-        };
+        self.actions.push(DraftAction::SaveExportCopy {
+            key: self.doc.key,
+            source: source.to_path_buf(),
+        });
+    }
+
+    /// 把导出的成品复制到用户选定的位置。
+    pub(crate) fn copy_export_to(&mut self, source: &Path, target: &Path) {
         let same = match (source.canonicalize(), target.canonicalize()) {
             (Ok(a), Ok(b)) => a == b,
             _ => false,
@@ -431,7 +429,7 @@ impl DraftPage<'_> {
             *self.status = "目标就是原文件，未做改动。".into();
             return;
         }
-        *self.status = match std::fs::copy(source, &target) {
+        *self.status = match std::fs::copy(source, target) {
             Ok(_) => format!("已导出到 {}。", target.display()),
             Err(error) => format!("导出到 {} 失败：{error}", target.display()),
         };
@@ -439,24 +437,32 @@ impl DraftPage<'_> {
 
     /// 功能区“导入文档”：选一个现成文档，转成 markdown 插到编辑器光标处。
     ///
-    /// 沿用主线程同步转换：本机短文档样张提取耗时为毫秒级（PDF 约 4–12ms）。
-    /// 这不是大文件的耗时上限，长 PDF 仍可能让界面短暂等待。
-    pub(crate) fn import_document(&mut self, ctx: &egui::Context) {
+    /// 文件框由应用层在后台线程开（主线程不能等），这里只把请求交出去。
+    pub(crate) fn import_document(&mut self, _ctx: &egui::Context) {
         if self.doc.read_only() {
             return;
         }
-        let Some(path) = doc_import::pick_file() else {
+        self.actions
+            .push(DraftAction::ImportDocument { key: self.doc.key });
+    }
+
+    /// 把用户选中的文档转成 markdown 插到编辑器光标处。
+    ///
+    /// 沿用主线程同步转换：本机短文档样张提取耗时为毫秒级（PDF 约 4–12ms）。
+    /// 这不是大文件的耗时上限，长 PDF 仍可能让界面短暂等待。
+    pub(crate) fn import_document_from(&mut self, ctx: &egui::Context, path: &Path) {
+        if self.doc.read_only() {
             return;
-        };
+        }
         // 稿子里已经有 `# 标题` 就不再从导入的正文里认标题，免得正文区出现两个。
         let detect_title = !self
             .doc
             .generated_markdown
             .lines()
             .any(|line| line.trim_start().starts_with("# "));
-        match doc_import::to_draft_markdown(&path, detect_title) {
+        match doc_import::to_draft_markdown(path, detect_title) {
             Ok(imported) => {
-                self.insert_imported_markdown(ctx, &imported.markdown, &path);
+                self.insert_imported_markdown(ctx, &imported.markdown, path);
                 self.status.push_str(&imported.images.notice());
             }
             Err(error) => *self.status = format!("导入失败：{error:#}"),
@@ -467,14 +473,20 @@ impl DraftPage<'_> {
     /// 插到编辑器光标处，多文件按行分隔。
     ///
     /// 图片宽度不写进 markdown，预览与导出统一按页面（版心）宽度等比缩放。
-    pub(crate) fn insert_images(&mut self, ctx: &egui::Context) {
+    pub(crate) fn insert_images(&mut self, _ctx: &egui::Context) {
         if self.doc.read_only() {
             return;
         }
-        let Some(files) = images::pick_files() else {
+        self.actions
+            .push(DraftAction::InsertImages { key: self.doc.key });
+    }
+
+    /// 把用户选中的图片复制入库，并把 markdown 图片引用插到编辑器光标处。
+    pub(crate) fn insert_images_from(&mut self, ctx: &egui::Context, files: &[PathBuf]) {
+        if self.doc.read_only() || files.is_empty() {
             return;
-        };
-        match images::import(&files) {
+        }
+        match images::import(files) {
             Ok(imported) if imported.is_empty() => {
                 *self.status =
                     "没有可插入的图片文件（支持 PNG / JPG / WebP / BMP / GIF / PDF）。".to_string();

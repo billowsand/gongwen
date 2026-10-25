@@ -8,6 +8,7 @@
 //!
 //! 学习要调模型，放在后台线程，界面每帧取一次结果。
 
+use super::file_dialog::FileDialogSpec;
 use super::settings::setting_row;
 use crate::agent::backend::LmBackend;
 use crate::agent::board::RefSource;
@@ -177,6 +178,8 @@ impl GongwenApp {
         self.poll_style_learning(ui.ctx());
         let page = &mut self.styles_page;
         let mut action = None;
+        // 要开文件对话框的请求单独记：路径要等用户挑完才有，页面只发请求。
+        let mut file_request = None;
         ui.horizontal_wrapped(|ui| {
             if theme::primary_icon_button_enabled(
                 ui,
@@ -193,20 +196,12 @@ impl GongwenApp {
                 });
                 page.editor = None;
             }
-            if theme::icon_button(ui, theme::Icon::FileUp, "导入风格档案…").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("风格档案", &["json"])
-                    .pick_file()
-            {
-                action = Some(PageAction::Import(path));
+            if theme::icon_button(ui, theme::Icon::FileUp, "导入风格档案…").clicked() {
+                file_request = Some(PageAction::ChooseImportFile);
             }
             if theme::icon_button(ui, theme::Icon::FileDown, "导出全部风格档案…").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("风格档案", &["json"])
-                    .set_file_name("风格档案.json")
-                    .save_file()
             {
-                action = Some(PageAction::Export(path));
+                file_request = Some(PageAction::ChooseExportFile);
             }
             ui.weak("也可以在 AI 侧栏 @ 几篇稿子，说「学一下这几篇的风格」。");
         });
@@ -318,6 +313,9 @@ impl GongwenApp {
         if let Some(action) = action {
             self.apply_styles_action(action);
         }
+        if let Some(action) = file_request {
+            self.apply_styles_action(action);
+        }
     }
 
     fn reload_styles(&mut self) {
@@ -404,6 +402,36 @@ impl GongwenApp {
     }
 
     fn apply_styles_action(&mut self, action: PageAction) {
+        // 要开对话框的两种先走：它们要拿整个应用（页面状态在 self 里）。
+        match action {
+            PageAction::ChooseImportFile => {
+                self.request_file(
+                    FileDialogSpec::pick_file().filter("风格档案", &["json"]),
+                    |app, path| {
+                        let Some(path) = path else {
+                            return;
+                        };
+                        app.apply_styles_action(PageAction::Import(path));
+                    },
+                );
+                return;
+            }
+            PageAction::ChooseExportFile => {
+                self.request_file(
+                    FileDialogSpec::save_file()
+                        .filter("风格档案", &["json"])
+                        .file_name("风格档案.json"),
+                    |app, path| {
+                        let Some(path) = path else {
+                            return;
+                        };
+                        app.apply_styles_action(PageAction::Export(path));
+                    },
+                );
+                return;
+            }
+            _ => {}
+        }
         let page = &mut self.styles_page;
         match action {
             PageAction::Persist => {
@@ -475,25 +503,35 @@ impl GongwenApp {
                     self.start_style_learning(chosen, Some(keep));
                 }
             }
-            PageAction::Import(path) => {
-                page.message = Some(
-                    match page.book.import(&path).and_then(|count| {
-                        page.book.save()?;
-                        Ok(count)
-                    }) {
-                        Ok(count) => (true, format!("导入了 {count} 份风格档案。")),
-                        Err(error) => (false, format!("导入失败：{error:#}")),
-                    },
-                );
-                page.stale = stale_map(&page.book, &self.config);
-            }
-            PageAction::Export(path) => {
-                page.message = Some(match page.book.export(&path) {
-                    Ok(()) => (true, format!("已导出到 {}", path.display())),
-                    Err(error) => (false, format!("导出失败：{error:#}")),
-                });
-            }
+            PageAction::Import(path) => self.import_styles(path),
+            PageAction::Export(path) => self.export_styles(path),
+            // 要开对话框的两种已经在前面处理过了。
+            PageAction::ChooseImportFile | PageAction::ChooseExportFile => {}
         }
+    }
+
+    /// 导入一份风格档案。
+    fn import_styles(&mut self, path: std::path::PathBuf) {
+        let page = &mut self.styles_page;
+        page.message = Some(
+            match page.book.import(&path).and_then(|count| {
+                page.book.save()?;
+                Ok(count)
+            }) {
+                Ok(count) => (true, format!("导入了 {count} 份风格档案。")),
+                Err(error) => (false, format!("导入失败：{error:#}")),
+            },
+        );
+        page.stale = stale_map(&page.book, &self.config);
+    }
+
+    /// 导出全部风格档案到一个文件。
+    fn export_styles(&mut self, path: std::path::PathBuf) {
+        let page = &mut self.styles_page;
+        page.message = Some(match page.book.export(&path) {
+            Ok(()) => (true, format!("已导出到 {}", path.display())),
+            Err(error) => (false, format!("导出失败：{error:#}")),
+        });
     }
 }
 
@@ -505,6 +543,10 @@ enum PageAction {
     CloseEditor,
     Learn,
     Relearn,
+    /// 请求打开「导入风格档案」的文件对话框（路径要等用户挑完才有）。
+    ChooseImportFile,
+    /// 请求打开「导出风格档案」的文件对话框（路径要等用户挑完才有）。
+    ChooseExportFile,
     Import(std::path::PathBuf),
     Export(std::path::PathBuf),
 }

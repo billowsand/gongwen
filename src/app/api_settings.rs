@@ -16,6 +16,7 @@ mod import;
 mod service;
 
 use super::agent_settings::code_block;
+use super::file_dialog::FileDialogSpec;
 use crate::agent::api::{
     self, ApiEndpoint, ApiMethod, ApiSecrets, ApiStore, ApiTestLog, TestRecord, TestStatus, Trial,
 };
@@ -60,6 +61,17 @@ pub(crate) struct ApisPage {
     import: Option<ImportFlow>,
     /// 后台在跑的批量实测（换了 Key 以后共用它的接口、服务页「全部重测」）：接口 id → 结果。
     batch: Vec<(String, Receiver<Trial>)>,
+    /// 页面上点到的、要开文件对话框的动作。路径要等用户挑完才有，所以页面只发请求。
+    dialog: Option<ApiDialog>,
+}
+
+/// 页面上要开的文件对话框。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiDialog {
+    /// 导入接口文件（可多选）。
+    ImportConfig,
+    /// 导出接口配置。
+    ExportConfig,
 }
 
 /// 右栏显示什么。
@@ -351,6 +363,96 @@ impl GongwenApp {
 
     pub(super) fn apis_section_ui(&mut self, ui: &mut egui::Ui) {
         section_ui(ui, &mut self.agent_settings.apis, &self.config);
+        self.poll_api_dialogs();
+    }
+
+    /// 处理页面上点到的文件对话框请求：对话框开在后台线程，用户挑完再接着做。
+    fn poll_api_dialogs(&mut self) {
+        // 同一时间只开一个对话框：「从文档添加」里的「选文件…」优先。
+        let pick_doc = self
+            .agent_settings
+            .apis
+            .import
+            .as_mut()
+            .is_some_and(import::take_file_request);
+        if pick_doc {
+            self.request_file(
+                FileDialogSpec::pick_file().filter(
+                    "接口文档",
+                    &[
+                        "txt", "md", "json", "yaml", "yml", "docx", "doc", "pdf", "xlsx", "rtf",
+                    ],
+                ),
+                |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    let Some(flow) = app.agent_settings.apis.import.as_mut() else {
+                        return;
+                    };
+                    import::apply_picked_file(flow, path);
+                },
+            );
+            return;
+        }
+        let Some(dialog) = self.agent_settings.apis.dialog.take() else {
+            return;
+        };
+        match dialog {
+            ApiDialog::ImportConfig => {
+                self.request_files(
+                    FileDialogSpec::pick_files()
+                        .filter("接口文件", &["json", "yaml", "yml", "txt", "sh"]),
+                    |app, paths| {
+                        let Some(paths) = paths else {
+                            return;
+                        };
+                        import_config(&mut app.agent_settings.apis, paths);
+                    },
+                );
+            }
+            ApiDialog::ExportConfig => {
+                let files = apidef::export(&self.agent_settings.apis.store);
+                if files.is_empty() {
+                    self.agent_settings.apis.message = Some((false, "还没有接口可以导出。".into()));
+                    return;
+                }
+                if files.len() == 1 {
+                    let (name, doc) = files.into_iter().next().expect("刚检查过有一个文件");
+                    self.request_file(
+                        FileDialogSpec::save_file()
+                            .file_name(name)
+                            .filter("OpenAPI（JSON）", &["json"])
+                            .filter("OpenAPI（YAML）", &["yaml", "yml"]),
+                        move |app, path| {
+                            let Some(path) = path else {
+                                return;
+                            };
+                            let written =
+                                write_doc(&path, &doc).map(|()| path.display().to_string());
+                            app.agent_settings.apis.message = Some(match written {
+                                Ok(place) => (true, format!("已导出到 {place}（不含密钥）")),
+                                Err(error) => (false, format!("导出失败：{error:#}")),
+                            });
+                        },
+                    );
+                } else {
+                    self.request_file(FileDialogSpec::pick_folder(), move |app, dir| {
+                        let Some(dir) = dir else {
+                            return;
+                        };
+                        let written = files
+                            .iter()
+                            .try_for_each(|(name, doc)| write_doc(&dir.join(name), doc))
+                            .map(|()| format!("{}（{} 个服务）", dir.display(), files.len()));
+                        app.agent_settings.apis.message = Some(match written {
+                            Ok(place) => (true, format!("已导出到 {place}（不含密钥）")),
+                            Err(error) => (false, format!("导出失败：{error:#}")),
+                        });
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -542,26 +644,21 @@ fn list_toolbar(ui: &mut egui::Ui, page: &mut ApisPage) {
                 )
                 .clicked()
             {
-                import_config(page);
+                page.dialog = Some(ApiDialog::ImportConfig);
             }
             if ui
                 .add(theme::menu_item(theme::Icon::FileDown, "导出为 OpenAPI…"))
                 .on_hover_text("每个服务一份 OpenAPI 3.0，能在 Postman、Apifox 里打开；不带密钥与本机环境地址")
                 .clicked()
             {
-                export_config(page);
+                page.dialog = Some(ApiDialog::ExportConfig);
             }
         });
     });
 }
 
-fn import_config(page: &mut ApisPage) {
-    let Some(paths) = rfd::FileDialog::new()
-        .add_filter("接口文件", &["json", "yaml", "yml", "txt", "sh"])
-        .pick_files()
-    else {
-        return;
-    };
+/// 导入挑好的接口文件。
+fn import_config(page: &mut ApisPage, paths: Vec<std::path::PathBuf>) {
     let mut files = Vec::new();
     let mut errors = Vec::new();
     for path in paths {
@@ -596,37 +693,6 @@ fn import_config(page: &mut ApisPage) {
 ",
         ),
     ));
-}
-
-fn export_config(page: &mut ApisPage) {
-    let files = apidef::export(&page.store);
-    if files.is_empty() {
-        page.message = Some((false, "还没有接口可以导出。".into()));
-        return;
-    }
-    let written = if let [(name, doc)] = files.as_slice() {
-        let Some(path) = rfd::FileDialog::new()
-            .set_file_name(name)
-            .add_filter("OpenAPI（JSON）", &["json"])
-            .add_filter("OpenAPI（YAML）", &["yaml", "yml"])
-            .save_file()
-        else {
-            return;
-        };
-        write_doc(&path, doc).map(|()| path.display().to_string())
-    } else {
-        let Some(dir) = rfd::FileDialog::new().pick_folder() else {
-            return;
-        };
-        files
-            .iter()
-            .try_for_each(|(name, doc)| write_doc(&dir.join(name), doc))
-            .map(|()| format!("{}（{} 个服务）", dir.display(), files.len()))
-    };
-    page.message = Some(match written {
-        Ok(place) => (true, format!("已导出到 {place}（不含密钥）")),
-        Err(error) => (false, format!("导出失败：{error:#}")),
-    });
 }
 
 /// 按扩展名写 JSON 或 YAML。
