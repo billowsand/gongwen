@@ -4,6 +4,7 @@
 //! 执行期间挡住其他操作，避免用户一边恢复一边编辑。
 //! 备份文件的读写与回滚在 [`crate::data_backup`]，这里只负责交互与状态。
 
+use super::file_dialog::FileDialogSpec;
 use super::settings::{setting_continuation, setting_row, sub_heading};
 use super::{GongwenApp, WorkerResult, open_in_os, warn};
 use crate::data_backup;
@@ -147,32 +148,43 @@ impl GongwenApp {
             "公文助手备份-{}.zip",
             chrono::Local::now().format("%Y%m%d-%H%M%S")
         );
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter("ZIP 备份", &["zip"])
-            .set_file_name(&file_name);
-        let output_dir = Path::new(self.config.output_dir.trim());
-        if !self.config.output_dir.trim().is_empty() && output_dir.is_dir() {
-            dialog = dialog.set_directory(output_dir);
-        }
-        let Some(path) = dialog.save_file() else {
-            return;
+        // 起始目录跟原来一致：输出目录存在就从它开始挑。
+        let output_dir = {
+            let trimmed = self.config.output_dir.trim();
+            let dir = Path::new(trimmed);
+            if !trimmed.is_empty() && dir.is_dir() {
+                Some(dir.to_path_buf())
+            } else {
+                None
+            }
         };
-        if let Err(error) = self.prepare_backup_export() {
-            self.status = format!("备份前保存失败，未导出备份：{error:#}");
-            return;
+        let mut spec = FileDialogSpec::save_file()
+            .filter("ZIP 备份", &["zip"])
+            .file_name(file_name);
+        if let Some(directory) = output_dir {
+            spec = spec.directory(directory);
         }
-        self.backup_busy = true;
-        self.status = format!("正在打包备份到 {}…", path.display());
-        let tx = self.sender.clone();
-        thread::spawn(move || {
-            let result = data_backup::export_backup(&path)
-                .map(|()| {
-                    std::fs::metadata(&path)
-                        .map(|metadata| metadata.len())
-                        .unwrap_or(0)
-                })
-                .map_err(|error| format!("{error:#}"));
-            let _ = tx.send(WorkerResult::BackupExported { path, result });
+        self.request_file(spec, move |app, path| {
+            let Some(path) = path else {
+                return;
+            };
+            if let Err(error) = app.prepare_backup_export() {
+                app.status = format!("备份前保存失败，未导出备份：{error:#}");
+                return;
+            }
+            app.backup_busy = true;
+            app.status = format!("正在打包备份到 {}…", path.display());
+            let tx = app.sender.clone();
+            thread::spawn(move || {
+                let result = data_backup::export_backup(&path)
+                    .map(|()| {
+                        std::fs::metadata(&path)
+                            .map(|metadata| metadata.len())
+                            .unwrap_or(0)
+                    })
+                    .map_err(|error| format!("{error:#}"));
+                let _ = tx.send(WorkerResult::BackupExported { path, result });
+            });
         });
     }
 
@@ -181,19 +193,22 @@ impl GongwenApp {
         if !self.backup_ready() {
             return;
         }
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("ZIP 备份", &["zip"])
-            .pick_file()
-        else {
-            return;
-        };
-        self.backup_busy = true;
-        self.status = format!("正在校验备份 {}…", path.display());
-        let tx = self.sender.clone();
-        thread::spawn(move || {
-            let result = data_backup::inspect_backup(&path).map_err(|error| format!("{error:#}"));
-            let _ = tx.send(WorkerResult::BackupInspected { path, result });
-        });
+        self.request_file(
+            FileDialogSpec::pick_file().filter("ZIP 备份", &["zip"]),
+            |app, path| {
+                let Some(path) = path else {
+                    return;
+                };
+                app.backup_busy = true;
+                app.status = format!("正在校验备份 {}…", path.display());
+                let tx = app.sender.clone();
+                thread::spawn(move || {
+                    let result =
+                        data_backup::inspect_backup(&path).map_err(|error| format!("{error:#}"));
+                    let _ = tx.send(WorkerResult::BackupInspected { path, result });
+                });
+            },
+        );
     }
 
     /// 用户确认后真正执行恢复：先释放 SQLite 连接，再在后台替换数据。

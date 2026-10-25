@@ -12,6 +12,7 @@
 //! 校对时才发现规则没生效。旁边的试验区是配套的：粘一段话进去立刻看命中在
 //! 哪儿，否则用户写完规则心里没底，就不会写第二条。
 
+use super::file_dialog::FileDialogSpec;
 use crate::app::GongwenApp;
 use crate::models::ProofreadRule;
 use crate::proofread::{self, Entry, Level};
@@ -279,44 +280,49 @@ impl GongwenApp {
     }
 
     fn export_proofread_xlsx(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Excel", &["xlsx"])
-            .set_file_name("公文助手校对词表.xlsx")
-            .save_file()
-        else {
-            return;
-        };
-        match crate::proofread_xlsx::to_xlsx(&self.config.proofread, &path) {
-            Ok(()) => self.status = format!("校对词表已导出到 {}。", path.display()),
-            Err(error) => self.status = format!("导出校对词表失败：{error:#}"),
-        }
+        self.request_file(
+            FileDialogSpec::save_file()
+                .filter("Excel", &["xlsx"])
+                .file_name("公文助手校对词表.xlsx"),
+            |app, path| {
+                let Some(path) = path else {
+                    return;
+                };
+                match crate::proofread_xlsx::to_xlsx(&app.config.proofread, &path) {
+                    Ok(()) => app.status = format!("校对词表已导出到 {}。", path.display()),
+                    Err(error) => app.status = format!("导出校对词表失败：{error:#}"),
+                }
+            },
+        );
     }
 
     fn import_proofread_xlsx(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Excel 词表", &["xlsx"])
-            .pick_file()
-        else {
-            return;
-        };
-        match crate::proofread_xlsx::parse(&path) {
-            Ok((rules, warnings)) => {
-                let report = crate::proofread_xlsx::merge(&mut self.config.proofread, rules);
-                self.persist();
-                // 坏行数量要说出来。只报"导入成功"，用户不会知道有几条被丢了。
-                self.status = if warnings.is_empty() {
-                    format!("校对词表已导入：{}。", report.summary())
-                } else {
-                    format!(
-                        "校对词表已导入：{}；{} 行有问题被跳过（{}）。",
-                        report.summary(),
-                        warnings.len(),
-                        warnings.join("；")
-                    )
+        self.request_file(
+            FileDialogSpec::pick_file().filter("Excel 词表", &["xlsx"]),
+            |app, path| {
+                let Some(path) = path else {
+                    return;
                 };
-            }
-            Err(error) => self.status = format!("导入校对词表失败：{error:#}"),
-        }
+                match crate::proofread_xlsx::parse(&path) {
+                    Ok((rules, warnings)) => {
+                        let report = crate::proofread_xlsx::merge(&mut app.config.proofread, rules);
+                        app.persist();
+                        // 坏行数量要说出来。只报"导入成功"，用户不会知道有几条被丢了。
+                        app.status = if warnings.is_empty() {
+                            format!("校对词表已导入：{}。", report.summary())
+                        } else {
+                            format!(
+                                "校对词表已导入：{}；{} 行有问题被跳过（{}）。",
+                                report.summary(),
+                                warnings.len(),
+                                warnings.join("；")
+                            )
+                        };
+                    }
+                    Err(error) => app.status = format!("导入校对词表失败：{error:#}"),
+                }
+            },
+        );
     }
 
     /// 搜索 + 分组 + 级别三个筛选，外加整组启停。

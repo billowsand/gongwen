@@ -29,6 +29,17 @@ cargo build --release --locked --no-default-features --features linux-portal-dia
 （Windows 与 macOS 无此依赖）。三平台用同一个应用内打印对话框：Windows 由应用自行
 光栅化页面走原生 GDI 打印（DEVMODE），macOS 自带 `lp`。
 
+### Wayland 下的「应用无响应」系统弹窗
+
+Hyprland 等 Wayland 合成器每 1.5 秒给客户端发一次存活探测，客户端的事件循环停摆
+超过阈值就会被判为「应用无响应」，弹出系统对话框让人选「终止」还是「等待」。本应用
+是原生 Wayland 客户端，文件选择框因此**开在后台线程**（`src/app/file_dialog.rs`）：
+用户挑文件时主线程照常画界面、照常回应探测，挑完再接着做导入或导出。
+
+早期版本用阻塞式文件框，主线程在用户挑文件期间整个停住，探测没人回应，于是弹出
+「应用无响应」——应用本身其实照常可用。若仍看到该弹窗，说明主线程被别的事占住了
+（例如超大文档的同步排版），不是文件框的问题。
+
 ### 输入法（fcitx5）候选窗定位
 
 本应用是原生 Wayland 客户端，候选窗由 compositor 按 `input-method-v2` 协议绘制，

@@ -280,17 +280,19 @@ impl DraftPage<'_> {
 }
 
 impl DraftPage<'_> {
-    /// 读入一个 .bib 作为本稿的文献库。`path` 为空时弹文件框（文献引用下拉里的
-    /// 「导入 .bib…」也走这里）；给了路径就是「重新读入」。
+    /// 读入一个 .bib 作为本稿的文献库。`path` 为空时登记一个请求，由应用层开
+    /// 文件框（文献引用下拉里的「导入 .bib…」也走这里）；给了路径就是「重新读入」。
     pub(crate) fn import_bibliography(&mut self, path: Option<std::path::PathBuf>) {
-        let reload = path.is_some();
-        let Some(path) = path.or_else(|| {
-            rfd::FileDialog::new()
-                .add_filter("BibTeX", &["bib"])
-                .pick_file()
-        }) else {
+        let Some(path) = path else {
+            self.actions
+                .push(DraftAction::ImportBibliography { key: self.doc.key });
             return;
         };
+        self.import_bibliography_from(path, true);
+    }
+
+    /// 把用户选中的 .bib 读进本稿的文献库。`reload` 为真表示是「重新读入」。
+    pub(crate) fn import_bibliography_from(&mut self, path: std::path::PathBuf, reload: bool) {
         match crate::text_file::read_to_string(&path) {
             Ok(content) => {
                 self.doc.draft.research.bibliography_name = path

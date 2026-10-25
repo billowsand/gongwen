@@ -47,6 +47,12 @@ cargo build --release --locked
 - `cargo test` 有**约 5 个与沙箱环境相关的失败，是预期结果**，不要为此改动测试。
 - Linux 变体：Arch/Omarchy 包（已不随 Release 发布，需自行构建）用
   `cargo build --release --locked --no-default-features --features linux-portal-dialogs`。
+- **文件对话框不能占住主线程**。Wayland 合成器（Hyprland 等）每 1.5 秒给客户端发一次
+  存活探测，主线程一停就弹「应用无响应」系统对话框。系统文件框一律走
+  `src/app/file_dialog.rs` 的 `request_file` / `request_files`：portal 后端（Linux/Wayland
+  变体）在后台线程开窗、主线程每帧问一次结果；GTK3 后端是本进程自己的窗口，只能留在
+  主线程（即 `linux-gtk-dialogs` 变体仍是阻塞式）。起草页、输入法词表页要开文件框时，
+  登记 `DraftAction` / `PageAction` 交给应用层，不要在页面里直接调 `rfd`。
 
 ## 代码组织
 

@@ -111,11 +111,29 @@ pub(super) struct Page {
     lookup_code: String,
     lookup_text: String,
     health: Option<Health>,
+    /// 页上登记的、交给应用层去办的事（开文件框一类）。帧末取走。
+    pub request: Option<PageAction>,
 }
 
 /// 页上要交给应用层做的事。
 pub(crate) enum PageAction {
     SyncLexicon,
+    /// 导入词表：应用层开文件框，选好后交给输入法。
+    ImportWordTable {
+        four: bool,
+    },
+    /// 恢复个人设置备份：应用层开文件框，选好后交给输入法。
+    RestoreWordTableBackup,
+    /// 导出当前生效词表或筛选结果。
+    ExportWordTable {
+        filtered: bool,
+    },
+    /// 导出个人设置（词条、屏蔽、排序与构词规则）。
+    ExportPersonalSettings,
+    /// 导出最终生效词表。
+    ExportFinalWordTable,
+    /// 导出个人层备份。
+    ExportPersonalBackup,
 }
 
 impl Ime {
@@ -176,6 +194,10 @@ impl Ime {
                 }
             });
         self.quick_details(ui.ctx());
+        // 页上登记的请求（开文件框一类）交给应用层去办。
+        if let Some(request) = self.page.request.take() {
+            action = Some(request);
+        }
         action
     }
 

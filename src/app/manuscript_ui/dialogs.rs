@@ -209,7 +209,16 @@ pub(crate) fn dialog_notice(ui: &mut egui::Ui, notice: &Option<String>) {
 }
 
 /// 归档确认框的表单。点了「确认归档」返回 `true`。
-pub(crate) fn archive_form(ui: &mut egui::Ui, pending: &mut ArchivePending, title: &str) -> bool {
+///
+/// 「选择扫描盖章 PDF…」不再当场开文件对话框（那会卡住主线程）：这里只把
+/// `pick_pdfs` 置上，由上层拿到 `&mut GongwenApp` 后发起请求式对话框，挑完的
+/// 路径再并回 pending。
+pub(crate) fn archive_form(
+    ui: &mut egui::Ui,
+    pending: &mut ArchivePending,
+    title: &str,
+    pick_pdfs: &mut bool,
+) -> bool {
     if !title.is_empty() {
         ui.strong(format!("《{}》", summarize(title, 30)));
     }
@@ -234,11 +243,9 @@ pub(crate) fn archive_form(ui: &mut egui::Ui, pending: &mut ArchivePending, titl
         ))
         .on_hover_text("可多选；归档后仍可在详情页继续添加附件")
         .clicked()
-        && let Some(paths) = rfd::FileDialog::new()
-            .add_filter("扫描盖章 PDF", &["pdf"])
-            .pick_files()
     {
-        pending.pdf_paths.extend(paths);
+        // 对话框在后台线程开：这里只记下意图，由上层发起请求。
+        *pick_pdfs = true;
     }
     if !pending.pdf_paths.is_empty() {
         ui.label(format!("已选 {} 个 PDF：", pending.pdf_paths.len()));

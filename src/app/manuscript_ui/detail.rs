@@ -3,6 +3,7 @@
 //! 由 src/app/manuscript_ui.rs 拆分而来：本文件是模块 `app::manuscript_ui::detail`，与其它子模块共享
 //! `app::manuscript_ui` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::app::file_dialog::FileDialogSpec;
 use crate::app::manuscript_ui::{ArchivePending, BatchDeleteConfirm, ManuscriptAction, PdfAction};
 use crate::app::{
     GongwenApp, VersionDiffState, VersionScope, joined_metadata, metadata_grid_row,
@@ -17,7 +18,6 @@ use crate::manuscript_io;
 use crate::models::{ManuscriptStatus, TemplateKind};
 use crate::theme;
 use eframe::egui;
-use std::path::PathBuf;
 
 impl GongwenApp {
     /// 稿件列表右侧的资料卡。列表行只负责切换这里的选中项；正文查看和编辑
@@ -42,7 +42,8 @@ impl GongwenApp {
         let mut create_from_existing = false;
         let mut pdf_action: Option<PdfAction> = None;
         let mut delete_pdf: Option<i64> = None;
-        let mut add_pdfs: Vec<PathBuf> = Vec::new();
+        // 附件要挑文件：对话框在后台线程开，这里只记下"用户点了添加"。
+        let mut pick_pdfs = false;
         let pending_heads = self
             .manuscript_store
             .as_ref()
@@ -314,11 +315,8 @@ impl GongwenApp {
                         .add(theme::icon_text_button(theme::Icon::Paperclip, "添加…"))
                         .on_hover_text("导入扫描盖章件等；归档后也可补充")
                         .clicked()
-                        && let Some(paths) = rfd::FileDialog::new()
-                            .add_filter("扫描盖章 PDF", &["pdf"])
-                            .pick_files()
                     {
-                        add_pdfs.extend(paths);
+                        pick_pdfs = true;
                     }
                 });
                 if detail.pdfs.is_empty() {
@@ -368,30 +366,39 @@ impl GongwenApp {
             self.manuscript_detail_delete_pdf = None;
             pdf_action = Some(PdfAction::Delete(pdf_id));
         }
-        if !add_pdfs.is_empty() {
-            let result: anyhow::Result<usize> = (|| {
-                let store = self
-                    .manuscript_store
-                    .as_mut()
-                    .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-                let mut added = 0;
-                for path in &add_pdfs {
-                    let bytes = std::fs::read(path)?;
-                    let name = path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("附件.pdf")
-                        .to_string();
-                    store.add_pdf(detail_id, &name, &bytes)?;
-                    added += 1;
-                }
-                Ok(added)
-            })();
-            self.reload_detail();
-            match result {
-                Ok(added) => self.status = format!("已添加 {added} 个附件。"),
-                Err(error) => self.status = format!("添加附件失败：{error:#}"),
-            }
+        if pick_pdfs {
+            // 对话框在后台线程开，用户挑完再把附件入库。
+            self.request_files(
+                FileDialogSpec::pick_files().filter("扫描盖章 PDF", &["pdf"]),
+                move |app, paths| {
+                    let Some(paths) = paths else {
+                        return;
+                    };
+                    let result: anyhow::Result<usize> = (|| {
+                        let store = app
+                            .manuscript_store
+                            .as_mut()
+                            .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
+                        let mut added = 0;
+                        for path in &paths {
+                            let bytes = std::fs::read(path)?;
+                            let name = path
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("附件.pdf")
+                                .to_string();
+                            store.add_pdf(detail_id, &name, &bytes)?;
+                            added += 1;
+                        }
+                        Ok(added)
+                    })();
+                    app.reload_detail();
+                    match result {
+                        Ok(added) => app.status = format!("已添加 {added} 个附件。"),
+                        Err(error) => app.status = format!("添加附件失败：{error:#}"),
+                    }
+                },
+            );
         }
         pdf_action
     }
@@ -853,56 +860,60 @@ impl GongwenApp {
     /// 选一个现成文档，把它转成 markdown，作为一篇新稿件打开。
     /// 只带正文——抬头、文号这些要素还得在左侧要素区自己填。
     pub(crate) fn new_manuscript_from_document(&mut self) {
-        let Some(path) = doc_import::pick_file() else {
-            return;
-        };
-        match doc_import::to_draft_markdown(&path, true) {
-            Ok(imported) => {
-                let chars = imported.markdown.chars().count();
-                let session = DraftSession::with_markdown(0, &self.config, imported.markdown);
-                self.open_doc(session);
-                self.status = format!(
-                    "已从 {} 新建稿件（{chars} 字）：请核对正文结构并补齐左侧文档要素。",
-                    doc_import::file_label(&path)
-                );
-                self.status.push_str(doc_import::import_notice(&path));
-                self.status.push_str(&imported.images.notice());
+        self.request_file(doc_import::file_dialog_spec(), |app, path| {
+            let Some(path) = path else {
+                return;
+            };
+            match doc_import::to_draft_markdown(&path, true) {
+                Ok(imported) => {
+                    let chars = imported.markdown.chars().count();
+                    let session = DraftSession::with_markdown(0, &app.config, imported.markdown);
+                    app.open_doc(session);
+                    app.status = format!(
+                        "已从 {} 新建稿件（{chars} 字）：请核对正文结构并补齐左侧文档要素。",
+                        doc_import::file_label(&path)
+                    );
+                    app.status.push_str(doc_import::import_notice(&path));
+                    app.status.push_str(&imported.images.notice());
+                }
+                Err(error) => app.status = format!("导入失败：{error:#}"),
             }
-            Err(error) => self.status = format!("导入失败：{error:#}"),
-        }
+        });
     }
 
     /// 按文件名顺序合并目录第一层的 Markdown，新建一篇研究报告。
     pub(crate) fn new_research_manuscript_from_folder(&mut self) {
-        let Some(folder) = doc_import::pick_folder() else {
-            return;
-        };
-        match doc_import::import_research_folder(&folder) {
-            Ok(imported) => {
-                let chars = imported.markdown.chars().count();
-                let count = imported.file_names.len();
-                let names = imported.file_names.join("、");
-                let session = DraftSession::with_research_markdown(
-                    0,
-                    imported.markdown,
-                    imported.title,
-                    imported.metadata,
-                );
-                let skipped = imported.skipped_images.clone();
-                self.open_doc(session);
-                self.status =
-                    format!("已按文件名顺序合并 {count} 个 Markdown（{chars} 字）：{names}");
-                // 缺图不阻断导入，但必须说出来：正文里这些引用还指着原文件夹，
-                // 不补齐的话编译 PDF 时才会失败。
-                if !skipped.is_empty() {
-                    self.status.push_str(&format!(
-                        "；{} 张图片未能入库，请补齐后重新插入：{}",
-                        skipped.len(),
-                        skipped.join("、")
-                    ));
+        self.request_file(doc_import::folder_spec(), |app, folder| {
+            let Some(folder) = folder else {
+                return;
+            };
+            match doc_import::import_research_folder(&folder) {
+                Ok(imported) => {
+                    let chars = imported.markdown.chars().count();
+                    let count = imported.file_names.len();
+                    let names = imported.file_names.join("、");
+                    let session = DraftSession::with_research_markdown(
+                        0,
+                        imported.markdown,
+                        imported.title,
+                        imported.metadata,
+                    );
+                    let skipped = imported.skipped_images.clone();
+                    app.open_doc(session);
+                    app.status =
+                        format!("已按文件名顺序合并 {count} 个 Markdown（{chars} 字）：{names}");
+                    // 缺图不阻断导入，但必须说出来：正文里这些引用还指着原文件夹，
+                    // 不补齐的话编译 PDF 时才会失败。
+                    if !skipped.is_empty() {
+                        app.status.push_str(&format!(
+                            "；{} 张图片未能入库，请补齐后重新插入：{}",
+                            skipped.len(),
+                            skipped.join("、")
+                        ));
+                    }
                 }
+                Err(error) => app.status = format!("研究报告文件夹导入失败：{error:#}"),
             }
-            Err(error) => self.status = format!("研究报告文件夹导入失败：{error:#}"),
-        }
+        });
     }
 }

@@ -3,6 +3,7 @@
 //! 由 src/app/manuscript_ui.rs 拆分而来：本文件是模块 `app::manuscript_ui::sync_io`，与其它子模块共享
 //! `app::manuscript_ui` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::app::file_dialog::FileDialogSpec;
 use crate::app::manuscript_ui::{
     ImportPreview, PendingMergeDialog, ZipPasswordDialog, ZipPasswordPurpose,
 };
@@ -35,30 +36,40 @@ impl GongwenApp {
         remember: bool,
         include_send_package: bool,
     ) {
-        let retry_import = match &purpose {
-            ZipPasswordPurpose::Import(path) => Some(path.clone()),
-            _ => None,
-        };
-        let completed = match purpose {
+        match purpose {
+            // 三个导出都要先问保存位置，而文件对话框是异步的（后台线程开），
+            // 所以「导出成功」与「记住密码」都挪到对话框回调里做。
             ZipPasswordPurpose::FilteredExport(filter) => {
-                self.perform_export_manuscripts_zip(&filter, &password, include_send_package)
+                self.perform_export_manuscripts_zip(
+                    filter,
+                    &password,
+                    include_send_package,
+                    remember,
+                );
             }
             ZipPasswordPurpose::SelectedExport(ids) => {
-                self.perform_export_selected_manuscripts_zip(ids, &password, include_send_package)
+                self.perform_export_selected_manuscripts_zip(
+                    ids,
+                    &password,
+                    include_send_package,
+                    remember,
+                );
             }
             ZipPasswordPurpose::PdfExport(options, ids) => {
-                self.perform_export_selected_manuscript_pdfs(options, ids, &password)
+                self.perform_export_selected_manuscript_pdfs(options, ids, &password, remember);
             }
-            ZipPasswordPurpose::Import(path) => self.prepare_import_manuscript(path, &password),
-        };
-        if completed {
-            self.update_remembered_zip_password(remember.then_some(password));
-        } else if let Some(path) = retry_import {
-            let mut dialog = ZipPasswordDialog::new(ZipPasswordPurpose::Import(path), None);
-            dialog.password = password;
-            dialog.remember = remember;
-            dialog.error = Some(self.status.clone());
-            self.manuscript_zip_password = Some(dialog);
+            ZipPasswordPurpose::Import(path) => {
+                // 导入的文件是早就定好的，没有对话框要等，失败照旧退回密码框。
+                if self.prepare_import_manuscript(path.clone(), &password) {
+                    self.update_remembered_zip_password(remember.then_some(password));
+                } else {
+                    let mut dialog = ZipPasswordDialog::new(ZipPasswordPurpose::Import(path), None);
+                    dialog.password = password;
+                    dialog.remember = remember;
+                    dialog.error = Some(self.status.clone());
+                    self.manuscript_zip_password = Some(dialog);
+                }
+            }
         }
     }
 
@@ -121,48 +132,54 @@ impl GongwenApp {
         self.open_zip_password_dialog(ZipPasswordPurpose::FilteredExport(filter));
     }
 
+    /// 按筛选条件导出稿件包。保存位置由文件对话框给出（后台线程开，主线程不阻塞），
+    /// 用户挑完再打包；导出成功与否在回调里才知道，所以「记住密码」也一并挪进回调。
     pub(crate) fn perform_export_manuscripts_zip(
         &mut self,
-        filter: &ManuscriptFilter,
+        filter: ManuscriptFilter,
         password: &str,
         include_send_package: bool,
-    ) -> bool {
+        remember: bool,
+    ) {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
         let default_name = format!("公文稿件-{stamp}.{}", package_file::EXTENSION);
-        let Some(path) = save_package_dialog(&default_name) else {
-            return false;
-        };
-        if let Err(error) = self.save_open_manuscripts_for_zip(None) {
-            self.status = format!("导出前保存当前工作稿失败：{error:#}");
-            return false;
-        }
-        let result: anyhow::Result<manuscript_io::ExportSummary> =
-            match self.manuscript_store.as_mut() {
-                Some(store) => manuscript_io::export_zip(
-                    store,
-                    filter,
-                    &self.config.vocabulary,
-                    &path,
-                    password,
-                    include_send_package,
-                ),
-                None => Err(anyhow::anyhow!("稿件库不可用")),
+        let password = password.to_string();
+        self.request_file(package_save_spec(&default_name), move |app, path| {
+            let Some(path) = path else {
+                return;
             };
-        match result {
-            Ok(summary) => {
-                self.status = format!(
-                    "已导出 {} 篇稿件、{} 个 PDF 附件到 {}。",
-                    summary.records,
-                    summary.pdfs,
-                    path.display()
-                );
-                true
+            let path = package_file::with_package_extension(path);
+            if let Err(error) = app.save_open_manuscripts_for_zip(None) {
+                app.status = format!("导出前保存当前工作稿失败：{error:#}");
+                return;
             }
-            Err(error) => {
-                self.status = format!("导出失败：{error:#}");
-                false
+            let result: anyhow::Result<manuscript_io::ExportSummary> =
+                match app.manuscript_store.as_mut() {
+                    Some(store) => manuscript_io::export_zip(
+                        store,
+                        &filter,
+                        &app.config.vocabulary,
+                        &path,
+                        &password,
+                        include_send_package,
+                    ),
+                    None => Err(anyhow::anyhow!("稿件库不可用")),
+                };
+            match result {
+                Ok(summary) => {
+                    app.status = format!(
+                        "已导出 {} 篇稿件、{} 个 PDF 附件到 {}。",
+                        summary.records,
+                        summary.pdfs,
+                        path.display()
+                    );
+                    app.update_remembered_zip_password(remember.then_some(password));
+                }
+                Err(error) => {
+                    app.status = format!("导出失败：{error:#}");
+                }
             }
-        }
+        });
     }
 
     pub(crate) fn export_selected_manuscripts_zip(&mut self) {
@@ -178,120 +195,135 @@ impl GongwenApp {
         self.open_zip_password_dialog(ZipPasswordPurpose::SelectedExport(ids));
     }
 
+    /// 导出勾选的稿件包。保存位置同样由文件对话框给出，挑完再打包。
     pub(crate) fn perform_export_selected_manuscripts_zip(
         &mut self,
         mut ids: Vec<i64>,
         password: &str,
         include_send_package: bool,
-    ) -> bool {
+        remember: bool,
+    ) {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
         let default_name = format!("所选公文稿件-{stamp}.{}", package_file::EXTENSION);
-        let Some(path) = save_package_dialog(&default_name) else {
-            return false;
-        };
-        // 随行件也要进包时，它们在起草页里开着的工作稿同样先存一下。
-        if include_send_package
-            && let Some(store) = self.manuscript_store.as_ref()
-            && let Ok(expanded) = store.with_send_package_items(&ids)
-        {
-            ids = expanded;
-        }
-        if let Err(error) = self.save_open_manuscripts_for_zip(Some(&ids)) {
-            self.status = format!("导出前保存所选工作稿失败：{error:#}");
-            return false;
-        }
-        let result = match self.manuscript_store.as_mut() {
-            Some(store) => manuscript_io::export_zip_selected(
-                store,
-                &ids,
-                &self.config.vocabulary,
-                &path,
-                password,
-                false,
-            ),
-            None => Err(anyhow::anyhow!("稿件库不可用")),
-        };
-        match result {
-            Ok(summary) => {
-                self.status = format!(
-                    "已导出所选 {} 篇稿件、{} 个 PDF 附件到 {}。",
-                    summary.records,
-                    summary.pdfs,
-                    path.display()
-                );
-                true
+        let password = password.to_string();
+        self.request_file(package_save_spec(&default_name), move |app, path| {
+            let Some(path) = path else {
+                return;
+            };
+            let path = package_file::with_package_extension(path);
+            // 随行件也要进包时，它们在起草页里开着的工作稿同样先存一下。
+            if include_send_package
+                && let Some(store) = app.manuscript_store.as_ref()
+                && let Ok(expanded) = store.with_send_package_items(&ids)
+            {
+                ids = expanded;
             }
-            Err(error) => {
-                self.status = format!("导出所选稿件失败：{error:#}");
-                false
+            if let Err(error) = app.save_open_manuscripts_for_zip(Some(&ids)) {
+                app.status = format!("导出前保存所选工作稿失败：{error:#}");
+                return;
             }
-        }
+            let result = match app.manuscript_store.as_mut() {
+                Some(store) => manuscript_io::export_zip_selected(
+                    store,
+                    &ids,
+                    &app.config.vocabulary,
+                    &path,
+                    &password,
+                    false,
+                ),
+                None => Err(anyhow::anyhow!("稿件库不可用")),
+            };
+            match result {
+                Ok(summary) => {
+                    app.status = format!(
+                        "已导出所选 {} 篇稿件、{} 个 PDF 附件到 {}。",
+                        summary.records,
+                        summary.pdfs,
+                        path.display()
+                    );
+                    app.update_remembered_zip_password(remember.then_some(password));
+                }
+                Err(error) => {
+                    app.status = format!("导出所选稿件失败：{error:#}");
+                }
+            }
+        });
     }
 
     /// 把勾选的稿件按选项导出为 PDF 集合并打包 zip，后台线程执行避免卡界面。
     /// 盖章件直接取附件；非盖章件编译 TeX 生成，缺引擎或失败时该篇记入汇总。
+    /// 保存位置由文件对话框给出（后台线程开），挑完再开导。
     pub(crate) fn perform_export_selected_manuscript_pdfs(
         &mut self,
         options: manuscript_io::PdfExportOptions,
         ids: Vec<i64>,
         password: &str,
-    ) -> bool {
+        remember: bool,
+    ) {
         if ids.is_empty() {
             self.status = "请先勾选要导出的稿件。".into();
-            return false;
+            return;
         }
         let Some(db_path) = storage::manuscript_db_path().ok() else {
             self.status = "稿件库路径不可用，无法导出 PDF。".into();
-            return false;
+            return;
         };
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
         let default_name = format!("所选公文PDF-{stamp}.zip");
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("ZIP PDF 压缩包", &["zip"])
-            .set_file_name(&default_name)
-            .save_file()
-        else {
-            return false;
-        };
-        let vocabulary = self.config.vocabulary.clone();
-        let fonts = self.config.fonts.clone();
-        let numbering = self.config.numbering;
         let password = password.to_string();
-        self.manuscript_pdf_export_busy = true;
-        self.status = format!("正在导出 {} 篇稿件的 PDF…", ids.len());
-        let tx = self.sender.clone();
-        thread::spawn(move || {
-            let result: anyhow::Result<manuscript_io::PdfExportSummary> = (|| {
-                let mut store = ManuscriptStore::open(&db_path)
-                    .with_context(|| format!("无法打开稿件库 {}", db_path.display()))?;
-                manuscript_io::export_selected_pdfs(
-                    &mut store,
-                    &ids,
-                    &options,
-                    &vocabulary,
-                    &fonts,
-                    &numbering,
-                    &path,
-                    &password,
-                    |_| {},
-                )
-            })();
-            let _ = tx.send(WorkerResult::ManuscriptPdfExport {
-                path,
-                result: result.map_err(|error| format!("{error:#}")),
-            });
-        });
-        true
+        self.request_file(
+            FileDialogSpec::save_file()
+                .filter("ZIP PDF 压缩包", &["zip"])
+                .file_name(default_name),
+            move |app, path| {
+                let Some(path) = path else {
+                    return;
+                };
+                let vocabulary = app.config.vocabulary.clone();
+                let fonts = app.config.fonts.clone();
+                let numbering = app.config.numbering;
+                app.manuscript_pdf_export_busy = true;
+                app.status = format!("正在导出 {} 篇稿件的 PDF…", ids.len());
+                let tx = app.sender.clone();
+                let thread_password = password.clone();
+                thread::spawn(move || {
+                    let result: anyhow::Result<manuscript_io::PdfExportSummary> = (|| {
+                        let mut store = ManuscriptStore::open(&db_path)
+                            .with_context(|| format!("无法打开稿件库 {}", db_path.display()))?;
+                        manuscript_io::export_selected_pdfs(
+                            &mut store,
+                            &ids,
+                            &options,
+                            &vocabulary,
+                            &fonts,
+                            &numbering,
+                            &path,
+                            &thread_password,
+                            |_| {},
+                        )
+                    })(
+                    );
+                    let _ = tx.send(WorkerResult::ManuscriptPdfExport {
+                        path,
+                        result: result.map_err(|error| format!("{error:#}")),
+                    });
+                });
+                app.update_remembered_zip_password(remember.then_some(password));
+            },
+        );
     }
 
     pub(crate) fn start_import_manuscript(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter(package_file::FILTER_NAME, package_file::IMPORT_EXTENSIONS)
-            .pick_file()
-        else {
-            return;
-        };
-        self.receive_import_package(path);
+        self.request_file(
+            FileDialogSpec::pick_file()
+                .filter(package_file::FILTER_NAME, package_file::IMPORT_EXTENSIONS),
+            |app, path| {
+                let Some(path) = path else {
+                    return;
+                };
+                app.receive_import_package(path);
+            },
+        );
     }
 
     /// 收到一个要导入的稿件包：按钮选的、双击启动带进来的、拖进窗口的都走这里。
@@ -793,17 +825,20 @@ impl GongwenApp {
         }) else {
             return;
         };
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PDF", &["pdf"])
-            .set_file_name(&file_name)
-            .save_file()
-        else {
-            return;
-        };
-        match std::fs::write(&path, &bytes) {
-            Ok(()) => self.status = format!("已保存附件到 {}。", path.display()),
-            Err(error) => self.status = format!("保存附件失败：{error}"),
-        }
+        self.request_file(
+            FileDialogSpec::save_file()
+                .filter("PDF", &["pdf"])
+                .file_name(file_name),
+            move |app, path| {
+                let Some(path) = path else {
+                    return;
+                };
+                match std::fs::write(&path, &bytes) {
+                    Ok(()) => app.status = format!("已保存附件到 {}。", path.display()),
+                    Err(error) => app.status = format!("保存附件失败：{error}"),
+                }
+            },
+        );
     }
 
     pub(crate) fn temp_pdf_path(&self, manuscript_id: i64, attachment_id: i64) -> PathBuf {
@@ -837,12 +872,12 @@ fn paint_drop_hint(ctx: &egui::Context) {
     painter.galley(card.center() - text.size() / 2.0, text, theme::text());
 }
 
-/// 稿件包的保存框。过滤器只列 `.gwx`；用户删掉后缀时补上，明确写 `.zip` 的保留
+/// 稿件包的保存框参数。过滤器只列 `.gwx`；用户删掉后缀时补上，明确写 `.zip` 的保留
 /// （发给还没升级的旧版程序时用）。
-fn save_package_dialog(default_name: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .add_filter(package_file::FILTER_NAME, &[package_file::EXTENSION])
-        .set_file_name(default_name)
-        .save_file()
-        .map(package_file::with_package_extension)
+///
+/// 对话框由 [`GongwenApp::request_file`] 在后台线程开，用户挑完再补后缀。
+fn package_save_spec(default_name: &str) -> FileDialogSpec {
+    FileDialogSpec::save_file()
+        .filter(package_file::FILTER_NAME, &[package_file::EXTENSION])
+        .file_name(default_name)
 }
