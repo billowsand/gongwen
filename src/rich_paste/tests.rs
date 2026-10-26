@@ -98,6 +98,26 @@ fn word_heading_styles_and_the_title_class_are_kept() {
     assert!(markdown.contains("### 指导思想\n"), "{markdown}");
 }
 
+/// 表格单元格里的软回车与多段落都留作 `<br>`，不再改成「；」。
+#[test]
+fn line_breaks_inside_table_cells_are_kept_as_br() {
+    let html = "<html><body><table>\
+        <tr><th>单位</th><th>联系方式</th></tr>\
+        <tr><td>办公室</td><td>张某<br>电话：12345678</td></tr>\
+        <tr><td>财务处</td><td><p>李某</p><p>电话：87654321</p></td></tr>\
+        </table></body></html>";
+    let markdown = markdown_of(html);
+    assert!(
+        markdown.contains("| 办公室 | 张某<br>电话：12345678 |"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("| 财务处 | 李某<br>电话：87654321 |"),
+        "{markdown}"
+    );
+    assert!(!markdown.contains('；'), "{markdown}");
+}
+
 /// 3. 表格：跨行跨列与表头照原样，只有一格的表格拆回段落。
 #[test]
 fn tables_keep_spans_and_single_cell_tables_become_paragraphs() {

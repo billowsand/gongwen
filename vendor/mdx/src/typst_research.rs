@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use crate::common::ast::{Block, Inline, LineAlign, MarkerKind, QuoteItem, QuoteKind};
 use crate::common::figure_size;
 use crate::common::front_matter;
-use crate::common::table::span_at;
+use crate::common::table::{cell_lines, has_cell_break, span_at};
 use crate::common::table_layout::{
     analyze_table, cell_alignment, is_group_cell, ColumnAlignment, ColumnWidth,
 };
@@ -253,6 +253,10 @@ pub struct Column {
 #[derive(Debug, Serialize)]
 pub struct Cell {
     pub c: Vec<Run>,
+    /// 单元格里写了 `<br>`：按行分好的内容，模板逐行排、行间 `linebreak()`。
+    /// 没有手动换行时省略，模板直接排 `c`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lines: Option<Vec<Vec<Run>>>,
     pub align: char,
     pub colspan: usize,
     pub rowspan: usize,
@@ -961,8 +965,15 @@ impl Builder {
                                 .get(column)
                                 .map_or(ColumnAlignment::Left, |c| c.alignment)
                         };
+                        let lines = has_cell_break(text).then(|| {
+                            cell_lines(text)
+                                .into_iter()
+                                .map(|line| cell_runs(&crate::common::inline::parse(line)))
+                                .collect()
+                        });
                         Some(Cell {
                             c: cell_runs(&crate::common::inline::parse(text)),
+                            lines,
                             align: align.latex(),
                             colspan: span.map_or(1, |s| s.column_span),
                             rowspan: span.map_or(1, |s| s.row_span),
@@ -1261,4 +1272,33 @@ fn heading_runs(text: &str) -> Vec<Run> {
             },
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 单元格写了 `<br>`：排版数据按行给出 `lines`，没写的格不带。
+    #[test]
+    fn table_cell_breaks_are_split_into_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("report.md");
+        std::fs::write(
+            &input,
+            "# 题名\n\n## 第一章\n\n| 单位 | 联系方式 |\n| --- | --- |\n| 办公室 | 张某<br>电话 |\n",
+        )
+        .unwrap();
+        let doc = build(&input).unwrap();
+        let table = doc
+            .blocks
+            .iter()
+            .find_map(|item| match item {
+                Item::Table(table) => Some(table),
+                _ => None,
+            })
+            .expect("应有表格");
+        let cell = table.rows[1][1].as_ref().unwrap();
+        assert_eq!(cell.lines.as_ref().map(Vec::len), Some(2));
+        assert!(table.rows[1][0].as_ref().unwrap().lines.is_none());
+    }
 }

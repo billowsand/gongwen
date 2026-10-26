@@ -23,7 +23,7 @@ use crate::common::ast::{quote_as_paragraphs, Block, Inline, LineAlign, MarkerKi
 use crate::common::front_matter;
 use crate::common::inline;
 use crate::common::numbering::{int_to_roman, number_to_chinese, number_to_uppercase_letter};
-use crate::common::table::{span_at, TableSpan};
+use crate::common::table::{cell_lines, span_at, TableSpan};
 use crate::common::table_layout::{analyze_table, cell_alignment, to_docx_grid, ColumnAlignment};
 use crate::parser;
 
@@ -513,8 +513,14 @@ impl OfficialEmitter {
                 // 首行黑体、其余行仿宋_GB2312；字号统一四号(28hp)。
                 // cell 内的 **加粗**/*斜体* 行内格式通过 inline::parse 解析。
                 let font = if row_idx == 0 { FONT_HEAD } else { FONT_BODY };
-                let p = Paragraph::new().align(align);
-                let p = add_inlines(p, &inline::parse(cell_data), font, SIZE_TABLE, false, None);
+                // 单元格里写了 `<br>`：逐行写，行间插软回车。
+                let mut p = Paragraph::new().align(align);
+                for (index, line) in cell_lines(cell_data).into_iter().enumerate() {
+                    if index > 0 {
+                        p = p.add_run(Run::new().add_break(BreakType::TextWrapping));
+                    }
+                    p = add_inlines(p, &inline::parse(line), font, SIZE_TABLE, false, None);
+                }
                 let mut cell = TableCell::new()
                     .width(width, WidthType::Dxa)
                     .vertical_align(VAlignType::Center)

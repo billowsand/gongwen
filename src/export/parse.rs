@@ -1537,7 +1537,7 @@ fn table_source_cells(line: &str) -> Vec<TableSourceCell> {
     value
         .split('|')
         .map(|cell| TableSourceCell {
-            text: cell.trim().to_string(),
+            text: mdx::table::normalize_cell_breaks(cell.trim()),
             join_left: cell.is_empty(),
         })
         .collect()

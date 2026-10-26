@@ -1072,6 +1072,36 @@ fn body_table_writes_grid_span_and_vertical_merge() {
 }
 
 #[test]
+fn table_cell_breaks_become_soft_returns_in_one_paragraph() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cell-breaks.docx");
+    let mut input = DraftInput::default();
+    input.kind = TemplateKind::PlainDocument;
+    write_docx_ok(
+        &path,
+        &input,
+        "# 单元格换行
+| 单位 | 联系方式 |
+| --- | --- |
+| 办公室 | 张某<br>电话：**12345678** |",
+    )
+    .unwrap();
+    let xml = zip_text(&path, "word/document.xml");
+    let cell = table_cell_containing(&xml, "张某");
+    assert_eq!(
+        cell.matches("<w:p ").count() + cell.matches("<w:p>").count(),
+        1
+    );
+    assert_eq!(
+        cell.matches(r#"<w:br w:type="textWrapping""#).count(),
+        1,
+        "{cell}"
+    );
+    assert!(!cell.contains("&lt;br&gt;"), "{cell}");
+    assert!(cell.contains("<w:b"), "换行后的加粗仍要保留：{cell}");
+}
+
+#[test]
 fn compact_style_merges_heading_and_paragraph_into_one_paragraph() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("compact.docx");

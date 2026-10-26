@@ -354,7 +354,7 @@ pub(crate) fn redline_slice_lines(text: &str, lines: &[String]) -> Vec<String> {
 
 /// 标题的 `\\` 换行不能落在 `\GwDel` / `\GwAdd` 内部：跨行的标注在行尾
 /// 补闭合哨兵、下一行行首补对应的开启哨兵，每行各自成对。
-fn balance_line_marks(lines: &mut [String]) {
+pub(crate) fn balance_line_marks(lines: &mut [String]) {
     let close_of = |open: char| -> char {
         match open {
             REDLINE_DEL_OPEN => REDLINE_DEL_CLOSE,

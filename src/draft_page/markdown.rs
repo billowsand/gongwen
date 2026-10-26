@@ -295,9 +295,11 @@ pub(crate) fn body_stats(markdown: &str) -> (usize, usize) {
             }
             // `parse_markdown` 已把引用块拆成了段落
             export::MarkdownBlock::Quote { .. } => continue,
+            // 单元格的 `<br>` 是换行标记，不算字。
             export::MarkdownBlock::Table { rows, .. } => rows
                 .iter()
-                .flat_map(|row| row.iter().cloned())
+                .flat_map(|row| row.iter())
+                .flat_map(|cell| mdx::table::cell_lines(cell))
                 .collect::<Vec<_>>()
                 .join(""),
             export::MarkdownBlock::Image { .. }

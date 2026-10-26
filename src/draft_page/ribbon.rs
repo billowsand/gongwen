@@ -1298,7 +1298,7 @@ impl DraftPage<'_> {
             }
             if ui
                 .add(theme::icon_text_button(theme::Icon::Table, "规范表格"))
-                .on_hover_text("按分隔行补齐或截断表格列数，单元格里的 <br> 改成「；」")
+                .on_hover_text("按分隔行补齐或截断表格列数，单元格里的换行统一写成 <br>")
                 .clicked()
             {
                 action = Some(CleanAction::NormalizeTables);

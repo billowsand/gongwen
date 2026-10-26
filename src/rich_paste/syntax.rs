@@ -159,7 +159,7 @@ fn prune_blocks(
     out
 }
 
-/// 段落里的换行拆成几段。表格单元格不拆（管道表一格只能一行，由 `clean` 处理）；
+/// 段落里的换行拆成几段。表格单元格不拆（格内换行写成 `<br>`，由 `clean` 归一）；
 /// 引用块与列表项里的段落一样拆。
 fn split_line_breaks(blocks: Vec<Block>) -> Vec<Block> {
     let mut out = Vec::with_capacity(blocks.len());

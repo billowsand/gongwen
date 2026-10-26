@@ -25,7 +25,12 @@ pub(super) fn body_text(markdown: &str) -> String {
                     append_inlines(&inline::parse(&caption), &mut text);
                     text.push('\n');
                 }
-                for cell in rows.iter().flatten() {
+                // 单元格的 `<br>` 是换行标记，不是文字。
+                for cell in rows
+                    .iter()
+                    .flatten()
+                    .flat_map(|cell| crate::common::table::cell_lines(cell))
+                {
                     append_inlines(&inline::parse(cell), &mut text);
                     text.push('\n');
                 }

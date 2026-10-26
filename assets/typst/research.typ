@@ -494,7 +494,8 @@
     let args = (:)
     if c.colspan > 1 { args.colspan = c.colspan }
     if c.rowspan > 1 { args.rowspan = c.rowspan }
-    let body = runs(c.c)
+    // 单元格里写了 `<br>`：逐行排，行间强制换行（与公文模板 cell-content 同一写法）。
+    let body = if "lines" in c { c.lines.map(runs).join(linebreak()) } else { runs(c.c) }
     // 表头：黑体字形、西文 Termes Regular（TeX 的 \heiti 不带 \enhei）。
     if header { body = text(font: hei, fill: if terminal { cyan } else { ink }, body) }
     // 序号表的分组行（kai）：只换楷体，字号仍是表格的小四。

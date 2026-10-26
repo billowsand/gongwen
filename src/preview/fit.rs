@@ -87,20 +87,25 @@ pub(crate) fn red_approval_title(ctx: &egui::Context, marked: &str) -> Fit {
     })
 }
 
-/// 居中表格格：判定见 [`export::table::centered_cell_plan`]，与 PDF 的 longtblr 同一条。
-/// 不处理的格原样返回。
+/// 表格格：判定见 [`export::table::cell_plan`]，与 Word、PDF 同一条——写了 `<br>`
+/// 的格按手写的行分，居中格压缩或均衡换行，其余原样返回。
 pub(crate) fn table_cell(
     ctx: &egui::Context,
     cell: &str,
+    alignment: export::table::ColumnAlignment,
     is_name: bool,
     width_twips: usize,
 ) -> Fit {
     cached(
         ctx,
-        ("cell", cell, is_name, width_twips),
-        || match export::table::centered_cell_plan(cell, is_name, width_twips) {
-            Some((plan, scale)) => Fit::from_plan(cell, &plan, scale),
-            None => Fit::plain(cell),
+        ("cell", cell, alignment as u8, is_name, width_twips),
+        || match export::table::cell_plan(cell, alignment, is_name, width_twips) {
+            export::table::CellPlan::Plain => Fit::plain(cell),
+            export::table::CellPlan::Compressed(percent) => Fit {
+                text: cell.to_string(),
+                scale: percent as f32 / 100.0,
+            },
+            export::table::CellPlan::Lines(lines) => Fit::plain(&lines.join("\n")),
         },
     )
 }
@@ -262,10 +267,47 @@ mod tests {
         );
         // 姓名格、加粗格不参与。
         let long = "国家发展和改革委员会办公厅综合司";
-        assert_eq!(table_cell(&ctx, long, true, 1500), Fit::plain(long));
+        let center = export::table::ColumnAlignment::Center;
+        assert_eq!(table_cell(&ctx, long, center, true, 1500), Fit::plain(long));
         let bold = format!("**{long}**");
-        assert_eq!(table_cell(&ctx, &bold, false, 1500), Fit::plain(&bold));
-        assert_ne!(table_cell(&ctx, long, false, 1500), Fit::plain(long));
+        assert_eq!(
+            table_cell(&ctx, &bold, center, false, 1500),
+            Fit::plain(&bold)
+        );
+        assert_ne!(
+            table_cell(&ctx, long, center, false, 1500),
+            Fit::plain(long)
+        );
+        // 靠左的格不压缩、不自动断行。
+        let left = export::table::ColumnAlignment::Left;
+        assert_eq!(table_cell(&ctx, long, left, false, 1500), Fit::plain(long));
+    }
+
+    #[test]
+    fn manual_cell_breaks_become_lines_in_every_alignment() {
+        let ctx = egui::Context::default();
+        for alignment in [
+            export::table::ColumnAlignment::Left,
+            export::table::ColumnAlignment::Center,
+            export::table::ColumnAlignment::Right,
+        ] {
+            assert_eq!(
+                table_cell(&ctx, "张某<br>电话：12345678", alignment, false, 9000),
+                Fit::plain("张某\n电话：12345678")
+            );
+        }
+        // 姓名格写了 `<br>` 也按手写的行分。
+        assert_eq!(
+            table_cell(
+                &ctx,
+                "张三<br>李四",
+                export::table::ColumnAlignment::Center,
+                true,
+                9000
+            )
+            .text,
+            "张三\n李四"
+        );
     }
 
     #[test]

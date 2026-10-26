@@ -130,9 +130,90 @@ fn source_cells(line: &str) -> Vec<SourceCell> {
     value
         .split('|')
         .map(|cell| SourceCell {
-            text: cell.trim().to_string(),
+            text: normalize_cell_breaks(cell.trim()),
             join_left: cell.is_empty(),
         })
+        .collect()
+}
+
+/// 单元格内的手动换行标记。管道表一格只能写在一行源码里，要分行就写 `<br>`。
+/// 解析时 `<br/>`、`<BR />`、带属性的 `<br class="…">` 等写法连同两侧空白一律
+/// 归一成这一种。
+pub const CELL_BREAK: &str = "<br>";
+
+/// 把单元格文字里各种写法的 `<br>` 归一成 [`CELL_BREAK`]，去掉它两侧的空白，
+/// 并丢掉格首格尾的换行（那只会多出空行）。不含 `<br>` 的文字原样返回。
+pub fn normalize_cell_breaks(text: &str) -> String {
+    static BREAK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = BREAK.get_or_init(|| {
+        regex::Regex::new(r"(?i)\s*<br\b[^>]*>\s*").expect("单元格换行正则必须合法")
+    });
+    let breaks = break_ranges(text, pattern);
+    if breaks.is_empty() {
+        return text.to_string();
+    }
+    let mut normalized = String::with_capacity(text.len());
+    let mut last = 0;
+    for range in breaks {
+        normalized.push_str(&text[last..range.start]);
+        normalized.push_str(CELL_BREAK);
+        last = range.end;
+    }
+    normalized.push_str(&text[last..]);
+    while let Some(rest) = normalized.strip_prefix(CELL_BREAK) {
+        normalized = rest.to_string();
+    }
+    while let Some(rest) = normalized.strip_suffix(CELL_BREAK) {
+        normalized = rest.to_string();
+    }
+    normalized
+}
+
+/// 单元格按 [`CELL_BREAK`] 拆成的各行；没有换行时只有一行（原文）。
+/// 调用方拿到的是解析后的格子，`<br>` 已经归一过。
+pub fn cell_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut last = 0;
+    for range in canonical_breaks(text) {
+        lines.push(&text[last..range.start]);
+        last = range.end;
+    }
+    lines.push(&text[last..]);
+    lines
+}
+
+/// 单元格里有没有手动换行。
+pub fn has_cell_break(text: &str) -> bool {
+    !canonical_breaks(text).is_empty()
+}
+
+/// 已归一的格子里，作换行用的那些 `<br>` 的位置。
+fn canonical_breaks(text: &str) -> Vec<std::ops::Range<usize>> {
+    if !text.contains(CELL_BREAK) {
+        return Vec::new();
+    }
+    static CANONICAL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = CANONICAL
+        .get_or_init(|| regex::Regex::new(&regex::escape(CELL_BREAK)).expect("字面正则必须合法"));
+    break_ranges(text, pattern)
+}
+
+/// `pattern` 在行内代码以外的匹配位置。反引号包着的 `` `<br>` `` 是在讲这个写法，
+/// 照字面印，不当换行。反引号按出现顺序两两成对，落单的最后一个按字面算。
+fn break_ranges(text: &str, pattern: &regex::Regex) -> Vec<std::ops::Range<usize>> {
+    let ticks = text
+        .match_indices('`')
+        .map(|(at, _)| at)
+        .collect::<Vec<_>>();
+    let in_code = |at: usize| {
+        ticks
+            .chunks_exact(2)
+            .any(|pair| pair[0] < at && at < pair[1])
+    };
+    pattern
+        .find_iter(text)
+        .filter(|found| !in_code(found.start()) && !in_code(found.end().saturating_sub(1)))
+        .map(|found| found.range())
         .collect()
 }
 
@@ -290,5 +371,29 @@ mod tests {
         assert_eq!(table.rows[1][0], "^^");
         assert_eq!(table.rows[3][0], "^^");
         assert_eq!(table.spans, vec![span(2, 0, 1, 3)]);
+    }
+
+    #[test]
+    fn cell_breaks_are_normalized_and_split_into_lines() {
+        let table = parse_cells(&["| A | B |", "| 张某 <BR/> 电话 | <br>前后<br />空行<br> |"]);
+        assert_eq!(table.rows[1], vec!["张某<br>电话", "前后<br>空行"]);
+        assert_eq!(cell_lines(&table.rows[1][0]), vec!["张某", "电话"]);
+        assert_eq!(cell_lines("单行"), vec!["单行"]);
+        assert!(has_cell_break(&table.rows[1][1]));
+        // 中间连写两个是有意留的空行，照样保留。
+        assert_eq!(
+            cell_lines(&normalize_cell_breaks("甲<br><br>乙")),
+            vec!["甲", "", "乙"]
+        );
+    }
+
+    #[test]
+    fn breaks_inside_inline_code_stay_literal() {
+        let cell = normalize_cell_breaks("单元格里的 `<br/>` 写法 <BR> 第二行");
+        assert_eq!(cell, "单元格里的 `<br/>` 写法<br>第二行");
+        assert_eq!(cell_lines(&cell), vec!["单元格里的 `<br/>` 写法", "第二行"]);
+        assert!(!has_cell_break("讲写法：`<br>`"));
+        // 落单的反引号按字面算，后面的 `<br>` 照样换行。
+        assert_eq!(cell_lines("a`b<br>c"), vec!["a`b", "c"]);
     }
 }

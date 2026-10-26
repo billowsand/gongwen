@@ -3,7 +3,7 @@
 //! This is the canonical implementation originally used by the research TeX
 //! emitter. All TeX and DOCX emitters consume the same analysis result.
 
-use crate::common::table::{span_at, TableSpan};
+use crate::common::table::{cell_lines, span_at, TableSpan};
 
 /// Analysis thresholds inherited from the research TeX table algorithm.
 const SHORT_TEXT_THRESHOLD: f64 = 8.0;
@@ -79,10 +79,16 @@ impl ColumnStats {
     }
 }
 
+/// 单元格的显示宽度：有手动换行（`<br>`）时取最宽的那一行。
 fn calc_display_width(s: &str) -> f64 {
-    s.chars()
-        .map(|c| if c.is_ascii() { 1.0 } else { CJK_WIDTH_FACTOR })
-        .sum()
+    cell_lines(s)
+        .into_iter()
+        .map(|line| {
+            line.chars()
+                .map(|c| if c.is_ascii() { 1.0 } else { CJK_WIDTH_FACTOR })
+                .sum::<f64>()
+        })
+        .fold(0.0, f64::max)
 }
 
 fn is_numeric_content(s: &str) -> bool {

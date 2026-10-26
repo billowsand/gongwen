@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use crate::common::ast::{Block, Inline, LineAlign, MarkerKind, QuoteItem, QuoteKind};
 use crate::common::front_matter::{self, Metadata};
 use crate::common::numbering::{int_to_roman, number_to_uppercase_letter};
-use crate::common::table::{span_at, TableSpan};
+use crate::common::table::{cell_lines, span_at, TableSpan};
 use crate::common::table_layout::{analyze_table, cell_alignment, to_docx_grid, ColumnAlignment};
 use crate::parser;
 use crate::typst_research::{LIST_LABEL_CLOSE, LIST_LABEL_OPEN};
@@ -1803,7 +1803,23 @@ fn add_table(docx: Docx, rows: &[Vec<String>], spans: &[TableSpan], numbered: bo
             // 表头整行黑体加粗；表体解析 cell 内的 **加粗**/*斜体* 行内格式。
             let is_header = row_idx == 0;
             let mut p = Paragraph::new().align(align);
-            for ip in crate::common::inline::parse(cell_data) {
+            // 单元格里写了 `<br>`：逐行写，行间插软回车，仍是同一段（与 PDF 一致）。
+            let inlines = cell_lines(cell_data)
+                .into_iter()
+                .enumerate()
+                .flat_map(|(index, line)| {
+                    let parsed = crate::common::inline::parse(line);
+                    (index > 0)
+                        .then_some(None)
+                        .into_iter()
+                        .chain(parsed.into_iter().map(Some))
+                })
+                .collect::<Vec<_>>();
+            for ip in inlines {
+                let Some(ip) = ip else {
+                    p = p.add_run(Run::new().add_break(BreakType::TextWrapping));
+                    continue;
+                };
                 let (text, bold, italic) = inline_run_style(&ip);
                 let mut run = Run::new().add_text(&text).size(SIZE_BODY);
                 if is_header {
@@ -2487,6 +2503,23 @@ mod tests {
         assert_eq!(table.grid[0], 560); // 2em at the 14pt body font size
         assert_eq!(table.grid.iter().sum::<usize>(), TABLE_CONTENT_WIDTH_TWIPS);
         assert!(table.grid[2] > table.grid[1]);
+    }
+
+    /// 单元格的 `<br>` 写成段内软回车，不印出字面的 `<br>`。
+    #[test]
+    fn table_cell_breaks_become_soft_returns() {
+        let rows = vec![
+            vec!["单位".into(), "联系方式".into()],
+            vec!["办公室".into(), "张某<br>电话".into()],
+        ];
+        let docx = add_table(Docx::new(), &rows, &[], false);
+        let xml = String::from_utf8(docx.document.build()).unwrap();
+        assert_eq!(
+            xml.matches(r#"<w:br w:type="textWrapping""#).count(),
+            1,
+            "{xml}"
+        );
+        assert!(!xml.contains("&lt;br&gt;"), "{xml}");
     }
 
     fn main_texts(markdown: &str) -> Vec<String> {

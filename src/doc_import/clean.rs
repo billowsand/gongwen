@@ -745,8 +745,8 @@ fn is_toc_line(trimmed: &str) -> bool {
 
 // ---------------------------------------------------------------- 表格
 
-/// 逐张 GFM 表格按分隔行的列数补齐 / 截断每一行，单元格里的 `<br>` 换成「；」，
-/// 去单元格首尾空白；分隔行每格至少 `---` 并保留对齐冒号；表头行全空时把第一
+/// 逐张 GFM 表格按分隔行的列数补齐 / 截断每一行，单元格里的 `<br>` 归一写法后
+/// 保留为格内换行，去单元格首尾空白；分隔行每格至少 `---` 并保留对齐冒号；表头行全空时把第一
 /// 数据行提作表头（只换位，不增删行数）。`^^` 与 `||` 保持原样，非表格行不动。
 pub(crate) fn normalize_tables(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
@@ -847,12 +847,9 @@ fn split_row(line: &str) -> (Vec<String>, bool, bool) {
     (cells, leading, trailing)
 }
 
+/// 去首尾空白；单元格里各种写法的 `<br>` 归一成 `<br>`，留作格内换行（三端都认）。
 fn normalize_cell(cell: &str) -> String {
-    fn br_re() -> &'static Regex {
-        static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| Regex::new(r"(?i)<br\b[^>]*>").expect("换行标记正则必须合法"))
-    }
-    br_re().replace_all(cell, "；").trim().to_string()
+    mdx::table::normalize_cell_breaks(cell.trim())
 }
 
 fn join_row(cells: &[String], leading: bool, trailing: bool) -> String {
@@ -1066,12 +1063,11 @@ mod tests {
     }
 
     #[test]
-    fn 表格_按列数补齐截断并转br() {
-        let raw =
-            "| 序号 | 事项 | 备注 |\n| --- | --- | --- |\n| 1 | 报送<br>审核 | 无 |\n| 2 | 完成 |";
+    fn 表格_按列数补齐截断并保留br() {
+        let raw = "| 序号 | 事项 | 备注 |\n| --- | --- | --- |\n| 1 | 报送 <BR/> 审核 | 无 |\n| 2 | 完成 |";
         assert_eq!(
             normalize_tables(raw),
-            "| 序号 | 事项 | 备注 |\n| --- | --- | --- |\n| 1 | 报送；审核 | 无 |\n| 2 | 完成 |  |"
+            "| 序号 | 事项 | 备注 |\n| --- | --- | --- |\n| 1 | 报送<br>审核 | 无 |\n| 2 | 完成 |  |"
         );
     }
 
@@ -1121,7 +1117,7 @@ mod tests {
         assert!(cleaned.starts_with("工作的通知"), "{cleaned}");
         assert!(cleaned.contains("正文，请详见下表。"), "{cleaned}");
         assert!(!cleaned.contains("....1"), "{cleaned}");
-        assert!(cleaned.contains("| 甲 | 乙；丙 |"), "{cleaned}");
+        assert!(cleaned.contains("| 甲 | 乙<br>丙 |"), "{cleaned}");
         assert!(cleaned.ends_with('\n'), "{cleaned}");
     }
 }

@@ -75,8 +75,11 @@ impl TextCounts {
                             if export::table_span_at(&spans, row, column)
                                 .is_none_or(|span| span.is_anchor(row, column))
                             {
-                                text.push_str(&export::plain_text(cell));
-                                text.push('\n');
+                                // 单元格的 `<br>` 是换行标记，不是文字。
+                                for line in mdx::table::cell_lines(cell) {
+                                    text.push_str(&export::plain_text(line));
+                                    text.push('\n');
+                                }
                             }
                         }
                     }

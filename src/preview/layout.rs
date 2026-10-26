@@ -1416,18 +1416,21 @@ pub(crate) fn measure_table(
                 ColumnAlignment::Left => Align::LEFT,
             };
             let has_math = metrics.math && math_flow::has_math(text);
-            // 居中格与导出同一套排布：按导出的格宽判定，多出 1–2 字横向压扁，
-            // 再多按分词均衡换行（各行以 `\n` 接好）。含公式的格照旧自然折行。
-            let fit = if align == ColumnAlignment::Center && !has_math {
+            // 与导出同一套排布（`export::table::cell_plan`）：写了 `<br>` 的格按手写的
+            // 行分；居中格按导出的格宽判定，多出 1–2 字横向压扁，再多按分词均衡换行。
+            // 各行以 `\n` 接好。含公式的格只认手写换行，其余照旧自然折行。
+            let fit = if !has_math {
                 let twips = columns[column..column + column_span]
                     .iter()
                     .map(|column| column.twips)
                     .sum();
-                let is_name = name_column == Some(column) && row_index > 0;
-                super::fit::table_cell(ui.ctx(), text, is_name, twips)
+                let is_name = name_column == Some(column)
+                    && row_index > 0
+                    && !mdx::table::has_cell_break(text);
+                super::fit::table_cell(ui.ctx(), text, align, is_name, twips)
             } else {
                 super::fit::Fit {
-                    text: text.to_string(),
+                    text: mdx::table::cell_lines(text).join("\n"),
                     scale: 1.0,
                 }
             };
@@ -1960,6 +1963,46 @@ mod tests {
             );
             assert!((table.width() - metrics.content).abs() < 0.01);
         }
+    }
+
+    #[test]
+    fn manual_cell_breaks_are_painted_as_separate_lines() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let blocks = export::parse_markdown(
+            "| 单位 | 联系方式 |\n| --- | --- |\n| 办公室 | 张某 <br/> 电话：12345678 |",
+        );
+        let export::MarkdownBlock::Table {
+            rows,
+            aligns,
+            spans,
+            numbered,
+        } = &blocks[0]
+        else {
+            panic!("应解析成表格");
+        };
+        let mut measured = None;
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
+            measured = measure_table(
+                ui,
+                &metrics,
+                rows,
+                aligns,
+                spans,
+                *numbered,
+                metrics.content,
+            );
+        });
+        let table = measured.expect("表格应排出");
+        let cell = table
+            .cells
+            .iter()
+            .find(|cell| cell.row == 1 && cell.column == 1)
+            .expect("联系方式格");
+        assert_eq!(cell.galley.text(), "张某\n电话：12345678");
+        assert_eq!(cell.galley.rows.len(), 2);
+        assert!(table.row_heights[1] > table.row_heights[0]);
     }
 
     #[test]

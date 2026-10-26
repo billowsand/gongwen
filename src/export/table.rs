@@ -1,6 +1,7 @@
 //! 与 mdx official/research 共用思路的智能表格列宽分析。
 
 use super::{ColumnAlign, TableSpan, inline_segments, table_span_at};
+use mdx::table::{cell_lines, has_cell_break};
 use regex::Regex;
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -58,21 +59,34 @@ impl ColumnStats {
     }
 }
 
+/// 显示宽度。单元格有手动换行（`<br>`，或已换成 `\n` 的纯文本）时取最宽的那一行：
+/// 列宽要装下的是一行，不是几行连起来的总长。
 fn display_width(value: &str) -> f64 {
-    value
-        .chars()
-        .map(|ch| if ch.is_ascii() { 1.0 } else { CJK_WIDTH_FACTOR })
-        .sum()
+    cell_lines(value)
+        .into_iter()
+        .flat_map(|line| line.split('\n'))
+        .map(|line| {
+            line.chars()
+                .map(|ch| if ch.is_ascii() { 1.0 } else { CJK_WIDTH_FACTOR })
+                .sum::<f64>()
+        })
+        .fold(0.0, f64::max)
 }
 
 fn plain_cell_text(value: &str) -> String {
     // 滤掉花脸稿哨兵：它们不占版面，但字符数会被算进列宽，让一张表凭空变宽
-    // 甚至被误判成需要横排。
-    inline_segments(value)
-        .iter()
-        .flat_map(|segment| segment.text.chars())
-        .filter(|ch| !crate::export::is_redline_sentinel(*ch))
-        .collect()
+    // 甚至被误判成需要横排。手动换行换成 `\n`，`<br>` 几个字符不算宽度。
+    cell_lines(value)
+        .into_iter()
+        .map(|line| {
+            inline_segments(line)
+                .iter()
+                .flat_map(|segment| segment.text.chars())
+                .filter(|ch| !crate::export::is_redline_sentinel(*ch))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn cjk_em_width(value: &str) -> f64 {
@@ -730,7 +744,9 @@ pub(super) fn to_typst_table(
                 continue;
             }
             let cleaned = plain_cell_text(cell);
-            let is_name = name_column == Some(column_index) && row_index > 0;
+            // 写了 `<br>` 的姓名格按手写的行排，不再按单个姓名撑宽。
+            let is_name =
+                name_column == Some(column_index) && row_index > 0 && !has_cell_break(cell);
             let header = row_index == 0;
             let runs = if header {
                 plain_runs(&cleaned)
@@ -753,28 +769,22 @@ pub(super) fn to_typst_table(
                 .sum::<usize>();
             let mut lines = None;
             let mut scale = 1.0;
-            if alignment == ColumnAlignment::Center
-                && let Some(plan) = centered_cell_plan(cell, is_name, width)
-            {
-                match plan {
-                    (super::title::TitlePlan::SingleLine, _) => {}
-                    (super::title::TitlePlan::Compressed, percent) => {
-                        scale = percent as f64 / 100.0;
-                    }
-                    (super::title::TitlePlan::Wrapped(parts), _) => {
-                        lines = Some(
-                            crate::export::redline_slice_lines(cell, &parts)
-                                .iter()
-                                .map(|piece| {
-                                    if header {
-                                        plain_runs(&plain_cell_text(piece))
-                                    } else {
-                                        cell_runs(piece)
-                                    }
-                                })
-                                .collect(),
-                        );
-                    }
+            match cell_plan(cell, alignment, is_name, width) {
+                CellPlan::Plain => {}
+                CellPlan::Compressed(percent) => scale = percent as f64 / 100.0,
+                CellPlan::Lines(pieces) => {
+                    lines = Some(
+                        pieces
+                            .iter()
+                            .map(|piece| {
+                                if header {
+                                    plain_runs(&plain_cell_text(piece))
+                                } else {
+                                    cell_runs(piece)
+                                }
+                            })
+                            .collect(),
+                    );
                 }
             }
             cells.push(TableCell {
@@ -812,6 +822,52 @@ pub(crate) fn name_column(rows: &[Vec<String>]) -> Option<usize> {
     })
 }
 
+/// 一个单元格怎么排。预览、PDF（Typst）、Word 三端都调 [`cell_plan`]，
+/// 分几行、断在哪、压不压由这一处定，三端只管照着画。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CellPlan {
+    /// 原样排，放不下由排版自然折行。
+    Plain,
+    /// 横向压缩到百分之几，保持一行。
+    Compressed(usize),
+    /// 分成这几行；各行仍带行内标记与花脸稿哨兵，各自成对。
+    Lines(Vec<String>),
+}
+
+/// 单元格排布：写了 `<br>` 的格按手写的行分，任何对齐都一样，不再压缩或自动断行；
+/// 否则居中格按 [`centered_cell_plan`] 压缩或均衡换行，其余原样。
+/// `is_name` 是姓名列的正文格（有手动换行时调用方不再按姓名排）。
+pub(crate) fn cell_plan(
+    cell: &str,
+    alignment: ColumnAlignment,
+    is_name: bool,
+    width_twips: usize,
+) -> CellPlan {
+    if has_cell_break(cell) {
+        return CellPlan::Lines(split_cell_lines(cell));
+    }
+    if alignment != ColumnAlignment::Center {
+        return CellPlan::Plain;
+    }
+    match centered_cell_plan(cell, is_name, width_twips) {
+        None | Some((super::title::TitlePlan::SingleLine, _)) => CellPlan::Plain,
+        Some((super::title::TitlePlan::Compressed, percent)) => CellPlan::Compressed(percent),
+        Some((super::title::TitlePlan::Wrapped(parts), _)) => {
+            CellPlan::Lines(crate::export::redline_slice_lines(cell, &parts))
+        }
+    }
+}
+
+/// 按 `<br>` 拆行。花脸稿里一处标注可能跨过换行，拆开后每行各自补齐哨兵。
+fn split_cell_lines(cell: &str) -> Vec<String> {
+    let mut lines = cell_lines(cell)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    crate::export::balance_line_marks(&mut lines);
+    lines
+}
+
 /// 居中格的排布，与主标题同一套：多出 1–2 字横向压缩，再多按分词均衡换行。
 /// 姓名格、带加粗标记的格、空格不处理（`None`）。`width_twips` 是这一格
 /// （含横向合并的各列）在智能列宽里的宽度。PDF 与预览共用这条判定。
@@ -834,6 +890,47 @@ pub(crate) fn centered_cell_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_cell_breaks_drive_lines_and_widest_line_widths() {
+        let rows = vec![
+            vec!["单位".to_string(), "联系方式".to_string()],
+            vec!["办公室".to_string(), "张某<br>电话：12345678".to_string()],
+        ];
+        // 任何对齐都按手写的行分，不再压缩或自动断行。
+        for alignment in [
+            ColumnAlignment::Left,
+            ColumnAlignment::Center,
+            ColumnAlignment::Right,
+        ] {
+            assert_eq!(
+                cell_plan(&rows[1][1], alignment, false, 100),
+                CellPlan::Lines(vec!["张某".into(), "电话：12345678".into()])
+            );
+        }
+        // 列宽按最宽的一行算，`<br>` 本身不算宽度。
+        assert_eq!(display_width(&rows[1][1]), display_width("电话：12345678"));
+        assert_eq!(plain_cell_text(&rows[1][1]), "张某\n电话：12345678");
+
+        let table = to_typst_table(&rows, &[], &[], false, "t".into()).expect("应排成表格");
+        let json = serde_json::to_value(&table.rows).unwrap();
+        let lines = json[1][1]["lines"]
+            .as_array()
+            .expect("有手写换行的格要带 lines");
+        assert_eq!(lines.len(), 2);
+        assert!(json[1][0].get("lines").is_none());
+    }
+
+    #[test]
+    fn redline_marks_across_a_cell_break_are_closed_on_each_line() {
+        let cell = format!("甲{}", crate::export::mark_added("乙<br>丙"));
+        let CellPlan::Lines(lines) = cell_plan(&cell, ColumnAlignment::Left, false, 9000) else {
+            panic!("应按 <br> 分行");
+        };
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], format!("甲{}", crate::export::mark_added("乙")));
+        assert_eq!(lines[1], crate::export::mark_added("丙"));
+    }
 
     fn rows() -> Vec<Vec<String>> {
         vec![

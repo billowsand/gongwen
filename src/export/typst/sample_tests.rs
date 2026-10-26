@@ -69,6 +69,18 @@ const BODY: &str = "# 关于加快推进全市社区养老服务设施提质改�
 3. 10月起组织第三方验收评估。
 ";
 
+const CELL_BREAKS: &str = "# 关于报送社区养老服务站点联络人信息的通知
+
+<!-- [正文] -->
+
+各站点联络人信息见下表。
+
+| 序号 | 站点 | 联系人 | 联系方式<br>（办公 / 手机） | 说明 |
+| --- | --- | --- | --- | --- |
+| 1 | 东城街道<br>第一服务站 | 张三<br>李四 | 010-12345678<br>13800000000 | 设施改造已完成，待验收。<br>验收后恢复日托服务。 |
+| 2 | 西城街道服务站 | 王五 | 010-87654321 | 正在改造。 |
+";
+
 const SHORT: &str = "# 关于申请拨付社区养老服务专项经费的请示
 
 <!-- [正文] -->
@@ -134,6 +146,13 @@ fn cases() -> Vec<Case> {
             name: "letter-attachment",
             kind: TemplateKind::OfficialLetter,
             markdown: WITH_ATTACHMENT.into(),
+            tweak: |_| {},
+        },
+        Case {
+            // 单元格内 `<br>` 换行：居左、居中、姓名列、表头各一处，与预览、Word 对照。
+            name: "letter-cell-breaks",
+            kind: TemplateKind::OfficialLetter,
+            markdown: CELL_BREAKS.into(),
             tweak: |_| {},
         },
         Case {
@@ -381,6 +400,15 @@ fn typst_samples() {
         )
         .unwrap();
         std::fs::write(dir.join("doc.json"), data).unwrap();
+        if case.name == "letter-cell-breaks" {
+            crate::export::docx::write_docx(
+                &dir.join("word.docx"),
+                &input,
+                &case.markdown,
+                &display,
+            )
+            .unwrap();
+        }
         if case.kind == TemplateKind::PhoneRecord {
             crate::export::docx::write_docx(
                 &dir.join("record.docx"),

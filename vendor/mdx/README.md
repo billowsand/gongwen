@@ -142,6 +142,16 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
   每种名称各编各的号，口径与 TeX 相同；`tex_official.rs` / `docx_official.rs`
   按普通段落排。
 
+表格单元格内的 `<br>` 换行同样先在这里落地（公文助手的公文与研究报告共用这套判定）：
+
+- `common/table.rs` 新增 `CELL_BREAK`、`normalize_cell_breaks`、`cell_lines`、
+  `has_cell_break`：解析时把 `<br/>`、`<BR />` 等写法连同两侧空白归一成 `<br>`，
+  去掉格首格尾的换行；反引号行内代码里的 `<br>` 照字面保留；
+- `common/table_layout.rs`：显示宽度取格内最宽的一行；
+- `typst_research::Cell` 多了 `lines`（有手写换行时按行给出），模板逐行排、行间
+  `linebreak()`；`docx_research.rs` / `docx_official.rs` 逐行写、行间插软回车；
+  `research_text.rs` 计字时不把 `<br>` 算作文字。
+
 ## 改动规则
 
 **不要直接改这里的代码。** 一旦这份副本与上游分叉，"研究报告的排版与 mdx 保持
