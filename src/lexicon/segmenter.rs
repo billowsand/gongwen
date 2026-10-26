@@ -26,18 +26,39 @@ pub fn shared() -> Arc<Jieba> {
         .clone()
 }
 
-/// 换上带用户词典的分词器。`dict` 是 jieba 词典文本（每行「词 词频」）。
+/// 用户词典里没写词性的词按「其他专名」标：词表收的多是本单位专名，
+/// 标题断行据此把它当名词看待。
+const USER_WORD_TAG: &str = "nz";
+
+/// 换上带用户词典的分词器。`dict` 是 jieba 词典文本（每行「词 词频 [词性]」）。
 ///
 /// 整个换掉而不是往现有实例里加词：`Jieba` 的加词要 `&mut`，而分词端拿的是
 /// 共享引用；重建一个再原子替换，正在分词的调用方继续用旧的那个，不会阻塞。
 /// 空词典等于回到自带词典。
+///
+/// 只补自带词典没有的词，已有的词原样不动。不能用 `load_dict`：它遇到已有的词
+/// 会拿用户词频**覆盖**自带词频，而词表的词频是本机语料里的出现次数（常为 0，
+/// 导出时抬到 3），「重大」这类常用词从上千跌到 3，jieba 就宁可切成「重|大」，
+/// 标题因此从词中间断行；各机接受的词不同，切法也就各不相同。
 pub fn install_user_dict(dict: &str) {
-    let mut jieba = Jieba::new();
-    if !dict.trim().is_empty() {
-        let mut reader = std::io::Cursor::new(dict.as_bytes());
+    let mut entries = Vec::new();
+    for line in dict.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(word) = parts.next() else {
+            continue;
+        };
         // 用户词典解析失败（某行词频不是整数）时保留自带词典，不让分词整个失效。
-        if jieba.load_dict(&mut reader).is_err() {
-            return;
+        let freq = match parts.next().map(str::parse::<usize>) {
+            Some(Ok(freq)) => freq,
+            Some(Err(_)) => return,
+            None => 0,
+        };
+        entries.push((word, freq, parts.next().unwrap_or(USER_WORD_TAG)));
+    }
+    let mut jieba = Jieba::new();
+    for (word, freq, tag) in entries {
+        if !jieba.has_word(word) {
+            jieba.add_word(word, Some(freq), Some(tag));
         }
     }
     // 测试里记一笔「现在挂的不是自带词典」，好让串行锁的守卫只在真有必要时
@@ -225,6 +246,26 @@ mod tests {
         assert!(
             !before.iter().any(|word| word == coined),
             "这个用例要证明用户词典起了作用，前提是自带词典切不出它：{before:?}"
+        );
+    }
+
+    #[test]
+    fn user_dict_does_not_lower_builtin_word_frequencies() {
+        let _guard = test_lock();
+        // 另一台机器的词表接受了「重大」「节点」（词频都是 3）：用 `load_dict`
+        // 时它们的自带词频被覆盖，标题切成「重|大节|点」。只补新词就不会。
+        let text = "关于明确落实工程相关领导重大节点研商会议精神措施通知";
+        let before = tagged(text);
+        install_user_dict("重大 3\n节点 3\n新舆处 3\n");
+        let after = tagged(text);
+        let coined = tagged("请新舆处按期报送");
+        install_user_dict("");
+        assert_eq!(after, before);
+        assert!(
+            coined
+                .iter()
+                .any(|(word, tag)| word == "新舆处" && tag == "nz"),
+            "新词应整词切出并标成专名：{coined:?}"
         );
     }
 

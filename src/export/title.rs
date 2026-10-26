@@ -285,7 +285,8 @@ pub(crate) fn display_units(text: &str) -> usize {
 
 /// 在两个单元之间换行的代价（越小越好）。依据公文标题回行“词意完整”的要求：
 /// - 最好断在“的”之后、连词介词（与、和、及、关于、对……）之前，意群在这里自然分开；
-/// - 断在名词与名词之间多半是拆开了一个复合词（“数字|政府”“数据共享|平台”）；
+/// - 断在名词与名词之间多半是拆开了一个复合词（“数字|政府”“数据共享|平台”），
+///   形容词、区别词与后面的名词之间同理（“重大|节点”“新型|基础设施”）；
 /// - 单字词多是词缀或没切准的半个词（“大|模型”“数据|局”），挨着它断最难看；
 /// - 西文词之间的空格是天然断点。
 fn break_cost(left: &Unit, right: &Unit) -> f32 {
@@ -315,7 +316,8 @@ fn break_cost(left: &Unit, right: &Unit) -> f32 {
     if right.text.starts_with(|ch: char| NO_LINE_END.contains(ch)) {
         return 4.0;
     }
-    if nominal(&left.tail_tag) && nominal(&right.head_tag) {
+    let modifier = |tag: &str| nominal(tag) || matches!(tag, "a" | "b");
+    if modifier(&left.tail_tag) && nominal(&right.head_tag) {
         return 6.0;
     }
     3.0
@@ -553,6 +555,14 @@ mod tests {
                 assert!(display_units(line) <= 40, "单行超上限：{line}");
             }
         }
+    }
+
+    #[test]
+    fn adjective_noun_break_costs_like_a_compound() {
+        let unit = |word: &str, tag: &str| Unit::new(word, tag);
+        assert_eq!(break_cost(&unit("重大", "a"), &unit("节点", "n")), 6.0);
+        assert_eq!(break_cost(&unit("新型", "b"), &unit("基础设施", "n")), 6.0);
+        assert_eq!(break_cost(&unit("领导", "n"), &unit("重大", "a")), 3.0);
     }
 
     fn glued(words: &[&str]) -> Vec<String> {
