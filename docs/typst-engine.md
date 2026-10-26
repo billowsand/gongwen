@@ -372,3 +372,18 @@ Typst 使用 `gongwen.typ` 的专用记录表，Word 使用 `export/docx/phone_r
 `letter_record_wrapping_keeps_note_above_contact_row` 检查实际排版文字落点；
 `typst_samples` 新增 `letter-record-note-wrap` 与 `letter-record-copies-wrap`，分别覆盖
 抄送一行而印数另行、抄送本身跨行的 PDF 样张。
+
+## 公函版记贴末页底（2026-10-26）
+
+PDF：`footer-record` 原先是 `v(1fr)` 接不可拆的版记块。附件正文或表格恰好排满一页时，
+版记块放不下被挤到下一页，弹性空白却留在上一页，版记落到新页**顶端**。现在先按版记
+之前的零高锚点（写法同 `place-closing`）量本页剩余高度，放不下就自己 `pagebreak()`，
+再在版记所在页用 `v(1fr)` 推到底。回归测试
+`letter_record_stays_at_page_bottom_when_pushed_to_next_page` 逐行加长附件正文与表格、
+跨过换页临界点检查承办行基线不变；样张 `letter-record-pushed`（附 `word.docx`）。
+
+Word：版记原先是接在内容后面的在流表格（前置 1cm 空段），只是碰巧落在页底。现在改成
+浮动表，`tblpPr` 取 `vertAnchor="margin"` + `tblpYSpec="bottom"`（与红头呈批件承办区
+同法），表后补一个压到最矮的锚段；与上方内容至少 1cm 由 `w:topFromText="567"` 保证，
+docx-rs 不写这个属性，打包前由 `export::docx::record::with_record_gap` 补上。
+**待真机验收**（本机没有 Word / WPS）：末页内容贴近页底时版记应连锚段整体挪到下一页底部。

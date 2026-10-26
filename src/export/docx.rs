@@ -726,7 +726,9 @@ pub fn write_docx_with_numbering(
 
     let file =
         File::create(path).with_context(|| format!("无法创建 Word 文件：{}", path.display()))?;
-    doc.build().pack(file).context("写入 DOCX 包失败")?;
+    let mut xml = doc.build();
+    xml.document = record::with_record_gap(xml.document);
+    xml.pack(file).context("写入 DOCX 包失败")?;
     Ok(())
 }
 

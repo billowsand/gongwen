@@ -134,6 +134,31 @@ fn phone_record_input(input: &mut DraftInput) {
     };
 }
 
+/// 附件正文排到恰好占满第 3 页、放不下版记的长度（逐行加长实测出的临界点）。
+fn record_pushed_markdown() -> String {
+    let mut md = String::from(
+        "# 关于申请拨付社区养老服务专项经费的请示
+
+<!-- [正文] -->
+
+正文。
+
+         <!-- [附件] -->
+
+# 附件标题
+
+",
+    );
+    for i in 0..19 {
+        md.push_str(&format!(
+            "附件第{i}段，今年以来。
+
+"
+        ));
+    }
+    md
+}
+
 fn cases() -> Vec<Case> {
     vec![
         Case {
@@ -170,6 +195,13 @@ fn cases() -> Vec<Case> {
             tweak: |input| {
                 input.profile.copies_to = "市财政局、市发展和改革委员会、市卫生健康委员会、市人力资源和社会保障局、市住房和城乡建设局".into();
             },
+        },
+        Case {
+            // 附件恰好排满一页：版记挤到下一页时仍贴版心底；另出 Word 供对照。
+            name: "letter-record-pushed",
+            kind: TemplateKind::OfficialLetter,
+            markdown: record_pushed_markdown(),
+            tweak: |_| {},
         },
         Case {
             name: "letter-preview-duplex",
@@ -400,7 +432,7 @@ fn typst_samples() {
         )
         .unwrap();
         std::fs::write(dir.join("doc.json"), data).unwrap();
-        if case.name == "letter-cell-breaks" {
+        if matches!(case.name, "letter-cell-breaks" | "letter-record-pushed") {
             crate::export::docx::write_docx(
                 &dir.join("word.docx"),
                 &input,
@@ -1055,4 +1087,62 @@ fn latin_and_digits_follow_the_font_recipe() {
             .any(|item| item.text == "2" && item.family == simsun),
         "页码应是宋体字面"
     );
+}
+
+/// 公函版记贴末页版心底：附件正文或表格恰好排满一页、版记被挤到下一页时，
+/// 也要贴在新页底端，不能落在页顶。逐行加长，跨过换页的临界点。
+#[test]
+fn letter_record_stays_at_page_bottom_when_pushed_to_next_page() {
+    if crate::portable_runtime::find_font_dir().is_none() {
+        return;
+    }
+    let input = base_input(TemplateKind::OfficialLetter);
+    let mut bottom = None;
+    for table in [false, true] {
+        for n in 14..26 {
+            let mut md = String::from(
+                "# 关于申请拨付社区养老服务专项经费的请示
+
+<!-- [正文] -->
+
+正文。
+
+                 <!-- [附件] -->
+
+# 附件标题
+
+",
+            );
+            if table {
+                md.push_str(
+                    "| 序号 | 名称 |
+| --- | --- |
+",
+                );
+            }
+            for i in 0..n {
+                md.push_str(&if table {
+                    format!(
+                        "| {i} | 站点 |
+"
+                    )
+                } else {
+                    format!(
+                        "附件第{i}段，今年以来。
+
+"
+                    )
+                });
+            }
+            let (items, _) = text_fonts(&input, &md, &NumberingConfig::default());
+            let contact = items.iter().find(|t| t.text.contains("承办单位")).unwrap();
+            let last_page = items.iter().map(|t| t.page).max().unwrap();
+            assert_eq!(contact.page, last_page, "版记应在末页：table={table} n={n}");
+            let base = *bottom.get_or_insert(contact.baseline_pt);
+            assert!(
+                (contact.baseline_pt - base).abs() < 0.1,
+                "版记应贴版心底：table={table} n={n} {contact:?}"
+            );
+        }
+    }
 }

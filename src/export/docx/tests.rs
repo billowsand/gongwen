@@ -1213,6 +1213,51 @@ fn empty_copies_to_leaves_the_record_line_without_a_dangling_label() {
 }
 
 #[test]
+fn letter_record_floats_at_the_bottom_of_the_last_page() {
+    let temp = tempfile::tempdir().unwrap();
+    for (name, markdown) in [
+        ("plain", "# 测试函\n\n正文。"),
+        (
+            "attachment",
+            "# 测试函\n\n<!-- [正文] -->\n\n正文。\n\n<!-- [附件] -->\n\n# 附件标题\n\n附件正文。",
+        ),
+    ] {
+        let path = temp.path().join(format!("{name}.docx"));
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::OfficialLetter;
+        input.profile.recipient = "某部门".into();
+        input.profile.responsible_unit = "办公室".into();
+        input.profile.contact_person = "张三".into();
+        input.profile.contact_phone = "010-1".into();
+        write_docx_ok(&path, &input, markdown).unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        // 版记是正文最后一张表：浮动、底边贴版心底，与上方内容至少隔 1cm。
+        let table = &xml[xml.rfind("<w:tbl>").unwrap()..];
+        assert!(table.contains("共印"), "{name}：最后一张表应是版记");
+        let position = &table[table.find("<w:tblpPr").unwrap()..];
+        let position = &position[..position.find("/>").unwrap()];
+        for attr in [
+            r#"w:vertAnchor="margin""#,
+            r#"w:tblpYSpec="bottom""#,
+            r#"w:horzAnchor="margin""#,
+            r#"w:topFromText="567""#,
+        ] {
+            assert!(
+                position.contains(attr),
+                "{name}：版记定位缺 {attr}：{position}"
+            );
+        }
+        // 浮动表锚在其后的段落上：表后必须还有一个段落，再接节属性。
+        let after = &table[table.find("</w:tbl>").unwrap()..];
+        let anchor = after.find("<w:p").expect("版记后应有锚段");
+        assert!(
+            anchor < after.find("<w:sectPr").unwrap(),
+            "{name}：锚段应在节属性之前"
+        );
+    }
+}
+
+#[test]
 fn red_head_approval_docx_has_floating_frame_records_small_title_and_second_page_signature() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("red-approval.docx");

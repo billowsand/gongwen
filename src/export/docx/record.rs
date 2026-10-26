@@ -99,23 +99,53 @@ pub(crate) fn add_footer_record(
         .set(TableBorder::new(TableBorderPosition::Top).size(14))
         .set(TableBorder::new(TableBorderPosition::Bottom).size(14))
         .set(TableBorder::new(TableBorderPosition::InsideH).size(7));
-    doc.add_paragraph(
-        Paragraph::new()
-            .line_spacing(
-                LineSpacing::new()
-                    .line(567)
-                    .line_rule(LineSpacingType::Exact),
-            )
-            .keep_next(true),
-    )
-    .add_table(
+    // 版记贴末页版心底：在流里接在内容之后只能碰巧落到页底，所以做成浮动表，
+    // 底边对齐版心底（与红头呈批件承办区同法）。浮动表锚在其后的段落上，锚段
+    // 压到最矮；末页剩余放不下版记时 Word 会连锚段一起挪到下一页底部。
+    // 与上方内容至少隔 1cm 由 `w:topFromText` 保证，docx-rs 不写这个属性，
+    // 打包前由 `with_record_gap` 补上。
+    doc.add_table(
         Table::new(rows)
             .set_grid(grid)
             .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
             .margins(TableCellMargins::new().margin(0, 0, 0, 0))
             .layout(TableLayoutType::Fixed)
-            .set_borders(borders),
+            .set_borders(borders)
+            .position(record_position()),
     )
+    .add_paragraph(
+        Paragraph::new()
+            .add_run(Run::new().size(2))
+            .line_spacing(LineSpacing::new().line(1).line_rule(LineSpacingType::Exact)),
+    )
+}
+
+/// 版记浮动表的定位：水平居版心，垂直底边贴版心底。
+fn record_position() -> TablePositionProperty {
+    TablePositionProperty::new()
+        .horizontal_anchor("margin")
+        .vertical_anchor("margin")
+        .position_x_alignment("center")
+        .position_y_alignment("bottom")
+        .left_from_text(0)
+        .right_from_text(0)
+}
+
+/// 版记与上方内容的最小间距：1cm。
+const RECORD_GAP_TWIPS: i32 = 567;
+
+/// 给版记浮动表补上 `w:topFromText`（docx-rs 的 `tblpPr` 不支持该属性）。
+/// 只认 `record_position` 写出的那一组属性，文档里没有版记时原样返回。
+pub(crate) fn with_record_gap(document: Vec<u8>) -> Vec<u8> {
+    let xml = match String::from_utf8(document) {
+        Ok(xml) => xml,
+        Err(err) => return err.into_bytes(),
+    };
+    let marker = r#"<w:tblpPr w:leftFromText="0" w:rightFromText="0" w:vertAnchor="margin" w:horzAnchor="margin" w:tblpXSpec="center" w:tblpYSpec="bottom""#;
+    let patched = format!(
+        r#"<w:tblpPr w:leftFromText="0" w:rightFromText="0" w:topFromText="{RECORD_GAP_TWIPS}" w:vertAnchor="margin" w:horzAnchor="margin" w:tblpXSpec="center" w:tblpYSpec="bottom""#
+    );
+    xml.replacen(marker, &patched, 1).into_bytes()
 }
 
 /// 版记单元格。`size` 按半磅计；`left_indent` 用于第 2 行起让名称与第一行标签后的位置对齐。

@@ -446,7 +446,24 @@
     rule(g.bottom, 0.6mm)
   })
 }
-#let footer-record(r) = { v(1fr); record-block(r) }
+// 版记贴末页版心底。不能只写 v(1fr) 接不可拆块：本页剩余放不下时块被挤到下一页，
+// 弹性空白却留在上一页，版记就落在新页顶端。所以先按版记之前的锚点量剩余高度，
+// 放不下就自己换页，再在版记所在页用 v(1fr) 推到底（锚点的写法同 place-closing）。
+#let record-serial = counter("gw-record")
+#let footer-record(r) = {
+  record-serial.step()
+  context {
+    let id = "gw-record-" + str(record-serial.get().first())
+    block(height: 0pt, spacing: 0pt, [#metadata(id)#label(id)])
+  }
+  context {
+    let id = "gw-record-" + str(record-serial.get().first())
+    let y = locate(label(id)).position().y
+    if y + record-height(r) > top-m + text-h { pagebreak() }
+    v(1fr)
+    record-block(r)
+  }
+}
 
 // ---------------- 附件 ----------------
 // 「附件」标识（黑体三号）、空一行、附件标题，标题之后直接接内容。
