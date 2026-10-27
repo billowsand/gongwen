@@ -5,9 +5,9 @@
 
 use crate::export::docx::runs::apply_redline;
 use crate::export::docx::{
-    BODY_LINE_TWIPS, BODY_SIZE, BoldFont, FOOTER_EM_TWIPS, HEADER_WIDTH_TWIPS, PAREN_SIZE,
-    SECURITY_FIRST_LINE_TWIPS, TABLE_CONTENT_WIDTH_TWIPS, apply_bold, body_run, chinese_fonts,
-    header, letter_security_paragraph, marked_runs, record_run,
+    BoldFont, FOOTER_EM_TWIPS, HEADER_WIDTH_TWIPS, SECURITY_FIRST_LINE_TWIPS,
+    TABLE_CONTENT_WIDTH_TWIPS, apply_bold, body_line_twips, body_run, body_size, chinese_fonts,
+    header, letter_security_paragraph, marked_runs, paren_size, record_run,
 };
 use crate::export::minutes::{
     RosterLine, enumeration_kai_spans, kai_pieces, minutes_heading, minutes_number_text, roster,
@@ -57,7 +57,7 @@ pub(crate) fn add_header(
                 Run::new()
                     .add_text("01")
                     .fonts(chinese_fonts("黑体"))
-                    .size(BODY_SIZE),
+                    .size(body_size()),
             )
             .line_spacing(exact_line(SECURITY_FIRST_LINE_TWIPS))
             .keep_next(true),
@@ -67,7 +67,7 @@ pub(crate) fn add_header(
             .add_paragraph(letter_security_paragraph(input, elements.security()).keep_next(true));
     }
     doc = doc.add_paragraph(blank(
-        BODY_LINE_TWIPS - (HEADING_LINE_TWIPS - BODY_LINE_TWIPS),
+        body_line_twips() - (HEADING_LINE_TWIPS - body_line_twips()),
     ));
 
     let heading = minutes_heading(input, display);
@@ -92,11 +92,11 @@ pub(crate) fn add_header(
             .line_spacing(exact_line(HEADING_LINE_TWIPS))
             .keep_next(true),
     );
-    doc = doc.add_paragraph(blank(BODY_LINE_TWIPS));
+    doc = doc.add_paragraph(blank(body_line_twips()));
 
     let mut number = Paragraph::new()
         .align(AlignmentType::Center)
-        .line_spacing(exact_line(BODY_LINE_TWIPS))
+        .line_spacing(exact_line(body_line_twips()))
         .keep_next(true);
     let [_, year_mark, serial_mark] = elements.number();
     if year_mark.changed() || serial_mark.changed() {
@@ -125,7 +125,7 @@ pub(crate) fn add_header(
             ),
         ),
     );
-    doc.add_paragraph(blank(BODY_LINE_TWIPS - NUMBER_RULE_GAP_TWIPS))
+    doc.add_paragraph(blank(body_line_twips() - NUMBER_RULE_GAP_TWIPS))
 }
 
 /// 会议纪要正文段：与 `body_paragraph` 相同，另把「一是……」那一截排成三号楷体。
@@ -133,7 +133,7 @@ pub(crate) fn body_paragraph(text: &str, bold: BoldFont<'_>) -> Paragraph {
     let mut paragraph = Paragraph::new()
         .align(AlignmentType::Both)
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
-        .line_spacing(exact_line(BODY_LINE_TWIPS))
+        .line_spacing(exact_line(body_line_twips()))
         .widow_control(false);
     for run in body_runs(text, bold) {
         paragraph = paragraph.add_run(run);
@@ -166,12 +166,12 @@ fn body_runs(text: &str, bold: BoldFont<'_>) -> Vec<Run> {
                 Run::new()
                     .add_text(text)
                     .fonts(chinese_fonts("楷体_GB2312"))
-                    .size(PAREN_SIZE)
+                    .size(paren_size())
             } else if kai {
                 Run::new()
                     .add_text(text)
                     .fonts(chinese_fonts("楷体_GB2312"))
-                    .size(BODY_SIZE)
+                    .size(body_size())
             } else {
                 body_run(text)
             };
@@ -209,13 +209,13 @@ fn label_run(label: &str) -> Run {
     Run::new()
         .add_text(format!("{label}："))
         .fonts(chinese_fonts("黑体"))
-        .size(BODY_SIZE)
+        .size(body_size())
 }
 
 fn roster_cell(width: usize, run: Option<Run>, align: AlignmentType) -> TableCell {
     let mut paragraph = Paragraph::new()
         .align(align)
-        .line_spacing(exact_line(BODY_LINE_TWIPS));
+        .line_spacing(exact_line(body_line_twips()));
     if let Some(run) = run {
         paragraph = paragraph.add_run(run);
     }
@@ -280,7 +280,7 @@ fn roster_running(line: &RosterLine) -> Paragraph {
             None,
             None,
         )
-        .line_spacing(exact_line(BODY_LINE_TWIPS))
+        .line_spacing(exact_line(body_line_twips()))
         .widow_control(false)
 }
 

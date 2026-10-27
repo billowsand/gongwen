@@ -155,6 +155,13 @@ pub(crate) struct Attachment {
     pub blocks: Vec<Block>,
 }
 
+/// 领导阅件的版式参数（字号、行距在模板里按这一项切换）。
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Leader {
+    /// 正文段落整体加粗。
+    pub bold: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Header {
     /// 发文机关全称（红头）。
@@ -259,6 +266,8 @@ pub(crate) struct Doc {
     pub duplex: bool,
     /// 整份横排（普通公文的横页选项）：横向 A4、左侧装订，附件随之横排。
     pub landscape: bool,
+    /// 领导阅件（普通公文的大字版）：正文小二宋体、行距 31.85 磅；`None` 为常规版式。
+    pub leader: Option<Leader>,
     pub probe: bool,
     pub fonts: FontFamilies,
     pub security: Option<Runs>,

@@ -3,6 +3,7 @@
 //! 各版式部件已拆分到 `preview/` 子模块（排版基础、红头、文尾、红头呈批件、
 //! 正文渲染、纸面行号），根文件保留版式常量、`Metrics` / `PreviewScale` 与测试。
 
+use crate::models::LeaderReading;
 use crate::theme;
 use eframe::egui;
 use eframe::egui::FontId;
@@ -171,7 +172,12 @@ pub(crate) struct Metrics {
     /// 共用的块渲染自动跟着版式走，不必为研究报告各复制一份。
     body_family: &'static str,
     body_pt: f32,
+    /// 正文里完整括号内容的楷体字号：比正文小一号。
+    paren_pt: f32,
     dedicated_bold: bool,
+    /// 领导阅件勾了加粗：正文段落（含列表、对齐行、附件说明）整段合成加粗，
+    /// 行内加粗不再另换字面；层级标题不受影响。
+    all_bold: bool,
     /// 表格正文的字面、字号与格内行距（表头一律黑体，加粗跟随设置）。
     table_family: &'static str,
     /// 表头字面：公文黑体；研究报告黑体字形配 Termes Regular。
@@ -274,7 +280,9 @@ impl Metrics {
             line: LINE_PT * PT * scale,
             body_family: theme::FONT_FANGSONG,
             body_pt: BODY_PT,
+            paren_pt: PAREN_PT,
             dedicated_bold: false,
+            all_bold: false,
             table_family: theme::FONT_FANGSONG,
             table_header_family: theme::FONT_HEITI,
             table_pt: TABLE_PT,
@@ -356,7 +364,9 @@ impl Metrics {
             // PDF 同字面。
             body_family: theme::FONT_SONGTI,
             body_pt: RESEARCH_BODY_PT,
+            paren_pt: PAREN_PT,
             dedicated_bold: false,
+            all_bold: false,
             table_family: theme::FONT_SONGTI,
             table_header_family: theme::FONT_RESEARCH_HEI_PLAIN,
             table_pt: RESEARCH_TABLE_PT,
@@ -383,6 +393,19 @@ impl Metrics {
 
     fn with_bold_style(mut self, ctx: &egui::Context) -> Self {
         self.dedicated_bold = theme::preview_uses_dedicated_bold(ctx);
+        self
+    }
+
+    /// 领导阅件（普通公文的大字版）：正文与层级标题小二、正文宋体、行距 31.85 磅，
+    /// 与导出的 PDF / Word 一致；主标题、表格、密级不变。
+    fn with_leader_reading(mut self, leader: Option<LeaderReading>) -> Self {
+        if let Some(leader) = leader {
+            self.line = self.pt(LeaderReading::LINE_PT);
+            self.body_family = theme::FONT_SONGTI;
+            self.body_pt = LeaderReading::BODY_PT;
+            self.paren_pt = LeaderReading::PAREN_PT;
+            self.all_bold = leader.bold;
+        }
         self
     }
 
@@ -482,9 +505,27 @@ impl Metrics {
         self.font(self.body_family, self.body_pt)
     }
 
-    /// 正文里的加粗：专用模式换字面，合成模式沿用正文字面。
+    /// 正文各级标题的字面：2 级黑体、3 级楷体，其余随正文字面；字号随正文。
+    fn heading_font(&self, level: u8) -> FontId {
+        let family = match level {
+            2 | 3 => layout::heading_family(level),
+            _ => self.body_family,
+        };
+        self.font(family, self.body_pt)
+    }
+
+    /// 整段合成加粗时，一段文字（`chars` 个字）要叠绘的范围；否则沿用行内加粗。
+    fn paragraph_bold(&self, chars: usize, inline: Vec<Range<usize>>) -> Vec<Range<usize>> {
+        if self.all_bold {
+            std::iter::once(0..chars).collect()
+        } else {
+            inline
+        }
+    }
+
+    /// 正文里的加粗：专用模式换字面，合成模式沿用正文字面（整段加粗时也沿用）。
     fn body_bold_font(&self) -> FontId {
-        if self.dedicated_bold {
+        if self.dedicated_bold && !self.all_bold {
             self.font(theme::FONT_BOLD, self.body_pt)
         } else {
             self.body_font()
@@ -541,6 +582,40 @@ mod tests {
                 assert_eq!(bold.format.font_id, normal);
             }
         }
+    }
+
+    #[test]
+    fn leader_reading_preview_enlarges_body_and_bolds_whole_paragraphs() {
+        let plain = Metrics::new(1000.0, Some(1.0));
+        let leader = Metrics::new(1000.0, Some(1.0))
+            .with_leader_reading(Some(LeaderReading { bold: false }));
+        assert_eq!(leader.body_font(), leader.font(theme::FONT_SONGTI, 18.0));
+        assert!((leader.line - leader.pt(31.85)).abs() < 1e-3);
+        assert!(leader.line > plain.line);
+        // 4 级标题随正文换宋体，2 级仍是黑体；字号都随正文。
+        assert_eq!(leader.heading_font(4), leader.body_font());
+        assert_eq!(leader.heading_font(2), leader.font(theme::FONT_HEITI, 18.0));
+        assert_eq!(
+            plain.heading_font(4),
+            plain.font(theme::FONT_FANGSONG, BODY_PT)
+        );
+        // 表格不跟着变。
+        assert_eq!(leader.table_family, theme::FONT_FANGSONG);
+        assert_eq!(leader.table_pt, TABLE_PT);
+        let inline = || std::iter::once(2..4).collect::<Vec<_>>();
+        assert_eq!(leader.paragraph_bold(6, inline()), inline());
+
+        let bold =
+            Metrics::new(1000.0, Some(1.0)).with_leader_reading(Some(LeaderReading { bold: true }));
+        assert_eq!(
+            bold.paragraph_bold(6, inline()),
+            std::iter::once(0..6).collect::<Vec<_>>()
+        );
+        assert_eq!(bold.body_bold_font(), bold.body_font());
+        assert_eq!(
+            plain.paragraph_bold(6, Vec::new()),
+            Vec::<Range<usize>>::new()
+        );
     }
 
     /// 一份两级单位的词库：厅下面挂一个处，处有简称。

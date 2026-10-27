@@ -4,9 +4,9 @@
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::docx::{
-    AGENDA_NUMBERING_ID, BODY_SIZE, BoldFont, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE,
-    agenda_blank_line, agenda_body_paragraph, aligned_paragraph, apply_bold, body_paragraph,
-    body_runs, chinese_fonts, document_title_paragraph, docx_name, heading_paragraph_with_number,
+    AGENDA_NUMBERING_ID, BoldFont, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE, agenda_blank_line,
+    agenda_body_paragraph, aligned_paragraph, apply_bold, body_paragraph, body_runs, body_size,
+    chinese_fonts, document_title_paragraph, docx_name, heading_paragraph_with_number,
     image_paragraph, ordered_list_paragraph, security_runs, table_run_sized, table_runs_sized,
 };
 use crate::export::table::{
@@ -238,7 +238,7 @@ pub(crate) fn agenda_numbering() -> AbstractNumbering {
         )
         .suffix(LevelSuffixType::Nothing)
         .fonts(chinese_fonts("仿宋_GB2312"))
-        .size(BODY_SIZE),
+        .size(body_size()),
     )
 }
 
@@ -280,10 +280,10 @@ pub(crate) fn write_meeting_agenda_docx(
             gutter: 0,
         })
         .default_fonts(chinese_fonts("仿宋_GB2312"))
-        .default_size(BODY_SIZE)
+        .default_size(body_size())
         .default_line_spacing(
             LineSpacing::new()
-                .line(super::BODY_LINE_TWIPS as i32)
+                .line(super::body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .add_abstract_numbering(agenda_numbering())
@@ -327,7 +327,7 @@ pub(crate) fn write_meeting_agenda_docx(
         document_title_paragraph(title, &plan, false)
             .line_spacing(
                 LineSpacing::new()
-                    .line(super::BODY_LINE_TWIPS as i32)
+                    .line(super::body_line_twips() as i32)
                     .line_rule(LineSpacingType::Exact),
             )
             .keep_next(true),

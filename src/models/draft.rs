@@ -226,6 +226,26 @@ impl ResearchPalette {
     }
 }
 
+/// 领导阅件（大字版）的版式参数，三端（预览、PDF、Word）共用。
+///
+/// 正文、层级标题、附件说明、落款与附件里的正文改小二（18 磅）、行距 31.85 磅
+/// （版心 225mm 恰好 20 行），正文字体由仿宋换宋体；主标题仍是二号方正小标宋，
+/// 表格、密级与页码不变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaderReading {
+    /// 正文段落整体加粗。行内的 `**加粗**` 随之不再另行区分；层级标题不加粗。
+    pub bold: bool,
+}
+
+impl LeaderReading {
+    /// 正文字号：小二。
+    pub const BODY_PT: f32 = 18.0;
+    /// 括号内楷体的字号：比正文小一号，三号。
+    pub const PAREN_PT: f32 = 16.0;
+    /// 固定行距（磅）。
+    pub const LINE_PT: f32 = 31.85;
+}
+
 impl Default for DraftInput {
     fn default() -> Self {
         Self {
@@ -247,6 +267,16 @@ impl DraftInput {
     /// 本篇是否整份横排：勾了横页且文种支持。换成别的文种时勾选保留但不生效。
     pub(crate) fn landscape(&self) -> bool {
         self.kind.supports_landscape() && self.profile.landscape
+    }
+
+    /// 本篇的领导阅件版式：勾了领导阅件且文种支持时给出，否则 `None`（常规版式）。
+    /// 换成别的文种时勾选保留但不生效。
+    pub(crate) fn leader_reading(&self) -> Option<LeaderReading> {
+        (self.kind.supports_leader_reading() && self.profile.leader_reading).then_some(
+            LeaderReading {
+                bold: self.profile.leader_reading_bold,
+            },
+        )
     }
 
     /// 本篇的密级与保密期限，不分文档类型。

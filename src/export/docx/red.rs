@@ -4,7 +4,7 @@
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::docx::{
-    BODY_SIZE, TABLE_CONTENT_WIDTH_TWIPS, chinese_fonts, docx_name, red_record_paragraph,
+    TABLE_CONTENT_WIDTH_TWIPS, body_size, chinese_fonts, docx_name, red_record_paragraph,
 };
 use crate::models::DraftInput;
 use crate::units::UnitDisplay;
@@ -34,14 +34,14 @@ pub(crate) fn red_approval_frame_table(input: &DraftInput) -> Table {
             Run::new()
                 .add_text("批　示")
                 .fonts(chinese_fonts("仿宋_GB2312"))
-                .size(BODY_SIZE)
+                .size(body_size())
                 .color("FF0000"),
         )
         .align(AlignmentType::Center)
         .line_spacing(
             LineSpacing::new()
                 .before(420)
-                .line(super::BODY_LINE_TWIPS as i32)
+                .line(super::body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         );
     Table::new(vec![
@@ -128,7 +128,7 @@ pub(crate) fn red_approval_record_table(input: &DraftInput, display: &UnitDispla
         .iter()
         .map(|entry| {
             // 联系人姓名导出时留空给经办人手写签字（预览仍显示）。
-            let (name, name_size) = docx_name("", BODY_SIZE);
+            let (name, name_size) = docx_name("", body_size());
             (
                 [display.abbr(&entry.unit), name, entry.phone.clone()],
                 name_size,
@@ -148,7 +148,7 @@ pub(crate) fn red_approval_record_table(input: &DraftInput, display: &UnitDispla
                     .add_paragraph(red_record_paragraph(
                         if first { "承办单位：" } else { "" },
                         &row[0],
-                        BODY_SIZE,
+                        body_size(),
                         crate::export::red_record_unit_twips(&row[0]),
                         AlignmentType::Left,
                         columns.unit_usable(),
@@ -178,7 +178,7 @@ pub(crate) fn red_approval_record_table(input: &DraftInput, display: &UnitDispla
                     .add_paragraph(red_record_paragraph(
                         if first { "电话：" } else { "" },
                         &row[2],
-                        BODY_SIZE,
+                        body_size(),
                         crate::export::red_record_phone_twips(&row[2], first),
                         AlignmentType::Right,
                         columns.phone_usable(),

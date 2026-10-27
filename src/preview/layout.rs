@@ -8,7 +8,7 @@ use crate::export::table::ColumnAlignment;
 use crate::preview::gutter;
 use crate::preview::marks::{self, LineMarks};
 use crate::preview::math_flow;
-use crate::preview::{INDENT_CHARS, Metrics, PAREN_PT};
+use crate::preview::{INDENT_CHARS, Metrics};
 use crate::theme;
 use eframe::egui;
 use eframe::egui::text::{LayoutJob, TextFormat};
@@ -912,6 +912,7 @@ pub(crate) fn numbered_body_block(
         );
     }
     let bold_ranges = append_numbered_inline(&mut job, metrics, text, &normal, numbers);
+    let bold_ranges = metrics.paragraph_bold(job.text.chars().count(), bold_ranges);
     draw_justified_with_bold_ranges(ui, metrics, job, &bold_ranges);
 }
 
@@ -947,6 +948,7 @@ pub(crate) fn aligned_block(
         export::LineAlign::Right => Align::Max,
     };
     let bold_ranges = append_inline_with_bold_ranges(&mut job, metrics, text, &metrics.body_font());
+    let bold_ranges = metrics.paragraph_bold(job.text.chars().count(), bold_ranges);
     // halign 让每行相对 galley 原点对齐，所以原点要放在版心中线或右沿上，
     // 道理同 `line_block_runs` 的居中分支。
     let galley = layout(ui, job);
@@ -994,6 +996,7 @@ pub(crate) fn clickable_body_block(
         0
     };
     let bold_ranges = append_numbered_inline(&mut job, metrics, text, &normal, numbers);
+    let bold_ranges = metrics.paragraph_bold(job.text.chars().count(), bold_ranges);
     let adjusted = segments
         .iter()
         .map(|segment| ClickableSourceSegment {
@@ -1247,7 +1250,7 @@ pub(crate) fn append_numbered_inline(
         let segment = &piece.segment;
         for (part, kai) in export::minutes::kai_pieces(&segment.text, offset, &spans) {
             let font = if segment.parenthesized {
-                metrics.font(theme::FONT_KAITI, PAREN_PT)
+                metrics.font(theme::FONT_KAITI, metrics.paren_pt)
             } else if kai {
                 metrics.font(theme::FONT_KAITI, metrics.body_pt)
             } else if segment.bold && metrics.dedicated_bold {

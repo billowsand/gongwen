@@ -11,7 +11,7 @@ use crate::export::{
 };
 #[cfg(test)]
 use crate::models::StyleMode;
-use crate::models::{DraftInput, FontConfig, NumberingConfig, TemplateKind};
+use crate::models::{DraftInput, FontConfig, LeaderReading, NumberingConfig, TemplateKind};
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result, bail};
 use docx_rs::*;
@@ -83,8 +83,6 @@ const FOOTER_DISTANCE_TWIPS: i32 =
     BODY_BOTTOM_MARGIN_TWIPS - PAGE_NUMBER_GAP_TWIPS - PAGE_NUMBER_LINE_TWIPS;
 // TeX 的 28.98 pt 换算为 Word 的 1/20 bp，四舍五入到 577 twips。
 const BODY_LINE_TWIPS: u32 = 577;
-/// 正文、附件概要或“此页无正文”与落款之间通常空 3 行（每行固定 560 缇）。
-const CLOSING_GAP_TWIPS: u32 = 3 * BODY_LINE_TWIPS;
 /// 密级行落在版心第一行时的行高。TeX 用 \topskip 把首行基线贴近版心顶端，
 /// 不走 28.98pt 的正文基线距；Word 用一个更矮的固定行高等效（白头件、普通公文、
 /// 会议议程三处一致）。函稿的密级行不是首行，仍用正文行距。
@@ -139,6 +137,73 @@ const RECORD_OTHER_COLUMN_TWIPS: usize =
 const AGENDA_NUMBERING_ID: usize = 17;
 const JOINT_SIGNATURE_SEAL_GAP_TWIPS: f32 = 2_551.0; // 45 mm 公章安全高度
 
+// ── 领导阅件（普通公文的大字版） ──────────────────────────────────────────
+// 正文字号、行距、字体在几十处段落构建里都要用，逐个传参会把每个部件的签名都
+// 改一遍；而一次导出只排一篇稿子，版式在入口处就定了。所以由 `write_docx_with_numbering`
+// 在入口挂上本线程的版式（`LeaderScope` 守卫，导出结束或出错都会摘掉），各部件
+// 通过下面几个取值函数读：没挂时与常量完全一致，别的文种不受影响。
+
+thread_local! {
+    static LEADER: std::cell::Cell<Option<LeaderReading>> = const { std::cell::Cell::new(None) };
+}
+
+/// 本线程正在导出的稿件按领导阅件排版期间挂着的守卫；析构时摘掉。
+struct LeaderScope;
+
+impl LeaderScope {
+    fn enter(leader: Option<LeaderReading>) -> Self {
+        LEADER.with(|cell| cell.set(leader));
+        Self
+    }
+}
+
+impl Drop for LeaderScope {
+    fn drop(&mut self) {
+        LEADER.with(|cell| cell.set(None));
+    }
+}
+
+fn leader() -> Option<LeaderReading> {
+    LEADER.with(|cell| cell.get())
+}
+
+/// 正文字号（半磅）：常规三号，领导阅件小二。
+fn body_size() -> usize {
+    leader().map_or(BODY_SIZE, |_| (LeaderReading::BODY_PT * 2.0) as usize)
+}
+
+/// 正文固定行距（缇）：常规 577，领导阅件 31.85 磅即 637。
+fn body_line_twips() -> u32 {
+    leader().map_or(BODY_LINE_TWIPS, |_| {
+        (LeaderReading::LINE_PT * 20.0).round() as u32
+    })
+}
+
+/// 括号内楷体的字号（半磅）：比正文小一号。
+fn paren_size() -> usize {
+    leader().map_or(PAREN_SIZE, |_| (LeaderReading::PAREN_PT * 2.0) as usize)
+}
+
+/// 正文、附件概要或“此页无正文”与落款之间通常空 3 行。
+fn closing_gap_twips() -> u32 {
+    3 * body_line_twips()
+}
+
+/// 正文字体：常规仿宋，领导阅件宋体。表格、版记不跟着换。
+fn body_font() -> &'static str {
+    leader().map_or("仿宋_GB2312", |_| "宋体")
+}
+
+/// 首行缩进两字（缇）：随正文字号。
+fn first_line_indent_twips() -> i32 {
+    body_size() as i32 * 20
+}
+
+/// 领导阅件勾了加粗：正文段落整段合成加粗。
+fn leader_bold() -> bool {
+    leader().is_some_and(|leader| leader.bold)
+}
+
 /// 红头（发文机关标志）可用的版心宽度：A4 页宽减去左右页边距，约 15.6cm。
 const HEADER_WIDTH_TWIPS: i32 = 11906 - 1587 - 1474;
 /// TeX HeaderFontSize = 29 pt，约 28.89 bp，Word 半磅精度取 58。
@@ -187,6 +252,8 @@ pub fn write_docx_with_numbering(
     // 加粗文字的排法：None 交给 Word 合成粗体（字体不变，等同点了加粗按钮），
     // Some 换用专用粗体字面。
     let bold = fonts.bold_family_docx();
+    // 领导阅件：之后各部件取正文字号、行距、字体都按大字版（见 `LeaderScope`）。
+    let _leader = LeaderScope::enter(input.leader_reading());
     if input.kind == TemplateKind::PhoneRecord {
         return phone_record::write(path, input, markdown, fonts, numbering, elements);
     }
@@ -237,11 +304,11 @@ pub fn write_docx_with_numbering(
         })
     };
     let mut doc = doc
-        .default_fonts(chinese_fonts("仿宋_GB2312"))
-        .default_size(BODY_SIZE)
+        .default_fonts(chinese_fonts(body_font()))
+        .default_size(body_size())
         .default_line_spacing(
             LineSpacing::new()
-                .line(BODY_LINE_TWIPS as i32)
+                .line(body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         );
 
@@ -263,7 +330,7 @@ pub fn write_docx_with_numbering(
                         Run::new()
                             .add_text("01")
                             .fonts(chinese_fonts("黑体"))
-                            .size(BODY_SIZE),
+                            .size(body_size()),
                     )
                     .add_run(body_run("").add_tab());
                 if let Some(value_runs) = number_runs(input, " ", elements) {
@@ -276,7 +343,7 @@ pub fn write_docx_with_numbering(
                         .line_spacing(
                             LineSpacing::new()
                                 .before(247)
-                                .line(BODY_LINE_TWIPS as i32)
+                                .line(body_line_twips() as i32)
                                 .line_rule(LineSpacingType::Exact),
                         )
                         .keep_next(true),
@@ -337,12 +404,12 @@ pub fn write_docx_with_numbering(
                 letter_security_paragraph(input, elements.security()).line_spacing(
                     LineSpacing::new()
                         .before(RED_APPROVAL_SECURITY_BEFORE_TWIPS)
-                        .line(BODY_LINE_TWIPS as i32)
+                        .line(body_line_twips() as i32)
                         .line_rule(LineSpacingType::Exact)
                         .after(0),
                 ),
             );
-            red_approval_header_twips += RED_APPROVAL_SECURITY_BEFORE_TWIPS + BODY_LINE_TWIPS;
+            red_approval_header_twips += RED_APPROVAL_SECURITY_BEFORE_TWIPS + body_line_twips();
             doc = doc.add_paragraph(
                 header::issuing_unit_paragraph(&main_issuing_unit(input, display)).line_spacing(
                     LineSpacing::new()
@@ -360,7 +427,7 @@ pub fn write_docx_with_numbering(
                 let mut paragraph = Paragraph::new().align(AlignmentType::Center).line_spacing(
                     LineSpacing::new()
                         .before(RED_APPROVAL_NUMBER_BEFORE_TWIPS)
-                        .line(BODY_LINE_TWIPS as i32)
+                        .line(body_line_twips() as i32)
                         .line_rule(LineSpacingType::Exact)
                         .after(RED_APPROVAL_NUMBER_AFTER_TWIPS),
                 );
@@ -369,7 +436,7 @@ pub fn write_docx_with_numbering(
                 }
                 doc = doc.add_paragraph(paragraph);
                 red_approval_header_twips += RED_APPROVAL_NUMBER_BEFORE_TWIPS
-                    + BODY_LINE_TWIPS
+                    + body_line_twips()
                     + RED_APPROVAL_NUMBER_AFTER_TWIPS;
             }
         }
@@ -402,7 +469,7 @@ pub fn write_docx_with_numbering(
             input.kind,
             TemplateKind::OfficialLetter | TemplateKind::PhoneNotice
         ) {
-            BODY_LINE_TWIPS
+            body_line_twips()
         } else {
             0
         }
@@ -427,8 +494,8 @@ pub fn write_docx_with_numbering(
                 .line_spacing(
                     LineSpacing::new()
                         .before(title_before)
-                        .after(BODY_LINE_TWIPS)
-                        .line(BODY_LINE_TWIPS as i32)
+                        .after(body_line_twips())
+                        .line(body_line_twips() as i32)
                         .line_rule(LineSpacingType::Exact),
                 )
                 .keep_next(true),
@@ -509,7 +576,7 @@ pub fn write_docx_with_numbering(
                             doc = doc.add_paragraph(
                                 Paragraph::new().page_break_before(true).line_spacing(
                                     LineSpacing::new()
-                                        .line(BODY_LINE_TWIPS as i32)
+                                        .line(body_line_twips() as i32)
                                         .line_rule(LineSpacingType::Exact),
                                 ),
                             );
@@ -629,12 +696,17 @@ pub fn write_docx_with_numbering(
                 Paragraph::new()
                     .add_run(body_run("（此页无正文）"))
                     .align(AlignmentType::Both)
-                    .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
+                    .indent(
+                        None,
+                        Some(SpecialIndentType::FirstLine(first_line_indent_twips())),
+                        None,
+                        None,
+                    )
                     .page_break_before(true)
                     .line_spacing(
                         LineSpacing::new()
                             .before(NO_BODY_NOTICE_GAP_TWIPS)
-                            .line(BODY_LINE_TWIPS as i32)
+                            .line(body_line_twips() as i32)
                             .line_rule(LineSpacingType::Exact),
                     ),
             );
@@ -686,8 +758,8 @@ pub fn write_docx_with_numbering(
                 .keep_next(true)
                 .line_spacing(
                     LineSpacing::new()
-                        .before(CLOSING_GAP_TWIPS)
-                        .line(BODY_LINE_TWIPS as i32)
+                        .before(closing_gap_twips())
+                        .line(body_line_twips() as i32)
                         .line_rule(LineSpacingType::Exact),
                 );
             for run in unit_runs {
@@ -699,7 +771,7 @@ pub fn write_docx_with_numbering(
                 .indent(Some(2_608), None, Some(0), None)
                 .line_spacing(
                     LineSpacing::new()
-                        .line(BODY_LINE_TWIPS as i32)
+                        .line(body_line_twips() as i32)
                         .line_rule(LineSpacingType::Exact),
                 );
             for run in signature_date_runs(input, elements) {

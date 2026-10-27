@@ -18,7 +18,17 @@
 #let paper-w = if landscape { 297mm } else { 210mm }
 #let paper-h = if landscape { 210mm } else { 297mm }
 #let texpt = 25.4mm / 72.27
-#let pitch = 28.98 * texpt                 // \BodyBaselineSkip
+// 领导阅件（普通公文的大字版）：正文小二、行距 31.85pt（版心 225mm 恰好 20 行）、正文
+// 改宋体，可选正文段落整体加粗；主标题、表格、密级与页码不变。
+#let leader = doc.at("leader", default: none)
+#let all-bold = leader != none and leader.bold
+#let pitch = if leader != none { 31.85pt } else { 28.98 * texpt }  // \BodyBaselineSkip
+// 正文字号与字身上下缘（0.85em / 0.15em）：三号 16pt 时即 13.6pt / 2.4pt。
+#let body-size = if leader != none { 18pt } else { 16pt }
+#let asc = 0.85 * body-size
+#let desc = 0.15 * body-size
+// 括号内楷体比正文小一号：常规四号，领导阅件三号。
+#let paren-size = if leader != none { 16pt } else { 14pt }
 #let text-w = if landscape { 225mm } else { 156mm }
 #let text-h = if landscape { 156mm } else { 225mm }
 #let top-m = if landscape { 28mm } else { 37mm }
@@ -39,6 +49,9 @@
 #let hei = fam(F.heading1)
 #let xbs = fam(F.title)
 #let song = if F.page_number_latin != none { (F.page_number_latin, ..fam(F.page_number)) } else { fam(F.page_number) }
+// 正文字面：常规仿宋；领导阅件用页码那支宋体（数字同样落在宋体拉丁子集上）。
+// 表格不跟着换，仍是仿宋（table-block 里显式设回 fs）。
+#let body-font = if leader != none { song } else { fs }
 
 // ---------------- 行内片段 ----------------
 // 片段：t 文字；b 加粗；k 括号楷体四号；h 段内楷体三号（会议纪要「一是」）；
@@ -60,10 +73,11 @@
   if "g" in r { return h(r.g * 1pt, weak: true) }
   if "w" in r { return box(width: r.w * 1em) }
   let c = [#r.t]
-  if r.at("k", default: false) { c = text(font: kai, size: 14pt, tracking: 0pt, c) }
+  if r.at("k", default: false) { c = text(font: kai, size: paren-size, tracking: 0pt, c) }
   // 会议纪要段内「一是……」：楷体，字号随正文。
   if r.at("h", default: false) { c = text(font: kai, c) }
-  if r.at("b", default: false) { c = bold(c) }
+  // 领导阅件整段加粗时行内加粗不再另加（段落外层已统一加粗）。
+  if r.at("b", default: false) and not all-bold { c = bold(c) }
   c
 }
 
@@ -119,34 +133,37 @@
 #let probe-tail(line, hsize: text-w) = if line != none {
   context if probing.get() {
     let p = here().position()
-    [#metadata((line: line, page: p.page, x: p.x.pt(), y: p.y.pt(), char: 16.0,
+    [#metadata((line: line, page: p.page, x: p.x.pt(), y: p.y.pt(), char: body-size.pt(),
       hsize: hsize.pt(), left: left-edge(counter(page).get().first()).pt(),
       pitch: pitch.pt(), top: top-m.pt()))<gwa-tail>]
   }
 }
 
 // ---------------- 正文块 ----------------
+// 领导阅件勾了加粗：正文段落（含列表、对齐行、附件说明）整段描边伪粗，不换专用
+// 粗体字面，宋体字形不变；层级标题不加粗。
+#let body-runs(rs) = if all-bold { fake-bold(runs(rs)) } else { runs(rs) }
 #let para(rs, line: none, hsize: text-w, indent: true) = {
-  let body = flow-probe("body") + probe-head(line) + runs(rs) + probe-tail(line, hsize: hsize)
+  let body = flow-probe("body") + probe-head(line) + body-runs(rs) + probe-tail(line, hsize: hsize)
   if indent { par(body) } else { par(first-line-indent: 0pt, body) }
 }
 
-#let heading-font(level) = if level == 2 { hei } else if level == 3 { kai } else { fs }
+#let heading-font(level) = if level == 2 { hei } else if level == 3 { kai } else { body-font }
 // 标题段：2 级黑体、3 级楷体、4/5 级仿宋合成加粗（固定伪粗，不随「专用粗体」）。
 #let heading-content(level, rs) = {
   let c = text(font: heading-font(level), tracking: 0pt, runs(rs))
   if level >= 4 { fake-bold(c) } else { c }
 }
 #let heading-block(b, hsize: text-w) = block(breakable: false,
-  above: pitch - 16pt, below: pitch - 16pt, par(
+  above: pitch - body-size, below: pitch - body-size, par(
     probe-head(b.line) + heading-content(b.level, b.runs) + probe-tail(b.line, hsize: hsize) + flow-probe("heading", line: b.line)))
 // 紧缩：标题（带句号）与紧随正文接成一段。
 #let compact-block(b, hsize: text-w) = par(
-  flow-probe("body") + probe-head(b.line) + heading-content(b.level, b.head) + runs(b.runs) + probe-tail(b.line, hsize: hsize))
+  flow-probe("body") + probe-head(b.line) + heading-content(b.level, b.head) + body-runs(b.runs) + probe-tail(b.line, hsize: hsize))
 
 #let aligned-block(b) = {
   let a = if b.align == "center" { center } else { right }
-  align(a, par(first-line-indent: 0pt, justify: false, runs(b.runs)))
+  align(a, par(first-line-indent: 0pt, justify: false, body-runs(b.runs)))
 }
 
 // 插图（TeX：\begin{center}\includegraphics[width=\textwidth]）。实测图前距上一行字底
@@ -192,7 +209,7 @@
   if after-table { v(table-sep, weak: false) }
   block(above: table-sep, below: table-sep, {
     // \fontsize{14bp}{21bp}：每行一个 21bp 的支柱（基线上 0.7、下 0.3），行距即 21bp。
-    set text(size: 14pt, tracking: 0pt, top-edge: 0.7 * 21pt, bottom-edge: -0.3 * 21pt)
+    set text(font: fs, size: 14pt, tracking: 0pt, top-edge: 0.7 * 21pt, bottom-edge: -0.3 * 21pt)
     set par(leading: 0pt, spacing: 0pt, first-line-indent: 0pt, justify: false)
     table(
       columns: widths,
@@ -243,7 +260,7 @@
   binding: left,
   background: portrait-number)
 
-#set text(font: fs, size: 16pt, lang: "zh", region: "cn", top-edge: 13.6pt, bottom-edge: -2.4pt,
+#set text(font: body-font, size: body-size, lang: "zh", region: "cn", top-edge: asc, bottom-edge: -desc,
   tracking: 0pt, overhang: false, cjk-latin-spacing: none,
   // TeX 不罚段末孤字（xeCJK CheckSingle 只管极窄的情形，见 cls 注释）；Typst 默认罚，会为躲
   // 末行单字把前面几行的断点全部挪动。孤行改由探针报到审校面板。
@@ -252,7 +269,7 @@
 // 断行与两端对齐按 xeCJK 的规矩：汉字固定一个字宽（三号 16pt，不压字距），行太长时
 // 只压标点（上限见 vendor/typst-layout 的补丁），行太短时字间拉开，上限取 CJKglue 的
 // plus 0.08\baselineskip。
-#set par(justify: true, leading: pitch - 16pt, spacing: pitch - 16pt,
+#set par(justify: true, leading: pitch - body-size, spacing: pitch - body-size,
   justification-limits: (tracking: (min: 0pt, max: 0.08 * pitch)),
   first-line-indent: (amount: 2em, all: true))
 #set strike(background: false)
@@ -282,7 +299,7 @@
   v(2 * pitch, weak: false)
   for (i, line) in doc.summary.enumerate() {
     let prefix = if doc.summary.len() == 1 or i == 0 { [附件] } else { hide[附件] }
-    par(prefix + runs(line))
+    par(prefix + body-runs(line))
   }
 }
 
@@ -317,20 +334,20 @@
   // align 必须在 par 外面：段落里的 align 不起作用。
   let line(body) = align(center, par(body))
   let two(a, b) = box(width: col, align(center, a)) + h(sep) + box(width: col, align(center, b))
-  v(8.2mm - 13.6pt, weak: false)
+  v(8.2mm - asc, weak: false)
   for (i, row) in c.rows.enumerate() {
-    if i > 0 { v(row-gap - 16pt, weak: false) }
+    if i > 0 { v(row-gap - body-size, weak: false) }
     if row.right == none {
       line(box(width: 2 * col + sep, align(center, runs(row.left))))
     } else {
       line(two(runs(row.left), runs(row.right)))
     }
   }
-  v(13.19mm - 16pt, weak: false)
+  v(13.19mm - body-size, weak: false)
   let date = runs(c.date)
   line(if c.date-column == 0 { two(date, []) } else if c.date-column == 1 { two([], date) } else { date })
   // center 环境结束处的 topsep：不印东西，但 TeX 量落款高度时算在里面，影响空几行。
-  v(8.2mm - 13.6pt, weak: false)
+  v(8.2mm - asc, weak: false)
 })
 
 // 带签字空间的落款（白头件、红头呈批件，\gwa@roomsignature）：单位右对齐、右侧留
@@ -378,9 +395,9 @@
     } else {
       pagebreak()
       // \NoBodyNotice：\vspace*{58pt} 后一行；之后空 3 行接落款。
-      v(notice-base - 13.6pt, weak: false)
+      v(notice-base - asc, weak: false)
       par(text("（此页无正文）"))
-      v(notice-gap - 2.4pt - 13.6pt, weak: false)
+      v(notice-gap - desc - asc, weak: false)
       closing
     }
   }
@@ -512,7 +529,7 @@
 #let narrow-w = 96mm
 #let line-count(content, width) = {
   let h = measure(block(width: width, content)).height
-  int(calc.round((h + (pitch - 16pt)) / pitch))
+  int(calc.round((h + (pitch - body-size)) / pitch))
 }
 #let take-runs(rs, k) = {
   let out = ()
@@ -616,7 +633,7 @@
     set text(tracking: 0pt)
     block(rect(width: text-w, height: 0.4mm, fill: red, stroke: none))
     v(1mm, weak: false)
-    set par(spacing: pitch - 16pt)
+    set par(spacing: pitch - body-size)
     block(for (i, r) in rd.rows.enumerate() { row(i, r) })
   })
 }
@@ -637,7 +654,7 @@
   // 首页窄栏：标题、空行、呈报领导、正文，全部落在 28.98pt 的基线网格上。
   // 栏顶取「第一条标题基线 = 原点 + 55mm + 小标宋字身高」（实测）。
   let first-baseline = topskip + 55mm + 15.08pt
-  let col-top = first-baseline - 13.6pt
+  let col-top = first-baseline - asc
   let title = block(width: narrow-w, title-block(doc.title, size: 18pt))
   let title-lines = doc.title.lines.len()
   // 网格行数：最后一条基线 + 字身下缘距承办区红线不少于 2mm（\RedFirstPageRemaining）。
@@ -645,7 +662,7 @@
   // 的缘故），首页其余正文行随之整体下移，额度也按下移后的位置算。
   let body-shift = 0.58mm
   let body-first = first-baseline + (title-lines + 2) * pitch + body-shift
-  let quota = int(calc.floor((rec-top - 2mm - body-first - 2.4pt) / pitch)) + 1
+  let quota = int(calc.floor((rec-top - 2mm - body-first - desc) / pitch)) + 1
   let parts = red-split(doc.body, quota)
 
   v(col-top, weak: false)
@@ -667,9 +684,9 @@
     // 实测：带签字空间的落款，末行基线到落款首行基线 35.98mm（3 行 + 字身上下缘 − 0.22mm）。
     place-closing(closing, notice-base: 30.67mm, notice-gap: 40.74mm, first-gap: -0.22mm)
   } else {
-    v(30.67mm - 13.6pt, weak: false)
+    v(30.67mm - asc, weak: false)
     par(text("（此页无正文）"))
-    v(40.74mm - 2.4pt - 13.6pt, weak: false)
+    v(40.74mm - desc - asc, weak: false)
     closing
   }
   for a in doc.attachments { attachment(a) }
@@ -680,7 +697,7 @@
   at-baseline(3.70mm, align-to: center, issuing-header(doc.header.issuing))
   place(top + left, dy: 9.19mm - 0.265mm, rect(width: text-w, height: 0.53mm, fill: red, stroke: none))
   // 份号/文号行基线在版心顶下 19.64mm（实测）：流式排版，后面的行按网格接下去。
-  v(19.64mm - 13.6pt, weak: false)
+  v(19.64mm - asc, weak: false)
   if doc.header.number != none {
     line-par(text(font: hei, serial) + h(1fr) + runs(doc.header.number))
   }
@@ -741,7 +758,7 @@
   v(5mm)
   let value(c) = text(size: 12pt, c)
   let body = {
-    set par(first-line-indent: (amount: 2em, all: true), leading: pitch - 16pt, spacing: pitch - 16pt)
+    set par(first-line-indent: (amount: 2em, all: true), leading: pitch - body-size, spacing: pitch - body-size)
     render-blocks(doc.body, total: 109.1mm, hsize: 109.1mm)
   }
   let suggestion = [建议：#for (i, line) in r.suggestion.split("\n").enumerate() {
@@ -791,9 +808,9 @@
   v(pitch, weak: false)
   // 反线挂在编号行的块里量：块顶是字身上缘，基线在其下 13.6pt。块的上下距与段间距
   // 相同，不改变网格。
-  block(width: text-w, above: pitch - 16pt, below: pitch - 16pt, {
+  block(width: text-w, above: pitch - body-size, below: pitch - body-size, {
     align(center, par(first-line-indent: 0pt, justify: false, text(tracking: 0pt, runs(m.number))))
-    place(top + left, dy: 13.6pt + 4mm - 0.265mm, rect(width: text-w, height: 0.53mm, fill: red, stroke: none))
+    place(top + left, dy: asc + 4mm - 0.265mm, rect(width: text-w, height: 0.53mm, fill: red, stroke: none))
   })
   v(pitch, weak: false)
 }
@@ -812,8 +829,8 @@
         for n in chunk { cells.push(align(center, name-text(n))) }
         for _ in range(cols - chunk.len()) { cells.push([]) }
       }
-      block(above: pitch - 16pt, below: pitch - 16pt, pad(left: 2em,
-        grid(columns: (3em, ..range(cols).map(_ => 1fr)), row-gutter: pitch - 16pt, ..cells)))
+      block(above: pitch - body-size, below: pitch - body-size, pad(left: 2em,
+        grid(columns: (3em, ..range(cols).map(_ => 1fr)), row-gutter: pitch - body-size, ..cells)))
     } else {
       par(first-line-indent: 0pt, justify: false, hanging-indent: 5em,
         h(2em) + label + row.names.join("、"))

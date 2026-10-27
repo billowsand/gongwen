@@ -737,6 +737,18 @@ pub fn profile_changes(a: &TemplateProfile, b: &TemplateProfile) -> Vec<FieldCha
         yes_no(a.landscape),
         yes_no(b.landscape),
     );
+    field(
+        &mut out,
+        "领导阅件",
+        yes_no(a.leader_reading),
+        yes_no(b.leader_reading),
+    );
+    field(
+        &mut out,
+        "领导阅件加粗",
+        yes_no(a.leader_reading_bold),
+        yes_no(b.leader_reading_bold),
+    );
     out
 }
 

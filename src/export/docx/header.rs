@@ -4,7 +4,7 @@
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::docx::{
-    BODY_LINE_TWIPS, HEADER_SIZE, HEADER_WIDTH_TWIPS, PAGE_NUMBER_LINE_TWIPS, PAGE_NUMBER_SIZE,
+    HEADER_SIZE, HEADER_WIDTH_TWIPS, PAGE_NUMBER_LINE_TWIPS, PAGE_NUMBER_SIZE, body_line_twips,
     chinese_fonts,
 };
 use docx_rs::*;
@@ -130,7 +130,7 @@ pub(crate) fn letter_header(unit: &str) -> Header {
 pub(crate) fn blank_line() -> Paragraph {
     Paragraph::new().line_spacing(
         LineSpacing::new()
-            .line(BODY_LINE_TWIPS as i32)
+            .line(body_line_twips() as i32)
             .line_rule(LineSpacingType::Exact),
     )
 }

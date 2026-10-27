@@ -115,6 +115,12 @@ impl TemplateKind {
         matches!(self, Self::PlainDocument)
     }
 
+    /// 可以排成领导阅件（大字版）的文种。只有普通公文：它没有红头、版记，
+    /// 改行距与字号不牵动按竖版心标定过的抬头部件。
+    pub(crate) fn supports_leader_reading(self) -> bool {
+        matches!(self, Self::PlainDocument)
+    }
+
     /// 承办条目数量上限。红头呈批件的承办区在首页底部、每条占一行，条目过多会
     /// 把批示框和正文区压没，因此限定 4 条；其他文种的版记不受此限。
     pub(crate) fn max_responsible_entries(self) -> Option<usize> {
@@ -324,6 +330,15 @@ pub struct TemplateProfile {
     /// 横向 A4、左侧装订，正文与附件一律横排。关闭时不写入快照，旧稿校验值不变。
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub landscape: bool,
+    /// 领导阅件（只对普通公文生效，见 [`TemplateKind::supports_leader_reading`]）：
+    /// 呈阅领导的大字版，正文与层级标题改小二、宋体，行距 31.85 磅；主标题与表格
+    /// 不变。关闭时不写入快照，旧稿校验值不变。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub leader_reading: bool,
+    /// 领导阅件的正文段落整体加粗（行内加粗随之不再另行区分）；不勾不加粗。
+    /// 只在 `leader_reading` 打开时生效。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub leader_reading_bold: bool,
 }
 
 impl Default for TemplateProfile {
@@ -359,6 +374,8 @@ impl Default for TemplateProfile {
             duplex_printing: false,
             number_copies: false,
             landscape: false,
+            leader_reading: false,
+            leader_reading_bold: false,
         }
     }
 }

@@ -2204,6 +2204,24 @@ impl DraftPage<'_> {
                         ui.end_row();
                     }
 
+                    if kind.supports_leader_reading() {
+                        row_label(ui, "阅件模式");
+                        ui.horizontal(|ui| {
+                            let profile = &mut self.doc.draft.profile;
+                            ui.checkbox(&mut profile.leader_reading, "领导阅件")
+                                .on_hover_text(
+                                    "呈阅领导的大字版：正文与层级标题改小二宋体、行距 31.85 磅；\
+                                     主标题仍是二号方正小标宋，表格不变。PDF、Word 与预览一致",
+                                );
+                            ui.add_enabled(
+                                profile.leader_reading,
+                                egui::Checkbox::new(&mut profile.leader_reading_bold, "加粗"),
+                            )
+                            .on_hover_text("正文段落整体加粗，行内加粗不再另行区分；层级标题不加粗");
+                        });
+                        ui.end_row();
+                    }
+
                     // 份号只有公函的版头有位置放，其余文种不显示这一行。
                     if kind.has_copy_numbering() {
                         row_label_with_info(

@@ -6,7 +6,7 @@ use chrono::Datelike;
 
 use super::body::{attachment_summary, main_title, sections, title_data};
 use super::data::{
-    Block, Closing, Doc, Header, JointRow, Minutes, MinutesRecord, Record, RecordRow, Red,
+    Block, Closing, Doc, Header, JointRow, Leader, Minutes, MinutesRecord, Record, RecordRow, Red,
     RosterRow, Run, Runs, Title,
 };
 use super::runs::{marked_runs, plain_runs, with_cjk_latin_gaps, with_enumeration_kai};
@@ -533,6 +533,9 @@ pub(crate) fn document(
         },
         duplex: input.profile.duplex_printing,
         landscape: input.landscape(),
+        leader: input
+            .leader_reading()
+            .map(|leader| Leader { bold: leader.bold }),
         probe: true,
         fonts,
         security: security_runs(input, elements.security()),

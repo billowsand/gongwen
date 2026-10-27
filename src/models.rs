@@ -27,6 +27,7 @@ pub(crate) use config::UI_SCALE_PRESETS;
 pub(crate) use draft::DraftInput;
 pub(crate) use draft::ExportSelection;
 pub(crate) use draft::GeneratedDraft;
+pub(crate) use draft::LeaderReading;
 pub(crate) use draft::ManuscriptStatus;
 pub(crate) use draft::PhoneRecordMetadata;
 pub(crate) use draft::PrintConfig;
@@ -121,6 +122,7 @@ mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect();
         assert!(!legacy.contains("\"landscape\""), "横页没勾不写入快照");
+        assert!(!legacy.contains("leader_reading"), "领导阅件没勾不写入快照");
         let restored: DraftInput = serde_json::from_str(&legacy).unwrap();
         assert_eq!(restored.research.template, ResearchTemplate::Classic);
         assert!(!restored.profile.landscape);

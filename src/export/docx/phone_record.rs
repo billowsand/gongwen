@@ -171,7 +171,7 @@ pub(super) fn write(
                 .right(1474),
         )
         .default_fonts(chinese_fonts("仿宋_GB2312"))
-        .default_size(BODY_SIZE)
+        .default_size(body_size())
         .add_paragraph(
             Paragraph::new()
                 .add_run(title_run(&r.institution, TITLE_SIZE).color("FF0000"))

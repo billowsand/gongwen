@@ -3,7 +3,7 @@
 //! 由 src/export/docx.rs 拆分而来：本文件是模块 `export::docx::runs`，与其它子模块共享
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::export::docx::{BODY_SIZE, FOOTER_SIZE, PAREN_SIZE};
+use crate::export::docx::{FOOTER_SIZE, body_font, body_size, leader_bold, paren_size};
 use crate::export::{RedlineKind, inline_segments, plain_text, redline_chunks};
 use crate::models::split_period_digits;
 use crate::visual_diff::elements::FieldMark;
@@ -29,14 +29,18 @@ pub(crate) fn apply_bold(run: Run, bold: BoldFont<'_>) -> Run {
 pub(crate) fn body_run(text: impl Into<String>) -> Run {
     Run::new()
         .add_text(text)
-        .fonts(chinese_fonts("仿宋_GB2312"))
-        .size(BODY_SIZE)
+        .fonts(chinese_fonts(body_font()))
+        .size(body_size())
 }
 
 /// 正文 run 序列：Markdown 加粗保留为同字体自动加粗；完整圆括号/方头括号及其中内容
 /// 用楷体_GB2312 四号，其余用仿宋三号。
 /// 标题（文档标题、各级标题、附件标签）不经由此处，不受此规则影响。
+///
+/// 领导阅件勾了加粗：每个 run 一律合成加粗，行内加粗不再另换专用粗体字面。
 pub(crate) fn body_runs(text: &str, bold: BoldFont<'_>) -> Vec<Run> {
+    let all_bold = leader_bold();
+    let bold = if all_bold { None } else { bold };
     // 先按花脸稿哨兵切块。没有哨兵时只有一块 `Same`，与从前完全一致。
     let chunks = redline_chunks(text);
     let mut runs = Vec::new();
@@ -50,11 +54,11 @@ pub(crate) fn body_runs(text: &str, bold: BoldFont<'_>) -> Vec<Run> {
                 Run::new()
                     .add_text(segment.text)
                     .fonts(chinese_fonts("楷体_GB2312"))
-                    .size(PAREN_SIZE)
+                    .size(paren_size())
             } else {
                 body_run(segment.text)
             };
-            if segment.bold {
+            if segment.bold || all_bold {
                 run = apply_bold(run, bold);
             }
             run = apply_redline(run, chunk.kind);
@@ -106,7 +110,7 @@ pub(crate) fn heiti_run(text: impl Into<String>) -> Run {
     Run::new()
         .add_text(text)
         .fonts(chinese_fonts("黑体"))
-        .size(BODY_SIZE)
+        .size(body_size())
         .bold()
 }
 
@@ -156,7 +160,7 @@ pub(crate) fn security_base_run(text: &str, base: &str, bold: bool) -> Run {
     let mut run = Run::new()
         .add_text(text.to_string())
         .fonts(chinese_fonts(base))
-        .size(BODY_SIZE);
+        .size(body_size());
     if bold {
         run = run.bold();
     }
@@ -164,11 +168,11 @@ pub(crate) fn security_base_run(text: &str, base: &str, bold: bool) -> Run {
 }
 
 /// 落款单位 run 序列：少于 5 字时逐字设置字符间距（单位缇，1/20 磅）分散对齐到
-/// 5 字宽——16pt 字号下 1em=320 缇，总宽恰好为 5 个字；否则整串一个 run。
+/// 5 字宽——1em 即正文字号（三号 16pt 为 320 缇），总宽恰好为 5 个字；否则整串一个 run。
 pub(crate) fn spread_runs(text: &str) -> Vec<Run> {
     match crate::units::spread_gap(text) {
         Some(gap) => {
-            let spacing = (gap * 320.0).round() as i32;
+            let spacing = (gap * (body_size() * 10) as f32).round() as i32;
             let chars = text.chars().collect::<Vec<_>>();
             chars
                 .iter()

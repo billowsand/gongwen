@@ -4,8 +4,8 @@
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::docx::{
-    BODY_SIZE, BoldFont, CLOSING_GAP_TWIPS, RED_APPROVAL_TITLE_SIZE, TITLE_SIZE, body_run,
-    body_runs, chinese_fonts, marked_runs, security_runs, title_run,
+    BoldFont, RED_APPROVAL_TITLE_SIZE, TITLE_SIZE, body_run, body_runs, body_size, chinese_fonts,
+    closing_gap_twips, marked_runs, security_runs, title_run,
 };
 use crate::export::title;
 use crate::export::title::TitlePlan;
@@ -27,10 +27,17 @@ fn add_runs(mut paragraph: Paragraph, runs: Vec<Run>) -> Paragraph {
 pub(crate) fn body_paragraph(text: &str, bold: BoldFont<'_>) -> Paragraph {
     let mut paragraph = Paragraph::new()
         .align(AlignmentType::Both)
-        .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
+        .indent(
+            None,
+            Some(SpecialIndentType::FirstLine(
+                super::first_line_indent_twips(),
+            )),
+            None,
+            None,
+        )
         .line_spacing(
             LineSpacing::new()
-                .line(super::BODY_LINE_TWIPS as i32)
+                .line(super::body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .widow_control(false);
@@ -49,7 +56,7 @@ pub(crate) fn aligned_paragraph(align: LineAlign, text: &str, bold: BoldFont<'_>
         })
         .line_spacing(
             LineSpacing::new()
-                .line(super::BODY_LINE_TWIPS as i32)
+                .line(super::body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .widow_control(false);
@@ -66,7 +73,7 @@ pub(crate) fn addressee_paragraph(value: &str, mark: &FieldMark) -> Paragraph {
         .align(AlignmentType::Both)
         .line_spacing(
             LineSpacing::new()
-                .line(super::BODY_LINE_TWIPS as i32)
+                .line(super::body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .keep_next(true);
@@ -75,7 +82,7 @@ pub(crate) fn addressee_paragraph(value: &str, mark: &FieldMark) -> Paragraph {
             Run::new()
                 .add_text(text)
                 .fonts(chinese_fonts("楷体_GB2312"))
-                .size(BODY_SIZE)
+                .size(body_size())
         }) {
             paragraph = paragraph.add_run(run);
         }
@@ -84,7 +91,7 @@ pub(crate) fn addressee_paragraph(value: &str, mark: &FieldMark) -> Paragraph {
             Run::new()
                 .add_text(format!("{value}："))
                 .fonts(chinese_fonts("楷体_GB2312"))
-                .size(BODY_SIZE),
+                .size(body_size()),
         );
     }
     paragraph
@@ -113,7 +120,7 @@ pub(crate) fn letter_security_paragraph(input: &DraftInput, mark: &FieldMark) ->
     };
     let mut paragraph = Paragraph::new().line_spacing(
         LineSpacing::new()
-            .line(super::BODY_LINE_TWIPS as i32)
+            .line(super::body_line_twips() as i32)
             .line_rule(LineSpacingType::Exact),
     );
     for run in security_runs(level, period, special, "黑体", true, mark) {
@@ -136,7 +143,7 @@ pub(crate) fn heading_paragraph_with_number(
     let font = match level {
         2 => "黑体",
         3 => "楷体_GB2312",
-        _ => "仿宋_GB2312",
+        _ => super::body_font(),
     };
     let mut paragraph = Paragraph::new();
     // 花脸稿：标题改动也就地标注（哨兵在解析后注入，marked_runs 按块注格式）。
@@ -155,7 +162,7 @@ pub(crate) fn heading_paragraph_with_number(
             let mut run = Run::new()
                 .add_text(piece)
                 .fonts(chinese_fonts(font))
-                .size(BODY_SIZE);
+                .size(body_size());
             if matches!(level, 4 | 5) {
                 run = run.bold();
             }
@@ -167,7 +174,7 @@ pub(crate) fn heading_paragraph_with_number(
         let mut run = Run::new()
             .add_text(number)
             .fonts(chinese_fonts(font))
-            .size(BODY_SIZE);
+            .size(body_size());
         if matches!(level, 4 | 5) {
             run = run.bold();
         }
@@ -186,7 +193,7 @@ pub(crate) fn heading_paragraph_with_number(
         let mut run = Run::new()
             .add_text(piece)
             .fonts(chinese_fonts(font))
-            .size(BODY_SIZE);
+            .size(body_size());
         if matches!(level, 4 | 5) {
             run = run.bold();
         }
@@ -199,10 +206,17 @@ pub(crate) fn heading_paragraph_with_number(
 fn finish_heading(paragraph: Paragraph) -> Paragraph {
     paragraph
         .align(AlignmentType::Both)
-        .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
+        .indent(
+            None,
+            Some(SpecialIndentType::FirstLine(
+                super::first_line_indent_twips(),
+            )),
+            None,
+            None,
+        )
         .line_spacing(
             LineSpacing::new()
-                .line(super::BODY_LINE_TWIPS as i32)
+                .line(super::body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .keep_next(true)
@@ -220,13 +234,13 @@ pub(crate) fn compact_heading_paragraph(
     let font = match level {
         2 => "黑体",
         3 => "楷体_GB2312",
-        _ => "仿宋_GB2312",
+        _ => super::body_font(),
     };
     let title_runs = marked_runs(&format!("{title}。"), |piece| {
         let mut run = Run::new()
             .add_text(piece)
             .fonts(chinese_fonts(font))
-            .size(BODY_SIZE);
+            .size(body_size());
         if matches!(level, 4 | 5) {
             run = run.bold();
         }
@@ -234,10 +248,17 @@ pub(crate) fn compact_heading_paragraph(
     });
     let mut paragraph = add_runs(Paragraph::new(), title_runs)
         .align(AlignmentType::Both)
-        .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
+        .indent(
+            None,
+            Some(SpecialIndentType::FirstLine(
+                super::first_line_indent_twips(),
+            )),
+            None,
+            None,
+        )
         .line_spacing(
             LineSpacing::new()
-                .line(super::BODY_LINE_TWIPS as i32)
+                .line(super::body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .widow_control(false);
@@ -256,13 +277,13 @@ pub(crate) fn attachment_label_paragraph(text: &str) -> Paragraph {
             Run::new()
                 .add_text(piece)
                 .fonts(fonts.clone())
-                .size(BODY_SIZE)
+                .size(body_size())
         }),
     )
     .align(AlignmentType::Left)
     .line_spacing(
         LineSpacing::new()
-            .line(super::BODY_LINE_TWIPS as i32)
+            .line(super::body_line_twips() as i32)
             .line_rule(LineSpacingType::Exact),
     )
     .keep_next(true)
@@ -272,7 +293,7 @@ pub(crate) fn joint_closing_paragraph(runs: Vec<Run>, before: u32) -> Paragraph 
     let mut paragraph = Paragraph::new().align(AlignmentType::Center).line_spacing(
         LineSpacing::new()
             .before(before)
-            .line(super::BODY_LINE_TWIPS as i32)
+            .line(super::body_line_twips() as i32)
             .line_rule(LineSpacingType::Exact),
     );
     for run in runs {
@@ -287,8 +308,12 @@ pub(crate) fn joint_signature_cell_paragraph(value: &str, row_index: usize) -> P
         .align(AlignmentType::Center)
         .line_spacing(
             LineSpacing::new()
-                .before(if row_index == 0 { CLOSING_GAP_TWIPS } else { 0 })
-                .line(super::BODY_LINE_TWIPS as i32)
+                .before(if row_index == 0 {
+                    closing_gap_twips()
+                } else {
+                    0
+                })
+                .line(super::body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         )
 }
@@ -304,8 +329,8 @@ pub(crate) fn attachment_document_title_paragraph(text: &str, landscape: bool) -
     document_title_paragraph(text, &plan, landscape)
         .line_spacing(
             LineSpacing::new()
-                .before(super::BODY_LINE_TWIPS)
-                .line(super::BODY_LINE_TWIPS as i32)
+                .before(super::body_line_twips())
+                .line(super::body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .keep_next(true)
@@ -416,7 +441,7 @@ pub(crate) fn red_record_paragraph(
         let mut label_run = Run::new()
             .add_text(label)
             .fonts(chinese_fonts("仿宋_GB2312"))
-            .size(BODY_SIZE)
+            .size(body_size())
             .color("FF0000");
         if scale < 100 {
             label_run = label_run.stretch(scale as i32);
@@ -432,7 +457,7 @@ pub(crate) fn red_record_paragraph(
     }
     paragraph = paragraph.add_run(value_run).align(alignment).line_spacing(
         LineSpacing::new()
-            .line(super::BODY_LINE_TWIPS as i32)
+            .line(super::body_line_twips() as i32)
             .line_rule(LineSpacingType::Exact),
     );
     if indent_twips > 0 {
@@ -499,10 +524,17 @@ pub(crate) fn image_paragraph_from_bytes(
 pub(crate) fn agenda_body_paragraph() -> Paragraph {
     Paragraph::new()
         .align(AlignmentType::Both)
-        .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
+        .indent(
+            None,
+            Some(SpecialIndentType::FirstLine(
+                super::first_line_indent_twips(),
+            )),
+            None,
+            None,
+        )
         .line_spacing(
             LineSpacing::new()
-                .line(super::BODY_LINE_TWIPS as i32)
+                .line(super::body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .widow_control(true)
@@ -512,7 +544,7 @@ pub(crate) fn agenda_blank_line() -> Paragraph {
     Paragraph::new()
         .line_spacing(
             LineSpacing::new()
-                .line(super::BODY_LINE_TWIPS as i32)
+                .line(super::body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .keep_next(true)

@@ -4,8 +4,8 @@
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::docx::{
-    BoldFont, CLOSING_GAP_TWIPS, JOINT_SIGNATURE_SEAL_GAP_TWIPS, PREVIEW_PLACEHOLDER,
-    TABLE_CONTENT_WIDTH_TWIPS, body_run, body_runs, joint_closing_paragraph,
+    BoldFont, JOINT_SIGNATURE_SEAL_GAP_TWIPS, PREVIEW_PLACEHOLDER, TABLE_CONTENT_WIDTH_TWIPS,
+    body_run, body_runs, closing_gap_twips, joint_closing_paragraph,
     joint_signature_cell_paragraph, marked_runs, spread_runs,
 };
 use crate::export::element_display::{
@@ -78,7 +78,7 @@ pub(crate) fn add_attachment_summary(mut doc: Docx, names: &[String], bold: Bold
         doc = doc.add_paragraph(
             Paragraph::new().line_spacing(
                 LineSpacing::new()
-                    .line(super::BODY_LINE_TWIPS as i32)
+                    .line(super::body_line_twips() as i32)
                     .line_rule(LineSpacingType::Exact),
             ),
         );
@@ -94,10 +94,17 @@ pub(crate) fn add_attachment_summary(mut doc: Docx, names: &[String], bold: Bold
         };
         let mut paragraph = Paragraph::new()
             .align(AlignmentType::Both)
-            .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
+            .indent(
+                None,
+                Some(SpecialIndentType::FirstLine(
+                    super::first_line_indent_twips(),
+                )),
+                None,
+                None,
+            )
             .line_spacing(
                 LineSpacing::new()
-                    .line(super::BODY_LINE_TWIPS as i32)
+                    .line(super::body_line_twips() as i32)
                     .line_rule(LineSpacingType::Exact),
             )
             .keep_next(true);
@@ -162,8 +169,8 @@ pub(crate) fn add_white_paper_signature(
             .indent(Some(0), None, Some(signing_room_twips as i32), None)
             .line_spacing(
                 LineSpacing::new()
-                    .before(if first { CLOSING_GAP_TWIPS } else { 0 })
-                    .line(super::BODY_LINE_TWIPS as i32)
+                    .before(if first { closing_gap_twips() } else { 0 })
+                    .line(super::body_line_twips() as i32)
                     .line_rule(LineSpacingType::Exact),
             );
         for run in runs {
@@ -174,7 +181,7 @@ pub(crate) fn add_white_paper_signature(
     let blank_line = || {
         Paragraph::new().add_run(body_run("")).line_spacing(
             LineSpacing::new()
-                .line(super::BODY_LINE_TWIPS as i32)
+                .line(super::body_line_twips() as i32)
                 .line_rule(LineSpacingType::Exact),
         )
     };
@@ -208,7 +215,7 @@ pub(crate) fn add_white_paper_signature(
     doc = doc.add_paragraph(blank_line());
     let date = Paragraph::new().line_spacing(
         LineSpacing::new()
-            .line(super::BODY_LINE_TWIPS as i32)
+            .line(super::body_line_twips() as i32)
             .line_rule(LineSpacingType::Exact),
     );
     let mut date = date;

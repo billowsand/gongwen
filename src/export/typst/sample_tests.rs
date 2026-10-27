@@ -283,6 +283,21 @@ fn cases() -> Vec<Case> {
             },
         },
         Case {
+            name: "plain-leader",
+            kind: TemplateKind::PlainDocument,
+            markdown: format!("{BODY}\n<!-- [附件] -->\n\n# 附件标题\n\n附件正文。\n"),
+            tweak: |input| input.profile.leader_reading = true,
+        },
+        Case {
+            name: "plain-leader-bold",
+            kind: TemplateKind::PlainDocument,
+            markdown: format!("{BODY}\n<!-- [附件] -->\n\n# 附件标题\n\n附件正文。\n"),
+            tweak: |input| {
+                input.profile.leader_reading = true;
+                input.profile.leader_reading_bold = true;
+            },
+        },
+        Case {
             name: "whitepaper",
             kind: TemplateKind::WhitePaper,
             markdown: BODY.into(),
@@ -450,6 +465,64 @@ fn landscape_plain_document_puts_every_page_on_its_side() {
     let portrait = rotations(false);
     assert_eq!(portrait.first(), Some(&0), "没勾横页时正文是竖页");
     assert_eq!(portrait.last(), Some(&90), "宽表附件仍自动转横");
+}
+
+/// 普通公文勾了领导阅件：模板数据带上版式开关，换了字号、行距后照样排得出来；
+/// 同一篇稿子字大行疏，页数只多不少。没勾或换了文种时不带开关。
+#[test]
+fn leader_reading_plain_document_enlarges_the_body() {
+    if crate::portable_runtime::find_font_dir().is_none() {
+        return;
+    }
+    let fonts = FontConfig::default();
+    let display = UnitDisplay::new(&[]);
+    let dir = tempfile::tempdir().unwrap();
+    // 每段 24 字：常规一行排得下（每行 28 字），小二要折成两行（每行 24 字，另有缩进）。
+    let markdown = format!(
+        "{BODY}\n{}",
+        "本段用于撑满版面，请逐项核对责任单位与完成时限。\n\n".repeat(40)
+    );
+    let pages = |kind: TemplateKind, leader: bool, bold: bool| {
+        let mut input = base_input(kind);
+        input.profile.leader_reading = leader;
+        input.profile.leader_reading_bold = bold;
+        let data = super::document_json(
+            &input,
+            &markdown,
+            &display,
+            &NumberingConfig::default(),
+            &ElementMarks::default(),
+            crate::typst_engine::font_set(&fonts).unwrap().families,
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&data).unwrap();
+        if leader && kind == TemplateKind::PlainDocument {
+            assert_eq!(json["leader"]["bold"], bold);
+        } else {
+            assert!(json["leader"].is_null(), "{kind:?} 不排领导阅件");
+        }
+        let outcome = super::write_pdf_with_base(
+            &dir.path().join("leader.pdf"),
+            &input,
+            &markdown,
+            &display,
+            &fonts,
+            &NumberingConfig::default(),
+            &ElementMarks::default(),
+            dir.path(),
+        )
+        .unwrap();
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        lopdf::Document::load_mem(&outcome.pdf)
+            .unwrap()
+            .get_pages()
+            .len()
+    };
+    let normal = pages(TemplateKind::PlainDocument, false, false);
+    let leader = pages(TemplateKind::PlainDocument, true, false);
+    assert!(leader > normal, "领导阅件 {leader} 页，常规 {normal} 页");
+    assert_eq!(pages(TemplateKind::PlainDocument, true, true), leader);
+    pages(TemplateKind::WhitePaper, true, true);
 }
 
 /// 各文种样张：PDF 与模板数据写到 `tmp/typst-samples/<用例>/`。

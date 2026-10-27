@@ -13,10 +13,10 @@ use crate::preview::gutter;
 use crate::preview::marks;
 use crate::preview::pdf_figure;
 use crate::preview::{
-    BODY_PT, BodyRun, ClickableSourceSegment, INDENT_CHARS, Metrics, PreviewScale, addressee_block,
+    BodyRun, ClickableSourceSegment, INDENT_CHARS, Metrics, PreviewScale, addressee_block,
     aligned_block, append_numbered_inline, body_block, clickable, clickable_body_block,
-    clickable_justified_job, draw_justified_with_bold, footer_record, header_block, heading_family,
-    indent, is_renderable_paragraph, job, line_block, numbered_body_block, place,
+    clickable_justified_job, draw_justified_with_bold, footer_record, header_block, indent,
+    is_renderable_paragraph, job, line_block, numbered_body_block, place,
     red_approval_print_preview, sheet, signature_block, table_block, text_format,
 };
 use crate::theme;
@@ -423,7 +423,14 @@ pub(crate) fn attachment_sheet(
         } else {
             format!("附件{}", sheet_index + 1)
         };
-        line_block(ui, metrics, &label, theme::FONT_HEITI, BODY_PT, Align::LEFT);
+        line_block(
+            ui,
+            metrics,
+            &label,
+            theme::FONT_HEITI,
+            metrics.body_pt,
+            Align::LEFT,
+        );
         for located in attachment {
             // 附件正式标题与正文标题使用同一层级编码。
             if let MarkdownBlock::Title(text) = &located.block {
@@ -537,6 +544,7 @@ pub(crate) fn official_preview(
         input.landscape(),
     )
     .with_bold_style(ui.ctx())
+    .with_leader_reading(input.leader_reading())
     .with_line_numbers(line_numbers)
     .with_enumeration_kai(input.kind == TemplateKind::MeetingMinutes);
     // 六个文种的正文都走 export::latex::official_letter_sections_to_tex，标题编号
@@ -787,10 +795,13 @@ fn clickable_compact_block(
         &mut job,
         metrics,
         &heading_text,
-        text_format(metrics.font(heading_family(level), BODY_PT), metrics.line),
+        text_format(metrics.heading_font(level), metrics.line),
     );
     let body_start = INDENT_CHARS as usize + export::strip_redline(&heading_text).chars().count();
     let mut bold_ranges = append_numbered_inline(&mut job, metrics, body, &normal, body_numbers);
+    if metrics.all_bold {
+        bold_ranges = std::iter::once(body_start..job.text.chars().count()).collect();
+    }
     if matches!(level, 4 | 5) {
         bold_ranges.insert(0, INDENT_CHARS as usize..body_start);
     }
@@ -844,7 +855,7 @@ pub(super) fn heading_job(
         None
     };
     let mut job = job(metrics.content);
-    let font = metrics.font(heading_family(level), BODY_PT);
+    let font = metrics.heading_font(level);
     job.append(
         &indent(INDENT_CHARS),
         0.0,

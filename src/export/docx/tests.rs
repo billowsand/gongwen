@@ -515,7 +515,7 @@ fn official_letter_docx_numbers_headings_and_starts_attachments_on_a_new_page() 
     let after_summary = &xml[xml.find("附件1：统计表").unwrap()..];
     let signature = paragraph_containing(after_summary, "某单位");
     assert!(
-        signature.contains(&format!(r#"w:before="{CLOSING_GAP_TWIPS}""#)),
+        signature.contains(&format!(r#"w:before="{}""#, closing_gap_twips())),
         "附件概要与落款之间通常应空 3 行：{signature}"
     );
     let body_heading = paragraph_containing(&xml, "一、总体要求");
@@ -771,6 +771,70 @@ fn landscape_plain_document_turns_the_page_and_widens_tables_and_title() {
     let xml = zip_text(&path, "word/document.xml");
     assert!(!xml.contains("landscape"));
     assert_eq!(grid_total(&xml), TABLE_CONTENT_WIDTH_TWIPS);
+}
+
+#[test]
+fn leader_reading_enlarges_body_but_keeps_title_and_tables() {
+    let temp = tempfile::tempdir().unwrap();
+    let markdown = "# 关于加快推进养老服务设施改造的通知
+<!-- [正文] -->
+## 工作目标
+共排查**站点312个**（截至8月底）。
+| 序号 | 区域 |
+| --- | --- |
+| 1 | 东城区 |
+";
+    let mut input = DraftInput::default();
+    input.kind = TemplateKind::PlainDocument;
+    input.profile.leader_reading = true;
+    let export = |input: &DraftInput, name: &str| {
+        let path = temp.path().join(name);
+        write_docx_ok(&path, input, markdown).unwrap();
+        zip_text(&path, "word/document.xml")
+    };
+    let xml = export(&input, "leader.docx");
+    let body = paragraph_containing(&xml, "共排查");
+    assert!(body.contains(r#"w:line="637""#), "{body}");
+    assert!(body.contains(r#"w:firstLine="720""#), "{body}");
+    assert!(body.contains(r#"w:eastAsia="宋体""#), "{body}");
+    assert!(body.contains(r#"<w:sz w:val="36" />"#), "{body}");
+    assert!(
+        body.contains(r#"<w:sz w:val="32" />"#),
+        "括号楷体比正文小一号：{body}"
+    );
+    assert!(body.contains("<w:b />"), "没勾加粗时行内加粗照旧：{body}");
+    let heading = paragraph_containing(&xml, "工作目标");
+    assert!(heading.contains(r#"<w:sz w:val="36" />"#), "{heading}");
+    assert!(heading.contains(r#"w:eastAsia="黑体""#), "{heading}");
+    let title = paragraph_containing(&xml, "养老服务设施改造");
+    assert!(
+        title.contains(&format!(r#"<w:sz w:val="{TITLE_SIZE}" />"#)),
+        "{title}"
+    );
+    let cell = paragraph_containing(&xml, "东城区");
+    assert!(
+        cell.contains(r#"w:eastAsia="仿宋_GB2312""#),
+        "表格不变：{cell}"
+    );
+    assert!(!cell.contains(r#"w:val="36""#), "{cell}");
+
+    // 勾了加粗：正文每个 run 都加粗，标题不加粗。
+    input.profile.leader_reading_bold = true;
+    let xml = export(&input, "leader-bold.docx");
+    let body = paragraph_containing(&xml, "共排查");
+    let runs = body.matches("<w:r>").count();
+    assert!(
+        runs >= 3 && body.matches("<w:b />").count() >= runs,
+        "{body}"
+    );
+    assert!(!paragraph_containing(&xml, "工作目标").contains("<w:b />"));
+
+    // 只对普通公文生效；导出完也不留在线程上影响下一篇。
+    input.kind = TemplateKind::WhitePaper;
+    let xml = export(&input, "whitepaper.docx");
+    let body = paragraph_containing(&xml, "共排查");
+    assert!(body.contains(r#"w:line="577""#) && body.contains(r#"w:val="32""#));
+    assert_eq!(body_line_twips(), BODY_LINE_TWIPS);
 }
 
 #[test]

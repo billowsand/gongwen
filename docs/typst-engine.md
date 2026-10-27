@@ -137,6 +137,15 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
   （横页左缘）落在纸张短边，双面打印选「短边翻转」。表格居中格的压缩 / 换行仍按竖页网格
   判定（与横向附件一致，见 `table::to_typst_table` 的注释）；主标题、附件标题按 225mm 断行。
   Word 侧横向页面设置 + 225mm 网格，预览 `Metrics::official(.., landscape)`。
+- **领导阅件**（普通公文的「领导阅件」，`doc.leader`，参数在 `models::LeaderReading`）：
+  模板开头按它换 `pitch`（31.85pt，版心 20 行）、`body-size`（小二 18pt）、字身上下缘
+  `asc` / `desc`（0.85 / 0.15 em）、`paren-size`（括号楷体三号）与 `body-font`（页码那支
+  宋体）。凡是原先写死 `16pt` / `13.6pt` / `2.4pt` 的地方都改成了这几个变量，常规版式取值
+  不变。主标题 22pt、表格（`table-block` 显式设回仿宋四号）、密级、页码不变。勾了加粗时
+  `body-runs` 给正文段落、对齐行、附件说明整段描边伪粗，行内 `b` 不再另加；层级标题不加粗。
+  Word 侧由 `write_docx_with_numbering` 入口挂 `LeaderScope`（线程局部），`body_size()` /
+  `body_line_twips()` / `body_font()` 等取值函数按它返回，没挂时与原常量一致；预览
+  `Metrics::with_leader_reading`。
 - **份号逐份编制**：每份之前把页码计数器归 0（页码在每页开头自动加一），新一份首页才是 1；
   只有第一份带孤行探针。
 - **孤行探针**：模板在段首段尾放带位置的 metadata，`typst_engine::proof_report` 拼成
