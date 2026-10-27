@@ -475,6 +475,26 @@ pub fn validate(
                 warnings.push("参加人员未单独填写：请确认生成结果确已从素材中正确归纳".into());
             }
         }
+        TemplateKind::MeetingMinutes => {
+            if input.profile.issuing_unit.trim().is_empty() {
+                warnings.push("会议纪要缺少发文单位".into());
+            }
+            if input.attendees.trim().is_empty() {
+                warnings.push("会议纪要缺少出席人员".into());
+            }
+            if input.minutes_printing_unit().is_empty() {
+                warnings.push("会议纪要缺少印发机关".into());
+            }
+            if input.date.trim().is_empty() {
+                warnings.push("会议纪要缺少印发日期".into());
+            }
+            if text.lines().any(|line| {
+                let s = line.trim_start();
+                s.starts_with("- ") || s.starts_with("* ")
+            }) {
+                warnings.push("会议纪要正文不宜使用项目符号，应改为“一是、二是……”".into());
+            }
+        }
         TemplateKind::WhitePaper => {
             if input.profile.reporting_leaders.trim().is_empty() {
                 warnings.push("白头件缺少呈报领导".into());
@@ -646,7 +666,7 @@ fn validate_metadata(
         ));
     }
 
-    if input.kind.has_document_number() {
+    if input.kind.has_document_number() || input.kind.has_minutes_number() {
         let year = input.document_year();
         if year.len() != 4 || !year.chars().all(|ch| ch.is_ascii_digit()) {
             warnings.push("文号发文年份应填写为四位数字，例如“2026”".to_string());
@@ -878,6 +898,24 @@ fn validate_metadata(
         TemplateKind::PlainDocument => {}
         // 会议地点直接填写，不入词库，因此无需校验。
         TemplateKind::MeetingAgenda => {}
+        // 出席、列席、请假、分送是人员，词库里不一定都有（外单位来人、临时列席），
+        // 只校验单位。
+        TemplateKind::MeetingMinutes => {
+            check_units(
+                &profile.issuing_unit,
+                &[VocabularyCategory::Unit],
+                "发文单位",
+                vocabulary,
+                warnings,
+            );
+            check_units(
+                &profile.copies_to,
+                &[VocabularyCategory::Unit],
+                "抄送单位",
+                vocabulary,
+                warnings,
+            );
+        }
         TemplateKind::WhitePaper => {
             check_units(
                 &profile.reporting_leaders,

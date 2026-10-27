@@ -98,6 +98,49 @@ pub(crate) fn heading_runs(number: &str, text: &str) -> Runs {
     with_punct_kerning(with_cjk_latin_gaps(out))
 }
 
+/// 会议纪要正文段：把「一是……」那一截切出来标成三号楷体（判定见
+/// [`crate::export::minutes::enumeration_kai_spans`]）。只看文字片段，占位与间隙
+/// 不占字数；花脸稿标注、加粗随切开的片段保留。
+pub(crate) fn with_enumeration_kai(runs: Runs) -> Runs {
+    let text: String = runs.iter().filter_map(|run| run.t.as_deref()).collect();
+    let spans = crate::export::minutes::enumeration_kai_spans(&text);
+    if spans.is_empty() {
+        return runs;
+    }
+    let in_span = |index: usize| spans.iter().any(|span| span.contains(&index));
+    let mut out: Runs = Vec::with_capacity(runs.len() + spans.len() * 2);
+    let mut offset = 0;
+    for run in runs {
+        let Some(text) = run.t.as_deref() else {
+            out.push(run);
+            continue;
+        };
+        let mut piece = String::new();
+        let mut piece_kai = None;
+        for ch in text.chars() {
+            let kai = in_span(offset);
+            if piece_kai.is_some_and(|current| current != kai) {
+                out.push(Run {
+                    t: Some(std::mem::take(&mut piece)),
+                    h: piece_kai == Some(true),
+                    ..run.clone()
+                });
+            }
+            piece.push(ch);
+            piece_kai = Some(kai);
+            offset += 1;
+        }
+        if !piece.is_empty() {
+            out.push(Run {
+                t: Some(piece),
+                h: piece_kai == Some(true),
+                ..run.clone()
+            });
+        }
+    }
+    out
+}
+
 /// 不带任何标注的纯文字。
 pub(crate) fn plain_runs(text: &str) -> Runs {
     if text.is_empty() {
@@ -326,6 +369,22 @@ mod tests {
             .filter_map(|r| r.t.clone())
             .collect();
         assert_eq!(kai, ["（办法另行印发）"]);
+    }
+
+    #[test]
+    fn minutes_enumerations_become_kai_across_runs() {
+        let runs = with_enumeration_kai(body_runs("会议认为，形势向好。一是**统一**思想。二是"));
+        let kai: Vec<_> = runs
+            .iter()
+            .filter(|r| r.h)
+            .filter_map(|r| r.t.clone())
+            .collect();
+        assert_eq!(kai, ["一是", "统一", "思想", "二是"]);
+        assert!(runs.iter().any(|r| r.h && r.b), "加粗随片段保留");
+        assert_eq!(
+            runs.iter().filter_map(|r| r.t.clone()).collect::<String>(),
+            "会议认为，形势向好。一是统一思想。二是"
+        );
     }
 
     #[test]

@@ -15,18 +15,20 @@ pub enum TemplateKind {
     PhoneRecord,
     PlainDocument,
     MeetingAgenda,
+    MeetingMinutes,
     WhitePaper,
     RedHeadApproval,
     ResearchReport,
 }
 
 impl TemplateKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::OfficialLetter,
         Self::PhoneNotice,
         Self::PhoneRecord,
         Self::PlainDocument,
         Self::MeetingAgenda,
+        Self::MeetingMinutes,
         Self::WhitePaper,
         Self::RedHeadApproval,
         Self::ResearchReport,
@@ -39,6 +41,7 @@ impl TemplateKind {
             Self::PhoneRecord => "电话记录单",
             Self::PlainDocument => "普通公文",
             Self::MeetingAgenda => "会议议程",
+            Self::MeetingMinutes => "会议纪要",
             Self::WhitePaper => "白头件（呈批件）",
             Self::RedHeadApproval => "红头呈批件",
             Self::ResearchReport => "研究报告",
@@ -52,6 +55,9 @@ impl TemplateKind {
             Self::PhoneRecord => "记录收到的电话通知，含来电信息、首长批示栏和拟办建议",
             Self::PlainDocument => "无红头、发文单位、主送单位、落款和版记的纯正文公文",
             Self::MeetingAgenda => "适用于会议时间地点、参会人员和议程安排",
+            Self::MeetingMinutes => {
+                "红头纪要标志与编号，正文后列出席名单，底部分送、抄送、印发版记"
+            }
             Self::WhitePaper => "适用于内部情况报告、请示和领导呈批",
             Self::RedHeadApproval => "带发文单位红头、文号和首页批示栏的内部呈批件",
             Self::ResearchReport => {
@@ -88,13 +94,19 @@ impl TemplateKind {
         matches!(self, Self::OfficialLetter | Self::RedHeadApproval)
     }
 
+    /// 只有年份与序号、没有机关代字的编号（会议纪要的「〔2026〕3号」）。
+    /// 与 [`Self::has_document_number`] 分开，免得表单和校验去找代字。
+    pub(crate) fn has_minutes_number(self) -> bool {
+        self == Self::MeetingMinutes
+    }
+
     /// 版头带份号位的文种。
     ///
-    /// 只有公函：份号由类文件的 `\DocumentHeader` 排在文号左端。红头呈批件走
-    /// `\makeredapproval`，版式里没有份号位；白头件、会议议程、普通公文的抬头
-    /// 只有密级。给它们加份号位是改版式，风险另计，没有一并做。
+    /// 公函的份号排在文号左端；会议纪要的份号顶格占版心第 1 行、密级在第 2 行。
+    /// 红头呈批件版式里没有份号位；白头件、会议议程、普通公文的抬头只有密级。
+    /// 给它们加份号位是改版式，风险另计，没有一并做。
     pub(crate) fn has_copy_numbering(self) -> bool {
-        matches!(self, Self::OfficialLetter)
+        matches!(self, Self::OfficialLetter | Self::MeetingMinutes)
     }
 
     /// 可以整份改排横页的文种。只有普通公文：它没有红头、版记和落款，横排不牵动

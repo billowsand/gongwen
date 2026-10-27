@@ -19,6 +19,9 @@ pub(crate) struct Run {
     /// 花脸稿标注：`del` / `add`。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub m: Option<&'static str>,
+    /// 会议纪要段内「一是……。」：楷体，字号随正文（三号）。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub h: bool,
     /// 中西文间隙（pt）：对应 xeCJK 的 CJKecglue。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub g: Option<f64>,
@@ -207,6 +210,40 @@ pub(crate) struct Record {
     pub joint: bool,
 }
 
+/// 会议纪要名单的一行（出席 / 列席 / 请假）。
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RosterRow {
+    pub label: &'static str,
+    pub names: Vec<String>,
+    /// 每行 6 格对齐排；有名字放不进一格时为假，改连排。
+    pub grid: bool,
+}
+
+/// 会议纪要版记：分送、抄送两行（可缺），细线，印发机关与印发日期。
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct MinutesRecord {
+    pub distribute: Option<Runs>,
+    #[serde(rename = "copies-to")]
+    pub copies_to: Option<Runs>,
+    #[serde(rename = "print-copies")]
+    pub print_copies: u32,
+    #[serde(rename = "printing-unit")]
+    pub printing_unit: Runs,
+    #[serde(rename = "printing-date")]
+    pub printing_date: Runs,
+}
+
+/// 会议纪要的版头、名单与版记。
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Minutes {
+    /// 纪要标志（红头文字）。
+    pub heading: String,
+    /// 编号「〔2026〕3号」。
+    pub number: Runs,
+    pub roster: Vec<RosterRow>,
+    pub record: MinutesRecord,
+}
+
 /// 红头呈批件首页承办区。
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Red {
@@ -217,7 +254,7 @@ pub(crate) struct Red {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Doc {
-    /// `letter` / `phone` / `plain` / `whitepaper` / `redapproval` / `agenda`。
+    /// `letter` / `phone` / `plain` / `whitepaper` / `redapproval` / `agenda` / `minutes`。
     pub kind: &'static str,
     pub duplex: bool,
     /// 整份横排（普通公文的横页选项）：横向 A4、左侧装订，附件随之横排。
@@ -236,6 +273,7 @@ pub(crate) struct Doc {
     /// 份号逐份编制时每份的份号；空表示只排一份（份号印 `01`）。
     pub copies: Vec<String>,
     pub red: Option<Red>,
+    pub minutes: Option<Minutes>,
     pub phone_record: Option<crate::models::PhoneRecordMetadata>,
     pub phone_record_contact: Option<RecordRow>,
 }

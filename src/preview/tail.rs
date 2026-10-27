@@ -84,7 +84,10 @@ pub(crate) fn signature_block(
 ) {
     if matches!(
         input.kind,
-        TemplateKind::MeetingAgenda | TemplateKind::PlainDocument | TemplateKind::ResearchReport
+        TemplateKind::MeetingAgenda
+            | TemplateKind::MeetingMinutes
+            | TemplateKind::PlainDocument
+            | TemplateKind::ResearchReport
     ) {
         return;
     }

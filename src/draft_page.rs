@@ -518,7 +518,9 @@ impl DraftSession {
         mut draft: DraftInput,
         generated_markdown: String,
     ) -> Self {
-        if draft.kind.has_document_number() && draft.profile.document_year.trim().is_empty() {
+        if (draft.kind.has_document_number() || draft.kind.has_minutes_number())
+            && draft.profile.document_year.trim().is_empty()
+        {
             draft.profile.document_year = draft.document_year();
         }
         let mut session = Self {

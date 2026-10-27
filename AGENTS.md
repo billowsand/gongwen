@@ -207,6 +207,11 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   第三、四期两段（`html::parse` 的 `boxes` 参数、`<img>` 分支、`embedded::render`、单行接管的
   门槛、`prune` 要保留 `assets`）；字体线索消歧单列为待定。
 
+- **会议纪要文种**（按 `examples/huiyijiyao.docx`：红头纪要标志与编号、正文「一是」楷体、
+  出席 / 列席 / 请假名单、分送 / 抄送 / 印发版记，分三期）：**第一期（模型、表单、校验与
+  Typst PDF）已完成**；第二期 Word 与预览、第三期提示词 / 技能包 / 使用帮助待做。方案、进度、
+  与方案的出入和已知坑见 `docs/meeting-minutes-design.md`（单文件，第十节是交接）。
+
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 
 > 2026-10-03 按智能体工作台方案修订（`docs/ai-agent-workbench.md` 第二节 D1–D3）。

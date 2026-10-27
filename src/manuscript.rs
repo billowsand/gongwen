@@ -1277,6 +1277,7 @@ pub(crate) fn kind_to_str(kind: TemplateKind) -> &'static str {
         TemplateKind::PhoneRecord => "PhoneRecord",
         TemplateKind::PlainDocument => "PlainDocument",
         TemplateKind::MeetingAgenda => "MeetingAgenda",
+        TemplateKind::MeetingMinutes => "MeetingMinutes",
         TemplateKind::WhitePaper => "WhitePaper",
         TemplateKind::RedHeadApproval => "RedHeadApproval",
         TemplateKind::ResearchReport => "ResearchReport",
@@ -1290,6 +1291,7 @@ pub(crate) fn str_to_kind(s: &str) -> Option<TemplateKind> {
         "PhoneRecord" => Some(TemplateKind::PhoneRecord),
         "PlainDocument" => Some(TemplateKind::PlainDocument),
         "MeetingAgenda" => Some(TemplateKind::MeetingAgenda),
+        "MeetingMinutes" => Some(TemplateKind::MeetingMinutes),
         "WhitePaper" => Some(TemplateKind::WhitePaper),
         "RedHeadApproval" => Some(TemplateKind::RedHeadApproval),
         "ResearchReport" => Some(TemplateKind::ResearchReport),
@@ -1337,6 +1339,7 @@ mod tests {
             },
             research: Default::default(),
             phone_record: Default::default(),
+            minutes: Default::default(),
         }
     }
 

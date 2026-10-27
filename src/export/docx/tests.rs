@@ -1653,7 +1653,11 @@ fn templates_with_security_line_use_heiti() {
     let temp = tempfile::tempdir().unwrap();
     for kind in TemplateKind::ALL {
         // 白头件目前未导出密级行；此处检查已有密级行的字体。
-        if kind == TemplateKind::WhitePaper || !kind.uses_official_docx() {
+        // TODO(会议纪要第二期)：Word 导出接入后去掉 MeetingMinutes 的跳过。
+        if kind == TemplateKind::WhitePaper
+            || kind == TemplateKind::MeetingMinutes
+            || !kind.uses_official_docx()
+        {
             continue;
         }
         for period in ["10年", "长期"] {
@@ -1695,7 +1699,8 @@ fn western_fonts_follow_chinese_fonts_in_exported_docx() {
     let fonts_pattern = regex::Regex::new(r"<w:rFonts\b[^>]*/>").unwrap();
     let east_asia_pattern = regex::Regex::new(r#"w:eastAsia="([^"]+)""#).unwrap();
     for kind in TemplateKind::ALL {
-        if !kind.uses_official_docx() {
+        // TODO(会议纪要第二期)：Word 导出接入后去掉 MeetingMinutes 的跳过。
+        if !kind.uses_official_docx() || kind == TemplateKind::MeetingMinutes {
             continue;
         }
         let path = temp.path().join("mixed-fonts.docx");

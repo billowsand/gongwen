@@ -70,8 +70,10 @@ impl FormSection {
             (Self::Record, TemplateKind::ResearchReport) => "参考文献",
             (Self::Header, TemplateKind::PlainDocument) => "密级",
             (Self::Header, TemplateKind::MeetingAgenda) => "密级",
+            (Self::Header, TemplateKind::MeetingMinutes) => "密级 · 纪要标志 · 编号",
             (Self::Header, _) => "密级 · 红头 · 文号",
             (Self::Body, TemplateKind::MeetingAgenda) => "会议时间 · 地点 · 人员",
+            (Self::Body, TemplateKind::MeetingMinutes) => "会议时间 · 地点 · 出席名单",
             (Self::Body, TemplateKind::WhitePaper | TemplateKind::RedHeadApproval) => {
                 "呈报领导 · 标题"
             }
@@ -79,6 +81,7 @@ impl FormSection {
             (Self::Body, _) => "主送 · 标题",
             (Self::Record, TemplateKind::PlainDocument) => "打印方式",
             (Self::Record, TemplateKind::PhoneNotice | TemplateKind::MeetingAgenda) => "成文日期",
+            (Self::Record, TemplateKind::MeetingMinutes) => "分送 · 抄送 · 印发",
             (Self::Record, TemplateKind::WhitePaper | TemplateKind::RedHeadApproval) => {
                 "落款 · 承办 · 成文日期"
             }
@@ -258,6 +261,32 @@ pub(crate) fn check_form(draft: &DraftInput) -> FormCheck {
                 "attendees",
                 filled(&draft.attendees),
                 "留空则由模型从素材归纳，生成后需人工核对",
+            );
+        }
+        TemplateKind::MeetingMinutes => {
+            check.require(
+                FormSection::Header,
+                "minutes_issuing_unit",
+                filled(&profile.issuing_unit),
+                "会议纪要必须有发文单位",
+            );
+            check.require(
+                FormSection::Body,
+                "minutes_attendees",
+                filled(&draft.attendees),
+                "会议纪要必须列出出席人员",
+            );
+            check.require(
+                FormSection::Record,
+                "minutes_printing_unit",
+                !draft.minutes_printing_unit().is_empty(),
+                "会议纪要必须有印发机关",
+            );
+            check.require(
+                FormSection::Record,
+                "minutes_date",
+                filled(&draft.date),
+                "会议纪要必须有印发日期",
             );
         }
         TemplateKind::WhitePaper => {
@@ -523,6 +552,53 @@ pub(crate) fn document_number_row(
                 format!("成文后显示为 {code}〔{year}〕□号")
             } else {
                 format!("成文后显示为 {code}〔{year}〕{number}号")
+            };
+            ui.label(
+                egui::RichText::new(text)
+                    .size(11.0)
+                    .color(theme::text_muted()),
+            );
+        }
+    });
+    ui.end_row();
+}
+
+/// 会议纪要编号：只有年份与序号，没有机关代字，印成「〔2026〕3号」。
+fn minutes_number_row(ui: &mut egui::Ui, profile: &mut crate::models::TemplateProfile) {
+    row_label_with_info(
+        ui,
+        "编号",
+        "纪要编号只有年份与序号，不带机关代字；序号只在「正式版」下可填。",
+    );
+    let formal = profile.letter_version == LetterVersion::Formal;
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.label("〔");
+            ui.add(
+                egui::TextEdit::singleline(&mut profile.document_year)
+                    .hint_text("2026")
+                    .char_limit(4)
+                    .desired_width(42.0),
+            );
+            ui.label("〕");
+            ui.add_enabled(
+                formal,
+                egui::TextEdit::singleline(&mut profile.document_number)
+                    .hint_text("3")
+                    .desired_width(34.0),
+            );
+            ui.label("号");
+        });
+        let year = profile.document_year.trim();
+        if !year.is_empty() {
+            let number = profile.document_number.trim();
+            let text = if !formal {
+                format!("预览版：〔{year}〕 号（序号留空）")
+            } else if number.is_empty() {
+                format!("成文后显示为 〔{year}〕□号")
+            } else {
+                format!("成文后显示为 〔{year}〕{number}号")
             };
             ui.label(
                 egui::RichText::new(text)
@@ -915,6 +991,9 @@ impl DraftPage<'_> {
                             }
                             TemplateKind::MeetingAgenda => {
                                 "会议议程无落款日期，稿件版本仅用于与其他文种保持一致。"
+                            }
+                            TemplateKind::MeetingMinutes => {
+                                "预览版自动留空纪要编号的序号和印发日期的“日”；正式版使用填写值。"
                             }
                             // 不能是 unreachable：`versioned` 在文种下拉框渲染之前求值，
                             // 用户点选“普通公文”的那一帧里 kind 已变、versioned 还是旧值 true，
@@ -1479,6 +1558,51 @@ impl DraftPage<'_> {
                                 "red_approval_department_code",
                             );
                         }
+                        TemplateKind::MeetingMinutes => {
+                            required_row_label(
+                                ui,
+                                "发文单位",
+                                Some("纪要标志与印发机关默认随它带出。"),
+                            );
+                            if single_select(
+                                ui,
+                                "minutes_issuing_unit",
+                                &mut self.doc.draft.profile.issuing_unit,
+                                &units,
+                                &mut self.doc.manual_fields,
+                                free_text,
+                                field_width,
+                                "使用标准全称",
+                            ) {
+                                let value = self.doc.draft.profile.issuing_unit.clone();
+                                element_fields::apply_field(
+                                    &mut self.doc.draft,
+                                    FieldId::IssuingUnit,
+                                    &value,
+                                    &self.config.vocabulary,
+                                );
+                            }
+                            ui.end_row();
+                            field_error(ui, &check, "minutes_issuing_unit");
+
+                            row_label_with_info(
+                                ui,
+                                "纪要标志",
+                                "版头红字。留空时为「发文单位＋会议纪要」，也可写成「××局局长办公会议纪要」。",
+                            );
+                            let default_heading = format!(
+                                "{}会议纪要",
+                                self.doc.draft.profile.issuing_unit.trim()
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.doc.draft.minutes.heading)
+                                    .hint_text(default_heading)
+                                    .desired_width(field_width),
+                            );
+                            ui.end_row();
+
+                            minutes_number_row(ui, &mut self.doc.draft.profile);
+                        }
                         TemplateKind::PhoneRecord | TemplateKind::PlainDocument
                         | TemplateKind::MeetingAgenda
                         | TemplateKind::WhitePaper
@@ -1613,6 +1737,58 @@ impl DraftPage<'_> {
                             );
                             ui.end_row();
                             field_error(ui, &check, "attendees");
+                        }
+                        TemplateKind::MeetingMinutes => {
+                            row_label_with_info(
+                                ui,
+                                "会议时间",
+                                "模型据此写正文首段；留空时从素材提取，依据不足时标记待核实。",
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.doc.draft.meeting_time)
+                                    .hint_text("例如：2026年8月5日（星期三）14:30")
+                                    .desired_width(field_width),
+                            );
+                            ui.end_row();
+
+                            row_label(ui, "会议地点");
+                            ui.add(
+                                egui::TextEdit::singleline(
+                                    &mut self.doc.draft.profile.meeting_location,
+                                )
+                                .hint_text("会议室或线上会议")
+                                .desired_width(field_width),
+                            );
+                            ui.end_row();
+
+                            required_row_label(
+                                ui,
+                                "出席",
+                                Some("顿号分隔。都是三字以内的姓名时每行 6 人对齐排列，否则连排。"),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.doc.draft.attendees)
+                                    .hint_text("例如：张三、李四、王小明")
+                                    .desired_width(field_width),
+                            );
+                            ui.end_row();
+                            field_error(ui, &check, "minutes_attendees");
+
+                            row_label_with_info(ui, "列席", "顿号分隔；留空则不印这一行。");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.doc.draft.minutes.nonvoting)
+                                    .hint_text("可留空")
+                                    .desired_width(field_width),
+                            );
+                            ui.end_row();
+
+                            row_label_with_info(ui, "请假", "顿号分隔；留空则不印这一行。");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.doc.draft.minutes.absent)
+                                    .hint_text("可留空")
+                                    .desired_width(field_width),
+                            );
+                            ui.end_row();
                         }
                         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
                             let leaders_display = UnitDisplay::new(&self.config.vocabulary)
@@ -1922,6 +2098,63 @@ impl DraftPage<'_> {
                             ui.weak("电话通知不设抄送、承办联系版记。");
                             ui.end_row();
                         }
+                        TemplateKind::MeetingMinutes => {
+                            row_label_with_info(
+                                ui,
+                                "分送",
+                                "分送的领导或人员，顿号分隔；留空则不印这一行。",
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.doc.draft.minutes.distribute)
+                                    .hint_text("可留空")
+                                    .desired_width(field_width),
+                            );
+                            ui.end_row();
+
+                            row_label_with_info(
+                                ui,
+                                "抄送单位",
+                                "可从标准词库多选；留空则不印这一行。",
+                            );
+                            if multi_select(
+                                ui,
+                                "minutes_copies_to",
+                                &mut self.doc.draft.profile.copies_to,
+                                &units,
+                                &[],
+                                "",
+                                &mut self.doc.manual_fields,
+                                free_text,
+                                field_width,
+                            ) {
+                                let value = self.doc.draft.profile.copies_to.clone();
+                                element_fields::apply_field(
+                                    &mut self.doc.draft,
+                                    FieldId::CopiesTo,
+                                    &value,
+                                    &self.config.vocabulary,
+                                );
+                            }
+                            ui.end_row();
+
+                            required_row_label(
+                                ui,
+                                "印发机关",
+                                Some("留空时取发文单位，一般填办公室。"),
+                            );
+                            single_select(
+                                ui,
+                                "minutes_printing_unit",
+                                &mut self.doc.draft.minutes.printing_unit,
+                                &units,
+                                &mut self.doc.manual_fields,
+                                free_text,
+                                field_width,
+                                "留空取发文单位",
+                            );
+                            ui.end_row();
+                            field_error(ui, &check, "minutes_printing_unit");
+                        }
                         TemplateKind::PhoneRecord
                         | TemplateKind::MeetingAgenda
                         | TemplateKind::PlainDocument
@@ -1929,7 +2162,12 @@ impl DraftPage<'_> {
                     }
 
                     if kind != TemplateKind::PlainDocument {
-                        row_label(ui, "成文日期");
+                        // 会议纪要没有落款，这个日期印在版记里，叫印发日期。
+                        if kind == TemplateKind::MeetingMinutes {
+                            required_row_label(ui, "印发日期", None);
+                        } else {
+                            row_label(ui, "成文日期");
+                        }
                         ui.horizontal(|ui| {
                             let enabled = !self.doc.draft.date_is_auto;
                             ui.add_enabled(
@@ -1942,9 +2180,12 @@ impl DraftPage<'_> {
                                 .on_hover_text("勾选后每次生成都按本机当天日期刷新");
                         });
                         ui.end_row();
+                        field_error(ui, &check, "minutes_date");
                     }
 
-                    if kind.uses_letter_layout() || kind == TemplateKind::WhitePaper {
+                    if kind.uses_letter_layout()
+                        || matches!(kind, TemplateKind::WhitePaper | TemplateKind::MeetingMinutes)
+                    {
                         row_label(ui, "打印方式");
                         ui.checkbox(&mut self.doc.draft.profile.duplex_printing, "双面打印")
                             .on_hover_text(
@@ -1974,8 +2215,13 @@ impl DraftPage<'_> {
                         // 份数不另设：就是版记那个「共印 N 份」。让人再填一遍，
                         // 两处迟早对不上，而对不上就意味着纸上的份号与登记簿数不齐。
                         let count = crate::export::copy_count(&self.doc.draft);
+                        let source = if kind == TemplateKind::MeetingMinutes {
+                            "随出席、列席、分送人员与抄送单位自动变"
+                        } else {
+                            "随主送、抄送、承办单位自动变"
+                        };
                         ui.checkbox(&mut self.doc.draft.profile.number_copies, "逐份编号")
-                            .on_hover_text("份数取版记的「共印 N 份」，随主送、抄送、承办单位自动变");
+                            .on_hover_text(format!("份数取版记的「共印 N 份」，{source}"));
                         ui.end_row();
                         if self.doc.draft.profile.number_copies {
                             ui.label("");

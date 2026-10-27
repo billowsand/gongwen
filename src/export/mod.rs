@@ -7,6 +7,7 @@
 pub(crate) mod bibliography;
 mod docx;
 pub(crate) mod element_display;
+pub(crate) mod minutes;
 pub(crate) mod research;
 mod research_theme;
 pub(crate) mod table;
@@ -157,16 +158,21 @@ pub(crate) fn copy_roster(input: &DraftInput) -> Option<String> {
     } else {
         &input.profile.responsible_unit
     };
+    let groups = if input.kind == TemplateKind::MeetingMinutes {
+        self::docx::record::minutes_recipients(input).to_vec()
+    } else {
+        vec![
+            ("主送", input.profile.recipient.as_str()),
+            ("抄送", input.profile.copies_to.as_str()),
+            ("承办", responsible.as_str()),
+        ]
+    };
     let mut out = String::from(
         "份号	单位	类别
 ",
     );
     let mut serial = 0u32;
-    for (label, value) in [
-        ("主送", &input.profile.recipient),
-        ("抄送", &input.profile.copies_to),
-        ("承办", responsible),
-    ] {
+    for (label, value) in groups {
         for unit in split_units(value) {
             serial += 1;
             out.push_str(&format!(
@@ -487,7 +493,8 @@ pub(crate) fn write_pdf_for_kind(
 /// - 白头件：`白头` + 名称；
 /// - 公函：函号 + 名称（草稿期未编序号时回落机关代字，均缺失时用“公函”）；
 /// - 电话通知：`电话通知`；
-/// - 普通公文：`普通公文` + 名称。
+/// - 普通公文：`普通公文` + 名称；
+/// - 会议纪要：`会议纪要` + 名称。
 pub(crate) fn document_stem_prefix(input: &DraftInput, title: &str) -> String {
     let title = safe_filename(title);
     match input.kind {
@@ -498,6 +505,7 @@ pub(crate) fn document_stem_prefix(input: &DraftInput, title: &str) -> String {
                 format!("{title}-{}", safe_filename(&input.meeting_time))
             }
         }
+        TemplateKind::MeetingMinutes => format!("会议纪要-{title}"),
         TemplateKind::WhitePaper => format!("白头-{title}"),
         TemplateKind::RedHeadApproval => format!("红头呈批-{}-{title}", letter_prefix(input)),
         TemplateKind::OfficialLetter => format!("{}-{title}", letter_prefix(input)),

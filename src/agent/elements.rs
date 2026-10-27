@@ -149,6 +149,14 @@ pub(crate) fn checklist(kind: TemplateKind) -> Vec<Scope> {
             scope(Where, "会议地点", "会议地点", true),
             scope(How, "议程安排", "议程安排", false),
         ],
+        TemplateKind::MeetingMinutes => vec![
+            scope(What, "会议议题与议定事项", "议定事项", true),
+            scope(Why, "会议缘由（没有可不写）", "会议缘由", false),
+            scope(Who, "主持人、出席人员", "出席人员", true),
+            scope(When, "会议时间", "会议时间", true),
+            scope(Where, "会议地点", "会议地点", true),
+            scope(How, "会议要求与分工落实", "落实要求", false),
+        ],
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => vec![
             scope(What, "请示或报批的事项", "报批事项", true),
             scope(Why, "缘由与依据", "缘由与依据", true),
@@ -337,9 +345,10 @@ fn unit_role(kind: TemplateKind) -> Option<&'static str> {
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => Some("致函对象"),
         TemplateKind::PlainDocument => Some("责任单位"),
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => Some("经办单位"),
-        TemplateKind::PhoneRecord | TemplateKind::MeetingAgenda | TemplateKind::ResearchReport => {
-            None
-        }
+        TemplateKind::PhoneRecord
+        | TemplateKind::MeetingAgenda
+        | TemplateKind::MeetingMinutes
+        | TemplateKind::ResearchReport => None,
     }
 }
 

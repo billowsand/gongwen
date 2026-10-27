@@ -41,7 +41,8 @@
 #let song = if F.page_number_latin != none { (F.page_number_latin, ..fam(F.page_number)) } else { fam(F.page_number) }
 
 // ---------------- 行内片段 ----------------
-// 片段：t 文字；b 加粗；k 括号楷体四号；m 花脸稿（del / add）；g 中西文间隙（pt）；
+// 片段：t 文字；b 加粗；k 括号楷体四号；h 段内楷体三号（会议纪要「一是」）；
+// m 花脸稿（del / add）；g 中西文间隙（pt）；
 // w 空占位（em，预览版的文号、日期留空）。
 
 // 加粗：选了专用粗体字体就换字面，否则描边伪粗（xeCJK AutoFakeBold 的对应做法）。
@@ -60,6 +61,8 @@
   if "w" in r { return box(width: r.w * 1em) }
   let c = [#r.t]
   if r.at("k", default: false) { c = text(font: kai, size: 14pt, tracking: 0pt, c) }
+  // 会议纪要段内「一是……」：楷体，字号随正文。
+  if r.at("h", default: false) { c = text(font: kai, c) }
   if r.at("b", default: false) { c = bold(c) }
   c
 }
@@ -449,8 +452,9 @@
 // 版记贴末页版心底。不能只写 v(1fr) 接不可拆块：本页剩余放不下时块被挤到下一页，
 // 弹性空白却留在上一页，版记就落在新页顶端。所以先按版记之前的锚点量剩余高度，
 // 放不下就自己换页，再在版记所在页用 v(1fr) 推到底（锚点的写法同 place-closing）。
+// height / body 是函数：版记高度要在 context 里量。会议纪要的版记共用这一段。
 #let record-serial = counter("gw-record")
-#let footer-record(r) = {
+#let pin-to-bottom(height, body) = {
   record-serial.step()
   context {
     let id = "gw-record-" + str(record-serial.get().first())
@@ -459,11 +463,12 @@
   context {
     let id = "gw-record-" + str(record-serial.get().first())
     let y = locate(label(id)).position().y
-    if y + record-height(r) > top-m + text-h { pagebreak() }
+    if y + height() > top-m + text-h { pagebreak() }
     v(1fr)
-    record-block(r)
+    body()
   }
 }
+#let footer-record(r) = pin-to-bottom(() => record-height(r), () => record-block(r))
 
 // ---------------- 附件 ----------------
 // 「附件」标识（黑体三号）、空一行、附件标题，标题之后直接接内容。
@@ -768,7 +773,113 @@
   for a in doc.attachments { attachment(a) }
 }
 
-#let render-copy(serial) = if doc.kind == "phone-record" { phone-record() } else if doc.kind == "redapproval" { red-approval(serial) } else { letter-like(serial) }
+// ================= 会议纪要 =================
+// 版式对照 examples/huiyijiyao.docx，规格见 docs/meeting-minutes-design.md 第二节。
+// 版头：份号、密级各占一行顶格；空一行排纪要标志（小标宋 26pt 红色居中，超宽横向
+// 压缩）；空一行排编号（仿宋三号居中）；编号基线下 4mm 是红色反线，粗细同函稿；
+// 再空一行接标题或正文。
+#let minutes-header(serial) = {
+  let m = doc.minutes
+  line-par(text(font: hei, serial))
+  security-line
+  v(pitch, weak: false)
+  align(center, par(first-line-indent: 0pt, justify: false, context {
+    let t = text(font: xbs, size: 26pt, fill: red, tracking: 0pt, m.heading)
+    let w = measure(t).width
+    if w > text-w { box(scale(x: text-w / w * 100%, reflow: true, t)) } else { t }
+  }))
+  v(pitch, weak: false)
+  // 反线挂在编号行的块里量：块顶是字身上缘，基线在其下 13.6pt。块的上下距与段间距
+  // 相同，不改变网格。
+  block(width: text-w, above: pitch - 16pt, below: pitch - 16pt, {
+    align(center, par(first-line-indent: 0pt, justify: false, text(tracking: 0pt, runs(m.number))))
+    place(top + left, dy: 13.6pt + 4mm - 0.265mm, rect(width: text-w, height: 0.53mm, fill: red, stroke: none))
+  })
+  v(pitch, weak: false)
+}
+
+// 名单：正文后空一行，左空二字。「出席：」黑体，人名仿宋。网格每行 6 格居中，两字名
+// 中间空一字凑成三字宽；有名字放不进一格的那一项改连排，回行与冒号后首字对齐。
+#let minutes-roster(rows) = if rows.len() > 0 {
+  v(pitch, weak: false)
+  for row in rows {
+    let label = text(font: hei, row.label + "：")
+    if row.grid {
+      let cols = 6
+      let cells = ()
+      for (i, chunk) in row.names.chunks(cols).enumerate() {
+        cells.push(if i == 0 { label } else { [] })
+        for n in chunk { cells.push(align(center, name-text(n))) }
+        for _ in range(cols - chunk.len()) { cells.push([]) }
+      }
+      block(above: pitch - 16pt, below: pitch - 16pt, pad(left: 2em,
+        grid(columns: (3em, ..range(cols).map(_ => 1fr)), row-gutter: pitch - 16pt, ..cells)))
+    } else {
+      par(first-line-indent: 0pt, justify: false, hanging-indent: 5em,
+        h(2em) + label + row.names.join("、"))
+    }
+  }
+}
+
+// 版记：顶粗线、分送、抄送（可缺，末行右端印数）、细线、印发机关与印发日期、底粗线。
+// 线距沿用函稿版记的实测值：粗线到首行基线 5.54mm、末行基线到细线 2.57mm、细线到
+// 下一行基线 5.39mm、末行基线到底线 2.72mm；同组相邻两行基线间 22.56pt。
+#let minutes-rec-par(body) = block(width: text-w, above: 0pt, below: 0pt,
+  text(size: 14pt, tracking: 0pt, top-edge: "baseline", bottom-edge: "baseline",
+    par(first-line-indent: 0pt, justify: false, hanging-indent: 3em, leading: 22.56pt, body)))
+#let minutes-record-layout(r) = {
+  let rows = ()
+  if r.distribute != none { rows.push(box(width: 3em, [分送：]) + runs(r.distribute)) }
+  if r.copies-to != none { rows.push(box(width: 3em, [抄送：]) + runs(r.copies-to)) }
+  let note = text(size: 14pt, tracking: 0pt, top-edge: "baseline", bottom-edge: "baseline", box(copies-note(r)))
+  let items = ()
+  let y = 5.84mm
+  for (i, body) in rows.enumerate() {
+    let last = i == rows.len() - 1
+    let p = minutes-rec-par(if last { body + h(2em, weak: true) + hide(note) } else { body })
+    let height = measure(p).height
+    items.push((y: y, right: false, body: p))
+    if last { items.push((y: y + height, right: true, body: note)) }
+    y += height + 22.56pt
+  }
+  let (mid, issue) = if rows.len() > 0 {
+    let m = y - 22.56pt + 2.57mm
+    (m, m + 5.39mm)
+  } else { (none, 5.84mm) }
+  (items: items, mid: mid, issue: issue, bottom: issue + 2.72mm)
+}
+#let minutes-record-block(r) = {
+  let g = minutes-record-layout(r)
+  block(width: text-w, height: g.bottom - 1.46mm, breakable: false, above: 0pt, below: 0pt, {
+    set par(first-line-indent: 0pt, justify: false)
+    let rule(y, w) = place(top + left, dy: y - w / 2, line(length: text-w, stroke: w))
+    rule(0.30mm, 0.6mm)
+    for it in g.items { place(top + if it.right { right } else { left }, dy: it.y, it.body) }
+    if g.mid != none { rule(g.mid, 0.3mm) }
+    place(top + left, dy: g.issue, box(width: text-w,
+      text(size: 14pt, tracking: 0pt, top-edge: "baseline", bottom-edge: "baseline",
+        h(1em) + runs(r.printing-unit) + h(1fr) + runs(r.printing-date) + h(1em))))
+    rule(g.bottom, 0.6mm)
+  })
+}
+
+#let minutes-doc(serial) = {
+  let m = doc.minutes
+  minutes-header(serial)
+  if doc.title.lines.len() > 0 {
+    title-block(doc.title)
+    v(pitch, weak: false)
+  }
+  render-blocks(doc.body)
+  summary-block
+  minutes-roster(m.roster)
+  for a in doc.attachments { attachment(a) }
+  if doc.attachments.len() > 0 and doc.attachments.last().landscape { pagebreak() }
+  pin-to-bottom(() => minutes-record-layout(m.record).bottom - 1.46mm,
+    () => minutes-record-block(m.record))
+}
+
+#let render-copy(serial) = if doc.kind == "phone-record" { phone-record() } else if doc.kind == "redapproval" { red-approval(serial) } else if doc.kind == "minutes" { minutes-doc(serial) } else { letter-like(serial) }
 
 // 份号逐份编制：每份换页、页码归 1；只有第一份带孤行探针。
 #if doc.copies.len() == 0 {

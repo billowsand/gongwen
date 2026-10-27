@@ -189,6 +189,10 @@ pub fn write_docx_with_numbering(
     if input.kind == TemplateKind::PhoneRecord {
         return phone_record::write(path, input, markdown, fonts, numbering, elements);
     }
+    if input.kind == TemplateKind::MeetingMinutes {
+        // TODO(会议纪要第二期)：版头、名单与三行版记的 Word 排法。
+        bail!("会议纪要的 Word 导出尚未接入，请先导出 PDF");
+    }
     if input.kind == TemplateKind::MeetingAgenda {
         return write_meeting_agenda_docx(path, input, markdown, fonts, numbering, elements);
     }
@@ -371,7 +375,10 @@ pub fn write_docx_with_numbering(
                     + RED_APPROVAL_NUMBER_AFTER_TWIPS;
             }
         }
-        TemplateKind::MeetingAgenda | TemplateKind::ResearchReport | TemplateKind::PhoneRecord => {
+        TemplateKind::MeetingAgenda
+        | TemplateKind::MeetingMinutes
+        | TemplateKind::ResearchReport
+        | TemplateKind::PhoneRecord => {
             // 这三个文种各有各的 Word 通道（前面已经分流），走到这里说明分流
             // 的判断与这里的模板分支对不上：报出来，不让程序崩在导出中途。
             bail!("该文种不走公文 Word 排版，请检查导出分流");

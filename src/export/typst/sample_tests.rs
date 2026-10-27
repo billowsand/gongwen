@@ -306,7 +306,52 @@ fn cases() -> Vec<Case> {
             markdown: "# 社区养老服务工作推进会议程\n\n<!-- [正文] -->\n\n## 时间地点\n\n2026年8月5日（星期三）14:30，3C会议室。\n\n## 会议议程\n\n1. 张三同志通报工作进展；\n2. 各区汇报；\n3. 王局长讲话。\n".into(),
             tweak: |_| {},
         },
+        Case {
+            name: "minutes",
+            kind: TemplateKind::MeetingMinutes,
+            markdown: MINUTES.into(),
+            tweak: minutes_tweak,
+        },
+        Case {
+            name: "minutes-titled",
+            kind: TemplateKind::MeetingMinutes,
+            markdown: format!("# 关于社区养老服务设施提质改造的专题会议纪要\n\n{MINUTES}"),
+            tweak: |input| {
+                minutes_tweak(input);
+                // 出席里有带单位的长名：这一项改连排；预览版序号与「日」留白。
+                input.attendees =
+                    "王局长、李副局长、张三、市财政局刘处长、养老服务处全体同志".into();
+                input.minutes.distribute.clear();
+                input.profile.letter_version = LetterVersion::Preview;
+            },
+        },
     ]
+}
+
+const MINUTES: &str = "<!-- [正文] -->
+
+2026年10月20日上午，王局长在局三楼会议室主持召开局长办公会议，听取养老服务处关于全市社区养老服务设施提质改造工作的汇报，研究部署下一阶段工作。
+
+会议认为，今年以来全市社区养老服务设施提质改造工作推进有力、成效初显。一是摸清了底数。共排查社区养老服务站点312个，建立了问题清单。二是落实了经费。专项经费860万元已全部下达。三是完善了机制。各区均明确了分管领导和责任处室。
+
+会议指出，当前改造进度不平衡，部分区专业护理人员不足的问题仍较突出，必须引起高度重视。
+
+会议要求，各区要对照时间节点倒排工期。一是压实责任。区民政局主要负责同志要亲自抓、负总责。二是强化督导。局里每月通报一次进度。三是严格验收。10月起组织第三方验收评估，验收不合格的限期整改。
+
+会议明确，由养老服务处牵头制定验收办法，11月15日前报局党组审定。
+";
+
+fn minutes_tweak(input: &mut DraftInput) {
+    // 八个三字以内的姓名：网格两行，第二行从第一格起。
+    input.attendees = "王建国、李明、张三、李四、王小明、赵六、钱七、孙八".into();
+    input.minutes.nonvoting = "周九、吴十".into();
+    input.minutes.absent = "郑一".into();
+    input.minutes.distribute = "局领导、局党组成员".into();
+    input.minutes.printing_unit = "某某市民政局办公室".into();
+    input.meeting_time = "2026年10月20日上午".into();
+    input.profile.meeting_location = "局三楼会议室".into();
+    input.profile.document_number = "3".into();
+    input.profile.copies_to = "市财政局、市卫生健康委".into();
 }
 
 fn sample_dir() -> PathBuf {
@@ -460,9 +505,43 @@ fn typst_samples() {
             &ElementMarks::default(),
             &dir,
         );
-        if let Err(error) = outcome {
-            eprintln!("{}: {error:#}", case.name);
+        match outcome {
+            // 会议纪要逐页出图，对照 examples/huiyijiyao.docx 目视检查。
+            Ok(outcome) if case.kind == TemplateKind::MeetingMinutes => {
+                save_page_images(&outcome.pdf, &dir);
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("{}: {error:#}", case.name),
         }
+    }
+}
+
+/// 把 PDF 每页渲染成 `page-N.png`（宽 1240 像素，约 150dpi）。
+fn save_page_images(pdf: &[u8], dir: &Path) {
+    use hayro::hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf};
+    use hayro::{RenderCache, RenderSettings};
+    let pdf = Pdf::new(std::sync::Arc::new(pdf.to_vec())).unwrap();
+    for (index, page) in pdf.pages().iter().enumerate() {
+        let scale = 1240.0 / page.render_dimensions().0;
+        let pixmap = hayro::render(
+            page,
+            &RenderCache::new(),
+            &InterpreterSettings::default(),
+            &RenderSettings {
+                x_scale: scale,
+                y_scale: scale,
+                bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+                ..Default::default()
+            },
+        );
+        image::RgbaImage::from_raw(
+            u32::from(pixmap.width()),
+            u32::from(pixmap.height()),
+            pixmap.data_as_u8_slice().to_vec(),
+        )
+        .unwrap()
+        .save(dir.join(format!("page-{}.png", index + 1)))
+        .unwrap();
     }
 }
 

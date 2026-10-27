@@ -975,6 +975,7 @@ mod tests {
             },
             research: Default::default(),
             phone_record: Default::default(),
+            minutes: Default::default(),
         }
     }
 
