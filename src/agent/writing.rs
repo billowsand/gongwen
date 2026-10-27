@@ -2,11 +2,12 @@
 
 use crate::models::TemplateKind;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 mod assemble;
 mod execution;
 pub(crate) mod store;
-use execution::chunks;
+use execution::chunk_ranges;
 pub(crate) use execution::run;
 
 #[cfg(test)]
@@ -27,6 +28,22 @@ pub(crate) fn supports(kind: TemplateKind) -> bool {
     !matches!(
         kind,
         TemplateKind::PhoneRecord | TemplateKind::MeetingAgenda | TemplateKind::MeetingMinutes
+    )
+}
+
+/// 没有风格样稿时的默认写法；换文种时按新文种重写这几行，人工改过的保留。
+pub(crate) fn default_style(kind: TemplateKind) -> String {
+    format!(
+        "默认写法（未从样稿学习）：\n{}",
+        crate::prompt::style_guide(kind)
+    )
+}
+
+/// 没有结构范文时的默认篇章框架；口径同 [`default_style`]。
+pub(crate) fn default_framework(kind: TemplateKind) -> String {
+    format!(
+        "默认篇章框架（未从范文提炼）：\n{}",
+        crate::prompt::kind_rules(kind)
     )
 }
 
@@ -181,6 +198,13 @@ pub(crate) struct Section {
     pub review_parts: Vec<String>,
     #[serde(default)]
     pub review_input_hash: String,
+    /// 锁定或人工章节的统稿建议：单独存放，拼全文仍用本节正文，采纳与否由用户决定。
+    #[serde(default)]
+    pub advisory_suggestion: Option<String>,
+    #[serde(default)]
+    pub advisory_parts: Vec<String>,
+    #[serde(default)]
+    pub advisory_input_hash: String,
     #[serde(default)]
     pub write_parts: Vec<String>,
     #[serde(default)]
@@ -227,7 +251,20 @@ pub(crate) enum ChunkStatus {
     Pending,
     Extracted,
     NoRelevantContent,
+    /// 模型处理失败，保留原因等待重试或人工处置。
     Failed,
+    /// 用户人工确认这块没有相关内容：计入覆盖，但单独显示为「人工跳过」，可撤销。
+    SkippedByUser,
+}
+
+impl ChunkStatus {
+    /// 这一块是否已经处理完（成功或人工确认），可以计入覆盖。
+    pub(crate) fn counts_as_done(self) -> bool {
+        matches!(
+            self,
+            Self::Extracted | Self::NoRelevantContent | Self::SkippedByUser
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +284,13 @@ pub(crate) struct WritingTask {
     pub style_manual: bool,
     #[serde(default)]
     pub framework_manual: bool,
+    /// 风格 / 框架归纳与主题观点目录的输入指纹：输入没变就复用上次结果，不重复问模型。
+    #[serde(default)]
+    pub style_summary_input: String,
+    #[serde(default)]
+    pub framework_summary_input: String,
+    #[serde(default)]
+    pub topic_directory_input: String,
     pub sections: Vec<Section>,
     #[serde(default)]
     pub section_history: Vec<Section>,
@@ -306,6 +350,9 @@ impl WritingTask {
             topic_directory: String::new(),
             style_manual: false,
             framework_manual: false,
+            style_summary_input: String::new(),
+            framework_summary_input: String::new(),
+            topic_directory_input: String::new(),
             sections: vec![],
             section_history: vec![],
             outline_confirmed: false,
@@ -430,6 +477,36 @@ impl WritingTask {
             .collect()
     }
 
+    /// 采纳锁定或人工稿的统稿建议：原稿进本节历史，正文换成建议并仍算人工稿。
+    pub(crate) fn accept_advisory(&mut self, index: usize) -> bool {
+        let Some(advice) = self
+            .sections
+            .get_mut(index)
+            .and_then(|section| section.advisory_suggestion.take())
+        else {
+            return false;
+        };
+        let section = &mut self.sections[index];
+        if !section.markdown.trim().is_empty() {
+            section.revision_history.push(section.markdown.clone());
+        }
+        section.markdown = advice;
+        section.manually_edited = true;
+        section.status = "人工已完成".into();
+        section.advisory_parts.clear();
+        section.advisory_input_hash.clear();
+        self.refresh_final_if_generated();
+        self.stale_reason = Some("已采纳统稿建议到人工稿，请重新核对后审阅".into());
+        true
+    }
+
+    /// 按当前各节正文重新拼全文；人工改过统稿时不动它，避免覆盖用户输入。
+    pub(crate) fn refresh_final_if_generated(&mut self) {
+        if !self.final_manual {
+            self.final_markdown = assemble::assemble(self);
+        }
+    }
+
     /// 旧版任务的块与卡片没有指纹；旧版每次改输入都会清空成果，留下的必然对应当前输入。
     pub(crate) fn adopt_legacy_records(&mut self) {
         let topic = self.topic_query();
@@ -464,9 +541,28 @@ impl WritingTask {
         }
     }
 
+    /// 块状态索引，键与 [`chunk_hash`] 记录的块身份一致。覆盖率与就绪判断都走它，
+    /// 不再对每一块线性扫描 `chunks`。
+    fn chunk_index(&self) -> HashMap<(&str, Option<&str>, &str, &str), ChunkStatus> {
+        self.chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    (
+                        chunk.source_id.as_str(),
+                        chunk.section_id.as_deref(),
+                        chunk.query.as_str(),
+                        chunk.chunk_hash.as_str(),
+                    ),
+                    chunk.status,
+                )
+            })
+            .collect()
+    }
+
     /// 这一块在给定请求下的处理状态；没有记录即为待处理。
-    fn chunk_state(
-        &self,
+    fn chunk_status(
+        index: &HashMap<(&str, Option<&str>, &str, &str), ChunkStatus>,
         source: &SourceSnapshot,
         section_id: Option<&str>,
         query: &str,
@@ -474,15 +570,9 @@ impl WritingTask {
         end: usize,
     ) -> Option<ChunkStatus> {
         let hash = chunk_hash(source, start, end);
-        self.chunks
-            .iter()
-            .find(|c| {
-                c.source_id == source.id
-                    && c.section_id.as_deref() == section_id
-                    && c.query == query
-                    && c.chunk_hash == hash
-            })
-            .map(|c| c.status)
+        index
+            .get(&(source.id.as_str(), section_id, query, hash.as_str()))
+            .copied()
     }
 
     pub(crate) fn coverage(&self) -> Coverage {
@@ -497,17 +587,21 @@ impl WritingTask {
             Some(section) => (section.chunk_bytes.max(512), self.section_query(section)),
             None => (self.topic_chunk_bytes, self.topic_query()),
         };
+        let index = self.chunk_index();
         let mut coverage = Coverage::default();
         for source in self
             .sources
             .iter()
             .filter(|s| s.role == SourceRole::Content)
         {
-            for (start, end, _) in chunks(&source.text, block_size) {
+            for (start, end) in chunk_ranges(&source.text, block_size) {
                 coverage.total += 1;
-                match self.chunk_state(source, section_id, &query, start, end) {
-                    Some(ChunkStatus::Extracted | ChunkStatus::NoRelevantContent) => {
-                        coverage.done += 1
+                match Self::chunk_status(&index, source, section_id, &query, start, end) {
+                    Some(status) if status.counts_as_done() => {
+                        coverage.done += 1;
+                        if status == ChunkStatus::SkippedByUser {
+                            coverage.skipped += 1;
+                        }
                     }
                     Some(ChunkStatus::Failed) => coverage.failed += 1,
                     _ => {}
@@ -518,6 +612,109 @@ impl WritingTask {
             .total
             .saturating_sub(coverage.done + coverage.failed);
         coverage
+    }
+
+    /// 人工确认一块没有相关内容：计入覆盖，但保留为可撤销的独立状态，绝不记成模型判定。
+    pub(crate) fn mark_chunk_skipped(
+        &mut self,
+        source: &SourceSnapshot,
+        section_id: Option<&str>,
+        query: &str,
+        start: usize,
+        end: usize,
+    ) -> bool {
+        let progress = ChunkProgress {
+            source_id: source.id.clone(),
+            chunk_hash: chunk_hash(source, start, end),
+            role: source.role,
+            section_id: section_id.map(str::to_string),
+            start,
+            end,
+            status: ChunkStatus::SkippedByUser,
+            error: None,
+            output: String::new(),
+            query: query.to_string(),
+        };
+        if let Some(index) = self.chunks.iter().position(|chunk| {
+            chunk.source_id == progress.source_id
+                && chunk.section_id == progress.section_id
+                && chunk.query == progress.query
+                && chunk.chunk_hash == progress.chunk_hash
+        }) {
+            if self.chunks[index].status == ChunkStatus::SkippedByUser {
+                return false;
+            }
+            self.chunks[index] = progress;
+        } else {
+            self.chunks.push(progress);
+        }
+        self.resume_action = None;
+        true
+    }
+
+    /// 撤销人工跳过，让这一块回到待处理。
+    pub(crate) fn unskip_chunk(
+        &mut self,
+        source: &SourceSnapshot,
+        section_id: Option<&str>,
+        query: &str,
+        start: usize,
+        end: usize,
+    ) -> bool {
+        let hash = chunk_hash(source, start, end);
+        let before = self.chunks.len();
+        self.chunks.retain(|chunk| {
+            !(chunk.source_id == source.id
+                && chunk.section_id.as_deref() == section_id
+                && chunk.query == query
+                && chunk.chunk_hash == hash
+                && chunk.status == ChunkStatus::SkippedByUser)
+        });
+        if self.chunks.len() != before {
+            self.resume_action = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 文种变了：风格 / 框架若是旧文种的默认文字就换新，人工改过的保留；
+    /// 提纲需要重新确认，已有成果不删除。
+    pub(crate) fn sync_kind(&mut self, kind: TemplateKind) -> bool {
+        if self.kind == kind {
+            return false;
+        }
+        let old = self.kind;
+        self.kind = kind;
+        let has_style = self
+            .sources
+            .iter()
+            .any(|source| source.role == SourceRole::Style);
+        let has_framework = self
+            .sources
+            .iter()
+            .any(|source| source.role == SourceRole::Framework);
+        if !self.style_manual && !has_style {
+            self.style_md = default_style(kind);
+            self.style_summary_input.clear();
+        }
+        if !self.framework_manual && !has_framework {
+            self.framework_md = default_framework(kind);
+            self.framework_summary_input.clear();
+        }
+        self.clear_topic_directory();
+        self.outline_changed();
+        self.stale_reason = Some(format!(
+            "文种已从「{}」改为「{}」：默认写法与框架已按新文种更新，提纲需重新确认；已读的材料照常复用",
+            old.label(),
+            kind.label()
+        ));
+        true
+    }
+
+    fn clear_topic_directory(&mut self) {
+        self.topic_directory.clear();
+        self.topic_directory_input.clear();
     }
 
     /// 有没有已经花过模型调用的成果；没有时改输入无须确认。
@@ -562,7 +759,7 @@ impl WritingTask {
     fn sources_changed(&mut self, content: bool) {
         self.resume_action = None;
         if content {
-            self.topic_directory.clear();
+            self.clear_topic_directory();
             self.outline_changed();
         } else {
             self.drafts_changed();
@@ -576,7 +773,7 @@ impl WritingTask {
             return;
         }
         self.topic = topic;
-        self.topic_directory.clear();
+        self.clear_topic_directory();
         self.outline_changed();
         self.stage = Stage::Prepare;
         self.stale_reason =
@@ -701,14 +898,13 @@ impl WritingTask {
                     .filter(|s| s.role == SourceRole::Content)
                     .collect();
                 anyhow::ensure!(!content.is_empty(), "请先准备内容材料");
+                let index = self.chunk_index();
                 let query = self.topic_query();
                 for source in content {
-                    for (start, end, _) in chunks(&source.text, self.topic_chunk_bytes) {
+                    for (start, end) in chunk_ranges(&source.text, self.topic_chunk_bytes) {
                         anyhow::ensure!(
-                            matches!(
-                                self.chunk_state(source, None, &query, start, end),
-                                Some(ChunkStatus::Extracted | ChunkStatus::NoRelevantContent)
-                            ),
+                            Self::chunk_status(&index, source, None, &query, start, end)
+                                .is_some_and(ChunkStatus::counts_as_done),
                             "内容材料「{}」尚未完整提炼",
                             source.title
                         );
@@ -719,9 +915,9 @@ impl WritingTask {
                     .iter()
                     .filter(|s| s.role != SourceRole::Content)
                 {
-                    for (start, end, _) in chunks(&source.text, self.topic_chunk_bytes) {
+                    for (start, end) in chunk_ranges(&source.text, self.topic_chunk_bytes) {
                         anyhow::ensure!(
-                            self.chunk_state(source, None, "", start, end)
+                            Self::chunk_status(&index, source, None, "", start, end)
                                 == Some(ChunkStatus::Extracted),
                             "样稿「{}」尚未提炼完成",
                             source.title
@@ -738,21 +934,22 @@ impl WritingTask {
                     .filter(|s| s.role == SourceRole::Content)
                     .collect();
                 anyhow::ensure!(!content.is_empty(), "没有内容材料");
+                let index = self.chunk_index();
                 for section in &self.sections {
                     let query = self.section_query(section);
                     for source in &content {
-                        for (start, end, _) in chunks(&source.text, section.chunk_bytes.max(512)) {
+                        for (start, end) in chunk_ranges(&source.text, section.chunk_bytes.max(512))
+                        {
                             anyhow::ensure!(
-                                matches!(
-                                    self.chunk_state(
-                                        source,
-                                        Some(section.id.as_str()),
-                                        &query,
-                                        start,
-                                        end
-                                    ),
-                                    Some(ChunkStatus::Extracted | ChunkStatus::NoRelevantContent)
-                                ),
+                                Self::chunk_status(
+                                    &index,
+                                    source,
+                                    Some(section.id.as_str()),
+                                    &query,
+                                    start,
+                                    end
+                                )
+                                .is_some_and(ChunkStatus::counts_as_done),
                                 "章节「{}」尚有原文块未成功处理",
                                 section.title
                             );
@@ -786,6 +983,8 @@ pub(crate) struct Coverage {
     pub done: usize,
     pub failed: usize,
     pub pending: usize,
+    /// 其中由用户人工确认「无相关内容」的块数，单独显示，不与模型判定混同。
+    pub skipped: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -796,7 +995,19 @@ pub(crate) enum Action {
     Collect,
     Write,
     RewriteSection(usize, String),
+    /// 只重试一个失败的原文块；`section_id` 为空表示主题提炼的块。
+    RetryChunk(ChunkRef),
     Polish,
+}
+
+/// 原文块的身份：只重试这一块时使用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ChunkRef {
+    pub source_id: String,
+    pub section_id: Option<String>,
+    pub role: SourceRole,
+    pub start: usize,
+    pub end: usize,
 }
 
 /// 原文块的身份：原文快照校验值加块的起止位置。

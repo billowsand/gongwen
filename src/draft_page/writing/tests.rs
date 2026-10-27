@@ -311,3 +311,64 @@ fn repolishing_over_a_hand_edited_final_asks_first() {
     assert!(harness.state().doc.writing.confirm.is_none());
     assert!(harness.state().doc.writing.task.final_manual);
 }
+
+#[test]
+fn a_failed_block_can_be_confirmed_manually_as_no_relevant_content() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(Stage::Extract);
+    {
+        let task = &mut harness.state_mut().doc.writing.task;
+        let query = task.topic_query();
+        let chunk = task
+            .chunks
+            .iter_mut()
+            .find(|chunk| chunk.section_id.is_none() && chunk.query == query)
+            .unwrap();
+        chunk.status = ChunkStatus::Failed;
+        chunk.error = Some("模拟失败：格式不合规".into());
+    }
+    harness.run();
+    harness.get_by_label("人工确认无相关内容").click();
+    harness.run();
+    let task = &harness.state().doc.writing.task;
+    assert_eq!(task.coverage().failed, 0);
+    assert_eq!(task.coverage().skipped, 1);
+    assert!(
+        task.chunks
+            .iter()
+            .any(|chunk| chunk.status == ChunkStatus::SkippedByUser),
+        "人工处置记为独立状态"
+    );
+}
+
+#[test]
+fn an_advisory_suggestion_can_be_adopted_into_a_manual_section() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(Stage::Review);
+    harness.state_mut().doc.writing.task.sections[0].advisory_suggestion =
+        Some("建议修改后的正文。".into());
+    harness.run();
+    harness.get_by_label("采纳到本节").click();
+    harness.run();
+    let section = &harness.state().doc.writing.task.sections[0];
+    assert_eq!(section.markdown, "建议修改后的正文。");
+    assert!(section.manually_edited);
+}
+
+#[test]
+fn changing_the_document_kind_updates_the_task_without_running() {
+    let mut harness = harness(Stage::Prepare);
+    harness.state_mut().doc.draft.kind = TemplateKind::OfficialLetter;
+    harness.run();
+    let writing = &harness.state().doc.writing;
+    assert_eq!(writing.task.kind, TemplateKind::OfficialLetter);
+    assert!(
+        writing
+            .task
+            .stale_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("文种")),
+        "切换文种后不点运行也能看到提示"
+    );
+    assert!(!writing.running, "切换文种不得启动模型");
+}

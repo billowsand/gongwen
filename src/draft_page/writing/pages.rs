@@ -170,20 +170,26 @@ impl DraftPage<'_> {
         task.final_manual && !task.final_markdown.trim().is_empty()
     }
 
-    pub(super) fn writing_artifacts(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn writing_artifacts(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
         ui.heading("查看提炼成果");
         let coverage = self.doc.writing.task.coverage();
+        let query = self.doc.writing.task.topic_query();
         let failed = self
             .doc
             .writing
             .task
             .chunks
             .iter()
-            .filter(|chunk| chunk.status == ChunkStatus::Failed)
+            .filter(|chunk| {
+                chunk.role == SourceRole::Content
+                    && chunk.section_id.is_none()
+                    && chunk.query == query
+                    && chunk.status == ChunkStatus::Failed
+            })
             .count();
         ui.weak(format!(
-            "内容块处理：{} / {}，失败条目 {} 块",
-            coverage.done, coverage.total, failed
+            "内容块处理：{} / {}（人工跳过 {}，失败 {}）",
+            coverage.done, coverage.total, coverage.skipped, failed
         ));
         ui.horizontal_wrapped(|ui| {
             for (index, label) in ["内容素材", "写作风格", "篇章框架"].into_iter().enumerate()
@@ -233,6 +239,14 @@ impl DraftPage<'_> {
                             });
                     }
                 });
+                let role = if style {
+                    SourceRole::Style
+                } else {
+                    SourceRole::Framework
+                };
+                if let Some(next) = self.writing_chunk_actions(ui, role, None) {
+                    *action = Some(next);
+                }
             }
             _ => {
                 let cards: Vec<_> = self
@@ -247,8 +261,134 @@ impl DraftPage<'_> {
                     ui.label("尚无相关观点。检查材料与主题，或先开始提炼。");
                 }
                 self.writing_cards(ui, &cards);
+                if let Some(next) = self.writing_chunk_actions(ui, SourceRole::Content, None) {
+                    *action = Some(next);
+                }
             }
         }
+    }
+
+    /// 失败块与人工跳过的原地处置：材料名、原文位置、原因、操作按钮。
+    fn writing_chunk_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        role: SourceRole,
+        section_id: Option<&str>,
+    ) -> Option<Action> {
+        let task = &self.doc.writing.task;
+        let query = match section_id {
+            Some(id) => {
+                let section = task.sections.iter().find(|section| section.id == id)?;
+                task.section_query(section)
+            }
+            None => {
+                if role != SourceRole::Content {
+                    String::new()
+                } else {
+                    task.topic_query()
+                }
+            }
+        };
+        let rows: Vec<_> = task
+            .chunks
+            .iter()
+            .filter(|chunk| {
+                chunk.role == role
+                    && chunk.section_id.as_deref() == section_id
+                    && chunk.query == query
+                    && matches!(
+                        chunk.status,
+                        ChunkStatus::Failed | ChunkStatus::SkippedByUser
+                    )
+            })
+            .cloned()
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        ui.add_space(6.0);
+        ui.strong("失败与人工跳过");
+        let mut action = None;
+        let mut skip = None;
+        let mut unskip = None;
+        for chunk in rows {
+            let Some(source) = task
+                .sources
+                .iter()
+                .find(|source| source.id == chunk.source_id)
+                .cloned()
+            else {
+                ui.weak(format!(
+                    "原文块 {}..{}：材料已移除，记录不再处理",
+                    chunk.start, chunk.end
+                ));
+                continue;
+            };
+            ui.push_id(
+                ("writing_chunk", &chunk.source_id, chunk.start, chunk.end),
+                |ui| match chunk.status {
+                    ChunkStatus::Failed => {
+                        ui.colored_label(
+                            theme::warn(),
+                            format!(
+                                "《{}》原文 {}..{}：{}",
+                                source.title,
+                                chunk.start,
+                                chunk.end,
+                                chunk.error.as_deref().unwrap_or("此块未能成功处理，可重试")
+                            ),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("重试此块").clicked() {
+                                action = Some(Action::RetryChunk(writing::ChunkRef {
+                                    source_id: chunk.source_id.clone(),
+                                    section_id: chunk.section_id.clone(),
+                                    role,
+                                    start: chunk.start,
+                                    end: chunk.end,
+                                }));
+                            }
+                            if role == SourceRole::Content
+                                && ui.button("人工确认无相关内容").clicked()
+                            {
+                                skip = Some((source.clone(), chunk.clone()));
+                            }
+                        });
+                    }
+                    ChunkStatus::SkippedByUser => {
+                        ui.label(format!(
+                            "《{}》原文 {}..{}：人工跳过（计入覆盖，不是模型判定）",
+                            source.title, chunk.start, chunk.end
+                        ));
+                        if ui.button("撤销人工跳过").clicked() {
+                            unskip = Some((source.clone(), chunk.clone()));
+                        }
+                    }
+                    _ => {}
+                },
+            );
+        }
+        if let Some((source, chunk)) = skip {
+            self.doc.writing.task.mark_chunk_skipped(
+                &source,
+                chunk.section_id.as_deref(),
+                &chunk.query,
+                chunk.start,
+                chunk.end,
+            );
+            self.doc.writing.changed();
+        }
+        if let Some((source, chunk)) = unskip {
+            self.doc.writing.task.unskip_chunk(
+                &source,
+                chunk.section_id.as_deref(),
+                &chunk.query,
+                chunk.start,
+                chunk.end,
+            );
+            self.doc.writing.changed();
+        }
+        action
     }
 
     pub(super) fn writing_outline(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
@@ -391,7 +531,7 @@ impl DraftPage<'_> {
         ui.separator();
     }
 
-    pub(super) fn writing_collection(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn writing_collection(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
         ui.heading("围绕每一节，重新读原始材料");
         self.writing_section_tabs(ui);
         let Some(section) = self.doc.writing.task.sections.get(self.doc.writing.section) else {
@@ -416,7 +556,10 @@ impl DraftPage<'_> {
             } else {
                 done as f32 / coverage.total as f32
             })
-            .text(format!("已处理 {done} / {} 块原文", coverage.total)),
+            .text(format!(
+                "已处理 {done} / {} 块原文（人工跳过 {}，失败 {}）",
+                coverage.total, coverage.skipped, coverage.failed
+            )),
         );
         for source in self
             .doc
@@ -441,17 +584,8 @@ impl DraftPage<'_> {
                 .count();
             ui.label(format!("《{}》已处理 {count} 块", source.title));
         }
-        for chunk in progress
-            .iter()
-            .filter(|chunk| chunk.status == ChunkStatus::Failed)
-        {
-            ui.colored_label(
-                theme::warn(),
-                chunk
-                    .error
-                    .as_deref()
-                    .unwrap_or("此块未能成功提取，接着跑可重试"),
-            );
+        if let Some(next) = self.writing_chunk_actions(ui, SourceRole::Content, Some(&section.id)) {
+            *action = Some(next);
         }
         ui.separator();
         let cards: Vec<_> = self
@@ -522,7 +656,93 @@ impl DraftPage<'_> {
             ));
         }
         ui.weak("人工修改会保留；整批续写不会覆盖人工改过或已锁定的章节。重写只针对当前节。");
+        let index = self.doc.writing.section;
+        if self
+            .doc
+            .writing
+            .task
+            .sections
+            .get(index)
+            .is_some_and(|section| {
+                section.advisory_suggestion.is_some() || !section.advisory_parts.is_empty()
+            })
+        {
+            self.writing_advisory(ui, index);
+        }
         self.writing_section_history(ui);
+    }
+
+    /// 锁定或人工稿的统稿建议：单独展示，采纳与否由用户决定，正文在采纳前不动。
+    fn writing_advisories(&mut self, ui: &mut egui::Ui) {
+        let indexes: Vec<usize> = self
+            .doc
+            .writing
+            .task
+            .sections
+            .iter()
+            .enumerate()
+            .filter(|(_, section)| section.advisory_suggestion.is_some())
+            .map(|(index, _)| index)
+            .collect();
+        if indexes.is_empty() {
+            return;
+        }
+        ui.add_space(8.0);
+        ui.strong("锁定与人工稿的统稿建议（不覆盖正文，采纳由你决定）");
+        for index in indexes {
+            self.writing_advisory(ui, index);
+        }
+    }
+
+    fn writing_advisory(&mut self, ui: &mut egui::Ui, index: usize) {
+        let Some(section) = self.doc.writing.task.sections.get(index) else {
+            return;
+        };
+        let title = section.title.clone();
+        let Some(advice) = section.advisory_suggestion.clone() else {
+            return;
+        };
+        let mut adopt = false;
+        let mut ignore = false;
+        ui.push_id(("writing_advisory", index), |ui| {
+            egui::Frame::new()
+                .fill(theme::warn_soft())
+                .corner_radius(6)
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(&title);
+                        if ui.button("采纳到本节").clicked() {
+                            adopt = true;
+                        }
+                        if ui.button("忽略").clicked() {
+                            ignore = true;
+                        }
+                    });
+                    egui::CollapsingHeader::new("原稿 / 统稿建议对照")
+                        .id_salt(("writing_advisory_body", index))
+                        .show(ui, |ui| {
+                            ui.label("统稿建议：");
+                            ui.label(&advice);
+                        });
+                    ui.weak("正文仍是原稿；采纳后原稿进入本节历史稿，正文换成建议并仍算人工稿。");
+                });
+        });
+        if adopt {
+            self.accept_advisory(index);
+        } else if ignore {
+            if let Some(section) = self.doc.writing.task.sections.get_mut(index) {
+                section.advisory_suggestion = None;
+                section.advisory_parts.clear();
+            }
+            self.doc.writing.changed();
+        }
+    }
+
+    fn accept_advisory(&mut self, index: usize) {
+        if self.doc.writing.task.accept_advisory(index) {
+            self.doc.writing.changed();
+        }
     }
 
     pub(super) fn writing_review(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
@@ -556,6 +776,7 @@ impl DraftPage<'_> {
                 ui.label(&self.doc.writing.task.review_notes);
             });
         }
+        self.writing_advisories(ui);
         let problems = self.writing_delivery_issues();
         for problem in &problems {
             ui.colored_label(theme::warn(), problem);

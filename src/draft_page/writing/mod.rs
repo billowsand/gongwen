@@ -428,6 +428,11 @@ impl DraftPage<'_> {
     pub(crate) fn writing_ui(&mut self, ui: &mut egui::Ui) {
         let mut action = None;
         let editable = !self.doc.read_only() && !self.doc.writing.running;
+        // 文种在外部表单里改了：立刻按新文种收窄失效、更新默认写法，不必等用户点运行。
+        if !self.doc.writing.running && self.doc.writing.task.kind != self.doc.draft.kind {
+            self.doc.writing.task.sync_kind(self.doc.draft.kind);
+            self.doc.writing.changed();
+        }
         let stage = self.doc.writing.task.stage;
         ui.horizontal_wrapped(|ui| {
             for next in Stage::ALL {
@@ -504,9 +509,9 @@ impl DraftPage<'_> {
                 }
                 ui.add_enabled_ui(editable, |ui| match stage {
                     Stage::Prepare => self.writing_prepare(ui),
-                    Stage::Extract => self.writing_artifacts(ui),
+                    Stage::Extract => self.writing_artifacts(ui, &mut action),
                     Stage::Outline => self.writing_outline(ui, &mut action),
-                    Stage::Collect => self.writing_collection(ui),
+                    Stage::Collect => self.writing_collection(ui, &mut action),
                     Stage::Write => self.writing_sections(ui, &mut action),
                     Stage::Review => self.writing_review(ui, &mut action),
                 });
@@ -540,11 +545,8 @@ impl DraftPage<'_> {
             self.doc.writing.task.error = Some("正在为本篇稿件保存身份，请稍后继续".into());
             return;
         };
-        if self.doc.writing.task.kind != self.doc.draft.kind {
-            self.doc.writing.task.kind = self.doc.draft.kind;
-            // 分节备料的指纹含文种，换文种后各节自然待重新备料，已读的主题材料照常复用。
-            self.doc.writing.task.outline_changed();
-        }
+        // 入口在界面上每帧也会同步文种；这里再收敛一次，防止启动瞬间外部表单刚改过。
+        self.doc.writing.task.sync_kind(self.doc.draft.kind);
         match self
             .doc
             .writing
