@@ -161,6 +161,7 @@ fn direction_of(kind: TemplateKind) -> Direction {
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => Direction::Upward,
         TemplateKind::PlainDocument
         | TemplateKind::MeetingAgenda
+        | TemplateKind::MeetingMinutes
         | TemplateKind::ResearchReport => Direction::Unknown,
     }
 }
@@ -255,6 +256,9 @@ pub fn kind_rules(kind: TemplateKind) -> &'static str {
 7. 时间、地点或参加人员未在“锁定元数据”单独填写时，必须从“用户素材与写作要求”中提取并做有限归纳：可将“明天下午2点30分”和“3C会议室”合并为标准时间地点，可将明确出现的主持人、汇报人、参会单位及参会范围归入参加人员；不得添加素材中没有出现的人名、单位、职务或参会范围。
 8. 素材只能支持部分信息时，保留能够确认的部分，其余原位标记“【待核实：会议时间/会议地点/参加人员】”；不得因为元数据为空而输出“无”“未提供”或自行编造。"#
         }
+        TemplateKind::MeetingMinutes => {
+            r#"文种为会议纪要。纪要如实记载会议主要情况和议定事项，不写会议之外的内容。正文首段概述会议六要素：时间、地点、主持人、出席范围和议题，取锁定元数据与素材中能确认的部分，不得编造。其后按“会议听取了……”“会议认为，……”“会议指出，……”“会议要求，……”“会议明确，……”“会议决定，……”分段，每段以这类主语引领，按素材实际取用，不必每样都写。段内枚举使用“一是……。二是……。三是……。”，每项先用一句话概括并以句号收住，再展开说明；不得使用 Markdown 项目符号。议题较多时可用“## 标题”按议题分节，程序自动编为“一、二、三”，标题文本不要手写编号。纪要标志、编号、出席列席请假名单、分送抄送与印发版记由程序排版，正文不写落款、日期和名单。"#
+        }
         TemplateKind::WhitePaper => {
             r#"文种为白头件（内部呈批件）。结构遵循“依据与概述—前期工作情况—下步工作建议—结语”；大节用“## 标题”，程序自动编为“一、二、三”，标题文本不要手写编号（不写“一、”“（一）”“1.”等，程序按层级自动编号）；段内枚举使用“一是、二是、三是”，不得使用 Markdown 项目符号。向上请示的，结语用“妥否，请指示。”；实为报告的，按报告写法收束，不加请示结语。"#
         }
@@ -297,6 +301,18 @@ pub fn build_draft_prompt(
     // 模型再写一遍就会重复；公函仅在素材明确提供附件全文时追加附件区段。
     let scope = match input.kind {
         TemplateKind::MeetingAgenda => String::new(),
+        TemplateKind::MeetingMinutes => format!(
+            r#"
+
+【输出范围：可选标题与正文】
+纪要标志、编号、名单和版记由本程序按会议纪要格式自动排版。请使用以下结构：
+# 标题（只有专题会议纪要需要单列标题时才写，否则省略这一行）
+<!-- [正文] -->
+正文自然段，以及按议题分节时的“## 一级标题”。
+以下内容一概不得出现在 Markdown 中，写了就是重复：{forbidden}。
+不要输出版记横线、分隔线、页码或任何版式符号，也不要在正文末尾另起一行写单位名称或日期。"#,
+            forbidden = "密级和保密期限、纪要标志（红头）、纪要编号、出席列席请假名单、分送、抄送、印发机关、印发日期、落款"
+        ),
         TemplateKind::OfficialLetter => format!(
             r#"
 
@@ -477,6 +493,18 @@ pub fn build_draft_prompt(
         display.abbr(&input.profile.responsible_unit)
     };
     let leaders_display = display.reporting_leaders(&input.profile.reporting_leaders);
+    // 会议纪要另有列席、请假与纪要名称：名单由程序排，告诉模型只为首段概述会议
+    // 范围时取用，不另起名单。
+    let minutes_meta = if input.kind == TemplateKind::MeetingMinutes {
+        format!(
+            "\n- 列席人员：{}\n- 请假人员：{}\n- 纪要名称：{}",
+            value_or_none(&input.minutes.nonvoting),
+            value_or_none(&input.minutes.absent),
+            crate::export::minutes::minutes_heading(input, &display),
+        )
+    } else {
+        String::new()
+    };
 
     format!(
         r#"请依据下列信息起草{kind}。
@@ -497,7 +525,7 @@ pub fn build_draft_prompt(
 - 成文日期：{date}
 - 会议时间：{meeting_time}
 - 会议地点：{meeting_location}
-- 参加人员：{attendees}
+- 参加人员：{attendees}{minutes_meta}
 - 承办单位：{responsible}
 - 联系人：{contact}
 - 联系电话：{phone}
@@ -534,6 +562,7 @@ pub fn build_draft_prompt(
         meeting_time = value_or_infer(&input.meeting_time, "会议时间"),
         meeting_location = value_or_infer(&input.profile.meeting_location, "会议地点"),
         attendees = value_or_infer(&input.attendees, "参加人员"),
+        minutes_meta = minutes_meta,
         responsible = value_or_none(&responsible_display),
         signing = value_or_none(&input.profile.signing_unit),
         document_number = value_or_none(&if input.kind.has_document_number() {
@@ -614,6 +643,9 @@ fn kind_structure_rules(kind: TemplateKind) -> &'static str {
         TemplateKind::RedHeadApproval => {
             r#"正文业务结构与白头件一致；大节用“## 标题”（程序自动编为“一、二、三”，标题不手写编号），段内枚举使用“一是、二是、三是”，不得使用 Markdown 项目符号；向上请示的结语为“妥否，请指示。”，实为报告的不加请示结语。
 正文一级标题使用“## 标题”、二级标题使用“### 标题”，标题文本不要手写编号（不写“一、”“（一）”“1.”等，程序按层级自动编号）；正文区段用“<!-- [正文] -->”标记；有附件内容时，每份附件前重复独占一行的“<!-- [附件] -->”，下一行用“# 附件正式标题”；附件内部标题与正文使用相同层级，附件编号和附件内标题编号都由程序生成，不要手写。不得输出批示框、发文字号、承办信息或落款。"#
+        }
+        TemplateKind::MeetingMinutes => {
+            r#"会议纪要正文首段概述会议六要素，其后以“会议认为”“会议指出”“会议要求”“会议明确”等引领分段；段内枚举用“一是……。二是……。”；议题较多时用“## 标题”分节，标题不手写编号。可选的“# 标题”只在专题纪要时保留；不得输出纪要标志、编号、名单、分送抄送、印发版记或落款。"#
         }
         TemplateKind::MeetingAgenda => {
             r#"严格保持会议议程骨架：第一行一个“# 标题”；“一、时间地点”“二、参加人员”“三、研讨内容”各占一行；议程事项从“1.”连续编号。"#
@@ -966,6 +998,19 @@ const RECORD_PREFIXES: [&str; 6] = [
     "电话：",
 ];
 
+/// 会议纪要的名单与版记由程序排，模型照抄出来的这几行整行剔除。只对会议纪要生效：
+/// 别的文种正文里以「出席：」开头的句子是正文。
+const MINUTES_PREFIXES: [&str; 8] = [
+    "出席：",
+    "出席:",
+    "列席：",
+    "列席:",
+    "请假：",
+    "请假:",
+    "分送：",
+    "分送:",
+];
+
 /// 剔除模型重复输出的版式要素：密级、文号、主送抬头、抄送、版记、落款和成文日期。
 /// 只删除与锁定元数据完全对应的整行，正文一律保留。
 fn strip_metadata_echoes(input: &DraftInput, generated: &str) -> String {
@@ -1000,6 +1045,19 @@ fn strip_metadata_echoes(input: &DraftInput, generated: &str) -> String {
         )
     });
 
+    // 会议纪要：纪要标志（含写成 `# ` 标题的）、编号与「……印发」行也是程序排的。
+    let minutes = input.kind == TemplateKind::MeetingMinutes;
+    let minutes_heading = if input.minutes.heading.trim().is_empty() {
+        format!("{}会议纪要", profile.issuing_unit.trim())
+    } else {
+        input.minutes.heading.trim().to_string()
+    };
+    let minutes_number = format!(
+        "〔{}〕{}号",
+        input.document_year(),
+        profile.document_number.trim()
+    );
+
     let mut kept: Vec<String> = Vec::new();
     for raw in generated.lines() {
         let line = raw.trim();
@@ -1028,6 +1086,18 @@ fn strip_metadata_echoes(input: &DraftInput, generated: &str) -> String {
         }
         if has_security && cleaned == security {
             continue;
+        }
+        if minutes {
+            let bare = cleaned.trim_start_matches('#').trim();
+            let echoed = MINUTES_PREFIXES
+                .iter()
+                .any(|prefix| cleaned.starts_with(prefix))
+                || bare == minutes_heading
+                || bare == minutes_number
+                || (cleaned.ends_with("印发") && cleaned.contains('年'));
+            if echoed {
+                continue;
+            }
         }
         if document_number
             .as_ref()
@@ -1598,6 +1668,44 @@ mod tests {
     }
 
     #[test]
+    fn meeting_minutes_prompt_locks_roster_and_record_out_of_the_body() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::MeetingMinutes;
+        input.profile.issuing_unit = "某某市民政局".into();
+        input.attendees = "王局长、李副局长".into();
+        input.minutes.nonvoting = "周九".into();
+        let prompt = build_draft_prompt(&input, &[], "素材", "");
+        assert!(prompt.contains("文种为会议纪要"));
+        assert!(prompt.contains("会议认为"));
+        assert!(prompt.contains("一是……。二是……。"));
+        assert!(prompt.contains("【输出范围：可选标题与正文】"));
+        assert!(prompt.contains("出席列席请假名单、分送、抄送、印发机关、印发日期"));
+        assert!(prompt.contains("- 列席人员：周九"));
+        assert!(prompt.contains("- 请假人员：（无/未提供）"));
+        assert!(prompt.contains("- 纪要名称：某某市民政局会议纪要"));
+        // 纪要也走语言层行文规范。
+        assert!(prompt.contains(STYLE_GUIDE_HEADING));
+    }
+
+    #[test]
+    fn meeting_minutes_output_drops_echoed_roster_and_record() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::MeetingMinutes;
+        input.profile.issuing_unit = "某某市民政局".into();
+        input.profile.document_year = "2026".into();
+        input.profile.document_number = "3".into();
+        let generated = "# 某某市民政局会议纪要\n\n〔2026〕3号\n\n<!-- [正文] -->\n\n\
+                         会议认为，一年来工作有成效。\n\n出席：王局长、李副局长\n\n\
+                         分送：局领导\n\n某某市民政局办公室　2026年9月30日印发";
+        let cleaned = normalize_generated_markdown(&input, generated);
+        assert_eq!(cleaned, "<!-- [正文] -->\n\n会议认为，一年来工作有成效。");
+        // 别的文种不动以「出席：」开头的正文。
+        input.kind = TemplateKind::PlainDocument;
+        let plain = normalize_generated_markdown(&input, "# 通知\n\n出席：全体干部职工。");
+        assert!(plain.contains("出席：全体干部职工。"));
+    }
+
+    #[test]
     fn meeting_agenda_prompt_contains_literal_schema() {
         let mut input = DraftInput::default();
         input.kind = TemplateKind::MeetingAgenda;
@@ -1670,6 +1778,16 @@ mod tests {
                 title: "平台建设工作专题会",
                 material: "明天下午2点半开个专题会，研究公共数据平台建设。张三主持，\
                     信息中心汇报建设进度，讨论数据归集方案，部署下一步工作。",
+            },
+            LiveSample {
+                name: "会议纪要：局长办公会，不得抄名单与版记",
+                kind: TemplateKind::MeetingMinutes,
+                title: "局长办公会议纪要",
+                material: "10月20日上午局长办公会，王局长主持，在局三楼会议室。听取养老服务处\
+                    关于社区养老服务设施改造的汇报。会议认为工作推进有力：摸清了底数，排查站点312个；\
+                    落实了经费860万元。会议要求各区倒排工期，局里每月通报进度，10月起第三方验收。\
+                    会议明确由养老服务处牵头制定验收办法，11月15日前报局党组审定。\
+                    出席：王局长、李副局长、张三；列席：周九；分送局领导。",
             },
             LiveSample {
                 name: "白头件：请示，不得用列表",
@@ -1822,6 +1940,23 @@ mod tests {
                     if in_body(line, seen_attachment) && list_item.is_match(line) {
                         issues.push(format!("呈批件正文用了列表：{line}"));
                     }
+                }
+            }
+            TemplateKind::MeetingMinutes => {
+                for line in markdown.lines() {
+                    let line = line.trim();
+                    if in_body(line, seen_attachment) && list_item.is_match(line) {
+                        issues.push(format!("会议纪要正文用了列表：{line}"));
+                    }
+                    if MINUTES_PREFIXES
+                        .iter()
+                        .any(|prefix| line.starts_with(prefix))
+                    {
+                        issues.push(format!("名单或版记写进正文：{line}"));
+                    }
+                }
+                if !markdown.contains("会议") {
+                    issues.push("会议纪要正文没有「会议认为 / 要求……」这类引领".into());
                 }
             }
             TemplateKind::ResearchReport => {

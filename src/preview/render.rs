@@ -537,7 +537,8 @@ pub(crate) fn official_preview(
         input.landscape(),
     )
     .with_bold_style(ui.ctx())
-    .with_line_numbers(line_numbers);
+    .with_line_numbers(line_numbers)
+    .with_enumeration_kai(input.kind == TemplateKind::MeetingMinutes);
     // 六个文种的正文都走 export::latex::official_letter_sections_to_tex，标题编号
     // 跟随设置里的编号样式；紧缩风格跟随模板配置。
     let numbered = true;
@@ -569,11 +570,16 @@ pub(crate) fn official_preview(
         .collect::<Vec<_>>();
     let names = &parsed.names;
     let compact_headings = parsed.compact_headings.clone();
-    // 标题取正文首个 `# `，缺省回落表单里的标题提示，与导出器一致。
-    let title = parsed
-        .title
-        .clone()
-        .unwrap_or_else(|| (export::plain_text(input.title_hint.trim()), 0..0));
+    // 标题取正文首个 `# `，缺省回落表单里的标题提示，与导出器一致；会议纪要的
+    // 标题可选，正文没写就不排。
+    let minutes = input.kind == TemplateKind::MeetingMinutes;
+    let title = parsed.title.clone().unwrap_or_else(|| {
+        if minutes {
+            (String::new(), 0..0)
+        } else {
+            (export::plain_text(input.title_hint.trim()), 0..0)
+        }
+    });
     let mut clicked = None;
     let mut counters = [0usize; 4];
     // 版记排在全文最后：有附件时跟在最后一份附件后面，没有附件时跟在落款后面。
@@ -623,8 +629,10 @@ pub(crate) fn official_preview(
                 },
             );
         }
-        // 类里标题与主送（或正文）之间固定空一行。
-        ui.add_space(metrics.line);
+        // 类里标题与主送（或正文）之间固定空一行；会议纪要没有标题时版头已留过。
+        if !(minutes && title.is_empty()) {
+            ui.add_space(metrics.line);
+        }
         addressee_block(ui, &metrics, input, display, elements);
 
         body_blocks(
@@ -657,6 +665,9 @@ pub(crate) fn official_preview(
                 };
                 body_block(ui, &metrics, &label, true);
             }
+        }
+        if minutes {
+            super::minutes::roster_block(ui, &metrics, input);
         }
         signature_block(ui, &metrics, input, display, elements);
         if record_on_body {

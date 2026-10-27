@@ -19,6 +19,7 @@ pub(crate) mod marks;
 mod math_flow;
 mod math_render;
 mod memo;
+mod minutes;
 mod paper;
 mod pdf_figure;
 mod phone_record;
@@ -183,6 +184,8 @@ pub(crate) struct Metrics {
     /// 西文数字为 Termes 的研究报告字体族。
     research_fonts: bool,
     terminal: bool,
+    /// 会议纪要正文段里的「一是……」排三号楷体（判定见 `export::minutes`）。
+    enumeration_kai: bool,
     /// 本帧纸面上每一条「改得动的行」的位置，画完纸再统一标到页边。
     /// 版面是一路画下来的，行的位置只有画到那一步才知道，所以这里用内部可变性：
     /// 各版式部件拿到的都是 `&Metrics`，为了记一行而把整条链路改成 `&mut` 不值得。
@@ -278,6 +281,7 @@ impl Metrics {
             table_line_pt: TABLE_LINE_PT,
             math: false,
             research_fonts: false,
+            enumeration_kai: false,
             terminal: false,
             gutter: RefCell::default(),
             tints: RefCell::default(),
@@ -359,6 +363,7 @@ impl Metrics {
             table_line_pt: RESEARCH_TABLE_LINE_PT,
             math: true,
             research_fonts: true,
+            enumeration_kai: false,
             terminal: false,
             gutter: RefCell::default(),
             tints: RefCell::default(),
@@ -368,6 +373,11 @@ impl Metrics {
     /// 开着行号排版：版面照旧，只是每画一条来自源码的行就记一笔。
     fn with_line_numbers(self, on: bool) -> Self {
         self.gutter.borrow_mut().enable(on);
+        self
+    }
+
+    fn with_enumeration_kai(mut self, on: bool) -> Self {
+        self.enumeration_kai = on;
         self
     }
 
@@ -803,6 +813,86 @@ mod tests {
                 .any(|rect| (rect.height() - mm(297.0)).abs() < mm(4.0)),
             "短稿纸张应为 A4，不能被表格撑成两倍高度"
         );
+    }
+
+    /// 会议纪要：版头、正文、名单、版记依次排下来；没写 `# 标题` 不排标题提示，
+    /// 也没有落款。
+    #[test]
+    fn minutes_preview_draws_header_roster_and_record_in_order() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let mut input = draft(TemplateKind::MeetingMinutes);
+        input.title_hint = "不该排出来的标题提示".into();
+        input.profile.document_year = "2026".into();
+        input.profile.document_number = "3".into();
+        input.profile.copies_to = "星海省财政厅".into();
+        input.attendees = "王建国、李明".into();
+        input.minutes.absent = "星海省财政厅刘处长".into();
+        input.minutes.distribute = "厅领导".into();
+        input.minutes.printing_unit = "星海省教育厅办公室".into();
+        let output = crate::test_support::run_ui(
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 4000.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                official_preview(
+                    ui,
+                    &input,
+                    &UnitDisplay::new(&vocabulary()),
+                    "<!-- [正文] -->\n\n会议认为，工作有成效。一是摸清了底数。",
+                    PreviewScale::zoom(Some(1.0)),
+                    None,
+                    false,
+                    &crate::models::NumberingConfig::default(),
+                    false,
+                    &crate::visual_diff::ElementMarks::default(),
+                );
+            },
+        );
+        let text = text_of(&output);
+        assert!(!text.contains("不该排出来的标题提示"), "{text}");
+        let order = [
+            "01",
+            "秘密★10年",
+            "星海省教育厅会议纪要",
+            "〔2026〕3号",
+            "会议认为",
+            "出席：",
+            "李\u{3000}明",
+            "星海省财政厅刘处长",
+            "分送：",
+            "（共印4份）",
+            "星海省教育厅办公室",
+            "2026年8月7日印发",
+        ];
+        let mut last = 0;
+        for needle in order {
+            let found = text[last..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("预览缺少或顺序不对：{needle}\n{text}"));
+            last += found + needle.len();
+        }
+        // 「一是……」那一截换楷体。
+        let kai_family = Metrics::new(1000.0, Some(1.0))
+            .font(theme::FONT_KAITI, BODY_PT)
+            .family;
+        let kai = output.shapes.iter().any(|clipped| match &clipped.shape {
+            egui::epaint::Shape::Text(shape) => {
+                let job = &shape.galley.job;
+                job.sections.iter().any(|section| {
+                    section.format.font_id.family == kai_family
+                        && job.text[section.byte_range.start.0..section.byte_range.end.0]
+                            == *"一是摸清了底数"
+                })
+            }
+            _ => false,
+        });
+        assert!(kai, "「一是摸清了底数」应排楷体");
     }
 
     #[test]

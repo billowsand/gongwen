@@ -20,6 +20,7 @@ use std::path::Path;
 
 mod content;
 mod header;
+mod minutes;
 mod paragraphs;
 mod phone_record;
 pub(crate) mod record;
@@ -194,13 +195,14 @@ pub fn write_docx_with_numbering(
     }
 
     let (blocks, block_lines) = parse_markdown_with_lines_with_numbering(markdown, numbering);
-    let title = blocks
-        .iter()
-        .find_map(|b| match b {
-            MarkdownBlock::Title(t) => Some(t.as_str()),
-            _ => None,
-        })
-        .unwrap_or(input.title_hint.as_str());
+    let markdown_title = blocks.iter().find_map(|b| match b {
+        MarkdownBlock::Title(t) => Some(t.as_str()),
+        _ => None,
+    });
+    let title = markdown_title.unwrap_or(input.title_hint.as_str());
+    let minutes = input.kind == TemplateKind::MeetingMinutes;
+    // 会议纪要的标题可选：正文没写 `# 标题` 就不排，红线下直接接正文。
+    let show_title = !minutes || markdown_title.is_some();
 
     // 红头呈批件首页抬头（密级、发文机关、文号）排下来的总高度，用来反推标题
     // 的段前间距，见 RED_APPROVAL_TITLE_TOP_TWIPS。
@@ -371,6 +373,9 @@ pub fn write_docx_with_numbering(
                     + RED_APPROVAL_NUMBER_AFTER_TWIPS;
             }
         }
+        TemplateKind::MeetingMinutes => {
+            doc = minutes::add_header(doc, input, display, elements);
+        }
         TemplateKind::MeetingAgenda | TemplateKind::ResearchReport | TemplateKind::PhoneRecord => {
             // 这三个文种各有各的 Word 通道（前面已经分流），走到这里说明分流
             // 的判断与这里的模板分支对不上：报出来，不让程序崩在导出中途。
@@ -416,17 +421,19 @@ pub fn write_docx_with_numbering(
     let red_body = crate::export::red_approval_body_metrics(&blocks);
     let mut red_float_break_pending = input.kind == TemplateKind::RedHeadApproval
         && red_body.float_needs_page_break(red_wrap_lines);
-    doc = doc.add_paragraph(
-        title_paragraph
-            .line_spacing(
-                LineSpacing::new()
-                    .before(title_before)
-                    .after(BODY_LINE_TWIPS)
-                    .line(BODY_LINE_TWIPS as i32)
-                    .line_rule(LineSpacingType::Exact),
-            )
-            .keep_next(true),
-    );
+    if show_title {
+        doc = doc.add_paragraph(
+            title_paragraph
+                .line_spacing(
+                    LineSpacing::new()
+                        .before(title_before)
+                        .after(BODY_LINE_TWIPS)
+                        .line(BODY_LINE_TWIPS as i32)
+                        .line_rule(LineSpacingType::Exact),
+                )
+                .keep_next(true),
+        );
+    }
 
     // 主送机关位的显示值（函稿主送 / 白头件呈报领导）与预览、TeX 同源。
     let addressee = crate::export::element_display::addressee_display(input, display);
@@ -440,7 +447,12 @@ pub fn write_docx_with_numbering(
     }
 
     let mut attachment_blocks = Vec::new();
-    if input.kind.uses_letter_layout() || input.kind == TemplateKind::WhitePaper {
+    if input.kind.uses_letter_layout()
+        || matches!(
+            input.kind,
+            TemplateKind::WhitePaper | TemplateKind::MeetingMinutes
+        )
+    {
         let mut in_attachment = false;
         let mut seen_document_title = false;
         let mut counters = [0usize; 4];
@@ -502,14 +514,25 @@ pub fn write_docx_with_numbering(
                                 ),
                             );
                         }
-                        doc = add_official_content_block(
-                            doc,
-                            block,
-                            &mut counters,
-                            numbering,
-                            bold,
-                            content_width,
-                        );
+                        doc = match block {
+                            // 会议纪要正文段多一道「一是」楷体。
+                            MarkdownBlock::Paragraph(text)
+                                if minutes
+                                    && !text.trim().is_empty()
+                                    && !text.contains("<div")
+                                    && !text.contains("</div") =>
+                            {
+                                doc.add_paragraph(minutes::body_paragraph(text, bold))
+                            }
+                            _ => add_official_content_block(
+                                doc,
+                                block,
+                                &mut counters,
+                                numbering,
+                                bold,
+                                content_width,
+                            ),
+                        };
                     }
                 }
             }
@@ -572,11 +595,20 @@ pub fn write_docx_with_numbering(
     }
 
     // 附件概要：正文结束后、落款之前列出附件名称（红头呈批件同样支持）。
-    if input.kind.uses_letter_layout() || input.kind == TemplateKind::WhitePaper {
+    if input.kind.uses_letter_layout()
+        || matches!(
+            input.kind,
+            TemplateKind::WhitePaper | TemplateKind::MeetingMinutes
+        )
+    {
         let names = attachment_names(&blocks);
         if !names.is_empty() {
             doc = add_attachment_summary(doc, &names, bold);
         }
+    }
+    // 会议纪要：正文（及附件说明）之后空一行排名单；没有落款。
+    if minutes {
+        doc = minutes::add_roster(doc, input);
     }
 
     if crate::models::is_joint_signature(input) {
@@ -722,6 +754,9 @@ pub fn write_docx_with_numbering(
 
     if input.kind == TemplateKind::OfficialLetter {
         doc = add_footer_record(doc, input, display, elements);
+    }
+    if minutes {
+        doc = minutes::add_record(doc, input, display, elements);
     }
 
     let file =

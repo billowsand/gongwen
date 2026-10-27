@@ -82,6 +82,8 @@ pub struct DraftInput {
     pub research: ResearchMetadata,
     #[serde(skip_serializing_if = "PhoneRecordMetadata::is_empty")]
     pub phone_record: PhoneRecordMetadata,
+    #[serde(skip_serializing_if = "MinutesMetadata::is_empty")]
+    pub minutes: MinutesMetadata,
 }
 
 /// 接听电话的原始记录要素；空值不写入旧稿快照，保持版本校验值兼容。
@@ -97,6 +99,32 @@ pub struct PhoneRecordMetadata {
 }
 
 impl PhoneRecordMetadata {
+    pub(crate) fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// 会议纪要独有的要素；空值不写入旧稿快照，保持版本校验值兼容。
+///
+/// 会议时间、地点、出席、抄送、编号年份与序号、印发日期复用 `DraftInput` 与
+/// `TemplateProfile` 里的已有字段，这里只放别的文种没有的东西。人名单位一律
+/// 顿号分隔，与 `attendees`、`copies_to` 同一写法。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MinutesMetadata {
+    /// 纪要标志（红头文字）。空时取「发文单位＋会议纪要」。
+    pub heading: String,
+    /// 列席人员。
+    pub nonvoting: String,
+    /// 请假人员。
+    pub absent: String,
+    /// 版记「分送」的人名。
+    pub distribute: String,
+    /// 版记印发机关。空时取发文单位。
+    pub printing_unit: String,
+}
+
+impl MinutesMetadata {
     pub(crate) fn is_empty(&self) -> bool {
         self == &Self::default()
     }
@@ -210,6 +238,7 @@ impl Default for DraftInput {
             profile: TemplateProfile::default(),
             research: ResearchMetadata::default(),
             phone_record: PhoneRecordMetadata::default(),
+            minutes: MinutesMetadata::default(),
         }
     }
 }
@@ -236,6 +265,16 @@ impl DraftInput {
                 self.profile.security_level.trim(),
                 self.profile.security_period.trim(),
             )
+        }
+    }
+
+    /// 会议纪要版记的印发机关：表单填了就用，否则取发文单位。
+    pub(crate) fn minutes_printing_unit(&self) -> &str {
+        let explicit = self.minutes.printing_unit.trim();
+        if explicit.is_empty() {
+            self.profile.issuing_unit.trim()
+        } else {
+            explicit
         }
     }
 

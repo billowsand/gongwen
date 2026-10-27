@@ -37,6 +37,7 @@ pub(crate) fn addressee_display(input: &DraftInput, display: &UnitDisplay) -> St
         TemplateKind::PhoneRecord
         | TemplateKind::PlainDocument
         | TemplateKind::MeetingAgenda
+        | TemplateKind::MeetingMinutes
         | TemplateKind::ResearchReport => String::new(),
     };
     text.trim().trim_end_matches('：').to_string()

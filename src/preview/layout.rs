@@ -1231,25 +1231,42 @@ pub(crate) fn append_numbered_inline(
 ) -> Vec<Range<usize>> {
     let mut bold_ranges = Vec::new();
     let mut previous = export::RedlineKind::Same;
-    for piece in export::numbered_inline_segments(text, numbers) {
+    let pieces = export::numbered_inline_segments(text, numbers);
+    // 会议纪要：「一是……」那一截换三号楷体，切点与 PDF、Word 同源。
+    let spans = if metrics.enumeration_kai {
+        let visible: String = pieces
+            .iter()
+            .map(|piece| piece.segment.text.as_str())
+            .collect();
+        export::minutes::enumeration_kai_spans(&visible)
+    } else {
+        Vec::new()
+    };
+    let mut offset = 0;
+    for piece in &pieces {
         let segment = &piece.segment;
-        let font = if segment.parenthesized {
-            metrics.font(theme::FONT_KAITI, PAREN_PT)
-        } else if segment.bold && metrics.dedicated_bold {
-            metrics.body_bold_font()
-        } else {
-            normal.clone()
-        };
-        let range = append_run(
-            job,
-            &segment.text,
-            marks::chunk_gap(metrics, previous, piece.kind),
-            marks::mark_format(text_format(font, metrics.line), piece.kind),
-        );
-        if segment.bold && !segment.parenthesized && !metrics.dedicated_bold {
-            bold_ranges.push(range);
+        for (part, kai) in export::minutes::kai_pieces(&segment.text, offset, &spans) {
+            let font = if segment.parenthesized {
+                metrics.font(theme::FONT_KAITI, PAREN_PT)
+            } else if kai {
+                metrics.font(theme::FONT_KAITI, metrics.body_pt)
+            } else if segment.bold && metrics.dedicated_bold {
+                metrics.body_bold_font()
+            } else {
+                normal.clone()
+            };
+            let range = append_run(
+                job,
+                &part,
+                marks::chunk_gap(metrics, previous, piece.kind),
+                marks::mark_format(text_format(font, metrics.line), piece.kind),
+            );
+            if segment.bold && !segment.parenthesized && !metrics.dedicated_bold {
+                bold_ranges.push(range);
+            }
+            previous = piece.kind;
         }
-        previous = piece.kind;
+        offset += segment.text.chars().count();
     }
     bold_ranges
 }

@@ -5,8 +5,11 @@
 use chrono::Datelike;
 
 use super::body::{attachment_summary, main_title, sections, title_data};
-use super::data::{Closing, Doc, Header, JointRow, Record, RecordRow, Red, Run, Runs};
-use super::runs::{marked_runs, plain_runs, with_cjk_latin_gaps};
+use super::data::{
+    Block, Closing, Doc, Header, JointRow, Minutes, MinutesRecord, Record, RecordRow, Red,
+    RosterRow, Run, Runs, Title,
+};
+use super::runs::{marked_runs, plain_runs, with_cjk_latin_gaps, with_enumeration_kai};
 use crate::export::element_display::{
     addressee_display, copies_to_display, date_display_parts, is_preview_version,
     number_display_parts, signing_unit_display,
@@ -390,6 +393,74 @@ fn red_frame(input: &DraftInput, display: &UnitDisplay, elements: &ElementMarks,
     });
 }
 
+/// 会议纪要：纪要标志、编号、名单与版记。
+fn minutes_frame(
+    input: &DraftInput,
+    display: &UnitDisplay,
+    elements: &ElementMarks,
+    doc: &mut Doc,
+) {
+    let heading = crate::export::minutes::minutes_heading(input, display);
+    // 编号只有年份与序号，没有机关代字；预览版序号留白，与发文字号同一套标注。
+    let (_, year, serial) = number_display_parts(input);
+    let [_, year_mark, serial_mark] = elements.number();
+    let serial_native = if is_preview_version(input) {
+        placeholder()
+    } else {
+        plain_runs(&serial)
+    };
+    let number = concat([
+        vec![Run::text("〔")],
+        element_runs(year_mark, || plain_runs(&year)),
+        vec![Run::text("〕")],
+        element_runs(serial_mark, || serial_native),
+        vec![Run::text("号")],
+    ]);
+    let roster = crate::export::minutes::roster(input)
+        .into_iter()
+        .map(|line| RosterRow {
+            label: line.label,
+            names: line.names,
+            grid: line.grid,
+        })
+        .collect();
+
+    let copies_display = copies_to_display(input, display);
+    let copies_to = if elements.copies_to().changed() {
+        Some(marked_runs(&elements.copies_to().marked()))
+    } else if copies_display.trim().is_empty() {
+        None
+    } else {
+        Some(plain_runs(&copies_display))
+    };
+    let distribute = split_units(&input.minutes.distribute);
+    let copy_numbering = input.profile.number_copies && input.kind.has_copy_numbering();
+    let print_copies = if copy_numbering {
+        crate::export::copy_count(input)
+    } else {
+        u32::try_from(crate::export::automatic_print_copies(input)).unwrap_or(u32::MAX)
+    };
+    let mut printing_date = date_runs(input, elements, false);
+    printing_date.extend(plain_runs("印发"));
+    doc.minutes = Some(Minutes {
+        heading,
+        number,
+        roster,
+        record: MinutesRecord {
+            distribute: (!distribute.is_empty()).then(|| plain_runs(&distribute.join("、"))),
+            copies_to,
+            print_copies,
+            printing_unit: plain_runs(&display.full_name(input.minutes_printing_unit())),
+            printing_date: with_cjk_latin_gaps(printing_date),
+        },
+    });
+    if copy_numbering {
+        doc.copies = (1..=crate::export::copy_count(input))
+            .map(crate::models::format_copy_number)
+            .collect();
+    }
+}
+
 /// 组装一份文档的模板数据。`markdown` 是已经物化过 Mermaid 的正文。
 pub(crate) fn document(
     input: &DraftInput,
@@ -416,6 +487,12 @@ pub(crate) fn document(
         .unwrap_or(input.title_hint.as_str())
         .to_string();
     let red = kind == TemplateKind::RedHeadApproval;
+    let minutes = kind == TemplateKind::MeetingMinutes;
+    // 会议纪要的标题可选：正文没写 `# 标题` 就不排，红线下直接接正文。
+    let untitled_minutes = minutes
+        && !blocks
+            .iter()
+            .any(|block| matches!(block, MarkdownBlock::Title(_)));
     let parts = sections(
         &blocks,
         &lines,
@@ -425,7 +502,12 @@ pub(crate) fn document(
         &numbering,
         input.landscape(),
     );
-    let title = if red {
+    let title = if untitled_minutes {
+        Title {
+            lines: Vec::new(),
+            scale: 1.0,
+        }
+    } else if red {
         title_data(&title_text, title::red_approval_chars_per_line(), |plain| {
             title::compressed_scale_percent_for(
                 plain,
@@ -446,6 +528,7 @@ pub(crate) fn document(
             TemplateKind::WhitePaper => "whitepaper",
             TemplateKind::RedHeadApproval => "redapproval",
             TemplateKind::MeetingAgenda => "agenda",
+            TemplateKind::MeetingMinutes => "minutes",
             TemplateKind::ResearchReport => "plain",
         },
         duplex: input.profile.duplex_printing,
@@ -456,7 +539,21 @@ pub(crate) fn document(
         header: None,
         title,
         recipient: None,
-        body: parts.body,
+        body: if minutes {
+            parts
+                .body
+                .into_iter()
+                .map(|block| match block {
+                    Block::Par { runs, line } => Block::Par {
+                        runs: with_enumeration_kai(runs),
+                        line,
+                    },
+                    other => other,
+                })
+                .collect()
+        } else {
+            parts.body
+        },
         // 会议议程没有附件与附件说明（TeX 路径同样丢弃附件区）。
         summary: if agenda {
             Vec::new()
@@ -472,6 +569,7 @@ pub(crate) fn document(
         record: None,
         copies: Vec::new(),
         red: None,
+        minutes: None,
         phone_record: (kind == TemplateKind::PhoneRecord).then(|| input.phone_record.clone()),
         phone_record_contact: (kind == TemplateKind::PhoneRecord).then(|| RecordRow {
             unit: input.profile.responsible_unit.clone(),
@@ -489,6 +587,7 @@ pub(crate) fn document(
             doc.closing = Some(room_closing(input, display, elements));
         }
         TemplateKind::RedHeadApproval => red_frame(input, display, elements, &mut doc),
+        TemplateKind::MeetingMinutes => minutes_frame(input, display, elements, &mut doc),
         TemplateKind::PhoneRecord
         | TemplateKind::PlainDocument
         | TemplateKind::MeetingAgenda

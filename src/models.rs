@@ -590,6 +590,7 @@ mod tests {
     fn the_copy_number_row_sits_with_the_print_row_for_letters() {
         assert!(TemplateKind::OfficialLetter.uses_letter_layout());
         assert!(TemplateKind::OfficialLetter.has_copy_numbering());
+        assert!(TemplateKind::MeetingMinutes.has_copy_numbering());
         // 其余文种版头没有份号位，不画这一行。
         for kind in [
             TemplateKind::PhoneNotice,
@@ -886,6 +887,7 @@ mod tests {
             },
             research: Default::default(),
             phone_record: Default::default(),
+            minutes: Default::default(),
         };
         let json = serde_json::to_string(&draft).expect("快照应能序列化");
         let back: DraftInput = serde_json::from_str(&json).expect("快照应能反序列化");

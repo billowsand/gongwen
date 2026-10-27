@@ -13,6 +13,12 @@ use crate::visual_diff::ElementMarks;
 use docx_rs::*;
 
 pub(crate) fn automatic_print_copies(input: &DraftInput) -> usize {
+    if input.kind == crate::models::TemplateKind::MeetingMinutes {
+        return minutes_recipients(input)
+            .iter()
+            .map(|(_, value)| split_units(value).len())
+            .sum();
+    }
     let responsible = if is_joint_mode_one(input) {
         &input.profile.joint_responsible_units
     } else {
@@ -21,6 +27,17 @@ pub(crate) fn automatic_print_copies(input: &DraftInput) -> usize {
     split_units(&input.profile.recipient).len()
         + split_units(&input.profile.copies_to).len()
         + split_units(responsible).len()
+}
+
+/// 会议纪要每人每单位各印一份，依次是出席、列席、分送、抄送；份号也按这个顺序编。
+/// 请假的人不在会上，不另印。
+pub(crate) fn minutes_recipients(input: &DraftInput) -> [(&'static str, &str); 4] {
+    [
+        ("出席", input.attendees.as_str()),
+        ("列席", input.minutes.nonvoting.as_str()),
+        ("分送", input.minutes.distribute.as_str()),
+        ("抄送", input.profile.copies_to.as_str()),
+    ]
 }
 
 /// 规格 §3.2：版记是一个带横线的表格——上、下横线粗（1pt），行间横线细（0.5pt），
@@ -99,18 +116,22 @@ pub(crate) fn add_footer_record(
         .set(TableBorder::new(TableBorderPosition::Top).size(14))
         .set(TableBorder::new(TableBorderPosition::Bottom).size(14))
         .set(TableBorder::new(TableBorderPosition::InsideH).size(7));
-    // 版记贴末页版心底：在流里接在内容之后只能碰巧落到页底，所以做成浮动表，
+    // 版记贴末页版心底（`add_record_table`）：在流里接在内容之后只能碰巧落到页底，所以做成浮动表，
     // 底边对齐版心底（与红头呈批件承办区同法）。浮动表锚在其后的段落上，锚段
     // 压到最矮；末页剩余放不下版记时 Word 会连锚段一起挪到下一页底部。
     // 与上方内容至少隔 1cm 由 `w:topFromText` 保证，docx-rs 不写这个属性，
     // 打包前由 `with_record_gap` 补上。
+    add_record_table(doc, Table::new(rows).set_grid(grid).set_borders(borders))
+}
+
+/// 把版记表做成底边贴版心底的浮动表，再接一个压到最矮的锚段。会议纪要的
+/// 版记共用这一段。
+pub(crate) fn add_record_table(doc: Docx, table: Table) -> Docx {
     doc.add_table(
-        Table::new(rows)
-            .set_grid(grid)
+        table
             .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
             .margins(TableCellMargins::new().margin(0, 0, 0, 0))
             .layout(TableLayoutType::Fixed)
-            .set_borders(borders)
             .position(record_position()),
     )
     .add_paragraph(

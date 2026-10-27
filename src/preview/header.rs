@@ -245,6 +245,9 @@ pub(crate) fn header_block(
             security_line(ui, metrics, input, elements.security());
             ui.add_space(metrics.line * WHITE_PAPER_BLANK_LINES);
         }
+        TemplateKind::MeetingMinutes => {
+            crate::preview::minutes::header(ui, metrics, input, display, elements);
+        }
         TemplateKind::MeetingAgenda => {
             security_line(ui, metrics, input, elements.security());
             ui.add_space(metrics.line);
