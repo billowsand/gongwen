@@ -1,7 +1,7 @@
 //! 统稿审阅：逐节原稿 / 统稿建议对照，直接改全文作为次级入口。
 
 use super::*;
-use crate::agent::writing::{Section, SectionStatus};
+use crate::agent::writing::Section;
 
 impl DraftPage<'_> {
     pub(crate) fn writing_review(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
@@ -52,8 +52,21 @@ impl DraftPage<'_> {
             ui.weak("还没有章节，先在提纲页确认提纲。");
             return;
         }
-        let mut adopt_suggestion = None;
-        let mut keep_draft = None;
+        let final_manual = self.doc.writing.task.final_manual;
+        if final_manual {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(theme::warn(), "统稿已人工修改，下面逐节选择不会改动它。");
+                if ui
+                    .button("按逐节选择重新拼全文")
+                    .on_hover_text("当前人工统稿先存入统稿历史，可随时恢复")
+                    .clicked()
+                {
+                    self.doc.writing.task.reassemble_final();
+                    self.doc.writing.changed();
+                }
+            });
+        }
+        let mut choice = None;
         let mut adopt_advisory = None;
         let mut ignore_advisory = None;
         for (index, section) in sections.iter().enumerate() {
@@ -69,19 +82,30 @@ impl DraftPage<'_> {
                     ui.weak(section.status.label());
                 });
                 if let Some(suggestion) = &section.review_suggestion {
-                    let mut use_it = false;
-                    let mut keep = false;
                     self.writing_comparison(ui, &section.markdown, suggestion, index);
+                    let kept = section.review_kept_draft;
                     ui.horizontal_wrapped(|ui| {
-                        use_it = ui.button("采纳建议").clicked();
-                        keep = ui.button("保留原稿").clicked();
+                        ui.weak(if kept {
+                            "全文用：原稿"
+                        } else {
+                            "全文用：统稿建议"
+                        });
+                        // 两个选项互斥且可来回切换，建议不会因为选了原稿而丢失。
+                        if ui
+                            .add(egui::Button::new("采纳建议").selected(!kept))
+                            .clicked()
+                            && kept
+                        {
+                            choice = Some((index, false));
+                        }
+                        if ui
+                            .add(egui::Button::new("保留原稿").selected(kept))
+                            .clicked()
+                            && !kept
+                        {
+                            choice = Some((index, true));
+                        }
                     });
-                    if use_it {
-                        adopt_suggestion = Some(index);
-                    }
-                    if keep {
-                        keep_draft = Some(index);
-                    }
                 } else if let Some(advice) = &section.advisory_suggestion {
                     ui.weak("锁定 / 人工稿只给建议，采纳后写入本节并仍算人工稿。");
                     let mut adopt = false;
@@ -102,21 +126,9 @@ impl DraftPage<'_> {
                 }
             });
         }
-        if let Some(index) = adopt_suggestion {
-            if let Some(section) = self.doc.writing.task.sections.get_mut(index) {
-                section.status = SectionStatus::ReviewReady;
-            }
-            self.doc.writing.task.refresh_final_if_generated();
-            self.doc.writing.changed();
-        }
-        if let Some(index) = keep_draft {
-            if let Some(section) = self.doc.writing.task.sections.get_mut(index) {
-                section.review_suggestion = None;
-                section.status = SectionStatus::Done;
-            }
-            self.doc.writing.task.refresh_final_if_generated();
-            self.doc.writing.task.stale_reason =
-                Some("已保留本节原稿；如需该节建议可重新统稿".into());
+        if let Some((index, keep_draft)) = choice
+            && self.doc.writing.task.choose_review(index, keep_draft)
+        {
             self.doc.writing.changed();
         }
         if let Some(index) = adopt_advisory

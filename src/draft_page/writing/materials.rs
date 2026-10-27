@@ -66,7 +66,7 @@ impl DraftPage<'_> {
                                 text: text.to_string(),
                             });
                         }
-                        let progress = self.doc.writing.task.source_coverage(&id);
+                        let progress = self.doc.writing.source_coverage(&id);
                         let mut line = format!(
                             "{chars} 字 · 已解析 · {} {}/{} 块",
                             if role == SourceRole::Content {

@@ -40,7 +40,7 @@ impl DraftPage<'_> {
                 .map(|source| (source.id.clone(), source.title.clone()))
                 .collect();
             for (id, title) in samples {
-                let progress = self.doc.writing.task.source_coverage(&id);
+                let progress = self.doc.writing.source_coverage(&id);
                 ui.weak(format!(
                     "{}《{}》分析 {}/{} 块",
                     if self

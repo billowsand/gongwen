@@ -668,11 +668,42 @@ fn review_uses_per_section_comparison_and_can_keep_the_draft() {
         harness.query_by_label("原稿").is_some(),
         "默认视图是逐节原稿 / 统稿建议对照"
     );
+    assert!(harness.query_by_label("全文用：统稿建议").is_some());
     harness.get_all_by_label("保留原稿").next().unwrap().click();
     harness.run();
     let task = &harness.state().doc.writing.task;
-    assert!(task.sections[0].review_suggestion.is_none());
+    assert!(
+        task.sections[0].review_suggestion.is_some(),
+        "保留原稿不丢建议，可以改回"
+    );
     assert!(!task.final_markdown.contains("统稿建议正文。"));
+    assert!(harness.query_by_label("全文用：原稿").is_some());
+
+    harness.get_all_by_label("采纳建议").next().unwrap().click();
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .doc
+            .writing
+            .task
+            .final_markdown
+            .contains("统稿建议正文。")
+    );
+
+    // 统稿人工改过：逐节选择不动它，提示并给出重拼入口（人工稿先进统稿历史）。
+    harness.state_mut().doc.writing.task.final_markdown = "人工统稿。".into();
+    harness.state_mut().doc.writing.task.final_manual = true;
+    harness.run();
+    harness.get_by_label("按逐节选择重新拼全文").click();
+    harness.run();
+    let task = &harness.state().doc.writing.task;
+    assert!(!task.final_manual);
+    assert!(task.final_markdown.contains("统稿建议正文。"));
+    assert_eq!(
+        task.final_history.last().map(String::as_str),
+        Some("人工统稿。")
+    );
 }
 
 #[test]

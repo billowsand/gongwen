@@ -132,7 +132,11 @@ impl DraftPage<'_> {
         let deviation = (total as f64 - target as f64).abs() / target as f64;
         let text = format!(
             "各节字数合计 {total} 字 / 目标 {target} 字（{}）",
-            if total > target { "超出" } else { "不足" }
+            match total.cmp(&target) {
+                std::cmp::Ordering::Greater => "超出",
+                std::cmp::Ordering::Less => "不足",
+                std::cmp::Ordering::Equal => "相符",
+            }
         );
         if deviation > 0.15 {
             ui.colored_label(

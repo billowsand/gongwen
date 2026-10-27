@@ -12,13 +12,17 @@ impl DraftPage<'_> {
         let section = section.clone();
         ui.strong(&section.title);
         ui.label(&section.points);
+        // 只数本节当前指纹下的块；改过提纲留下的旧记录不算进来。
+        let query = self.doc.writing.task.section_query(&section);
         let progress: Vec<_> = self
             .doc
             .writing
             .task
             .chunks
             .iter()
-            .filter(|chunk| chunk.section_id.as_deref() == Some(&section.id))
+            .filter(|chunk| {
+                chunk.section_id.as_deref() == Some(&section.id) && chunk.query == query
+            })
             .cloned()
             .collect();
         let coverage = self.doc.writing.section_coverage(&section.id);
@@ -48,12 +52,7 @@ impl DraftPage<'_> {
                 .collect();
             let count = chunks
                 .iter()
-                .filter(|chunk| {
-                    matches!(
-                        chunk.status,
-                        ChunkStatus::Extracted | ChunkStatus::NoRelevantContent
-                    )
-                })
+                .filter(|chunk| chunk.status.counts_as_done())
                 .count();
             ui.label(format!("《{}》已处理 {count} 块", source.title));
         }

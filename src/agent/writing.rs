@@ -251,6 +251,9 @@ pub(crate) struct Section {
     pub review_parts: Vec<String>,
     #[serde(default)]
     pub review_input_hash: String,
+    /// 审阅时选了「保留原稿」：建议仍保留、可随时改回，拼全文用本节正文。
+    #[serde(default)]
+    pub review_kept_draft: bool,
     /// 锁定或人工章节的统稿建议：单独存放，拼全文仍用本节正文，采纳与否由用户决定。
     #[serde(default)]
     pub advisory_suggestion: Option<String>,
@@ -551,6 +554,28 @@ impl WritingTask {
         self.refresh_final_if_generated();
         self.stale_reason = Some("已采纳统稿建议到人工稿，请重新核对后审阅".into());
         true
+    }
+
+    /// 审阅时逐节选用统稿建议或原稿；建议本身保留，可随时改回。
+    pub(crate) fn choose_review(&mut self, index: usize, keep_draft: bool) -> bool {
+        let Some(section) = self.sections.get_mut(index) else {
+            return false;
+        };
+        if section.review_suggestion.is_none() || section.review_kept_draft == keep_draft {
+            return false;
+        }
+        section.review_kept_draft = keep_draft;
+        self.refresh_final_if_generated();
+        true
+    }
+
+    /// 按逐节选择重新拼全文；人工改过的统稿先存入统稿历史，可恢复。
+    pub(crate) fn reassemble_final(&mut self) {
+        if self.final_manual {
+            self.archive_final();
+        }
+        self.final_manual = false;
+        self.final_markdown = assemble::assemble(self);
     }
 
     /// 按当前各节正文重新拼全文；人工改过统稿时不动它，避免覆盖用户输入。
@@ -945,6 +970,11 @@ impl WritingTask {
             section.review_suggestion = None;
             section.review_parts.clear();
             section.review_input_hash.clear();
+            section.review_kept_draft = false;
+            // 锁定 / 人工稿的建议基于改动前的正文，采纳会盖掉新的修改，一并作废。
+            section.advisory_suggestion = None;
+            section.advisory_parts.clear();
+            section.advisory_input_hash.clear();
         }
         if self.final_manual && !self.final_markdown.trim().is_empty() {
             self.stale_reason = Some(

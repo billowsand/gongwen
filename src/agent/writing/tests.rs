@@ -1061,3 +1061,120 @@ fn retrying_one_failed_chunk_only_calls_the_model_for_that_chunk() {
     assert_eq!(task.coverage().failed, 0);
     assert_eq!(task.resume_action, None);
 }
+
+#[test]
+fn a_manually_skipped_block_is_not_sent_back_to_the_model_when_continuing() {
+    let mut task = WritingTask::new(TemplateKind::PlainDocument);
+    task.topic = "工作".into();
+    let bad = SourceSnapshot::new("甲材料", SourceRole::Content, "甲材料原文。").unwrap();
+    task.add_source(bad.clone());
+    task.add_source(SourceSnapshot::new("乙材料", SourceRole::Content, "乙材料原文。").unwrap());
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("甲材料原文") {
+            "观点：伪造观点\n原句：不存在的原句。".into()
+        } else {
+            "观点：乙\n原句：乙材料原文。".into()
+        }
+    });
+    assert!(run(&mut task, Action::Extract, &model, &mut |_| Ok(())).is_err());
+    let query = task.topic_query();
+    assert!(task.mark_chunk_skipped(&bad, None, &query, 0, bad.text.len()));
+
+    let again = ScriptedModel::new(|_, _| "无相关内容".into());
+    run(&mut task, Action::Extract, &again, &mut |_| Ok(())).unwrap();
+    assert_eq!(
+        again.prompts("甲材料原文").len(),
+        0,
+        "人工确认过的块接着跑时不再交给模型"
+    );
+    assert!(
+        task.chunks
+            .iter()
+            .any(|chunk| chunk.status == ChunkStatus::SkippedByUser),
+        "人工跳过的记录不被模型判定覆盖"
+    );
+    assert_eq!(task.coverage().skipped, 1);
+}
+
+#[test]
+fn editing_a_locked_section_after_polish_drops_its_stale_advisory() {
+    let (mut task, model) = written_task();
+    task.sections[0].locked = true;
+    run(&mut task, Action::Polish, &model, &mut |_| Ok(())).unwrap();
+    assert!(task.sections[0].advisory_suggestion.is_some());
+    // 用户解锁后又改了正文：旧建议是按改前正文生成的，采纳会盖掉新的修改。
+    task.sections[0].markdown = "我刚改的正文。".into();
+    task.sections[0].manually_edited = true;
+    task.drafts_changed();
+    assert!(task.sections[0].advisory_suggestion.is_none());
+    assert!(!task.accept_advisory(0));
+    assert_eq!(task.sections[0].markdown, "我刚改的正文。");
+}
+
+#[test]
+fn review_choice_between_suggestion_and_draft_is_reversible() {
+    let (mut task, _) = written_task();
+    let polish = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("正文片段") {
+            "统稿后的正文。".into()
+        } else {
+            "未发现明显结构问题".into()
+        }
+    });
+    run(&mut task, Action::Polish, &polish, &mut |_| Ok(())).unwrap();
+    let draft = task.sections[0].markdown.clone();
+    assert!(task.final_markdown.contains("统稿后的正文。"));
+
+    assert!(task.choose_review(0, true));
+    assert!(
+        task.sections[0].review_suggestion.is_some(),
+        "保留原稿不丢建议"
+    );
+    let first_section = task.final_markdown.split("\n\n## ").next().unwrap();
+    assert!(first_section.contains(draft.lines().last().unwrap()));
+    assert!(!first_section.contains("统稿后的正文。"));
+
+    assert!(task.choose_review(0, false), "可以改回采纳建议");
+    let first_section = task.final_markdown.split("\n\n## ").next().unwrap();
+    assert!(first_section.contains("统稿后的正文。"));
+
+    // 统稿人工改过时逐节选择不动它；按选择重拼时人工稿先进统稿历史。
+    task.final_markdown = "人工统稿。".into();
+    task.final_manual = true;
+    assert!(task.choose_review(0, true));
+    assert_eq!(task.final_markdown, "人工统稿。");
+    task.reassemble_final();
+    assert!(!task.final_manual);
+    assert_eq!(
+        task.final_history.last().map(String::as_str),
+        Some("人工统稿。")
+    );
+    let first_section = task.final_markdown.split("\n\n## ").next().unwrap();
+    assert!(!first_section.contains("统稿后的正文。"), "重拼按逐节选择");
+}
+
+#[test]
+fn style_summary_is_redone_when_the_document_kind_changes() {
+    let mut task = WritingTask::new(TemplateKind::PlainDocument);
+    task.topic = "工作".into();
+    task.add_source(SourceSnapshot::new("材料", SourceRole::Content, "原文。").unwrap());
+    task.add_source(SourceSnapshot::new("样稿", SourceRole::Style, "样稿原文。").unwrap());
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("样稿：") || prompt.contains("归纳层级") {
+            "风格分析。".into()
+        } else {
+            "无相关内容".into()
+        }
+    });
+    run(&mut task, Action::Extract, &model, &mut |_| Ok(())).unwrap();
+    let first = model.asked("归纳层级");
+    assert!(first > 0);
+    run(&mut task, Action::Extract, &model, &mut |_| Ok(())).unwrap();
+    assert_eq!(model.asked("归纳层级"), first, "输入没变复用归纳结果");
+    task.sync_kind(TemplateKind::OfficialLetter);
+    run(&mut task, Action::Extract, &model, &mut |_| Ok(())).unwrap();
+    assert!(
+        model.asked("归纳层级") > first,
+        "换了文种要按新文种重新归纳"
+    );
+}

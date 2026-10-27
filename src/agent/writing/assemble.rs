@@ -27,7 +27,7 @@ pub(super) fn section_heading(title: &str) -> String {
     }
 }
 
-/// 拼接全文：各节优先用统稿建议，没有建议（锁定、人工稿）用本节正文。
+/// 拼接全文：各节优先用统稿建议；没有建议（锁定、人工稿）或审阅时选了保留原稿，用本节正文。
 pub(super) fn assemble(task: &WritingTask) -> String {
     let count = task.sections.len();
     task.sections
@@ -41,6 +41,7 @@ fn assemble_section(section: &Section, count: usize) -> String {
     let body = section
         .review_suggestion
         .as_deref()
+        .filter(|_| !section.review_kept_draft)
         .unwrap_or(&section.markdown);
     let title = section_heading(&section.title);
     let body = normalize_body(body, &title, body_base_level(count));

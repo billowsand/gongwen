@@ -53,6 +53,7 @@ pub(crate) fn run(
             section.review_suggestion = None;
             section.review_parts.clear();
             section.review_input_hash.clear();
+            section.review_kept_draft = false;
             section.advisory_suggestion = None;
             section.advisory_parts.clear();
             section.advisory_input_hash.clear();
@@ -302,10 +303,7 @@ pub(super) fn same_chunk(
             && c.section_id.as_deref() == section
             && c.query == query
             && c.chunk_hash == hash
-            && matches!(
-                c.status,
-                ChunkStatus::Extracted | ChunkStatus::NoRelevantContent
-            )
+            && c.status.counts_as_done()
     })
 }
 
@@ -565,7 +563,8 @@ fn summarize_role(
         return Ok(default_for_role(task, role));
     }
     let entries = role_entries(task, role);
-    let fingerprint = digest(entries.join("\n----\n").as_bytes());
+    // 归纳提示词带文种，指纹也带上：同一批样稿换了文种要重新归纳。
+    let fingerprint = digest(format!("{:?}|{}", task.kind, entries.join("\n----\n")).as_bytes());
     if summary_input(task, role) == fingerprint && !default_for_role(task, role).trim().is_empty() {
         return Ok(default_for_role(task, role));
     }
@@ -1459,6 +1458,7 @@ fn write_section(
         task.sections[index].rewrite_in_progress = true;
         task.sections[index].write_parts.clear();
         task.sections[index].review_suggestion = None;
+        task.sections[index].review_kept_draft = false;
     }
     let section = task.sections[index].clone();
     let previous_draft = if request.is_some() {
@@ -1573,6 +1573,7 @@ fn write_section(
     task.sections[index].manually_edited = false;
     task.sections[index].input_hash = section_input_hash(task, index);
     task.sections[index].review_suggestion = None;
+    task.sections[index].review_kept_draft = false;
     task.stage = Stage::Write;
     save(task)
 }
@@ -1765,6 +1766,7 @@ fn polish(
         if task.sections[i].review_input_hash != input_hash {
             task.sections[i].review_parts.clear();
             task.sections[i].review_input_hash = input_hash;
+            task.sections[i].review_kept_draft = false;
         }
         let parts = polish_parts(&old, task.chunk_bytes.max(512));
         let mut review_parts = task.sections[i].review_parts.clone();

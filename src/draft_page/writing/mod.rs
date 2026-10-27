@@ -77,6 +77,7 @@ struct CoverageCache {
     revision: u64,
     topic: Coverage,
     sections: HashMap<String, Coverage>,
+    sources: HashMap<String, Coverage>,
 }
 
 impl WritingPanel {
@@ -158,6 +159,23 @@ impl WritingPanel {
         coverage
     }
 
+    /// 单份材料的提炼 / 分析进度，同样按修订号缓存（素材列表、阶段勾与调用估算每帧都要）。
+    pub(crate) fn source_coverage(&mut self, source_id: &str) -> Coverage {
+        self.ensure_coverage_cache();
+        if let Some(coverage) = self
+            .coverage_cache
+            .as_ref()
+            .and_then(|cache| cache.sources.get(source_id))
+        {
+            return *coverage;
+        }
+        let coverage = self.task.source_coverage(source_id);
+        if let Some(cache) = self.coverage_cache.as_mut() {
+            cache.sources.insert(source_id.to_string(), coverage);
+        }
+        coverage
+    }
+
     /// 阶段是否已经完成（用于阶段导航的勾）。
     pub(crate) fn stage_complete(&mut self, stage: Stage) -> bool {
         match stage {
@@ -182,7 +200,7 @@ impl WritingPanel {
                     .map(|source| source.id.clone())
                     .collect();
                 sources.iter().all(|id| {
-                    let progress = self.task.source_coverage(id);
+                    let progress = self.source_coverage(id);
                     progress.total == 0 || (progress.pending == 0 && progress.failed == 0)
                 })
             }
@@ -302,7 +320,7 @@ impl WritingPanel {
                     .map(|source| source.id.clone())
                     .collect();
                 for id in sample_ids {
-                    samples += self.task.source_coverage(&id).total;
+                    samples += self.source_coverage(&id).total;
                 }
                 let summarize = if samples > 0 { 2 } else { 0 };
                 Some((
@@ -373,6 +391,7 @@ impl WritingPanel {
             revision: self.revision,
             topic,
             sections: HashMap::new(),
+            sources: HashMap::new(),
         });
     }
 
@@ -728,7 +747,10 @@ impl DraftPage<'_> {
         let mut action = None;
         let editable = !self.doc.read_only() && !self.doc.writing.running;
         // 文种在外部表单里改了：立刻按新文种收窄失效、更新默认写法，不必等用户点运行。
-        if !self.doc.writing.running && self.doc.writing.task.kind != self.doc.draft.kind {
+        if !self.doc.writing.running
+            && !self.doc.read_only()
+            && self.doc.writing.task.kind != self.doc.draft.kind
+        {
             self.doc.writing.task.sync_kind(self.doc.draft.kind);
             self.doc.writing.changed();
         }
