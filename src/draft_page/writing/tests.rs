@@ -73,6 +73,7 @@ fn fixture() -> WritingTask {
             status: ChunkStatus::Extracted,
             error: None,
             output: String::new(),
+            query: String::new(),
         });
     }
     task.outline_confirmed = true;
@@ -83,6 +84,7 @@ fn fixture() -> WritingTask {
         .collect::<Vec<_>>()
         .join("\n\n");
     task.status = "阶段成果已保存".into();
+    task.adopt_legacy_records();
     task
 }
 
@@ -176,4 +178,136 @@ fn staged_writing_ui_samples() {
         680.0,
         Some(std::path::Path::new("tmp/staged-writing/narrow.png")),
     );
+}
+
+/// 交互测试用的起草页外壳；`DraftPage` 借用的状态都放在这里。
+struct Bench {
+    doc: DraftSession,
+    config: AppConfig,
+    sender: mpsc::Sender<crate::app::WorkerResult>,
+    status: String,
+    version_switch: Option<crate::app::VersionSwitchPrompt>,
+    revert_confirm: Option<(i64, i64)>,
+    metrics: crate::metrics::Metrics,
+    actions: Vec<crate::app::DraftAction>,
+    exports: ExportLinks,
+}
+
+fn harness(stage: Stage) -> egui_kittest::Harness<'static, Bench> {
+    let config = AppConfig::default();
+    let mut doc = DraftSession::with_markdown(7, &config, "# 原有正式正文\n\n由用户维护。".into());
+    doc.manuscript_id = None;
+    doc.writing.task = fixture();
+    doc.draft.kind = TemplateKind::PlainDocument;
+    doc.writing.task.stage = stage;
+    doc.writing.open = true;
+    let (sender, _receiver) = mpsc::channel();
+    let bench = Bench {
+        doc,
+        config,
+        sender,
+        status: String::new(),
+        version_switch: None,
+        revert_confirm: None,
+        metrics: Default::default(),
+        actions: Vec::new(),
+        exports: ExportLinks::default(),
+    };
+    let mut harness = egui_kittest::Harness::new_ui_state(
+        |ui, bench: &mut Bench| {
+            crate::theme::configure_icons(ui.ctx());
+            let mut page = DraftPage {
+                doc: &mut bench.doc,
+                config: &mut bench.config,
+                store: None,
+                sender: &bench.sender,
+                status: &mut bench.status,
+                version_switch: &mut bench.version_switch,
+                revert_confirm: &mut bench.revert_confirm,
+                metrics: &mut bench.metrics,
+                actions: &mut bench.actions,
+                export_links: &mut bench.exports,
+            };
+            page.writing_header(ui);
+            page.writing_ui(ui);
+        },
+        bench,
+    );
+    harness.set_size(egui::vec2(1280.0, 880.0));
+    harness.run();
+    harness
+}
+
+#[test]
+fn removing_a_processed_material_asks_first_and_cancel_keeps_it() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(Stage::Prepare);
+    harness.get_by_label("移除").click();
+    harness.run();
+    assert_eq!(harness.state().doc.writing.task.sources.len(), 1);
+    harness.get_by_label("移除材料");
+    harness.get_by_label("取消").click();
+    harness.run();
+    assert!(harness.state().doc.writing.confirm.is_none());
+    assert_eq!(harness.state().doc.writing.task.sources.len(), 1);
+
+    harness.get_by_label("移除").click();
+    harness.run();
+    harness.get_all_by_label("移除").last().unwrap().click();
+    harness.run();
+    let task = &harness.state().doc.writing.task;
+    assert!(task.sources.is_empty());
+    assert!(task.chunks.is_empty() && task.topic_cards.is_empty());
+}
+
+#[test]
+fn a_topic_edit_waits_for_apply_and_keeps_finished_extraction() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(Stage::Prepare);
+    let original = harness.state().doc.writing.task.topic.clone();
+    harness.state_mut().doc.writing.topic_draft = Some("另拟主题".into());
+    harness.run();
+    assert_eq!(harness.state().doc.writing.task.topic, original);
+    harness.get_by_label("放弃修改").click();
+    harness.run();
+    assert_eq!(
+        harness.state().doc.writing.topic_draft.as_deref(),
+        Some(original.as_str()),
+        "放弃后草稿回到原主题"
+    );
+    assert_eq!(harness.state().doc.writing.task.topic, original);
+    assert!(harness.query_by_label("应用新主题").is_none());
+
+    harness.state_mut().doc.writing.topic_draft = Some("另拟主题".into());
+    harness.run();
+    let chunks = harness.state().doc.writing.task.chunks.len();
+    harness.get_by_label("应用新主题").click();
+    harness.run();
+    let task = &harness.state().doc.writing.task;
+    assert_eq!(task.topic, "另拟主题");
+    assert!(!task.outline_confirmed);
+    assert_eq!(
+        task.chunks.len(),
+        chunks,
+        "已完成的提炼保留，改回原主题可恢复"
+    );
+}
+
+#[test]
+fn repolishing_over_a_hand_edited_final_asks_first() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(Stage::Review);
+    harness.state_mut().doc.writing.task.final_manual = true;
+    harness.run();
+    harness.get_by_label("重新统稿").click();
+    harness.run();
+    assert!(matches!(
+        harness.state().doc.writing.confirm,
+        Some(Confirm::Repolish)
+    ));
+    assert!(!harness.state().doc.writing.running, "确认前不得启动模型");
+    harness.get_by_label("取消").click();
+    harness.run();
+    assert!(harness.state().doc.writing.confirm.is_none());
+    assert!(harness.state().doc.writing.task.final_manual);
 }

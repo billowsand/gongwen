@@ -1,5 +1,6 @@
 //! 六阶段的成果编辑、就绪提示与交付操作。
 
+use super::Confirm;
 use super::*;
 use crate::agent::writing::{ChunkStatus, MaterialCard, Section};
 use crate::app::GongwenApp;
@@ -41,6 +42,8 @@ impl DraftPage<'_> {
         }
         if stage == Stage::Review {
             self.deliver_writing_proposal();
+        } else if stage == Stage::Write && self.final_needs_confirm() {
+            self.doc.writing.confirm = Some(Confirm::Repolish);
         } else if stage == Stage::Outline {
             match self.doc.writing.task.confirm_outline() {
                 Ok(()) => {
@@ -59,14 +62,7 @@ impl DraftPage<'_> {
         ui.label("内容材料提供事实，风格样稿学习表达，结构范文学习篇章组织。");
         ui.add_space(12.0);
         ui.strong("这篇公文要写什么");
-        let topic_changed = ui
-            .add(
-                egui::TextEdit::multiline(&mut self.doc.writing.task.topic)
-                    .desired_rows(3)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("写明主题、受文对象、写作目的与重点"),
-            )
-            .changed();
+        self.writing_topic(ui);
         let mut length_changed = false;
         ui.horizontal(|ui| {
             ui.label("目标篇幅");
@@ -80,11 +76,8 @@ impl DraftPage<'_> {
                 .changed();
             ui.weak(format!("文种：{}", self.doc.draft.kind.label()));
         });
-        if topic_changed {
-            self.doc.writing.task.invalidate_from(Stage::Extract);
-            self.doc.writing.changed();
-        } else if length_changed {
-            self.doc.writing.task.invalidate_from(Stage::Outline);
+        if length_changed {
+            self.doc.writing.task.target_changed();
             self.doc.writing.changed();
         }
         ui.add_space(14.0);
@@ -107,6 +100,74 @@ impl DraftPage<'_> {
         ui.weak(
             "无风格或结构范文时采用文种默认要求。文件导入在后台处理，解析失败的材料不会计为可用。",
         );
+    }
+
+    /// 还没有成果时直接改主题；已有成果时先改草稿，说明影响后由用户点「应用」。
+    fn writing_topic(&mut self, ui: &mut egui::Ui) {
+        fn editor(text: &mut String) -> egui::TextEdit<'_> {
+            egui::TextEdit::multiline(text)
+                .desired_rows(3)
+                .desired_width(f32::INFINITY)
+                .hint_text("写明主题、受文对象、写作目的与重点")
+        }
+        let writing = &mut self.doc.writing;
+        if !writing.task.has_results() {
+            writing.topic_draft = None;
+            if ui.add(editor(&mut writing.task.topic)).changed() {
+                writing.changed();
+            }
+            return;
+        }
+        let draft = writing
+            .topic_draft
+            .get_or_insert_with(|| writing.task.topic.clone());
+        ui.add(editor(draft));
+        if *draft == writing.task.topic {
+            return;
+        }
+        let cards = writing.task.current_topic_cards().len();
+        let done = writing
+            .task
+            .chunks
+            .iter()
+            .filter(|chunk| {
+                chunk.role == SourceRole::Content
+                    && matches!(
+                        chunk.status,
+                        ChunkStatus::Extracted | ChunkStatus::NoRelevantContent
+                    )
+            })
+            .count();
+        let mut apply = false;
+        let mut discard = false;
+        egui::Frame::new()
+            .fill(theme::warn_soft())
+            .corner_radius(6)
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.colored_label(
+                    theme::warn(),
+                    format!(
+                        "改主题后，已提炼的 {cards} 张主题素材卡与各节备料（已处理 {done} 块）不再算作当前成果，需按新主题重新提炼、备料，提纲也要重新确认。重新提炼完成前改回原主题即可恢复。"
+                    ),
+                );
+                ui.horizontal(|ui| {
+                    apply = ui.button("应用新主题").clicked();
+                    discard = ui.button("放弃修改").clicked();
+                });
+            });
+        if apply && let Some(topic) = writing.topic_draft.take() {
+            writing.task.set_topic(topic);
+            writing.changed();
+        } else if discard {
+            writing.topic_draft = None;
+        }
+    }
+
+    /// 统稿页人工改过且还有内容时，重新统稿要先确认。
+    fn final_needs_confirm(&self) -> bool {
+        let task = &self.doc.writing.task;
+        task.final_manual && !task.final_markdown.trim().is_empty()
     }
 
     pub(super) fn writing_artifacts(&mut self, ui: &mut egui::Ui) {
@@ -152,13 +213,7 @@ impl DraftPage<'_> {
                     )
                     .changed()
                 {
-                    if style {
-                        self.doc.writing.task.style_manual = true;
-                    } else {
-                        self.doc.writing.task.framework_manual = true;
-                    }
-                    self.doc.writing.task.invalidate_from(Stage::Outline);
-                    self.doc.writing.task.stage = Stage::Extract;
+                    self.doc.writing.task.style_changed(style);
                     self.doc.writing.changed();
                 }
                 ui.horizontal(|ui| {
@@ -180,7 +235,14 @@ impl DraftPage<'_> {
                 });
             }
             _ => {
-                let cards = self.doc.writing.task.topic_cards.clone();
+                let cards: Vec<_> = self
+                    .doc
+                    .writing
+                    .task
+                    .current_topic_cards()
+                    .into_iter()
+                    .cloned()
+                    .collect();
                 if cards.is_empty() {
                     ui.label("尚无相关观点。检查材料与主题，或先开始提炼。");
                 }
@@ -191,7 +253,7 @@ impl DraftPage<'_> {
 
     pub(super) fn writing_outline(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
         ui.heading("先把提纲定下来");
-        ui.weak("直接编辑标题、要点与篇幅。确认后再按各节主题重新读取全部内容材料。");
+        ui.weak("直接编辑标题、要点与篇幅，标题不写编号。确认后按各节要求读取内容材料；只调顺序或未改动的章节沿用已备素材。");
         let mut changed = false;
         let mut move_up = None;
         let mut remove = None;
@@ -244,9 +306,14 @@ impl DraftPage<'_> {
             changed = true;
         }
         if let Some(index) = remove {
-            let removed = self.doc.writing.task.sections.remove(index);
-            self.doc.writing.task.section_history.push(removed);
-            changed = true;
+            let section = &self.doc.writing.task.sections[index];
+            let id = section.id.clone();
+            if section.markdown.trim().is_empty() && section.cards.is_empty() {
+                self.doc.writing.task.remove_section(&id);
+                changed = true;
+            } else {
+                self.doc.writing.confirm = Some(Confirm::RemoveSection(id));
+            }
         }
         if ui.button("＋ 增加一节").clicked() {
             self.doc.writing.task.sections.push(Section {
@@ -285,8 +352,8 @@ impl DraftPage<'_> {
             }
         }
         if changed {
-            self.doc.writing.task.invalidate_from(Stage::Collect);
-            self.doc.writing.task.outline_confirmed = false;
+            // 各节备料按本节指纹判断：只调顺序全部保留，改了哪一节只有那一节待重新备料。
+            self.doc.writing.task.outline_changed();
             self.doc.writing.task.stage = Stage::Outline;
             self.doc.writing.changed();
         }
@@ -387,7 +454,15 @@ impl DraftPage<'_> {
             );
         }
         ui.separator();
-        self.writing_cards(ui, &section.cards);
+        let cards: Vec<_> = self
+            .doc
+            .writing
+            .task
+            .current_section_cards(&section)
+            .into_iter()
+            .cloned()
+            .collect();
+        self.writing_cards(ui, &cards);
     }
 
     pub(super) fn writing_sections(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
@@ -426,7 +501,7 @@ impl DraftPage<'_> {
             .checkbox(&mut section.locked, "锁定本节，统稿只提建议")
             .changed();
         if changed || lock_changed || confirm_manual {
-            self.doc.writing.task.invalidate_from(Stage::Review);
+            self.doc.writing.task.drafts_changed();
             self.doc.writing.changed();
         }
         ui.label("本节修改要求");
@@ -450,9 +525,32 @@ impl DraftPage<'_> {
         self.writing_section_history(ui);
     }
 
-    pub(super) fn writing_review(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn writing_review(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
         ui.heading("通读统稿，再审阅合并");
         ui.weak("这里仍是工作稿。接受后进入正文，再使用现有预览、排版和导出。");
+        let ready = self.doc.writing.ready(Stage::Review);
+        ui.horizontal_wrapped(|ui| {
+            let label = if self.doc.writing.task.final_markdown.trim().is_empty() {
+                "开始统稿"
+            } else {
+                "重新统稿"
+            };
+            let response = ui.add_enabled(ready.is_ok(), egui::Button::new(label));
+            let response = match &ready {
+                Err(reason) => response.on_disabled_hover_text(reason.as_str()),
+                Ok(()) => response,
+            };
+            if response.clicked() {
+                if self.final_needs_confirm() {
+                    self.doc.writing.confirm = Some(Confirm::Repolish);
+                } else {
+                    *action = Some(Action::Polish);
+                }
+            }
+            if self.doc.writing.task.final_manual {
+                ui.weak("统稿已人工修改，上游变化不会清掉它");
+            }
+        });
         if !self.doc.writing.task.review_notes.is_empty() {
             ui.collapsing("全篇结构与衔接检查", |ui| {
                 ui.label(&self.doc.writing.task.review_notes);
@@ -471,10 +569,45 @@ impl DraftPage<'_> {
             .changed()
         {
             self.doc.writing.task.resume_action = None;
+            self.doc.writing.task.final_manual = true;
             self.doc.writing.task.status = "统稿已人工修改，请重新核对后审阅".into();
             self.doc.writing.changed();
         }
         ui.weak("差异审阅支持逐块排除。正式正文已有改动时，接受入口会再次检查基线与关键事实。");
+        self.writing_final_history(ui);
+    }
+
+    fn writing_final_history(&mut self, ui: &mut egui::Ui) {
+        let history = self.doc.writing.task.final_history.clone();
+        if history.is_empty() {
+            return;
+        }
+        let mut restore = None;
+        ui.collapsing(format!("统稿历史（{} 份）", history.len()), |ui| {
+            for (number, text) in history.iter().enumerate().rev() {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "第 {} 份 · {} 字",
+                        number + 1,
+                        text.chars().count()
+                    ));
+                    if ui.button("查看").clicked() {
+                        self.doc.writing.source_viewer = Some(SourceViewer {
+                            title: "统稿历史".into(),
+                            text: text.clone(),
+                        });
+                    }
+                    if ui.button("恢复到统稿页").clicked() {
+                        restore = Some(number);
+                    }
+                });
+            }
+        });
+        if let Some(index) = restore {
+            self.doc.writing.task.restore_final(index);
+            self.doc.writing.task.status = "已恢复历史统稿，请重新核对后审阅".into();
+            self.doc.writing.changed();
+        }
     }
 
     pub(super) fn writing_evidence(&mut self, ui: &mut egui::Ui) {
@@ -507,12 +640,20 @@ impl DraftPage<'_> {
                 ui.separator();
                 ui.strong("本节职责");
                 ui.label(&section.points);
+                let cards: Vec<_> = self
+                    .doc
+                    .writing
+                    .task
+                    .current_section_cards(&section)
+                    .into_iter()
+                    .cloned()
+                    .collect();
                 ui.weak(format!(
                     "本节约 {} 字；素材 {} 条",
                     section.target_chars,
-                    section.cards.len()
+                    cards.len()
                 ));
-                self.writing_cards(ui, &section.cards);
+                self.writing_cards(ui, &cards);
             }
         } else if self.doc.writing.task.stage == Stage::Review {
             ui.separator();
@@ -624,7 +765,7 @@ impl DraftPage<'_> {
             section.markdown = text;
             section.manually_edited = true;
             section.locked = false;
-            self.doc.writing.task.invalidate_from(Stage::Review);
+            self.doc.writing.task.drafts_changed();
             self.doc.writing.changed();
         }
     }

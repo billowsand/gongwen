@@ -40,6 +40,7 @@ pub(crate) fn load_at(path: &Path, manuscript_id: i64) -> Result<Option<WritingT
         let mut task: WritingTask =
             serde_json::from_str(&raw).context("写作任务数据损坏，已拒绝恢复")?;
         anyhow::ensure!(task.version == 1, "写作任务版本不兼容，已拒绝恢复");
+        task.adopt_legacy_records();
         let mut total = 0usize;
         for source in &mut task.sources {
             if source.text.is_empty() {

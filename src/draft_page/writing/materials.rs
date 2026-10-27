@@ -70,8 +70,13 @@ impl DraftPage<'_> {
                 });
             }
             if let Some(id) = remove {
-                self.doc.writing.task.remove_source(&id);
-                self.doc.writing.changed();
+                // 已有处理记录的材料移除后不能恢复，先确认。
+                if self.doc.writing.task.source_impact(&id) == (0, 0) {
+                    self.doc.writing.task.remove_source(&id);
+                    self.doc.writing.changed();
+                } else {
+                    self.doc.writing.confirm = Some(super::Confirm::RemoveSource(id));
+                }
             }
             ui.menu_button("＋ 添加材料", |ui| {
                 if ui.button("从文件导入…").clicked() {

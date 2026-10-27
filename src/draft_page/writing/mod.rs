@@ -19,6 +19,13 @@ use std::time::{Duration, Instant};
 
 use materials::{MaterialPicker, SourceViewer};
 
+/// 会丢掉成果或替换人工修改的操作，先弹框确认再做。
+enum Confirm {
+    RemoveSource(String),
+    RemoveSection(String),
+    Repolish,
+}
+
 enum Update {
     Progress(Box<WritingTask>),
     Finished(Box<WritingTask>, Option<String>),
@@ -47,6 +54,9 @@ pub(crate) struct WritingPanel {
     evidence_open: bool,
     import_errors: Vec<String>,
     readiness: [Option<String>; 6],
+    /// 已有成果时主题先改在这里，用户点「应用」才写进任务。
+    topic_draft: Option<String>,
+    confirm: Option<Confirm>,
     readiness_valid: bool,
     delivery_cache: Option<(u64, Vec<String>)>,
 }
@@ -75,6 +85,8 @@ impl WritingPanel {
             import_errors: Vec::new(),
             readiness: std::array::from_fn(|_| None),
             readiness_valid: false,
+            topic_draft: None,
+            confirm: None,
             delivery_cache: None,
         }
     }
@@ -119,6 +131,7 @@ impl WritingPanel {
                 match writing::store::load(id) {
                     Ok(Some(task)) => {
                         self.task = task;
+                        self.topic_draft = None;
                         self.readiness_valid = false;
                         self.delivery_cache = None;
                     }
@@ -283,6 +296,98 @@ impl WritingPanel {
     }
 }
 
+impl DraftPage<'_> {
+    fn writing_confirm_modal(&mut self, ctx: &egui::Context, action: &mut Option<Action>) {
+        let Some(confirm) = &self.doc.writing.confirm else {
+            return;
+        };
+        let task = &self.doc.writing.task;
+        let (title, message, button, icon) = match confirm {
+            Confirm::RemoveSource(id) => {
+                let Some(source) = task.sources.iter().find(|s| &s.id == id) else {
+                    self.doc.writing.confirm = None;
+                    return;
+                };
+                let (cards, chunks) = task.source_impact(id);
+                let after = if source.role == SourceRole::Content {
+                    "提纲需要重新确认；其他材料已完成的提炼与备料照常保留。"
+                } else {
+                    "下次提炼时按剩余样稿重新归纳（人工改过的风格与框架保留）。"
+                };
+                (
+                    "移除材料",
+                    format!(
+                        "移除《{}》后，它的 {cards} 张素材卡与 {chunks} 块处理记录一并删除，不能恢复。{after}",
+                        source.title
+                    ),
+                    "移除",
+                    crate::theme::Icon::Trash,
+                )
+            }
+            Confirm::RemoveSection(id) => {
+                let Some(section) = task.sections.iter().find(|s| &s.id == id) else {
+                    self.doc.writing.confirm = None;
+                    return;
+                };
+                (
+                    "删除章节",
+                    format!(
+                        "删除「{}」后，本节正文移入「历史提纲中的章节」，可以恢复为一节，但恢复后需要重新备料。提纲需要重新确认。",
+                        section.title
+                    ),
+                    "删除本节",
+                    crate::theme::Icon::Trash,
+                )
+            }
+            Confirm::Repolish => (
+                "重新统稿",
+                "重新统稿会用新的统稿结果替换你在统稿页上的修改。当前稿会存入「统稿历史」，可以随时恢复。"
+                    .to_string(),
+                "重新统稿",
+                crate::theme::Icon::Sparkles,
+            ),
+        };
+        let dialog = crate::modal::dialog(
+            ctx,
+            egui::Id::new(("writing_confirm", self.doc.key)),
+            title,
+            400.0,
+            crate::modal::Dismiss::EscOrBackdrop,
+            |ui| {
+                ui.label(message);
+                ui.add_space(10.0);
+                let mut confirmed = false;
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(crate::theme::warning_icon_button(icon, button))
+                        .clicked()
+                    {
+                        confirmed = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        ui.close();
+                    }
+                });
+                confirmed
+            },
+        );
+        if dialog.inner {
+            let task = &mut self.doc.writing.task;
+            match self.doc.writing.confirm.take() {
+                Some(Confirm::RemoveSource(id)) => {
+                    task.remove_source(&id);
+                }
+                Some(Confirm::RemoveSection(id)) => task.remove_section(&id),
+                Some(Confirm::Repolish) => *action = Some(Action::Polish),
+                None => {}
+            }
+            self.doc.writing.changed();
+        } else if dialog.dismissed {
+            self.doc.writing.confirm = None;
+        }
+    }
+}
+
 impl Drop for WritingPanel {
     fn drop(&mut self) {
         self.pause();
@@ -388,13 +493,22 @@ impl DraftPage<'_> {
         egui::ScrollArea::vertical()
             .id_salt(("writing_stage", self.doc.key, stage.index()))
             .show(ui, |ui| {
+                if !writing::supports(self.doc.draft.kind) {
+                    ui.colored_label(
+                        crate::theme::warn(),
+                        format!(
+                            "{}有固定骨架或如实记录要求，不适合分阶段写作；已有成果可以查看，不能继续运行。",
+                            self.doc.draft.kind.label()
+                        ),
+                    );
+                }
                 ui.add_enabled_ui(editable, |ui| match stage {
                     Stage::Prepare => self.writing_prepare(ui),
                     Stage::Extract => self.writing_artifacts(ui),
                     Stage::Outline => self.writing_outline(ui, &mut action),
                     Stage::Collect => self.writing_collection(ui),
                     Stage::Write => self.writing_sections(ui, &mut action),
-                    Stage::Review => self.writing_review(ui),
+                    Stage::Review => self.writing_review(ui, &mut action),
                 });
                 if inline_evidence {
                     ui.collapsing("写作依据与待处理事项", |ui| {
@@ -403,6 +517,7 @@ impl DraftPage<'_> {
                 }
             });
         self.writing_material_modal(ui.ctx());
+        self.writing_confirm_modal(ui.ctx(), &mut action);
         if let Some(action) = action {
             self.start_writing(action, ui.ctx());
         }
@@ -413,6 +528,13 @@ impl DraftPage<'_> {
             self.doc.writing.task.error = Some("请先完成其他任务，且仅在草稿中运行写作".into());
             return;
         }
+        if !writing::supports(self.doc.draft.kind) {
+            self.doc.writing.task.error = Some(format!(
+                "{}不适合分阶段写作，请改用 AI 侧栏起草",
+                self.doc.draft.kind.label()
+            ));
+            return;
+        }
         let Some(id) = self.doc.manuscript_id else {
             self.actions.push(crate::app::DraftAction::SaveToLibrary);
             self.doc.writing.task.error = Some("正在为本篇稿件保存身份，请稍后继续".into());
@@ -420,7 +542,8 @@ impl DraftPage<'_> {
         };
         if self.doc.writing.task.kind != self.doc.draft.kind {
             self.doc.writing.task.kind = self.doc.draft.kind;
-            self.doc.writing.task.invalidate_from(Stage::Outline);
+            // 分节备料的指纹含文种，换文种后各节自然待重新备料，已读的主题材料照常复用。
+            self.doc.writing.task.outline_changed();
         }
         match self
             .doc

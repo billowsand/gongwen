@@ -357,12 +357,19 @@ impl DraftPage<'_> {
         toolbar_separator(ui);
 
         // 写作向导属于当前稿件的起草操作，不占正文区的常驻空间。
+        // 固定骨架与如实记录的文种不按章节拼接，入口直接灰掉并说明原因。
+        let kind_fits = crate::agent::writing::supports(self.doc.draft.kind);
         if ui
             .add_enabled(
-                editable,
+                editable && kind_fits,
                 theme::icon_text_button(theme::Icon::FilePlus, "分阶段写作…"),
             )
             .on_hover_text("按素材、提纲、分节写作与统稿审阅逐步成文；已有任务继续上次进度")
+            .on_disabled_hover_text(if kind_fits {
+                "当前稿件只读，不能分阶段写作"
+            } else {
+                "会议议程、会议纪要有固定骨架，电话记录单如实记录来电，不适合分节写作"
+            })
             .clicked()
         {
             self.doc.writing.open = true;

@@ -3,6 +3,8 @@
 use super::*;
 use anyhow::Context;
 
+use super::assemble;
+
 /// 执行一个固定写作动作。每个块或章节完成后先调用持久化回调，再进入下一项。
 pub(crate) fn run(
     task: &mut WritingTask,
@@ -10,8 +12,18 @@ pub(crate) fn run(
     model: &dyn crate::agent::backend::ModelBackend,
     persist_and_emit: &mut dyn FnMut(&WritingTask) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        supports(task.kind),
+        "{}有固定骨架或如实记录要求，不适合分阶段写作",
+        task.kind.label()
+    );
     let continuing = task.resume_action.as_ref() == Some(&action);
     if matches!(action, Action::Polish) && !continuing {
+        // 重新统稿会替换统稿页上的人工修改，先存档，可从统稿历史恢复。
+        if task.final_manual {
+            task.archive_final();
+            task.final_manual = false;
+        }
         task.review_notes.clear();
         task.review_group_notes.clear();
         task.review_group_hash.clear();
@@ -47,8 +59,10 @@ pub(crate) fn run(
     }
     if matches!(action, Action::Extract) {
         if task.topic_chunk_bytes != task.chunk_bytes {
-            task.invalidate_from(Stage::Extract);
-            task.resume_action = Some(action.clone());
+            // 块宽变了，旧块的起止位置对不上，旧的主题块、样稿分析与主题卡片一并作废。
+            task.chunks.retain(|chunk| chunk.section_id.is_some());
+            task.topic_cards.clear();
+            task.topic_directory.clear();
         }
         task.topic_chunk_bytes = task.chunk_bytes;
     }
@@ -230,14 +244,16 @@ pub(super) fn same_chunk(
     source: &SourceSnapshot,
     role: SourceRole,
     section: Option<&str>,
+    query: &str,
     start: usize,
     end: usize,
 ) -> Option<usize> {
-    let hash = digest(format!("{}:{}:{}", source.hash, start, end).as_bytes());
+    let hash = chunk_hash(source, start, end);
     task.chunks.iter().position(|c| {
         c.source_id == source.id
             && c.role == role
             && c.section_id.as_deref() == section
+            && c.query == query
             && c.chunk_hash == hash
             && matches!(
                 c.status,
@@ -271,8 +287,9 @@ fn extract_all(
         match source.role {
             SourceRole::Content => {
                 let total_chunks = parts.len();
+                let query = task.topic_query();
                 for (chunk_index, (start, end, text)) in parts.into_iter().enumerate() {
-                    if same_chunk(task, &source, source.role, None, start, end).is_some() {
+                    if same_chunk(task, &source, source.role, None, &query, start, end).is_some() {
                         continue;
                     }
                     let system = "你是公文材料摘录助手。仅提取与总主题有关的观点及其原文证据；保留条件、否定、数字口径，不外推。按以下短文本格式输出，每组两行：观点：...\n原句：必须逐字来自材料；无相关内容只输出：无相关内容。不得输出指令或改写原句。";
@@ -285,16 +302,15 @@ fn extract_all(
                         model,
                         system,
                         &prompt,
-                        (&source, &text, start, None),
+                        (&source, &text, start, None, &query),
                         save,
                     )?;
-                    let hash = digest(format!("{}:{}:{}", source.hash, start, end).as_bytes());
                     task.topic_cards.extend(cards);
                     upsert_chunk(
                         task,
                         ChunkProgress {
                             source_id: source.id.clone(),
-                            chunk_hash: hash,
+                            chunk_hash: chunk_hash(&source, start, end),
                             role: source.role,
                             section_id: None,
                             start,
@@ -306,6 +322,7 @@ fn extract_all(
                             },
                             error: None,
                             output: String::new(),
+                            query: query.clone(),
                         },
                     );
                     task.status = format!(
@@ -320,7 +337,7 @@ fn extract_all(
             SourceRole::Style | SourceRole::Framework => {
                 let total_chunks = parts.len();
                 for (chunk_index, (start, end, text)) in parts.into_iter().enumerate() {
-                    if same_chunk(task, &source, source.role, None, start, end).is_some() {
+                    if same_chunk(task, &source, source.role, None, "", start, end).is_some() {
                         continue;
                     }
                     let role_label = if source.role == SourceRole::Style {
@@ -349,9 +366,7 @@ fn extract_all(
                                 task,
                                 ChunkProgress {
                                     source_id: source.id.clone(),
-                                    chunk_hash: digest(
-                                        format!("{}:{}:{}", source.hash, start, end).as_bytes(),
-                                    ),
+                                    chunk_hash: chunk_hash(&source, start, end),
                                     role: source.role,
                                     section_id: None,
                                     start,
@@ -363,18 +378,18 @@ fn extract_all(
                                     },
                                     error: Some(format!("《{}》分析失败：{error:#}", source.title)),
                                     output: String::new(),
+                                    query: String::new(),
                                 },
                             );
                             save(task)?;
                             return Err(error);
                         }
                     };
-                    let hash = digest(format!("{}:{}:{}", source.hash, start, end).as_bytes());
                     upsert_chunk(
                         task,
                         ChunkProgress {
                             source_id: source.id.clone(),
-                            chunk_hash: hash,
+                            chunk_hash: chunk_hash(&source, start, end),
                             role: source.role,
                             section_id: None,
                             start,
@@ -382,6 +397,7 @@ fn extract_all(
                             status: ChunkStatus::Extracted,
                             error: None,
                             output: output.clone(),
+                            query: String::new(),
                         },
                     );
                     task.status = format!(
@@ -404,6 +420,12 @@ fn extract_all(
     if !task.framework_manual && !framework.is_empty() {
         task.framework_md = framework;
     }
+    // 新主题的提炼已全部完成，旧主题留下的块与卡片不再需要。
+    let query = task.topic_query();
+    task.chunks.retain(|chunk| {
+        chunk.section_id.is_some() || chunk.role != SourceRole::Content || chunk.query == query
+    });
+    task.topic_cards.retain(|card| card.query == query);
     task.stage = Stage::Extract;
     task.status = "提炼素材阶段已完成".into();
     Ok(())
@@ -526,12 +548,91 @@ fn text_parts(text: &str, max_bytes: usize) -> Vec<String> {
     result
 }
 
+/// 统稿的一个片段及其后原有的分隔（换行或空）；拼回时照原样接上，不在句中插空行。
+pub(super) struct PolishPart {
+    pub text: String,
+    pub separator: String,
+}
+
+/// 统稿按段装组：整段整表不拆；单段超长才按句末细分，细分处原样接回同一段。
+pub(super) fn polish_parts(text: &str, max_bytes: usize) -> Vec<PolishPart> {
+    let max = max_bytes.max(64);
+    // 先切成不可再分的单元：一行正文，或紧挨着的连续表格行。
+    let mut units: Vec<(usize, usize, bool)> = Vec::new();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let content = line.trim_end();
+        if content.trim().is_empty() {
+            continue;
+        }
+        let end = start + content.len();
+        let table = content.trim_start().starts_with('|');
+        match units.last_mut() {
+            Some((_, last_end, true)) if table && !text[*last_end..start].contains("\n\n") => {
+                *last_end = end
+            }
+            _ => units.push((start, end, table)),
+        }
+    }
+    let mut parts = Vec::new();
+    let mut group: Option<(usize, usize)> = None;
+    let flush = |group: &mut Option<(usize, usize)>, parts: &mut Vec<PolishPart>, next: usize| {
+        if let Some((group_start, group_end)) = group.take() {
+            parts.push(PolishPart {
+                text: text[group_start..group_end].to_string(),
+                separator: text[group_end..next].to_string(),
+            });
+        }
+    };
+    for (index, &(start, end, _)) in units.iter().enumerate() {
+        let next = units.get(index + 1).map_or(end, |(next, _, _)| *next);
+        if end - start > max {
+            flush(&mut group, &mut parts, start);
+            let pieces = chunks(&text[start..end], max);
+            let count = pieces.len();
+            for (number, (_, _, piece)) in pieces.into_iter().enumerate() {
+                let trimmed = piece.trim_end();
+                let separator = if number + 1 == count {
+                    text[end..next].to_string()
+                } else {
+                    piece[trimmed.len()..].to_string()
+                };
+                parts.push(PolishPart {
+                    text: trimmed.to_string(),
+                    separator,
+                });
+            }
+            continue;
+        }
+        if group.is_some_and(|(group_start, _)| end - group_start > max) {
+            flush(&mut group, &mut parts, start);
+        }
+        group = Some((group.map_or(start, |(group_start, _)| group_start), end));
+    }
+    let tail = group.map_or(0, |(_, end)| end);
+    flush(&mut group, &mut parts, tail);
+    parts
+}
+
+/// 把逐段统稿结果按原分隔拼回；缺的片段沿用原文。
+pub(super) fn join_polished(parts: &[PolishPart], polished: &[String]) -> String {
+    let mut out = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        out.push_str(polished.get(index).map_or(part.text.as_str(), |p| p.trim()));
+        out.push_str(&part.separator);
+    }
+    out.trim_end().to_string()
+}
+
 fn parse_cards(
     raw: &str,
     source: &SourceSnapshot,
     chunk: &str,
     base: usize,
     section: Option<String>,
+    query: &str,
 ) -> (Vec<MaterialCard>, bool, bool) {
     if raw.trim().eq_ignore_ascii_case("无相关内容") {
         return (vec![], true, false);
@@ -573,6 +674,7 @@ fn parse_cards(
                             end: start + quote.len(),
                             verification: Verification::Unverified,
                             status: "出处命中，观点未核实".into(),
+                            query: query.to_string(),
                         });
                     } else {
                         invalid = true;
@@ -596,9 +698,9 @@ fn request_cards_inner(
     model: &dyn crate::agent::backend::ModelBackend,
     system: &str,
     prompt: &str,
-    location: (&SourceSnapshot, &str, usize, Option<String>),
+    location: (&SourceSnapshot, &str, usize, Option<String>, &str),
 ) -> anyhow::Result<(Vec<MaterialCard>, bool)> {
-    let (source, chunk, base, section) = location;
+    let (source, chunk, base, section, query) = location;
     for attempt in 0..=MAX_RETRIES {
         let retry = if attempt == 0 {
             ""
@@ -613,7 +715,7 @@ fn request_cards_inner(
             &format!("{prompt}{retry}"),
         )?;
         let (cards, no_relevant, invalid) =
-            parse_cards(&response, source, chunk, base, section.clone());
+            parse_cards(&response, source, chunk, base, section.clone(), query);
         if no_relevant || (!invalid && !cards.is_empty()) {
             return Ok((cards, no_relevant));
         }
@@ -628,6 +730,7 @@ fn upsert_chunk(task: &mut WritingTask, progress: ChunkProgress) {
     if let Some(index) = task.chunks.iter().position(|chunk| {
         chunk.source_id == progress.source_id
             && chunk.section_id == progress.section_id
+            && chunk.query == progress.query
             && chunk.chunk_hash == progress.chunk_hash
     }) {
         task.chunks[index] = progress;
@@ -641,16 +744,16 @@ fn request_cards(
     model: &dyn crate::agent::backend::ModelBackend,
     system: &str,
     prompt: &str,
-    location: (&SourceSnapshot, &str, usize, Option<String>),
+    location: (&SourceSnapshot, &str, usize, Option<String>, &str),
     save: &mut dyn FnMut(&WritingTask) -> anyhow::Result<()>,
 ) -> anyhow::Result<(Vec<MaterialCard>, bool)> {
-    let (source, chunk, start, section) = location;
+    let (source, chunk, start, section, query) = location;
     let result = request_cards_inner(
         task,
         model,
         system,
         prompt,
-        (source, chunk, start, section.clone()),
+        (source, chunk, start, section.clone(), query),
     );
     if let Err(error) = &result {
         let end = start + chunk.len();
@@ -658,7 +761,7 @@ fn request_cards(
             task,
             ChunkProgress {
                 source_id: source.id.clone(),
-                chunk_hash: digest(format!("{}:{}:{}", source.hash, start, end).as_bytes()),
+                chunk_hash: chunk_hash(source, start, end),
                 role: source.role,
                 section_id: section,
                 start,
@@ -673,6 +776,7 @@ fn request_cards(
                     source.title, start, end
                 )),
                 output: String::new(),
+                query: query.to_string(),
             },
         );
         save(task)?;
@@ -689,7 +793,7 @@ fn plan(
     task.ready_for(Stage::Outline)?;
     task.topic_directory = summarize_topic_cards(task, model, save)?;
     let cards = task.topic_directory.clone();
-    let system = "你是公文结构规划助手。规划章节，不新增材料事实。按行输出：章节：标题 | 本节要点 | 字数。短文可以只给一个正文单元，不强造多级标题。";
+    let system = "你是公文结构规划助手。规划章节，不新增材料事实。按行输出：章节：标题 | 本节要点 | 字数。标题只写名称，不写“一、”“（一）”“1.”“第一部分”等编号，程序自动编号。短文可以只给一个正文单元，不强造多级标题。";
     let prompt = format!(
         "文种：{}\n主题：{}\n目标篇幅：{}字\n当前提纲：\n{}\n结构框架（完整注入）：\n{}\n\n写作风格（完整注入）：\n{}\n\n主题材料卡目录：\n{}\n\n{}修改要求：{}",
         task.kind,
@@ -764,12 +868,14 @@ fn plan(
                 new.manually_edited = old.manually_edited;
                 new.revision_history = old.revision_history.clone();
                 new.review_suggestion = old.review_suggestion.clone();
+                // 备料按本节指纹判断：标题、要点、字数都没变的章节，素材照常复用。
+                new.cards = old.cards.clone();
+                new.chunk_bytes = old.chunk_bytes;
             }
         }
     }
     task.sections = proposed;
-    task.invalidate_from(Stage::Collect);
-    task.outline_confirmed = false;
+    task.outline_changed();
     task.stage = Stage::Outline;
     task.stale_reason = Some("提纲由模型更新，等待人工确认".into());
     save(task)
@@ -781,8 +887,8 @@ fn summarize_topic_cards(
     save: &mut dyn FnMut(&WritingTask) -> anyhow::Result<()>,
 ) -> anyhow::Result<String> {
     let records = task
-        .topic_cards
-        .iter()
+        .current_topic_cards()
+        .into_iter()
         .map(|c| {
             format!(
                 "观点：{}\n原句：{}\n来源ID：{}",
@@ -852,6 +958,7 @@ fn collect_all(
         .cloned()
         .collect();
     for section in sections {
+        let query = task.section_query(&section);
         let section_chunk_count = sources
             .iter()
             .map(|source| chunks(&source.text, task.chunk_bytes).len())
@@ -865,6 +972,7 @@ fn collect_all(
                     source,
                     SourceRole::Content,
                     Some(&section.id),
+                    &query,
                     start,
                     end,
                 )
@@ -890,7 +998,7 @@ fn collect_all(
                     model,
                     system,
                     &prompt,
-                    (source, &text, start, Some(section.id.clone())),
+                    (source, &text, start, Some(section.id.clone()), &query),
                     save,
                 )
                 .with_context(|| format!("章节「{}」的原文块抽取失败", section.title))?;
@@ -898,12 +1006,11 @@ fn collect_all(
                     target.cards.extend(cards.clone());
                     target.status = "备料进行中".into();
                 }
-                let hash = digest(format!("{}:{}:{}", source.hash, start, end).as_bytes());
                 upsert_chunk(
                     task,
                     ChunkProgress {
                         source_id: source.id.clone(),
-                        chunk_hash: hash,
+                        chunk_hash: chunk_hash(source, start, end),
                         role: SourceRole::Content,
                         section_id: Some(section.id.clone()),
                         start,
@@ -915,6 +1022,7 @@ fn collect_all(
                         },
                         error: None,
                         output: String::new(),
+                        query: query.clone(),
                     },
                 );
                 task.status = format!(
@@ -928,6 +1036,21 @@ fn collect_all(
             target.status = "备料完成".into();
         }
         save(task)?;
+    }
+    // 全部章节按当前要求备料完成，旧要求与已删章节留下的块和卡片不再需要。
+    let current: Vec<_> = task
+        .sections
+        .iter()
+        .map(|section| (section.id.clone(), task.section_query(section)))
+        .collect();
+    task.chunks.retain(|chunk| match &chunk.section_id {
+        None => true,
+        Some(id) => current
+            .iter()
+            .any(|(section, query)| section == id && *query == chunk.query),
+    });
+    for (section, (_, query)) in task.sections.iter_mut().zip(&current) {
+        section.cards.retain(|card| card.query == *query);
     }
     task.stage = Stage::Collect;
     task.status = "分节备料阶段已完成".into();
@@ -993,7 +1116,12 @@ fn write_section(
     .max(256);
     let mut group = Vec::new();
     let mut size = 0;
-    for card in section.cards.iter().cloned() {
+    let cards: Vec<MaterialCard> = task
+        .current_section_cards(&section)
+        .into_iter()
+        .cloned()
+        .collect();
+    for card in cards {
         let n = card.point.len() + card.quote.len() + 64;
         if !group.is_empty() && size + n > evidence_limit {
             card_groups.push(std::mem::take(&mut group));
@@ -1020,7 +1148,10 @@ fn write_section(
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        let system = "你是公文正文起草助手。只起草当前章节，严格遵循篇幅与边界。不得捏造数字、日期、机构或完成事实；材料不足时标注待核实或写成计划建议。只输出 Markdown 正文，不带解释。";
+        let system = format!(
+            "你是公文正文起草助手。只起草当前章节，严格遵循篇幅与边界。不得捏造数字、日期、机构或完成事实；材料不足时标注待核实或写成计划建议。只输出 Markdown 正文，不带解释。{}",
+            assemble::section_heading_rule(task.sections.len())
+        );
         let prompt = format!(
             "文种：{}\n总主题：{}\n确认提纲：\n{}\n全文目标篇幅：{}字；本节目标：{}字\n当前章节：{}\n本节职责与要点：{}\n当前章节素材组 {}/{}：\n{}\n已由其他章节承担的观点：{}\n相邻章节摘要：{}\n写作风格（本次显式注入）：\n{}\n结构框架：\n{}\n统一术语：无\n当前已有人工作稿（重写时必须保留其有用内容并按要求修订）：\n{}\n额外修改要求：{}",
             task.kind,
@@ -1044,7 +1175,7 @@ fn write_section(
             task,
             model,
             crate::agent::backend::ModelRole::Draft,
-            system,
+            &system,
             &prompt,
         )?;
         pieces.push(piece);
@@ -1063,6 +1194,8 @@ fn write_section(
     );
     task.sections[index].status = "已完成".into();
     task.sections[index].rewrite_in_progress = false;
+    // 重写前的人工稿已存入本节历史；新稿是 AI 稿，重新参加整批续写与统稿。
+    task.sections[index].manually_edited = false;
     task.sections[index].input_hash = section_input_hash(task, index);
     task.sections[index].review_suggestion = None;
     task.stage = Stage::Write;
@@ -1174,9 +1307,8 @@ fn polish(
             index + 1,
             section.title,
             section.points,
-            section
-                .cards
-                .iter()
+            task.current_section_cards(section)
+                .into_iter()
                 .map(|c| c.point.as_str())
                 .collect::<Vec<_>>()
                 .join("；"),
@@ -1246,9 +1378,10 @@ fn polish(
             continue;
         }
         let old = task.sections[i].markdown.clone();
+        // v2：按段落与句末切分；旧版按字节硬切的片段不能续用。
         let input_hash = digest(
             format!(
-                "{}|{}|{}|{}",
+                "v2|{}|{}|{}|{}",
                 old, task.style_md, task.review_notes, task.sections[i].points
             )
             .as_bytes(),
@@ -1257,9 +1390,12 @@ fn polish(
             task.sections[i].review_parts.clear();
             task.sections[i].review_input_hash = input_hash;
         }
-        let parts = text_parts(&old, task.chunk_bytes.max(512));
+        let parts = polish_parts(&old, task.chunk_bytes.max(512));
         let mut review_parts = task.sections[i].review_parts.clone();
-        let system = "你是公文统稿助手。根据全局清单与相邻章节，只修正表达、衔接、重复，不新增无依据事实，不改变数字及其口径，不删除限定条件；逐条对照证据并保留依据不足项。只输出该节 Markdown 作为独立审阅建议，不覆盖原稿。";
+        let system = format!(
+            "你是公文统稿助手。根据全局清单与相邻章节，只修正表达、衔接、重复，不新增无依据事实，不改变数字及其口径，不删除限定条件；逐条对照证据并保留依据不足项。只输出给定片段修改后的 Markdown 作为独立审阅建议，不覆盖原稿，不补写片段以外的内容。{}",
+            assemble::section_heading_rule(task.sections.len())
+        );
         for part_index in review_parts.len()..parts.len() {
             let prompt = format!(
                 "文种：{}\n总主题：{}\n完整提纲：\n{}\n本节：{}\n写作风格（本次显式注入）：\n{}\n全局论点检查清单：\n{}\n正文片段 {}/{}：\n{}\n片段相邻上下文：\n前文：{}\n后文：{}\n本节证据目录（不代表语义核实）：\n{}",
@@ -1271,47 +1407,34 @@ fn polish(
                 task.review_notes,
                 part_index + 1,
                 parts.len(),
-                parts[part_index],
+                parts[part_index].text,
                 part_index
                     .checked_sub(1)
                     .and_then(|p| parts.get(p))
-                    .map(String::as_str)
-                    .unwrap_or("无"),
+                    .map_or("无", |part| part.text.as_str()),
                 parts
                     .get(part_index + 1)
-                    .map(String::as_str)
-                    .unwrap_or("无"),
+                    .map_or("无", |part| part.text.as_str()),
                 task.topic_directory
             );
             let polished = complete(
                 task,
                 model,
                 crate::agent::backend::ModelRole::Draft,
-                system,
+                &system,
                 &prompt,
             )?;
             review_parts.push(polished);
             task.sections[i].review_parts = review_parts.clone();
-            task.sections[i].review_suggestion = Some(review_parts.join("\n\n"));
+            task.sections[i].review_suggestion = Some(join_polished(&parts, &review_parts));
             save(task)?;
         }
-        task.sections[i].review_suggestion = Some(review_parts.join("\n\n"));
+        task.sections[i].review_suggestion = Some(join_polished(&parts, &review_parts));
         task.sections[i].status = "已有统稿建议，待审阅".into();
         save(task)?;
     }
-    task.final_markdown = task
-        .sections
-        .iter()
-        .map(|s| {
-            let body = s.review_suggestion.as_deref().unwrap_or(&s.markdown);
-            if task.sections.len() == 1 {
-                body.to_string()
-            } else {
-                format!("## {}\n\n{}", s.title.trim_start_matches('#').trim(), body)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    task.final_markdown = assemble::assemble(task);
+    task.final_manual = false;
     task.status = "统稿完成，来源核验待人工处理".into();
     task.stage = Stage::Review;
     save(task)?;
@@ -1337,7 +1460,7 @@ fn section_input_hash(task: &WritingTask, index: usize) -> String {
         task.style_md,
         task.framework_md
     );
-    for card in &section.cards {
+    for card in task.current_section_cards(section) {
         input.push_str(&card.source_id);
         input.push_str(&card.quote);
         input.push_str(&card.point);
