@@ -290,11 +290,13 @@ impl Drop for WritingPanel {
 }
 
 impl DraftPage<'_> {
-    pub(crate) fn writing_mode_switch(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn writing_header(&mut self, ui: &mut egui::Ui) {
         let was_open = self.doc.writing.open;
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.doc.writing.open, false, "正文");
-            ui.selectable_value(&mut self.doc.writing.open, true, "分阶段写作");
+            if ui.button("← 返回正文").clicked() {
+                self.doc.writing.open = false;
+            }
+            ui.strong("分阶段写作");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.doc.writing.open {
                     if ui.button("公文要素").clicked() {
@@ -313,14 +315,6 @@ impl DraftPage<'_> {
                 }
             });
         });
-        if self.doc.writing.open && !was_open {
-            self.doc.form_collapsed = true;
-            self.doc.ai_panel.open = false;
-            self.doc.result_drawer_open = false;
-            if self.doc.manuscript_id.is_none() {
-                self.actions.push(crate::app::DraftAction::SaveToLibrary);
-            }
-        }
         if was_open && !self.doc.writing.open {
             self.doc.writing.sync(self.doc.manuscript_id, true);
         }

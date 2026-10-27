@@ -87,9 +87,9 @@ impl DraftPage<'_> {
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 self.read_only_banner(ui);
-                self.writing_mode_switch(ui);
-                ui.separator();
                 if self.doc.writing.open {
+                    self.writing_header(ui);
+                    ui.separator();
                     self.writing_ui(ui);
                     return;
                 }
