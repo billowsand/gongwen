@@ -356,6 +356,25 @@ impl DraftPage<'_> {
         }
         toolbar_separator(ui);
 
+        // 写作向导属于当前稿件的起草操作，不占正文区的常驻空间。
+        if ui
+            .add_enabled(
+                editable,
+                theme::icon_text_button(theme::Icon::FilePlus, "分阶段写作…"),
+            )
+            .on_hover_text("按素材、提纲、分节写作与统稿审阅逐步成文；已有任务继续上次进度")
+            .clicked()
+        {
+            self.doc.writing.open = true;
+            self.doc.form_collapsed = true;
+            self.doc.ai_panel.open = false;
+            self.doc.result_drawer_open = false;
+            if !saved {
+                self.actions.push(DraftAction::SaveToLibrary);
+            }
+        }
+        toolbar_separator(ui);
+
         // 二、稿件本身的编辑动作
         if ui
             .add(theme::icon_text_button(

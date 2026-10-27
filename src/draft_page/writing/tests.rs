@@ -128,7 +128,7 @@ fn draw(stage: Stage, width: f32, sample: Option<&std::path::Path>) {
                         actions: &mut actions,
                         export_links: &mut exports,
                     };
-                    page.writing_mode_switch(ui);
+                    page.writing_header(ui);
                     page.writing_ui(ui);
                 });
             },

@@ -846,24 +846,6 @@ impl GongwenApp {
                 compact_menu(ui);
                 ui.set_min_width(148.0);
                 self.new_document_items(ui);
-                let can_write = matches!(self.tabs.get(self.active_tab), Some(TabRef::Doc(_)))
-                    && self.active_doc_ref().is_some_and(|doc| !doc.read_only());
-                if ui
-                    .add_enabled(can_write, theme::menu_item(theme::Icon::FilePlus, "分阶段写作…"))
-                    .on_hover_text("围绕当前稿件，按素材、提纲、分节写作与统稿审阅逐步成文；已有任务继续上次进度")
-                    .clicked()
-                {
-                    if self.docs[self.active_doc].manuscript_id.is_none() {
-                        self.save_to_manuscript_library();
-                    }
-                    let doc = &mut self.docs[self.active_doc];
-                    doc.writing.open = true;
-                    doc.form_collapsed = true;
-                    doc.ai_panel.open = false;
-                    doc.result_drawer_open = false;
-                    ui.close();
-                }
-
                 ui.separator();
                 self.nav_menu_item(ui, NavPage::Manuscript);
                 // 四张词表同属「词库」，收进一个子菜单；当前页是其中之一时，
