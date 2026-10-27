@@ -73,7 +73,7 @@ pub(crate) fn body_runs(text: &str, bold: BoldFont<'_>) -> Vec<Run> {
 /// Word 画不出穿过文字的波浪线——OOXML 的波浪只有下划线一种。删除用红色
 /// 直删除线；新增用字符边框：Word 会把相邻且边框设置相同的 run 自动并成
 /// 一个框，"多个字一个框"是天然就有的。
-fn apply_redline(run: Run, kind: RedlineKind) -> Run {
+pub(super) fn apply_redline(run: Run, kind: RedlineKind) -> Run {
     match kind {
         RedlineKind::Same => run,
         RedlineKind::Deleted => run.strike().color("C00000"),

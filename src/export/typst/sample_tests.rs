@@ -486,6 +486,15 @@ fn typst_samples() {
             )
             .unwrap();
         }
+        if case.kind == TemplateKind::MeetingMinutes {
+            crate::export::docx::write_docx(
+                &dir.join("word.docx"),
+                &input,
+                &case.markdown,
+                &display,
+            )
+            .unwrap();
+        }
         if case.kind == TemplateKind::PhoneRecord {
             crate::export::docx::write_docx(
                 &dir.join("record.docx"),

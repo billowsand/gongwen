@@ -209,8 +209,9 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 
 - **会议纪要文种**（按 `examples/huiyijiyao.docx`：红头纪要标志与编号、正文「一是」楷体、
   出席 / 列席 / 请假名单、分送 / 抄送 / 印发版记，分三期）：**第一期（模型、表单、校验与
-  Typst PDF）已完成**；第二期 Word 与预览、第三期提示词 / 技能包 / 使用帮助待做。方案、进度、
+  Typst PDF）、第二期（Word 与预览）已完成**；第三期提示词 / 技能包 / 使用帮助待做。方案、进度、
   与方案的出入和已知坑见 `docs/meeting-minutes-design.md`（单文件，第十节是交接）。
+  三端共用的文字规则在 `src/export/minutes.rs`，改「一是」楷体或名单排法只改那里。
 
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 

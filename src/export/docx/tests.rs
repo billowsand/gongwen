@@ -1653,11 +1653,7 @@ fn templates_with_security_line_use_heiti() {
     let temp = tempfile::tempdir().unwrap();
     for kind in TemplateKind::ALL {
         // 白头件目前未导出密级行；此处检查已有密级行的字体。
-        // TODO(会议纪要第二期)：Word 导出接入后去掉 MeetingMinutes 的跳过。
-        if kind == TemplateKind::WhitePaper
-            || kind == TemplateKind::MeetingMinutes
-            || !kind.uses_official_docx()
-        {
+        if kind == TemplateKind::WhitePaper || !kind.uses_official_docx() {
             continue;
         }
         for period in ["10年", "长期"] {
@@ -1699,8 +1695,7 @@ fn western_fonts_follow_chinese_fonts_in_exported_docx() {
     let fonts_pattern = regex::Regex::new(r"<w:rFonts\b[^>]*/>").unwrap();
     let east_asia_pattern = regex::Regex::new(r#"w:eastAsia="([^"]+)""#).unwrap();
     for kind in TemplateKind::ALL {
-        // TODO(会议纪要第二期)：Word 导出接入后去掉 MeetingMinutes 的跳过。
-        if !kind.uses_official_docx() || kind == TemplateKind::MeetingMinutes {
+        if !kind.uses_official_docx() {
             continue;
         }
         let path = temp.path().join("mixed-fonts.docx");
@@ -1842,4 +1837,57 @@ fn document_title_compresses_small_overflow_and_wraps_large() {
         first_line.contains(r#"w:type="textWrapping""#),
         "长标题应换行：{first_line}"
     );
+}
+
+/// 会议纪要：纪要标志、无代字编号与红线、「一是」楷体、名单、三行版记；没写
+/// `# 标题` 时不排标题，也不落款。
+#[test]
+fn meeting_minutes_docx_has_header_roster_and_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("minutes.docx");
+    let mut input = DraftInput::default();
+    input.kind = TemplateKind::MeetingMinutes;
+    input.title_hint = "不该印出来的标题提示".into();
+    input.profile.issuing_unit = "某某市民政局".into();
+    input.profile.document_year = "2026".into();
+    input.profile.document_number = "3".into();
+    input.profile.copies_to = "市财政局".into();
+    input.attendees = "王建国、李明".into();
+    input.minutes.absent = "市财政局刘处长".into();
+    input.minutes.distribute = "局领导".into();
+    input.minutes.printing_unit = "某某市民政局办公室".into();
+    input.date = "2026年9月30日".into();
+    let markdown = "<!-- [正文] -->\n\n会议认为，工作有成效。一是摸清了底数。二是落实了经费。";
+
+    write_docx_ok(&path, &input, markdown).unwrap();
+    let document = zip_text(&path, "word/document.xml");
+
+    let heading = paragraph_containing(&document, "某某市民政局会议纪要");
+    assert!(heading.contains("w:color w:val=\"FF0000\""), "{heading}");
+    assert!(heading.contains("方正小标宋简体"));
+    assert!(document.contains("〔2026〕3号"));
+    assert!(document.contains("w:color=\"FF0000\""), "编号下应有红线");
+    assert!(!document.contains("不该印出来的标题提示"));
+
+    let body = paragraph_containing(&document, "会议认为");
+    let kai: Vec<_> = body
+        .split("<w:r>")
+        .skip(1)
+        .filter(|run| run.contains("w:eastAsia=\"楷体_GB2312\""))
+        .map(runs_text)
+        .collect();
+    assert_eq!(kai, ["一是摸清了底数", "二是落实了经费"]);
+
+    // 出席两字名补成三字宽排网格；请假里有长名就连排。
+    assert!(document.contains("王建国"));
+    assert!(document.contains("李\u{3000}明"));
+    let absent = paragraph_containing(&document, "市财政局刘处长");
+    assert!(absent.contains("请假："));
+
+    assert!(document.contains("分送：局领导"));
+    assert!(runs_text(paragraph_containing(&document, "抄送：")).starts_with("抄送：市财政局"));
+    // 出席 2 + 分送 1 + 抄送 1；请假不另印。
+    assert!(document.contains("（共印4份）"));
+    let issue = paragraph_containing(&document, "某某市民政局办公室");
+    assert!(runs_text(issue).ends_with("2026年9月30日印发"), "{issue}");
 }

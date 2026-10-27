@@ -204,9 +204,30 @@ pub struct MinutesMetadata {
 - 名单网格两字名按样例中间空一字，格宽约 3.8 字，格间空隙（约 0.8 字）比名内空隙略窄，
   与样例同样观感；没有另做调整。
 
-**第二期要接的坑**
+### 第二期（Word 与预览）——已完成，2026-10-27
 
-- `export/docx.rs` 对会议纪要暂时直接报错「Word 导出尚未接入」，默认勾着 Word 导出时
-  会看到这条错误；`docx/tests.rs` 两个遍历文种的测试临时跳过了会议纪要（标了 TODO）。
-- 预览（`preview/header.rs`、`preview/tail.rs`）只排了密级，纪要标志、编号、红线、名单、
-  版记都还没有（标了 TODO）。
+- 共用规则再收进 `src/export/minutes.rs`：`minutes_heading`（纪要标志）、`minutes_number_text`
+  （编号）、`kai_pieces`（按楷体范围切片段）。PDF、Word、预览三端的「一是」切点都从
+  `enumeration_kai_spans` + `kai_pieces` 取，不各写一套。
+- Word（`src/export/docx/minutes.rs`）走公文主链 `write_docx_with_numbering`，只在三处
+  分叉：版头（`add_header`：份号、密级、纪要标志、编号放进一格无框表、表下边框即红线）、
+  正文段（`body_paragraph` 多一道楷体）、名单（`add_roster`：网格是无框表，连排是悬挂缩进段）
+  与版记（`add_record`：浮动表贴版心底，和函稿版记共用 `record::add_record_table`）。
+  没写 `# 标题` 不排标题；附件、附件说明照常。
+- 预览（`src/preview/minutes.rs`）：`header` / `roster_block` / `record_block`，由
+  `header_block`、`official_preview`、`footer_record` 分派；「一是」楷体靠 `Metrics` 的
+  `enumeration_kai` 开关在 `append_numbered_inline` 里切。预览不分页，版记紧跟名单。
+- 样张：`typst_samples` 的两个会议纪要用例另出 `word.docx`；拿本机 Word 转 PDF 与
+  `typst.pdf` 对照过，版头、名单（网格 / 连排）、版记三行与印数一致。
+- 测试：`docx/tests.rs` 的 `meeting_minutes_docx_has_header_roster_and_record`、
+  `preview.rs` 的 `minutes_preview_draws_header_roster_and_record_in_order`，第一期临时跳过
+  会议纪要的两个 Word 测试已恢复。
+
+**出入与已知坑**
+
+- Word 里纪要标志用 34pt 固定行高（字号 26pt，按正文网格的 28.85pt 会被 Word 裁掉字顶），
+  多出来的 103 缇从它上面的空行扣回；编号到红线的 4mm 用单元格下边距 113 缇撑出，同样从
+  下一个空行扣回，后面的行仍在网格上。
+- Word 版只出一份，份号固定 01（与函稿 Word 一致）；逐份编号只在 PDF。
+- 预览没在真机界面里目视过（开发版窗口没截到图），只靠预览测试核对了内容与先后顺序；
+  第三期顺带在界面里看一眼。

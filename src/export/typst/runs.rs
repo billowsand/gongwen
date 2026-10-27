@@ -107,7 +107,6 @@ pub(crate) fn with_enumeration_kai(runs: Runs) -> Runs {
     if spans.is_empty() {
         return runs;
     }
-    let in_span = |index: usize| spans.iter().any(|span| span.contains(&index));
     let mut out: Runs = Vec::with_capacity(runs.len() + spans.len() * 2);
     let mut offset = 0;
     for run in runs {
@@ -115,28 +114,15 @@ pub(crate) fn with_enumeration_kai(runs: Runs) -> Runs {
             out.push(run);
             continue;
         };
-        let mut piece = String::new();
-        let mut piece_kai = None;
-        for ch in text.chars() {
-            let kai = in_span(offset);
-            if piece_kai.is_some_and(|current| current != kai) {
-                out.push(Run {
-                    t: Some(std::mem::take(&mut piece)),
-                    h: piece_kai == Some(true),
-                    ..run.clone()
-                });
-            }
-            piece.push(ch);
-            piece_kai = Some(kai);
-            offset += 1;
-        }
-        if !piece.is_empty() {
+        let count = text.chars().count();
+        for (piece, kai) in crate::export::minutes::kai_pieces(text, offset, &spans) {
             out.push(Run {
                 t: Some(piece),
-                h: piece_kai == Some(true),
+                h: kai,
                 ..run.clone()
             });
         }
+        offset += count;
     }
     out
 }

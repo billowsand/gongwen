@@ -400,11 +400,7 @@ fn minutes_frame(
     elements: &ElementMarks,
     doc: &mut Doc,
 ) {
-    let heading = if input.minutes.heading.trim().is_empty() {
-        format!("{}会议纪要", display.full_name(&input.profile.issuing_unit))
-    } else {
-        input.minutes.heading.trim().to_string()
-    };
+    let heading = crate::export::minutes::minutes_heading(input, display);
     // 编号只有年份与序号，没有机关代字；预览版序号留白，与发文字号同一套标注。
     let (_, year, serial) = number_display_parts(input);
     let [_, year_mark, serial_mark] = elements.number();

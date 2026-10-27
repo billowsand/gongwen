@@ -403,6 +403,10 @@ pub(crate) fn footer_record(
     display: &UnitDisplay,
     elements: &ElementMarks,
 ) {
+    if input.kind == TemplateKind::MeetingMinutes {
+        crate::preview::minutes::record_block(ui, metrics, input, display, elements);
+        return;
+    }
     if input.kind != TemplateKind::OfficialLetter {
         return;
     }

@@ -245,8 +245,10 @@ pub(crate) fn header_block(
             security_line(ui, metrics, input, elements.security());
             ui.add_space(metrics.line * WHITE_PAPER_BLANK_LINES);
         }
-        // TODO(会议纪要第二期)：预览补上份号、纪要标志、编号与红线。
-        TemplateKind::MeetingAgenda | TemplateKind::MeetingMinutes => {
+        TemplateKind::MeetingMinutes => {
+            crate::preview::minutes::header(ui, metrics, input, display, elements);
+        }
+        TemplateKind::MeetingAgenda => {
             security_line(ui, metrics, input, elements.security());
             ui.add_space(metrics.line);
         }
