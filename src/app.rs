@@ -52,6 +52,7 @@ mod tabs;
 mod versioning;
 mod vocabulary;
 pub(crate) mod widgets;
+mod writing;
 
 pub(crate) use ai_manage::AiSection;
 pub(crate) use ai_prompts::AiPromptDraft;
@@ -764,6 +765,7 @@ impl eframe::App for GongwenApp {
         crate::net::set_proxy(&self.config.proxy);
         self.handle_shortcuts(&ctx);
         self.poll_worker(&ctx);
+        self.poll_writing_tasks(&ctx);
         // 系统文件对话框在后台线程开窗，这里问一次结果；用户挑完再接着做那件事。
         self.poll_file_dialogs(&ctx);
         self.receive_forwarded_requests(&ctx);

@@ -40,6 +40,7 @@ pub(crate) mod skill_files;
 pub(crate) mod style;
 pub(crate) mod toolcall;
 pub(crate) mod tools;
+pub(crate) mod writing;
 
 #[cfg(test)]
 mod agent_tests;

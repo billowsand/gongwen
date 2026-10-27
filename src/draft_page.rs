@@ -50,6 +50,7 @@ mod tasks;
 mod timeline;
 mod version_diff;
 mod versions;
+pub(crate) mod writing;
 
 pub(crate) use editor::{PreviewAnchor, editor_id};
 pub(crate) use find::{
@@ -446,6 +447,8 @@ pub(crate) struct DraftSession {
     pub(crate) ai_proposal: Option<AiProposal>,
     /// 右侧 AI 侧栏：输入区、任务流与停止开关。按稿件各存一份，只在内存里。
     pub(crate) ai_panel: crate::ai_panel::AiPanel,
+    /// 独立于聊天的固定六阶段写作任务。
+    pub(crate) writing: writing::WritingPanel,
     /// 本篇待确认的修订建议。词表、文档规则与模型检查器共用这一份。
     pub(crate) revisions: crate::revision::RevisionSet,
     /// 逐句复核的结论缓存：句子指纹 → 模型原话。改了别处的句子不必重问一遍，
@@ -523,6 +526,7 @@ impl DraftSession {
         {
             draft.profile.document_year = draft.document_year();
         }
+        let writing = writing::WritingPanel::new(draft.kind);
         let mut session = Self {
             key,
             manuscript_id,
@@ -574,6 +578,7 @@ impl DraftSession {
             ai_review_baseline: None,
             ai_proposal: None,
             ai_panel: crate::ai_panel::AiPanel::default(),
+            writing,
             revisions: crate::revision::RevisionSet::default(),
             revise_cache: std::collections::BTreeMap::new(),
             saved_baseline: None,

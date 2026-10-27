@@ -52,6 +52,13 @@ pub(crate) enum DraftAction {
     Persist,
     /// 导入文档：应用层开文件框，选好后把正文插进这篇稿件。
     ImportDocument { key: DocKey },
+    /// 给分阶段写作添加原文快照；系统文件框仍由应用层调度。
+    ImportWritingSources {
+        key: DocKey,
+        role: crate::agent::writing::SourceRole,
+    },
+    /// 导出本次任务的风格或框架 Markdown，文件框仍在应用层打开。
+    ExportWritingArtifact { name: String, text: String },
     /// 插入图片：应用层开文件框，选好后把图片插进这篇稿件。
     InsertImages { key: DocKey },
     /// 另存导出成品：应用层开保存框，选好后复制过去。
@@ -101,6 +108,14 @@ impl GongwenApp {
                 save_ai_session(&mut self.docs[index], self.manuscript_store.as_mut())
             {
                 self.status = error;
+            }
+            let manuscript_id = self.docs[index].manuscript_id;
+            self.docs[index].writing.sync(manuscript_id, true);
+            if let Some(error) = &self.docs[index].writing.save_error
+                && self.docs[index].writing.waiting_to_save()
+            {
+                self.status = error.clone();
+                return;
             }
             self.docs.remove(index);
             if index < self.active_doc {
@@ -213,6 +228,16 @@ impl GongwenApp {
         }
         if self.exit_confirmed {
             return;
+        }
+        for doc in &mut self.docs {
+            doc.writing.sync(doc.manuscript_id, true);
+            if let Some(error) = &doc.writing.save_error
+                && doc.writing.waiting_to_save()
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.status.clone_from(error);
+                return;
+            }
         }
         // 开着自动保存时先静默存一轮，能不打扰就不打扰。
         self.autosave_all();
@@ -457,6 +482,10 @@ impl GongwenApp {
         }
         // 候选区里正在打的字等不到停手了：切标签、关窗前一并写下去。
         for doc in &mut self.docs {
+            doc.writing.sync(doc.manuscript_id, true);
+            if let Some(error) = &doc.writing.save_error {
+                self.status.clone_from(error);
+            }
             let id = doc.manuscript_id;
             if let Some(error) = doc
                 .candidates

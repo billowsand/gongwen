@@ -24,9 +24,11 @@ impl DraftPage<'_> {
             .frame(theme::panel(theme::surface(), 10))
             .show(ui, |ui| self.ribbon(ui));
         // AI 侧栏先于审校抽屉声明，贴在最右边。
-        self.ai_panel_side(ui);
+        if !self.doc.writing.open {
+            self.ai_panel_side(ui);
+        }
         // 历史版本时间轴：第 ④ 期并入左侧时间轴列，旧右侧抽屉下线。
-        let mut result_open = self.doc.result_drawer_open;
+        let mut result_open = self.doc.result_drawer_open && !self.doc.writing.open;
         let mut close_result = false;
         egui::Panel::right("review_result_drawer_right_v1")
             .default_size(DRAWER_DEFAULT_WIDTH)
@@ -85,6 +87,12 @@ impl DraftPage<'_> {
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 self.read_only_banner(ui);
+                self.writing_mode_switch(ui);
+                ui.separator();
+                if self.doc.writing.open {
+                    self.writing_ui(ui);
+                    return;
+                }
                 if let Some(loaded) = &self.doc.loaded_version
                     && self.doc.manuscript_id == Some(loaded.manuscript_id)
                 {

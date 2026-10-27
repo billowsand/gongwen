@@ -406,6 +406,40 @@ impl GongwenApp {
                         app.draft_page_at(index).import_document_from(&ctx, &path);
                     });
                 }
+                DraftAction::ImportWritingSources { key, role } => {
+                    let ctx = ctx.clone();
+                    self.request_files(
+                        crate::doc_import::knowledge_files_spec(),
+                        move |app, paths| {
+                            let Some(paths) = paths else { return };
+                            let Some(index) = app.doc_index_of_key(key) else {
+                                return;
+                            };
+                            if app.docs[index].read_only()
+                                || app.docs[index].busy
+                                || app.docs[index].writing.running
+                            {
+                                app.status = "当前稿件只读或已有任务进行中，请稍后导入材料".into();
+                                return;
+                            }
+                            app.docs[index].writing.import_files(paths, role, ctx);
+                            app.docs[index].busy = true;
+                        },
+                    );
+                }
+                DraftAction::ExportWritingArtifact { name, text } => {
+                    let spec = super::file_dialog::FileDialogSpec::save_file()
+                        .file_name(name)
+                        .filter("Markdown", &["md"]);
+                    self.request_file(spec, move |app, path| {
+                        if let Some(path) = path {
+                            app.status = match std::fs::write(&path, text.as_bytes()) {
+                                Ok(()) => format!("写作成果已导出到 {}", path.display()),
+                                Err(error) => format!("导出写作成果失败：{error}"),
+                            };
+                        }
+                    });
+                }
                 DraftAction::InsertImages { key } => {
                     let ctx = ctx.clone();
                     self.request_files(crate::images::pick_files_spec(), move |app, files| {
