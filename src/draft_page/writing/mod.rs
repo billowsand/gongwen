@@ -1,5 +1,7 @@
 //! 分阶段写作界面与后台任务桥接；正式正文只通过既有提案入口写入。
 
+#[cfg(test)]
+mod live_tests;
 mod materials;
 mod pages;
 #[cfg(test)]

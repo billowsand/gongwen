@@ -1178,3 +1178,118 @@ fn style_summary_is_redone_when_the_document_kind_changes() {
         "换了文种要按新文种重新归纳"
     );
 }
+
+/// 真机（qwen3.6-35b-a3b）上复现过：样稿每块分析都比原文切块还长，按切块宽度分组时
+/// 每组只装一条，归纳后条数不减，提炼整轮报「没有缩小到可安全合并」。
+#[test]
+fn long_sample_analyses_still_merge_into_one_style() {
+    let mut task = WritingTask::new(TemplateKind::ResearchReport);
+    task.topic = "工作".into();
+    task.add_source(SourceSnapshot::new("材料", SourceRole::Content, "原文。").unwrap());
+    let sample = "样稿段落，讲清问题与对策。\n\n".repeat(400);
+    task.add_source(SourceSnapshot::new("样稿", SourceRole::Style, sample).unwrap());
+    // 窗口小一些，六块分析分成几组，才能走到「最后剩一组再合一次」那一层。
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("归纳层级") {
+            "统一风格：短句、先结论后依据。".into()
+        } else if prompt.contains("样稿：") {
+            // 小模型常把一块的风格分析写得比原块还长。
+            "- 句式偏短，先结论后依据。\n".repeat(120)
+        } else {
+            "无相关内容".into()
+        }
+    })
+    .with_window(8192);
+    run(&mut task, Action::Extract, &model, &mut |_| Ok(())).unwrap();
+    assert!(
+        task.chunks
+            .iter()
+            .filter(|chunk| chunk.role == SourceRole::Style)
+            .count()
+            > 3,
+        "样稿要切成多块才能复现"
+    );
+    assert_eq!(task.style_md, "统一风格：短句、先结论后依据。");
+    assert_eq!(
+        model.asked("归纳层级：2"),
+        1,
+        "两组归纳结果再合成一份，最后一层不能空手退出"
+    );
+}
+
+/// 真机上两块总失败都不是模型能力问题：一块回答「无相关内容。」带了句号，
+/// 一块的原句跨段、把段间空行合掉了。只放宽这两处包装，用字仍须逐字一致。
+#[test]
+fn small_model_wrapping_of_no_relevant_and_cross_paragraph_quotes_is_accepted() {
+    let mut task = WritingTask::new(TemplateKind::ResearchReport);
+    task.topic = "工作".into();
+    let empty = SourceSnapshot::new("甲", SourceRole::Content, "甲材料与主题无关。").unwrap();
+    let text = "试点不宜贪大求全。\n\n中期，应把试点流程固化。";
+    let crossing = SourceSnapshot::new("乙", SourceRole::Content, text).unwrap();
+    task.add_source(empty);
+    task.add_source(crossing.clone());
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("甲材料") {
+            "**无相关内容。**".into()
+        } else {
+            "观点：试点要聚焦\n原句：试点不宜贪大求全。中期，应把试点流程固化。".into()
+        }
+    });
+    run(&mut task, Action::Extract, &model, &mut |_| Ok(())).unwrap();
+    assert_eq!(task.coverage().done, 2);
+    let card = &task.topic_cards[0];
+    assert_eq!(card.quote, text, "卡片存原文里的实际片段（含段间空行）");
+    assert_eq!(&crossing.text[card.start..card.end], card.quote);
+    assert!(task.validate_sources().is_empty());
+
+    // 改了一个字的原句仍然不算命中。
+    let mut strict = WritingTask::new(TemplateKind::ResearchReport);
+    strict.topic = "工作".into();
+    strict.add_source(SourceSnapshot::new("乙", SourceRole::Content, text).unwrap());
+    let model = ScriptedModel::new(|_, _| {
+        "观点：试点要聚焦\n原句：试点不宜贪大求全。中期，要把试点流程固化。".into()
+    });
+    assert!(run(&mut strict, Action::Extract, &model, &mut |_| Ok(())).is_err());
+    assert_eq!(strict.coverage().failed, 1);
+}
+
+/// 真机上 88 张主题卡（约 1.4 万字）按 16 000 字节分三组，目录要保留全部来源 ID，
+/// 每组输出仍有 8 KB 左右，两层后还是两组，拟纲报「仍超过规划上下文上限」。
+/// 按窗口分组时一次就能整理完。
+#[test]
+fn many_topic_cards_are_organized_within_the_model_window() {
+    let mut task = WritingTask::new(TemplateKind::ResearchReport);
+    task.topic = "工作".into();
+    let source = SourceSnapshot::new("材料", SourceRole::Content, "材料原文。").unwrap();
+    task.add_source(source.clone());
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("请拟定提纲") {
+            "章节：甲 | 要点 | 1500字\n章节：乙 | 要点 | 1500字".into()
+        } else if prompt.contains("目录整理层级") {
+            // 保留全部来源 ID 的目录缩不了多少。
+            "- 观点（来源ID：材料）关键词保留。\n".repeat(220)
+        } else {
+            "无相关内容".into()
+        }
+    });
+    run(&mut task, Action::Extract, &model, &mut |_| Ok(())).unwrap();
+    for index in 0..88 {
+        task.topic_cards.push(MaterialCard {
+            id: format!("card-{index}"),
+            source_id: source.id.clone(),
+            quote: source.text.clone(),
+            point: format!(
+                "第 {index} 条观点：{}",
+                "围绕主题的具体判断与适用条件。".repeat(12)
+            ),
+            start: 0,
+            end: source.text.len(),
+            query: task.topic_query(),
+            ..Default::default()
+        });
+    }
+    run(&mut task, Action::Plan, &model, &mut |_| Ok(())).unwrap();
+    assert_eq!(task.sections.len(), 2);
+    // 约 59 KB 卡片：按窗口两组，各出一份目录后再合一次，共三次。
+    assert_eq!(model.asked("目录整理层级"), 3, "按窗口分组，不该层层卡住");
+}

@@ -69,11 +69,13 @@ fn heading(line: &str) -> Option<(usize, &str)> {
 /// 附件标记之后的内容按附件自己的规则排，原样保留。
 fn normalize_body(body: &str, title: &str, base: usize) -> String {
     let lines: Vec<&str> = body.trim().lines().collect();
+    // 开头可能连着几行要去掉：模型常先写一个全文标题（真机上还写过风格样稿的题目），
+    // 再重复一遍本节标题，逐行去掉，直到正文。
     let mut start = 0;
-    if let Some((level, text)) = lines.first().and_then(|line| heading(line))
+    while let Some((level, text)) = lines.get(start).and_then(|line| heading(line))
         && (level == 1 || section_heading(text) == title)
     {
-        start = 1;
+        start += 1;
         while lines.get(start).is_some_and(|line| line.trim().is_empty()) {
             start += 1;
         }
@@ -193,6 +195,21 @@ mod tests {
         assert!(text.ends_with(
             "## 背景\n\n### 情况\n\n正文。\n\n<!-- [附件] -->\n# 情况表\n\n## 表内说明"
         ));
+    }
+
+    #[test]
+    fn a_document_title_followed_by_the_section_title_are_both_dropped() {
+        let task = task(&[
+            (
+                "范式跃迁",
+                "# 某份样稿的题目\n## 范式跃迁\n正文。\n\n### 小标题\n细则。",
+            ),
+            ("攻防演进", "正文二。"),
+        ]);
+        assert_eq!(
+            assemble(&task),
+            "## 范式跃迁\n\n正文。\n\n### 小标题\n细则。\n\n## 攻防演进\n\n正文二。"
+        );
     }
 
     #[test]
