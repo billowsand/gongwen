@@ -1010,3 +1010,54 @@ fn card_verification_three_states_are_counted_and_kept_out_of_the_hard_gate() {
     let after = task.verification_stats();
     assert_eq!(before.conflict - after.conflict, 1);
 }
+
+#[test]
+fn retrying_one_failed_chunk_only_calls_the_model_for_that_chunk() {
+    let mut task = WritingTask::new(TemplateKind::PlainDocument);
+    task.topic = "工作".into();
+    for (title, text) in [
+        ("甲材料", "甲材料原文。"),
+        ("乙材料", "乙材料原文。"),
+        ("丙材料", "丙材料原文。"),
+    ] {
+        task.add_source(SourceSnapshot::new(title, SourceRole::Content, text).unwrap());
+    }
+    let failing = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("乙材料原文") {
+            "观点：伪造观点\n原句：不存在的原句。".into()
+        } else {
+            "无相关内容".into()
+        }
+    });
+    assert!(run(&mut task, Action::Extract, &failing, &mut |_| Ok(())).is_err());
+    let failed = task
+        .chunks
+        .iter()
+        .find(|chunk| {
+            chunk.role == SourceRole::Content
+                && chunk.section_id.is_none()
+                && chunk.status == ChunkStatus::Failed
+        })
+        .cloned()
+        .expect("有一块失败");
+    let retry = ScriptedModel::new(|_, _| "无相关内容".into());
+    run(
+        &mut task,
+        Action::RetryChunk(ChunkRef {
+            source_id: failed.source_id.clone(),
+            section_id: None,
+            role: SourceRole::Content,
+            start: failed.start,
+            end: failed.end,
+        }),
+        &retry,
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(retry.prompts("乙材料原文").len(), 1);
+    assert_eq!(retry.prompts("甲材料原文").len(), 0, "只重试失败块");
+    assert_eq!(retry.prompts("丙材料原文").len(), 0, "只重试失败块");
+    assert_eq!(task.coverage().done, 3);
+    assert_eq!(task.coverage().failed, 0);
+    assert_eq!(task.resume_action, None);
+}
