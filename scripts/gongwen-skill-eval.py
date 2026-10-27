@@ -12,10 +12,10 @@
     # 1) 冒烟：确认模型名可用（每个模型发一次极小请求）
     python scripts/gongwen-skill-eval.py smoke
 
-    # 2) 基线：qny 3 模型 × 6 文种 × 2 条件 = 36 次
+    # 2) 基线：qny 3 模型 × 7 文种 × 2 条件 = 42 次
     python scripts/gongwen-skill-eval.py run --matrix baseline
 
-    # 3) 交叉验证：dmxapi / siliconflow 各 2 模型 × 6 文种 × 条件 A
+    # 3) 交叉验证：dmxapi / siliconflow 各 2 模型 × 7 文种 × 条件 A
     python scripts/gongwen-skill-eval.py run --matrix cross
 
     # 4) 全量
@@ -92,7 +92,7 @@ MODEL_MATRIX: dict[str, list[str]] = {
     "siliconflow": ["deepseek-ai/DeepSeek-V4-Flash", "Qwen/Qwen3.8-27B"],
 }
 
-# 基线只跑七牛三个模型：3 模型 × 6 文种 × 2 条件 = 36 次。
+# 基线只跑七牛三个模型：3 模型 × 7 文种 × 2 条件 = 42 次。
 BASELINE_MATRIX: dict[str, list[str]] = {"qny": MODEL_MATRIX["qny"]}
 
 # 交叉验证按任务要求只看条件 A，每个模型 6 个文种。
@@ -115,6 +115,7 @@ KINDS = [
     "official-letter",
     "plain-document",
     "meeting-agenda",
+    "meeting-minutes",
     "white-paper",
     "phone-notice",
     "research-report",
@@ -124,6 +125,7 @@ KIND_LABELS = {
     "official-letter": "公函",
     "plain-document": "普通公文",
     "meeting-agenda": "会议议程",
+    "meeting-minutes": "会议纪要",
     "white-paper": "白头件（请示）",
     "phone-notice": "电话通知",
     "research-report": "研究报告",
@@ -210,6 +212,23 @@ CASES: dict[str, dict[str, str]] = {
         ),
         "expect_attachments": False,
     },
+    "meeting-minutes": {
+        "request": (
+            "文种是会议纪要。纪要名称、编号、出席列席请假名单和分送抄送印发版记都在程序表单里，"
+            "正文只写会议情况与议定事项：首段概述会议，其后以“会议认为”“会议要求”“会议明确”"
+            "等分段，段内枚举写成“一是……。二是……。”。"
+        ),
+        "material": (
+            "【会议】2026 年 10 月 20 日上午，局长办公会，王局长主持，局三楼会议室。\n"
+            "【议题】听取养老服务处关于全市社区养老服务设施提质改造工作的汇报。\n"
+            "【会议意见】工作推进有力：摸清底数，排查站点 312 个；专项经费 860 万元已下达；"
+            "各区明确分管领导。存在问题：改造进度不平衡，部分区护理人员不足。要求各区倒排工期，"
+            "局里每月通报进度，10 月起组织第三方验收。明确由养老服务处牵头制定验收办法，"
+            "11 月 15 日前报局党组审定。\n"
+            "【出席】王局长、李副局长、张三；【列席】周九；【分送】局领导。"
+        ),
+        "expect_attachments": False,
+    },
     "white-paper": {
         "request": (
             "文种是白头件（内部呈批件），标题是请示。按呈批件写法：大节用 ## 标题；段内枚举"
@@ -285,7 +304,7 @@ MODE_LABELS = {
     "agenda-skeleton": "会议议程骨架被改",
     "table-columns": "表格列数不一致",
     "table-separator": "表格缺少合格分隔行（整表会按正文印出）",
-    "list-in-approval": "呈批件用了列表",
+    "list-in-approval": "呈批件 / 会议纪要用了列表",
     "relative-date": "相对日期",
     "research-marker-anchor": "研究报告标记/锚点/引用错",
     "extra-explanation": "输出夹带解释/清单",
@@ -347,7 +366,7 @@ def classify_check_message(message: str) -> str:
         return "manual-numbering"
     if "不构成合格表格" in message or "没有分隔行" in message:
         return "table-separator"
-    if "版头" in message or "成文日期" in message:
+    if "版头" in message or "成文日期" in message or "版记" in message:
         return "header-footer-elements"
     if "代码围栏" in message or "代码块" in message or "mermaid 围栏" in message:
         return "code-fence-residue"
@@ -359,7 +378,7 @@ def classify_check_message(message: str) -> str:
         return "agenda-skeleton"
     if "表格" in message or "分隔行" in message or "格，多于表头" in message:
         return "table-columns"
-    if "呈批件不得使用列表" in message:
+    if "呈批件不得使用列表" in message or "会议纪要不用列表" in message:
         return "list-in-approval"
     if "相对日期" in message:
         return "relative-date"
@@ -398,8 +417,8 @@ def classify_text(kind: str, clean: str, raw: str, case: dict) -> list[tuple[str
     stripped = [line.strip() for line in lines]
     nonblank = [(i + 1, line) for i, line in enumerate(stripped) if line]
 
-    # 首行 / 夹带解释
-    if nonblank and not nonblank[0][1].startswith("# "):
+    # 首行 / 夹带解释（会议纪要的正文标题可选，纪要名称在表单里）
+    if nonblank and not nonblank[0][1].startswith("# ") and kind != "meeting-minutes":
         found.append(("title-first-line", f"首行：{nonblank[0][1][:60]}"))
     elif not nonblank:
         found.append(("title-first-line", "清洗后内容为空"))
@@ -524,6 +543,17 @@ def classify_text(kind: str, clean: str, raw: str, case: dict) -> list[tuple[str
         missing = [marker for marker in ("<!-- [摘要] -->", "<!-- [目录] -->") if marker not in clean]
         if missing:
             found.append(("research-marker-anchor", "缺少区段标记：" + "、".join(missing)))
+
+    # 会议纪要：名单与版记由程序排，正文不用列表
+    if kind == "meeting-minutes":
+        for number, line in nonblank:
+            if re.match(r"^(?:出席|列席|请假|分送)[：:]", line) or line.endswith("印发"):
+                found.append(("header-footer-elements", f"第{number}行：{line[:50]}"))
+                break
+        for number, line in nonblank:
+            if LIST_ITEM_RE.match(line):
+                found.append(("list-in-approval", f"第{number}行：{line[:50]}"))
+                break
 
     # 议程骨架（正文层面兜底）
     if kind == "meeting-agenda":

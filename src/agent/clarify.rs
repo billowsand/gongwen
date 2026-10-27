@@ -225,8 +225,9 @@ fn echoes_format(question: &str, options: &[String]) -> bool {
 }
 
 /// 要求里写的文种 → 可接受的文种。同一位置上长词优先：「研究报告」不算成「报告」。
-const KIND_WORDS: [(&str, &[TemplateKind]); 14] = [
+const KIND_WORDS: [(&str, &[TemplateKind]); 16] = [
     ("红头呈批件", &[TemplateKind::RedHeadApproval]),
+    ("会议纪要", &[TemplateKind::MeetingMinutes]),
     ("电话记录单", &[TemplateKind::PhoneRecord]),
     ("电话记录", &[TemplateKind::PhoneRecord]),
     ("电话通知", &[TemplateKind::PhoneNotice]),
@@ -239,6 +240,7 @@ const KIND_WORDS: [(&str, &[TemplateKind]); 14] = [
     ),
     ("白头件", &[TemplateKind::WhitePaper]),
     ("议程", &[TemplateKind::MeetingAgenda]),
+    ("纪要", &[TemplateKind::MeetingMinutes]),
     (
         "通知",
         &[TemplateKind::PlainDocument, TemplateKind::PhoneNotice],
@@ -292,6 +294,11 @@ fn keep_choice(current: TemplateKind) -> Choice {
 /// 定文种题（程序判断）：要求里点名的文种与当前文种对不上时出这一题。它是其余题的前提，
 /// 必须单独一批先问（[`Target::Kind`]）。
 pub(crate) fn kind_question(request: &str, current: TemplateKind) -> Option<Question> {
+    // `@` 引用的材料并在要求前面（「【引用材料《10月10日会议纪要》】……【要求】……」），
+    // 材料的标题不是要写的文种，只看要求那一段。
+    let request = request
+        .rsplit_once("【要求】")
+        .map_or(request, |(_, requirement)| requirement);
     let kind = kind_mismatch(request, current)?;
     Some(Question {
         id: 1,
@@ -1159,6 +1166,22 @@ mod tests {
         assert_eq!(
             kind_mismatch("根据材料起草", TemplateKind::OfficialLetter),
             None
+        );
+        assert_eq!(
+            kind_mismatch("把局长办公会整理成会议纪要", TemplateKind::OfficialLetter),
+            Some(TemplateKind::MeetingMinutes)
+        );
+        assert_eq!(
+            kind_mismatch("整理一份纪要", TemplateKind::MeetingMinutes),
+            None
+        );
+        // `@` 引用的材料标题里的「会议纪要」不是要写的文种，只看【要求】那段。
+        assert!(
+            kind_question(
+                "【引用材料《10月10日会议纪要》】\n# 10月10日会议纪要\n\n【要求】\n整理成一份通知",
+                TemplateKind::PlainDocument
+            )
+            .is_none()
         );
         // 实测踩过：后面的「调研报告」是让各单位交的，要写的是通知。
         assert_eq!(

@@ -44,6 +44,7 @@ pub(crate) const FILES: &[(&str, &str)] = &[
     skill_file!("templates/phone-record.md"),
     skill_file!("templates/plain-document.md"),
     skill_file!("templates/meeting-agenda.md"),
+    skill_file!("templates/meeting-minutes.md"),
     skill_file!("templates/white-paper.md"),
     skill_file!("templates/red-head-approval.md"),
     skill_file!("templates/research-report.md"),
@@ -191,10 +192,20 @@ mod tests {
                 continue;
             }
             let blocks = parse_markdown(content);
-            assert!(
-                matches!(blocks.first(), Some(MarkdownBlock::Title(_))),
-                "{path} 第一块应是文档标题"
-            );
+            // 会议纪要的纪要名称在表单里印成红头，正文标题可选，模板不写。
+            if name == "meeting-minutes.md" {
+                assert!(
+                    !blocks
+                        .iter()
+                        .any(|block| matches!(block, MarkdownBlock::Title(_))),
+                    "{path} 不写 `# 标题`"
+                );
+            } else {
+                assert!(
+                    matches!(blocks.first(), Some(MarkdownBlock::Title(_))),
+                    "{path} 第一块应是文档标题"
+                );
+            }
             for block in &blocks {
                 if let MarkdownBlock::Paragraph(text) = block {
                     for leak in ["<!--", "#", "|"] {
@@ -328,7 +339,9 @@ mod tests {
             !matches!(kind_name, "white-paper" | "meeting-agenda" | "phone-record");
         let mut problems = Vec::new();
         let blocks = parse_markdown(text);
-        if !matches!(blocks.first(), Some(MarkdownBlock::Title(_))) {
+        // 会议纪要的正文标题可选（纪要名称在表单里印成红头）。
+        let title_optional = kind_name == "meeting-minutes";
+        if !title_optional && !matches!(blocks.first(), Some(MarkdownBlock::Title(_))) {
             problems.push("第一块不是文档标题（第一行必须是一个 `# 标题`）".into());
         }
         let mut section = MarkdownSection::Body;
@@ -396,6 +409,12 @@ mod tests {
         if research {
             if body_titles == 0 {
                 problems.push("研究报告正文区没有 `# 报告题名`".into());
+            }
+        } else if title_optional {
+            if body_titles > 1 {
+                problems.push(format!(
+                    "正文区的 `#` 标题有 {body_titles} 个，会议纪要至多 1 个"
+                ));
             }
         } else if body_titles != 1 {
             problems.push(format!(
@@ -494,6 +513,7 @@ mod tests {
             "phone-record" => TemplateKind::PhoneRecord,
             "plain-document" => TemplateKind::PlainDocument,
             "meeting-agenda" => TemplateKind::MeetingAgenda,
+            "meeting-minutes" => TemplateKind::MeetingMinutes,
             "white-paper" => TemplateKind::WhitePaper,
             "red-head-approval" => TemplateKind::RedHeadApproval,
             "research-report" => TemplateKind::ResearchReport,
@@ -578,6 +598,19 @@ mod tests {
                 .iter()
                 .any(|problem| problem.contains("恰好 1 个")),
             "第二个文档标题没被挑出来"
+        );
+
+        // 会议纪要不写 `# 标题` 是常态，不算错；写两个才算。
+        let minutes = "<!-- [正文] -->\n\n会议认为，工作有成效。一是摸清底数。\n";
+        assert_eq!(
+            syntax_problems_in_model_output("meeting-minutes", minutes),
+            Vec::<String>::new()
+        );
+        let minutes_two_titles = format!("# 甲纪要\n\n# 乙纪要\n\n{minutes}");
+        assert!(
+            syntax_problems_in_model_output("meeting-minutes", &minutes_two_titles)
+                .iter()
+                .any(|problem| problem.contains("至多 1 个"))
         );
 
         // 研究报告的附录标题是 `## 附录标题`，不是 `#`，不能按公文附件去要求 `#`。

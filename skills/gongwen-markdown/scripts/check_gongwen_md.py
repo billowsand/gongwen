@@ -23,6 +23,7 @@ KINDS = {
     "phone-record": "电话记录单",
     "plain-document": "普通公文",
     "meeting-agenda": "会议议程",
+    "meeting-minutes": "会议纪要",
     "white-paper": "白头件",
     "red-head-approval": "红头呈批件",
     "research-report": "研究报告",
@@ -38,6 +39,9 @@ ALIASES = {
     "plain": "plain-document",
     "会议议程": "meeting-agenda",
     "agenda": "meeting-agenda",
+    "会议纪要": "meeting-minutes",
+    "纪要": "meeting-minutes",
+    "minutes": "meeting-minutes",
     "白头件": "white-paper",
     "呈批件": "white-paper",
     "white": "white-paper",
@@ -75,6 +79,8 @@ RESEARCH_MARKERS = OFFICIAL_MARKERS | {
     "参考文献", "references", "bibliography",
     "部分", "part", "不编号", "unnumbered", "nonumber", "no-number", "no_number",
 }
+# 会议纪要的名单、编号与「……印发」行由程序排。
+MINUTES_LINE = re.compile(r"^(?:出席|列席|请假|分送)[：:]|^.*\d{4}年.*印发$|^〔\d{4}〕\s*\d*\s*号$")
 ELEMENT_LINE = re.compile(
     r"^(?:主送(?:单位)?[：:]|抄送(?:单位)?[：:]|承办(?:单位)?[：:]|联系人[：:]|联系电话[：:]"
     r"|发文字号[：:]|密级[：:]|保密期限[：:]|印发|签发人[：:])"
@@ -162,8 +168,12 @@ def check(text: str, kind: str) -> Report:
         report.error(first_no, "文件以代码围栏开头：交付的 .md 内容里不能带 ``` 包裹")
     if first == "---":
         report.error(first_no, "疑似 YAML frontmatter：要素在程序表单里填，不写元数据")
-    if not first.startswith("# "):
+    # 会议纪要的纪要标志（红头）在表单里，正文标题可选：只有专题纪要才单列 `# 标题`。
+    minutes = kind == "meeting-minutes"
+    if not first.startswith("# ") and not minutes:
         report.error(first_no, "第一行应是唯一的 `# 正式标题`")
+    if minutes and first.startswith("# ") and not first.rstrip("。").endswith("纪要"):
+        report.warn(first_no, "会议纪要的标题以“纪要”结尾；一般会议纪要不写标题，纪要名称在表单里")
 
     allowed = RESEARCH_MARKERS if research else OFFICIAL_MARKERS
     in_attachment = False
@@ -255,6 +265,11 @@ def check(text: str, kind: str) -> Report:
 
         if kind in {"white-paper", "red-head-approval"} and LIST_ITEM.match(line):
             report.error(number, "呈批件不得使用列表，段内枚举写成“一是……；二是……。”")
+        if minutes and not in_attachment:
+            if LIST_ITEM.match(line):
+                report.error(number, "会议纪要不用列表，段内枚举写成“一是……。二是……。”")
+            if MINUTES_LINE.match(line):
+                report.error(number, "出席、列席、请假名单与分送、印发版记由程序按表单排，不写进正文")
         if not research and re.search(r"\$[^$\s][^$]*\$", line):
             report.warn(number, "公文文种不支持公式，`$` 按普通字符印出")
         if re.search(r'"[^"]*[一-鿿][^"]*"', line):
@@ -481,6 +496,21 @@ def selftest() -> int:
             "会议议程缺少固定行",
         ),
         (
+            "meeting-minutes",
+            "<!-- [正文] -->\n\n会议认为，工作有成效。一是摸清底数。二是落实经费。\n",
+            None,
+        ),
+        (
+            "meeting-minutes",
+            "<!-- [正文] -->\n\n会议要求，抓好落实。\n\n出席：王局长、李副局长\n",
+            "名单与分送、印发版记",
+        ),
+        (
+            "meeting-minutes",
+            "<!-- [正文] -->\n\n会议要求：\n\n1. 压实责任；\n2. 强化督导。\n",
+            "会议纪要不用列表",
+        ),
+        (
             "research-report",
             "# 报告题名\n\n<!-- [正文] -->\n\n## 章标题\n\n如 {@sec:none} 所述。\n",
             "找不到对应的锚点",
@@ -512,7 +542,7 @@ def main() -> int:
     parser.add_argument(
         "--kind",
         default="official-letter",
-        help="文种：公函 / 电话通知 / 电话记录单 / 普通公文 / 会议议程 / 白头件 / 红头呈批件 / 研究报告（也认英文名）",
+        help="文种：公函 / 电话通知 / 电话记录单 / 普通公文 / 会议议程 / 会议纪要 / 白头件 / 红头呈批件 / 研究报告（也认英文名）",
     )
     parser.add_argument(
         "--selftest",

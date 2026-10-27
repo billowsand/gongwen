@@ -41,7 +41,11 @@ pub(crate) fn check_with_config(
     // 主文掩码保护附件、引文与非正文块，并在 [正文] 标记后恢复检查。
     let body = 0..markdown.len();
     let title = find_title(original);
-    let actual = title.as_ref().and_then(|title| claimed_kind(&title.text));
+    // 会议纪要的标题可选：没写标题时它仍是纪要，夹带请示结语照样要报。
+    let actual = title
+        .as_ref()
+        .and_then(|title| claimed_kind(&title.text))
+        .or((input.kind == TemplateKind::MeetingMinutes).then_some("纪要"));
     if let Some(title) = &title {
         check_title(input.kind, title, &mut notes);
     }
@@ -172,6 +176,7 @@ fn definite_suffixes(kind: TemplateKind) -> &'static [&'static str] {
     match kind {
         TemplateKind::OfficialLetter => &["函"],
         TemplateKind::PhoneNotice => &["通知"],
+        TemplateKind::MeetingMinutes => &["纪要"],
         _ => &[],
     }
 }
@@ -186,6 +191,7 @@ fn title_rules_apply(kind: TemplateKind) -> bool {
             | TemplateKind::WhitePaper
             | TemplateKind::RedHeadApproval
             | TemplateKind::PlainDocument
+            | TemplateKind::MeetingMinutes
     )
 }
 
