@@ -226,12 +226,19 @@ impl Ime {
         let mut save = false;
         let mut cancel = false;
         let mut all = !rows.is_empty() && self.page.checked.len() == rows.len();
-        let height = (ui.available_height() - 64.0).max(80.0);
+        let height = (ui.available_height()
+            - 32.0
+            - theme::CONTROL_HEIGHT
+            - 4.0 * ui.spacing().item_spacing.y)
+            .max(80.0);
         let word_width = (ui.available_width() * 0.40).clamp(160.0, 560.0);
         let code_width = (ui.available_width() * 0.20).clamp(175.0, 260.0);
+        let ledger_painter = ui
+            .painter()
+            .with_clip_rect(ui.clip_rect().intersect(ui.available_rect_before_wrap()));
         TableBuilder::new(ui)
             .id_salt("ime_quick_rows")
-            .striped(true)
+            .striped(!theme::smartisan::active())
             .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::exact(30.0))
@@ -242,6 +249,7 @@ impl Ime {
             .max_scroll_height(height)
             .header(32.0, |mut header| {
                 header.col(|ui| {
+                    theme::smartisan::ledger_header(ui);
                     if ui
                         .checkbox(&mut all, "")
                         .on_hover_text("全选当前结果")
@@ -259,6 +267,7 @@ impl Ime {
                 });
                 for title in ["文字", "编码", "来源", "操作"] {
                     header.col(|ui| {
+                        theme::smartisan::ledger_header(ui);
                         ui.strong(title);
                     });
                 }
@@ -373,6 +382,11 @@ impl Ime {
                             }
                         });
                     });
+                    theme::smartisan::index_row(
+                        &ledger_painter,
+                        row.response().rect,
+                        self.page.selected.as_ref() == Some(&entry),
+                    );
                     if row.response().clicked() {
                         self.page.selected = Some(entry.clone());
                     }

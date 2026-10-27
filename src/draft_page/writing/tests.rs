@@ -137,8 +137,7 @@ fn draw_with(
                         actions: &mut actions,
                         export_links: &mut exports,
                     };
-                    page.writing_header(ui);
-                    page.writing_ui(ui);
+                    page.writing_workspace(ui);
                 });
             },
         );
@@ -746,4 +745,24 @@ fn the_footer_shows_call_estimate_and_long_task_progress() {
         "长任务显示总进度条"
     );
     assert!(harness.query_by_label_contains("已用 1:").is_some());
+}
+
+#[test]
+#[ignore = "生成便签主题六阶段与窄窗样张供目视检查"]
+fn smartisan_staged_writing_ui_samples() {
+    crate::theme::set_current(crate::models::ThemeName::Smartisan);
+    std::fs::create_dir_all("tmp/staged-writing").unwrap();
+    for width in [1280.0, 680.0] {
+        for stage in Stage::ALL {
+            draw(
+                stage,
+                width,
+                Some(std::path::Path::new(&format!(
+                    "tmp/staged-writing/smartisan-{}-{width}.png",
+                    stage.index() + 1
+                ))),
+            );
+        }
+    }
+    crate::theme::set_current(crate::models::ThemeName::default());
 }

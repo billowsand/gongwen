@@ -88,9 +88,7 @@ impl DraftPage<'_> {
             .show(ui, |ui| {
                 self.read_only_banner(ui);
                 if self.doc.writing.open {
-                    self.writing_header(ui);
-                    ui.separator();
-                    self.writing_ui(ui);
+                    self.writing_workspace(ui);
                     return;
                 }
                 if let Some(loaded) = &self.doc.loaded_version

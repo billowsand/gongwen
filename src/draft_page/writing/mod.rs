@@ -713,6 +713,15 @@ impl Drop for WritingPanel {
 }
 
 impl DraftPage<'_> {
+    /// 与管理页共用便签纸面，内部面板继续使用原有布局和交互。
+    pub(crate) fn writing_workspace(&mut self, ui: &mut egui::Ui) {
+        crate::theme::smartisan::management_page(ui, |ui| {
+            self.writing_header(ui);
+            ui.separator();
+            self.writing_ui(ui);
+        });
+    }
+
     pub(crate) fn writing_header(&mut self, ui: &mut egui::Ui) {
         let was_open = self.doc.writing.open;
         ui.horizontal(|ui| {
@@ -811,54 +820,62 @@ impl DraftPage<'_> {
             }
             return;
         }
-        egui::Panel::bottom(egui::Id::new(("writing_footer", self.doc.key))).show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(&self.doc.writing.task.status);
-                if self.doc.writing.running {
-                    ui.spinner();
-                    if ui.button("暂停").clicked() {
-                        self.doc.writing.pause();
-                    }
-                } else {
-                    if let Some(resume) = &self.doc.writing.task.resume_action
-                        && ui
-                            .add_enabled(editable, egui::Button::new("接着跑"))
-                            .clicked()
-                    {
-                        action = Some(resume.clone());
-                    }
-                    self.writing_primary_action(ui, editable, &mut action);
-                }
-                if let Some((estimate, basis)) = self.doc.writing.estimated_calls() {
-                    ui.weak(estimate).on_hover_text(basis);
-                }
-            });
-            if self.doc.writing.running
-                || (self.doc.writing.task.started_at_unix.is_some()
-                    && self.doc.writing.task.resume_action.is_some())
-            {
-                let (done, total) = self.doc.writing.overall_progress();
+        let panel_frame = if crate::theme::smartisan::active() {
+            crate::theme::panel(crate::theme::surface(), 8)
+        } else {
+            egui::Frame::side_top_panel(ui.style())
+        };
+        egui::Panel::bottom(egui::Id::new(("writing_footer", self.doc.key)))
+            .frame(panel_frame)
+            .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.add(
-                        egui::ProgressBar::new(if total == 0 {
-                            0.0
-                        } else {
-                            done as f32 / total as f32
-                        })
-                        .desired_width(240.0)
-                        .text(format!("总进度 {done} / {total}")),
-                    );
-                    if self.doc.writing.running
-                        && let Some(started) = self.doc.writing.task.started_at_unix
-                    {
-                        ui.weak(format!("已用 {}", format_elapsed(unix_now() - started)));
+                    ui.label(&self.doc.writing.task.status);
+                    if self.doc.writing.running {
+                        ui.spinner();
+                        if ui.button("暂停").clicked() {
+                            self.doc.writing.pause();
+                        }
+                    } else {
+                        if let Some(resume) = &self.doc.writing.task.resume_action
+                            && ui
+                                .add_enabled(editable, egui::Button::new("接着跑"))
+                                .clicked()
+                        {
+                            action = Some(resume.clone());
+                        }
+                        self.writing_primary_action(ui, editable, &mut action);
+                    }
+                    if let Some((estimate, basis)) = self.doc.writing.estimated_calls() {
+                        ui.weak(estimate).on_hover_text(basis);
                     }
                 });
-            }
-        });
+                if self.doc.writing.running
+                    || (self.doc.writing.task.started_at_unix.is_some()
+                        && self.doc.writing.task.resume_action.is_some())
+                {
+                    let (done, total) = self.doc.writing.overall_progress();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add(
+                            egui::ProgressBar::new(if total == 0 {
+                                0.0
+                            } else {
+                                done as f32 / total as f32
+                            })
+                            .desired_width(240.0)
+                            .text(format!("总进度 {done} / {total}")),
+                        );
+                        if self.doc.writing.running
+                            && let Some(started) = self.doc.writing.task.started_at_unix
+                        {
+                            ui.weak(format!("已用 {}", format_elapsed(unix_now() - started)));
+                        }
+                    });
+                }
+            });
         let inline_evidence = self.doc.writing.evidence_open && ui.available_width() <= 850.0;
         if self.doc.writing.evidence_open && !inline_evidence {
             egui::Panel::right(egui::Id::new(("writing_evidence", self.doc.key)))
+                .frame(panel_frame)
                 .default_size(280.0)
                 .size_range(240.0..=360.0)
                 .show(ui, |ui| {

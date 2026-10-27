@@ -146,7 +146,13 @@ impl Ime {
         }
         // 先消费旧标记：本帧的保存/撤销不能在帧尾被清掉。
         self.manager.dirty = false;
-        let margin = if ui.available_width() < 900.0 { 20 } else { 28 };
+        let margin = if theme::smartisan::active() {
+            0
+        } else if ui.available_width() < 900.0 {
+            20
+        } else {
+            28
+        };
         let mut action = None;
         egui::Frame::new()
             .inner_margin(egui::Margin::same(margin))

@@ -305,6 +305,8 @@ fn smartisan_management_samples() {
         (NavPage::Proofread, "proofread"),
         (NavPage::Lexicon, "lexicon"),
         (NavPage::Knowledge, "knowledge"),
+        (NavPage::ImeTable, "ime-table"),
+        (NavPage::ImeTable, "ime-table-narrow"),
         (NavPage::Vocabulary, "vocabulary-narrow"),
         (NavPage::Manuscript, "manuscript-narrow"),
     ]
@@ -347,6 +349,9 @@ fn smartisan_management_samples() {
                                 NavPage::Lexicon => crate::lexicon_ui::lexicon_ui(&mut app, ui),
                                 NavPage::Knowledge => {
                                     crate::knowledge_ui::knowledge_ui(&mut app, ui)
+                                }
+                                NavPage::ImeTable => {
+                                    app.ime.page_ui(ui);
                                 }
                                 _ => unreachable!(),
                             });

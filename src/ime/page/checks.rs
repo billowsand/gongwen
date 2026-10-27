@@ -208,11 +208,18 @@ impl Ime {
             }
         });
         let mut all_checked = !rows.is_empty() && rows.len() == self.page.health_checked.len();
-        let table_height = (ui.available_height() - 52.0).max(80.0);
+        let table_height = (ui.available_height()
+            - 30.0
+            - theme::CONTROL_HEIGHT
+            - 4.0 * ui.spacing().item_spacing.y)
+            .max(80.0);
         let word_width = (ui.available_width() * 0.26).clamp(100.0, 360.0);
+        let ledger_painter = ui
+            .painter()
+            .with_clip_rect(ui.clip_rect().intersect(ui.available_rect_before_wrap()));
         TableBuilder::new(ui)
             .id_salt("ime_quick_checks")
-            .striped(true)
+            .striped(!theme::smartisan::active())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::exact(28.0))
             .column(Column::initial(word_width).at_least(100.0))
@@ -223,6 +230,7 @@ impl Ime {
             .max_scroll_height(table_height)
             .header(30.0, |mut header| {
                 header.col(|ui| {
+                    theme::smartisan::ledger_header(ui);
                     if ui.checkbox(&mut all_checked, "").changed() {
                         if all_checked {
                             self.page.health_checked = rows.iter().map(|row| row.key()).collect();
@@ -233,6 +241,7 @@ impl Ime {
                 });
                 for title in ["词条", "当前编码", "建议", "说明", "操作"] {
                     header.col(|ui| {
+                        theme::smartisan::ledger_header(ui);
                         ui.strong(title);
                     });
                 }
@@ -299,6 +308,11 @@ impl Ime {
                             ignore.push(data);
                         }
                     });
+                    theme::smartisan::index_row(
+                        &ledger_painter,
+                        row.response().rect,
+                        self.page.health_checked.contains(&data.key()),
+                    );
                 });
             });
         if rows.is_empty() {

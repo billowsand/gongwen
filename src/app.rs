@@ -858,7 +858,11 @@ impl eframe::App for GongwenApp {
                         })
                     }
                     TabRef::Page(NavPage::ImeTable) => {
-                        if let Some(action) = self.ime.page_ui(&mut content_ui) {
+                        let mut action = None;
+                        theme::smartisan::management_page(&mut content_ui, |ui| {
+                            action = self.ime.page_ui(ui);
+                        });
+                        if let Some(action) = action {
                             self.apply_ime_page_action(action);
                         }
                     }
