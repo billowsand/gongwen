@@ -15,4 +15,12 @@ ignore = [
     # 用户输入（BibLaTeX 文献库）不走 XML。hayagriva 升级 quick-xml 后删掉。
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # zstd 0.13.3 / zstd-safe 7.2.4：只剩 zip 8.6 这一条路径（jieba 的
+    # include-flate 已升到 zstd 0.14.3）。zip 只用 `Decoder::with_buffer`
+    # 为每个条目新建解码器，不碰 Seekable（seekable 特性未开）、不复用上下文，
+    # 写只用 Encoder、不用 write::Decoder；zip 对 zstd 还关掉了默认特性，
+    # experimental / zstdmt 均未启用。zip 升到 9 后删掉这三条。
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0403",
 ]

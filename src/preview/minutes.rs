@@ -124,7 +124,9 @@ fn roster_line(ui: &mut egui::Ui, metrics: &Metrics, line: &RosterLine) {
         metrics,
         &format!("{}：", line.label),
         metrics.font(theme::FONT_HEITI, BODY_PT),
-        3.0 * em,
+        // 换行宽度留一个字余量：三个字面（如「出席：」）恰好 3em 时，像素取整
+        // 会让它在某些平台上差一点点折成两行。
+        4.0 * em,
         Align::LEFT,
     );
     let fangsong = metrics.font(theme::FONT_FANGSONG, BODY_PT);
@@ -272,7 +274,7 @@ pub(crate) fn record_block(
     );
     let labels: Vec<_> = upper
         .iter()
-        .map(|(label, _)| line_galley(ui, metrics, label, font.clone(), hang, Align::LEFT))
+        .map(|(label, _)| line_galley(ui, metrics, label, font.clone(), hang + em, Align::LEFT))
         .collect();
 
     let thick = metrics.mm(0.6).max(1.0);
