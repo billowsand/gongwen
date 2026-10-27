@@ -13,7 +13,7 @@ impl DraftPage<'_> {
         editable: bool,
         action: &mut Option<Action>,
     ) {
-        let stage = self.doc.writing.task.stage;
+        let stage = self.doc.writing.view_stage;
         let (label, next, required) = match stage {
             Stage::Prepare => ("开始提炼", Some(Action::Extract), Stage::Extract),
             Stage::Extract => ("生成提纲", Some(Action::Plan), Stage::Outline),
@@ -172,7 +172,7 @@ impl DraftPage<'_> {
 
     pub(super) fn writing_artifacts(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
         ui.heading("查看提炼成果");
-        let coverage = self.doc.writing.task.coverage();
+        let coverage = self.doc.writing.coverage();
         let query = self.doc.writing.task.topic_query();
         let failed = self
             .doc
@@ -547,8 +547,9 @@ impl DraftPage<'_> {
             .chunks
             .iter()
             .filter(|chunk| chunk.section_id.as_deref() == Some(&section.id))
+            .cloned()
             .collect();
-        let coverage = self.doc.writing.task.section_coverage(&section.id);
+        let coverage = self.doc.writing.section_coverage(&section.id);
         let done = coverage.done;
         ui.add(
             egui::ProgressBar::new(if coverage.total == 0 {
@@ -612,7 +613,7 @@ impl DraftPage<'_> {
             return;
         };
         ui.strong(&section.title);
-        ui.weak(&section.status);
+        ui.weak(section.status.label());
         let changed = ui
             .add_enabled(
                 !section.locked,
@@ -625,11 +626,11 @@ impl DraftPage<'_> {
             section.manually_edited = true;
         }
         let confirm_manual = section.manually_edited
-            && section.status == "写作中"
+            && section.status == crate::agent::writing::SectionStatus::Writing
             && !section.markdown.trim().is_empty()
             && ui.button("确认本节人工稿已完成").clicked();
         if confirm_manual {
-            section.status = "人工已完成".into();
+            section.status = crate::agent::writing::SectionStatus::ManualDone;
         }
         let lock_changed = ui
             .checkbox(&mut section.locked, "锁定本节，统稿只提建议")
@@ -847,15 +848,23 @@ impl DraftPage<'_> {
         ui.collapsing("篇章框架", |ui| {
             ui.label(&self.doc.writing.task.framework_md);
         });
-        if self.doc.writing.task.stage == Stage::Collect {
+        if self.doc.writing.view_stage == Stage::Collect {
             ui.separator();
             ui.strong("分节备料进度");
-            for section in &self.doc.writing.task.sections {
-                let coverage = self.doc.writing.task.section_coverage(&section.id);
-                ui.label(&section.title);
+            let sections: Vec<(String, String)> = self
+                .doc
+                .writing
+                .task
+                .sections
+                .iter()
+                .map(|section| (section.id.clone(), section.title.clone()))
+                .collect();
+            for (id, title) in sections {
+                let coverage = self.doc.writing.section_coverage(&id);
+                ui.label(title);
                 ui.weak(format!("已处理 {} / {} 块", coverage.done, coverage.total));
             }
-        } else if self.doc.writing.task.stage == Stage::Write {
+        } else if self.doc.writing.view_stage == Stage::Write {
             if let Some(section) = self.doc.writing.task.sections.get(self.doc.writing.section) {
                 let section = section.clone();
                 ui.separator();
@@ -874,11 +883,21 @@ impl DraftPage<'_> {
                     section.target_chars,
                     cards.len()
                 ));
+                let stats = self
+                    .doc
+                    .writing
+                    .task
+                    .section_verification_stats(&section.id);
+                self.writing_verification_summary(ui, stats);
                 self.writing_cards(ui, &cards);
             }
-        } else if self.doc.writing.task.stage == Stage::Review {
+        } else if self.doc.writing.view_stage == Stage::Review {
             ui.separator();
             ui.strong("交付前核对");
+            let stats = self.doc.writing.task.verification_stats();
+            self.writing_verification_summary(ui, stats);
+            ui.weak("出处命中、人工核对与依据不足分开计数，不再显示笼统的全部通过。");
+            self.writing_verification_issues(ui);
             let issues = self.writing_delivery_issues();
             if issues.is_empty() {
                 ui.label("原文定位与已识别的关键事实来源检查未发现新增问题。");
@@ -891,6 +910,50 @@ impl DraftPage<'_> {
         } else {
             ui.separator();
             ui.label("材料用于取证，样稿用于学习表达。模型提炼的观点始终保留原文供核对。");
+        }
+    }
+
+    fn writing_verification_summary(
+        &self,
+        ui: &mut egui::Ui,
+        stats: crate::agent::writing::VerificationStats,
+    ) {
+        ui.label(format!(
+            "已核对 {} · 存在冲突 {} · 依据不足 {} · 待核对 {}",
+            stats.checked, stats.conflict, stats.insufficient, stats.unverified
+        ));
+    }
+
+    fn writing_verification_issues(&mut self, ui: &mut egui::Ui) {
+        let issues = self.doc.writing.task.verification_issue_cards();
+        if issues.is_empty() {
+            return;
+        }
+        ui.weak("软提醒：存在冲突或依据不足的条目不影响合并，但请核对原文与适用性。");
+        for (title, card) in issues {
+            ui.horizontal_wrapped(|ui| {
+                let label = if card.verification == crate::agent::writing::Verification::Conflict {
+                    "存在冲突"
+                } else {
+                    "依据不足"
+                };
+                ui.colored_label(theme::warn(), format!("{label}：{}", card.point));
+                if !title.is_empty()
+                    && ui.link(format!("查看《{title}》原文")).clicked()
+                    && let Some(source) = self
+                        .doc
+                        .writing
+                        .task
+                        .sources
+                        .iter()
+                        .find(|source| source.id == card.source_id)
+                {
+                    self.doc.writing.source_viewer = Some(SourceViewer {
+                        title: source.title.clone(),
+                        text: source.text.clone(),
+                    });
+                }
+            });
         }
     }
 
@@ -907,15 +970,35 @@ impl DraftPage<'_> {
                 };
                 ui.weak(format!("原句定位已命中 · 观点核验：{verification}"));
                 ui.label(&card.quote);
-                let mut checked =
-                    card.verification == crate::agent::writing::Verification::Supported;
-                if ui
-                    .add_enabled(
-                        !self.doc.writing.running && !self.doc.read_only(),
-                        egui::Checkbox::new(&mut checked, "我已核对这条观点及其适用性"),
-                    )
-                    .changed()
-                {
+                let mut set = None;
+                ui.horizontal_wrapped(|ui| {
+                    for (value, label) in [
+                        (crate::agent::writing::Verification::Supported, "已核对"),
+                        (crate::agent::writing::Verification::Conflict, "存在冲突"),
+                        (
+                            crate::agent::writing::Verification::Insufficient,
+                            "依据不足",
+                        ),
+                    ] {
+                        let selected = card.verification == value;
+                        if ui
+                            .add_enabled(
+                                !self.doc.writing.running && !self.doc.read_only(),
+                                egui::Button::new(label).selected(selected),
+                            )
+                            .clicked()
+                        {
+                            // 再点一次已选状态即撤回为待核对。
+                            set = Some(if selected {
+                                crate::agent::writing::Verification::Unverified
+                            } else {
+                                value
+                            });
+                        }
+                    }
+                });
+                ui.weak("出处命中只说明原句存在；可标记三态，再点一次撤回待核对。");
+                if let Some(verification) = set {
                     let rows = self.doc.writing.task.topic_cards.iter_mut().chain(
                         self.doc
                             .writing
@@ -925,11 +1008,7 @@ impl DraftPage<'_> {
                             .flat_map(|section| section.cards.iter_mut()),
                     );
                     for row in rows.filter(|row| row.id == card.id) {
-                        row.verification = if checked {
-                            crate::agent::writing::Verification::Supported
-                        } else {
-                            crate::agent::writing::Verification::Unverified
-                        };
+                        row.verification = verification;
                     }
                     self.doc.writing.changed();
                 }

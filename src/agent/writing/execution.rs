@@ -155,7 +155,7 @@ fn run_action(
                     continue;
                 }
                 let expected = section_input_hash(task, i);
-                if task.sections[i].status == "已完成"
+                if task.sections[i].status == SectionStatus::Done
                     && task.sections[i].input_hash == expected
                     && !task.sections[i].markdown.trim().is_empty()
                 {
@@ -1026,7 +1026,7 @@ fn plan(
         new.advisory_suggestion = previous.advisory_suggestion.clone();
         new.advisory_parts = previous.advisory_parts.clone();
         new.advisory_input_hash = previous.advisory_input_hash.clone();
-        new.status = previous.status.clone();
+        new.status = previous.status;
         // 备料按本节指纹判断：标题、要点、字数都没变的章节，素材照常复用。
         new.cards = previous.cards.clone();
         new.chunk_bytes = previous.chunk_bytes;
@@ -1197,7 +1197,7 @@ fn collect_all(
                         if let Some(target) = task.sections.iter_mut().find(|s| s.id == section.id)
                         {
                             target.cards.extend(cards);
-                            target.status = "备料进行中".into();
+                            target.status = SectionStatus::Collecting;
                         }
                         upsert_chunk(
                             task,
@@ -1239,9 +1239,9 @@ fn collect_all(
         }
         if let Some(target) = task.sections.iter_mut().find(|s| s.id == section.id) {
             target.status = if section_failures == 0 {
-                "备料完成".into()
+                SectionStatus::Collected
             } else {
-                "备料未完成".into()
+                SectionStatus::CollectFailed
             };
         }
         save(task)?;
@@ -1556,7 +1556,7 @@ fn write_section(
         pieces.push(piece);
         task.sections[index].write_parts = pieces.clone();
         task.sections[index].markdown = pieces.join("\n\n");
-        task.sections[index].status = "写作中".into();
+        task.sections[index].status = SectionStatus::Writing;
         save(task)?;
     }
     if pieces.len() > 1 {
@@ -1567,7 +1567,7 @@ fn write_section(
         !task.sections[index].markdown.trim().is_empty(),
         "章节正文为空"
     );
-    task.sections[index].status = "已完成".into();
+    task.sections[index].status = SectionStatus::Done;
     task.sections[index].rewrite_in_progress = false;
     // 重写前的人工稿已存入本节历史；新稿是 AI 稿，重新参加整批续写与统稿。
     task.sections[index].manually_edited = false;
@@ -1806,7 +1806,7 @@ fn polish(
             save(task)?;
         }
         task.sections[i].review_suggestion = Some(join_polished(&parts, &review_parts));
-        task.sections[i].status = "已有统稿建议，待审阅".into();
+        task.sections[i].status = SectionStatus::ReviewReady;
         save(task)?;
     }
     task.final_markdown = assemble::assemble(task);

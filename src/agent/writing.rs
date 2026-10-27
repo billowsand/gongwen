@@ -177,6 +177,59 @@ pub(crate) enum Verification {
     Insufficient,
 }
 
+/// 章节状态。旧任务 JSON 里存的是中文字符串，读写都按原字符串兼容，
+/// 界面文案统一由 [`SectionStatus::label`] 给出。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SectionStatus {
+    #[default]
+    Idle,
+    Collecting,
+    Collected,
+    CollectFailed,
+    Writing,
+    Done,
+    ManualDone,
+    ReviewReady,
+}
+
+impl SectionStatus {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "",
+            Self::Collecting => "备料进行中",
+            Self::Collected => "备料完成",
+            Self::CollectFailed => "备料未完成",
+            Self::Writing => "写作中",
+            Self::Done => "已完成",
+            Self::ManualDone => "人工已完成",
+            Self::ReviewReady => "已有统稿建议，待审阅",
+        }
+    }
+}
+
+impl Serialize for SectionStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.label())
+    }
+}
+
+impl<'de> Deserialize<'de> for SectionStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "备料进行中" => Self::Collecting,
+            "备料完成" => Self::Collected,
+            "备料未完成" => Self::CollectFailed,
+            "写作中" => Self::Writing,
+            "已完成" => Self::Done,
+            "人工已完成" => Self::ManualDone,
+            "已有统稿建议，待审阅" => Self::ReviewReady,
+            // 旧值或空串：当作尚未推进，用户可以继续操作，不假装已完成。
+            _ => Self::Idle,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct Section {
     pub id: String,
@@ -189,7 +242,7 @@ pub(crate) struct Section {
     #[serde(default)]
     pub input_hash: String,
     #[serde(default)]
-    pub status: String,
+    pub status: SectionStatus,
     #[serde(default)]
     pub manually_edited: bool,
     #[serde(default)]
@@ -492,7 +545,7 @@ impl WritingTask {
         }
         section.markdown = advice;
         section.manually_edited = true;
-        section.status = "人工已完成".into();
+        section.status = SectionStatus::ManualDone;
         section.advisory_parts.clear();
         section.advisory_input_hash.clear();
         self.refresh_final_if_generated();
@@ -505,6 +558,53 @@ impl WritingTask {
         if !self.final_manual {
             self.final_markdown = assemble::assemble(self);
         }
+    }
+
+    /// 本次全文实际用到的章节素材的核对统计（只算当前指纹有效的卡片）。
+    pub(crate) fn verification_stats(&self) -> VerificationStats {
+        let mut stats = VerificationStats::default();
+        for section in &self.sections {
+            for card in self.current_section_cards(section) {
+                stats.add(card.verification);
+            }
+        }
+        stats
+    }
+
+    pub(crate) fn section_verification_stats(&self, section_id: &str) -> VerificationStats {
+        let mut stats = VerificationStats::default();
+        if let Some(section) = self
+            .sections
+            .iter()
+            .find(|section| section.id == section_id)
+        {
+            for card in self.current_section_cards(section) {
+                stats.add(card.verification);
+            }
+        }
+        stats
+    }
+
+    /// 冲突与依据不足的卡片连同材料标题，供交付前软提醒列表与跳回原文。
+    pub(crate) fn verification_issue_cards(&self) -> Vec<(String, MaterialCard)> {
+        let mut issues = Vec::new();
+        for section in &self.sections {
+            for card in self.current_section_cards(section) {
+                if !matches!(
+                    card.verification,
+                    Verification::Conflict | Verification::Insufficient
+                ) {
+                    continue;
+                }
+                let title = self
+                    .sources
+                    .iter()
+                    .find(|source| source.id == card.source_id)
+                    .map_or_else(String::new, |source| source.title.clone());
+                issues.push((title, card.clone()));
+            }
+        }
+        issues
     }
 
     /// 旧版任务的块与卡片没有指纹；旧版每次改输入都会清空成果，留下的必然对应当前输入。
@@ -964,7 +1064,8 @@ impl WritingTask {
                         && self
                             .sections
                             .iter()
-                            .all(|s| !s.markdown.trim().is_empty() && s.status != "写作中"),
+                            .all(|s| !s.markdown.trim().is_empty()
+                                && s.status != SectionStatus::Writing),
                     "请先完成各节正文"
                 );
             }
@@ -977,6 +1078,25 @@ pub(crate) struct SourceIssue {
     pub source_id: String,
     pub message: String,
 }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct VerificationStats {
+    pub checked: usize,
+    pub conflict: usize,
+    pub insufficient: usize,
+    pub unverified: usize,
+}
+
+impl VerificationStats {
+    fn add(&mut self, verification: Verification) {
+        match verification {
+            Verification::Supported => self.checked += 1,
+            Verification::Conflict => self.conflict += 1,
+            Verification::Insufficient => self.insufficient += 1,
+            Verification::Unverified => self.unverified += 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Coverage {
     pub total: usize,
@@ -1011,7 +1131,7 @@ pub(crate) struct ChunkRef {
 }
 
 /// 原文块的身份：原文快照校验值加块的起止位置。
-fn chunk_hash(source: &SourceSnapshot, start: usize, end: usize) -> String {
+pub(crate) fn chunk_hash(source: &SourceSnapshot, start: usize, end: usize) -> String {
     digest(format!("{}:{}:{}", source.hash, start, end).as_bytes())
 }
 

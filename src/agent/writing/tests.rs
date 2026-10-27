@@ -887,3 +887,126 @@ fn the_topic_directory_is_summarized_once_until_its_input_changes() {
     );
     assert_eq!(model.asked("请拟定提纲"), 2);
 }
+
+#[test]
+fn section_statuses_from_old_task_json_are_still_readable() {
+    assert_eq!(SectionStatus::default(), SectionStatus::Idle);
+    for (raw, expected) in [
+        ("", SectionStatus::Idle),
+        ("备料进行中", SectionStatus::Collecting),
+        ("备料完成", SectionStatus::Collected),
+        ("写作中", SectionStatus::Writing),
+        ("已完成", SectionStatus::Done),
+        ("人工已完成", SectionStatus::ManualDone),
+        ("已有统稿建议，待审阅", SectionStatus::ReviewReady),
+    ] {
+        let status: SectionStatus = serde_json::from_str(&format!("\"{raw}\"")).unwrap();
+        assert_eq!(status, expected, "{raw}");
+        assert_eq!(
+            serde_json::to_string(&expected).unwrap(),
+            format!("\"{raw}\"")
+        );
+    }
+}
+
+#[test]
+fn a_task_json_saved_before_the_status_enum_still_loads() {
+    // 与 v0.9.9 / fdfd0c8 存下的结构一致：没有本轮新增字段，章节状态是中文串。
+    let raw = serde_json::json!({
+        "id": "task-1",
+        "kind": "PlainDocument",
+        "topic": "基层减负",
+        "target_chars": 1000,
+        "stage": "Write",
+        "sources": [{
+            "id": "src-1",
+            "title": "材料",
+            "role": "Content",
+            "text": "合并同类报表。",
+            "hash": digest("合并同类报表。".as_bytes()),
+        }],
+        "style_md": "风格。",
+        "framework_md": "框架。",
+        "topic_cards": [],
+        "sections": [
+            {
+                "id": "a",
+                "title": "第一节",
+                "points": "要点",
+                "target_chars": 300,
+                "markdown": "正文。",
+                "locked": false,
+                "cards": [],
+                "status": "已完成",
+            },
+            {
+                "id": "b",
+                "title": "第二节",
+                "points": "要点",
+                "target_chars": 300,
+                "markdown": "",
+                "locked": false,
+                "cards": [],
+                "status": "备料完成",
+            },
+            {
+                "id": "c",
+                "title": "第三节",
+                "points": "要点",
+                "target_chars": 300,
+                "markdown": "人工正文。",
+                "locked": true,
+                "cards": [],
+                "status": "人工已完成",
+            }
+        ],
+        "outline_confirmed": true,
+        "final_markdown": "",
+        "status": "统稿进行中",
+        "version": 1,
+    });
+    let task: WritingTask = serde_json::from_value(raw).unwrap();
+    assert_eq!(task.version, 1);
+    assert_eq!(task.sections[0].status, SectionStatus::Done);
+    assert_eq!(task.sections[1].status, SectionStatus::Collected);
+    assert_eq!(task.sections[2].status, SectionStatus::ManualDone);
+    assert_eq!(task.sections[2].status.label(), "人工已完成");
+    assert!(task.style_summary_input.is_empty());
+    assert!(task.sections[0].advisory_suggestion.is_none());
+    assert_eq!(task.stage, Stage::Write);
+    let written = serde_json::to_value(&task).unwrap();
+    assert_eq!(written["sections"][0]["status"], "已完成");
+}
+
+#[test]
+fn card_verification_three_states_are_counted_and_kept_out_of_the_hard_gate() {
+    let (mut task, _) = written_task();
+    let total: usize = task
+        .sections
+        .iter()
+        .map(|section| task.current_section_cards(section).len())
+        .sum();
+    assert_eq!(total, 2);
+    assert_eq!(task.verification_stats().unverified, total);
+    task.sections[0].cards[0].verification = Verification::Conflict;
+    task.sections[1].cards[0].verification = Verification::Insufficient;
+    let stats = task.verification_stats();
+    assert_eq!(stats.conflict, 1);
+    assert_eq!(stats.insufficient, 1);
+    assert_eq!(stats.checked, 0);
+    assert_eq!(stats.unverified, 0);
+
+    let issues = task.verification_issue_cards();
+    assert_eq!(issues.len(), 2, "冲突与依据不足单独列出");
+    assert!(issues.iter().any(|(title, card)| {
+        !title.is_empty()
+            && card.verification == Verification::Conflict
+            && card.quote == "合并同类报表。"
+    }));
+
+    // 软提醒不进入交付硬检查：验证状态本身不产生 delivery issue。
+    let before = task.verification_stats();
+    task.sections[0].cards[0].verification = Verification::Unverified;
+    let after = task.verification_stats();
+    assert_eq!(before.conflict - after.conflict, 1);
+}

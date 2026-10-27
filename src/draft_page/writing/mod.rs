@@ -7,10 +7,13 @@ mod tests;
 mod validation;
 
 use crate::agent::backend::LmBackend;
-use crate::agent::writing::{self, Action, SourceRole, SourceSnapshot, Stage, WritingTask};
+use crate::agent::writing::{
+    self, Action, Coverage, SourceRole, SourceSnapshot, Stage, WritingTask,
+};
 use crate::draft_page::DraftPage;
 use crate::models::{AppConfig, TemplateKind};
 use eframe::egui;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,6 +62,20 @@ pub(crate) struct WritingPanel {
     confirm: Option<Confirm>,
     readiness_valid: bool,
     delivery_cache: Option<(u64, Vec<String>)>,
+    /// 正在看的阶段；运行中进度更新只改任务阶段，不把用户拉回去。
+    pub(crate) view_stage: Stage,
+    view_manual: bool,
+    /// 覆盖率按任务修订号缓存：每帧重算 MB 级材料的切块与哈希会卡帧。
+    coverage_cache: Option<CoverageCache>,
+    revision: u64,
+    #[cfg(test)]
+    coverage_computations: usize,
+}
+
+struct CoverageCache {
+    revision: u64,
+    topic: Coverage,
+    sections: HashMap<String, Coverage>,
 }
 
 impl WritingPanel {
@@ -88,15 +105,76 @@ impl WritingPanel {
             topic_draft: None,
             confirm: None,
             delivery_cache: None,
+            view_stage: Stage::Prepare,
+            view_manual: false,
+            coverage_cache: None,
+            revision: 0,
+            #[cfg(test)]
+            coverage_computations: 0,
         }
     }
 
-    fn changed(&mut self) {
+    fn invalidate_caches(&mut self) {
         self.readiness_valid = false;
         self.delivery_cache = None;
+        self.coverage_cache = None;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn changed(&mut self) {
+        self.invalidate_caches();
         self.dirty = true;
         self.last_edit = Some(Instant::now());
         self.task.error = None;
+    }
+
+    /// 覆盖率缓存命中时不重切材料、不算哈希；任务变化后自动重算。
+    pub(crate) fn coverage(&mut self) -> Coverage {
+        self.ensure_coverage_cache();
+        self.coverage_cache
+            .as_ref()
+            .map(|cache| cache.topic)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn section_coverage(&mut self, section_id: &str) -> Coverage {
+        self.ensure_coverage_cache();
+        if let Some(coverage) = self
+            .coverage_cache
+            .as_ref()
+            .and_then(|cache| cache.sections.get(section_id))
+        {
+            return *coverage;
+        }
+        let coverage = self.task.section_coverage(section_id);
+        #[cfg(test)]
+        {
+            self.coverage_computations += 1;
+        }
+        if let Some(cache) = self.coverage_cache.as_mut() {
+            cache.sections.insert(section_id.to_string(), coverage);
+        }
+        coverage
+    }
+
+    fn ensure_coverage_cache(&mut self) {
+        if self
+            .coverage_cache
+            .as_ref()
+            .is_some_and(|cache| cache.revision == self.revision)
+        {
+            return;
+        }
+        let topic = self.task.coverage();
+        #[cfg(test)]
+        {
+            self.coverage_computations += 1;
+        }
+        self.coverage_cache = Some(CoverageCache {
+            revision: self.revision,
+            topic,
+            sections: HashMap::new(),
+        });
     }
 
     fn ready(&mut self, stage: Stage) -> Result<(), String> {
@@ -131,9 +209,10 @@ impl WritingPanel {
                 match writing::store::load(id) {
                     Ok(Some(task)) => {
                         self.task = task;
+                        self.view_stage = self.task.stage;
+                        self.view_manual = false;
                         self.topic_draft = None;
-                        self.readiness_valid = false;
-                        self.delivery_cache = None;
+                        self.invalidate_caches();
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -158,13 +237,24 @@ impl WritingPanel {
             }
         }
         for update in updates {
-            self.readiness_valid = false;
-            self.delivery_cache = None;
+            self.invalidate_caches();
             match update {
-                Update::Progress(task) => self.task = *task,
+                Update::Progress(task) => {
+                    let old_stage = self.task.stage;
+                    self.task = *task;
+                    if !self.view_manual || self.view_stage == old_stage {
+                        self.view_stage = self.task.stage;
+                        self.view_manual = false;
+                    }
+                }
                 Update::Finished(task, error) => {
+                    let old_stage = self.task.stage;
                     self.task = *task;
                     self.task.error = error;
+                    if !self.view_manual || self.view_stage == old_stage {
+                        self.view_stage = self.task.stage;
+                        self.view_manual = false;
+                    }
                     self.running = false;
                     self.receiver = None;
                     self.dirty = true;
@@ -433,20 +523,37 @@ impl DraftPage<'_> {
             self.doc.writing.task.sync_kind(self.doc.draft.kind);
             self.doc.writing.changed();
         }
-        let stage = self.doc.writing.task.stage;
+        if !self.doc.writing.running
+            && !self.doc.writing.view_manual
+            && self.doc.writing.view_stage != self.doc.writing.task.stage
+        {
+            self.doc.writing.view_stage = self.doc.writing.task.stage;
+        }
+        let stage = self.doc.writing.view_stage;
+        let running = self.doc.writing.running;
         ui.horizontal_wrapped(|ui| {
             for next in Stage::ALL {
-                let available = next == Stage::Prepare || self.doc.writing.ready(next).is_ok();
-                if ui
-                    .add_enabled(
-                        available,
-                        egui::Button::new(format!("{} {}", next.index() + 1, next.label()))
-                            .selected(stage == next),
-                    )
-                    .clicked()
-                {
-                    self.doc.writing.task.stage = next;
-                    self.doc.writing.changed();
+                let ready = self.doc.writing.ready(next);
+                // 运行中允许翻看其他阶段（只读），不被就绪条件挡在门外。
+                let available = running || next == Stage::Prepare || ready.is_ok();
+                let response = ui.add_enabled(
+                    available,
+                    egui::Button::new(format!("{} {}", next.index() + 1, next.label()))
+                        .selected(stage == next),
+                );
+                let response = match &ready {
+                    Err(reason) if !running => response.on_disabled_hover_text(reason.as_str()),
+                    _ => response,
+                };
+                if response.clicked() {
+                    self.doc.writing.view_stage = next;
+                    if running {
+                        self.doc.writing.view_manual = next != self.doc.writing.task.stage;
+                    } else {
+                        self.doc.writing.task.stage = next;
+                        self.doc.writing.view_manual = false;
+                        self.doc.writing.changed();
+                    }
                 }
             }
         });

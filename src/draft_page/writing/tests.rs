@@ -3,7 +3,6 @@
 use super::*;
 use crate::agent::writing::{ChunkProgress, ChunkStatus, MaterialCard, Section};
 use crate::draft_page::{DraftSession, ExportLinks};
-use sha2::{Digest, Sha256};
 
 fn fixture() -> WritingTask {
     let mut task = WritingTask::new(TemplateKind::PlainDocument);
@@ -48,15 +47,12 @@ fn fixture() -> WritingTask {
             target_chars: 500,
             markdown: "各有关单位要统筹安排，推动已有数据共享利用，减少不必要的重复填报。".into(),
             cards: vec![card],
-            status: "已完成".into(),
+            status: crate::agent::writing::SectionStatus::Done,
             chunk_bytes: 3200,
             ..Default::default()
         });
     }
-    let hash = Sha256::digest(format!("{}:0:{}", source.hash, source.text.len()).as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let hash = crate::agent::writing::chunk_hash(&source, 0, source.text.len());
     for section_id in [
         None,
         Some("first".into()),
@@ -99,6 +95,7 @@ fn draw(stage: Stage, width: f32, sample: Option<&std::path::Path>) {
     doc.draft.kind = TemplateKind::PlainDocument;
     doc.writing.task.stale_reason = None;
     doc.writing.task.stage = stage;
+    doc.writing.view_stage = stage;
     doc.writing.open = true;
     let original = doc.generated_markdown.clone();
     let (sender, _receiver) = mpsc::channel();
@@ -200,6 +197,7 @@ fn harness(stage: Stage) -> egui_kittest::Harness<'static, Bench> {
     doc.writing.task = fixture();
     doc.draft.kind = TemplateKind::PlainDocument;
     doc.writing.task.stage = stage;
+    doc.writing.view_stage = stage;
     doc.writing.open = true;
     let (sender, _receiver) = mpsc::channel();
     let bench = Bench {
@@ -371,4 +369,149 @@ fn changing_the_document_kind_updates_the_task_without_running() {
         "切换文种后不点运行也能看到提示"
     );
     assert!(!writing.running, "切换文种不得启动模型");
+}
+
+#[test]
+fn coverage_is_cached_until_the_task_changes() {
+    let mut harness = harness(Stage::Extract);
+    let first = harness.state_mut().doc.writing.coverage();
+    let computations = harness.state().doc.writing.coverage_computations;
+    let again = harness.state_mut().doc.writing.coverage();
+    assert_eq!(first, again);
+    assert_eq!(
+        harness.state().doc.writing.coverage_computations,
+        computations,
+        "同一修订号直接复用缓存"
+    );
+
+    harness
+        .state_mut()
+        .doc
+        .writing
+        .task
+        .add_source(SourceSnapshot::new("补充", SourceRole::Content, "补充材料。").unwrap());
+    harness.state_mut().doc.writing.changed();
+    let after = harness.state_mut().doc.writing.coverage();
+    assert_eq!(
+        harness.state().doc.writing.coverage_computations,
+        computations + 1,
+        "任务变化后缓存失效并重算"
+    );
+    assert_eq!(after.total, first.total + 1);
+}
+
+#[test]
+fn progress_updates_follow_the_task_unless_the_user_switched_the_stage() {
+    let mut harness = harness(Stage::Write);
+    let (sender, receiver) = mpsc::channel();
+    harness.state_mut().doc.writing.receiver = Some(receiver);
+    // 用户点去别的阶段查看，任务自己前进时不把人拉回去。
+    harness.state_mut().doc.writing.view_stage = Stage::Collect;
+    harness.state_mut().doc.writing.view_manual = true;
+    let mut task = harness.state().doc.writing.task.clone();
+    task.stage = Stage::Review;
+    sender.send(Update::Progress(Box::new(task))).unwrap();
+    harness.state_mut().doc.writing.sync(None, false);
+    harness.run();
+    assert_eq!(
+        harness.state().doc.writing.view_stage,
+        Stage::Collect,
+        "运行中看别的阶段不被拉回"
+    );
+
+    // 用户没手动切过（或切回任务当前阶段）时跟随任务阶段。
+    harness.state_mut().doc.writing.view_stage = Stage::Review;
+    harness.state_mut().doc.writing.view_manual = false;
+    let mut task = harness.state().doc.writing.task.clone();
+    task.stage = Stage::Write;
+    sender.send(Update::Progress(Box::new(task))).unwrap();
+    harness.state_mut().doc.writing.sync(None, false);
+    harness.run();
+    assert_eq!(
+        harness.state().doc.writing.view_stage,
+        Stage::Write,
+        "没有手动切换时跟随任务阶段"
+    );
+}
+
+#[test]
+fn marking_a_card_conflict_updates_the_verification_counts() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(Stage::Write);
+    harness.run();
+    assert!(
+        harness
+            .query_by_label("已核对 0 · 存在冲突 0 · 依据不足 0 · 待核对 1")
+            .is_some(),
+        "初始统计按当前节素材计算"
+    );
+    harness.get_by_label("存在冲突").click();
+    harness.run();
+    assert!(
+        harness
+            .query_by_label("已核对 0 · 存在冲突 1 · 依据不足 0 · 待核对 0")
+            .is_some()
+    );
+    harness.get_by_label("存在冲突").click();
+    harness.run();
+    assert!(
+        harness
+            .query_by_label("已核对 0 · 存在冲突 0 · 依据不足 0 · 待核对 1")
+            .is_some(),
+        "再点一次撤回为待核对"
+    );
+}
+
+#[test]
+#[ignore = "测量 1 MB 材料、8 节时覆盖率缓存前后的单帧开销"]
+fn coverage_benchmark_one_megabyte_and_eight_sections() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    let mut task = WritingTask::new(TemplateKind::PlainDocument);
+    task.topic = "基层减负".into();
+    task.add_source(
+        SourceSnapshot::new(
+            "大材料",
+            SourceRole::Content,
+            "材料段落内容。".repeat(50_000),
+        )
+        .unwrap(),
+    );
+    task.sections = (0..8)
+        .map(|index| Section {
+            id: format!("s{index}"),
+            title: format!("第{}节", index + 1),
+            points: "要点".into(),
+            target_chars: 300,
+            chunk_bytes: 3200,
+            ..Default::default()
+        })
+        .collect();
+    let rounds = 20;
+    let start = Instant::now();
+    for _ in 0..rounds {
+        black_box(task.coverage());
+    }
+    let uncached = start.elapsed() / rounds;
+    let start = Instant::now();
+    for _ in 0..rounds {
+        black_box(task.section_coverage("s0"));
+    }
+    let uncached_section = start.elapsed() / rounds;
+
+    let mut panel = WritingPanel::new(TemplateKind::PlainDocument);
+    panel.task = task;
+    let start = Instant::now();
+    for _ in 0..rounds {
+        black_box(panel.coverage());
+    }
+    let cached = start.elapsed() / rounds;
+    let start = Instant::now();
+    for _ in 0..rounds {
+        black_box(panel.section_coverage("s0"));
+    }
+    let cached_section = start.elapsed() / rounds;
+    println!(
+        "1 MB 材料 / 8 节：每次覆盖率 未缓存 {uncached:?} → 缓存命中 {cached:?}；单节 未缓存 {uncached_section:?} → 缓存命中 {cached_section:?}"
+    );
 }
