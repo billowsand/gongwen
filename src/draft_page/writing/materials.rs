@@ -52,23 +52,45 @@ impl DraftPage<'_> {
                 })
                 .collect();
             let mut remove = None;
-            for (id, title, chars) in sources {
-                ui.separator();
-                if ui.link(&title).clicked()
-                    && let Some(text) = self.doc.writing.task.source_text(&id)
-                {
-                    self.doc.writing.source_viewer = Some(SourceViewer {
-                        title: title.clone(),
-                        text: text.to_string(),
-                    });
-                }
-                ui.horizontal_wrapped(|ui| {
-                    ui.weak(format!("{chars} 字"));
-                    if ui.small_button("移除").clicked() {
-                        remove = Some(id);
+            egui::ScrollArea::vertical()
+                .id_salt(("writing_source_list", role as usize))
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    for (id, title, chars) in sources {
+                        ui.separator();
+                        if ui.link(&title).clicked()
+                            && let Some(text) = self.doc.writing.task.source_text(&id)
+                        {
+                            self.doc.writing.source_viewer = Some(SourceViewer {
+                                title: title.clone(),
+                                text: text.to_string(),
+                            });
+                        }
+                        let progress = self.doc.writing.task.source_coverage(&id);
+                        let mut line = format!(
+                            "{chars} 字 · 已解析 · {} {}/{} 块",
+                            if role == SourceRole::Content {
+                                "提炼"
+                            } else {
+                                "分析"
+                            },
+                            progress.done,
+                            progress.total
+                        );
+                        if progress.skipped > 0 {
+                            line.push_str(&format!("（人工跳过 {}）", progress.skipped));
+                        }
+                        if progress.failed > 0 {
+                            line.push_str(&format!("（失败 {}）", progress.failed));
+                        }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.weak(line);
+                            if ui.small_button("移除").clicked() {
+                                remove = Some(id);
+                            }
+                        });
                     }
                 });
-            }
             if let Some(id) = remove {
                 // 已有处理记录的材料移除后不能恢复，先确认。
                 if self.doc.writing.task.source_impact(&id) == (0, 0) {

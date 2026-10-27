@@ -19,7 +19,81 @@ impl DraftPage<'_> {
         ui.collapsing("篇章框架", |ui| {
             ui.label(&self.doc.writing.task.framework_md);
         });
-        if self.doc.writing.view_stage == Stage::Collect {
+        if self.doc.writing.view_stage == Stage::Extract {
+            ui.separator();
+            ui.strong("提炼覆盖");
+            let coverage = self.doc.writing.coverage();
+            ui.label(format!(
+                "内容块 {} / {}（人工跳过 {}，失败 {}）",
+                coverage.done, coverage.total, coverage.skipped, coverage.failed
+            ));
+            if coverage.failed > 0 || coverage.skipped > 0 {
+                ui.weak("失败块与人工跳过在中央页面逐块列出，可重试、确认无关或撤销。");
+            }
+            let samples: Vec<(String, String)> = self
+                .doc
+                .writing
+                .task
+                .sources
+                .iter()
+                .filter(|source| source.role != SourceRole::Content)
+                .map(|source| (source.id.clone(), source.title.clone()))
+                .collect();
+            for (id, title) in samples {
+                let progress = self.doc.writing.task.source_coverage(&id);
+                ui.weak(format!(
+                    "{}《{}》分析 {}/{} 块",
+                    if self
+                        .doc
+                        .writing
+                        .task
+                        .sources
+                        .iter()
+                        .find(|source| source.id == id)
+                        .is_some_and(|source| source.role == SourceRole::Style)
+                    {
+                        "风格样稿"
+                    } else {
+                        "结构范文"
+                    },
+                    title,
+                    progress.done,
+                    progress.total
+                ));
+            }
+        } else if self.doc.writing.view_stage == Stage::Outline {
+            ui.separator();
+            ui.strong("各节备料状态");
+            let rows: Vec<(String, String, usize)> = self
+                .doc
+                .writing
+                .task
+                .sections
+                .iter()
+                .map(|section| {
+                    (
+                        section.id.clone(),
+                        section.title.clone(),
+                        self.doc.writing.task.current_section_cards(section).len(),
+                    )
+                })
+                .collect();
+            for (id, title, cards) in rows {
+                let coverage = self.doc.writing.section_coverage(&id);
+                let state = if coverage.total > 0 && coverage.pending == 0 && coverage.failed == 0 {
+                    "已备料"
+                } else if coverage.done > 0 {
+                    "待重新备料"
+                } else {
+                    "待备料"
+                };
+                ui.label(title);
+                ui.weak(format!(
+                    "素材 {cards} 条 · {state}（{}/{} 块）",
+                    coverage.done, coverage.total
+                ));
+            }
+        } else if self.doc.writing.view_stage == Stage::Collect {
             ui.separator();
             ui.strong("分节备料进度");
             let sections: Vec<(String, String)> = self

@@ -6,15 +6,12 @@ impl DraftPage<'_> {
     pub(crate) fn writing_sections(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
         ui.heading("一节一节写，随时可以修改");
         self.writing_section_tabs(ui);
-        let Some(section) = self
-            .doc
-            .writing
-            .task
-            .sections
-            .get_mut(self.doc.writing.section)
-        else {
+        let index = self.doc.writing.section;
+        let Some(section) = self.doc.writing.task.sections.get_mut(index) else {
             return;
         };
+        let section_id = section.id.clone();
+        let (chars, target_chars) = (section.markdown.chars().count(), section.target_chars);
         ui.strong(&section.title);
         ui.weak(section.status.label());
         let changed = ui
@@ -28,6 +25,7 @@ impl DraftPage<'_> {
         if changed {
             section.manually_edited = true;
         }
+        ui.weak(format!("当前 {chars} 字 / 目标 {target_chars} 字"));
         let confirm_manual = section.manually_edited
             && section.status == crate::agent::writing::SectionStatus::Writing
             && !section.markdown.trim().is_empty()
@@ -43,24 +41,42 @@ impl DraftPage<'_> {
             self.doc.writing.changed();
         }
         ui.label("本节修改要求");
-        ui.add(
-            egui::TextEdit::multiline(&mut self.doc.writing.rewrite)
-                .desired_width(f32::INFINITY)
-                .desired_rows(2)
-                .hint_text("例如：保留第一段，第二段压缩到两句话"),
-        );
-        let locked = self.doc.writing.task.sections[self.doc.writing.section].locked;
+        let mut request = self
+            .doc
+            .writing
+            .rewrite_drafts
+            .get(&section_id)
+            .cloned()
+            .unwrap_or_default();
         if ui
-            .add_enabled(!locked, egui::Button::new("按要求重写本节"))
-            .clicked()
+            .add(
+                egui::TextEdit::multiline(&mut request)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(2)
+                    .hint_text("例如：保留第一段，第二段压缩到两句话"),
+            )
+            .changed()
         {
-            *action = Some(Action::RewriteSection(
-                self.doc.writing.section,
-                self.doc.writing.rewrite.clone(),
-            ));
+            // 按章节分别保存，切换章节不串。
+            self.doc
+                .writing
+                .rewrite_drafts
+                .insert(section_id.clone(), request.clone());
+        }
+        let locked = self.doc.writing.task.sections[index].locked;
+        let has_request = !request.trim().is_empty();
+        let response = ui.add_enabled(!locked && has_request, egui::Button::new("按要求重写本节"));
+        let response = if !locked && !has_request {
+            response.on_disabled_hover_text("先写本节修改要求")
+        } else if locked {
+            response.on_disabled_hover_text("本节已锁定，请先解锁")
+        } else {
+            response
+        };
+        if response.clicked() {
+            *action = Some(Action::RewriteSection(index, request));
         }
         ui.weak("人工修改会保留；整批续写不会覆盖人工改过或已锁定的章节。重写只针对当前节。");
-        let index = self.doc.writing.section;
         if self
             .doc
             .writing
@@ -74,28 +90,6 @@ impl DraftPage<'_> {
             self.writing_advisory(ui, index);
         }
         self.writing_section_history(ui);
-    }
-
-    /// 锁定或人工稿的统稿建议：单独展示，采纳与否由用户决定，正文在采纳前不动。
-    pub(crate) fn writing_advisories(&mut self, ui: &mut egui::Ui) {
-        let indexes: Vec<usize> = self
-            .doc
-            .writing
-            .task
-            .sections
-            .iter()
-            .enumerate()
-            .filter(|(_, section)| section.advisory_suggestion.is_some())
-            .map(|(index, _)| index)
-            .collect();
-        if indexes.is_empty() {
-            return;
-        }
-        ui.add_space(8.0);
-        ui.strong("锁定与人工稿的统稿建议（不覆盖正文，采纳由你决定）");
-        for index in indexes {
-            self.writing_advisory(ui, index);
-        }
     }
 
     pub(crate) fn writing_advisory(&mut self, ui: &mut egui::Ui, index: usize) {

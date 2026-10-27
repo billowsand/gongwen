@@ -1,10 +1,11 @@
-//! 统稿审阅与统稿历史。
+//! 统稿审阅：逐节原稿 / 统稿建议对照，直接改全文作为次级入口。
 
 use super::*;
+use crate::agent::writing::{Section, SectionStatus};
 
 impl DraftPage<'_> {
     pub(crate) fn writing_review(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
-        ui.heading("通读统稿，再审阅合并");
+        ui.heading("逐节对照，再审阅合并");
         ui.weak("这里仍是工作稿。接受后进入正文，再使用现有预览、排版和导出。");
         let ready = self.doc.writing.ready(Stage::Review);
         ui.horizontal_wrapped(|ui| {
@@ -34,26 +35,153 @@ impl DraftPage<'_> {
                 ui.label(&self.doc.writing.task.review_notes);
             });
         }
-        self.writing_advisories(ui);
         let problems = self.writing_delivery_issues();
         for problem in &problems {
             ui.colored_label(theme::warn(), problem);
         }
-        if ui
-            .add(
-                egui::TextEdit::multiline(&mut self.doc.writing.task.final_markdown)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(24),
-            )
-            .changed()
-        {
-            self.doc.writing.task.resume_action = None;
-            self.doc.writing.task.final_manual = true;
-            self.doc.writing.task.status = "统稿已人工修改，请重新核对后审阅".into();
-            self.doc.writing.changed();
-        }
+        self.writing_review_sections(ui);
+        self.writing_review_editor(ui);
         ui.weak("差异审阅支持逐块排除。正式正文已有改动时，接受入口会再次检查基线与关键事实。");
         self.writing_final_history(ui);
+    }
+
+    /// 默认视图：每节左边原稿、右边统稿建议，由用户决定拼进全文的是哪一份。
+    fn writing_review_sections(&mut self, ui: &mut egui::Ui) {
+        let sections: Vec<Section> = self.doc.writing.task.sections.clone();
+        if sections.is_empty() {
+            ui.weak("还没有章节，先在提纲页确认提纲。");
+            return;
+        }
+        let mut adopt_suggestion = None;
+        let mut keep_draft = None;
+        let mut adopt_advisory = None;
+        let mut ignore_advisory = None;
+        for (index, section) in sections.iter().enumerate() {
+            ui.push_id(("writing_review_section", index), |ui| {
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong(&section.title);
+                    if section.locked {
+                        ui.weak("已锁定");
+                    } else if section.manually_edited {
+                        ui.weak("人工稿");
+                    }
+                    ui.weak(section.status.label());
+                });
+                if let Some(suggestion) = &section.review_suggestion {
+                    let mut use_it = false;
+                    let mut keep = false;
+                    self.writing_comparison(ui, &section.markdown, suggestion, index);
+                    ui.horizontal_wrapped(|ui| {
+                        use_it = ui.button("采纳建议").clicked();
+                        keep = ui.button("保留原稿").clicked();
+                    });
+                    if use_it {
+                        adopt_suggestion = Some(index);
+                    }
+                    if keep {
+                        keep_draft = Some(index);
+                    }
+                } else if let Some(advice) = &section.advisory_suggestion {
+                    ui.weak("锁定 / 人工稿只给建议，采纳后写入本节并仍算人工稿。");
+                    let mut adopt = false;
+                    let mut ignore = false;
+                    self.writing_comparison(ui, &section.markdown, advice, index);
+                    ui.horizontal_wrapped(|ui| {
+                        adopt = ui.button("采纳到本节").clicked();
+                        ignore = ui.button("忽略").clicked();
+                    });
+                    if adopt {
+                        adopt_advisory = Some(index);
+                    }
+                    if ignore {
+                        ignore_advisory = Some(index);
+                    }
+                } else if !section.markdown.trim().is_empty() {
+                    ui.weak("本节暂未生成统稿建议，拼全文时使用本节正文。");
+                }
+            });
+        }
+        if let Some(index) = adopt_suggestion {
+            if let Some(section) = self.doc.writing.task.sections.get_mut(index) {
+                section.status = SectionStatus::ReviewReady;
+            }
+            self.doc.writing.task.refresh_final_if_generated();
+            self.doc.writing.changed();
+        }
+        if let Some(index) = keep_draft {
+            if let Some(section) = self.doc.writing.task.sections.get_mut(index) {
+                section.review_suggestion = None;
+                section.status = SectionStatus::Done;
+            }
+            self.doc.writing.task.refresh_final_if_generated();
+            self.doc.writing.task.stale_reason =
+                Some("已保留本节原稿；如需该节建议可重新统稿".into());
+            self.doc.writing.changed();
+        }
+        if let Some(index) = adopt_advisory
+            && self.doc.writing.task.accept_advisory(index)
+        {
+            self.doc.writing.changed();
+        }
+        if let Some(index) = ignore_advisory {
+            if let Some(section) = self.doc.writing.task.sections.get_mut(index) {
+                section.advisory_suggestion = None;
+                section.advisory_parts.clear();
+            }
+            self.doc.writing.changed();
+        }
+    }
+
+    fn writing_comparison(
+        &mut self,
+        ui: &mut egui::Ui,
+        original: &str,
+        suggestion: &str,
+        index: usize,
+    ) {
+        if ui.available_width() >= 760.0 {
+            ui.columns(2, |columns| {
+                columns[0].strong("原稿");
+                egui::ScrollArea::vertical()
+                    .id_salt(("writing_review_original", index))
+                    .max_height(220.0)
+                    .show(&mut columns[0], |ui| ui.label(original));
+                columns[1].strong("统稿建议");
+                egui::ScrollArea::vertical()
+                    .id_salt(("writing_review_suggestion", index))
+                    .max_height(220.0)
+                    .show(&mut columns[1], |ui| ui.label(suggestion));
+            });
+        } else {
+            egui::CollapsingHeader::new("原稿")
+                .id_salt(("writing_review_original", index))
+                .show(ui, |ui| ui.label(original));
+            egui::CollapsingHeader::new("统稿建议")
+                .id_salt(("writing_review_suggestion", index))
+                .show(ui, |ui| ui.label(suggestion));
+        }
+    }
+
+    /// 次级入口：直接改整篇统稿，改过之后按人工统稿保留。
+    fn writing_review_editor(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("直接编辑全文")
+            .id_salt("writing_review_editor")
+            .show(ui, |ui| {
+                if ui
+                    .add(
+                        egui::TextEdit::multiline(&mut self.doc.writing.task.final_markdown)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(20),
+                    )
+                    .changed()
+                {
+                    self.doc.writing.task.resume_action = None;
+                    self.doc.writing.task.final_manual = true;
+                    self.doc.writing.task.status = "统稿已人工修改，请重新核对后审阅".into();
+                    self.doc.writing.changed();
+                }
+            });
     }
 
     fn writing_final_history(&mut self, ui: &mut egui::Ui) {

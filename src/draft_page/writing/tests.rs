@@ -85,6 +85,15 @@ fn fixture() -> WritingTask {
 }
 
 fn draw(stage: Stage, width: f32, sample: Option<&std::path::Path>) {
+    draw_with(stage, width, sample, |_| {});
+}
+
+fn draw_with(
+    stage: Stage,
+    width: f32,
+    sample: Option<&std::path::Path>,
+    prepare: impl FnOnce(&mut DraftSession),
+) {
     let ctx = egui::Context::default();
     crate::theme::configure_icons(&ctx);
     crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
@@ -92,6 +101,7 @@ fn draw(stage: Stage, width: f32, sample: Option<&std::path::Path>) {
     let mut config = AppConfig::default();
     let mut doc = DraftSession::with_markdown(7, &config, "# 原有正式正文\n\n由用户维护。".into());
     doc.writing.task = fixture();
+    prepare(&mut doc);
     doc.draft.kind = TemplateKind::PlainDocument;
     doc.writing.task.stale_reason = None;
     doc.writing.task.stage = stage;
@@ -175,6 +185,50 @@ fn staged_writing_ui_samples() {
         680.0,
         Some(std::path::Path::new("tmp/staged-writing/narrow.png")),
     );
+    for width in [1280.0, 680.0] {
+        draw_with(
+            Stage::Extract,
+            width,
+            Some(std::path::Path::new(&format!(
+                "tmp/staged-writing/failed-blocks-{width}.png"
+            ))),
+            |doc| {
+                let task = &mut doc.writing.task;
+                let query = task.topic_query();
+                if let Some(chunk) = task
+                    .chunks
+                    .iter_mut()
+                    .find(|chunk| chunk.section_id.is_none() && chunk.query == query)
+                {
+                    chunk.status = ChunkStatus::Failed;
+                    chunk.error =
+                        Some("模型输出的原句未能在原文块中逐字匹配，该块未标记成功".into());
+                }
+            },
+        );
+        draw_with(
+            Stage::Review,
+            width,
+            Some(std::path::Path::new(&format!(
+                "tmp/staged-writing/review-compare-{width}.png"
+            ))),
+            |doc| {
+                let task = &mut doc.writing.task;
+                task.sections[0].review_suggestion = Some(
+                    "各有关单位要统筹安排检查事项，推动已有数据共享利用，减少不必要的重复填报。"
+                        .into(),
+                );
+                task.sections[1].advisory_suggestion =
+                    Some("建议压缩为：规范报表填报，推动数据共享。".into());
+                task.final_markdown = task
+                    .sections
+                    .iter()
+                    .map(|section| format!("## {}\n\n{}", section.title, section.markdown))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+            },
+        );
+    }
 }
 
 /// 交互测试用的起草页外壳；`DraftPage` 借用的状态都放在这里。
@@ -514,4 +568,151 @@ fn coverage_benchmark_one_megabyte_and_eight_sections() {
     println!(
         "1 MB 材料 / 8 节：每次覆盖率 未缓存 {uncached:?} → 缓存命中 {cached:?}；单节 未缓存 {uncached_section:?} → 缓存命中 {cached_section:?}"
     );
+}
+
+#[test]
+fn completed_stages_show_a_check_and_incomplete_stages_warn() {
+    use egui_kittest::kittest::Queryable;
+    let mut complete = harness(Stage::Extract);
+    complete.run();
+    assert!(
+        complete.query_by_label_contains("2 提炼素材 √").is_some(),
+        "完成的阶段带勾"
+    );
+    let mut pending = harness(Stage::Outline);
+    pending.state_mut().doc.writing.task.outline_confirmed = false;
+    pending.run();
+    assert!(
+        pending.query_by_label_contains("3 确认提纲 ⚠").is_some(),
+        "待人工确认的阶段带提示"
+    );
+}
+
+#[test]
+fn the_material_list_shows_parse_status_and_extraction_progress() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(Stage::Prepare);
+    harness.run();
+    assert!(
+        harness
+            .query_by_label_contains("已解析 · 提炼 1/1 块")
+            .is_some(),
+        "每份材料显示解析状态与提炼进度"
+    );
+}
+
+#[test]
+fn the_outline_can_move_sections_down_and_flags_bad_length_split() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(Stage::Outline);
+    harness.run();
+    let first = harness.state().doc.writing.task.sections[0].title.clone();
+    let second = harness.state().doc.writing.task.sections[1].title.clone();
+    harness.get_all_by_label("↓ 下移").next().unwrap().click();
+    harness.run();
+    let sections = &harness.state().doc.writing.task.sections;
+    assert_eq!(sections[0].title, second);
+    assert_eq!(sections[1].title, first);
+    assert!(
+        harness.query_by_label_contains("偏差超过 15%").is_some(),
+        "各节字数合计与目标篇幅相差过大时提示"
+    );
+}
+
+#[test]
+fn section_tabs_show_state_marks_and_rewrite_needs_a_request() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(Stage::Write);
+    harness.run();
+    assert!(
+        harness
+            .query_by_label_contains("√ 一、精简规范检查考核")
+            .is_some(),
+        "完成章节页签带勾"
+    );
+    assert!(
+        harness.query_by_label_contains("当前 ").is_some(),
+        "正文下方显示当前字数与目标字数"
+    );
+    // 修改要求为空时重写按钮禁用：点击不产生任何动作。
+    harness.get_by_label("按要求重写本节").click();
+    harness.run();
+    assert!(harness.state().actions.is_empty());
+    // 给本节单独写要求后可以重写；没有稿件身份时先把动作转成保存。
+    harness
+        .state_mut()
+        .doc
+        .writing
+        .rewrite_drafts
+        .insert("first".into(), "压缩到两句话".into());
+    harness.run();
+    harness.get_by_label("按要求重写本节").click();
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .actions
+            .iter()
+            .any(|action| matches!(action, crate::app::DraftAction::SaveToLibrary))
+    );
+}
+
+#[test]
+fn review_uses_per_section_comparison_and_can_keep_the_draft() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(Stage::Review);
+    harness.state_mut().doc.writing.task.sections[0].review_suggestion =
+        Some("统稿建议正文。".into());
+    harness.run();
+    assert!(
+        harness.query_by_label("原稿").is_some(),
+        "默认视图是逐节原稿 / 统稿建议对照"
+    );
+    harness.get_all_by_label("保留原稿").next().unwrap().click();
+    harness.run();
+    let task = &harness.state().doc.writing.task;
+    assert!(task.sections[0].review_suggestion.is_none());
+    assert!(!task.final_markdown.contains("统稿建议正文。"));
+}
+
+#[test]
+fn the_evidence_column_shows_stage_specific_status() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(Stage::Outline);
+    harness.run();
+    assert!(
+        harness.query_by_label_contains("各节备料状态").is_some(),
+        "提纲页右栏显示每节备料状态"
+    );
+    assert!(
+        harness
+            .query_all_by_label_contains("素材 1 条 · 已备料")
+            .count()
+            >= 1
+    );
+}
+
+#[test]
+fn the_footer_shows_call_estimate_and_long_task_progress() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(Stage::Prepare);
+    harness.run();
+    assert!(
+        harness
+            .query_by_label_contains("开始提炼前：预计约")
+            .is_some(),
+        "开始提炼前显示预计模型调用次数"
+    );
+    harness.state_mut().doc.writing.running = true;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    harness.state_mut().doc.writing.task.started_at_unix = Some(now - 65);
+    harness.run_steps(2);
+    assert!(
+        harness.query_by_label_contains("总进度").is_some(),
+        "长任务显示总进度条"
+    );
+    assert!(harness.query_by_label_contains("已用 1:").is_some());
 }

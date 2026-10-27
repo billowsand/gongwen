@@ -51,7 +51,8 @@ pub(crate) struct WritingPanel {
     pub(crate) section: usize,
     artifact_tab: usize,
     revise: String,
-    rewrite: String,
+    /// 每节各自的修改要求，切换章节不串。
+    rewrite_drafts: HashMap<String, String>,
     picker: Option<MaterialPicker>,
     source_viewer: Option<SourceViewer>,
     evidence_open: bool,
@@ -95,7 +96,7 @@ impl WritingPanel {
             section: 0,
             artifact_tab: 0,
             revise: String::new(),
-            rewrite: String::new(),
+            rewrite_drafts: HashMap::new(),
             picker: None,
             source_viewer: None,
             evidence_open: true,
@@ -155,6 +156,204 @@ impl WritingPanel {
             cache.sections.insert(section_id.to_string(), coverage);
         }
         coverage
+    }
+
+    /// 阶段是否已经完成（用于阶段导航的勾）。
+    pub(crate) fn stage_complete(&mut self, stage: Stage) -> bool {
+        match stage {
+            Stage::Prepare => {
+                !self.task.topic.trim().is_empty()
+                    && self
+                        .task
+                        .sources
+                        .iter()
+                        .any(|source| source.role == SourceRole::Content)
+            }
+            Stage::Extract => {
+                let coverage = self.coverage();
+                if coverage.total == 0 || coverage.pending > 0 || coverage.failed > 0 {
+                    return false;
+                }
+                let sources: Vec<String> = self
+                    .task
+                    .sources
+                    .iter()
+                    .filter(|source| source.role != SourceRole::Content)
+                    .map(|source| source.id.clone())
+                    .collect();
+                sources.iter().all(|id| {
+                    let progress = self.task.source_coverage(id);
+                    progress.total == 0 || (progress.pending == 0 && progress.failed == 0)
+                })
+            }
+            Stage::Outline => !self.task.sections.is_empty() && self.task.outline_confirmed,
+            Stage::Collect => {
+                let ids: Vec<String> = self
+                    .task
+                    .sections
+                    .iter()
+                    .map(|section| section.id.clone())
+                    .collect();
+                !ids.is_empty()
+                    && ids.iter().all(|id| {
+                        let coverage = self.section_coverage(id);
+                        coverage.total > 0 && coverage.pending == 0 && coverage.failed == 0
+                    })
+            }
+            Stage::Write => {
+                !self.task.sections.is_empty()
+                    && self.task.sections.iter().all(|section| {
+                        !section.markdown.trim().is_empty()
+                            && matches!(
+                                section.status,
+                                crate::agent::writing::SectionStatus::Done
+                                    | crate::agent::writing::SectionStatus::ManualDone
+                                    | crate::agent::writing::SectionStatus::ReviewReady
+                            )
+                    })
+            }
+            Stage::Review => !self.task.final_markdown.trim().is_empty(),
+        }
+    }
+
+    /// 这一阶段有失败块或失效的成果，需要用户回来看一眼。
+    pub(crate) fn stage_attention(&mut self, stage: Stage) -> bool {
+        match stage {
+            Stage::Extract => {
+                let coverage = self.coverage();
+                coverage.failed > 0 || (coverage.done > 0 && coverage.pending > 0)
+            }
+            Stage::Collect => {
+                let ids: Vec<String> = self
+                    .task
+                    .sections
+                    .iter()
+                    .map(|section| section.id.clone())
+                    .collect();
+                ids.iter().any(|id| {
+                    let coverage = self.section_coverage(id);
+                    coverage.failed > 0 || (coverage.done > 0 && coverage.pending > 0)
+                })
+            }
+            Stage::Outline => !self.task.sections.is_empty() && !self.task.outline_confirmed,
+            Stage::Write => {
+                self.task.stale_reason.is_some()
+                    && self
+                        .task
+                        .sections
+                        .iter()
+                        .any(|section| !section.markdown.trim().is_empty())
+            }
+            Stage::Prepare | Stage::Review => false,
+        }
+    }
+
+    /// 长任务的总进度：主题提炼 + 各节备料 + 各节正文。
+    pub(crate) fn overall_progress(&mut self) -> (usize, usize) {
+        let topic = self.coverage();
+        let mut total = topic.total;
+        let mut done = topic.done;
+        let ids: Vec<String> = self
+            .task
+            .sections
+            .iter()
+            .map(|section| section.id.clone())
+            .collect();
+        for id in &ids {
+            let coverage = self.section_coverage(id);
+            total += coverage.total;
+            done += coverage.done;
+        }
+        total += ids.len();
+        done += self
+            .task
+            .sections
+            .iter()
+            .filter(|section| {
+                use crate::agent::writing::SectionStatus;
+                !section.markdown.trim().is_empty()
+                    && matches!(
+                        section.status,
+                        SectionStatus::Done
+                            | SectionStatus::ManualDone
+                            | SectionStatus::ReviewReady
+                    )
+            })
+            .count();
+        (done, total)
+    }
+
+    /// 主操作旁的预计模型调用次数；口径写在悬停说明里。
+    pub(crate) fn estimated_calls(&mut self) -> Option<(String, String)> {
+        let basis =
+            "按当前材料块数、章节数和素材组数粗估，实际会受窗口大小、已完成块与失败重试影响";
+        match self.task.stage {
+            Stage::Prepare => {
+                let coverage = self.coverage();
+                if coverage.total == 0 {
+                    return None;
+                }
+                let mut samples = 0usize;
+                let sample_ids: Vec<String> = self
+                    .task
+                    .sources
+                    .iter()
+                    .filter(|source| source.role != SourceRole::Content)
+                    .map(|source| source.id.clone())
+                    .collect();
+                for id in sample_ids {
+                    samples += self.task.source_coverage(&id).total;
+                }
+                let summarize = if samples > 0 { 2 } else { 0 };
+                Some((
+                    format!(
+                        "开始提炼前：预计约 {} 次模型调用（内容 {} 块 + 样稿 {} 块 + 归纳 {} 次）",
+                        coverage.total + samples + summarize,
+                        coverage.total,
+                        samples,
+                        summarize
+                    ),
+                    basis.to_string(),
+                ))
+            }
+            Stage::Outline => {
+                let coverage = self.coverage();
+                let sections = self.task.sections.len().max(1);
+                Some((
+                    format!(
+                        "准备各节素材前：预计约 {} 次模型调用（内容 {} 块 × {} 节）",
+                        coverage.total * sections,
+                        coverage.total,
+                        sections
+                    ),
+                    basis.to_string(),
+                ))
+            }
+            Stage::Collect => {
+                let sections: Vec<usize> = self
+                    .task
+                    .sections
+                    .iter()
+                    .map(|section| {
+                        self.task
+                            .current_section_cards(section)
+                            .len()
+                            .div_ceil(5)
+                            .max(1)
+                    })
+                    .collect();
+                let calls: usize = sections.iter().sum();
+                Some((
+                    format!(
+                        "开始分节写作前：预计约 {} 次模型调用（{} 节、按素材组粗估）",
+                        calls,
+                        sections.len()
+                    ),
+                    basis.to_string(),
+                ))
+            }
+            Stage::Extract | Stage::Write | Stage::Review => None,
+        }
     }
 
     fn ensure_coverage_cache(&mut self) {
@@ -478,6 +677,16 @@ impl DraftPage<'_> {
     }
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_secs())
+}
+
+fn format_elapsed(seconds: u64) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
 impl Drop for WritingPanel {
     fn drop(&mut self) {
         self.pause();
@@ -536,9 +745,18 @@ impl DraftPage<'_> {
                 let ready = self.doc.writing.ready(next);
                 // 运行中允许翻看其他阶段（只读），不被就绪条件挡在门外。
                 let available = running || next == Stage::Prepare || ready.is_ok();
+                let done = self.doc.writing.stage_complete(next);
+                let attention = !done && self.doc.writing.stage_attention(next);
+                let mark = if done {
+                    " √"
+                } else if attention {
+                    " ⚠"
+                } else {
+                    ""
+                };
                 let response = ui.add_enabled(
                     available,
-                    egui::Button::new(format!("{} {}", next.index() + 1, next.label()))
+                    egui::Button::new(format!("{} {}{}", next.index() + 1, next.label(), mark))
                         .selected(stage == next),
                 );
                 let response = match &ready {
@@ -589,7 +807,32 @@ impl DraftPage<'_> {
                     }
                     self.writing_primary_action(ui, editable, &mut action);
                 }
+                if let Some((estimate, basis)) = self.doc.writing.estimated_calls() {
+                    ui.weak(estimate).on_hover_text(basis);
+                }
             });
+            if self.doc.writing.running
+                || (self.doc.writing.task.started_at_unix.is_some()
+                    && self.doc.writing.task.resume_action.is_some())
+            {
+                let (done, total) = self.doc.writing.overall_progress();
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(
+                        egui::ProgressBar::new(if total == 0 {
+                            0.0
+                        } else {
+                            done as f32 / total as f32
+                        })
+                        .desired_width(240.0)
+                        .text(format!("总进度 {done} / {total}")),
+                    );
+                    if self.doc.writing.running
+                        && let Some(started) = self.doc.writing.task.started_at_unix
+                    {
+                        ui.weak(format!("已用 {}", format_elapsed(unix_now() - started)));
+                    }
+                });
+            }
         });
         let inline_evidence = self.doc.writing.evidence_open && ui.available_width() <= 850.0;
         if self.doc.writing.evidence_open && !inline_evidence {

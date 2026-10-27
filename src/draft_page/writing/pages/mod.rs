@@ -14,6 +14,22 @@ use crate::agent::writing::{ChunkStatus, MaterialCard, Section};
 use crate::app::GongwenApp;
 use crate::theme;
 
+/// 章节页签上的状态标记：完成、写作中、人工稿、锁定、待处理。
+fn section_mark(section: &Section) -> &'static str {
+    use crate::agent::writing::SectionStatus;
+    if section.locked {
+        return "锁";
+    }
+    match section.status {
+        SectionStatus::Done | SectionStatus::ReviewReady => "√",
+        SectionStatus::Writing => "写",
+        SectionStatus::ManualDone => "人",
+        SectionStatus::CollectFailed => "!",
+        SectionStatus::Collected | SectionStatus::Collecting => "备",
+        SectionStatus::Idle => "·",
+    }
+}
+
 impl DraftPage<'_> {
     pub(crate) fn writing_primary_action(
         &mut self,
@@ -77,9 +93,21 @@ impl DraftPage<'_> {
             .writing
             .section
             .min(self.doc.writing.task.sections.len().saturating_sub(1));
+        let tabs: Vec<(String, String)> = self
+            .doc
+            .writing
+            .task
+            .sections
+            .iter()
+            .map(|section| (section.title.clone(), section_mark(section).to_string()))
+            .collect();
         ui.horizontal_wrapped(|ui| {
-            for (index, section) in self.doc.writing.task.sections.iter().enumerate() {
-                ui.selectable_value(&mut self.doc.writing.section, index, &section.title);
+            for (index, (title, mark)) in tabs.into_iter().enumerate() {
+                ui.selectable_value(
+                    &mut self.doc.writing.section,
+                    index,
+                    format!("{mark} {title}"),
+                );
             }
         });
         ui.separator();

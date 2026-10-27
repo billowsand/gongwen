@@ -687,16 +687,39 @@ impl WritingTask {
             Some(section) => (section.chunk_bytes.max(512), self.section_query(section)),
             None => (self.topic_chunk_bytes, self.topic_query()),
         };
-        let index = self.chunk_index();
-        let mut coverage = Coverage::default();
-        for source in self
+        let sources: Vec<_> = self
             .sources
             .iter()
             .filter(|s| s.role == SourceRole::Content)
-        {
+            .collect();
+        self.coverage_of(&sources, section_id, block_size, &query)
+    }
+
+    /// 单份材料的处理进度（素材准备页逐份显示用）；样式与结构样稿按空指纹统计。
+    pub(crate) fn source_coverage(&self, source_id: &str) -> Coverage {
+        let Some(source) = self.sources.iter().find(|s| s.id == source_id) else {
+            return Coverage::default();
+        };
+        if source.role == SourceRole::Content {
+            self.coverage_of(&[source], None, self.topic_chunk_bytes, &self.topic_query())
+        } else {
+            self.coverage_of(&[source], None, self.topic_chunk_bytes, "")
+        }
+    }
+
+    fn coverage_of(
+        &self,
+        sources: &[&SourceSnapshot],
+        section_id: Option<&str>,
+        block_size: usize,
+        query: &str,
+    ) -> Coverage {
+        let index = self.chunk_index();
+        let mut coverage = Coverage::default();
+        for source in sources {
             for (start, end) in chunk_ranges(&source.text, block_size) {
                 coverage.total += 1;
-                match Self::chunk_status(&index, source, section_id, &query, start, end) {
+                match Self::chunk_status(&index, source, section_id, query, start, end) {
                     Some(status) if status.counts_as_done() => {
                         coverage.done += 1;
                         if status == ChunkStatus::SkippedByUser {

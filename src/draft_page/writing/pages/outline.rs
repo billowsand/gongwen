@@ -8,6 +8,7 @@ impl DraftPage<'_> {
         ui.weak("直接编辑标题、要点与篇幅，标题不写编号。确认后按各节要求读取内容材料；只调顺序或未改动的章节沿用已备素材。");
         let mut changed = false;
         let mut move_up = None;
+        let mut move_down = None;
         let mut remove = None;
         let count = self.doc.writing.task.sections.len();
         for (index, section) in self.doc.writing.task.sections.iter_mut().enumerate() {
@@ -45,6 +46,12 @@ impl DraftPage<'_> {
                         move_up = Some(index);
                     }
                     if ui
+                        .add_enabled(index + 1 < count, egui::Button::new("↓ 下移"))
+                        .clicked()
+                    {
+                        move_down = Some(index);
+                    }
+                    if ui
                         .add_enabled(count > 1, egui::Button::new("删除本节"))
                         .clicked()
                     {
@@ -55,6 +62,10 @@ impl DraftPage<'_> {
         }
         if let Some(index) = move_up {
             self.doc.writing.task.sections.swap(index, index - 1);
+            changed = true;
+        }
+        if let Some(index) = move_down {
+            self.doc.writing.task.sections.swap(index, index + 1);
             changed = true;
         }
         if let Some(index) = remove {
@@ -108,6 +119,28 @@ impl DraftPage<'_> {
             self.doc.writing.task.outline_changed();
             self.doc.writing.task.stage = Stage::Outline;
             self.doc.writing.changed();
+        }
+        let total: usize = self
+            .doc
+            .writing
+            .task
+            .sections
+            .iter()
+            .map(|section| section.target_chars)
+            .sum();
+        let target = self.doc.writing.task.target_chars.max(1);
+        let deviation = (total as f64 - target as f64).abs() / target as f64;
+        let text = format!(
+            "各节字数合计 {total} 字 / 目标 {target} 字（{}）",
+            if total > target { "超出" } else { "不足" }
+        );
+        if deviation > 0.15 {
+            ui.colored_label(
+                theme::warn(),
+                format!("{text} 偏差超过 15%，建议调整各节篇幅或目标篇幅"),
+            );
+        } else {
+            ui.weak(text);
         }
         ui.add_space(14.0);
         ui.strong("让 AI 按要求调整提纲");
