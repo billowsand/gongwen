@@ -403,6 +403,29 @@ pub(crate) fn footer_record(
     display: &UnitDisplay,
     elements: &ElementMarks,
 ) {
+    draw_footer_record(ui, metrics, input, display, elements, None);
+}
+
+/// 横向附件之后独立的竖向版记页：按完整 A4 纸高把版记推到下方。
+pub(crate) fn footer_record_page(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    input: &DraftInput,
+    display: &UnitDisplay,
+    elements: &ElementMarks,
+) {
+    let bottom = ui.cursor().top() + metrics.page_height - 2.0 * metrics.margin_top;
+    draw_footer_record(ui, metrics, input, display, elements, Some(bottom));
+}
+
+fn draw_footer_record(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    input: &DraftInput,
+    display: &UnitDisplay,
+    elements: &ElementMarks,
+    bottom: Option<f32>,
+) {
     if input.kind == TemplateKind::MeetingMinutes {
         crate::preview::minutes::record_block(ui, metrics, input, display, elements);
         return;
@@ -536,6 +559,9 @@ pub(crate) fn footer_record(
         .collect::<Vec<_>>();
 
     let total = thick + head_height + thin + row_heights.iter().sum::<f32>() + thick;
+    if let Some(bottom) = bottom {
+        ui.add_space((bottom - ui.cursor().top() - total).max(0.0));
+    }
     place(ui, metrics, total, |painter, rect| {
         let rule = |y: f32, width: f32| {
             painter.rect_filled(

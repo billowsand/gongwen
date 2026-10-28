@@ -2490,11 +2490,10 @@ mod tests {
         assert!(metrics.page < metrics.page_height, "还原后纸应回到竖放");
     }
 
-    /// 渲染一帧公文预览，返回所有纸面（白底矩形）的宽高（毫米）。
-    fn paper_sizes_mm(input: &DraftInput, markdown: &str) -> Vec<(f32, f32)> {
+    fn preview_paper_output(input: &DraftInput, markdown: &str) -> egui::FullOutput {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
-        let output = crate::test_support::run_ui(
+        crate::test_support::run_ui(
             &ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -2517,7 +2516,12 @@ mod tests {
                     &crate::visual_diff::ElementMarks::default(),
                 );
             },
-        );
+        )
+    }
+
+    /// 渲染一帧公文预览，返回所有纸面（白底矩形）的宽高（毫米）。
+    fn paper_sizes_mm(input: &DraftInput, markdown: &str) -> Vec<(f32, f32)> {
+        let output = preview_paper_output(input, markdown);
         let to_mm = |px: f32| px / (72.0 / 25.4 * PT);
         fn collect(
             shape: &egui::epaint::Shape,
@@ -2582,6 +2586,116 @@ mod tests {
                 .iter()
                 .all(|(width, height)| (width - 210.0).abs() < 2.0 && *height > 200.0),
             "窄表附件不应转横：{sizes:?}"
+        );
+    }
+
+    /// 横向附件之后的公函版记独占竖页，并位于纸面下方。
+    #[test]
+    fn letter_record_after_landscape_attachment_uses_a_portrait_page_bottom() {
+        let input = draft(TemplateKind::OfficialLetter);
+        let markdown = format!(
+            "# 关于报送整改情况的函\n\n现将整改情况函告如下。\n\n<!-- [附件] -->\n\n# 问题整改清单\n\n{}",
+            wide_table_markdown_row()
+        );
+        let sizes = paper_sizes_mm(&input, &markdown);
+        assert_eq!(
+            sizes.len(),
+            3,
+            "正文、横向附件、竖向版记各一张纸：{sizes:?}"
+        );
+        assert!((sizes[2].0 - 210.0).abs() < 2.0);
+        assert!(
+            (sizes[2].1 - 297.0).abs() < 2.0,
+            "版记页应为完整 A4：{sizes:?}"
+        );
+
+        let output = preview_paper_output(&input, &markdown);
+        let mut papers = Vec::new();
+        let mut copies = Vec::new();
+        fn collect(
+            shape: &egui::Shape,
+            papers: &mut Vec<egui::Rect>,
+            copies: &mut Vec<egui::Pos2>,
+        ) {
+            match shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == theme::paper::bg() && rect.rect.is_positive() =>
+                {
+                    papers.push(rect.rect);
+                }
+                egui::Shape::Text(text) if text.galley.job.text.contains("共印") => {
+                    copies.push(text.pos);
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, papers, copies);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut papers, &mut copies);
+        }
+        assert_eq!(copies.len(), 1, "版记只能出现一次");
+        let page = papers.last().unwrap();
+        assert!(page.contains(copies[0]), "版记应位于最后的竖页内");
+        assert!(
+            copies[0].y > page.top() + page.height() * 0.75,
+            "版记应贴近页底"
+        );
+
+        let narrow = markdown.replace(&wide_table_markdown_row(), "附件内容。");
+        assert_eq!(
+            paper_sizes_mm(&input, &narrow).len(),
+            2,
+            "竖向附件不另起版记页"
+        );
+        let multiple = format!("{markdown}\n\n<!-- [附件] -->\n\n# 补充说明\n\n附件内容。");
+        assert_eq!(
+            paper_sizes_mm(&input, &multiple).len(),
+            3,
+            "仅最后一份附件为横页时才另起版记页"
+        );
+    }
+
+    #[test]
+    #[ignore = "生成横向附件之后的版记预览样张"]
+    fn letter_record_landscape_preview_sample() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let size = egui::vec2(1000.0, 3200.0);
+        let input = draft(TemplateKind::OfficialLetter);
+        let markdown = format!(
+            "# 关于报送整改情况的函\n\n现将整改情况函告如下。\n\n<!-- [附件] -->\n\n# 问题整改清单\n\n{}",
+            wide_table_markdown_row()
+        );
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            },
+            |ui| {
+                official_preview(
+                    ui,
+                    &input,
+                    &UnitDisplay::new(&[]),
+                    &markdown,
+                    PreviewScale::zoom(Some(1.0)),
+                    None,
+                    false,
+                    &crate::models::NumberingConfig::default(),
+                    false,
+                    &crate::visual_diff::ElementMarks::default(),
+                );
+            },
+        );
+        crate::ui_snapshot::Canvas::default().render(
+            &ctx,
+            output,
+            size,
+            egui::Color32::from_gray(210),
+            std::path::Path::new("tmp/preview-samples/letter-record-after-landscape.png"),
         );
     }
 

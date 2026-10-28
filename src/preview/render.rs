@@ -696,6 +696,9 @@ pub(crate) fn official_preview(
                 .get(sheet_index)
                 .copied()
                 .unwrap_or(false);
+        let separate_record = landscape_sheet
+            && sheet_index == last_attachment
+            && input.kind == TemplateKind::OfficialLetter;
         let saved = landscape_sheet.then(|| metrics.enter_attachment_landscape());
         attachment_sheet(
             ui,
@@ -703,7 +706,7 @@ pub(crate) fn official_preview(
             &attachment,
             sheet_index,
             attachment_count,
-            sheet_index == last_attachment,
+            sheet_index == last_attachment && !separate_record,
             input,
             display,
             elements,
@@ -715,6 +718,12 @@ pub(crate) fn official_preview(
         );
         if let Some(saved) = saved {
             metrics.leave_attachment_landscape(saved);
+        }
+        if separate_record {
+            ui.add_space(14.0);
+            sheet(ui, &metrics, |ui| {
+                super::tail::footer_record_page(ui, &metrics, input, display, elements);
+            });
         }
     }
     // 行号压在纸面留白上，等纸和附件都画完再标：晚画才不会被纸底盖住。

@@ -396,3 +396,14 @@ Word：版记原先是接在内容后面的在流表格（前置 1cm 空段）�
 同法），表后补一个压到最矮的锚段；与上方内容至少 1cm 由 `w:topFromText="567"` 保证，
 docx-rs 不写这个属性，打包前由 `export::docx::record::with_record_gap` 补上。
 **待真机验收**（本机没有 Word / WPS）：末页内容贴近页底时版记应连锚段整体挪到下一页底部。
+
+
+## 公函横向附件后的版记预览（2026-10-28）
+
+连续预览在最后一份附件自动横排时，不再把公函版记接到横纸内；附件画完后恢复
+竖页几何，另起完整 A4 纸，把版记按实际高度推到纸面下方，与 PDF 的另页规则一致。
+最后一份附件为竖页时仍在附件后接排，不因前面的附件横排而多添一页。
+
+回归 `letter_record_after_landscape_attachment_uses_a_portrait_page_bottom` 检查纸张数量、
+竖页尺寸、版记只出现一次及其位置；`letter_record_landscape_preview_sample`（ignored）
+生成 `tmp/preview-samples/letter-record-after-landscape.png` 供目视检查。
