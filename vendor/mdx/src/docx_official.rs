@@ -278,6 +278,7 @@ impl OfficialEmitter {
             }
             Block::Table {
                 rows,
+                header_rows,
                 caption,
                 spans,
                 numbered,
@@ -289,7 +290,7 @@ impl OfficialEmitter {
                 } else {
                     docx
                 };
-                self.add_table(docx, rows, spans, *numbered)
+                self.add_table(docx, rows, spans, *header_rows, *numbered)
             }
             Block::CodeBlock { content, .. } => {
                 self.list.reset();
@@ -465,12 +466,14 @@ impl OfficialEmitter {
         docx: Docx,
         rows: &[Vec<String>],
         spans: &[TableSpan],
+        header_rows: usize,
         numbered: bool,
     ) -> Docx {
         if rows.is_empty() {
             return docx;
         }
-        let column_layout = analyze_table(rows, spans);
+        let header_rows = header_rows.max(1);
+        let column_layout = analyze_table(rows, spans, header_rows);
         let max_cols = column_layout.len();
         if max_cols == 0 {
             return docx;
@@ -500,10 +503,18 @@ impl OfficialEmitter {
                     row_data.get(col_idx).map(|s| s.as_str()).unwrap_or("")
                 };
                 // 表头居中、表体靠左；横向合并格按跨列统一判定（见 cell_alignment）。
-                let align = if row_idx == 0 {
+                let align = if row_idx < header_rows {
                     AlignmentType::Center
                 } else if column_span > 1 {
-                    match cell_alignment(rows, spans, &column_layout, numbered, row_idx, col_idx) {
+                    match cell_alignment(
+                        rows,
+                        spans,
+                        header_rows,
+                        &column_layout,
+                        numbered,
+                        row_idx,
+                        col_idx,
+                    ) {
                         ColumnAlignment::Center => AlignmentType::Center,
                         ColumnAlignment::Left => AlignmentType::Left,
                     }
@@ -512,7 +523,11 @@ impl OfficialEmitter {
                 };
                 // 首行黑体、其余行仿宋_GB2312；字号统一四号(28hp)。
                 // cell 内的 **加粗**/*斜体* 行内格式通过 inline::parse 解析。
-                let font = if row_idx == 0 { FONT_HEAD } else { FONT_BODY };
+                let font = if row_idx < header_rows {
+                    FONT_HEAD
+                } else {
+                    FONT_BODY
+                };
                 // 单元格里写了 `<br>`：逐行写，行间插软回车。
                 let mut p = Paragraph::new().align(align);
                 for (index, line) in cell_lines(cell_data).into_iter().enumerate() {
@@ -884,7 +899,7 @@ mod tests {
             vec!["1".into(), "短项".into(), "这是一段很长的说明文字。".into()],
             vec!["2".into(), "另一项".into(), "另一段较长的说明文字。".into()],
         ];
-        let docx = OfficialEmitter::new().add_table(Docx::new(), &rows, &[], false);
+        let docx = OfficialEmitter::new().add_table(Docx::new(), &rows, &[], 1, false);
         let table = match docx.document.children.last() {
             Some(DocumentChild::Table(table)) => table,
             other => panic!("expected table, got {other:?}"),

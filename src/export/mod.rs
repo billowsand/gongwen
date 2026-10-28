@@ -1204,6 +1204,116 @@ mod tests {
         assert!(spans.is_empty(), "全空行不该被当成分组行：{spans:?}");
     }
 
+    /// 多行表头：分隔行之前的各行都算表头；表头内部可以 `^^` 纵向合并、`||` 横向合并，
+    /// 表头与正文之间的 `^^` 不合并，按原文保留。
+    #[test]
+    fn multi_row_header_with_merged_cells() {
+        let blocks = parse_markdown(
+            "| 项目 | 2025年 || 2026年 ||
+| ^^ | 收入 | 支出 | 收入 | 支出 |
+| --- | --- | --- | --- | --- |
+| 甲 | 1 | 2 | 3 | 4 |
+| ^^ | 5 | 6 | 7 | 8 |
+| 乙 | ^^ | 9 | 9 | 9 |",
+        );
+        let MarkdownBlock::Table {
+            rows,
+            header_rows,
+            spans,
+            ..
+        } = &blocks[0]
+        else {
+            panic!("应当解析为表格：{blocks:?}");
+        };
+        assert_eq!(*header_rows, 2);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0], ["项目", "2025年", "", "2026年", ""]);
+        assert_eq!(rows[1][0], "", "表头里的 ^^ 并入上方");
+        let spans = spans
+            .iter()
+            .map(|span| (span.row, span.column, span.row_span, span.column_span))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            spans,
+            vec![
+                (0, 0, 2, 1),
+                (0, 1, 1, 2),
+                (0, 3, 1, 2),
+                (2, 0, 2, 1),
+                (3, 1, 2, 1)
+            ]
+        );
+        // 正文里的 ^^ 照常合并（上面「乙」行第 2 列并入「5」）；
+        // 但正文首行写 ^^ 时上方是表头，不合并。
+        let blocks = parse_markdown(
+            "| 项目 | 金额 |
+| 名称 | 元 |
+| --- | --- |
+| ^^ | 1 |",
+        );
+        let MarkdownBlock::Table {
+            rows,
+            header_rows,
+            spans,
+            ..
+        } = &blocks[0]
+        else {
+            panic!("应当解析为表格：{blocks:?}");
+        };
+        assert_eq!(*header_rows, 2);
+        assert_eq!(rows[2][0], "^^", "表头与正文之间不纵向合并");
+        assert!(spans.is_empty(), "{spans:?}");
+    }
+
+    /// 单行表头的旧写法不受影响；表格前一行普通文字不会被当成表头。
+    #[test]
+    fn single_row_header_is_unchanged() {
+        let blocks = parse_markdown("正文一句。\n| A | B |\n| --- | --- |\n| 1 | 2 |");
+        assert_eq!(blocks[0], MarkdownBlock::Paragraph("正文一句。".into()));
+        let MarkdownBlock::Table {
+            rows, header_rows, ..
+        } = &blocks[1]
+        else {
+            panic!("应当解析为表格：{blocks:?}");
+        };
+        assert_eq!(*header_rows, 1);
+        assert_eq!(rows.len(), 2);
+    }
+
+    /// 序号表配多行表头：首列整列空着时「序号」竖跨整组表头，编号从正文首行起。
+    #[test]
+    fn numbered_table_with_multi_row_header() {
+        let blocks = parse_markdown(
+            "<!-- [序号表] -->
+|  | 指标 || 说明 |
+|  | 计划 | 完成 | ^^ |
+| --- | --- | --- | --- |
+| 大标题 |  |  |  |
+|  | 1 | 2 | 甲 |",
+        );
+        let MarkdownBlock::Table {
+            rows,
+            header_rows,
+            spans,
+            ..
+        } = &blocks[1]
+        else {
+            panic!("应当解析为序号表：{blocks:?}");
+        };
+        assert_eq!(*header_rows, 2);
+        assert_eq!(rows[0][0], "序号");
+        assert_eq!(rows[2][0], "（一）大标题");
+        assert_eq!(rows[3][0], "1");
+        let spans = spans
+            .iter()
+            .map(|span| (span.row, span.column, span.row_span, span.column_span))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            spans,
+            vec![(0, 0, 2, 1), (0, 1, 1, 2), (0, 3, 2, 1), (2, 0, 1, 4)]
+        );
+    }
+
     /// 标记行只管紧邻的那张表格：中间隔了别的非空行就不算数。
     #[test]
     fn numbered_table_marker_only_applies_to_the_next_table() {
@@ -1529,7 +1639,7 @@ mod tests {
             panic!("应当解析为合并表格：{blocks:?}");
         };
         assert_eq!(spans.len(), 1);
-        let fractions = table_columns(rows, aligns, spans)
+        let fractions = table_columns(rows, aligns, spans, 1)
             .iter()
             .map(|column| column.fraction)
             .collect::<Vec<_>>();

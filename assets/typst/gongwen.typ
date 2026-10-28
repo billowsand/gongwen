@@ -216,8 +216,9 @@
       // TeX 的横线占高度，Typst 的线压在格边上：补半根线宽。
       inset: (x: col-sep, y: 2 * texpt + rule-w / 2),
       stroke: rule-w + black,
-      table.header(..t.rows.at(0).map(c => mk(c, true))),
-      ..t.rows.slice(1).map(r => r.map(c => mk(c, false))).flatten(),
+      // 多行表头整组进 table.header，续页一起重复；表头里的纵向合并不越过分界。
+      table.header(..t.rows.slice(0, t.header-rows).map(r => r.map(c => mk(c, true))).flatten()),
+      ..t.rows.slice(t.header-rows).map(r => r.map(c => mk(c, false))).flatten(),
       // 续表提示（tabularray 的 contfoot）：每页重复的表尾，只在表格还没结束的页上
       // 有内容；最后一页内容为空、留白为 0，不占高度。
       table.footer(repeat: true, table.cell(colspan: n, stroke: none, inset: 0pt, align: right,

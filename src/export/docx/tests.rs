@@ -1135,6 +1135,36 @@ fn body_table_writes_grid_span_and_vertical_merge() {
     assert_eq!(xml.matches("纵向合并").count(), 1);
 }
 
+/// 多行表头：两条表头行都排黑体居中，表头内的纵向、横向合并写成 vMerge / gridSpan。
+#[test]
+fn multi_row_header_is_bold_and_merged() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("multi-header.docx");
+    let mut input = DraftInput::default();
+    input.kind = TemplateKind::PlainDocument;
+    write_docx_ok(
+        &path,
+        &input,
+        "# 多行表头
+| 单位 | 经费 ||
+| ^^ | 计划数 | 完成数 |
+| --- | --- | --- |
+| 办公室 | 10 | 8 |",
+    )
+    .unwrap();
+    let xml = zip_text(&path, "word/document.xml");
+    for header in ["单位", "经费", "计划数", "完成数"] {
+        let cell = table_cell_containing(&xml, header);
+        assert!(cell.contains("w:eastAsia=\"黑体\""), "{header}：{cell}");
+        assert!(cell.contains(r#"w:jc w:val="center""#), "{header}：{cell}");
+    }
+    assert!(table_cell_containing(&xml, "经费").contains(r#"w:gridSpan w:val="2""#));
+    assert!(table_cell_containing(&xml, "单位").contains(r#"w:vMerge w:val="restart""#));
+    assert!(xml.contains(r#"w:vMerge w:val="continue""#), "{xml}");
+    let body = table_cell_containing(&xml, "办公室");
+    assert!(!body.contains("w:eastAsia=\"黑体\""), "{body}");
+}
+
 #[test]
 fn table_cell_breaks_become_soft_returns_in_one_paragraph() {
     let temp = tempfile::tempdir().unwrap();

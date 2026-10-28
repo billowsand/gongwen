@@ -203,14 +203,18 @@ fn calculate_width_ratios(columns_stats: &[ColumnStats]) -> Vec<f64> {
 ///
 /// 横向合并的格子横跨好几列，它的字数说明不了其中任何一列，统计时跳过——
 /// 否则序号表的分组标题会把只放一两位数字的序号列撑宽。
-pub fn analyze_table(rows: &[Vec<String>], spans: &[TableSpan]) -> Vec<ColumnLayout> {
+pub fn analyze_table(
+    rows: &[Vec<String>],
+    spans: &[TableSpan],
+    header_rows: usize,
+) -> Vec<ColumnLayout> {
     let num_cols = rows.first().map_or(0, Vec::len);
     if num_cols == 0 {
         return Vec::new();
     }
 
     let mut columns = vec![Vec::new(); num_cols];
-    for (row_idx, row) in rows.iter().enumerate().skip(1) {
+    for (row_idx, row) in rows.iter().enumerate().skip(header_rows.max(1)) {
         for (col_idx, cell) in row.iter().take(num_cols).enumerate() {
             if span_at(spans, row_idx, col_idx).is_some_and(|span| span.column_span > 1) {
                 continue;
@@ -245,13 +249,14 @@ pub fn analyze_table(rows: &[Vec<String>], spans: &[TableSpan]) -> Vec<ColumnLay
 /// 跨度铺满整行。普通表格的整行合并格（`合计` 之类）不算。
 pub fn is_group_cell(
     spans: &[TableSpan],
+    header_rows: usize,
     columns: usize,
     numbered: bool,
     row: usize,
     column: usize,
 ) -> bool {
     numbered
-        && row > 0
+        && row >= header_rows.max(1)
         && column == 0
         && span_at(spans, row, column)
             .is_some_and(|span| span.column_span >= columns && span.column_span > 1)
@@ -265,12 +270,14 @@ pub fn is_group_cell(
 pub fn cell_alignment(
     rows: &[Vec<String>],
     spans: &[TableSpan],
+    header_rows: usize,
     columns: &[ColumnLayout],
     numbered: bool,
     row: usize,
     column: usize,
 ) -> ColumnAlignment {
-    if row == 0 {
+    // 表头（多行表头的每一行）一律居中。
+    if row < header_rows.max(1) {
         return ColumnAlignment::Center;
     }
     let fallback = columns
@@ -383,7 +390,7 @@ mod tests {
             vec!["1".into(), "第一条说明文字，较长。".into()],
             vec!["12".into(), "第二条说明文字，同样较长。".into()],
         ];
-        let layout = analyze_table(&rows, &[]);
+        let layout = analyze_table(&rows, &[], 1);
         assert_eq!(layout[0].width, ColumnWidth::FixedEm(2.0));
         assert!(matches!(layout[1].width, ColumnWidth::Relative(_)));
     }
@@ -399,7 +406,7 @@ mod tests {
             ],
             vec!["2".into(), "另一项".into(), "另一段较长的说明文字。".into()],
         ];
-        let layout = analyze_table(&rows, &[]);
+        let layout = analyze_table(&rows, &[], 1);
         let grid = to_docx_grid(&layout, 8_844, 280);
 
         assert_eq!(grid[0], 560);

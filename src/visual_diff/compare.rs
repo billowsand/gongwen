@@ -503,8 +503,9 @@ fn align_content(
 }
 
 fn same_block_item(block: VisualBlock) -> OverlayItem {
+    let header_rows = DocumentModel::table_header_rows(&block);
     let table = DocumentModel::table(&block)
-        .map(|(rows, spans)| whole_table_overlay(rows, spans, RedlineKind::Same));
+        .map(|(rows, spans)| whole_table_overlay(rows, spans, header_rows, RedlineKind::Same));
     let text = block
         .text()
         .map(|text| vec![Fragment::same(text)])
@@ -532,7 +533,12 @@ fn deleted_block_overlay(block: &VisualBlock) -> (Vec<Fragment>, Option<TableOve
     if let Some((rows, spans)) = DocumentModel::table(block) {
         return (
             Vec::new(),
-            Some(whole_table_overlay(rows, spans, RedlineKind::Deleted)),
+            Some(whole_table_overlay(
+                rows,
+                spans,
+                DocumentModel::table_header_rows(block),
+                RedlineKind::Deleted,
+            )),
         );
     }
     let text = block
@@ -545,6 +551,7 @@ fn deleted_block_overlay(block: &VisualBlock) -> (Vec<Fragment>, Option<TableOve
 fn whole_table_overlay(
     rows: &[Vec<String>],
     spans: &[TableSpan],
+    header_rows: usize,
     kind: RedlineKind,
 ) -> TableOverlay {
     let fragment = |text: &str| match kind {
@@ -573,6 +580,8 @@ fn whole_table_overlay(
         } else {
             Vec::new()
         },
+        header_rows,
+        old_header_rows: header_rows,
         split_after: None,
     }
 }
@@ -997,11 +1006,17 @@ fn resolve_run(
 }
 
 fn added_block_item(block: VisualBlock) -> OverlayItem {
+    let header_rows = DocumentModel::table_header_rows(&block);
     if let Some((rows, spans)) = DocumentModel::table(&block) {
         return OverlayItem::Block(BlockOverlay {
             block: block.clone(),
             text: Vec::new(),
-            table: Some(whole_table_overlay(rows, spans, RedlineKind::Added)),
+            table: Some(whole_table_overlay(
+                rows,
+                spans,
+                header_rows,
+                RedlineKind::Added,
+            )),
             note: None,
         });
     }
@@ -1286,17 +1301,22 @@ fn best_pairs(
 fn diff_tables(old_block: &VisualBlock, new_block: &VisualBlock) -> TableOverlay {
     let (old_rows, old_spans) = DocumentModel::table(old_block).unwrap_or((&[], &[]));
     let (new_rows, new_spans) = DocumentModel::table(new_block).unwrap_or((&[], &[]));
+    let header_rows = DocumentModel::table_header_rows(new_block);
+    let old_header_rows = DocumentModel::table_header_rows(old_block);
     let columns = new_rows.first().map_or(0, Vec::len);
     let old_columns = old_rows.first().map_or(0, Vec::len);
     if columns == 0 || old_columns != columns {
         let split_after = old_rows.len();
-        let mut rows = whole_table_overlay(old_rows, old_spans, RedlineKind::Deleted).rows;
-        rows.extend(whole_table_overlay(new_rows, new_spans, RedlineKind::Added).rows);
+        let mut rows =
+            whole_table_overlay(old_rows, old_spans, old_header_rows, RedlineKind::Deleted).rows;
+        rows.extend(whole_table_overlay(new_rows, new_spans, header_rows, RedlineKind::Added).rows);
         return TableOverlay {
             columns,
             rows,
             spans: Vec::new(),
             old_spans: old_spans.to_vec(),
+            header_rows,
+            old_header_rows,
             split_after: Some(split_after),
         };
     }
@@ -1375,8 +1395,8 @@ fn diff_tables(old_block: &VisualBlock, new_block: &VisualBlock) -> TableOverlay
                         });
                     }
                 }
-                // 旧行比新行多出来的部分整行删除，排在新行之后。
-                let extra_start = old_range.start + new_len;
+                // 旧行比新行多出来的部分整行删除，排在新行之后（新行更多时没有）。
+                let extra_start = (old_range.start + new_len).min(old_range.end);
                 for (offset, row) in old_rows[extra_start..old_range.end].iter().enumerate() {
                     rows.push(RowOverlay {
                         deleted: true,
@@ -1395,6 +1415,8 @@ fn diff_tables(old_block: &VisualBlock, new_block: &VisualBlock) -> TableOverlay
         rows,
         spans: new_spans.to_vec(),
         old_spans: old_spans.to_vec(),
+        header_rows,
+        old_header_rows,
         split_after: None,
     }
 }

@@ -94,11 +94,11 @@ impl RedPrintPage {
     }
 }
 
-/// 落在某一页上的一段表格：同一张表可以跨页，续页上表头重复一遍，与 TeX 的
-/// longtblr（`rowhead = 1`）一致。
+/// 落在某一页上的一段表格：同一张表可以跨页，续页上表头（多行表头整组）重复
+/// 一遍，与 PDF 的 `table.header` 一致。
 pub(crate) struct RedTableSlice {
     table: Arc<MeasuredTable>,
-    /// 这一段画哪几行（续页以表头 0 打头），自上而下紧挨着排。
+    /// 这一段画哪几行（续页以表头各行打头），自上而下紧挨着排。
     pub(crate) rows: Vec<usize>,
     /// 每一行对应的那一行 Markdown 源码，点击回跳与页边行号都认它。
     sources: Arc<Vec<Range<usize>>>,
@@ -506,6 +506,7 @@ fn red_place_table(
     rows: &[Vec<String>],
     aligns: &[export::ColumnAlign],
     spans: &[export::TableSpan],
+    header_rows: usize,
     numbered: bool,
 ) {
     if state.page_index == 0 {
@@ -517,18 +518,21 @@ fn red_place_table(
         rows,
         aligns,
         spans,
+        header_rows,
         numbered,
         state.body_width(metrics),
     ) else {
         return;
     };
     let table = Arc::new(table);
-    let sources = Arc::new(table_row_sources(markdown, &range, rows.len()));
+    let header_rows = table.header_rows;
+    let sources = Arc::new(table_row_sources(markdown, &range, rows.len(), header_rows));
     let heights = &table.row_heights;
     let height_of = |from: usize, to: usize| heights[from..to].iter().sum::<f32>();
+    let header_height = height_of(0, header_rows);
     let page_top = metrics.mm(37.0);
 
-    let mut next = 1usize;
+    let mut next = header_rows;
     loop {
         // 表头连同紧跟的第一段放不下、这一页又不是从头排的，整张挪到下一页。
         let first_end = if next < heights.len() {
@@ -536,18 +540,19 @@ fn red_place_table(
         } else {
             next
         };
-        if state.cursor_y + heights[0] + height_of(next, first_end) > state.body_bottom(metrics)
+        if state.cursor_y + header_height + height_of(next, first_end) > state.body_bottom(metrics)
             && state.cursor_y > page_top + 0.5
         {
             state.next_page(metrics);
         }
-        let mut slice_rows = vec![0];
-        let mut height = heights[0];
+        let mut slice_rows = (0..header_rows).collect::<Vec<_>>();
+        let mut height = header_height;
         while next < heights.len() {
             let end = table.unbreakable_end(next);
             let group = height_of(next, end);
             // 每页至少放一段，哪怕它比整页还高，免得死循环。
-            if slice_rows.len() > 1 && state.cursor_y + height + group > state.body_bottom(metrics)
+            if slice_rows.len() > header_rows
+                && state.cursor_y + height + group > state.body_bottom(metrics)
             {
                 break;
             }
@@ -572,8 +577,14 @@ fn red_place_table(
     }
 }
 
-/// 表格第 `row` 行对应的那一行源码：表头是第 0 行，分隔行不算，其后一行一行对应。
-fn table_row_sources(markdown: &str, range: &Range<usize>, row_count: usize) -> Vec<Range<usize>> {
+/// 表格第 `row` 行对应的那一行源码：表头是前 `header_rows` 行，分隔行不算，
+/// 其后一行一行对应。
+fn table_row_sources(
+    markdown: &str,
+    range: &Range<usize>,
+    row_count: usize,
+    header_rows: usize,
+) -> Vec<Range<usize>> {
     let mut lines = Vec::new();
     let mut start = range.start;
     for line in markdown[range.clone()].split_inclusive('\n') {
@@ -583,7 +594,7 @@ fn table_row_sources(markdown: &str, range: &Range<usize>, row_count: usize) -> 
     }
     (0..row_count)
         .map(|row| {
-            let line = if row == 0 { 0 } else { row + 1 };
+            let line = if row < header_rows { row } else { row + 1 };
             lines.get(line).cloned().unwrap_or_else(|| range.clone())
         })
         .collect()
@@ -918,6 +929,7 @@ pub(crate) fn red_build_print_layout(
             }
             MarkdownBlock::Table {
                 rows,
+                header_rows,
                 aligns,
                 spans,
                 numbered,
@@ -931,6 +943,7 @@ pub(crate) fn red_build_print_layout(
                     rows,
                     aligns,
                     spans,
+                    *header_rows,
                     *numbered,
                 );
             }

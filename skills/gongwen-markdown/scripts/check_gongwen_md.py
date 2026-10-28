@@ -355,7 +355,8 @@ def looks_like_separator(line: str) -> bool:
 
 
 def check_tables(lines: list[str], report: Report) -> None:
-    """按解析器的判据查表格：一行含 `|` 且紧接分隔行才成表，不要求首尾竖线。
+    """按解析器的判据查表格：连续几行含 `|` 且紧接分隔行才成表，不要求首尾竖线。
+    分隔行之前的各行都是表头（多行表头）。
 
     围栏里的内容不算（Mermaid 里就有 `|`），所以进出 ``` 都要跳过。
     """
@@ -373,18 +374,26 @@ def check_tables(lines: list[str], report: Report) -> None:
         if not is_table_row(line):
             index += 1
             continue
-        if index + 1 < len(lines) and is_table_separator(lines[index + 1]):
-            width = table_cells(lines[index + 1])
-            if table_cells(line) != width:
-                report.error(index + 1, "表头列数与分隔行不一致")
-            index += 2
+        separator = index + 1
+        while (
+            separator < len(lines)
+            and is_table_row(lines[separator])
+            and not is_table_separator(lines[separator])
+        ):
+            separator += 1
+        if separator < len(lines) and is_table_separator(lines[separator]):
+            width = table_cells(lines[separator])
+            for header in range(index, separator):
+                if table_cells(lines[header]) != width:
+                    report.error(header + 1, "表头列数与分隔行不一致")
+            index = separator + 1
             while index < len(lines) and is_table_row(lines[index]):
                 cells = table_cells(lines[index])
                 if cells > width:
                     report.error(index + 1, f"这一行有 {cells} 格，多于表头的 {width} 列")
                 index += 1
             continue
-        # 含 `|` 却没有合格分隔行：解析器要求分隔行紧跟表头行，否则整组按正文印出。
+        # 含 `|` 却没有合格分隔行：解析器要求分隔行紧跟表头各行，否则整组按正文印出。
         start = index
         while index < len(lines) and is_table_row(lines[index]):
             index += 1
@@ -393,7 +402,7 @@ def check_tables(lines: list[str], report: Report) -> None:
         if rows >= 2 or looks_like_separator(following):
             report.error(
                 start + 1,
-                "这一组含 `|` 的行不构成合格表格：分隔行必须是紧跟表头下一行的 "
+                "这一组含 `|` 的行不构成合格表格：表头各行之后必须紧跟 "
                 "`| --- | --- |`（每格至少 3 个短横、格数与表头一致），否则整张表按正文印出",
             )
         else:
@@ -469,6 +478,17 @@ def selftest() -> int:
             "official-letter",
             "# 关于××××的函\n\n<!-- [正文] -->\n\n| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n",
             None,
+        ),
+        (
+            # 多行表头：分隔行之前的各行都是表头，不算「没有分隔行」。
+            "official-letter",
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n| 单位 | 经费 ||\n| ^^ | 计划 | 完成 |\n| --- | --- | --- |\n| 甲 | 1 | 2 |\n",
+            None,
+        ),
+        (
+            "official-letter",
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n| 单位 | 经费 |\n| ^^ | 计划 | 完成 |\n| --- | --- | --- |\n| 甲 | 1 | 2 |\n",
+            "表头列数与分隔行不一致",
         ),
         (
             "official-letter",

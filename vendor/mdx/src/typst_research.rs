@@ -237,6 +237,9 @@ pub struct Table {
     pub number: Option<String>,
     pub label: Option<String>,
     pub cols: Vec<Column>,
+    /// 表头行数（至少 1）：`rows` 的前几行进 `table.header`，续页整组重复。
+    #[serde(rename = "header-rows")]
+    pub header_rows: usize,
     /// 网格：被合并掉的格子为 `None`。
     pub rows: Vec<Vec<Option<Cell>>>,
 }
@@ -557,10 +560,11 @@ impl Builder {
             Block::List { .. } => unreachable!(),
             Block::Table {
                 rows,
+                header_rows,
                 caption,
                 spans,
                 numbered,
-            } => self.table(rows, spans, *numbered, caption.as_deref()),
+            } => self.table(rows, spans, *header_rows, *numbered, caption.as_deref()),
             Block::Marker(kind) => self.marker(*kind),
             Block::Label(id) => self.pending_label = Some(id.clone()),
             Block::CodeBlock { lang, content } => {
@@ -918,6 +922,7 @@ impl Builder {
         &mut self,
         rows: &[Vec<String>],
         spans: &[crate::common::table::TableSpan],
+        header_rows: usize,
         numbered: bool,
         caption: Option<&str>,
     ) {
@@ -925,7 +930,8 @@ impl Builder {
         if rows.is_empty() {
             return;
         }
-        let columns = analyze_table(rows, spans);
+        let header_rows = header_rows.clamp(1, rows.len());
+        let columns = analyze_table(rows, spans, header_rows);
         if columns.is_empty() {
             return;
         }
@@ -957,8 +963,16 @@ impl Builder {
                             return None;
                         }
                         let align = if span.is_some() {
-                            cell_alignment(rows, spans, &columns, numbered, row, column)
-                        } else if row == 0 {
+                            cell_alignment(
+                                rows,
+                                spans,
+                                header_rows,
+                                &columns,
+                                numbered,
+                                row,
+                                column,
+                            )
+                        } else if row < header_rows {
                             ColumnAlignment::Center
                         } else {
                             columns
@@ -977,7 +991,14 @@ impl Builder {
                             align: align.latex(),
                             colspan: span.map_or(1, |s| s.column_span),
                             rowspan: span.map_or(1, |s| s.row_span),
-                            kai: is_group_cell(spans, columns.len(), numbered, row, column),
+                            kai: is_group_cell(
+                                spans,
+                                header_rows,
+                                columns.len(),
+                                numbered,
+                                row,
+                                column,
+                            ),
                         })
                     })
                     .collect()
@@ -989,6 +1010,7 @@ impl Builder {
             number,
             label,
             cols,
+            header_rows,
             rows: grid,
         }));
     }

@@ -159,6 +159,40 @@ fn record_pushed_markdown() -> String {
     md
 }
 
+/// 多行表头样张：表格足够长，跨页时看两行表头是否整组重复。
+fn multi_header_markdown() -> String {
+    let mut md = String::from(
+        "# 关于社区养老服务专项经费执行情况的报告
+
+<!-- [正文] -->
+
+现将经费执行情况报告如下。
+
+| 单位 | 2025年 || 2026年 || 备注 |
+| ^^ | 计划数 | 完成数 | 计划数 | 完成数 | ^^ |
+| --- | --- | --- | --- | --- | --- |
+",
+    );
+    for i in 1..=30 {
+        md.push_str(&format!(
+            "| 第{i}街道 | {i}0 | {i}5 | {i}2 | {i}1 | |
+"
+        ));
+    }
+    md.push_str(
+        "
+特此报告。
+
+<!-- [附件] -->
+
+# 经费明细表
+
+附件正文。
+",
+    );
+    md
+}
+
 fn cases() -> Vec<Case> {
     vec![
         Case {
@@ -319,6 +353,13 @@ fn cases() -> Vec<Case> {
             name: "agenda",
             kind: TemplateKind::MeetingAgenda,
             markdown: "# 社区养老服务工作推进会议程\n\n<!-- [正文] -->\n\n## 时间地点\n\n2026年8月5日（星期三）14:30，3C会议室。\n\n## 会议议程\n\n1. 张三同志通报工作进展；\n2. 各区汇报；\n3. 王局长讲话。\n".into(),
+            tweak: |_| {},
+        },
+        Case {
+            // 多行表头：表头内横向、纵向合并，跨页时两行表头整组重复；正文后接附件说明。
+            name: "plain-multi-header",
+            kind: TemplateKind::PlainDocument,
+            markdown: multi_header_markdown(),
             tweak: |_| {},
         },
         Case {
@@ -589,7 +630,10 @@ fn typst_samples() {
         );
         match outcome {
             // 会议纪要逐页出图，对照 examples/huiyijiyao.docx 目视检查。
-            Ok(outcome) if case.kind == TemplateKind::MeetingMinutes => {
+            Ok(outcome)
+                if case.kind == TemplateKind::MeetingMinutes
+                    || case.name == "plain-multi-header" =>
+            {
                 save_page_images(&outcome.pdf, &dir);
             }
             Ok(_) => {}

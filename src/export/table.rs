@@ -124,35 +124,49 @@ fn percentile_75(mut values: Vec<f64>) -> f64 {
 /// 含句读的长说明按三行容纳；表头最多允许两行，并保护不可断开的西文/数字串。
 /// 所有列的最小宽度加上单元格内边距超过竖向版心时，横页才真正有收益。
 /// 横向合并单元格的需求按跨度摊到它跨过的各列上，合并标题不会单独撑大一列。
-pub(super) fn requires_landscape(rows: &[Vec<String>], spans: &[TableSpan]) -> bool {
+pub(super) fn requires_landscape(
+    rows: &[Vec<String>],
+    spans: &[TableSpan],
+    header_rows: usize,
+) -> bool {
     let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
     if column_count <= 1 {
         return false;
     }
 
     let required_content_width = (0..column_count)
-        .map(|column_index| column_requirement(rows, spans, column_index))
+        .map(|column_index| column_requirement(rows, spans, header_rows, column_index))
         .sum::<f64>();
 
     required_content_width + column_count as f64 * COLUMN_PADDING_EM > PORTRAIT_TABLE_WIDTH_EM
 }
 
 /// 单列保持可读所需的最小字宽；横向合并格的需求摊分到跨度上后与普通内容取较大值。
-fn column_requirement(rows: &[Vec<String>], spans: &[TableSpan], column_index: usize) -> f64 {
+/// 多行表头取这一列里最宽的那格单列表头。
+fn column_requirement(
+    rows: &[Vec<String>],
+    spans: &[TableSpan],
+    header_rows: usize,
+    column_index: usize,
+) -> f64 {
     // 横向合并格的内容不能算到单列头上，否则合并标题会被当成“一列要装下整句”
     // 而误判成需要横排。锚点格与覆盖格都跳过，需求另由 merged_requirement 给出。
     let single_column = |row: usize| {
         table_span_at(spans, row, column_index).is_none_or(|span| span.column_span == 1)
     };
     let header = rows
-        .first()
-        .filter(|_| single_column(0))
-        .and_then(|row| row.get(column_index))
-        .map_or("", String::as_str);
+        .iter()
+        .enumerate()
+        .take(header_rows.max(1))
+        .filter(|(row_index, _)| single_column(*row_index))
+        .filter_map(|(_, row)| row.get(column_index))
+        .map(String::as_str)
+        .max_by(|a, b| cjk_em_width(a).total_cmp(&cjk_em_width(b)))
+        .unwrap_or("");
     let body = rows
         .iter()
         .enumerate()
-        .skip(1)
+        .skip(header_rows.max(1))
         .filter(|(row_index, _)| single_column(*row_index))
         .filter_map(|(_, row)| row.get(column_index))
         .filter(|cell| !cell.trim().is_empty())
@@ -308,6 +322,7 @@ fn analyze_table(
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
     spans: &[TableSpan],
+    header_rows: usize,
 ) -> Vec<ColumnLayout> {
     let column_count = rows.first().map_or(0, Vec::len);
     if column_count == 0 {
@@ -321,7 +336,7 @@ fn analyze_table(
         };
         column_count
     ];
-    for (row_index, row) in rows.iter().enumerate().skip(1) {
+    for (row_index, row) in rows.iter().enumerate().skip(header_rows.max(1)) {
         for (index, value) in row.iter().take(column_count).enumerate() {
             // 横向合并格的锚点和覆盖格都不进单列统计，它们的宽度另按跨度整体核算。
             let span = table_span_at(spans, row_index, index);
@@ -528,10 +543,11 @@ pub(super) fn to_docx_grid(
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
     spans: &[TableSpan],
+    header_rows: usize,
     total_width_twips: usize,
     em_width_twips: usize,
 ) -> (Vec<usize>, Vec<ColumnAlignment>) {
-    let columns = analyze_table(rows, aligns, spans);
+    let columns = analyze_table(rows, aligns, spans, header_rows);
     let fixed = columns
         .iter()
         .map(|column| match column.width {
@@ -576,12 +592,13 @@ pub(super) fn to_docx_grid(
 pub(crate) fn is_group_cell(
     numbered: bool,
     spans: &[TableSpan],
+    header_rows: usize,
     columns: usize,
     row: usize,
     column: usize,
 ) -> bool {
     numbered
-        && row > 0
+        && row >= header_rows.max(1)
         && column == 0
         && table_span_at(spans, row, column)
             .is_some_and(|span| span.column_span >= columns && span.column_span > 1)
@@ -595,12 +612,14 @@ pub(crate) fn is_group_cell(
 pub(crate) fn resolve_cell_alignment(
     rows: &[Vec<String>],
     spans: &[TableSpan],
+    header_rows: usize,
     column_alignments: &[ColumnAlignment],
     numbered: bool,
     row: usize,
     column: usize,
 ) -> ColumnAlignment {
-    if row == 0 {
+    // 表头（多行表头的每一行）一律居中。
+    if row < header_rows.max(1) {
         return ColumnAlignment::Center;
     }
     let fallback = column_alignments
@@ -613,7 +632,14 @@ pub(crate) fn resolve_cell_alignment(
     if span.column_span <= 1 {
         return fallback;
     }
-    if is_group_cell(numbered, spans, column_alignments.len(), row, column) {
+    if is_group_cell(
+        numbered,
+        spans,
+        header_rows,
+        column_alignments.len(),
+        row,
+        column,
+    ) {
         return ColumnAlignment::Left;
     }
     let end = (span.column + span.column_span).min(column_alignments.len());
@@ -654,9 +680,10 @@ pub(crate) fn typst_column_widths(
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
     spans: &[TableSpan],
+    header_rows: usize,
     total_pt: f32,
 ) -> Vec<f32> {
-    let columns = analyze_table(rows, aligns, spans);
+    let columns = analyze_table(rows, aligns, spans, header_rows);
     let padding = 2.0 * 6.0 * 72.0 / 72.27;
     // 与模板数据相同：定宽 em 取整，相对权重保留一位小数。
     let widths = columns
@@ -689,13 +716,15 @@ pub(super) fn to_typst_table(
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
     spans: &[TableSpan],
+    header_rows: usize,
     numbered: bool,
     id: String,
 ) -> Option<crate::export::typst::data::Table> {
     use crate::export::typst::data::{Table, TableCell, TableColumn};
     use crate::export::typst::runs::{cell_runs, plain_runs};
 
-    let columns = analyze_table(rows, aligns, spans);
+    let header_rows = header_rows.clamp(1, rows.len().max(1));
+    let columns = analyze_table(rows, aligns, spans, header_rows);
     if rows.is_empty() || columns.is_empty() {
         return None;
     }
@@ -723,7 +752,7 @@ pub(super) fn to_typst_table(
         .iter()
         .map(|column| column.alignment)
         .collect::<Vec<_>>();
-    let name_column = name_column(rows);
+    let name_column = name_column(rows, header_rows);
     // 居中格的压缩 / 换行一律按竖页网格判定，横页（横向附件、整份横排）也一样：模板
     // 按 tabularray 的规则分列宽，与 Word 网格在横页宽度下分得不一样，按横页网格判定
     // 会把实际放不下的格判成单行。竖页网格偏保守，横页上至多多换一行。
@@ -731,6 +760,7 @@ pub(super) fn to_typst_table(
         rows,
         aligns,
         spans,
+        header_rows,
         super::docx::TABLE_CONTENT_WIDTH_TWIPS,
         super::docx::TABLE_SIZE * 10,
     );
@@ -745,9 +775,8 @@ pub(super) fn to_typst_table(
             }
             let cleaned = plain_cell_text(cell);
             // 写了 `<br>` 的姓名格按手写的行排，不再按单个姓名撑宽。
-            let is_name =
-                name_column == Some(column_index) && row_index > 0 && !has_cell_break(cell);
-            let header = row_index == 0;
+            let header = row_index < header_rows;
+            let is_name = name_column == Some(column_index) && !header && !has_cell_break(cell);
             let runs = if header {
                 plain_runs(&cleaned)
             } else {
@@ -756,6 +785,7 @@ pub(super) fn to_typst_table(
             let alignment = resolve_cell_alignment(
                 rows,
                 spans,
+                header_rows,
                 &column_alignments,
                 numbered,
                 row_index,
@@ -798,6 +828,7 @@ pub(super) fn to_typst_table(
                 kai: is_group_cell(
                     numbered,
                     spans,
+                    header_rows,
                     column_alignments.len(),
                     row_index,
                     column_index,
@@ -809,13 +840,15 @@ pub(super) fn to_typst_table(
     Some(Table {
         id,
         cols,
+        header_rows,
         rows: out_rows,
     })
 }
 
 /// 规格 §6：表头含“姓名/联系人”的列，非表头单元格按版记的方式处理姓名宽度。
-pub(crate) fn name_column(rows: &[Vec<String>]) -> Option<usize> {
-    rows.first().and_then(|header| {
+/// 多行表头逐行找。
+pub(crate) fn name_column(rows: &[Vec<String>], header_rows: usize) -> Option<usize> {
+    rows.iter().take(header_rows.max(1)).find_map(|header| {
         header
             .iter()
             .position(|cell| cell.contains("姓名") || cell.contains("联系人"))
@@ -912,13 +945,47 @@ mod tests {
         assert_eq!(display_width(&rows[1][1]), display_width("电话：12345678"));
         assert_eq!(plain_cell_text(&rows[1][1]), "张某\n电话：12345678");
 
-        let table = to_typst_table(&rows, &[], &[], false, "t".into()).expect("应排成表格");
+        let table = to_typst_table(&rows, &[], &[], 1, false, "t".into()).expect("应排成表格");
         let json = serde_json::to_value(&table.rows).unwrap();
         let lines = json[1][1]["lines"]
             .as_array()
             .expect("有手写换行的格要带 lines");
         assert_eq!(lines.len(), 2);
         assert!(json[1][0].get("lines").is_none());
+    }
+
+    /// 多行表头：模板数据带上表头行数，各条表头行都居中、不认姓名列压缩。
+    #[test]
+    fn typst_table_carries_header_rows() {
+        let rows = vec![
+            vec!["姓名".to_string(), "联系方式".into(), String::new()],
+            vec![String::new(), "电话".into(), "手机".into()],
+            vec!["张三".into(), "1".into(), "2".into()],
+        ];
+        let spans = [
+            TableSpan {
+                row: 0,
+                column: 0,
+                row_span: 2,
+                column_span: 1,
+            },
+            TableSpan {
+                row: 0,
+                column: 1,
+                row_span: 1,
+                column_span: 2,
+            },
+        ];
+        let table = to_typst_table(&rows, &[], &spans, 2, false, "t".into()).expect("应排成表格");
+        let json = serde_json::to_value(&table).unwrap();
+        assert_eq!(json["header-rows"], 2);
+        // 第二条表头行只排两格（首列被上方竖跨的格子盖住）。
+        let second = json["rows"][1].as_array().unwrap();
+        assert_eq!(second.len(), 2);
+        assert!(second.iter().all(|cell| cell["align"] == "c"));
+        assert!(second.iter().all(|cell| cell.get("name").is_none()));
+        assert_eq!(json["rows"][0][0]["rowspan"], 2);
+        assert!(json["rows"][2][0].get("name").is_some(), "正文姓名格照常");
     }
 
     #[test]
@@ -946,7 +1013,7 @@ mod tests {
         spans: &[TableSpan],
         numbered: bool,
     ) -> crate::export::typst::data::Table {
-        to_typst_table(rows, aligns, spans, numbered, "t".into()).expect("应排成表格")
+        to_typst_table(rows, aligns, spans, 1, numbered, "t".into()).expect("应排成表格")
     }
 
     fn cell_json(table: &crate::export::typst::data::Table) -> String {
@@ -955,7 +1022,7 @@ mod tests {
 
     #[test]
     fn narrow_numeric_column_is_fixed_and_docx_fills_width() {
-        let (grid, _) = to_docx_grid(&rows(), &[], &[], 8_844, 280);
+        let (grid, _) = to_docx_grid(&rows(), &[], &[], 1, 8_844, 280);
         assert_eq!(grid[0], 560);
         assert_eq!(grid.iter().sum::<usize>(), 8_844);
         assert!(grid[2] > grid[1]);
@@ -965,12 +1032,12 @@ mod tests {
     #[test]
     fn explicit_alignment_overrides_the_heuristic() {
         // 不写冒号时首列是数字列，智能列宽判它居中。
-        let (_, alignments) = to_docx_grid(&rows(), &[], &[], 8_844, 280);
+        let (_, alignments) = to_docx_grid(&rows(), &[], &[], 1, 8_844, 280);
         assert_eq!(alignments[0], ColumnAlignment::Center);
         assert_eq!(alignments[2], ColumnAlignment::Left, "长说明列左对齐");
 
         let aligns = [ColumnAlign::Left, ColumnAlign::Auto, ColumnAlign::Right];
-        let (_, alignments) = to_docx_grid(&rows(), &aligns, &[], 8_844, 280);
+        let (_, alignments) = to_docx_grid(&rows(), &aligns, &[], 1, 8_844, 280);
         assert_eq!(alignments[0], ColumnAlignment::Left);
         assert_eq!(alignments[2], ColumnAlignment::Right);
         // 没写冒号的第二列不受影响，仍按内容判定。
@@ -1071,10 +1138,10 @@ mod tests {
                 column_span: 2,
             },
         ];
-        assert!(is_group_cell(true, &spans, 3, 1, 0));
-        assert!(!is_group_cell(false, &spans, 3, 1, 0), "普通表格不算");
-        assert!(!is_group_cell(true, &spans, 3, 2, 1), "没铺满整行不算");
-        assert!(!is_group_cell(true, &spans, 4, 1, 0), "表头行不算");
+        assert!(is_group_cell(true, &spans, 1, 3, 1, 0));
+        assert!(!is_group_cell(false, &spans, 1, 3, 1, 0), "普通表格不算");
+        assert!(!is_group_cell(true, &spans, 1, 3, 2, 1), "没铺满整行不算");
+        assert!(!is_group_cell(true, &spans, 1, 4, 1, 0), "表头行不算");
     }
 
     #[test]
@@ -1101,7 +1168,7 @@ mod tests {
                 "是".into(),
             ],
         ];
-        assert!(!requires_landscape(&compact, &[]));
+        assert!(!requires_landscape(&compact, &[], 1));
 
         let crowded = vec![
             vec![
@@ -1125,7 +1192,7 @@ mod tests {
                 "已完成".into(),
             ],
         ];
-        assert!(requires_landscape(&crowded, &[]));
+        assert!(requires_landscape(&crowded, &[], 1));
     }
 
     #[test]
@@ -1134,7 +1201,7 @@ mod tests {
         for index in 1..=100 {
             table.push(vec![index.to_string(), "短项".into()]);
         }
-        assert!(!requires_landscape(&table, &[]));
+        assert!(!requires_landscape(&table, &[], 1));
     }
 
     #[test]
@@ -1184,7 +1251,7 @@ mod tests {
             row_span: 1,
             column_span: 2,
         }];
-        let (grid, _) = to_docx_grid(&table, &[], &spans, 8_844, 280);
+        let (grid, _) = to_docx_grid(&table, &[], &spans, 1, 8_844, 280);
         assert!(
             grid[0].abs_diff(grid[3]) < 400,
             "合并格不该把锚点列撑宽：{grid:?}"
@@ -1226,7 +1293,7 @@ mod tests {
             row_span: 1,
             column_span: 2,
         }];
-        let (grid, _) = to_docx_grid(&table, &[], &spans, 8_844, 280);
+        let (grid, _) = to_docx_grid(&table, &[], &spans, 1, 8_844, 280);
         let merged_width = grid[0] + grid[1];
         // 合并格要放得下约 20 个字宽（约 3100 twips）。
         assert!(merged_width >= 3_000, "合并格没被补宽：{grid:?}");
@@ -1255,7 +1322,7 @@ mod tests {
             row_span: 1,
             column_span: 2,
         }];
-        let (grid, _) = to_docx_grid(&table, &[], &spans, 8_844, 280);
+        let (grid, _) = to_docx_grid(&table, &[], &spans, 1, 8_844, 280);
         assert_eq!(grid[0], 560, "数字列必须保持 2em 定宽：{grid:?}");
         assert!(grid[1] > grid[2], "缺口应落到跨过的非定宽列：{grid:?}");
     }
@@ -1315,7 +1382,7 @@ mod tests {
                 row_span: 1,
                 column_span: 2,
             }];
-            let (grid, _) = to_docx_grid(&table, &[], &spans, 8_844, 280);
+            let (grid, _) = to_docx_grid(&table, &[], &spans, 1, 8_844, 280);
             grid[0] + grid[1]
         };
         assert!(
@@ -1351,7 +1418,7 @@ mod tests {
             row_span: 1,
             column_span: 7,
         }];
-        assert!(requires_landscape(&table, &spans));
+        assert!(requires_landscape(&table, &spans, 1));
     }
 
     /// 合并表头只算一次：把需求按跨度摊到跨过的列上，紧凑表不会被误判成需要横排。
@@ -1385,13 +1452,16 @@ mod tests {
             row_span: 1,
             column_span: 6,
         }];
-        assert!(!requires_landscape(&table, &spans), "合并表头不该触发横排");
+        assert!(
+            !requires_landscape(&table, &spans, 1),
+            "合并表头不该触发横排"
+        );
         // 同一张表若按单列硬算，表头会把一列撑到 13em，误判成需要横排。
         let mut narrow = table.clone();
         for cell in &mut narrow[0][2..7] {
             *cell = String::new();
         }
-        assert!(requires_landscape(&narrow, &[]));
+        assert!(requires_landscape(&narrow, &[], 1));
     }
 
     /// 横向合并格跨过的各列对齐一致时继承该值，不一致时按内容判定。
@@ -1413,7 +1483,7 @@ mod tests {
             ColumnAlignment::Left,
         ];
         assert_eq!(
-            resolve_cell_alignment(&table, &spans, &alignments, false, 1, 0),
+            resolve_cell_alignment(&table, &spans, 1, &alignments, false, 1, 0),
             ColumnAlignment::Center
         );
 
@@ -1424,7 +1494,7 @@ mod tests {
         ];
         // 跨过的列对齐不一致，横向合并格按自身内容判定：短文本居中。
         assert_eq!(
-            resolve_cell_alignment(&table, &spans, &alignments, false, 1, 0),
+            resolve_cell_alignment(&table, &spans, 1, &alignments, false, 1, 0),
             ColumnAlignment::Center
         );
     }
@@ -1458,11 +1528,11 @@ mod tests {
             ColumnAlignment::Left,
         ];
         assert_eq!(
-            resolve_cell_alignment(&table, &spans, &alignments, true, 1, 0),
+            resolve_cell_alignment(&table, &spans, 1, &alignments, true, 1, 0),
             ColumnAlignment::Left
         );
         assert_eq!(
-            resolve_cell_alignment(&table, &spans, &alignments, false, 1, 0),
+            resolve_cell_alignment(&table, &spans, 1, &alignments, false, 1, 0),
             ColumnAlignment::Center,
             "普通表格的整行合并格仍按内容判定"
         );
@@ -1474,7 +1544,7 @@ mod tests {
             column_span: 2,
         }];
         assert_eq!(
-            resolve_cell_alignment(&table, &narrow, &alignments, true, 1, 0),
+            resolve_cell_alignment(&table, &narrow, 1, &alignments, true, 1, 0),
             ColumnAlignment::Center
         );
     }

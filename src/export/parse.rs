@@ -39,8 +39,12 @@ pub(crate) enum MarkdownBlock {
     /// `numbered` 是序号表（表前一行 `<!-- [序号表] -->`）：首列编号与分组行
     /// 的整行合并都由解析器填好（见 `normalize_numbered_table`），渲染端据此
     /// 把整行合并的分组行靠左排。
+    ///
+    /// `header_rows` 是表头行数（至少 1）：分隔行之前的连续表格行都算表头
+    /// （MultiMarkdown 写法），`rows` 的前 `header_rows` 行就是表头，续页整组重复。
     Table {
         rows: Vec<Vec<String>>,
+        header_rows: usize,
         aligns: Vec<ColumnAlign>,
         spans: Vec<TableSpan>,
         numbered: bool,
@@ -834,38 +838,43 @@ fn parse_located(
                 source_segments: Vec::new(),
                 generated_prefixes: Vec::new(),
             });
-        } else if index + 1 < lines.len()
-            && is_table_row(line)
-            && is_table_separator(lines[index + 1].text.trim())
+        } else if let Some(header_rows) = is_table_row(line)
+            .then(|| table_header_rows(lines[index..].iter().map(|line| line.text.trim())))
+            .flatten()
         {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
             let header_line = index;
-            let mut source_rows = vec![line.to_string()];
+            let separator = index + header_rows;
+            let mut source_rows = lines[index..separator]
+                .iter()
+                .map(|line| line.text.trim().to_string())
+                .collect::<Vec<_>>();
             // 分隔行不进正文，但它的冒号决定各列对齐。
-            let mut aligns = parse_table_row(lines[index + 1].text.trim())
+            let mut aligns = parse_table_row(lines[separator].text.trim())
                 .iter()
                 .map(|cell| ColumnAlign::parse(cell))
                 .collect::<Vec<_>>();
-            let mut end = lines[index + 1].start + lines[index + 1].len;
-            index += 2;
+            let mut end = lines[separator].start + lines[separator].len;
+            index = separator + 1;
             while index < lines.len() && is_table_row(lines[index].text.trim()) {
                 source_rows.push(lines[index].text.trim().to_string());
                 end = lines[index].start + lines[index].len;
                 index += 1;
             }
             let column_count = aligns.len();
-            let (mut rows, mut spans) = parse_table_cells(&source_rows, column_count);
+            let (mut rows, mut spans) = parse_table_cells(&source_rows, column_count, header_rows);
             aligns.resize(column_count, ColumnAlign::Auto);
             // 标记行与表格之间只允许空行；中间插了别的非空行就不再算序号表。
             let numbered = numbered_table_line.take().is_some_and(|marker| {
                 (marker + 1..header_line).all(|between| lines[between].text.trim().is_empty())
             });
             if numbered {
-                normalize_numbered_table(&mut rows, &mut spans, numbering);
+                normalize_numbered_table(&mut rows, &mut spans, header_rows, numbering);
             }
             blocks.push(LocatedBlock {
                 block: MarkdownBlock::Table {
                     rows,
+                    header_rows,
                     aligns,
                     spans,
                     numbered,
@@ -1511,6 +1520,21 @@ pub(crate) fn is_table_separator(line: &str) -> bool {
         })
 }
 
+/// 表格的表头有几行：`lines` 从第一条表头行起，分隔行之前的连续表格行都算表头
+/// （MultiMarkdown 允许多行表头，GFM 只有一行，单行时两者一致）。
+/// 返回分隔行相对首行的偏移，也就是表头行数；没遇到分隔行就不成表，返回 None。
+pub(crate) fn table_header_rows<'a>(lines: impl IntoIterator<Item = &'a str>) -> Option<usize> {
+    for (offset, line) in lines.into_iter().enumerate() {
+        if offset > 0 && is_table_separator(line) {
+            return Some(offset);
+        }
+        if !is_table_row(line) || is_table_separator(line) {
+            return None;
+        }
+    }
+    None
+}
+
 pub(crate) fn parse_table_row(line: &str) -> Vec<String> {
     table_source_cells(line)
         .into_iter()
@@ -1555,9 +1579,13 @@ struct WorkingTableCell {
 
 /// 把 MultiMarkdown 风格的横向连续竖线和 ^^ 纵向标记归一化为矩形网格与跨度。
 /// 不合法的 ^^ 保留为普通文字，避免手工编辑时静默吞掉内容。
+///
+/// 前 `header_rows` 行是表头：表头内部可以纵向合并（多行表头的「项目」竖跨两行），
+/// 但表头与正文之间不合并——续页要整组重复表头，跨过分界的格子没法切。
 pub(crate) fn parse_table_cells(
     source_rows: &[String],
     column_count: usize,
+    header_rows: usize,
 ) -> (Vec<Vec<String>>, Vec<TableSpan>) {
     if source_rows.is_empty() || column_count == 0 {
         return (Vec::new(), Vec::new());
@@ -1613,7 +1641,7 @@ pub(crate) fn parse_table_cells(
                     continue;
                 };
                 let valid = cells[above].active
-                    && cells[above].row != 0
+                    && (cells[above].row < header_rows) == (row_index < header_rows)
                     && cells[above].column == column
                     && cells[above].column_span == column_span
                     && cells[above].row + cells[above].row_span == row_index;
@@ -1673,6 +1701,7 @@ fn looks_like_row_number(value: &str) -> bool {
 fn normalize_numbered_table(
     rows: &mut [Vec<String>],
     spans: &mut Vec<TableSpan>,
+    header_rows: usize,
     numbering: &NumberingConfig,
 ) {
     let Some(column_count) = rows.first().map(Vec::len) else {
@@ -1683,14 +1712,26 @@ fn normalize_numbered_table(
         return;
     }
     // 表头首格留空时补上「序号」：首列既然是自动编号列，表头不写反倒奇怪。
-    if rows[0][0].trim().is_empty() {
+    // 多行表头的首列整列都空、也没人合并过时，「序号」竖跨整组表头。
+    let header_rows = header_rows.clamp(1, rows.len());
+    let first_column_free = (0..header_rows)
+        .all(|row| rows[row][0].trim().is_empty() && table_span_at(spans, row, 0).is_none());
+    if first_column_free && header_rows > 1 {
+        rows[0][0] = "序号".to_string();
+        spans.push(TableSpan {
+            row: 0,
+            column: 0,
+            row_span: header_rows,
+            column_span: 1,
+        });
+    } else if rows[0][0].trim().is_empty() {
         rows[0][0] = "序号".to_string();
     }
 
     let style = numbering.table_group;
     let mut group = 0usize;
     let mut number = 0usize;
-    for (row_index, row) in rows.iter_mut().enumerate().skip(1) {
+    for (row_index, row) in rows.iter_mut().enumerate().skip(header_rows) {
         let first_span = table_span_at(spans, row_index, 0);
         // `^^` 的延续行：首格是被覆盖的占位，既不编号也不当分组行。
         if first_span.is_some_and(|span| !span.is_anchor(row_index, 0)) {

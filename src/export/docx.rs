@@ -643,6 +643,7 @@ pub fn write_docx_with_numbering(
                 }
                 MarkdownBlock::Table {
                     rows,
+                    header_rows,
                     aligns,
                     spans,
                     numbered,
@@ -652,6 +653,7 @@ pub fn write_docx_with_numbering(
                         rows,
                         aligns,
                         spans,
+                        *header_rows,
                         *numbered,
                         bold,
                         content_width,

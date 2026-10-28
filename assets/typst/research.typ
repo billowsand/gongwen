@@ -532,8 +532,9 @@
         inset: (x: col-sep, y: 2 * texpt + rule-w / 2),
         stroke: rule-w + if terminal { rule } else { black },
         // 没有表题的表不编号（与 Word、预览一致），表头里也就没有表题这一行。
-        table.header(..if t.number != none { (caption,) }, ..t.rows.at(0).map(c => cell-or-skip(c, true)).flatten()),
-        ..t.rows.slice(1).map(r => r.map(c => cell-or-skip(c, false)).flatten()).flatten(),
+        // 多行表头整组进 table.header，续页一起重复。
+        table.header(..if t.number != none { (caption,) }, ..t.rows.slice(0, t.header-rows).map(r => r.map(c => cell-or-skip(c, true)).flatten()).flatten()),
+        ..t.rows.slice(t.header-rows).map(r => r.map(c => cell-or-skip(c, false)).flatten()).flatten(),
         // 续表提示（tabularray 的 contfoot）：只在表格还没结束的页上有内容。
         table.footer(repeat: true, table.cell(colspan: n, stroke: none, inset: 0pt, align: right,
           context {

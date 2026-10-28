@@ -143,6 +143,9 @@ pub(crate) struct Table {
     /// 文档内唯一，模板用它挂「表尾」标签判断表格是否跨页。
     pub id: String,
     pub cols: Vec<TableColumn>,
+    /// 表头行数（至少 1）：`rows` 的前几行进 `table.header`，续页整组重复。
+    #[serde(rename = "header-rows")]
+    pub header_rows: usize,
     /// 每行只列出要排的格（被合并掉的格不出现）。
     pub rows: Vec<Vec<TableCell>>,
 }

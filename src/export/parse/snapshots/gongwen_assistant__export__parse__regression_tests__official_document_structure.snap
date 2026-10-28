@@ -29,6 +29,7 @@ expression: parse_markdown(markdown)
                 "3",
             ],
         ],
+        header_rows: 1,
         aligns: [
             Auto,
             Right,

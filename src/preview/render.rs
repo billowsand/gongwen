@@ -903,10 +903,11 @@ pub(crate) fn content_block(
         }
         MarkdownBlock::Table {
             rows,
+            header_rows,
             aligns,
             spans,
             numbered,
-        } => table_block(ui, metrics, rows, aligns, spans, *numbered),
+        } => table_block(ui, metrics, rows, aligns, spans, *header_rows, *numbered),
         MarkdownBlock::Image { alt, src } => image_block(ui, metrics, alt, src),
         MarkdownBlock::Diagram { source, caption } => {
             diagram_image_block(ui, metrics, source, false);

@@ -361,6 +361,8 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
                         rows: old_rows.to_vec(),
                         spans: Vec::new(),
                         old_spans: table.old_spans.clone(),
+                        header_rows: table.old_header_rows,
+                        old_header_rows: table.old_header_rows,
                         split_after: None,
                     };
                     let new_part = TableOverlay {
@@ -368,6 +370,8 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
                         rows: new_rows.to_vec(),
                         spans: table.spans.clone(),
                         old_spans: Vec::new(),
+                        header_rows: table.header_rows,
+                        old_header_rows: table.header_rows,
                         split_after: None,
                     };
                     lines.extend(emit_table(&old_part, &aligns[..old_part.columns], true));
@@ -449,6 +453,21 @@ fn emit_table(table: &TableOverlay, aligns: &[ColumnAlign], deleted: bool) -> Ve
     } else {
         &table.spans
     };
+    // 开头连续的表头行（新行按新表、整删行按旧表的表头行数认）之后写分隔行，
+    // 至少一行。
+    let header_count = table
+        .rows
+        .iter()
+        .take_while(|row| {
+            row.source_row
+                < if row.deleted {
+                    table.old_header_rows
+                } else {
+                    table.header_rows
+                }
+        })
+        .count()
+        .max(1);
     let mut lines: Vec<String> = Vec::new();
     for (index, row) in table.rows.iter().enumerate() {
         let cells = row
@@ -459,7 +478,7 @@ fn emit_table(table: &TableOverlay, aligns: &[ColumnAlign], deleted: bool) -> Ve
             .collect::<Vec<_>>()
             .join("|");
         lines.push(format!("|{cells}|"));
-        if index == 0 {
+        if index + 1 == header_count {
             // 分隔行：按列对齐写最简形式，冒号决定对齐，与导出器一致。
             let separator = (0..table.columns)
                 .map(|column| match aligns.get(column) {
@@ -792,6 +811,31 @@ mod tests {
                 .any(|block| matches!(block, MarkdownBlock::Table { .. })),
             "剥掉哨兵后仍是表格：{clean}"
         );
+    }
+
+    /// 多行表头的表格标注后，分隔行仍写在两条表头行之后，表头内的合并也保留。
+    #[test]
+    fn multi_row_header_survives_marking() {
+        let header = "| 事项 | 时限 ||\n| ^^ | 开始 | 结束 |\n| --- | --- | --- |\n";
+        let old = format!("{header}| 备案 | 8月 | 9月 |");
+        let new = format!("{header}| 备案 | 8月 | 10月 |\n| 审核 | 9月 | 11月 |");
+        let marked = marked(&old, &new);
+        let clean = strip_redline(&marked);
+        let blocks = crate::export::parse_markdown(&clean);
+        let Some(MarkdownBlock::Table {
+            header_rows,
+            rows,
+            spans,
+            ..
+        }) = blocks
+            .iter()
+            .find(|block| matches!(block, MarkdownBlock::Table { .. }))
+        else {
+            panic!("剥掉哨兵后仍是表格：{clean}");
+        };
+        assert_eq!(*header_rows, 2, "{clean}");
+        assert_eq!(rows.len(), 4, "{clean}");
+        assert_eq!(spans.len(), 2, "{clean}");
     }
 
     #[test]

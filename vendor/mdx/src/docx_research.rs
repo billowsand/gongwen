@@ -985,6 +985,7 @@ impl MainEmitter {
             }
             Block::Table {
                 rows,
+                header_rows,
                 caption,
                 spans,
                 numbered,
@@ -996,7 +997,7 @@ impl MainEmitter {
                 } else {
                     docx
                 };
-                add_table(docx, rows, spans, *numbered)
+                add_table(docx, rows, spans, *header_rows, *numbered)
             }
             Block::Quote { kind, items } => {
                 self.list.reset();
@@ -1336,6 +1337,7 @@ impl ChangelogEmitter {
             }
             Block::Table {
                 rows,
+                header_rows,
                 caption,
                 spans,
                 numbered,
@@ -1347,7 +1349,7 @@ impl ChangelogEmitter {
                 } else {
                     docx
                 };
-                add_table(docx, rows, spans, *numbered)
+                add_table(docx, rows, spans, *header_rows, *numbered)
             }
             Block::Math(content) => {
                 // docx 不支持公式：降级为源码原文段落
@@ -1756,11 +1758,17 @@ fn add_code_block(mut docx: Docx, content: &str) -> Docx {
     docx
 }
 
-fn add_table(docx: Docx, rows: &[Vec<String>], spans: &[TableSpan], numbered: bool) -> Docx {
+fn add_table(
+    docx: Docx,
+    rows: &[Vec<String>],
+    spans: &[TableSpan],
+    header_rows: usize,
+    numbered: bool,
+) -> Docx {
     if rows.is_empty() {
         return docx;
     }
-    let column_layout = analyze_table(rows, spans);
+    let column_layout = analyze_table(rows, spans, header_rows);
     let max_cols = column_layout.len();
     if max_cols == 0 {
         return docx;
@@ -1793,15 +1801,22 @@ fn add_table(docx: Docx, rows: &[Vec<String>], spans: &[TableSpan], numbered: bo
             // 公文助手预览一致。
             let group_row = numbered
                 && column_span == grid.len()
-                && cell_alignment(rows, spans, &column_layout, numbered, row_idx, col_idx)
-                    == ColumnAlignment::Left;
+                && cell_alignment(
+                    rows,
+                    spans,
+                    header_rows,
+                    &column_layout,
+                    numbered,
+                    row_idx,
+                    col_idx,
+                ) == ColumnAlignment::Left;
             let align = if group_row {
                 AlignmentType::Left
             } else {
                 AlignmentType::Center
             };
-            // 表头整行黑体加粗；表体解析 cell 内的 **加粗**/*斜体* 行内格式。
-            let is_header = row_idx == 0;
+            // 表头（多行表头的每一行）黑体加粗；表体解析 cell 内的 **加粗**/*斜体* 行内格式。
+            let is_header = row_idx < header_rows.max(1);
             let mut p = Paragraph::new().align(align);
             // 单元格里写了 `<br>`：逐行写，行间插软回车，仍是同一段（与 PDF 一致）。
             let inlines = cell_lines(cell_data)
@@ -2494,7 +2509,7 @@ mod tests {
             vec!["1".into(), "短项".into(), "这是一段很长的说明文字。".into()],
             vec!["2".into(), "另一项".into(), "另一段较长的说明文字。".into()],
         ];
-        let docx = add_table(Docx::new(), &rows, &[], false);
+        let docx = add_table(Docx::new(), &rows, &[], 1, false);
         let table = match docx.document.children.last() {
             Some(DocumentChild::Table(table)) => table,
             other => panic!("expected table, got {other:?}"),
@@ -2512,7 +2527,7 @@ mod tests {
             vec!["单位".into(), "联系方式".into()],
             vec!["办公室".into(), "张某<br>电话".into()],
         ];
-        let docx = add_table(Docx::new(), &rows, &[], false);
+        let docx = add_table(Docx::new(), &rows, &[], 1, false);
         let xml = String::from_utf8(docx.document.build()).unwrap();
         assert_eq!(
             xml.matches(r#"<w:br w:type="textWrapping""#).count(),

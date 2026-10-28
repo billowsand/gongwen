@@ -228,6 +228,17 @@ impl DocumentModel {
             _ => None,
         }
     }
+
+    /// 表格块的表头行数；不是表格时按 1 算。
+    pub(crate) fn table_header_rows(block: &VisualBlock) -> usize {
+        match block {
+            VisualBlock::Parsed {
+                block: MarkdownBlock::Table { header_rows, .. },
+                ..
+            } => *header_rows,
+            _ => 1,
+        }
+    }
 }
 
 /// 文本类块的原文（非文本块返回 None）。

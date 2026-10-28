@@ -65,6 +65,7 @@ pub(super) fn write(
         if !in_attachment {
             content = if let MarkdownBlock::Table {
                 rows,
+                header_rows,
                 aligns,
                 spans,
                 numbered,
@@ -75,6 +76,7 @@ pub(super) fn write(
                     rows,
                     aligns,
                     spans,
+                    *header_rows,
                     *numbered,
                     fonts.bold_family_docx(),
                     5970,

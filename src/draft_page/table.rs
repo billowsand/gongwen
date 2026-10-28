@@ -18,6 +18,8 @@ use std::ops::Range;
 pub(crate) struct TableEdit {
     /// 表头也在内，但不含分隔行。
     pub(crate) rows: Vec<Vec<String>>,
+    /// 表头行数（至少 1）：分隔行之前的各行。
+    pub(crate) header_rows: usize,
     pub(crate) aligns: Vec<ColumnAlign>,
     pub(crate) spans: Vec<TableSpan>,
     /// 整张表在源码中的字节范围（表头行首到最后一行数据的行尾）。
@@ -33,8 +35,8 @@ impl TableEdit {
     }
 }
 
-/// 光标落在表格里就把它解析出来；不在表格里、或那几行不是合法的 GFM 表格
-/// （表头之后必须紧跟分隔行）时返回 None。
+/// 光标落在表格里就把它解析出来；不在表格里、或那几行不是合法的表格
+/// （表头各行之后必须紧跟分隔行）时返回 None。
 pub(crate) fn table_at(text: &str, cursor: usize) -> Option<TableEdit> {
     let ranges = line_ranges(text);
     let lines = ranges
@@ -53,27 +55,27 @@ pub(crate) fn table_at(text: &str, cursor: usize) -> Option<TableEdit> {
     while last + 1 < lines.len() && is_table_source_line(lines[last + 1]) {
         last += 1;
     }
-    if last <= first || !is_table_separator_line(lines[first + 1]) {
-        return None;
-    }
-    let mut aligns = split_row(lines[first + 1])
+    // 分隔行之前都是表头（多行表头）；首行就是分隔行的不成表。
+    let separator = (first + 1..=last).find(|index| is_table_separator_line(lines[*index]))?;
+    let header_rows = separator - first;
+    let mut aligns = split_row(lines[separator])
         .iter()
         .map(|cell| ColumnAlign::parse(cell))
         .collect::<Vec<_>>();
     let columns = aligns.len().max(split_row(lines[first]).len()).max(1);
     aligns.resize(columns, ColumnAlign::Auto);
     let mut source_rows: Vec<String> = Vec::new();
-    // 每个源码行对应 `rows` 里的哪一行；分隔行算在表头上。
+    // 每个源码行对应 `rows` 里的哪一行；分隔行算在表头最后一行上。
     let mut row_of_line: Vec<usize> = Vec::new();
     for (offset, line) in lines[first..=last].iter().enumerate() {
-        if offset == 1 {
-            row_of_line.push(0);
+        if offset == header_rows {
+            row_of_line.push(header_rows - 1);
             continue;
         }
         row_of_line.push(source_rows.len());
         source_rows.push((*line).to_string());
     }
-    let (rows, spans) = parse_table_cells(&source_rows, columns);
+    let (rows, spans) = parse_table_cells(&source_rows, columns, header_rows);
     // 列：数一数光标之前有几根竖线。行首那根不算一列的开始。
     let line_start = ranges[at].start;
     let mut cut = cursor.clamp(line_start, ranges[at].end);
@@ -88,6 +90,7 @@ pub(crate) fn table_at(text: &str, cursor: usize) -> Option<TableEdit> {
         .min(columns - 1);
     Some(TableEdit {
         rows,
+        header_rows,
         aligns,
         spans,
         span: ranges[first].start..ranges[last].end,
@@ -97,12 +100,14 @@ pub(crate) fn table_at(text: &str, cursor: usize) -> Option<TableEdit> {
 }
 
 /// 把单元格重排成对齐好的 Markdown。列宽取该列最宽的一格，最少三格
-/// （分隔行要放得下 `:-:`）。
+/// （分隔行要放得下 `:-:`）。分隔行写在前 `header_rows` 行（表头）之后。
 pub(crate) fn render_table(
     rows: &[Vec<String>],
+    header_rows: usize,
     aligns: &[ColumnAlign],
     spans: &[TableSpan],
 ) -> String {
+    let header_rows = header_rows.clamp(1, rows.len().max(1));
     let widths = aligns
         .iter()
         .enumerate()
@@ -147,7 +152,7 @@ pub(crate) fn render_table(
             line.push_str(" |");
         }
         lines.push(line);
-        if index == 0 {
+        if index + 1 == header_rows {
             let mut separator = String::new();
             for (column, width) in widths.iter().copied().enumerate() {
                 separator.push_str("| ");
@@ -168,7 +173,7 @@ pub(crate) fn render_table(
 pub(crate) fn blank_table(rows: usize, columns: usize) -> String {
     let columns = columns.max(2);
     let cells = vec![vec![String::new(); columns]; rows.max(1)];
-    render_table(&cells, &vec![ColumnAlign::Auto; columns], &[])
+    render_table(&cells, 1, &vec![ColumnAlign::Auto; columns], &[])
 }
 
 /// 序号表格的骨架：标记行 + 表头 + 一条分组行 + 两条数据行。
@@ -181,7 +186,7 @@ pub(crate) fn numbered_table_skeleton(columns: usize) -> String {
     let mut rows = vec![vec![String::new(); columns]; 4];
     rows[0][0] = "序号".to_string();
     rows[1][0] = "（一）分组标题".to_string();
-    let table = render_table(&rows, &vec![ColumnAlign::Auto; columns], &[]);
+    let table = render_table(&rows, 1, &vec![ColumnAlign::Auto; columns], &[]);
     format!("{NUMBERED_TABLE_MARKER}\n{table}")
 }
 
@@ -233,7 +238,11 @@ fn retain_real_spans(spans: &mut Vec<TableSpan>) {
     spans.sort_by_key(|span| (span.row, span.column));
 }
 
+/// 在第 `at` 行处插一行。插在某条表头行之上就是多一行表头。
 fn insert_table_row(table: &mut TableEdit, at: usize) {
+    if at < table.header_rows {
+        table.header_rows += 1;
+    }
     table.rows.insert(at, vec![String::new(); table.columns()]);
     for span in &mut table.spans {
         if at <= span.row {
@@ -266,6 +275,9 @@ fn delete_table_row(table: &mut TableEdit, at: usize) {
         }
     }
     table.rows.remove(at);
+    if at < table.header_rows {
+        table.header_rows -= 1;
+    }
     table.spans = next;
     for (row, column, text) in transfers {
         if let Some(cell) = table.rows.get_mut(row).and_then(|row| row.get_mut(column)) {
@@ -325,10 +337,11 @@ fn delete_table_column(table: &mut TableEdit, at: usize) {
 
 fn extend_span(table: &mut TableEdit, span: TableSpan, down: bool) -> Result<(), &'static str> {
     let (target_rows, target_columns) = if down {
-        if span.row == 0 {
+        let target = span.row + span.row_span;
+        // 表头内部可以纵向合并（多行表头），跨过表头与正文的分界不行。
+        if target == table.header_rows {
             return Err("表头不能与正文纵向合并。");
         }
-        let target = span.row + span.row_span;
         if target >= table.rows.len() {
             return Err("下方没有可合并的单元格。");
         }
@@ -534,18 +547,27 @@ impl DraftPage<'_> {
         let columns = table.columns();
         let message = match op {
             TableOp::InsertRowAbove | TableOp::InsertRowBelow => {
-                // 表头之上插不了数据行——第一行就是表头。
+                // 光标在表头里时插的是表头行（多行表头）；在正文里插的是数据行。
+                let in_header = table.row < table.header_rows;
                 let at = if op == TableOp::InsertRowAbove {
-                    table.row.max(1)
+                    table.row
                 } else {
                     table.row + 1
                 };
                 insert_table_row(&mut table, at);
+                // 插在表头最后一行之下也还算表头。
+                if in_header && at == table.header_rows {
+                    table.header_rows += 1;
+                }
                 table.row = at;
-                "已插入一行。".to_string()
+                if in_header {
+                    "已插入一行表头。".to_string()
+                } else {
+                    "已插入一行。".to_string()
+                }
             }
             TableOp::DeleteRow => {
-                if table.row == 0 {
+                if table.row < table.header_rows && table.header_rows == 1 {
                     *self.status = "表头删不得；要去掉整张表就把那几行选中删掉。".into();
                     return;
                 }
@@ -607,9 +629,13 @@ impl DraftPage<'_> {
                 format!("第 {} 列已设为{}。", table.column + 1, align.label())
             }
         };
-        let rendered = render_table(&table.rows, &table.aligns, &table.spans);
+        let rendered = render_table(&table.rows, table.header_rows, &table.aligns, &table.spans);
         // 光标回到原来那一行的第一格里，接着改。分隔行在表头之后占一行。
-        let target_line = if table.row == 0 { 0 } else { table.row + 1 };
+        let target_line = if table.row < table.header_rows {
+            table.row
+        } else {
+            table.row + 1
+        };
         let offset = rendered
             .split('\n')
             .take(target_line)
@@ -635,6 +661,7 @@ mod tests {
                 vec!["综合".into(), String::new(), String::new()],
                 vec![String::new(), String::new(), String::new()],
             ],
+            header_rows: 1,
             aligns: vec![ColumnAlign::Auto; 3],
             spans: Vec::new(),
             span: 0..0,
@@ -670,6 +697,45 @@ mod tests {
         assert_eq!(table.spans[0].column_span, 2);
         assert_eq!(table.spans[0].row_span, 2);
         assert_eq!(table.rows[1][0], "综合");
+    }
+
+    /// 多行表头：光标在第一条表头行也认得出整张表，重排后分隔行仍在表头之后；
+    /// 表头里插行多一行表头、删行少一行表头，表头内可以向下合并。
+    #[test]
+    fn multi_row_header_survives_editing() {
+        let source = "| 项目 | 金额 ||\n| ^^ | 计划 | 完成 |\n| --- | --- | --- |\n| 甲 | 1 | 2 |";
+        let mut table = table_at(source, 2).expect("光标在首条表头行");
+        assert_eq!(table.header_rows, 2);
+        assert_eq!(table.row, 0);
+        assert_eq!(table.spans.len(), 2, "{:?}", table.spans);
+        let rendered = render_table(&table.rows, table.header_rows, &table.aligns, &table.spans);
+        assert!(
+            is_table_separator_line(rendered.lines().nth(2).unwrap()),
+            "{rendered}"
+        );
+        let again = table_at(&rendered, 0).expect("重排后仍是表格");
+        assert_eq!(again.rows, table.rows);
+        assert_eq!(again.spans, table.spans);
+        assert_eq!(again.header_rows, 2);
+        let on_separator = source.find("---").unwrap();
+        assert_eq!(table_at(source, on_separator).unwrap().row, 1);
+
+        insert_table_row(&mut table, 1);
+        assert_eq!(table.header_rows, 3, "插在表头行之上是表头");
+        assert_eq!(table.spans[0].row_span, 3, "竖跨表头的格子跟着变高");
+        delete_table_row(&mut table, 1);
+        assert_eq!(table.header_rows, 2);
+
+        // 表头内向下合并可以，越过表头与正文的分界不行。
+        let first = effective_span(&table.spans, 0, 0);
+        assert_eq!(
+            extend_span(&mut table, first, true),
+            Err("表头不能与正文纵向合并。")
+        );
+        table.spans.clear();
+        table.rows[1][0].clear();
+        let cell = effective_span(&table.spans, 0, 0);
+        assert!(extend_span(&mut table, cell, true).is_ok());
     }
 
     #[test]

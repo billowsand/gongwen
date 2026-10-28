@@ -23,7 +23,8 @@ pub enum Block {
         content: Vec<Inline>,
     },
 
-    /// 表格。`rows[0]` 视为表头；分隔行 `|---|` 已被剥离。
+    /// 表格。前 `header_rows` 行是表头（分隔行之前的各行，至少 1 行，MultiMarkdown
+    /// 的多行表头）；分隔行 `|---|` 已被剥离。
     /// `caption` 对应 pandoc table caption（如 `Table: 标题` 或表后 `: 标题`）。
     /// `rows` 是矩形网格；`spans` 是其中的合并单元格（见 `table::parse_cells`），
     /// 被合并掉的格子在 `rows` 里是空串。
@@ -31,6 +32,7 @@ pub enum Block {
     /// 靠左排，其余与普通表格相同。
     Table {
         rows: Vec<Vec<String>>,
+        header_rows: usize,
         caption: Option<String>,
         spans: Vec<TableSpan>,
         numbered: bool,

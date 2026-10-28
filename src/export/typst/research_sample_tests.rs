@@ -359,6 +359,27 @@ fn cases() -> Vec<Case> {
             },
         },
         Case {
+            name: "research-multi-header",
+            markdown: "# 多行表头样张
+
+## 经费执行
+
+表：经费执行情况 {#tbl:fund}
+
+| 单位 | 2025年 || 2026年 ||
+| ^^ | 计划数 | 完成数 | 计划数 | 完成数 |
+| --- | --- | --- | --- | --- |
+| 甲街道 | 10 | 8 | 12 | 11 |
+| ^^ | 补 2 | 补 1 | 补 3 | 补 2 |
+| 乙街道 | 20 | 18 | 22 | 21 |
+
+表{@tbl:fund}的表头占两行。
+",
+            tweak: |input| {
+                input.title_hint = "多行表头样张".into();
+            },
+        },
+        Case {
             name: "research-body-flow",
             markdown: "# 段落与列表转换验收\n\n<!-- [摘要] -->\n\n摘要第一行\n接在同一段。\n\n<!-- [正文] -->\n\n## 转换规则\n\n短句前半\n接上后半。\n\nEnglish\nwords stay together.\n\n要求如下：\n1. **段内甲**；\n2. 段内乙含公式 $x=1$。\n\n3. 独立列表甲\n1. 独立列表乙\n\n后续段落第一行\n接在同一段。\n\n### 特殊结构\n\n```text\n代码第一行\n代码第二行\n```\n\n$$\nx + y\n= z\n$$\n\n<!-- [居中] -->\n居中第一行\n居中第二行\n\n表：边界检查 {#tbl:boundary}\n\n| 项目 | 结果 |\n| --- | --- |\n| 段内列表 | 同段 |\n| 独立列表 | 分段 |\n\n表{@tbl:boundary}保留交叉引用。\n",
             tweak: |input| {
@@ -432,7 +453,7 @@ fn run() {
             &base,
         )
         .unwrap();
-        if case.name == "research-body-flow" {
+        if matches!(case.name, "research-body-flow" | "research-multi-header") {
             render_pages(outcome.pdf.clone(), &dir);
         }
         for warning in &outcome.warnings {

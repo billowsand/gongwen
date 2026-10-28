@@ -177,7 +177,12 @@ pub fn parse(content: &str) -> Vec<Block> {
             list_indents.clear();
             let leading_caption = take_leading_table_caption(&mut blocks);
             let (parsed, new_i) = table::parse_table(&lines, i);
-            if let Some(table::ParsedTable { rows, spans }) = parsed {
+            if let Some(table::ParsedTable {
+                rows,
+                spans,
+                header_rows,
+            }) = parsed
+            {
                 // 表前已有表题时不再往后找：表后那一行多半是下一张表的表前表题，
                 // 顺手吞掉的话下一张表就没了题目。
                 let (caption, final_i) = match leading_caption {
@@ -194,6 +199,7 @@ pub fn parse(content: &str) -> Vec<Block> {
                 }
                 blocks.push(Block::Table {
                     rows,
+                    header_rows,
                     caption,
                     spans,
                     numbered: std::mem::take(&mut numbered_pending),
@@ -837,6 +843,7 @@ mod tests {
             spans,
             numbered,
             rows,
+            ..
         }) = blocks.iter().find(|b| matches!(b, Block::Table { .. }))
         else {
             panic!("应当解析出表格：{blocks:?}");

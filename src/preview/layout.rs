@@ -1472,6 +1472,8 @@ pub(crate) struct TableCellLayout {
 pub(crate) struct MeasuredTable {
     pub(crate) widths: Vec<f32>,
     pub(crate) row_heights: Vec<f32>,
+    /// 表头行数（至少 1）：续页把前这几行整组重复一遍。
+    pub(crate) header_rows: usize,
     cells: Vec<TableCellLayout>,
 }
 
@@ -1491,42 +1493,51 @@ fn table_cell_font(metrics: &Metrics, header: bool, group: bool) -> egui::FontId
 /// 表格：字面、字号与格内行距跟着版式走（公文仿宋四号、21 磅；研究报告宋体
 /// 小四、18 磅，见 [`Metrics`]），表头黑体居中。公文列宽与左右留白按 PDF 的
 /// 内容宽分配规则换算；研究报告沿用智能网格。`content_width` 是表格占的版心宽度。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn measure_table(
     ui: &egui::Ui,
     metrics: &Metrics,
     rows: &[Vec<String>],
     aligns: &[export::ColumnAlign],
     spans: &[export::TableSpan],
+    header_rows: usize,
     numbered: bool,
     content_width: f32,
 ) -> Option<MeasuredTable> {
-    let columns = export::table_columns(rows, aligns, spans);
+    let columns = export::table_columns(rows, aligns, spans, header_rows);
     if columns.is_empty() || rows.is_empty() {
         return None;
     }
+    let header_rows = header_rows.clamp(1, rows.len());
     let widths = if metrics.research_fonts {
         columns
             .iter()
             .map(|column| content_width * column.fraction)
             .collect::<Vec<_>>()
     } else {
-        export::table::typst_column_widths(rows, aligns, spans, content_width / metrics.pt(1.0))
-            .into_iter()
-            .map(|width| metrics.pt(width))
-            .collect()
+        export::table::typst_column_widths(
+            rows,
+            aligns,
+            spans,
+            header_rows,
+            content_width / metrics.pt(1.0),
+        )
+        .into_iter()
+        .map(|width| metrics.pt(width))
+        .collect()
     };
     let column_alignments = columns
         .iter()
         .map(|column| column.alignment)
         .collect::<Vec<_>>();
-    let name_column = export::table::name_column(rows);
+    let name_column = export::table::name_column(rows, header_rows);
 
     // 先排出所有锚点单元格，再由跨行单元格反推各物理行所需高度。
     let line = metrics.pt(metrics.table_line_pt);
     let mut cells = Vec::new();
     let mut row_heights = vec![line; rows.len()];
     for (row_index, row) in rows.iter().enumerate() {
-        let header = row_index == 0;
+        let header = row_index < header_rows;
         let font = table_cell_font(metrics, header, false);
         let bold_font = if metrics.dedicated_bold {
             metrics.font(theme::FONT_BOLD, metrics.table_pt)
@@ -1541,8 +1552,14 @@ pub(crate) fn measure_table(
                 continue;
             }
             // 序号表的分组行整格换楷体，字号不变；表头仍是黑体优先。
-            let group =
-                export::table::is_group_cell(numbered, spans, widths.len(), row_index, column);
+            let group = export::table::is_group_cell(
+                numbered,
+                spans,
+                header_rows,
+                widths.len(),
+                row_index,
+                column,
+            );
             let cell_font = if group {
                 group_font.clone()
             } else {
@@ -1572,6 +1589,7 @@ pub(crate) fn measure_table(
             let align = crate::export::table::resolve_cell_alignment(
                 rows,
                 spans,
+                header_rows,
                 &column_alignments,
                 numbered,
                 row_index,
@@ -1591,9 +1609,8 @@ pub(crate) fn measure_table(
                     .iter()
                     .map(|column| column.twips)
                     .sum();
-                let is_name = name_column == Some(column)
-                    && row_index > 0
-                    && !mdx::table::has_cell_break(text);
+                let is_name =
+                    name_column == Some(column) && !header && !mdx::table::has_cell_break(text);
                 super::fit::table_cell(ui.ctx(), text, align, is_name, twips)
             } else {
                 super::fit::Fit {
@@ -1703,6 +1720,7 @@ pub(crate) fn measure_table(
     Some(MeasuredTable {
         widths,
         row_heights,
+        header_rows,
         cells,
     })
 }
@@ -1730,8 +1748,8 @@ impl MeasuredTable {
     /// `(行号, 行框, 基线)`，供页边行号与点击回跳用。
     ///
     /// `rows` 里每个锚点格跨到的行必须也在其中且紧挨着——按
-    /// [`Self::unbreakable_end`] 切段就能保证；表头（第 0 行）不参与纵向合并，
-    /// 续页时可以单独拼在前面重复一遍。
+    /// [`Self::unbreakable_end`] 切段就能保证；表头（前 `header_rows` 行）的纵向合并
+    /// 不越过表头，续页时可以整组拼在前面重复一遍。
     pub(crate) fn paint_rows(
         &self,
         painter: &egui::Painter,
@@ -1837,10 +1855,19 @@ pub(crate) fn table_block(
     rows: &[Vec<String>],
     aligns: &[export::ColumnAlign],
     spans: &[export::TableSpan],
+    header_rows: usize,
     numbered: bool,
 ) {
-    let Some(table) = measure_table(ui, metrics, rows, aligns, spans, numbered, metrics.content)
-    else {
+    let Some(table) = measure_table(
+        ui,
+        metrics,
+        rows,
+        aligns,
+        spans,
+        header_rows,
+        numbered,
+        metrics.content,
+    ) else {
         return;
     };
     let total_height = table.row_heights.iter().sum::<f32>();
@@ -2098,6 +2125,7 @@ mod tests {
         let blocks = export::parse_markdown(markdown);
         let export::MarkdownBlock::Table {
             rows,
+            header_rows,
             aligns,
             spans,
             numbered,
@@ -2115,6 +2143,7 @@ mod tests {
                     rows,
                     aligns,
                     spans,
+                    *header_rows,
                     *numbered,
                     metrics.content,
                 );
@@ -2142,6 +2171,7 @@ mod tests {
         );
         let export::MarkdownBlock::Table {
             rows,
+            header_rows,
             aligns,
             spans,
             numbered,
@@ -2157,6 +2187,7 @@ mod tests {
                 rows,
                 aligns,
                 spans,
+                *header_rows,
                 *numbered,
                 metrics.content,
             );
@@ -2192,7 +2223,8 @@ mod tests {
             ];
             let mut measured = None;
             let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
-                measured = measure_table(ui, &metrics, &rows, &aligns, &[], false, metrics.content);
+                measured =
+                    measure_table(ui, &metrics, &rows, &aligns, &[], 1, false, metrics.content);
             });
             let table = measured.expect("表格应排出");
             let cell = table
@@ -2200,7 +2232,7 @@ mod tests {
                 .iter()
                 .find(|cell| cell.row == 1 && cell.column == 0)
                 .expect("长格");
-            let twips = export::table_columns(&rows, &aligns, &[])[0].twips;
+            let twips = export::table_columns(&rows, &aligns, &[], 1)[0].twips;
             let inner = table.widths[0] - 2.0 * cell.horizontal_padding;
             match export::table::centered_cell_plan(long, false, twips) {
                 Some((export::title::TitlePlan::Wrapped(lines), _)) => {

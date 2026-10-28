@@ -63,6 +63,9 @@ pub(crate) struct TableOverlay {
     pub(crate) spans: Vec<TableSpan>,
     /// 旧表的合并单元格，存在整删行时用于序列化。
     pub(crate) old_spans: Vec<TableSpan>,
+    /// 新表 / 旧表的表头行数：序列化时分隔行写在开头那几条表头行之后。
+    pub(crate) header_rows: usize,
+    pub(crate) old_header_rows: usize,
     /// 列数变化整表替换时，前 `split_after` 行属于旧表（列数不同，必须拆成
     /// 两张独立的 GFM 表，否则解析器会把它们并成一张）。
     pub(crate) split_after: Option<usize>,

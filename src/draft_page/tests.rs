@@ -465,7 +465,7 @@ fn render_table_pads_by_display_width() {
         vec!["序号".to_string(), "名称".to_string()],
         vec!["1".to_string(), "甲单位".to_string()],
     ];
-    let rendered = render_table(&rows, &[ColumnAlign::Auto, ColumnAlign::Center], &[]);
+    let rendered = render_table(&rows, 1, &[ColumnAlign::Auto, ColumnAlign::Center], &[]);
     assert_eq!(
         rendered,
         "| 序号 | 名称   |
@@ -487,7 +487,7 @@ fn merged_table_round_trips_multimarkdown_markers() {
 | ^^ | 事项二 | 乙 |";
     let table = table_at(source, source.find("横向合并").unwrap()).unwrap();
     assert_eq!(table.spans.len(), 2);
-    let rendered = render_table(&table.rows, &table.aligns, &table.spans);
+    let rendered = render_table(&table.rows, table.header_rows, &table.aligns, &table.spans);
     assert!(rendered.contains("横向合并"), "{rendered}");
     assert!(rendered.contains("||"), "{rendered}");
     assert!(rendered.contains("^^"), "{rendered}");
@@ -510,7 +510,7 @@ fn narrow_columns_still_render_a_valid_separator_row() {
             vec!["甲".to_string(), "乙".to_string()],
             vec!["1".to_string(), "2".to_string()],
         ];
-        let rendered = render_table(&rows, &[align, ColumnAlign::Auto], &[]);
+        let rendered = render_table(&rows, 1, &[align, ColumnAlign::Auto], &[]);
         let separator = rendered.lines().nth(1).expect("有分隔行");
         assert!(
             is_table_separator_line(separator),

@@ -21,11 +21,13 @@ pub(crate) fn table_columns(
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
     spans: &[TableSpan],
+    header_rows: usize,
 ) -> Vec<TableColumn> {
     let (grid, alignments) = table::to_docx_grid(
         rows,
         aligns,
         spans,
+        header_rows,
         docx::TABLE_CONTENT_WIDTH_TWIPS,
         docx::TABLE_SIZE * 10,
     );

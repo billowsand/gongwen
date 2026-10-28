@@ -91,18 +91,19 @@ fn write_numbered_tables(markdown: &str, numbering: &NumberingConfig) -> String 
         let MarkdownBlock::Table {
             rows,
             spans,
+            header_rows,
             numbered: true,
             ..
         } = &located.block
         else {
             continue;
         };
-        // 分隔行照抄源码：列对齐的冒号写在那里。
-        let Some(separator) = markdown[located.range.clone()].lines().nth(1) else {
+        // 分隔行照抄源码：列对齐的冒号写在那里，紧跟在各条表头行之后。
+        let Some(separator) = markdown[located.range.clone()].lines().nth(*header_rows) else {
             continue;
         };
         output.push_str(&markdown[copied..located.range.start]);
-        output.push_str(&table_markdown(rows, spans, separator.trim()));
+        output.push_str(&table_markdown(rows, spans, *header_rows, separator.trim()));
         copied = located.range.end;
     }
     output.push_str(&markdown[copied..]);
@@ -111,7 +112,12 @@ fn write_numbered_tables(markdown: &str, numbering: &NumberingConfig) -> String 
 
 /// 把网格与合并单元格写回 MultiMarkdown 表格：被横向合并的格子写成紧挨的
 /// `|`，纵向合并的续行在锚点列写 `^^`。与 `parse::parse_table_cells` 互逆。
-fn table_markdown(rows: &[Vec<String>], spans: &[TableSpan], separator: &str) -> String {
+fn table_markdown(
+    rows: &[Vec<String>],
+    spans: &[TableSpan],
+    header_rows: usize,
+    separator: &str,
+) -> String {
     let mut lines = Vec::with_capacity(rows.len() + 1);
     for (row_index, row) in rows.iter().enumerate() {
         let mut line = String::from("|");
@@ -127,7 +133,7 @@ fn table_markdown(rows: &[Vec<String>], spans: &[TableSpan], separator: &str) ->
             }
         }
         lines.push(line);
-        if row_index == 0 {
+        if row_index + 1 == header_rows.max(1) {
             lines.push(separator.to_string());
         }
     }
@@ -347,7 +353,7 @@ mod tests {
             .filter(|(index, _)| *index != 1)
             .map(|(_, line)| *line)
             .collect::<Vec<_>>();
-        let parsed = mdx::table::parse_cells(&source_rows);
+        let parsed = mdx::table::parse_cells(&source_rows, 1);
         assert_eq!(&parsed.rows, rows);
         let mdx_spans = parsed
             .spans

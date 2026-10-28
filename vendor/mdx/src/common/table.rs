@@ -54,11 +54,12 @@ pub fn span_at(spans: &[TableSpan], row: usize, column: usize) -> Option<TableSp
 }
 
 /// 解析好的表格：`rows` 是矩形网格（每行列数相同，被合并掉的格子是空串），
-/// `spans` 是其中的合并单元格。
+/// `spans` 是其中的合并单元格，前 `header_rows` 行是表头（至少 1 行）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedTable {
     pub rows: Vec<Vec<String>>,
     pub spans: Vec<TableSpan>,
+    pub header_rows: usize,
 }
 
 /// 从 `lines[start_index]` 起尝试解析连续表格块。
@@ -95,21 +96,25 @@ pub fn parse_table(lines: &[String], start_index: usize) -> (Option<ParsedTable>
     }
 
     let mut source_rows = Vec::new();
-    let mut separator_found = false;
+    // 第一条分隔行之前的各行都是表头（多行表头）。
+    let mut header_rows = None;
 
     for line in &table_lines {
         if is_table_separator(line) {
-            separator_found = true;
+            header_rows.get_or_insert(source_rows.len());
             continue;
         }
         source_rows.push(line.as_str());
     }
 
-    if !separator_found || source_rows.is_empty() {
+    let Some(header_rows) = header_rows else {
+        return (None, start_index);
+    };
+    if source_rows.is_empty() {
         return (None, start_index);
     }
 
-    (Some(parse_cells(&source_rows)), i)
+    (Some(parse_cells(&source_rows, header_rows.max(1))), i)
 }
 
 /// 一行源码里的一格。两个竖线之间完全没有字符时（`||`）沿用 MultiMarkdown
@@ -229,13 +234,15 @@ struct WorkingCell {
 /// 把表格各行（不含分隔行）归一化为矩形网格与合并单元格。
 ///
 /// - 横向：`| 标题 |||` 里紧挨着的竖线表示本格并入左格；
-/// - 纵向：单元格只写 `^^` 表示并入正上方的格子（表头不参与纵向合并）。
+/// - 纵向：单元格只写 `^^` 表示并入正上方的格子。前 `header_rows` 行是表头，
+///   表头内部可以纵向合并，表头与正文之间不合并（续页要整组重复表头）。
 ///   `^^` 右侧紧跟的 `||` 须与上方格子同宽，否则不合并、按原文保留，
 ///   免得手写出错时静默吞掉内容。
 ///
-/// 列数取表头的列数（表头里的 `||` 也算列），其余行多截少补。规则与公文助手
+/// 列数取首行的列数（表头里的 `||` 也算列），其余行多截少补。规则与公文助手
 /// 的 `export::parse::parse_table_cells` 一致，预览与成品才对得上。
-pub fn parse_cells(source_rows: &[&str]) -> ParsedTable {
+pub fn parse_cells(source_rows: &[&str], header_rows: usize) -> ParsedTable {
+    let header_rows = header_rows.clamp(1, source_rows.len().max(1));
     let column_count = source_rows
         .first()
         .map_or(0, |header| source_cells(header).len());
@@ -243,6 +250,7 @@ pub fn parse_cells(source_rows: &[&str]) -> ParsedTable {
         return ParsedTable {
             rows: Vec::new(),
             spans: Vec::new(),
+            header_rows,
         };
     }
 
@@ -294,7 +302,7 @@ pub fn parse_cells(source_rows: &[&str]) -> ParsedTable {
                 continue;
             };
             let valid = cells[above].active
-                && cells[above].row != 0
+                && (cells[above].row < header_rows) == (row_index < header_rows)
                 && cells[above].column == column
                 && cells[above].column_span == column_span
                 && cells[above].row + cells[above].row_span == row_index;
@@ -322,7 +330,11 @@ pub fn parse_cells(source_rows: &[&str]) -> ParsedTable {
             });
         }
     }
-    ParsedTable { rows, spans }
+    ParsedTable {
+        rows,
+        spans,
+        header_rows,
+    }
 }
 
 #[cfg(test)]
@@ -340,21 +352,21 @@ mod tests {
 
     #[test]
     fn plain_table_has_no_spans() {
-        let table = parse_cells(&["| A | B |", "| 1 |  |"]);
+        let table = parse_cells(&["| A | B |", "| 1 |  |"], 1);
         assert_eq!(table.rows, vec![vec!["A", "B"], vec!["1", ""]]);
         assert!(table.spans.is_empty());
     }
 
     #[test]
     fn adjacent_pipes_merge_into_the_left_cell() {
-        let table = parse_cells(&["| A | B | C |", "| 分组 |||", "| 1 | x ||"]);
+        let table = parse_cells(&["| A | B | C |", "| 分组 |||", "| 1 | x ||"], 1);
         assert_eq!(table.rows[1], vec!["分组", "", ""]);
         assert_eq!(table.spans, vec![span(1, 0, 1, 3), span(2, 1, 1, 2)]);
     }
 
     #[test]
     fn carets_merge_with_the_cell_above() {
-        let table = parse_cells(&["| A | B |", "| 甲 | 1 |", "| ^^ | 2 |", "| ^^ | 3 |"]);
+        let table = parse_cells(&["| A | B |", "| 甲 | 1 |", "| ^^ | 2 |", "| ^^ | 3 |"], 1);
         assert_eq!(table.spans, vec![span(1, 0, 3, 1)]);
         assert_eq!(table.rows[2][0], "");
     }
@@ -362,20 +374,45 @@ mod tests {
     #[test]
     fn invalid_carets_stay_as_text() {
         // 表头不参与纵向合并；宽度对不上的 `^^` 也不合并。
-        let table = parse_cells(&[
-            "| A | B | C |",
-            "| ^^ | 1 | 2 |",
-            "| 甲 |||",
-            "| ^^ | x | y |",
-        ]);
+        let table = parse_cells(
+            &[
+                "| A | B | C |",
+                "| ^^ | 1 | 2 |",
+                "| 甲 |||",
+                "| ^^ | x | y |",
+            ],
+            1,
+        );
         assert_eq!(table.rows[1][0], "^^");
         assert_eq!(table.rows[3][0], "^^");
         assert_eq!(table.spans, vec![span(2, 0, 1, 3)]);
     }
 
+    /// 分隔行之前的各行都是表头；表头内部可以纵向合并，表头与正文之间不合并。
+    #[test]
+    fn multi_row_header_before_the_separator() {
+        let lines = [
+            "| 项目 | 金额 ||",
+            "| ^^ | 计划 | 完成 |",
+            "| --- | --- | --- |",
+            "| ^^ | 1 | 2 |",
+        ]
+        .map(String::from);
+        let (table, next) = parse_table(&lines, 0);
+        let table = table.expect("应当解析为表格");
+        assert_eq!(next, 4);
+        assert_eq!(table.header_rows, 2);
+        assert_eq!(table.rows.len(), 3);
+        assert_eq!(table.spans, vec![span(0, 0, 2, 1), span(0, 1, 1, 2)]);
+        assert_eq!(table.rows[2][0], "^^", "正文首行不并入表头");
+    }
+
     #[test]
     fn cell_breaks_are_normalized_and_split_into_lines() {
-        let table = parse_cells(&["| A | B |", "| 张某 <BR/> 电话 | <br>前后<br />空行<br> |"]);
+        let table = parse_cells(
+            &["| A | B |", "| 张某 <BR/> 电话 | <br>前后<br />空行<br> |"],
+            1,
+        );
         assert_eq!(table.rows[1], vec!["张某<br>电话", "前后<br>空行"]);
         assert_eq!(cell_lines(&table.rows[1][0]), vec!["张某", "电话"]);
         assert_eq!(cell_lines("单行"), vec!["单行"]);

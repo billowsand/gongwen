@@ -29,6 +29,7 @@ pub(crate) fn add_smart_table_with_width(
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
     spans: &[TableSpan],
+    header_rows: usize,
     numbered: bool,
     bold: BoldFont<'_>,
     width_twips: usize,
@@ -36,16 +37,25 @@ pub(crate) fn add_smart_table_with_width(
     if rows.is_empty() {
         return doc;
     }
-    let (grid, alignments) = to_docx_grid(rows, aligns, spans, width_twips, TABLE_SIZE * 10);
+    let header_rows = header_rows.clamp(1, rows.len());
+    let (grid, alignments) = to_docx_grid(
+        rows,
+        aligns,
+        spans,
+        header_rows,
+        width_twips,
+        TABLE_SIZE * 10,
+    );
     if grid.is_empty() {
         return doc;
     }
-    let name_column = crate::export::table::name_column(rows);
+    let name_column = crate::export::table::name_column(rows, header_rows);
 
     let table_rows = rows
         .iter()
         .enumerate()
         .map(|(row_index, row)| {
+            let header = row_index < header_rows;
             let mut cells = Vec::new();
             let mut column_index = 0usize;
             while column_index < grid.len() {
@@ -73,6 +83,7 @@ pub(crate) fn add_smart_table_with_width(
                 let column_alignment = resolve_cell_alignment(
                     rows,
                     spans,
+                    header_rows,
                     &alignments,
                     numbered,
                     row_index,
@@ -87,6 +98,7 @@ pub(crate) fn add_smart_table_with_width(
                 let kai = crate::export::table::is_group_cell(
                     numbered,
                     spans,
+                    header_rows,
                     grid.len(),
                     row_index,
                     column_index,
@@ -94,15 +106,13 @@ pub(crate) fn add_smart_table_with_width(
                 // 分几行、压不压与预览、PDF 同一条判定（`table::cell_plan`）。
                 // 写了 `<br>` 的姓名格按手写的行排，不再按单个姓名撑宽。
                 let is_name = name_column == Some(column_index)
-                    && row_index > 0
+                    && !header
                     && !mdx::table::has_cell_break(text);
                 let mut paragraph = Paragraph::new();
                 match cell_plan(text, column_alignment, is_name, width) {
                     CellPlan::Lines(pieces) => {
                         for (index, piece) in pieces.iter().enumerate() {
-                            for run in
-                                table_runs_sized(piece, row_index == 0, kai, TABLE_SIZE, bold)
-                            {
+                            for run in table_runs_sized(piece, header, kai, TABLE_SIZE, bold) {
                                 paragraph = paragraph.add_run(run);
                             }
                             if index + 1 < pieces.len() {
@@ -126,12 +136,12 @@ pub(crate) fn add_smart_table_with_width(
                         paragraph = paragraph.add_run(run);
                     }
                     CellPlan::Compressed(scale) => {
-                        for run in table_runs_sized(text, row_index == 0, kai, TABLE_SIZE, bold) {
+                        for run in table_runs_sized(text, header, kai, TABLE_SIZE, bold) {
                             paragraph = paragraph.add_run(run.stretch(scale as i32));
                         }
                     }
                     CellPlan::Plain => {
-                        for run in table_runs_sized(text, row_index == 0, kai, TABLE_SIZE, bold) {
+                        for run in table_runs_sized(text, header, kai, TABLE_SIZE, bold) {
                             paragraph = paragraph.add_run(run);
                         }
                     }
@@ -211,11 +221,21 @@ pub(crate) fn add_official_content_block(
         }
         MarkdownBlock::Table {
             rows,
+            header_rows,
             aligns,
             spans,
             numbered,
         } => {
-            doc = add_smart_table_with_width(doc, rows, aligns, spans, *numbered, bold, width_twips)
+            doc = add_smart_table_with_width(
+                doc,
+                rows,
+                aligns,
+                spans,
+                *header_rows,
+                *numbered,
+                bold,
+                width_twips,
+            )
         }
         MarkdownBlock::Image { alt, src } => {
             if let Some(paragraph) = image_paragraph(alt, src, width_twips) {

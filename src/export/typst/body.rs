@@ -217,6 +217,7 @@ pub(crate) fn sections(
             }
             MarkdownBlock::Table {
                 rows,
+                header_rows,
                 aligns,
                 spans,
                 numbered,
@@ -226,6 +227,7 @@ pub(crate) fn sections(
                     rows,
                     aligns,
                     spans,
+                    *header_rows,
                     *numbered,
                     format!("t{table_serial}"),
                 ) {
@@ -271,9 +273,14 @@ pub(crate) fn attachment_landscape_flags(blocks: &[MarkdownBlock]) -> Vec<bool> 
                 current_attachment = Some(flags.len() - 1);
             }
             MarkdownBlock::Marker(MarkdownSection::Body) => current_attachment = None,
-            MarkdownBlock::Table { rows, spans, .. } => {
+            MarkdownBlock::Table {
+                rows,
+                spans,
+                header_rows,
+                ..
+            } => {
                 if let Some(index) = current_attachment
-                    && requires_landscape(rows, spans)
+                    && requires_landscape(rows, spans, *header_rows)
                 {
                     flags[index] = true;
                 }
