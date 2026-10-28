@@ -81,6 +81,8 @@ mod single_instance;
 mod skill_pack;
 mod storage;
 mod system_fonts;
+mod task_assistant;
+mod task_ui;
 #[cfg(test)]
 mod test_support;
 mod text_file;

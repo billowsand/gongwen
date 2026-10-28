@@ -848,6 +848,7 @@ impl GongwenApp {
                 self.new_document_items(ui);
                 ui.separator();
                 self.nav_menu_item(ui, NavPage::Manuscript);
+                self.nav_menu_item(ui, NavPage::TaskAssistant);
                 // 四张词表同属「词库」，收进一个子菜单；当前页是其中之一时，
                 // 子菜单入口也带选中底，顺着高亮就能找到所在位置。
                 let lexicon_active = LEXICON_PAGES

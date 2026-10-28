@@ -26,12 +26,13 @@ impl Entry {
             literal,
             title,
             subtitle,
-            target,
-            icon: match target {
+            target: target.clone(),
+            icon: match &target {
                 Target::Document(_) | Target::Manuscript(_) => crate::theme::Icon::FileTypeDoc,
                 Target::Vocabulary(_) => crate::theme::Icon::Building,
                 Target::Page(page) => page.icon(),
                 Target::NewDocument => crate::theme::Icon::FilePlus,
+                Target::Task(_) => crate::theme::Icon::List,
             },
             badge: None,
         }

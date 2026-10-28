@@ -13,13 +13,14 @@ use eframe::egui;
 use index::Entry;
 use nucleo_matcher::{Config, Matcher};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Target {
     Document(DocKey),
     Manuscript(i64),
     Vocabulary(u64),
     Page(NavPage),
     NewDocument,
+    Task(String),
 }
 
 pub(super) struct QuickFind {
@@ -67,7 +68,7 @@ impl QuickFind {
 
     fn selected_target(&self) -> Option<Target> {
         let index = *self.results.get(self.selected)?;
-        Some(self.entries.get(index)?.target)
+        Some(self.entries.get(index)?.target.clone())
     }
 }
 
@@ -167,6 +168,26 @@ impl GongwenApp {
             },
             None => Some("稿件库不可用，仍可查找已打开稿件、词库和页面。".to_string()),
         };
+        let mut warning = warning;
+        if let Some(store) = self.task_store.as_ref() {
+            match store.list(false) {
+                Ok(tasks) => {
+                    for task in tasks {
+                        entries.push(Entry::new(
+                            task.name,
+                            format!("任务助手 · {} · {}", task.status.as_str(), task.next_step),
+                            &format!("{} {}", task.collaborators, task.category),
+                            Target::Task(task.id),
+                        ));
+                    }
+                }
+                Err(error) => {
+                    warning = Some(format!("任务列表读取失败：{error:#}。仍可查找其他对象。"))
+                }
+            }
+        } else if warning.is_none() {
+            warning = Some("任务助手数据库不可用。".into());
+        }
         for entry in &self.config.vocabulary {
             entries.push(
                 Entry::new(
@@ -193,6 +214,7 @@ impl GongwenApp {
             NavPage::Lexicon,
             NavPage::ImeTable,
             NavPage::Knowledge,
+            NavPage::TaskAssistant,
             NavPage::AiPrompts,
             NavPage::Settings,
             NavPage::Help,
@@ -204,6 +226,7 @@ impl GongwenApp {
                 NavPage::Proofread => ("常用页面 · 词库", "词库 错别字 纠错 建议写法"),
                 NavPage::Lexicon => ("常用页面 · 词库", "词库 公文用词 语料"),
                 NavPage::ImeTable => ("常用页面 · 词库", "词库 输入法 编码 查码 码表"),
+                NavPage::TaskAssistant => ("任务与进展", "任务 下一步 期限 阻塞 待办"),
                 _ => ("常用页面", ""),
             };
             entries.push(Entry::new(
@@ -230,7 +253,7 @@ impl GongwenApp {
             state.previous_focus = ctx.memory(|memory| memory.focused());
         }
         let response = ui::modal(ctx).show(ctx, |ui| state.ui(ui));
-        let (target, close) = response.inner;
+        let (target, close) = response.inner.clone();
         let close = close || response.should_close();
         if target.is_some() || close {
             let previous_focus = state.previous_focus;
@@ -289,6 +312,14 @@ impl GongwenApp {
             }
             Target::Page(page) => self.open_page(page),
             Target::NewDocument => self.new_blank_manuscript(),
+            Target::Task(id) => {
+                self.open_page(NavPage::TaskAssistant);
+                self.task_ui.selected = Some(id);
+                if self.task_ui.draft.is_some() {
+                    self.task_ui.notice =
+                        Some("已保留未保存草稿；保存或放弃编辑后可查看所选任务。".into());
+                }
+            }
         }
     }
 }

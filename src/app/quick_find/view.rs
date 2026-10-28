@@ -135,7 +135,7 @@ pub(super) fn result_row(
     } else {
         theme::text_soft()
     };
-    if matches!(entry.target, Target::Document(_) | Target::Manuscript(_)) {
+    if matches!(&entry.target, Target::Document(_) | Target::Manuscript(_)) {
         document_icon(ui, icon_rect, icon_color);
     } else {
         entry

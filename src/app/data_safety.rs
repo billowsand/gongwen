@@ -397,6 +397,7 @@ impl GongwenApp {
         self.manuscript_store = None;
         self.knowledge_store = None;
         self.lexicon_store = None;
+        self.task_store = None;
     }
 
     /// 恢复失败后把三个本地库重新打开，避免界面一直停在「库不可用」。
@@ -442,6 +443,18 @@ impl GongwenApp {
                 None
             }
         };
+        self.task_store = match crate::task_assistant::Store::open(&path) {
+            Ok(store) => {
+                self.task_error = None;
+                Some(store)
+            }
+            Err(error) => {
+                self.task_error = Some(format!("任务助手数据库重开失败：{error:#}"));
+                None
+            }
+        };
+        // 恢复后不能继续展示旧库的候选或保存旧编辑草稿。
+        self.task_ui = crate::task_ui::State::default();
         self.manuscript_dirty = true;
         self.knowledge_dirty = true;
         self.lexicon_dirty = true;

@@ -32,6 +32,7 @@ pub(super) fn fixture() -> GongwenApp {
             Ok(store) => (Some(store), None),
             Err(error) => (None, Some(format!("词表库打开失败：{error:#}"))),
         };
+    let task_store = crate::task_assistant::Store::open(std::path::Path::new(":memory:")).ok();
     let mut app = GongwenApp {
         applied_theme: config.theme,
         config,
@@ -75,6 +76,11 @@ pub(super) fn fixture() -> GongwenApp {
         ai_prompt_delete_confirm: None,
         ai_contract_preview_kind: kind,
         manuscript_store,
+        task_store,
+        task_error: None,
+        task_ui: crate::task_ui::State::default(),
+        task_extraction_rx: None,
+        task_auto_queue: Default::default(),
         manuscript_error,
         manuscript_filter: ManuscriptFilter::default(),
         manuscript_applied: None,
@@ -505,6 +511,87 @@ fn smartisan_document_chrome_samples() {
                     std::path::Path::new(&format!(
                         "tmp/smartisan-chrome-{width}-{}.png",
                         (scale * 100.0) as u32
+                    )),
+                );
+            }
+        }
+    }
+    theme::set_current(crate::models::ThemeName::default());
+}
+/// 个人任务助手原生样张：1280px 与窄屏布局，使用内存库和真实页面函数。
+#[test]
+#[ignore = "生成任务助手界面样张，供人工目视检查"]
+fn task_assistant_samples() {
+    let ctx = egui::Context::default();
+    theme::set_current(crate::models::ThemeName::Smartisan);
+    theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+    theme::configure_icons(&ctx);
+    theme::configure_style(&ctx);
+    let mut app = fixture();
+    let mut parent = crate::task_assistant::Task::blank();
+    parent.name = "跨部门专项推进与验收准备工作任务".into();
+    parent.goal = "完成跨部门试点并经负责人复核验收".into();
+    parent.collaborators = "办公室统筹，业务处配合，信息中心跟进".into();
+    parent.next_step = "汇总各单位意见并形成验收清单".into();
+    parent.deadline = Some("2026-11-30".into());
+    let mut child = crate::task_assistant::Task::blank();
+    child.name = "收集试点单位反馈".into();
+    child.goal = "反馈材料齐备并核对来源".into();
+    child.parent_id = Some(parent.id.clone());
+    child.needs_review = true;
+    if let Some(store) = app.task_store.as_mut() {
+        store.save(&parent, "创建", "样张数据").unwrap();
+        store.save(&child, "创建", "样张数据").unwrap();
+    }
+    app.task_ui.selected = Some(child.id.clone());
+    app.tabs = vec![TabRef::Page(NavPage::TaskAssistant)];
+    app.active_tab = 0;
+    let mut canvas = crate::ui_snapshot::Canvas::default();
+    for (index, (width, editing)) in [(1280.0, false), (760.0, false), (760.0, true)]
+        .into_iter()
+        .enumerate()
+    {
+        app.task_ui.draft = if editing {
+            app.task_store
+                .as_ref()
+                .unwrap()
+                .list(true)
+                .unwrap()
+                .into_iter()
+                .find(|t| t.id == child.id)
+        } else {
+            None
+        };
+        let size = egui::vec2(width, 900.0);
+        for frame in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    time: Some((index * 4 + frame) as f64),
+                    ..Default::default()
+                },
+                |ui| {
+                    theme::smartisan::management_page(ui, |ui| {
+                        crate::task_ui::show(
+                            ui,
+                            app.task_store.as_mut(),
+                            app.knowledge_store.as_mut(),
+                            &mut app.task_ui,
+                        )
+                    });
+                },
+            );
+            if frame < 2 {
+                canvas.absorb(&mut output.textures_delta)
+            } else {
+                canvas.render(
+                    &ctx,
+                    output,
+                    size,
+                    theme::canvas(),
+                    std::path::Path::new(&format!(
+                        "tmp/task-assistant-{width}{}.png",
+                        if editing { "-edit" } else { "" }
                     )),
                 );
             }

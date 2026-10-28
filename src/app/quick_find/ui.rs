@@ -105,7 +105,7 @@ impl QuickFind {
                             }
                             if response.clicked() {
                                 self.selected = position;
-                                target = Some(entry.target);
+                                target = Some(entry.target.clone());
                             }
                             ui.add_space(2.0);
                         }

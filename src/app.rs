@@ -49,6 +49,7 @@ mod settings;
 mod skill_manager;
 mod style_settings;
 mod tabs;
+mod task_assistant;
 mod versioning;
 mod vocabulary;
 pub(crate) mod widgets;
@@ -209,6 +210,13 @@ pub struct GongwenApp {
     ai_contract_preview_kind: TemplateKind,
     /// 稿件库（SQLite）。初始化失败时为 None，稿件管理页显示错误但不影响其他功能。
     manuscript_store: Option<ManuscriptStore>,
+    /// 个人任务助手复用 manuscripts.db 的独立连接。
+    task_store: Option<crate::task_assistant::Store>,
+    task_error: Option<String>,
+    task_ui: crate::task_ui::State,
+    task_extraction_rx:
+        Option<std::sync::mpsc::Receiver<anyhow::Result<task_assistant::Extraction>>>,
+    task_auto_queue: VecDeque<(String, String, String)>,
     manuscript_error: Option<String>,
     manuscript_filter: ManuscriptFilter,
     /// 上次已执行的过滤条件，用于判断过滤是否变化而需要重查。
@@ -499,6 +507,13 @@ impl GongwenApp {
             },
             Err(error) => (None, Some(format!("稿件库路径获取失败：{error:#}"))),
         };
+        let (task_store, task_error) = match storage::manuscript_db_path() {
+            Ok(path) => match crate::task_assistant::Store::open(path) {
+                Ok(s) => (Some(s), None),
+                Err(e) => (None, Some(format!("任务助手数据库打开失败：{e:#}"))),
+            },
+            Err(e) => (None, Some(format!("任务助手数据库路径不可用：{e:#}"))),
+        };
         // 知识库与稿件库同一文件、独立连接；打开失败同样不阻塞启动。
         let (mut knowledge_store, knowledge_error) = match storage::manuscript_db_path() {
             Ok(path) => match knowledge::KnowledgeStore::open(&path) {
@@ -574,6 +589,11 @@ impl GongwenApp {
             ai_prompt_delete_confirm: None,
             ai_contract_preview_kind: kind,
             manuscript_store,
+            task_store,
+            task_error,
+            task_ui: crate::task_ui::State::default(),
+            task_extraction_rx: None,
+            task_auto_queue: VecDeque::new(),
             manuscript_error,
             manuscript_filter: ManuscriptFilter::default(),
             manuscript_applied: None,
@@ -765,6 +785,7 @@ impl eframe::App for GongwenApp {
         crate::net::set_proxy(&self.config.proxy);
         self.handle_shortcuts(&ctx);
         self.poll_worker(&ctx);
+        self.poll_task_extraction(&ctx);
         self.poll_writing_tasks(&ctx);
         // 系统文件对话框在后台线程开窗，这里问一次结果；用户挑完再接着做那件事。
         self.poll_file_dialogs(&ctx);
@@ -871,6 +892,17 @@ impl eframe::App for GongwenApp {
                             self.manuscript_ui(ui)
                         })
                     }
+                    TabRef::Page(NavPage::TaskAssistant) => {
+                        theme::smartisan::management_page(&mut content_ui, |ui| {
+                            self.task_ui.db_error = self.task_error.clone();
+                            crate::task_ui::show(
+                                ui,
+                                self.task_store.as_mut(),
+                                self.knowledge_store.as_mut(),
+                                &mut self.task_ui,
+                            )
+                        })
+                    }
                     TabRef::Page(NavPage::AiPrompts) => self.ai_manage_ui(&mut content_ui),
                     TabRef::Page(NavPage::Knowledge) => {
                         theme::smartisan::management_page(&mut content_ui, |ui| {
@@ -895,6 +927,15 @@ impl eframe::App for GongwenApp {
             self.start_help_pdf(&ctx);
         }
         self.auto_create_touched_doc();
+        if let Some(id) = self.task_ui.request_knowledge.take() {
+            self.start_task_knowledge_extraction(id);
+        } else if let Some((title, text, source_ref)) = self.task_ui.request_extract.take() {
+            self.start_task_extraction(title, text, source_ref);
+        } else if self.task_extraction_rx.is_none()
+            && let Some((title, text, source_ref)) = self.task_auto_queue.pop_front()
+        {
+            self.start_task_extraction(title, text, source_ref);
+        }
         self.autosave_tick();
         self.close_confirm_window(&ctx);
         self.handle_close_request(&ctx);

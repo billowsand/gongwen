@@ -15,6 +15,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NavPage {
     Manuscript,
+    TaskAssistant,
     Vocabulary,
     Proofread,
     Lexicon,
@@ -39,6 +40,7 @@ impl NavPage {
     pub(crate) fn key(self) -> &'static str {
         match self {
             Self::Manuscript => "manuscript",
+            Self::TaskAssistant => "task_assistant",
             Self::Vocabulary => "vocabulary",
             Self::Proofread => "proofread",
             Self::Lexicon => "lexicon",
@@ -53,6 +55,7 @@ impl NavPage {
     pub(crate) fn from_key(key: &str) -> Option<Self> {
         match key {
             "manuscript" => Some(Self::Manuscript),
+            "task_assistant" => Some(Self::TaskAssistant),
             "vocabulary" => Some(Self::Vocabulary),
             "proofread" => Some(Self::Proofread),
             "lexicon" => Some(Self::Lexicon),
@@ -68,6 +71,7 @@ impl NavPage {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Manuscript => "稿件管理",
+            Self::TaskAssistant => "任务助手",
             Self::Vocabulary => "标准词库",
             Self::Proofread => "校对词表",
             Self::Lexicon => "公文词表",
@@ -82,6 +86,7 @@ impl NavPage {
     pub(crate) fn icon(self) -> theme::Icon {
         match self {
             Self::Manuscript => theme::Icon::Library,
+            Self::TaskAssistant => theme::Icon::List,
             Self::Vocabulary => theme::Icon::Book,
             Self::Proofread => theme::Icon::SquareCheck,
             Self::Lexicon => theme::Icon::Type,
@@ -328,6 +333,8 @@ impl GongwenApp {
         self.busy
             || self.knowledge_busy
             || self.lexicon_busy
+            || self.task_ui.extraction_busy
+            || !self.task_auto_queue.is_empty()
             || self.backup_busy
             || self.docs.iter().any(|doc| doc.busy)
             || self.pdfs.iter().any(PdfSession::busy)
@@ -505,6 +512,7 @@ mod tests {
     fn 每个导航页的键都能往返() {
         for page in [
             NavPage::Manuscript,
+            NavPage::TaskAssistant,
             NavPage::Vocabulary,
             NavPage::Proofread,
             NavPage::Lexicon,

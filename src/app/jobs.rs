@@ -141,6 +141,8 @@ pub(crate) enum KnowledgeJob {
     ImportFinished {
         ok: usize,
         failed: Vec<(String, String)>,
+        auto_enabled: bool,
+        auto_materials: Vec<(String, String, String)>,
     },
     /// 索引整批完成。`failed` 是 (标题, 错误)。
     IndexFinished {
@@ -659,7 +661,12 @@ impl GongwenApp {
             } => {
                 self.knowledge_index_progress = Some((done, total, current_title));
             }
-            KnowledgeJob::ImportFinished { ok, failed } => {
+            KnowledgeJob::ImportFinished {
+                ok,
+                failed,
+                auto_enabled,
+                auto_materials,
+            } => {
                 self.knowledge_busy = false;
                 self.knowledge_index_progress = None;
                 self.knowledge_dirty = true;
@@ -672,6 +679,15 @@ impl GongwenApp {
                     "导入完成：{ok} 篇成功{next}{}。",
                     failure_summary(&failed)
                 ));
+                if auto_enabled {
+                    if ok > auto_materials.len() {
+                        self.task_ui.extraction_error = Some(format!(
+                            "{} 篇材料超过自动整理上限，已保存在知识库，请分批手工整理。",
+                            ok - auto_materials.len()
+                        ));
+                    }
+                    self.enqueue_task_materials(auto_materials);
+                }
             }
             KnowledgeJob::IndexFinished { ok, failed } => {
                 self.knowledge_busy = false;
@@ -792,6 +808,14 @@ impl GongwenApp {
         };
         self.knowledge_error = None;
         let kind = draft.kind;
+        let auto_enabled = match self.task_store.as_ref().map(|s| s.auto()) {
+            Some(Ok(v)) => v,
+            Some(Err(e)) => {
+                self.task_ui.extraction_error = Some(format!("读取自动整理开关失败：{e:#}"));
+                false
+            }
+            None => false,
+        };
         let paths = draft.paths;
         let total = paths.len();
         self.knowledge_busy = true;
@@ -802,6 +826,7 @@ impl GongwenApp {
         thread::spawn(move || {
             let mut ok = 0usize;
             let mut failed: Vec<(String, String)> = Vec::new();
+            let mut auto_materials = Vec::new();
             let mut store = match knowledge::KnowledgeStore::open(&db_path) {
                 Ok(store) => store,
                 Err(error) => {
@@ -809,6 +834,8 @@ impl GongwenApp {
                     let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::ImportFinished {
                         ok,
                         failed,
+                        auto_enabled,
+                        auto_materials,
                     }));
                     return;
                 }
@@ -843,13 +870,29 @@ impl GongwenApp {
                     content_markdown: content,
                 };
                 match store.import_document(&item) {
-                    Ok(_) => ok += 1,
+                    Ok(_) => {
+                        ok += 1;
+                        if auto_enabled
+                            && super::task_assistant::can_add_material(
+                                &auto_materials,
+                                &item.content_markdown,
+                            )
+                        {
+                            auto_materials.push((
+                                item.title.clone(),
+                                item.content_markdown.clone(),
+                                format!("knowledge:{}", item.source_path),
+                            ));
+                        }
+                    }
                     Err(error) => failed.push((name, format!("写入知识库失败：{error:#}"))),
                 }
             }
             let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::ImportFinished {
                 ok,
                 failed,
+                auto_enabled,
+                auto_materials,
             }));
         });
     }
@@ -857,6 +900,14 @@ impl GongwenApp {
     /// 把稿件库当前勾选的稿件加入知识库（只入库，不建索引）。稿件正文已在库里，
     /// 写一遍是毫秒级，直接在主线程做。
     pub(crate) fn knowledge_import_selected_manuscripts(&mut self) {
+        let auto_enabled = match self.task_store.as_ref().map(|s| s.auto()) {
+            Some(Ok(v)) => v,
+            Some(Err(e)) => {
+                self.task_ui.extraction_error = Some(format!("读取自动整理开关失败：{e:#}"));
+                false
+            }
+            None => false,
+        };
         let ids: Vec<i64> = self.manuscript_selected.iter().copied().collect();
         if ids.is_empty() {
             self.status = "请先在稿件管理里勾选要加入知识库的稿件。".into();
@@ -887,11 +938,38 @@ impl GongwenApp {
             return;
         };
         let mut ok = 0usize;
+        let mut auto_materials = Vec::new();
         for item in &items {
             match store.import_document(item) {
-                Ok(_) => ok += 1,
+                Ok(_) => {
+                    ok += 1;
+                    if auto_enabled
+                        && super::task_assistant::can_add_material(
+                            &auto_materials,
+                            &item.content_markdown,
+                        )
+                    {
+                        auto_materials.push((
+                            item.title.clone(),
+                            item.content_markdown.clone(),
+                            format!(
+                                "manuscript:{}",
+                                item.source_manuscript_id.unwrap_or_default()
+                            ),
+                        ));
+                    }
+                }
                 Err(error) => failed.push((item.title.clone(), format!("{error:#}"))),
             }
+        }
+        if auto_enabled {
+            if ok > auto_materials.len() {
+                self.task_ui.extraction_error = Some(format!(
+                    "{} 篇材料超过自动整理上限，已保存在知识库，请分批手工整理。",
+                    ok - auto_materials.len()
+                ));
+            }
+            self.enqueue_task_materials(auto_materials);
         }
         self.knowledge_dirty = true;
         let message = format!(
