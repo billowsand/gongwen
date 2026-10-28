@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::ops::Range;
 
 mod cull;
+mod cursor;
 mod fit;
 mod freeze;
 mod gutter;

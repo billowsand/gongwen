@@ -1558,6 +1558,13 @@ pub(crate) fn paint_red_print_pages(
                                 start,
                                 end,
                             ) {
+                                super::cursor::paint_backdrop(
+                                    ui,
+                                    top_left + egui::vec2(placed.pos.x, row_y),
+                                    tint_top,
+                                    placed.size.y,
+                                    fragment.width,
+                                );
                                 caret_at = Some((
                                     row_index,
                                     char - row_start,

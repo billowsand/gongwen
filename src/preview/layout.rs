@@ -92,19 +92,15 @@ fn cursor_id() -> egui::Id {
 }
 
 pub(crate) fn set_text_cursor(ctx: &egui::Context, source: &str, byte: Option<usize>) {
-    ctx.data_mut(|data| {
-        if let Some(byte) = byte {
-            data.insert_temp(
-                cursor_id(),
-                Arc::new(PreviewTextCursor {
-                    source: Arc::from(source),
-                    byte,
-                }),
-            );
-        } else {
-            data.remove::<Arc<PreviewTextCursor>>(cursor_id());
-        }
-    });
+    if let Some(byte) = byte {
+        let source: Arc<str> = Arc::from(source);
+        super::cursor::track(ctx, source.clone(), byte);
+        ctx.data_mut(|data| {
+            data.insert_temp(cursor_id(), Arc::new(PreviewTextCursor { source, byte }));
+        });
+    } else {
+        ctx.data_mut(|data| data.remove::<Arc<PreviewTextCursor>>(cursor_id()));
+    }
 }
 
 fn text_cursor(ctx: &egui::Context) -> Option<Arc<PreviewTextCursor>> {
@@ -183,13 +179,7 @@ pub(super) fn paint_caret(
     tint_top: f32,
     height: f32,
 ) {
-    let x = origin.x + row.pos_from_cursor(egui::text::CCursor::new(index)).left();
-    let top = origin.y + tint_top;
-    ui.painter().vline(
-        x,
-        egui::Rangef::new(top, top + height),
-        ui.visuals().text_cursor.stroke,
-    );
+    super::cursor::paint(ui, row, index, origin, tint_top, height);
 }
 
 /// 将选中的源码字符与这一段的可见字符对齐。Markdown 标记、自动编号和缩进
@@ -1307,6 +1297,13 @@ pub(crate) fn clickable_justified_job(
                 );
             }
             if let Some(char) = caret_in_row(caret, segment_index, segment, start, end) {
+                super::cursor::paint_backdrop(
+                    ui,
+                    block_rect.left_top() + placed.pos.to_vec2(),
+                    tint_top,
+                    placed.size.y,
+                    metrics.content,
+                );
                 caret_at = Some((
                     row_index,
                     char - row_start,
@@ -2477,7 +2474,7 @@ mod tests {
             set_text_cursor(&ctx, source, caret);
             let mut stroke = Stroke::NONE;
             let output = crate::test_support::run_ui(&ctx, Default::default(), |ui| {
-                stroke = ui.visuals().text_cursor.stroke;
+                stroke = Stroke::new(3.0, crate::preview::cursor::INK);
                 let metrics = Metrics::research(1000.0, Some(1.0));
                 let mut scroll = false;
                 let mut clicked = None;
@@ -2502,7 +2499,7 @@ mod tests {
             (bars, fills)
         };
         let (bars, fills) = paint(Some("第一行\n第".len()));
-        assert_eq!(bars, 1, "光标所在的字前画一条竖线");
+        assert_eq!(bars, 3, "光标所在的字前画加粗竖线与上下端帽");
         assert!(fills.contains(&anchor_tint(true)));
         assert!(
             !fills.contains(&theme::accent_soft()),
