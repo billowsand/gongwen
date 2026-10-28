@@ -43,7 +43,7 @@ fn blank(twips: u32) -> Paragraph {
         .keep_next(true)
 }
 
-/// 版头：份号、密级（版心第 1、2 行），空一行，纪要标志，空一行，编号与红线，空一行。
+/// 版头：份号、密级（版心第 1、2 行），空一行，纪要标志紧接编号与红线，空一行。
 pub(crate) fn add_header(
     mut doc: Docx,
     input: &DraftInput,
@@ -92,8 +92,6 @@ pub(crate) fn add_header(
             .line_spacing(exact_line(HEADING_LINE_TWIPS))
             .keep_next(true),
     );
-    doc = doc.add_paragraph(blank(body_line_twips()));
-
     let mut number = Paragraph::new()
         .align(AlignmentType::Center)
         .line_spacing(exact_line(body_line_twips()))

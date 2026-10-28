@@ -22,7 +22,7 @@ const HEADING_PT: f32 = 26.0;
 const NUMBER_RULE_GAP_MM: f32 = 1.5;
 const ROSTER_COLUMNS: usize = 6;
 
-/// 版头：份号、密级，空一行，纪要标志，空一行，编号与红线，空一行。
+/// 版头：份号、密级，空一行，纪要标志紧接编号与红线，空一行。
 pub(crate) fn header(
     ui: &mut egui::Ui,
     metrics: &Metrics,
@@ -58,8 +58,6 @@ pub(crate) fn header(
             theme::paper::red(),
         );
     });
-    ui.add_space(metrics.line);
-
     let number_font = text_format(metrics.font(theme::FONT_FANGSONG, BODY_PT), metrics.line);
     let [_, year_mark, serial_mark] = elements.number();
     let number = if year_mark.changed() || serial_mark.changed() {

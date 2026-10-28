@@ -794,7 +794,7 @@
 // ================= 会议纪要 =================
 // 版式对照 examples/huiyijiyao.docx，规格见 docs/meeting-minutes-design.md 第二节。
 // 版头：份号、密级各占一行顶格；空一行排纪要标志（小标宋 26pt 红色居中，超宽横向
-// 压缩）；空一行排编号（仿宋三号居中）；编号基线下 4mm 是红色反线，粗细同函稿；
+// 压缩）；紧接编号（仿宋三号居中），中间不空行；编号基线下 4mm 是红色反线，粗细同函稿；
 // 再空一行接标题或正文。
 #let minutes-header(serial) = {
   let m = doc.minutes
@@ -806,7 +806,6 @@
     let w = measure(t).width
     if w > text-w { box(scale(x: text-w / w * 100%, reflow: true, t)) } else { t }
   }))
-  v(pitch, weak: false)
   // 反线挂在编号行的块里量：块顶是字身上缘，基线在其下 13.6pt。块的上下距与段间距
   // 相同，不改变网格。
   block(width: text-w, above: pitch - body-size, below: pitch - body-size, {
