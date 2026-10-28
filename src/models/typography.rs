@@ -37,10 +37,14 @@ pub enum ThemeName {
     GruvboxDark,
     /// MDEX 夜墨：纸墨的深色版，暖墨底与鼠尾草绿。
     MdexDark,
+    /// 跟随 Omarchy：读 Omarchy 当前主题的 `colors.toml` 现算配色，明暗随它。
+    /// 只在 Omarchy 上出现，不在 [`ThemeName::ALL`] 里。
+    Omarchy,
 }
 
 impl ThemeName {
-    /// 全部可选主题，顺序与设置页展示一致：先明色后深色。
+    /// 全部固定预设，顺序与设置页展示一致：先明色后深色。
+    /// 「跟随 Omarchy」随桌面而定，单列在外。
     pub const ALL: [ThemeName; 6] = [
         Self::Claude,
         Self::Mdex,

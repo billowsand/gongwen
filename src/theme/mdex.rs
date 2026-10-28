@@ -25,6 +25,7 @@ pub(super) const fn palette() -> Theme {
         accent_hover: Color32::from_rgb(0x28, 0x7B, 0x50),
         accent_active: Color32::from_rgb(0x18, 0x53, 0x35),
         accent_soft: Color32::from_rgb(0xE1, 0xEB, 0xDF),
+        on_accent: Color32::WHITE,
         warn: Color32::from_rgb(0x97, 0x62, 0x18),
         warn_soft: Color32::from_rgb(0xFA, 0xEF, 0xD8),
         danger: Color32::from_rgb(0xAD, 0x3E, 0x36),
@@ -76,6 +77,8 @@ pub(super) const fn dark_palette() -> Theme {
         accent_hover: Color32::from_rgb(0xBB, 0xDD, 0xA0),
         accent_active: Color32::from_rgb(0x8B, 0xAC, 0x73),
         accent_soft: Color32::from_rgb(0x34, 0x45, 0x2F),
+        // 夜墨的浅绿底使用墨色，避免白字失去对比度。
+        on_accent: Color32::from_rgb(0x19, 0x1C, 0x19),
         warn: Color32::from_rgb(0xE0, 0xB7, 0x6C),
         warn_soft: Color32::from_rgb(0x40, 0x37, 0x25),
         danger: Color32::from_rgb(0xE9, 0x97, 0x8C),

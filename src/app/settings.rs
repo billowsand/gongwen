@@ -491,14 +491,35 @@ impl GongwenApp {
     ///
     /// 手动点选任何一套配色都意味着「不再跟随系统明暗」；想重新跟随，勾回
     /// 上面的「明暗跟随系统」开关即可。
+    ///
+    /// 「跟随 Omarchy」每点一次就重读一次 Omarchy 当前主题，Omarchy 那边换了
+    /// 主题，再点一下卡片就跟上。读失败而手里还有上一份配色时照用上一份。
     pub(crate) fn apply_theme(&mut self, ctx: &egui::Context, name: ThemeName) {
+        let omarchy_error = if name == ThemeName::Omarchy {
+            match theme::omarchy::refresh() {
+                Ok(()) => None,
+                Err(error) if theme::omarchy::available() => Some(error),
+                Err(error) => {
+                    self.status = format!("无法跟随 Omarchy：{error}");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         self.config.theme = name;
         self.config.theme_follows_system = false;
         self.applied_theme = name;
         theme::set_current(name);
         theme::reconfigure_style(ctx);
         theme::apply_app_icon(ctx, name);
-        self.status = format!("界面主题已切换为「{}」。", theme::by_name(name).label);
+        self.status = match (&omarchy_error, theme::omarchy::theme_name()) {
+            (Some(error), _) => format!("Omarchy 主题重读失败，沿用上一次读到的配色：{error}"),
+            (None, Some(omarchy)) if name == ThemeName::Omarchy => {
+                format!("界面主题已改为跟随 Omarchy，当前是「{omarchy}」。")
+            }
+            _ => format!("界面主题已切换为「{}」。", theme::by_name(name).label),
+        };
         if let Err(error) = storage::save(&self.config) {
             self.status = format!("界面主题已在本次生效，但配置保存失败：{error:#}");
         }
@@ -737,6 +758,18 @@ impl GongwenApp {
                 egui::FontId::proportional(14.0),
                 palette.text,
             );
+            // 「跟随 Omarchy」多一行，写 Omarchy 那边当前用的主题名。
+            if name == ThemeName::Omarchy
+                && let Some(omarchy) = theme::omarchy::theme_name()
+            {
+                painter.text(
+                    egui::pos2(rect.left() + 12.0, rect.top() + 59.0),
+                    egui::Align2::LEFT_TOP,
+                    omarchy,
+                    egui::FontId::proportional(11.0),
+                    palette.text_muted,
+                );
+            }
             if selected {
                 painter.text(
                     egui::pos2(rect.right() - 12.0, rect.top() + 10.0),
@@ -823,7 +856,24 @@ impl GongwenApp {
         }
 
         let mut pending = None;
-        for (title, dark) in [("浅色", false), ("深色", true)] {
+        let preset_group = |dark: bool| -> Vec<ThemeName> {
+            ThemeName::ALL
+                .into_iter()
+                .filter(|name| theme::by_name(*name).dark == dark)
+                .collect()
+        };
+        let omarchy_group: Vec<ThemeName> = theme::omarchy::available()
+            .then_some(ThemeName::Omarchy)
+            .into_iter()
+            .collect();
+        for (title, names) in [
+            ("浅色", preset_group(false)),
+            ("深色", preset_group(true)),
+            ("Omarchy 桌面", omarchy_group),
+        ] {
+            if names.is_empty() {
+                continue;
+            }
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(title)
@@ -832,11 +882,19 @@ impl GongwenApp {
             );
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                for name in ThemeName::ALL
-                    .into_iter()
-                    .filter(|name| theme::by_name(*name).dark == dark)
-                {
-                    if self.theme_card(ui, name).clicked() && self.applied_theme != name {
+                for name in names {
+                    let card = self.theme_card(ui, name);
+                    let card = if name == ThemeName::Omarchy {
+                        card.on_hover_text(
+                            "按 Omarchy 当前主题的配色与明暗换算界面颜色。                             Omarchy 换了主题后，再点一下这张卡片即可跟上。",
+                        )
+                    } else {
+                        card
+                    };
+                    // 「跟随 Omarchy」已选中时再点也要重读，其余主题点当前项不动。
+                    if card.clicked()
+                        && (self.applied_theme != name || name == ThemeName::Omarchy)
+                    {
                         pending = Some(name);
                     }
                 }

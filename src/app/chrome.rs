@@ -985,14 +985,27 @@ impl GongwenApp {
         ui.separator();
         let ids = egui::Id::new("theme_swatch");
         let mut index = 0usize;
-        for dark in [false, true] {
-            if dark {
-                ui.separator();
-            }
-            for name in ThemeName::ALL
+        let preset_group = |dark: bool| -> Vec<ThemeName> {
+            ThemeName::ALL
                 .into_iter()
                 .filter(|name| theme::by_name(*name).dark == dark)
-            {
+                .collect()
+        };
+        let omarchy_group: Vec<ThemeName> = theme::omarchy::available()
+            .then_some(ThemeName::Omarchy)
+            .into_iter()
+            .collect();
+        for (group, names) in [preset_group(false), preset_group(true), omarchy_group]
+            .into_iter()
+            .enumerate()
+        {
+            if names.is_empty() {
+                continue;
+            }
+            if group > 0 {
+                ui.separator();
+            }
+            for name in names {
                 let palette = theme::by_name(name);
                 let selected = name == self.applied_theme;
                 let swatch = ids.with(index);
@@ -1010,7 +1023,14 @@ impl GongwenApp {
                         .right_text(theme::Icon::Check.image_sized(14.0))
                         .image_tint_follows_text_color(true);
                 }
-                let response = item.atom_ui(ui);
+                let mut response = item.atom_ui(ui);
+                if name == ThemeName::Omarchy
+                    && let Some(omarchy) = theme::omarchy::theme_name()
+                {
+                    response.response = response.response.on_hover_text(format!(
+                        "Omarchy 当前主题：{omarchy}。Omarchy 换主题后再点一次即可跟上。"
+                    ));
+                }
                 if let Some(rect) = response.rect(swatch) {
                     let painter = ui.painter();
                     let radius = THEME_SWATCH_SIZE / 2.0;
@@ -1023,7 +1043,8 @@ impl GongwenApp {
                     painter.circle_filled(rect.center(), radius * 0.45, palette.accent);
                 }
                 if response.clicked() {
-                    if !selected {
+                    // 「跟随 Omarchy」已选中时再点也要重读 Omarchy 当前主题。
+                    if !selected || name == ThemeName::Omarchy {
                         self.apply_theme(ui.ctx(), name);
                     }
                     ui.close();

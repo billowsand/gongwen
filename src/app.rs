@@ -445,12 +445,20 @@ impl GongwenApp {
             ),
         };
         let crash_report_pending = crate::crash_log::take_unseen_report();
+        // 在 Omarchy 上先读一次当前主题：读到了，设置页才出现「跟随 Omarchy」。
+        // 配置选的就是它却读不到（换了桌面、主题文件坏了），本次退回默认主题，
+        // 配置不改，回到 Omarchy 自动恢复。
+        let omarchy_error = theme::omarchy::refresh()
+            .err()
+            .filter(|_| config.theme == ThemeName::Omarchy);
         let startup_status = if let Some(path) = &config_recovered_from {
             format!("配置文件已损坏，原文件已备份到：{}", path.display())
         } else if let Some(path) = &crash_report_pending {
             format!("上次运行异常退出，崩溃日志：{}", path.display())
         } else if let Some(error) = &config_load_error {
             error.clone()
+        } else if let Some(error) = &omarchy_error {
+            format!("「跟随 Omarchy」本次未生效，先用默认主题：{error}")
         } else {
             "就绪。先在“AI 管理”中连接模型服务。".into()
         };

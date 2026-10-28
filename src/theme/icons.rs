@@ -382,7 +382,8 @@ pub(crate) fn app_icon_png(name: ThemeName) -> &'static [u8] {
             include_bytes!("../../assets/app-icon/themes/mdex-dark/app-icon-256.png")
         }
         ThemeName::Mdex => include_bytes!("../../assets/app-icon/themes/mdex/app-icon-256.png"),
-        ThemeName::Claude | ThemeName::Smartisan => {
+        // Wayland 不让客户端设窗口图标，Omarchy 上用不上按主题换的图标。
+        ThemeName::Claude | ThemeName::Smartisan | ThemeName::Omarchy => {
             include_bytes!("../../assets/app-icon/themes/claude/app-icon-256.png")
         }
         ThemeName::Nord => include_bytes!("../../assets/app-icon/themes/nord/app-icon-256.png"),

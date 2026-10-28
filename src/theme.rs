@@ -5,6 +5,7 @@
 //! 控件、字体、全局样式），这里保留字号/动效常量、`paper` 与 `md` 取色模块及测试。
 
 mod mdex;
+pub(crate) mod omarchy;
 pub mod smartisan;
 
 use crate::models::PaperMode;

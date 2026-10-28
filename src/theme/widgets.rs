@@ -5,7 +5,7 @@
 
 use crate::theme::{
     Icon, Theme, accent, accent_active, accent_hover, border, border_strong, chrome_radius,
-    current, danger, font_sizes, is_mdex, mdex, smartisan, surface, surface_active, surface_hover,
+    current, danger, font_sizes, is_mdex, smartisan, surface, surface_active, surface_hover,
     surface_sunk, text, text_muted, text_soft, warn,
 };
 use eframe::egui;
@@ -71,17 +71,13 @@ pub(crate) fn dropdown_button(text: impl Into<String>, width: f32) -> egui::Butt
         .min_size(egui::vec2(width, 0.0))
 }
 
-/// 强调色实底上的文字与图标。夜墨的浅绿底使用墨色，避免白字失去对比度。
+/// 强调色实底上的文字与图标，取各主题自己的 `on_accent`。
 pub(crate) fn accent_text() -> Color32 {
     accent_text_for(current())
 }
 
 pub(crate) fn accent_text_for(palette: Theme) -> Color32 {
-    if palette.label == mdex::DARK_LABEL {
-        Color32::from_rgb(0x19, 0x1C, 0x19)
-    } else {
-        Color32::WHITE
-    }
+    palette.on_accent
 }
 
 /// 在子作用域内把按钮三态底色覆盖成主题强调色（clone-on-write，退出自动还原），

@@ -214,6 +214,12 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   与方案的出入和已知坑见 `docs/meeting-minutes-design.md`（单文件，第十节是交接）。
   三端共用的文字规则在 `src/export/minutes.rs`，改「一是」楷体或名单排法只改那里。
 
+- **跟随 Omarchy 主题**（读 Omarchy 当前主题的 `colors.toml` 现算界面配色，分三期）：
+  **第一期（探测、解析、换算、`Theme::on_accent`、`ThemeName::Omarchy` 与设置页 / 菜单入口、
+  23 套官方样本对比度测试）已完成，待 Omarchy 真机验收**；第二期（后台轮询即时跟随、直角外壳）
+  未开工。代码在 `src/theme/omarchy/`，样本在 `tests/fixtures/omarchy/`。方案、出入与交接见
+  `docs/omarchy-theme-design.md`（单文件，第九节是交接）。只读用户的 Omarchy 配置，不写钩子与模板。
+
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 
 > 2026-10-03 按智能体工作台方案修订（`docs/ai-agent-workbench.md` 第二节 D1–D3）。

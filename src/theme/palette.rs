@@ -4,7 +4,7 @@
 //! `theme` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::models::{PaperMode, ThemeName};
-use crate::theme::{CURRENT, CURRENT_PAPER, REVISION, mdex, smartisan};
+use crate::theme::{CURRENT, CURRENT_PAPER, REVISION, mdex, omarchy, smartisan};
 use eframe::egui::Color32;
 use std::sync::atomic::Ordering;
 
@@ -106,6 +106,8 @@ pub struct Theme {
     pub accent_active: Color32,
     /// 强调色的淡底，用于选中项背景、行内高亮。
     pub accent_soft: Color32,
+    /// 强调色实底（主按钮三态）上的文字与图标。
+    pub on_accent: Color32,
     pub warn: Color32,
     pub warn_soft: Color32,
     pub danger: Color32,
@@ -140,6 +142,7 @@ impl Theme {
             accent_hover: Color32::from_rgb(0xD4, 0x74, 0x50),
             accent_active: Color32::from_rgb(0x9E, 0x4B, 0x30),
             accent_soft: Color32::from_rgb(0xF4, 0xE5, 0xDC),
+            on_accent: Color32::WHITE,
             warn: Color32::from_rgb(0xA1, 0x63, 0x1C),
             warn_soft: Color32::from_rgb(0xF9, 0xF0, 0xDE),
             danger: Color32::from_rgb(0xB4, 0x46, 0x3C),
@@ -194,6 +197,7 @@ impl Theme {
             accent_hover: Color32::from_rgb(0x9B, 0xD0, 0xDE),
             accent_active: Color32::from_rgb(0x5E, 0x81, 0xAC),
             accent_soft: Color32::from_rgb(0x33, 0x41, 0x4F),
+            on_accent: Color32::WHITE,
             warn: Color32::from_rgb(0xEB, 0xCB, 0x8B),
             warn_soft: Color32::from_rgb(0x3D, 0x3A, 0x2C),
             danger: Color32::from_rgb(0xBF, 0x61, 0x6A),
@@ -245,6 +249,7 @@ impl Theme {
             accent_hover: Color32::from_rgb(0xFF, 0x96, 0x45),
             accent_active: Color32::from_rgb(0xD6, 0x5D, 0x0E),
             accent_soft: Color32::from_rgb(0x3B, 0x2D, 0x1F),
+            on_accent: Color32::WHITE,
             warn: Color32::from_rgb(0xFA, 0xBD, 0x2F),
             warn_soft: Color32::from_rgb(0x3C, 0x33, 0x20),
             danger: Color32::from_rgb(0xFB, 0x49, 0x34),
@@ -277,6 +282,7 @@ impl Theme {
 }
 
 /// 按配置里的主题名取色板；旧主题名在配置反序列化时回退默认主题。
+/// 「跟随 Omarchy」还没读到配色（不在 Omarchy 上、读失败）时也回退默认主题。
 pub(crate) fn by_name(name: ThemeName) -> Theme {
     match name {
         ThemeName::Claude => Theme::claude(),
@@ -285,6 +291,7 @@ pub(crate) fn by_name(name: ThemeName) -> Theme {
         ThemeName::MdexDark => mdex::dark_palette(),
         ThemeName::Nord => Theme::nord(),
         ThemeName::GruvboxDark => Theme::gruvbox_dark(),
+        ThemeName::Omarchy => omarchy::palette().unwrap_or_else(Theme::claude),
     }
 }
 

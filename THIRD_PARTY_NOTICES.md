@@ -227,3 +227,12 @@ distributed under the MIT License.
 - arboard：<https://github.com/1Password/arboard>
 - scraper：<https://github.com/rust-scraper/scraper>
 - html5ever：<https://github.com/servo/html5ever>
+
+## Omarchy 主题配色样本
+
+`tests/fixtures/omarchy/*.toml` 是 Omarchy 23 套内置主题的 `colors.toml`，原样取自
+basecamp/omarchy 仓库，只用于测试「跟随 Omarchy」主题的配色换算，不随安装包分发。
+运行时只读用户本机 Omarchy 当前主题的配色文件，不复制、不修改。
+
+- Project: <https://github.com/basecamp/omarchy>
+- License: MIT, Copyright (c) David Heinemeier Hansson
