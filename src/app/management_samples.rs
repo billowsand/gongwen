@@ -539,18 +539,84 @@ fn task_assistant_samples() {
     child.goal = "反馈材料齐备并核对来源".into();
     child.parent_id = Some(parent.id.clone());
     child.needs_review = true;
+    child.next_step = "催报三家未交单位".into();
+    child.deadline = Some(
+        (chrono::Local::now().date_naive() - chrono::Duration::days(2))
+            .format("%Y-%m-%d")
+            .to_string(),
+    );
+    let mut other = crate::task_assistant::Task::blank();
+    other.name = "数字政府建设年度总结".into();
+    other.goal = "形成总结初稿报分管领导审定".into();
+    other.role = crate::task_assistant::Role::Collaborate;
+    other.status = crate::task_assistant::Status::Waiting;
     if let Some(store) = app.task_store.as_mut() {
+        store.add_category("专项推进").unwrap();
+        parent.category = "专项推进".into();
         store.save(&parent, "创建", "样张数据").unwrap();
         store.save(&child, "创建", "样张数据").unwrap();
+        store.save(&other, "创建", "样张数据").unwrap();
+        store
+            .record_progress(&child.id, "已收到两家单位反馈")
+            .unwrap();
+        let source =
+            "会议要求：信息中心于11月5日前报送试点数据。办公室牵头起草数字政府建设年度总结。";
+        let proposal = |kind: &str, task_id: Option<String>, evidence: &str| {
+            crate::task_assistant::extract::Proposal {
+                kind: kind.into(),
+                task_id,
+                name: None,
+                goal: None,
+                next_step: None,
+                deadline: None,
+                collaborators: None,
+                speaker: None,
+                about: None,
+                note: None,
+                evidence: evidence.into(),
+            }
+        };
+        let mut deadline = proposal(
+            "deadline",
+            Some(child.id.clone()),
+            "信息中心于11月5日前报送试点数据",
+        );
+        deadline.deadline = Some("2026-11-05".into());
+        let mut fresh = proposal("new_task", None, "办公室牵头起草数字政府建设年度总结");
+        fresh.name = Some("起草数字政府建设年度总结".into());
+        fresh.collaborators = Some("办公室牵头".into());
+        let tasks = store.list(false).unwrap();
+        store
+            .commit_extraction(
+                "调度会纪要",
+                source,
+                "sample",
+                "pasted",
+                &[deadline, fresh],
+                &tasks,
+            )
+            .unwrap();
     }
     app.task_ui.selected = Some(child.id.clone());
     app.tabs = vec![TabRef::Page(NavPage::TaskAssistant)];
     app.active_tab = 0;
     let mut canvas = crate::ui_snapshot::Canvas::default();
-    for (index, (width, editing)) in [(1280.0, false), (760.0, false), (760.0, true)]
-        .into_iter()
-        .enumerate()
+    for (index, (width, editing, inbox)) in [
+        (1280.0, false, false),
+        (1280.0, true, false),
+        (1280.0, false, true),
+        (900.0, false, false),
+        (760.0, true, false),
+        (600.0, false, false),
+    ]
+    .into_iter()
+    .enumerate()
     {
+        app.task_ui.view = if inbox {
+            crate::task_ui::View::Inbox
+        } else {
+            crate::task_ui::View::Active
+        };
         app.task_ui.draft = if editing {
             app.task_store
                 .as_ref()
@@ -591,7 +657,13 @@ fn task_assistant_samples() {
                     theme::canvas(),
                     std::path::Path::new(&format!(
                         "tmp/task-assistant-{width}{}.png",
-                        if editing { "-edit" } else { "" }
+                        if editing {
+                            "-edit"
+                        } else if inbox {
+                            "-inbox"
+                        } else {
+                            ""
+                        }
                     )),
                 );
             }

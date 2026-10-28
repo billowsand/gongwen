@@ -220,6 +220,13 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   未开工。代码在 `src/theme/omarchy/`，样本在 `tests/fixtures/omarchy/`。方案、出入与交接见
   `docs/omarchy-theme-design.md`（单文件，第九节是交接）。只读用户的 Omarchy 配置，不写钩子与模板。
 
+- **任务助手界面改版与「粘贴填表」**（三栏布局 + 视图栏、表单内「从文字填写」、待整理建议视图，
+  分三期）：**第一期（三栏骨架、视图栏与计数、列表 / 详情 / 表单重排、中文日历、分类弹窗、
+  流程断点 F1–F10、按数据代号缓存）已完成，待 GUI 真机验收**；第二期（表单「从文字填写」、
+  材料标题选填）、第三期（候选按材料分组与旧新对照、详情内粘贴更新）未开工。审阅结论、方案、
+  进度与出入见 `docs/task-assistant-ui-redesign.md`（单文件，第六节是交接）；数据规则见
+  `docs/personal-task-assistant.md`。代码在 `src/task_ui/`。
+
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 
 > 2026-10-03 按智能体工作台方案修订（`docs/ai-agent-workbench.md` 第二节 D1–D3）。

@@ -6,6 +6,15 @@ const DDL: &str = "CREATE TABLE IF NOT EXISTS task_categories(name TEXT PRIMARY 
 pub type CandidateRow = (String, String, String, String, String);
 pub struct Store {
     pub(super) conn: Connection,
+    /// 每次打开连接取一个新号；数据库恢复后重开连接，界面缓存据此整体失效。
+    instance: u64,
+}
+/// 任务历史的一条，`source_id` 指向当时依据的材料快照。
+pub struct HistoryEntry {
+    pub at: String,
+    pub action: String,
+    pub detail: String,
+    pub source_id: Option<String>,
 }
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -15,7 +24,14 @@ impl Store {
         conn.execute_batch("PRAGMA foreign_keys=ON;")
             .context("启用任务助手外键失败")?;
         conn.execute_batch(DDL).context("初始化任务助手表失败")?;
-        Ok(Self { conn })
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let instance = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Self { conn, instance })
+    }
+    /// 数据代号：本连接累计改动行数随任何写入增长（含回滚的写入，只会多刷新一次）。
+    /// 界面按它判断缓存是否过期，代号不变的帧不查库。
+    pub fn data_key(&self) -> (u64, u64) {
+        (self.instance, self.conn.total_changes())
     }
     pub fn list(&self, include_closed: bool) -> Result<Vec<Task>> {
         load_tasks(&self.conn, include_closed)
@@ -327,16 +343,31 @@ impl Store {
         )?;
         Ok(())
     }
-    pub fn history(&self, task_id: &str) -> Result<Vec<(String, String, String)>> {
-        let mut q=self.conn.prepare("SELECT happened_at,action,detail FROM task_history WHERE task_id=?1 ORDER BY id DESC LIMIT 100")?;
-        Ok(
-            q.query_map([task_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?,
-        )
+    pub fn history_entries(&self, task_id: &str) -> Result<Vec<HistoryEntry>> {
+        let mut q = self.conn.prepare("SELECT happened_at,action,detail,source_id FROM task_history WHERE task_id=?1 ORDER BY id DESC LIMIT 100")?;
+        Ok(q.query_map([task_id], |r| {
+            Ok(HistoryEntry {
+                at: r.get(0)?,
+                action: r.get(1)?,
+                detail: r.get(2)?,
+                source_id: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
     }
-    pub fn source_matches(&self, task_id: &str, query: &str) -> Result<bool> {
+    pub fn source(&self, source_id: &str) -> Result<(String, String)> {
+        Ok(self.conn.query_row(
+            "SELECT title,content FROM task_sources WHERE id=?1",
+            [source_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+    /// 关键词命中材料来源或历史说明的任务集合，一条查询取全，取代逐任务查询。
+    pub fn source_hits(&self, query: &str) -> Result<std::collections::HashSet<String>> {
         let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
-        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM task_history h JOIN task_sources s ON s.id=h.source_id WHERE h.task_id=?1 AND (s.title LIKE ?2 ESCAPE '\\' OR s.content LIKE ?2 ESCAPE '\\' OR h.detail LIKE ?2 ESCAPE '\\'))",params![task_id,pattern],|r|r.get(0))?)
+        let mut q = self.conn.prepare("SELECT DISTINCT h.task_id FROM task_history h LEFT JOIN task_sources s ON s.id=h.source_id WHERE s.title LIKE ?1 ESCAPE '\\' OR s.content LIKE ?1 ESCAPE '\\' OR h.detail LIKE ?1 ESCAPE '\\'")?;
+        Ok(q.query_map([pattern], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
     }
     pub fn record_progress(&self, task_id: &str, detail: &str) -> Result<()> {
         if detail.trim().is_empty() || detail.chars().count() > 2000 {
@@ -545,11 +576,6 @@ impl Store {
         tx.execute("INSERT INTO task_history(task_id,happened_at,action,detail) VALUES(?1,?2,'恢复','保留原状态；回收站已解除的关系须重新核对设置')",params![id,now])?;
         tx.commit()?;
         Ok(())
-    }
-    pub fn sources(&self, id: &str) -> Result<Vec<(String, String)>> {
-        let mut q=self.conn.prepare("SELECT DISTINCT s.title,s.content FROM task_sources s JOIN task_history h ON h.source_id=s.id WHERE h.task_id=?1 ORDER BY s.created_at DESC LIMIT 30")?;
-        Ok(q.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn candidate_source(&self, id: &str) -> Result<(String, String)> {
         Ok(self.conn.query_row("SELECT s.title,s.content FROM task_sources s JOIN task_candidates c ON c.source_id=s.id WHERE c.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?)))?)

@@ -183,7 +183,19 @@ fn new_task_candidate_and_source_history_are_applied_together() {
     t.needs_review = false;
     s.create_from_candidate(&id, &t).unwrap();
     assert_eq!(s.candidates().unwrap()[0].4, "accepted");
-    assert_eq!(s.history(&t.id).unwrap()[0].1, "采纳新任务候选");
+    assert_eq!(
+        s.history_entries(&t.id).unwrap()[0].action,
+        "采纳新任务候选"
+    );
+    // 搜索一次取全：材料原文里的词能找到据此建立的任务，历史条目带来源可点开原文。
+    let hits = s.source_hits("原文摘录").unwrap();
+    assert!(hits.contains(&t.id));
+    assert!(s.source_hits("不存在的词").unwrap().is_empty());
+    let source = s.history_entries(&t.id).unwrap()[0]
+        .source_id
+        .clone()
+        .unwrap();
+    assert_eq!(s.source(&source).unwrap().1, "这是原文摘录");
 }
 #[test]
 fn deleting_task_unlinks_and_marks_related_tasks_for_review() {
