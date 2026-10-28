@@ -930,6 +930,32 @@ pub(crate) fn append_with_math(
     maths
 }
 
+fn paint_slot(
+    painter: &egui::Painter,
+    metrics: &Metrics,
+    origin: egui::Pos2,
+    galley: &egui::Galley,
+    slot: usize,
+    pad: f32,
+    atom: &MathAtom,
+) {
+    let mut first = 0usize;
+    for row in &galley.rows {
+        let count = row.char_count_including_newline().0;
+        if slot < first + count
+            && let Some(glyph) = row.glyphs.get(slot - first)
+        {
+            let x = origin.x + row.pos.x + glyph.pos.x - pad;
+            let baseline = origin.y + row.pos.y + glyph.pos.y;
+            let rect =
+                egui::Rect::from_min_size(egui::pos2(x, baseline - atom.baseline), atom.size);
+            paint_math(painter, metrics, rect, atom);
+            break;
+        }
+        first += count;
+    }
+}
+
 /// 按 [`append_with_math`] 记下的占位贴公式。`origin` 是 galley 的画点。
 pub(crate) fn paint_slots(
     painter: &egui::Painter,
@@ -939,23 +965,40 @@ pub(crate) fn paint_slots(
     maths: &[MathSlot],
 ) {
     for math in maths {
-        let mut first = 0usize;
-        for row in &galley.rows {
-            let count = row.char_count_including_newline().0;
-            if math.slot < first + count
-                && let Some(glyph) = row.glyphs.get(math.slot - first)
-            {
-                let x = origin.x + row.pos.x + glyph.pos.x - math.pad;
-                let baseline = origin.y + row.pos.y + glyph.pos.y;
-                let rect = egui::Rect::from_min_size(
-                    egui::pos2(x, baseline - math.atom.baseline),
-                    math.atom.size,
-                );
-                paint_math(painter, metrics, rect, &math.atom);
-                break;
-            }
-            first += count;
+        paint_slot(
+            painter, metrics, origin, galley, math.slot, math.pad, &math.atom,
+        );
+    }
+}
+
+/// 两端对齐的逐行 galley 改变了公式占位符的横坐标，全局字符序号仍按原 galley 逐行换算。
+pub(crate) fn paint_justified_slots(
+    painter: &egui::Painter,
+    metrics: &Metrics,
+    origin: egui::Pos2,
+    base: &egui::Galley,
+    rows: &[std::sync::Arc<egui::Galley>],
+    maths: &[MathSlot],
+) {
+    let mut first = 0usize;
+    for (placed, galley) in base.rows.iter().zip(rows) {
+        let count = placed.char_count_including_newline().0;
+        let at = origin + placed.pos.to_vec2();
+        for math in maths
+            .iter()
+            .filter(|math| math.slot >= first && math.slot < first + count)
+        {
+            paint_slot(
+                painter,
+                metrics,
+                at,
+                galley,
+                math.slot - first,
+                math.pad,
+                &math.atom,
+            );
         }
+        first += count;
     }
 }
 

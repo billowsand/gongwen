@@ -500,6 +500,7 @@
     if header { body = text(font: hei, fill: if terminal { cyan } else { ink }, body) }
     // 序号表的分组行（kai）：只换楷体，字号仍是表格的小四。
     else if c.at("kai", default: false) { body = text(font: kai, body) }
+    if not header and not c.at("kai", default: false) and c.align == "l" { body = par(justify: true, body) }
     table.cell(..args, align: al(c.align) + horizon, body)
   }
   let cell-or-skip(c, header) = if c == none { () } else { (mk(c, header),) }

@@ -89,11 +89,6 @@ pub(crate) fn add_smart_table_with_width(
                     row_index,
                     column_index,
                 );
-                let alignment = match column_alignment {
-                    ColumnAlignment::Center => AlignmentType::Center,
-                    ColumnAlignment::Right => AlignmentType::Right,
-                    ColumnAlignment::Left => AlignmentType::Left,
-                };
                 // 序号表的分组行整格换楷体，字号不变：Word、预览与 Typst 模板同源。
                 let kai = crate::export::table::is_group_cell(
                     numbered,
@@ -103,6 +98,12 @@ pub(crate) fn add_smart_table_with_width(
                     row_index,
                     column_index,
                 );
+                let alignment = match column_alignment {
+                    ColumnAlignment::Center => AlignmentType::Center,
+                    ColumnAlignment::Right => AlignmentType::Right,
+                    ColumnAlignment::Left if kai => AlignmentType::Left,
+                    ColumnAlignment::Left => AlignmentType::Both,
+                };
                 // 分几行、压不压与预览、PDF 同一条判定（`table::cell_plan`）。
                 // 写了 `<br>` 的姓名格按手写的行排，不再按单个姓名撑宽。
                 let is_name = name_column == Some(column_index)

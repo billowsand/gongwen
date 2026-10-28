@@ -1797,23 +1797,22 @@ fn add_table(
             } else {
                 row.get(col_idx).map(String::as_str).unwrap_or("")
             };
-            // 表格一律居中；序号表整行合并的分组行靠左并整格排楷体，与 TeX、
-            // 公文助手预览一致。
-            let group_row = numbered
-                && column_span == grid.len()
-                && cell_alignment(
-                    rows,
-                    spans,
-                    header_rows,
-                    &column_layout,
-                    numbered,
-                    row_idx,
-                    col_idx,
-                ) == ColumnAlignment::Left;
-            let align = if group_row {
-                AlignmentType::Left
-            } else {
-                AlignmentType::Center
+            // 左对齐正文格两端对齐；序号表整行合并的分组行仍靠左并整格排楷体。
+            let column_alignment = cell_alignment(
+                rows,
+                spans,
+                header_rows,
+                &column_layout,
+                numbered,
+                row_idx,
+                col_idx,
+            );
+            let group_row =
+                numbered && column_span == grid.len() && column_alignment == ColumnAlignment::Left;
+            let align = match column_alignment {
+                _ if group_row => AlignmentType::Left,
+                ColumnAlignment::Left => AlignmentType::Both,
+                ColumnAlignment::Center => AlignmentType::Center,
             };
             // 表头（多行表头的每一行）黑体加粗；表体解析 cell 内的 **加粗**/*斜体* 行内格式。
             let is_header = row_idx < header_rows.max(1);

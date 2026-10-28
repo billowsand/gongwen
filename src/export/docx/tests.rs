@@ -122,6 +122,33 @@ fn numbered_table_exports_merged_left_aligned_group_rows() {
     assert!(xml.contains(">序号</w:t>"), "表头首格应补「序号」");
 }
 
+#[test]
+fn left_table_cells_are_justified_without_changing_center_and_right_cells() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("table-alignment.docx");
+    let mut input = DraftInput::default();
+    input.kind = TemplateKind::PlainDocument;
+    write_docx_ok(
+        &path,
+        &input,
+        "# 表格对齐测试\n\
+         | 左对齐 | 居中 | 右对齐 |\n\
+         | :--- | :---: | ---: |\n\
+         | 左侧长说明文字 | 中间说明文字 | 右侧说明文字 |",
+    )
+    .unwrap();
+    let xml = zip_text(&path, "word/document.xml");
+    for (needle, alignment) in [
+        ("左侧长说明文字", "both"),
+        ("中间说明文字", "center"),
+        ("右侧说明文字", "right"),
+    ] {
+        let paragraph = paragraph_containing(&xml, needle);
+        let expected = format!(r#"<w:jc w:val="{alignment}" />"#);
+        assert!(paragraph.contains(&expected), "{needle}：{paragraph}");
+    }
+}
+
 /// 居中 / 居右区：两条导出路径（普通文档与函稿版式）都按标记排成居中、
 /// 右对齐段落，不带首行缩进；空行之后的正文恢复两端对齐。
 #[test]

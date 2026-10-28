@@ -449,6 +449,42 @@ mod tests {
         assert!(xml.contains(r#"<w:vMerge w:val="continue" />"#), "{xml}");
     }
 
+    #[test]
+    fn research_word_export_justifies_left_table_cells() {
+        use std::io::Read as _;
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("表格对齐.docx");
+        let input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "表格对齐测试".into(),
+            ..Default::default()
+        };
+        write_docx(
+            &path,
+            &input,
+            "<!-- [正文] -->\n\n## 表格对齐\n\n| 左对齐 | 居中 |\n| :--- | :---: |\n| 左侧长说明文字用于检查两端对齐 | 中间说明 |",
+            &NumberingConfig::default(),
+        )
+        .expect("研究报告 Word 应转换成功");
+        let file = fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        for (needle, alignment) in [
+            ("左侧长说明文字用于检查两端对齐", "both"),
+            ("中间说明", "center"),
+        ] {
+            let at = xml.find(needle).expect(needle);
+            let paragraph = &xml[xml[..at].rfind("<w:p ").unwrap()..at];
+            let expected = format!(r#"<w:jc w:val="{alignment}" />"#);
+            assert!(paragraph.contains(&expected), "{needle}：{paragraph}");
+        }
+    }
+
     /// 研究报告 Word 里的居中 / 居右区：整行居中、右对齐，不带首行缩进。
     #[test]
     fn research_word_export_aligns_marked_lines() {

@@ -1454,6 +1454,7 @@ pub(crate) struct TableCellLayout {
     row_span: usize,
     column_span: usize,
     galley: Arc<egui::Galley>,
+    justified: Vec<Arc<egui::Galley>>,
     synthetic_bold_chars: Vec<Range<usize>>,
     padding: f32,
     horizontal_padding: f32,
@@ -1681,7 +1682,13 @@ pub(crate) fn measure_table(
                     }
                 }
             }
-            let galley = super::fit::squeeze(layout(ui, cell_job), fit.scale);
+            let base = layout(ui, cell_job.clone());
+            let justified = if align == ColumnAlignment::Left && !group && base.rows.len() > 1 {
+                justified_rows(ui, &cell_job, &base)
+            } else {
+                Vec::new()
+            };
+            let galley = super::fit::squeeze(base, fit.scale);
             if row_span == 1 {
                 row_heights[row_index] =
                     row_heights[row_index].max(galley.size().y + 2.0 * padding);
@@ -1692,6 +1699,7 @@ pub(crate) fn measure_table(
                 row_span,
                 column_span,
                 galley,
+                justified,
                 synthetic_bold_chars,
                 padding,
                 horizontal_padding,
@@ -1819,27 +1827,44 @@ impl MeasuredTable {
             // 按字形框居中，不用 galley 几何居中：行距 21 磅比字高多出来的余量整块
             // 留在字下方，几何居中字会贴着上沿偏上半格。
             let top = rect.center().y - galley_visual_midline(&cell.galley);
-            marks::paint_galley_marks(painter, metrics, egui::pos2(anchor, top), &cell.galley);
-            painter.galley(
-                egui::pos2(anchor, top),
-                cell.galley.clone(),
-                theme::paper::ink(),
-            );
-            for chars in &cell.synthetic_bold_chars {
-                paint_synthetic_bold_galley(
+            let origin = egui::pos2(anchor, top);
+            if cell.justified.is_empty() {
+                marks::paint_galley_marks(painter, metrics, origin, &cell.galley);
+                painter.galley(origin, cell.galley.clone(), theme::paper::ink());
+                for chars in &cell.synthetic_bold_chars {
+                    paint_synthetic_bold_galley(painter, origin, &cell.galley, chars.clone());
+                }
+            } else {
+                paint_justified_rows(
                     painter,
-                    egui::pos2(anchor, top),
+                    metrics,
+                    origin,
+                    &cell.galley.job,
                     &cell.galley,
-                    chars.clone(),
+                    cell.justified.clone(),
+                );
+                for chars in &cell.synthetic_bold_chars {
+                    paint_synthetic_bold_rows(
+                        painter,
+                        origin,
+                        &cell.galley,
+                        &cell.justified,
+                        chars.clone(),
+                    );
+                }
+            }
+            if cell.justified.is_empty() {
+                math_flow::paint_slots(painter, metrics, origin, &cell.galley, &cell.math);
+            } else {
+                math_flow::paint_justified_slots(
+                    painter,
+                    metrics,
+                    origin,
+                    &cell.galley,
+                    &cell.justified,
+                    &cell.math,
                 );
             }
-            math_flow::paint_slots(
-                painter,
-                metrics,
-                egui::pos2(anchor, top),
-                &cell.galley,
-                &cell.math,
-            );
         }
         marked
     }
@@ -2155,6 +2180,50 @@ mod tests {
                 "PDF 序号列内容宽为两字"
             );
             assert!((table.width() - metrics.content).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn left_table_cells_justify_all_but_the_last_line() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let text = "这是一段用于检查表格单元格两端对齐效果的长说明文字，应当在换行后撑满单元格，而末行仍保持自然宽度。";
+        let rows = vec![
+            vec!["左对齐".into(), "居中".into(), "右对齐".into()],
+            vec![text.into(), text.into(), text.into()],
+        ];
+        let aligns = [
+            export::ColumnAlign::Left,
+            export::ColumnAlign::Center,
+            export::ColumnAlign::Right,
+        ];
+        let mut measured = None;
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
+            measured = measure_table(ui, &metrics, &rows, &aligns, &[], 1, false, metrics.content);
+        });
+        let table = measured.expect("表格应排出");
+        let left = table
+            .cells
+            .iter()
+            .find(|cell| cell.row == 1 && cell.column == 0)
+            .expect("左对齐格");
+        assert!(left.galley.rows.len() > 1, "测试文字应自然折行");
+        assert_eq!(left.justified.len(), left.galley.rows.len());
+        let inner = table.widths[0] - 2.0 * left.horizontal_padding + 1.0 / ctx.pixels_per_point();
+        let first = left.justified.first().expect("首行");
+        assert!(
+            (first.size().x - inner).abs() < 0.5,
+            "非末行应撑满内容宽：{} != {inner}",
+            first.size().x
+        );
+        assert!(left.justified.last().expect("末行").size().x < inner);
+        for cell in table
+            .cells
+            .iter()
+            .filter(|cell| cell.row == 1 && cell.column != 0)
+        {
+            assert!(cell.justified.is_empty(), "居中与右对齐格不应补字距");
         }
     }
 
