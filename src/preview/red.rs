@@ -1419,13 +1419,27 @@ pub(crate) fn paint_red_print_pages(
                     egui::vec2(fragment.width, fragment.visible_height),
                 );
                 let text_selected = super::layout::has_text_selection(ui.ctx());
+                let with_caret = !text_selected && super::layout::has_text_cursor(ui.ctx());
+                // 竖线压在字上面，等这一块的字画完再画：（行号、行内下标、行左上角、
+                // 底色偏移、行高）。
+                let mut caret_at = None;
                 if !fragment.source_segments.is_empty() {
+                    // 避头尾排版插入了硬换行；段内字符下标按原文数，得剔掉它们。
+                    let rendered = fragment.galley.job.text.replace('\n', "");
                     let selected_chars = super::layout::selected_chars_for_segments(
                         ui.ctx(),
-                        // 避头尾排版插入了硬换行；段内字符下标按原文数，得剔掉它们。
-                        &fragment.galley.job.text.replace('\n', ""),
+                        &rendered,
                         &fragment.source_segments,
                     );
+                    let caret = with_caret
+                        .then(|| {
+                            super::layout::caret_char_for_segments(
+                                ui.ctx(),
+                                &rendered,
+                                &fragment.source_segments,
+                            )
+                        })
+                        .flatten();
                     let mut row_start = 0usize;
                     for (row_index, (placed, row_galley)) in fragment
                         .galley
@@ -1518,11 +1532,26 @@ pub(crate) fn paint_red_print_pages(
                                     row_rect(ink_start, local_end),
                                     3.0,
                                     if anchored {
-                                        theme::accent_soft()
+                                        super::layout::anchor_tint(with_caret)
                                     } else {
                                         theme::paper::hover_tint()
                                     },
                                 );
+                            }
+                            if let Some(char) = super::layout::caret_in_row(
+                                caret,
+                                segment_index,
+                                segment,
+                                start,
+                                end,
+                            ) {
+                                caret_at = Some((
+                                    row_index,
+                                    char - row_start,
+                                    top_left + egui::vec2(placed.pos.x, row_y),
+                                    tint_top,
+                                    placed.size.y,
+                                ));
                             }
                             for selected in &selected_chars[segment_index] {
                                 let from = selected.start.max(start);
@@ -1651,6 +1680,11 @@ pub(crate) fn paint_red_print_pages(
                         }
                         first_char += placed.glyphs.len();
                     }
+                }
+                if let Some((row_index, index, origin, tint_top, height)) = caret_at
+                    && let Some(row) = fragment.justified.get(row_index)
+                {
+                    super::layout::paint_caret(ui, row, index, origin, tint_top, height);
                 }
             }
 

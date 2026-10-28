@@ -1301,6 +1301,24 @@ impl DraftPage<'_> {
                 !range.is_empty() && self.doc.generated_markdown.get(range.clone()).is_some()
             });
         preview::set_text_selection(ui.ctx(), &self.doc.generated_markdown, selection.clone());
+        // 对照模式下源码编辑框有焦点、光标就在跟随高亮的那一行里时，版面上也画
+        // 出光标竖线；查找命中、点版面带过去的高亮不跟光标走，不画。
+        let caret = (self.doc.preview_mode == PreviewMode::Split && selection.is_none())
+            .then(|| {
+                ui.ctx()
+                    .memory(|memory| memory.has_focus(editor_id()))
+                    .then(|| editor_cursor(ui.ctx(), &self.doc.generated_markdown))
+                    .flatten()
+            })
+            .flatten()
+            .filter(|byte| {
+                self.doc
+                    .preview_anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.range_in(&self.doc.generated_markdown))
+                    .is_some_and(|range| range.start <= *byte && *byte <= range.end)
+            });
+        preview::set_text_cursor(ui.ctx(), &self.doc.generated_markdown, caret);
         let scrolled = egui::ScrollArea::both()
             .id_salt("render_scroll")
             .auto_shrink([false; 2])
@@ -1360,6 +1378,7 @@ impl DraftPage<'_> {
                 ui.add_space(12.0);
             });
         preview::set_text_selection(ui.ctx(), &self.doc.generated_markdown, None);
+        preview::set_text_cursor(ui.ctx(), &self.doc.generated_markdown, None);
         // 右缘导航刻度要把标题的版面位置换算成刻度条上的位置，量度只有滚动区知道。
         self.doc.preview_scroll = PreviewScroll {
             offset_y: scrolled.state.offset.y,

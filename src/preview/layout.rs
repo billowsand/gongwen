@@ -79,6 +79,119 @@ pub(super) fn has_text_selection(ctx: &egui::Context) -> bool {
     })
 }
 
+/// 分栏编辑器的光标（源码字节位置）。同选区一样只在预览绘制期间有效：
+/// 正文段落据此在纸面上对应的字前画一条竖线，光标所在段的底色随之调淡。
+#[derive(Clone)]
+struct PreviewTextCursor {
+    source: Arc<str>,
+    byte: usize,
+}
+
+fn cursor_id() -> egui::Id {
+    egui::Id::new("gw-preview-text-cursor")
+}
+
+pub(crate) fn set_text_cursor(ctx: &egui::Context, source: &str, byte: Option<usize>) {
+    ctx.data_mut(|data| {
+        if let Some(byte) = byte {
+            data.insert_temp(
+                cursor_id(),
+                Arc::new(PreviewTextCursor {
+                    source: Arc::from(source),
+                    byte,
+                }),
+            );
+        } else {
+            data.remove::<Arc<PreviewTextCursor>>(cursor_id());
+        }
+    });
+}
+
+fn text_cursor(ctx: &egui::Context) -> Option<Arc<PreviewTextCursor>> {
+    ctx.data(|data| data.get_temp::<Arc<PreviewTextCursor>>(cursor_id()))
+}
+
+pub(super) fn has_text_cursor(ctx: &egui::Context) -> bool {
+    text_cursor(ctx).is_some()
+}
+
+/// 光标所在段的底色：有竖线指明到字时只留一层淡色，标出是哪一段即可。
+pub(super) fn anchor_tint(with_caret: bool) -> egui::Color32 {
+    if with_caret {
+        theme::accent_soft().gamma_multiply(0.45)
+    } else {
+        theme::accent_soft()
+    }
+}
+
+/// 光标落在哪一段、哪个可见字之前（按 `rendered` 的字符下标数；落在段尾时
+/// 等于最后一个字的下标加一）。光标不在这几段里时为 `None`。
+pub(super) fn caret_char_for_segments(
+    ctx: &egui::Context,
+    rendered: &str,
+    segments: &[ClickableSourceSegment],
+) -> Option<(usize, usize)> {
+    let cursor = text_cursor(ctx)?;
+    segments.iter().enumerate().find_map(|(index, segment)| {
+        caret_visible_char(&cursor, rendered, segment).map(|char| (index, char))
+    })
+}
+
+/// 光标竖线是否画在这一行的这一段上：`start..end` 是段与行相交的字符范围。
+/// 落在行尾的光标若这一段在下一行还有字，就画到下一行行首，与编辑器一致。
+pub(super) fn caret_in_row(
+    caret: Option<(usize, usize)>,
+    segment_index: usize,
+    segment: &ClickableSourceSegment,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    let (index, char) = caret?;
+    (index == segment_index
+        && start <= char
+        && (char < end || (char == end && end == segment.chars.end)))
+        .then_some(char)
+}
+
+/// 光标对到纸面上的字：取光标之后第一个对得上的可见字，停在 Markdown 标记
+/// 或自动编号里时落到紧随其后的正文字前；光标后面已无可见字时落在段尾。
+fn caret_visible_char(
+    cursor: &PreviewTextCursor,
+    rendered: &str,
+    segment: &ClickableSourceSegment,
+) -> Option<usize> {
+    if cursor.byte < segment.source.start || cursor.byte > segment.source.end {
+        return None;
+    }
+    let source = cursor.source.get(segment.source.clone())?;
+    let local = cursor.byte - segment.source.start;
+    let pairs = visible_pairs(source, rendered, segment);
+    pairs
+        .iter()
+        .find(|(chars, _)| chars.start >= local)
+        .map(|(_, index)| *index)
+        .or_else(|| pairs.last().map(|(_, index)| index + 1))
+}
+
+/// 一行里第 `index` 个字之前的光标竖线：横坐标取字的左缘，行尾取最后一个字的
+/// 右缘；竖向与这一行的底色同高。`origin` 是这一行在纸面上的左上角。
+pub(super) fn paint_caret(
+    ui: &egui::Ui,
+    row: &egui::Galley,
+    index: usize,
+    origin: egui::Pos2,
+    tint_top: f32,
+    height: f32,
+) {
+    let x = origin.x + row.pos_from_cursor(egui::text::CCursor::new(index)).left();
+    let top = origin.y + tint_top;
+    ui.painter().vline(
+        x,
+        egui::Rangef::new(top, top + height),
+        ui.visuals().text_cursor.stroke,
+    );
+}
+
 /// 将选中的源码字符与这一段的可见字符对齐。Markdown 标记、自动编号和缩进
 /// 不会被误认作被选文字；同一源码段落中的换行与版面换行也不改变字符映射。
 fn selected_visible_chars(
@@ -92,6 +205,31 @@ fn selected_visible_chars(
     let Some(source) = selection.source.get(segment.source.clone()) else {
         return Vec::new();
     };
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for (source_char, index) in visible_pairs(source, rendered, segment) {
+        if segment.source.start + source_char.start >= selection.range.end
+            || segment.source.start + source_char.end <= selection.range.start
+        {
+            continue;
+        }
+        if let Some(last) = ranges.last_mut()
+            && last.end == index
+        {
+            last.end += 1;
+        } else {
+            ranges.push(index..index + 1);
+        }
+    }
+    ranges
+}
+
+/// 这一段源码里每个可见字与纸面字符的配对：（字在段内的源码字节范围，纸面
+/// 字符下标），按先后排列。Markdown 标记、自动编号与缩进不参与配对。
+fn visible_pairs(
+    source: &str,
+    rendered: &str,
+    segment: &ClickableSourceSegment,
+) -> Vec<(Range<usize>, usize)> {
     let atoms = export::inline_char_spans(source);
     let visible = rendered
         .chars()
@@ -145,24 +283,15 @@ fn selected_visible_chars(
         }
         pairs.reverse();
     }
-    let mut ranges: Vec<Range<usize>> = Vec::new();
-    for (source_index, visible_index) in pairs {
-        let source_char = &atoms[source_index].0;
-        if segment.source.start + source_char.start >= selection.range.end
-            || segment.source.start + source_char.end <= selection.range.start
-        {
-            continue;
-        }
-        let index = segment.chars.start + visible_index;
-        if let Some(last) = ranges.last_mut()
-            && last.end == index
-        {
-            last.end += 1;
-        } else {
-            ranges.push(index..index + 1);
-        }
-    }
-    ranges
+    pairs
+        .into_iter()
+        .map(|(source_index, visible_index)| {
+            (
+                atoms[source_index].0.clone(),
+                segment.chars.start + visible_index,
+            )
+        })
+        .collect()
 }
 
 /// 正文各级标题的字体：与 `export::docx::heading_paragraph` 保持一致。
@@ -1087,6 +1216,12 @@ pub(crate) fn clickable_justified_job(
             })
         })
         .collect::<Vec<_>>();
+    let with_caret = selection.is_none() && has_text_cursor(ui.ctx());
+    let caret = with_caret
+        .then(|| caret_char_for_segments(ui.ctx(), &job.text, segments))
+        .flatten();
+    // 竖线压在字上面，等字画完再画：（行号、行内下标、行左上角、底色偏移、行高）。
+    let mut caret_at = None;
 
     let mut row_start = 0usize;
     for (row_index, (placed, row_galley)) in base.rows.iter().zip(&rows).enumerate() {
@@ -1165,11 +1300,20 @@ pub(crate) fn clickable_justified_job(
                     row_rect(ink_start, local_end),
                     3.0,
                     if anchored {
-                        theme::accent_soft()
+                        anchor_tint(with_caret)
                     } else {
                         theme::paper::hover_tint()
                     },
                 );
+            }
+            if let Some(char) = caret_in_row(caret, segment_index, segment, start, end) {
+                caret_at = Some((
+                    row_index,
+                    char - row_start,
+                    block_rect.left_top() + placed.pos.to_vec2(),
+                    tint_top,
+                    placed.size.y,
+                ));
             }
             for selected in &selected_chars[segment_index] {
                 let from = selected.start.max(start);
@@ -1194,6 +1338,9 @@ pub(crate) fn clickable_justified_job(
         &base,
         rows.clone(),
     );
+    if let Some((row_index, index, origin, tint_top, height)) = caret_at {
+        paint_caret(ui, &rows[row_index], index, origin, tint_top, height);
+    }
     for chars in synthetic_bold_chars {
         paint_synthetic_bold_rows(
             ui.painter(),
@@ -2218,6 +2365,124 @@ mod tests {
         }
         assert_eq!(selected, 2, "两条源码行各自只画选中的那一截");
         assert_eq!(anchored, 0, "文字选区期间不能再画光标同步底色");
+    }
+
+    #[test]
+    fn preview_caret_lands_before_the_matching_visible_character() {
+        let caret = |source: &str, byte: usize, rendered: &str| {
+            let segment = ClickableSourceSegment {
+                source: 0..source.len(),
+                chars: 0..rendered.chars().count(),
+            };
+            let cursor = PreviewTextCursor {
+                source: Arc::from(source),
+                byte,
+            };
+            caret_visible_char(&cursor, rendered, &segment)
+        };
+        assert_eq!(caret("第一行", 0, "第一行"), Some(0));
+        assert_eq!(caret("第一行", "第一".len(), "第一行"), Some(2));
+        assert_eq!(caret("第一行", "第一行".len(), "第一行"), Some(3), "段尾");
+        // 停在粗体标记里：落到紧随其后的正文字前。
+        let source = "**重点**继续";
+        assert_eq!(caret(source, 1, "重点继续"), Some(0));
+        assert_eq!(caret(source, "**重点*".len(), "重点继续"), Some(2));
+        // 列表标记换成了纸面上的自动编号：光标在标记里时落在编号之后的第一个字前。
+        assert_eq!(caret("- 事项", 0, "（一）事项"), Some(3));
+        assert_eq!(caret("- 事项", "- 事".len(), "（一）事项"), Some(4));
+
+        let source = "第一行\n第二行";
+        let second = ClickableSourceSegment {
+            source: "第一行\n".len()..source.len(),
+            chars: 3..6,
+        };
+        let cursor = |byte| PreviewTextCursor {
+            source: Arc::from(source),
+            byte,
+        };
+        assert_eq!(
+            caret_visible_char(&cursor(1), "第一行第二行", &second),
+            None
+        );
+        assert_eq!(
+            caret_visible_char(&cursor("第一行\n第".len()), "第一行第二行", &second),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn preview_caret_paints_a_bar_over_a_lighter_anchor_fill() {
+        fn collect(shape: &egui::Shape, stroke: Stroke, fills: &mut Vec<egui::Color32>) -> usize {
+            match shape {
+                egui::Shape::LineSegment { stroke: line, .. } if *line == stroke => 1,
+                egui::Shape::Rect(rect) => {
+                    fills.push(rect.fill);
+                    0
+                }
+                egui::Shape::Vec(shapes) => shapes
+                    .iter()
+                    .map(|shape| collect(shape, stroke, fills))
+                    .sum(),
+                _ => 0,
+            }
+        }
+
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let source = "第一行\n第二行";
+        let segments = [
+            ClickableSourceSegment {
+                source: 0.."第一行".len(),
+                chars: 0..3,
+            },
+            ClickableSourceSegment {
+                source: "第一行\n".len()..source.len(),
+                chars: 3..6,
+            },
+        ];
+        let anchor = "第一行\n".len()..source.len();
+        let paint = |caret: Option<usize>| {
+            set_text_cursor(&ctx, source, caret);
+            let mut stroke = Stroke::NONE;
+            let output = crate::test_support::run_ui(&ctx, Default::default(), |ui| {
+                stroke = ui.visuals().text_cursor.stroke;
+                let metrics = Metrics::research(1000.0, Some(1.0));
+                let mut scroll = false;
+                let mut clicked = None;
+                clickable_body_block(
+                    ui,
+                    &metrics,
+                    "第一行第二行",
+                    &[],
+                    false,
+                    &segments,
+                    Some(&anchor),
+                    &mut scroll,
+                    &mut clicked,
+                );
+            });
+            let mut fills = Vec::new();
+            let bars = output
+                .shapes
+                .iter()
+                .map(|clipped| collect(&clipped.shape, stroke, &mut fills))
+                .sum::<usize>();
+            (bars, fills)
+        };
+        let (bars, fills) = paint(Some("第一行\n第".len()));
+        assert_eq!(bars, 1, "光标所在的字前画一条竖线");
+        assert!(fills.contains(&anchor_tint(true)));
+        assert!(
+            !fills.contains(&theme::accent_soft()),
+            "有竖线时段落底色调淡"
+        );
+
+        let (bars, fills) = paint(None);
+        assert_eq!(bars, 0);
+        assert!(
+            fills.contains(&theme::accent_soft()),
+            "没有光标时仍是原来的底色"
+        );
     }
 
     /// 研究报告按行高亮：带首行缩进的单行，底色从第一个实字起笔、不压缩进，
