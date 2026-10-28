@@ -37,12 +37,22 @@ pub(super) fn assemble(task: &WritingTask) -> String {
         .join("\n\n")
 }
 
+/// 去掉模型照着素材编号写出的「[@C15]」「[@C3, @C7]」：那是本任务内部的素材编号，不是参考文献。
+fn strip_card_citations(text: &str) -> String {
+    static CITATION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\s?\[@C\d+(?:\s*[,;，；]\s*@?C\d+)*\]").expect("固定素材编号正则")
+    });
+    CITATION.replace_all(text, "").into_owned()
+}
+
 fn assemble_section(section: &Section, count: usize) -> String {
     let body = section
         .review_suggestion
         .as_deref()
         .filter(|_| !section.review_kept_draft)
         .unwrap_or(&section.markdown);
+    let body = strip_card_citations(body);
+    let body = body.as_str();
     let title = section_heading(&section.title);
     let body = normalize_body(body, &title, body_base_level(count));
     if count == 1 {
@@ -209,6 +219,18 @@ mod tests {
         assert_eq!(
             assemble(&task),
             "## 范式跃迁\n\n正文。\n\n### 小标题\n细则。\n\n## 攻防演进\n\n正文二。"
+        );
+    }
+
+    #[test]
+    fn internal_card_numbers_written_as_citations_are_removed() {
+        let task = task(&[(
+            "措施",
+            "量化映射 [@C15]。另见[@C3, @C7]；正常引用[@smith2020]保留。",
+        )]);
+        assert_eq!(
+            assemble(&task),
+            "量化映射。另见；正常引用[@smith2020]保留。"
         );
     }
 

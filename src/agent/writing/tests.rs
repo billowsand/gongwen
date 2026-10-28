@@ -22,10 +22,14 @@ fn every_content_chunk_is_visited_and_all_writing_stages_inject_style() {
     let model = ScriptedModel::new(move |_, prompt| {
         if prompt.contains("请拟定提纲") || prompt.contains("请调整提纲") {
             "章节：工作要求 | 说明任务与措施 | 500字".into()
-        } else if prompt.contains("当前章节素材组") || prompt.contains("正文片段") {
+        } else if prompt.contains("素材（第") {
+            "#1：C1".into()
+        } else if prompt.contains("确认提纲与各节素材") {
+            "## 工作要求\n\n现已落实有关措施。".into()
+        } else if prompt.contains("正文片段") {
             "现已落实有关措施。".into()
         } else if prompt.contains(evidence) {
-            format!("观点：已落实防汛措施\n原句：{evidence}")
+            format!("观点：已落实防汛措施\n依据：{evidence}\n来源：材料1")
         } else {
             "无相关内容".into()
         }
@@ -37,7 +41,9 @@ fn every_content_chunk_is_visited_and_all_writing_stages_inject_style() {
     };
     run(&mut task, Action::Extract, &model, &mut persist).unwrap();
     let content_chunks = chunks(&task.sources[0].text, task.chunk_bytes).len();
-    assert!(content_chunks > 20);
+    // 约 90 KB 材料按半个窗口（32k 窗口约 44 KB）一批，几批读完，每批都问到。
+    assert!(content_chunks >= 2);
+    assert_eq!(model.prompts("建议归纳").len(), content_chunks);
     assert_eq!(task.coverage().done, content_chunks);
     assert!(task.topic_cards.iter().any(|card| card.quote == evidence));
     assert_eq!(task.validate_sources().len(), 0);
@@ -51,19 +57,23 @@ fn every_content_chunk_is_visited_and_all_writing_stages_inject_style() {
     );
     task.confirm_outline().unwrap();
     run(&mut task, Action::Collect, &model, &mut persist).unwrap();
+    assert_eq!(model.prompts("素材（第").len(), 1, "分配素材不重读原文");
     assert!(
         model
-            .prompts("原文材料")
+            .prompts("素材（第")
             .iter()
-            .all(|p| !p.contains("FRAMEWORK-MARKER"))
+            .all(|p| !p.contains("前段材料") && !p.contains("FRAMEWORK-MARKER"))
     );
+    assert_eq!(task.current_section_cards(&task.sections[0]).len(), 1);
     run(&mut task, Action::Write, &model, &mut persist).unwrap();
     assert!(
         model
             .prompts("STYLE-MARKER")
             .iter()
-            .any(|p| p.contains("当前章节素材组"))
+            .any(|p| p.contains("确认提纲与各节素材")),
+        "整篇一次成文，风格随提示词注入"
     );
+    assert_eq!(task.sections[0].markdown, "现已落实有关措施。");
     run(&mut task, Action::Polish, &model, &mut persist).unwrap();
     assert!(
         model
@@ -87,6 +97,11 @@ fn written_task() -> (WritingTask, ScriptedModel) {
         if prompt.contains("请拟定提纲") || prompt.contains("请调整提纲") {
             // 模型常常不听话手写编号，拼接时要剥掉。
             "章节：一、精简报表 | 合并报表 | 300字\n章节：二、规范考核 | 统筹检查 | 300字".into()
+        } else if prompt.contains("素材（第") {
+            "#1：C1\n#2：C1".into()
+        } else if prompt.contains("确认提纲与各节素材") {
+            // 整篇一次成文：每节以本节标题开头，节内小标题用 `###`。
+            "# 全文标题\n## 精简报表\n\n### 具体措施\n\n现已合并同类报表。\n\n## 规范考核\n\n### 具体措施\n\n现已合并同类报表。".into()
         } else if prompt.contains("当前章节素材组") {
             // 文种规则让模型用 `##` 写一级标题，节内小标题会与节标题同级。
             "## 具体措施\n\n现已合并同类报表。".into()
@@ -94,8 +109,8 @@ fn written_task() -> (WritingTask, ScriptedModel) {
             "建议改法。".into()
         } else if prompt.contains("正文片段") {
             fragment_of(prompt).unwrap_or_default()
-        } else if prompt.contains("原文块") || prompt.contains("本块位置") {
-            "观点：合并报表\n原句：合并同类报表。".into()
+        } else if prompt.contains("建议归纳") {
+            "观点：合并报表\n依据：合并同类报表。\n来源：材料1".into()
         } else {
             "未发现明显结构问题".into()
         }
@@ -129,13 +144,21 @@ fn topic_edits_keep_finished_extraction_until_replaced_and_reverting_restores_it
     task.set_topic("另一个主题".into());
     assert_eq!(task.coverage().done, 0, "新主题下旧提炼不算当前成果");
     assert!(task.current_topic_cards().is_empty());
-    assert_eq!(task.section_coverage(&first).done, 0);
+    assert!(
+        !task.section_assigned(&task.sections[0]),
+        "新主题下要重新分配素材"
+    );
+    assert_eq!(task.sections[0].id, first);
     assert!(!task.outline_confirmed);
     assert!(!task.chunks.is_empty(), "改主题不删除已花调用的成果");
 
     task.set_topic("基层减负".into());
     assert_eq!(task.coverage().done, coverage.total, "改回原主题即恢复");
     assert_eq!(task.current_section_cards(&task.sections[0]).len(), cards);
+    assert!(
+        task.section_assigned(&task.sections[0]),
+        "改回原主题，分配也恢复"
+    );
 }
 
 #[test]
@@ -144,10 +167,9 @@ fn adding_or_removing_one_material_keeps_the_others_extraction() {
     let content = task.coverage().done;
     task.add_source(SourceSnapshot::new("风格", SourceRole::Style, "先结论，后措施。").unwrap());
     assert_eq!(task.coverage().done, content, "加风格样稿不重读内容材料");
-    let first = task.sections[0].id.clone();
-    assert_eq!(
-        task.section_coverage(&first).done,
-        task.section_coverage(&first).total
+    assert!(
+        task.section_assigned(&task.sections[0]),
+        "加风格样稿不需要重新分配素材"
     );
 
     let extra = SourceSnapshot::new("补充", SourceRole::Content, "另有补充事实。").unwrap();
@@ -186,27 +208,30 @@ fn outline_reordering_keeps_section_material_and_an_edit_only_affects_its_sectio
     let index = task.sections.iter().position(|s| s.id == second).unwrap();
     task.sections[index].points.push_str("，补充时限");
     task.outline_changed();
-    assert_eq!(task.section_coverage(&second).done, 0);
-    let covered = task.section_coverage(&first);
-    assert_eq!(covered.done, covered.total, "未改动的章节沿用已备素材");
+    assert!(!task.section_assigned(&task.sections[index]));
+    let untouched = task.sections.iter().find(|s| s.id == first).unwrap();
+    assert!(
+        task.section_assigned(untouched),
+        "未改动的章节沿用已分配的素材"
+    );
     assert!(task.sections.iter().all(|s| !s.markdown.is_empty()));
 }
 
 #[test]
 fn style_edits_do_not_send_material_back_through_the_model() {
     let (mut task, model) = written_task();
-    let reads = model.prompts("本块位置").len();
+    let reads = model.prompts("建议归纳").len();
     task.style_md = "改过的写法：句子更短。".into();
     task.style_changed(true);
     assert!(task.style_manual);
     assert!(task.ready_for(Stage::Write).is_ok());
     run(&mut task, Action::Write, &model, &mut |_| Ok(())).unwrap();
-    assert_eq!(model.prompts("本块位置").len(), reads, "改风格不重读材料");
+    assert_eq!(model.prompts("建议归纳").len(), reads, "改风格不重读材料");
     assert!(
         model
             .prompts("改过的写法")
             .iter()
-            .any(|p| p.contains("当前章节素材组")),
+            .any(|p| p.contains("确认提纲与各节素材")),
         "未经人工修改的章节按新风格重写"
     );
 }
@@ -348,19 +373,30 @@ fn records_saved_before_fingerprints_are_adopted_as_current() {
     assert!(task.ready_for(Stage::Review).is_ok());
 }
 
+/// 依据不再强制逐字：找得到的记精确位置，找不到的如实记成「概括」，不冒充原句，也不作废整批。
 #[test]
-fn partial_quotes_are_not_accepted_as_a_successful_extraction() {
+fn evidence_not_found_verbatim_is_kept_as_a_summary_not_passed_off_as_a_quote() {
     let mut task = WritingTask::new(crate::models::TemplateKind::PlainDocument);
     task.topic = "工作".into();
-    task.add_source(SourceSnapshot::new("材料", SourceRole::Content, "真实原句。").unwrap());
+    let source = SourceSnapshot::new("材料", SourceRole::Content, "真实原句。另一段。").unwrap();
+    task.add_source(source.clone());
     let model = ScriptedModel::new(|_, _| {
-        "观点：真实观点\n原句：真实原句。\n观点：伪造观点\n原句：不存在的原句。".into()
+        "观点：真实观点\n依据：真实原句。\n来源：材料1\n\n观点：概括观点\n依据：材料大意是另有一段\n来源：材料1".into()
     });
-    assert!(run(&mut task, Action::Extract, &model, &mut |_| Ok(())).is_err());
-    assert_eq!(task.coverage().done, 0);
-    assert_eq!(task.coverage().failed, 1);
-    assert!(task.topic_cards.is_empty());
-    assert_eq!(task.resume_action, Some(Action::Extract));
+    run(&mut task, Action::Extract, &model, &mut |_| Ok(())).unwrap();
+    assert_eq!(task.coverage().done, 1);
+    let located = &task.topic_cards[0];
+    assert!(located.located);
+    assert_eq!(&source.text[located.start..located.end], located.quote);
+    let summary = &task.topic_cards[1];
+    assert!(!summary.located, "找不到原文的依据标成概括");
+    assert_eq!(summary.quote, "材料大意是另有一段");
+    assert_eq!((summary.start, summary.end), (0, source.text.len()));
+    assert!(task.validate_sources().is_empty());
+
+    // 声称逐字定位的卡片对不上原文，仍是硬错误。
+    task.topic_cards[0].quote = "篡改过的原句。".into();
+    assert_eq!(task.validate_sources().len(), 1);
 }
 
 #[test]
@@ -399,7 +435,7 @@ fn resume_skips_successful_blocks_and_resets_the_call_budget() {
     let remaining = task.coverage().pending;
     let second = ScriptedModel::new(|_, _| "无相关内容".into());
     run(&mut task, Action::Extract, &second, &mut |_| Ok(())).unwrap();
-    assert_eq!(second.prompts("原文块").len(), remaining);
+    assert_eq!(second.prompts("建议归纳").len(), remaining);
     assert_eq!(task.coverage().pending, 0);
     assert_eq!(task.resume_action, None);
 }
@@ -534,20 +570,22 @@ fn long_section_merge_uses_bounded_groups_and_can_resume_between_groups() {
 fn a_failed_block_does_not_stop_the_rest_of_extraction() {
     let mut task = WritingTask::new(TemplateKind::PlainDocument);
     task.topic = "工作".into();
+    // 每份约 8 KB，8k 窗口下一批只装得下一份：三份分三批问。
     for (title, text) in [
         ("甲材料", "甲材料原文。"),
         ("乙材料", "乙材料原文。"),
         ("丙材料", "丙材料原文。"),
     ] {
-        task.add_source(SourceSnapshot::new(title, SourceRole::Content, text).unwrap());
+        task.add_source(SourceSnapshot::new(title, SourceRole::Content, text.repeat(450)).unwrap());
     }
     let model = ScriptedModel::new(|_, prompt| {
         if prompt.contains("乙材料原文") {
-            "观点：伪造观点\n原句：不存在的原句。".into()
+            "这一批我不按格式回答。".into()
         } else {
             "无相关内容".into()
         }
-    });
+    })
+    .with_window(8192);
     let error = run(&mut task, Action::Extract, &model, &mut |_| Ok(())).unwrap_err();
     assert!(error.to_string().contains("1 块失败"), "{error:#}");
     let coverage = task.coverage();
@@ -561,8 +599,15 @@ fn a_failed_block_does_not_stop_the_rest_of_extraction() {
     );
     assert_eq!(task.resume_action, Some(Action::Extract));
 
-    // 接着跑只重试失败的那一块。
-    let retry = ScriptedModel::new(|_, _| "无相关内容".into());
+    assert!(
+        task.chunks.iter().any(|chunk| chunk
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("不按格式"))),
+        "失败原因带上模型回答的开头，便于判断"
+    );
+    // 接着跑只重试失败的那一批。
+    let retry = ScriptedModel::new(|_, _| "无相关内容".into()).with_window(8192);
     run(&mut task, Action::Extract, &retry, &mut |_| Ok(())).unwrap();
     assert_eq!(retry.prompts("乙材料原文").len(), 1);
     assert_eq!(retry.prompts("甲材料原文").len(), 0, "已成功的块不重跑");
@@ -576,7 +621,7 @@ fn a_manually_skipped_block_counts_as_covered_and_can_be_undone() {
     task.topic = "工作".into();
     let source = SourceSnapshot::new("材料", SourceRole::Content, "原文。").unwrap();
     task.add_source(source.clone());
-    let model = ScriptedModel::new(|_, _| "观点：假观点\n原句：不存在的原句。".into());
+    let model = ScriptedModel::new(|_, _| "格式不对的回答".into());
     assert!(run(&mut task, Action::Extract, &model, &mut |_| Ok(())).is_err());
     assert_eq!(task.coverage().failed, 1);
     let query = task.topic_query();
@@ -638,7 +683,8 @@ fn cancelling_stops_immediately_instead_of_retrying_the_rest() {
     let mut task = WritingTask::new(TemplateKind::PlainDocument);
     task.topic = "工作".into();
     task.add_source(
-        SourceSnapshot::new("长材料", SourceRole::Content, "原文段落。".repeat(500)).unwrap(),
+        // 约 150 KB：32k 窗口下要分几批。
+        SourceSnapshot::new("长材料", SourceRole::Content, "原文段落。".repeat(10_000)).unwrap(),
     );
     let model = Cancelling {
         inner: ScriptedModel::new(|_, _| "无相关内容".into()),
@@ -651,7 +697,7 @@ fn cancelling_stops_immediately_instead_of_retrying_the_rest() {
     assert!(coverage.total > 1);
     assert_eq!(coverage.done, 1, "取消后不再安排新请求");
     assert_eq!(coverage.failed, 0, "取消不是块失败");
-    assert_eq!(model.inner.prompts("原文块").len(), 1);
+    assert_eq!(model.inner.prompts("建议归纳").len(), 1);
 }
 
 #[test]
@@ -853,7 +899,7 @@ fn manually_edited_style_skips_the_summarization_call() {
 }
 
 #[test]
-fn the_topic_directory_is_summarized_once_until_its_input_changes() {
+fn a_catalog_that_fits_goes_to_planning_without_summarizing() {
     let mut task = WritingTask::new(TemplateKind::PlainDocument);
     task.topic = "工作".into();
     let source = SourceSnapshot::new("材料", SourceRole::Content, "材料原文。").unwrap();
@@ -878,14 +924,15 @@ fn the_topic_directory_is_summarized_once_until_its_input_changes() {
         ..Default::default()
     });
     run(&mut task, Action::Plan, &model, &mut |_| Ok(())).unwrap();
-    assert_eq!(model.asked("目录整理层级"), 1);
     run(&mut task, Action::Plan, &model, &mut |_| Ok(())).unwrap();
-    assert_eq!(
-        model.asked("目录整理层级"),
-        1,
-        "输入未变时连续调整提纲只归纳一次目录"
+    assert_eq!(model.asked("目录整理层级"), 0, "目录装得下就不让模型再归纳");
+    assert!(
+        model
+            .prompts("请拟定提纲")
+            .iter()
+            .all(|p| p.contains("C1 已提炼观点（《材料》）")),
+        "拟纲直接看到逐条素材与编号"
     );
-    assert_eq!(model.asked("请拟定提纲"), 2);
 }
 
 #[test]
@@ -1020,15 +1067,16 @@ fn retrying_one_failed_chunk_only_calls_the_model_for_that_chunk() {
         ("乙材料", "乙材料原文。"),
         ("丙材料", "丙材料原文。"),
     ] {
-        task.add_source(SourceSnapshot::new(title, SourceRole::Content, text).unwrap());
+        task.add_source(SourceSnapshot::new(title, SourceRole::Content, text.repeat(450)).unwrap());
     }
     let failing = ScriptedModel::new(|_, prompt| {
         if prompt.contains("乙材料原文") {
-            "观点：伪造观点\n原句：不存在的原句。".into()
+            "这一批我不按格式回答。".into()
         } else {
             "无相关内容".into()
         }
-    });
+    })
+    .with_window(8192);
     assert!(run(&mut task, Action::Extract, &failing, &mut |_| Ok(())).is_err());
     let failed = task
         .chunks
@@ -1040,7 +1088,7 @@ fn retrying_one_failed_chunk_only_calls_the_model_for_that_chunk() {
         })
         .cloned()
         .expect("有一块失败");
-    let retry = ScriptedModel::new(|_, _| "无相关内容".into());
+    let retry = ScriptedModel::new(|_, _| "无相关内容".into()).with_window(8192);
     run(
         &mut task,
         Action::RetryChunk(ChunkRef {
@@ -1158,7 +1206,9 @@ fn style_summary_is_redone_when_the_document_kind_changes() {
     let mut task = WritingTask::new(TemplateKind::PlainDocument);
     task.topic = "工作".into();
     task.add_source(SourceSnapshot::new("材料", SourceRole::Content, "原文。").unwrap());
+    // 两份样稿才需要归纳；一份样稿一次分析完就是结论。
     task.add_source(SourceSnapshot::new("样稿", SourceRole::Style, "样稿原文。").unwrap());
+    task.add_source(SourceSnapshot::new("样稿二", SourceRole::Style, "另一份样稿。").unwrap());
     let model = ScriptedModel::new(|_, prompt| {
         if prompt.contains("样稿：") || prompt.contains("归纳层级") {
             "风格分析。".into()
@@ -1186,7 +1236,7 @@ fn long_sample_analyses_still_merge_into_one_style() {
     let mut task = WritingTask::new(TemplateKind::ResearchReport);
     task.topic = "工作".into();
     task.add_source(SourceSnapshot::new("材料", SourceRole::Content, "原文。").unwrap());
-    let sample = "样稿段落，讲清问题与对策。\n\n".repeat(400);
+    let sample = "样稿段落，讲清问题与对策。\n\n".repeat(1500);
     task.add_source(SourceSnapshot::new("样稿", SourceRole::Style, sample).unwrap());
     // 窗口小一些，六块分析分成几组，才能走到「最后剩一组再合一次」那一层。
     let model = ScriptedModel::new(|_, prompt| {
@@ -1221,36 +1271,35 @@ fn long_sample_analyses_still_merge_into_one_style() {
 /// 一块的原句跨段、把段间空行合掉了。只放宽这两处包装，用字仍须逐字一致。
 #[test]
 fn small_model_wrapping_of_no_relevant_and_cross_paragraph_quotes_is_accepted() {
-    let mut task = WritingTask::new(TemplateKind::ResearchReport);
-    task.topic = "工作".into();
-    let empty = SourceSnapshot::new("甲", SourceRole::Content, "甲材料与主题无关。").unwrap();
-    let text = "试点不宜贪大求全。\n\n中期，应把试点流程固化。";
-    let crossing = SourceSnapshot::new("乙", SourceRole::Content, text).unwrap();
-    task.add_source(empty);
-    task.add_source(crossing.clone());
-    let model = ScriptedModel::new(|_, prompt| {
-        if prompt.contains("甲材料") {
-            "**无相关内容。**".into()
-        } else {
-            "观点：试点要聚焦\n原句：试点不宜贪大求全。中期，应把试点流程固化。".into()
-        }
-    });
-    run(&mut task, Action::Extract, &model, &mut |_| Ok(())).unwrap();
-    assert_eq!(task.coverage().done, 2);
-    let card = &task.topic_cards[0];
-    assert_eq!(card.quote, text, "卡片存原文里的实际片段（含段间空行）");
-    assert_eq!(&crossing.text[card.start..card.end], card.quote);
-    assert!(task.validate_sources().is_empty());
+    let run_with = |text: &str, answer: &'static str| {
+        let mut task = WritingTask::new(TemplateKind::ResearchReport);
+        task.topic = "工作".into();
+        task.add_source(SourceSnapshot::new("乙", SourceRole::Content, text).unwrap());
+        let model = ScriptedModel::new(move |_, _| answer.into());
+        run(&mut task, Action::Extract, &model, &mut |_| Ok(())).unwrap();
+        task
+    };
+    let empty = run_with("甲材料与主题无关。", "**无相关内容。**");
+    assert_eq!(empty.coverage().done, 1);
+    assert!(empty.topic_cards.is_empty());
 
-    // 改了一个字的原句仍然不算命中。
-    let mut strict = WritingTask::new(TemplateKind::ResearchReport);
-    strict.topic = "工作".into();
-    strict.add_source(SourceSnapshot::new("乙", SourceRole::Content, text).unwrap());
-    let model = ScriptedModel::new(|_, _| {
-        "观点：试点要聚焦\n原句：试点不宜贪大求全。中期，要把试点流程固化。".into()
-    });
-    assert!(run(&mut strict, Action::Extract, &model, &mut |_| Ok(())).is_err());
-    assert_eq!(strict.coverage().failed, 1);
+    let text = "试点不宜贪大求全。\n\n中期，应把试点流程固化。";
+    let crossing = run_with(
+        text,
+        "观点：试点要聚焦\n依据：试点不宜贪大求全。中期，应把试点流程固化。\n来源：材料1",
+    );
+    let card = &crossing.topic_cards[0];
+    assert!(card.located);
+    assert_eq!(card.quote, text, "卡片存原文里的实际片段（含段间空行）");
+    assert!(crossing.validate_sources().is_empty());
+
+    // 改了一个字的依据不算逐字定位，照收但标成概括，不冒充原句。
+    let changed = run_with(
+        text,
+        "观点：试点要聚焦\n依据：试点不宜贪大求全。中期，要把试点流程固化。\n来源：材料1",
+    );
+    assert!(!changed.topic_cards[0].located);
+    assert!(changed.validate_sources().is_empty());
 }
 
 /// 真机上 88 张主题卡（约 1.4 万字）按 16 000 字节分三组，目录要保留全部来源 ID，
@@ -1292,4 +1341,200 @@ fn many_topic_cards_are_organized_within_the_model_window() {
     assert_eq!(task.sections.len(), 2);
     // 约 59 KB 卡片：按窗口两组，各出一份目录后再合一次，共三次。
     assert_eq!(model.asked("目录整理层级"), 3, "按窗口分组，不该层层卡住");
+}
+
+/// 分阶段写作每一步都走关思考的补全；普通补全一调就报错。
+#[test]
+fn every_staged_writing_call_turns_thinking_off() {
+    use crate::agent::backend::{Completion, ModelBackend, ModelRole};
+    struct NoThinking(ScriptedModel);
+    impl ModelBackend for NoThinking {
+        fn complete(
+            &self,
+            _: ModelRole,
+            _: &str,
+            _: &str,
+            _: &mut dyn FnMut(crate::lmstudio::StreamDelta<'_>),
+        ) -> anyhow::Result<Completion> {
+            anyhow::bail!("分阶段写作不该走开着思考的补全")
+        }
+        fn complete_without_thinking(
+            &self,
+            role: ModelRole,
+            system: &str,
+            user: &str,
+            delta: &mut dyn FnMut(crate::lmstudio::StreamDelta<'_>),
+        ) -> anyhow::Result<Completion> {
+            self.0.complete(role, system, user, delta)
+        }
+        fn cancelled(&self) -> bool {
+            false
+        }
+    }
+    let (_, scripted) = written_task();
+    let calls_before = scripted.calls.borrow().len();
+    let mut task = WritingTask::new(TemplateKind::PlainDocument);
+    task.topic = "基层减负".into();
+    task.add_source(
+        SourceSnapshot::new("材料", SourceRole::Content, "合并同类报表。规范检查考核。").unwrap(),
+    );
+    let model = NoThinking(scripted);
+    let mut save = |_: &WritingTask| Ok(());
+    for action in [Action::Extract, Action::Plan] {
+        run(&mut task, action, &model, &mut save).unwrap();
+    }
+    task.confirm_outline().unwrap();
+    for action in [Action::Collect, Action::Write, Action::Polish] {
+        run(&mut task, action, &model, &mut save).unwrap();
+    }
+    assert!(model.0.calls.borrow().len() > calls_before);
+    assert!(!task.final_markdown.is_empty());
+}
+
+/// 60k 窗口一批投送约 30k token；几份材料拼进同一次请求，各自的观点按「来源」认回各自材料。
+#[test]
+fn a_sixty_k_window_sends_about_thirty_k_tokens_and_packs_several_materials() {
+    let tokens = super::execution::extract_tokens_for_test(61_440);
+    assert!((29_000..=31_000).contains(&tokens), "{tokens}");
+
+    let mut task = WritingTask::new(TemplateKind::ResearchReport);
+    task.topic = "工作".into();
+    for (title, text) in [
+        ("甲", "甲方案要点。"),
+        ("乙", "乙方案要点。"),
+        ("丙", "丙方案要点。"),
+    ] {
+        task.add_source(SourceSnapshot::new(title, SourceRole::Content, text.repeat(800)).unwrap());
+    }
+    let model = ScriptedModel::new(|_, _| {
+        "观点：甲的做法\n依据：甲方案要点。\n来源：材料1\n\n观点：丙的做法\n依据：丙方案要点。\n来源：材料3".into()
+    })
+    .with_window(61_440);
+    run(&mut task, Action::Extract, &model, &mut |_| Ok(())).unwrap();
+    assert_eq!(model.prompts("建议归纳").len(), 1, "三份约 43 KB 一次投完");
+    assert!(model.prompts("建议归纳")[0].contains("【材料3】《丙》"));
+    let source_of = |title: &str| {
+        task.sources
+            .iter()
+            .find(|s| s.title == title)
+            .unwrap()
+            .id
+            .clone()
+    };
+    assert_eq!(task.topic_cards[0].source_id, source_of("甲"));
+    assert_eq!(task.topic_cards[1].source_id, source_of("丙"));
+    let coverage = task.coverage();
+    assert_eq!(
+        (coverage.done, coverage.total),
+        (3, 3),
+        "乙没有观点记为无相关内容"
+    );
+}
+
+/// 分配素材一次问完、不重读原文；手动调整过的章节在重新分配时保持原样，只有改过的章节重分。
+#[test]
+fn material_is_assigned_once_and_only_changed_sections_are_reassigned() {
+    let (mut task, model) = written_task();
+    assert_eq!(model.prompts("素材（第").len(), 1);
+    let card = task.current_topic_cards()[0].id.clone();
+    assert!(
+        task.sections
+            .iter()
+            .all(|s| s.cards.len() == 1 && s.cards[0].id == card),
+        "卡片 ID 与主题卡一致，核对状态同步"
+    );
+    // 用户把第二节的素材移出；第一节改了要点。
+    task.sections[1].cards.clear();
+    task.sections[0].points.push_str("，补充时限");
+    task.outline_changed();
+    task.confirm_outline().unwrap();
+    assert!(
+        task.ready_for(Stage::Write).is_err(),
+        "改过的章节要先重新分配"
+    );
+    run(&mut task, Action::Collect, &model, &mut |_| Ok(())).unwrap();
+    assert_eq!(model.prompts("素材（第").len(), 2);
+    assert_eq!(task.sections[0].cards.len(), 1, "改过的章节重新分配");
+    assert!(task.sections[1].cards.is_empty(), "没改的章节保留手动调整");
+    assert!(task.ready_for(Stage::Write).is_ok());
+}
+
+/// 短稿整篇一次写成：锁定章节只作衔接参考、不重写；回答里漏掉的章节退回逐节写。
+#[test]
+fn short_drafts_are_written_at_once_and_missing_sections_fall_back_to_one_by_one() {
+    let (mut task, _) = written_task();
+    task.sections[0].locked = true;
+    task.sections[0].markdown = "锁定的原稿。".into();
+    task.sections[1].markdown.clear();
+    task.sections[1].status = SectionStatus::Idle;
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("确认提纲与各节素材") {
+            // 模型把要写的那节漏了，只回了一段开场白。
+            "下面是正文。".into()
+        } else if prompt.contains("当前章节素材组") {
+            "逐节补写的正文。".into()
+        } else {
+            "未发现明显结构问题".into()
+        }
+    });
+    run(&mut task, Action::Write, &model, &mut |_| Ok(())).unwrap();
+    let at_once = model.prompts("确认提纲与各节素材");
+    assert_eq!(at_once.len(), 1);
+    assert!(at_once[0].contains("本节已定稿，不要改写"));
+    assert!(at_once[0].contains("锁定的原稿。"));
+    assert_eq!(task.sections[0].markdown, "锁定的原稿。");
+    assert_eq!(task.sections[1].markdown, "逐节补写的正文。");
+    assert_eq!(task.sections[1].status, SectionStatus::Done);
+    // 真机上没分到素材的章节照搬了风格样稿里的期限，提示词要说清只写原则。
+    task.sections[1].cards.clear();
+    task.sections[1].status = SectionStatus::Idle;
+    task.sections[1].assigned_query = task.assignment_query(&task.sections[1]);
+    run(&mut task, Action::Write, &model, &mut |_| Ok(())).unwrap();
+    assert!(
+        model.prompts("确认提纲与各节素材")[1].contains("不写具体数字、期限"),
+        "没分到素材的章节只写原则性表述"
+    );
+
+    // 超过一次成文上限的长稿直接逐节写。
+    let (mut long, _) = written_task();
+    for section in &mut long.sections {
+        section.target_chars = ONE_SHOT_MAX_CHARS;
+        section.status = SectionStatus::Idle;
+    }
+    long.outline_changed();
+    long.confirm_outline().unwrap();
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("素材（第") {
+            "#1：C1\n#2：C1".into()
+        } else {
+            "逐节写的正文。".into()
+        }
+    });
+    run(&mut long, Action::Collect, &model, &mut |_| Ok(())).unwrap();
+    run(&mut long, Action::Write, &model, &mut |_| Ok(())).unwrap();
+    assert_eq!(model.prompts("确认提纲与各节素材").len(), 0);
+    assert_eq!(model.prompts("当前章节素材组").len(), 2);
+}
+
+/// 真机上关掉思考后，模型把拟纲写成了整篇正文（带「## 标题」）：重试一次仍如此时，从标题认出提纲。
+#[test]
+fn an_outline_written_as_a_full_draft_is_recovered_from_its_headings() {
+    let mut task = WritingTask::new(TemplateKind::ResearchReport);
+    task.topic = "工作".into();
+    task.target_chars = 3000;
+    task.add_source(SourceSnapshot::new("材料", SourceRole::Content, "原文。").unwrap());
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("请拟定提纲") {
+            "# 全文标题\n\n<!-- [摘要] -->\n摘要。\n\n## 一、瓶颈与挑战\n\n### 1. 小标题\n传统研究停留在定性描述。还有后文。\n\n## 转译路径\n从技术点到能力落地。".into()
+        } else {
+            "无相关内容".into()
+        }
+    });
+    run(&mut task, Action::Extract, &model, &mut |_| Ok(())).unwrap();
+    run(&mut task, Action::Plan, &model, &mut |_| Ok(())).unwrap();
+    assert_eq!(model.asked("上次没有按提纲格式输出"), 1, "先提醒重试一次");
+    let titles: Vec<_> = task.sections.iter().map(|s| s.title.as_str()).collect();
+    assert_eq!(titles, ["瓶颈与挑战", "转译路径"]);
+    assert_eq!(task.sections[0].points, "传统研究停留在定性描述。");
+    assert_eq!(task.sections[0].target_chars, 1500, "没给字数按节数平分");
 }

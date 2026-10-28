@@ -42,11 +42,11 @@ impl DraftPage<'_> {
             Stage::Prepare => ("开始提炼", Some(Action::Extract), Stage::Extract),
             Stage::Extract => ("生成提纲", Some(Action::Plan), Stage::Outline),
             Stage::Outline => (
-                "确认提纲，准备各节素材",
+                "确认提纲，分配各节素材",
                 Some(Action::Collect),
                 Stage::Outline,
             ),
-            Stage::Collect => ("开始分节写作", Some(Action::Write), Stage::Write),
+            Stage::Collect => ("开始成文", Some(Action::Write), Stage::Write),
             Stage::Write => ("合并全文，开始统稿", Some(Action::Polish), Stage::Review),
             Stage::Review => ("审阅并合并到正文…", None, Stage::Review),
         };

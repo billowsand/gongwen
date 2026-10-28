@@ -6,6 +6,8 @@
 //! - `GONGWEN_WRITING_CONTENT`：内容材料路径，多份用 `;` 分隔；
 //! - `GONGWEN_WRITING_STYLE`：风格样稿路径（可选，多份用 `;` 分隔）；
 //! - `GONGWEN_WRITING_CHARS`：目标字数（缺省 3000）；
+//! - `GONGWEN_LIVE_LLM_WINDOW`：模型上下文窗口（token，缺省 61440）。服务不报窗口时程序按模型名估，
+//!   常常偏小；分阶段写作按半个窗口投送材料，所以这里按实际部署的窗口填；
 //! - `GONGWEN_WRITING_OUT`：输出目录，写入逐步保存的任务 JSON、运行日志、提纲与全文；
 //! - `GONGWEN_WRITING_RESUME=1`：输出目录里已有 `task.json` 时从它续跑（与界面「接着跑」相同，
 //!   已完成的块不再问模型）。
@@ -177,6 +179,10 @@ fn live_staged_writing_end_to_end() {
     config.lm_studio.model = model.clone();
     config.lm_studio.api_key = std::env::var("GONGWEN_LIVE_LLM_KEY").unwrap_or_default();
     config.lm_studio.timeout_seconds = 600;
+    config.lm_studio.context_window = std::env::var("GONGWEN_LIVE_LLM_WINDOW")
+        .ok()
+        .and_then(|window| window.parse().ok())
+        .unwrap_or(61_440);
     let mut run = Run {
         config,
         log: std::fs::OpenOptions::new()
@@ -290,26 +296,25 @@ fn finish(mut run: Run, mut task: WritingTask, model: String) {
     run.save("outline.md", &outline);
     task.confirm_outline().expect("确认提纲");
 
-    // 四：分节备料。
-    if run.step(&mut task, Action::Collect, "分节备料", 2).is_err() {
+    // 四：从提炼结果给各节分配素材。
+    if run.step(&mut task, Action::Collect, "分配素材", 2).is_err() {
         skip_failed(&mut run, &mut task);
     }
     for section in task.sections.clone() {
-        let coverage = task.section_coverage(&section.id);
+        let cards = task.current_section_cards(&section);
+        let located = cards.iter().filter(|card| card.located).count();
         run.log(format!(
-            "  {}：素材 {} 条，块 {}/{}（跳过 {}，失败 {}）",
+            "  {}：素材 {} 条（逐字定位 {}，概括 {}）",
             section.title,
-            task.current_section_cards(&section).len(),
-            coverage.done,
-            coverage.total,
-            coverage.skipped,
-            coverage.failed
+            cards.len(),
+            located,
+            cards.len() - located
         ));
     }
 
-    // 五：分节写作。
-    run.step(&mut task, Action::Write, "分节写作", 2)
-        .expect("分节写作失败");
+    // 五：成文（短稿整篇一次写成）。
+    run.step(&mut task, Action::Write, "成文", 2)
+        .expect("成文失败");
     for section in &task.sections {
         run.log(format!(
             "  {}：{} 字 / 目标 {} 字",

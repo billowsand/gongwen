@@ -364,7 +364,9 @@ impl DraftPage<'_> {
                 editable && kind_fits,
                 theme::icon_text_button(theme::Icon::FilePlus, "分阶段写作…"),
             )
-            .on_hover_text("按素材、提纲、分节写作与统稿审阅逐步成文；已有任务继续上次进度")
+            .on_hover_text(
+                "按提炼素材、确认提纲、分配素材、成文与统稿审阅逐步完成；已有任务继续上次进度",
+            )
             .on_disabled_hover_text(if kind_fits {
                 "当前稿件只读，不能分阶段写作"
             } else {

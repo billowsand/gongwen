@@ -78,7 +78,6 @@ pub(crate) struct WritingPanel {
 struct CoverageCache {
     revision: u64,
     topic: Coverage,
-    sections: HashMap<String, Coverage>,
     sources: HashMap<String, Coverage>,
 }
 
@@ -141,26 +140,6 @@ impl WritingPanel {
             .unwrap_or_default()
     }
 
-    pub(crate) fn section_coverage(&mut self, section_id: &str) -> Coverage {
-        self.ensure_coverage_cache();
-        if let Some(coverage) = self
-            .coverage_cache
-            .as_ref()
-            .and_then(|cache| cache.sections.get(section_id))
-        {
-            return *coverage;
-        }
-        let coverage = self.task.section_coverage(section_id);
-        #[cfg(test)]
-        {
-            self.coverage_computations += 1;
-        }
-        if let Some(cache) = self.coverage_cache.as_mut() {
-            cache.sections.insert(section_id.to_string(), coverage);
-        }
-        coverage
-    }
-
     /// 单份材料的提炼 / 分析进度，同样按修订号缓存（素材列表、阶段勾与调用估算每帧都要）。
     pub(crate) fn source_coverage(&mut self, source_id: &str) -> Coverage {
         self.ensure_coverage_cache();
@@ -208,17 +187,12 @@ impl WritingPanel {
             }
             Stage::Outline => !self.task.sections.is_empty() && self.task.outline_confirmed,
             Stage::Collect => {
-                let ids: Vec<String> = self
-                    .task
-                    .sections
-                    .iter()
-                    .map(|section| section.id.clone())
-                    .collect();
-                !ids.is_empty()
-                    && ids.iter().all(|id| {
-                        let coverage = self.section_coverage(id);
-                        coverage.total > 0 && coverage.pending == 0 && coverage.failed == 0
-                    })
+                !self.task.sections.is_empty()
+                    && self
+                        .task
+                        .sections
+                        .iter()
+                        .all(|section| self.task.section_assigned(section))
             }
             Stage::Write => {
                 !self.task.sections.is_empty()
@@ -243,17 +217,19 @@ impl WritingPanel {
                 let coverage = self.coverage();
                 coverage.failed > 0 || (coverage.done > 0 && coverage.pending > 0)
             }
+            // 提纲确认过、但有章节在改纲或重新提炼后还没重新分配素材。
             Stage::Collect => {
-                let ids: Vec<String> = self
-                    .task
-                    .sections
-                    .iter()
-                    .map(|section| section.id.clone())
-                    .collect();
-                ids.iter().any(|id| {
-                    let coverage = self.section_coverage(id);
-                    coverage.failed > 0 || (coverage.done > 0 && coverage.pending > 0)
-                })
+                self.task.outline_confirmed
+                    && self
+                        .task
+                        .sections
+                        .iter()
+                        .any(|section| !section.assigned_query.is_empty())
+                    && self
+                        .task
+                        .sections
+                        .iter()
+                        .any(|section| !self.task.section_assigned(section))
             }
             Stage::Outline => !self.task.sections.is_empty() && !self.task.outline_confirmed,
             Stage::Write => {
@@ -268,29 +244,22 @@ impl WritingPanel {
         }
     }
 
-    /// 长任务的总进度：主题提炼 + 各节备料 + 各节正文。
+    /// 长任务的总进度：主题提炼 + 各节分配素材 + 各节正文。
     pub(crate) fn overall_progress(&mut self) -> (usize, usize) {
+        use crate::agent::writing::SectionStatus;
         let topic = self.coverage();
-        let mut total = topic.total;
-        let mut done = topic.done;
-        let ids: Vec<String> = self
+        let sections = self.task.sections.len();
+        let assigned = self
             .task
             .sections
             .iter()
-            .map(|section| section.id.clone())
-            .collect();
-        for id in &ids {
-            let coverage = self.section_coverage(id);
-            total += coverage.total;
-            done += coverage.done;
-        }
-        total += ids.len();
-        done += self
+            .filter(|section| self.task.section_assigned(section))
+            .count();
+        let written = self
             .task
             .sections
             .iter()
             .filter(|section| {
-                use crate::agent::writing::SectionStatus;
                 !section.markdown.trim().is_empty()
                     && matches!(
                         section.status,
@@ -300,77 +269,58 @@ impl WritingPanel {
                     )
             })
             .count();
-        (done, total)
+        (topic.done + assigned + written, topic.total + sections * 2)
     }
 
     /// 主操作旁的预计模型调用次数；口径写在悬停说明里。
     pub(crate) fn estimated_calls(&mut self) -> Option<(String, String)> {
-        let basis =
-            "按当前材料块数、章节数和素材组数粗估，实际会受窗口大小、已完成块与失败重试影响";
+        let basis = "按当前材料量与上次运行的块宽粗估：内容材料按约半个模型窗口一批投送，每份样稿一次；\
+                     实际批数随模型窗口变化，失败重试另计";
         match self.task.stage {
             Stage::Prepare => {
                 let coverage = self.coverage();
                 if coverage.total == 0 {
                     return None;
                 }
-                let mut samples = 0usize;
-                let sample_ids: Vec<String> = self
+                let content: usize = self
+                    .task
+                    .sources
+                    .iter()
+                    .filter(|source| source.role == SourceRole::Content)
+                    .map(|source| source.text.len())
+                    .sum();
+                let batches = content.div_ceil(self.task.chunk_bytes.max(1)).max(1);
+                let samples = self
                     .task
                     .sources
                     .iter()
                     .filter(|source| source.role != SourceRole::Content)
-                    .map(|source| source.id.clone())
-                    .collect();
-                for id in sample_ids {
-                    samples += self.source_coverage(&id).total;
-                }
-                let summarize = if samples > 0 { 2 } else { 0 };
+                    .count();
                 Some((
                     format!(
-                        "开始提炼前：预计约 {} 次模型调用（内容 {} 块 + 样稿 {} 块 + 归纳 {} 次）",
-                        coverage.total + samples + summarize,
-                        coverage.total,
-                        samples,
-                        summarize
+                        "开始提炼前：预计约 {} 次模型调用（内容 {} 批 + 样稿 {} 份）",
+                        batches + samples,
+                        batches,
+                        samples
                     ),
                     basis.to_string(),
                 ))
             }
-            Stage::Outline => {
-                let coverage = self.coverage();
-                let sections = self.task.sections.len().max(1);
-                Some((
-                    format!(
-                        "准备各节素材前：预计约 {} 次模型调用（内容 {} 块 × {} 节）",
-                        coverage.total * sections,
-                        coverage.total,
-                        sections
-                    ),
-                    basis.to_string(),
-                ))
-            }
+            Stage::Outline => Some((
+                "确认提纲后：从已提炼的素材分配各节，约 1 次模型调用，不再重读原文".into(),
+                basis.to_string(),
+            )),
             Stage::Collect => {
-                let sections: Vec<usize> = self
-                    .task
-                    .sections
-                    .iter()
-                    .map(|section| {
-                        self.task
-                            .current_section_cards(section)
-                            .len()
-                            .div_ceil(5)
-                            .max(1)
-                    })
-                    .collect();
-                let calls: usize = sections.iter().sum();
-                Some((
+                let total: usize = self.task.sections.iter().map(|s| s.target_chars).sum();
+                let text = if total <= crate::agent::writing::ONE_SHOT_MAX_CHARS {
+                    format!("开始写作前：全文约 {total} 字，整篇一次写成，约 1 次模型调用")
+                } else {
                     format!(
-                        "开始分节写作前：预计约 {} 次模型调用（{} 节、按素材组粗估）",
-                        calls,
-                        sections.len()
-                    ),
-                    basis.to_string(),
-                ))
+                        "开始写作前：全文约 {total} 字，超过一次成文上限，逐节写约 {} 次以上模型调用",
+                        self.task.sections.len()
+                    )
+                };
+                Some((text, basis.to_string()))
             }
             Stage::Extract | Stage::Write | Stage::Review => None,
         }
@@ -392,7 +342,6 @@ impl WritingPanel {
         self.coverage_cache = Some(CoverageCache {
             revision: self.revision,
             topic,
-            sections: HashMap::new(),
             sources: HashMap::new(),
         });
     }

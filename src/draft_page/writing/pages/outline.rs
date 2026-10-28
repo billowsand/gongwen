@@ -5,7 +5,7 @@ use super::*;
 impl DraftPage<'_> {
     pub(crate) fn writing_outline(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
         ui.heading("先把提纲定下来");
-        ui.weak("直接编辑标题、要点与篇幅，标题不写编号。确认后按各节要求读取内容材料；只调顺序或未改动的章节沿用已备素材。");
+        ui.weak("直接编辑标题、要点与篇幅，标题不写编号。确认后从已提炼的素材里给各节分配素材（不再重读原文）；只调顺序或未改动的章节沿用已分配的素材。");
         let mut changed = false;
         let mut move_up = None;
         let mut move_down = None;

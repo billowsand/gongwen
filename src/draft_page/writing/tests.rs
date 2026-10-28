@@ -546,11 +546,6 @@ fn coverage_benchmark_one_megabyte_and_eight_sections() {
         black_box(task.coverage());
     }
     let uncached = start.elapsed() / rounds;
-    let start = Instant::now();
-    for _ in 0..rounds {
-        black_box(task.section_coverage("s0"));
-    }
-    let uncached_section = start.elapsed() / rounds;
 
     let mut panel = WritingPanel::new(TemplateKind::PlainDocument);
     panel.task = task;
@@ -559,14 +554,7 @@ fn coverage_benchmark_one_megabyte_and_eight_sections() {
         black_box(panel.coverage());
     }
     let cached = start.elapsed() / rounds;
-    let start = Instant::now();
-    for _ in 0..rounds {
-        black_box(panel.section_coverage("s0"));
-    }
-    let cached_section = start.elapsed() / rounds;
-    println!(
-        "1 MB 材料 / 8 节：每次覆盖率 未缓存 {uncached:?} → 缓存命中 {cached:?}；单节 未缓存 {uncached_section:?} → 缓存命中 {cached_section:?}"
-    );
+    println!("1 MB 材料 / 8 节：每次覆盖率 未缓存 {uncached:?} → 缓存命中 {cached:?}");
 }
 
 #[test]
@@ -711,15 +699,13 @@ fn the_evidence_column_shows_stage_specific_status() {
     let mut harness = harness(Stage::Outline);
     harness.run();
     assert!(
-        harness.query_by_label_contains("各节备料状态").is_some(),
-        "提纲页右栏显示每节备料状态"
-    );
-    assert!(
         harness
-            .query_all_by_label_contains("素材 1 条 · 已备料")
-            .count()
-            >= 1
+            .query_by_label_contains("确认提纲后分给各节")
+            .is_some(),
+        "提纲页右栏显示各节素材分配情况"
     );
+    // 夹具里各节素材是旧版逐节备料留下的，读回时视为已分配。
+    assert!(harness.query_all_by_label_contains("· 素材 1 条").count() >= 1);
 }
 
 #[test]

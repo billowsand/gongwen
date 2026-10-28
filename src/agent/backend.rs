@@ -59,6 +59,19 @@ pub(crate) trait ModelBackend {
         self.complete(role, system, user, on_delta)
     }
 
+    /// 同 [`complete`](Self::complete)，但关掉思考型模型的推理。分阶段写作的摘录、拟纲、成文都是
+    /// 照着给定材料与格式办事，推理会吃掉大部分输出预算与时间（真机上提炼首轮输入 4 万 token、
+    /// 输出 17 万 token）。默认实现就是普通补全（脚本模型）。
+    fn complete_without_thinking(
+        &self,
+        role: ModelRole,
+        system: &str,
+        user: &str,
+        on_delta: &mut dyn FnMut(StreamDelta<'_>),
+    ) -> anyhow::Result<Completion> {
+        self.complete(role, system, user, on_delta)
+    }
+
     /// 用户是否已经点了停止。流程在两步之间查它，不必等下一次模型调用才停。
     fn cancelled(&self) -> bool;
 
@@ -313,6 +326,20 @@ impl ModelBackend for LmBackend {
         on_delta: &mut dyn FnMut(StreamDelta<'_>),
     ) -> anyhow::Result<Completion> {
         self.complete_with(role, system, user, ChatOptions::default(), on_delta)
+    }
+
+    fn complete_without_thinking(
+        &self,
+        role: ModelRole,
+        system: &str,
+        user: &str,
+        on_delta: &mut dyn FnMut(StreamDelta<'_>),
+    ) -> anyhow::Result<Completion> {
+        let options = ChatOptions {
+            disable_thinking: true,
+            ..ChatOptions::default()
+        };
+        self.complete_with(role, system, user, options, on_delta)
     }
 
     fn complete_json(

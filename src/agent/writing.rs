@@ -8,14 +8,19 @@ mod assemble;
 mod execution;
 pub(crate) mod store;
 use execution::chunk_ranges;
-pub(crate) use execution::run;
+pub(crate) use execution::{ONE_SHOT_MAX_CHARS, run};
 
 #[cfg(test)]
 mod tests;
 
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_CHUNK_BYTES: usize = 3_200;
+/// 单块原文的安全上限。块宽平时按模型窗口算（约半个窗口，见执行层 `extract_tokens`）。
+const MAX_CHUNK_BYTES: usize = 512 * 1024;
+/// 新任务的初始块宽，约是 32k 窗口的一半；开始提炼时按实际窗口重算。
+const DEFAULT_CHUNK_BYTES: usize = 44_000;
+/// 旧版任务存盘时没有块宽字段，那时固定按 3200 字节切块，读回按它算才对得上旧的块记录。
+const LEGACY_CHUNK_BYTES: usize = 3_200;
 const MAX_RETRIES: usize = 2;
 const MAX_CALLS_PER_ACTION: usize = 400;
 const MAX_TASK_SECONDS: u64 = 3 * 60 * 60;
@@ -74,8 +79,8 @@ impl Stage {
             Self::Prepare => "素材准备",
             Self::Extract => "提炼素材",
             Self::Outline => "确认提纲",
-            Self::Collect => "分节备料",
-            Self::Write => "分节写作",
+            Self::Collect => "各节素材",
+            Self::Write => "成文",
             Self::Review => "统稿审阅",
         }
     }
@@ -150,7 +155,16 @@ pub(crate) struct MaterialCard {
     /// 产生这张卡片时的请求指纹（主题或本节要求）；与当前指纹不同即为过期，保留不用。
     #[serde(default)]
     pub query: String,
+    /// 依据是否已在原文里逐字定位。是：`quote` 就是原文 `start..end` 的片段；否：`quote` 是模型
+    /// 概括的依据，`start..end` 只标出它出自哪一段原文。旧卡片都是逐字定位的，缺省为是。
+    #[serde(default = "located_default")]
+    pub located: bool,
 }
+
+fn located_default() -> bool {
+    true
+}
+
 impl Default for MaterialCard {
     fn default() -> Self {
         Self {
@@ -164,6 +178,7 @@ impl Default for MaterialCard {
             verification: Verification::Unverified,
             status: String::new(),
             query: String::new(),
+            located: true,
         }
     }
 }
@@ -254,6 +269,9 @@ pub(crate) struct Section {
     /// 审阅时选了「保留原稿」：建议仍保留、可随时改回，拼全文用本节正文。
     #[serde(default)]
     pub review_kept_draft: bool,
+    /// 上次给本节分配素材时的指纹（[`WritingTask::assignment_query`]）；与当前一致即已备料。
+    #[serde(default)]
+    pub assigned_query: String,
     /// 锁定或人工章节的统稿建议：单独存放，拼全文仍用本节正文，采纳与否由用户决定。
     #[serde(default)]
     pub advisory_suggestion: Option<String>,
@@ -423,8 +441,8 @@ impl WritingTask {
             stale_reason: None,
             version: 1,
             resume_action: None,
-            topic_chunk_bytes: MAX_CHUNK_BYTES,
-            chunk_bytes: MAX_CHUNK_BYTES,
+            topic_chunk_bytes: DEFAULT_CHUNK_BYTES,
+            chunk_bytes: DEFAULT_CHUNK_BYTES,
             review_notes: String::new(),
             review_group_notes: Vec::new(),
             review_group_hash: String::new(),
@@ -479,11 +497,13 @@ impl WritingTask {
                 .chain(self.sections.iter().flat_map(|x| x.cards.iter()))
                 .filter(|c| c.source_id == s.id)
             {
+                // 逐字定位的卡片必须与原文片段完全一致；概括的依据只核对所标出处在原文范围内，
+                // 不冒充原句。事实是否有出处由交付前对全文的关键事实核对把关。
                 if c.end > s.text.len()
                     || c.start > c.end
                     || !s.text.is_char_boundary(c.start)
                     || !s.text.is_char_boundary(c.end)
-                    || s.text.get(c.start..c.end) != Some(c.quote.as_str())
+                    || (c.located && s.text.get(c.start..c.end) != Some(c.quote.as_str()))
                 {
                     out.push(SourceIssue {
                         source_id: s.id.clone(),
@@ -499,7 +519,7 @@ impl WritingTask {
         digest(format!("topic|{}", self.topic.trim()).as_bytes())
     }
 
-    /// 分节备料的请求指纹：只随文种、主题与本节标题、要点、字数变化，与章节顺序无关。
+    /// 本节要求的指纹：只随文种、主题与本节标题、要点、字数变化，与章节顺序无关。
     pub(crate) fn section_query(&self, section: &Section) -> String {
         digest(
             format!(
@@ -512,6 +532,22 @@ impl WritingTask {
             )
             .as_bytes(),
         )
+    }
+
+    /// 分配素材的指纹：本节要求加当前主题卡片集合。章节改了、材料重新提炼了，都要重新分配。
+    pub(crate) fn assignment_query(&self, section: &Section) -> String {
+        let mut ids: Vec<&str> = self
+            .current_topic_cards()
+            .into_iter()
+            .map(|card| card.id.as_str())
+            .collect();
+        ids.sort_unstable();
+        digest(format!("assign|{}|{}", self.section_query(section), ids.join(",")).as_bytes())
+    }
+
+    /// 本节是否已按当前提纲与当前素材分配过素材（可以一条也没分到）。
+    pub(crate) fn section_assigned(&self, section: &Section) -> bool {
+        section.assigned_query == self.assignment_query(section)
     }
 
     /// 按当前主题有效的主题素材卡。
@@ -664,6 +700,21 @@ impl WritingTask {
                 card.query.clone_from(query);
             }
         }
+        // 逐节重读原文那一版备好的章节：素材已在本节，视为已分配，不必再问一次模型。
+        let adopted: Vec<_> = self
+            .sections
+            .iter()
+            .map(|section| {
+                (section.assigned_query.is_empty()
+                    && !self.current_section_cards(section).is_empty())
+                .then(|| self.assignment_query(section))
+            })
+            .collect();
+        for (section, query) in self.sections.iter_mut().zip(adopted) {
+            if let Some(query) = query {
+                section.assigned_query = query;
+            }
+        }
     }
 
     /// 块状态索引，键与 [`chunk_hash`] 记录的块身份一致。覆盖率与就绪判断都走它，
@@ -700,24 +751,14 @@ impl WritingTask {
             .copied()
     }
 
+    /// 主题提炼的覆盖情况（只算内容材料）。
     pub(crate) fn coverage(&self) -> Coverage {
-        self.coverage_for(None)
-    }
-    pub(crate) fn section_coverage(&self, section_id: &str) -> Coverage {
-        self.coverage_for(Some(section_id))
-    }
-    fn coverage_for(&self, section_id: Option<&str>) -> Coverage {
-        let section = section_id.and_then(|id| self.sections.iter().find(|s| s.id == id));
-        let (block_size, query) = match section {
-            Some(section) => (section.chunk_bytes.max(512), self.section_query(section)),
-            None => (self.topic_chunk_bytes, self.topic_query()),
-        };
         let sources: Vec<_> = self
             .sources
             .iter()
             .filter(|s| s.role == SourceRole::Content)
             .collect();
-        self.coverage_of(&sources, section_id, block_size, &query)
+        self.coverage_of(&sources, None, self.topic_chunk_bytes, &self.topic_query())
     }
 
     /// 单份材料的处理进度（素材准备页逐份显示用）；样式与结构样稿按空指纹统计。
@@ -942,7 +983,7 @@ impl WritingTask {
         }
         self.drafts_changed();
         self.stale_reason = Some(format!(
-            "{}已修改：提纲请复核；未经人工修改的章节会在下次分节写作时按新要求重写",
+            "{}已修改：提纲请复核；未经人工修改的章节会在下次成文时按新要求重写",
             if style {
                 "写作风格"
             } else {
@@ -1081,33 +1122,19 @@ impl WritingTask {
             Stage::Collect => anyhow::ensure!(self.outline_confirmed, "请先确认提纲"),
             Stage::Write => {
                 anyhow::ensure!(self.outline_confirmed, "请先确认提纲");
-                let content: Vec<_> = self
-                    .sources
-                    .iter()
-                    .filter(|s| s.role == SourceRole::Content)
-                    .collect();
-                anyhow::ensure!(!content.is_empty(), "没有内容材料");
-                let index = self.chunk_index();
+                anyhow::ensure!(
+                    self.sources
+                        .iter()
+                        .any(|source| source.role == SourceRole::Content),
+                    "没有内容材料"
+                );
+                // 各节素材从已提炼的主题素材里分配，不再逐节重读原文。
                 for section in &self.sections {
-                    let query = self.section_query(section);
-                    for source in &content {
-                        for (start, end) in chunk_ranges(&source.text, section.chunk_bytes.max(512))
-                        {
-                            anyhow::ensure!(
-                                Self::chunk_status(
-                                    &index,
-                                    source,
-                                    Some(section.id.as_str()),
-                                    &query,
-                                    start,
-                                    end
-                                )
-                                .is_some_and(ChunkStatus::counts_as_done),
-                                "章节「{}」尚有原文块未成功处理",
-                                section.title
-                            );
-                        }
-                    }
+                    anyhow::ensure!(
+                        self.section_assigned(section),
+                        "章节「{}」尚未分配素材",
+                        section.title
+                    );
                 }
             }
             Stage::Review => {
@@ -1197,5 +1224,5 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 fn default_chunk_bytes() -> usize {
-    MAX_CHUNK_BYTES
+    LEGACY_CHUNK_BYTES
 }

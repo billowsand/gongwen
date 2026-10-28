@@ -61,53 +61,22 @@ impl DraftPage<'_> {
                     progress.total
                 ));
             }
-        } else if self.doc.writing.view_stage == Stage::Outline {
+        } else if matches!(self.doc.writing.view_stage, Stage::Outline | Stage::Collect) {
             ui.separator();
-            ui.strong("各节备料状态");
-            let rows: Vec<(String, String, usize)> = self
-                .doc
-                .writing
-                .task
-                .sections
-                .iter()
-                .map(|section| {
-                    (
-                        section.id.clone(),
-                        section.title.clone(),
-                        self.doc.writing.task.current_section_cards(section).len(),
-                    )
-                })
-                .collect();
-            for (id, title, cards) in rows {
-                let coverage = self.doc.writing.section_coverage(&id);
-                let state = if coverage.total > 0 && coverage.pending == 0 && coverage.failed == 0 {
-                    "已备料"
-                } else if coverage.done > 0 {
-                    "待重新备料"
+            ui.strong("各节素材");
+            let task = &self.doc.writing.task;
+            ui.weak(format!(
+                "已提炼素材 {} 条，确认提纲后分给各节",
+                task.current_topic_cards().len()
+            ));
+            for section in &task.sections {
+                let state = if task.section_assigned(section) {
+                    format!("素材 {} 条", task.current_section_cards(section).len())
                 } else {
-                    "待备料"
+                    "待分配".to_string()
                 };
-                ui.label(title);
-                ui.weak(format!(
-                    "素材 {cards} 条 · {state}（{}/{} 块）",
-                    coverage.done, coverage.total
-                ));
-            }
-        } else if self.doc.writing.view_stage == Stage::Collect {
-            ui.separator();
-            ui.strong("分节备料进度");
-            let sections: Vec<(String, String)> = self
-                .doc
-                .writing
-                .task
-                .sections
-                .iter()
-                .map(|section| (section.id.clone(), section.title.clone()))
-                .collect();
-            for (id, title) in sections {
-                let coverage = self.doc.writing.section_coverage(&id);
-                ui.label(title);
-                ui.weak(format!("已处理 {} / {} 块", coverage.done, coverage.total));
+                ui.label(&section.title);
+                ui.weak(format!("约 {} 字 · {state}", section.target_chars));
             }
         } else if self.doc.writing.view_stage == Stage::Write {
             if let Some(section) = self.doc.writing.task.sections.get(self.doc.writing.section) {
@@ -213,7 +182,14 @@ impl DraftPage<'_> {
                     crate::agent::writing::Verification::Conflict => "存在冲突",
                     crate::agent::writing::Verification::Insufficient => "依据不足",
                 };
-                ui.weak(format!("原句定位已命中 · 观点核验：{verification}"));
+                ui.weak(format!(
+                    "{} · 观点核验：{verification}",
+                    if card.located {
+                        "依据已在原文逐字定位"
+                    } else {
+                        "依据为模型概括，未逐字定位"
+                    }
+                ));
                 ui.label(&card.quote);
                 let mut set = None;
                 ui.horizontal_wrapped(|ui| {
