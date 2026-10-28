@@ -80,6 +80,7 @@ pub(super) fn fixture() -> GongwenApp {
         task_error: None,
         task_ui: crate::task_ui::State::default(),
         task_extraction_rx: None,
+        task_fill_rx: None,
         task_auto_queue: Default::default(),
         manuscript_error,
         manuscript_filter: ManuscriptFilter::default(),
@@ -601,17 +602,21 @@ fn task_assistant_samples() {
     app.tabs = vec![TabRef::Page(NavPage::TaskAssistant)];
     app.active_tab = 0;
     let mut canvas = crate::ui_snapshot::Canvas::default();
-    for (index, (width, editing, inbox)) in [
-        (1280.0, false, false),
-        (1280.0, true, false),
-        (1280.0, false, true),
-        (900.0, false, false),
-        (760.0, true, false),
-        (600.0, false, false),
+    for (index, (width, editing, inbox, filling)) in [
+        (1280.0, false, false, false),
+        (1280.0, true, false, false),
+        (1280.0, false, true, false),
+        (900.0, false, false, false),
+        (760.0, true, false, false),
+        (600.0, false, false, false),
+        (1280.0, false, false, true),
+        (760.0, false, false, true),
     ]
     .into_iter()
     .enumerate()
     {
+        app.task_ui = crate::task_ui::State::default();
+        app.task_ui.selected = Some(child.id.clone());
         app.task_ui.view = if inbox {
             crate::task_ui::View::Inbox
         } else {
@@ -628,6 +633,35 @@ fn task_assistant_samples() {
         } else {
             None
         };
+        if filling {
+            use crate::task_assistant::extract::{Fill, FilledValue};
+            let source = "办公室要求形成方案报审，下一步征求各科室意见。另安排会议筹备。";
+            let mut draft = crate::task_assistant::Task::blank();
+            draft.goal = "形成可执行的工作安排".into();
+            app.task_ui.fill_text = source.into();
+            let value = |value: &str| {
+                Some(FilledValue {
+                    value: value.into(),
+                    evidence: "办公室要求形成方案报审".into(),
+                })
+            };
+            crate::task_ui::apply_fill(
+                &mut app.task_ui,
+                &mut draft,
+                Fill {
+                    name: value("形成方案报审"),
+                    goal: value("形成方案报审"),
+                    next_step: Some(FilledValue {
+                        value: "征求各科室意见".into(),
+                        evidence: "下一步征求各科室意见".into(),
+                    }),
+                    others: 1,
+                    dropped: 1,
+                    ..Default::default()
+                },
+            );
+            app.task_ui.draft = Some(draft);
+        }
         let size = egui::vec2(width, 900.0);
         for frame in 0..3 {
             let mut output = ctx.run_ui(
@@ -657,7 +691,9 @@ fn task_assistant_samples() {
                     theme::canvas(),
                     std::path::Path::new(&format!(
                         "tmp/task-assistant-{width}{}.png",
-                        if editing {
+                        if filling {
+                            "-fill"
+                        } else if editing {
                             "-edit"
                         } else if inbox {
                             "-inbox"

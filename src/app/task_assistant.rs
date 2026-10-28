@@ -16,6 +16,12 @@ enum Material {
     Knowledge(i64),
 }
 
+pub(super) struct TaskFillOutput {
+    draft_id: String,
+    text: String,
+    result: Result<crate::task_assistant::extract::Fill, String>,
+}
+
 /// 导入线程先限量，再克隆正文，避免超大批次在交给队列之前耗尽内存。
 pub(super) fn can_add_material(items: &[(String, String, String)], text: &str) -> bool {
     text.len() <= MAX_SOURCE_BYTES
@@ -29,6 +35,92 @@ pub(super) fn can_add_material(items: &[(String, String, String)], text: &str) -
 }
 
 impl super::GongwenApp {
+    pub(crate) fn start_task_fill(&mut self, request: crate::task_ui::FillRequest) {
+        if self.task_fill_rx.is_some() {
+            self.task_ui.fill_error = Some("上一次识别还没结束，请等待后重试。".into());
+            return;
+        }
+        let setup = (|| -> Result<_> {
+            let store = self
+                .task_store
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("任务数据库不可用"))?;
+            let tasks = store
+                .list(false)?
+                .into_iter()
+                .filter(|t| !t.archived && !t.deleted)
+                .take(50)
+                .collect::<Vec<_>>();
+            let categories = store.categories()?;
+            let mut cfg = self.config.assist_chat()?;
+            cfg.temperature = 0.0;
+            cfg.max_tokens = cfg.max_tokens.clamp(1024, 4096);
+            Ok((tasks, categories, cfg))
+        })();
+        let (tasks, categories, cfg) = match setup {
+            Ok(v) => v,
+            Err(e) => {
+                self.task_ui.fill_error = Some(format!("无法开始填写：{e:#}"));
+                return;
+            }
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.task_fill_rx = Some(rx);
+        self.task_ui.fill_busy = true;
+        self.task_ui.fill_discard = false;
+        self.task_ui.fill_error = None;
+        std::thread::spawn(move || {
+            let result = (|| -> Result<_> {
+                if request.text.trim().is_empty() || request.text.len() > MAX_SOURCE_BYTES {
+                    bail!("请粘贴非空且不超过 1 MB 的文字，系统不会截断原文");
+                }
+                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                let (system, user) = crate::task_assistant::extract::prompt_fill(
+                    &request.text,
+                    &today,
+                    &categories,
+                    &tasks,
+                    &request.current,
+                );
+                let raw = crate::lmstudio::generate(&cfg, &system, &user)?;
+                crate::task_assistant::extract::parse_fill(&raw, &request.text, &categories, &tasks)
+            })()
+            .map_err(|e| format!("识别失败，可重试：{e:#}"));
+            let _ = tx.send(TaskFillOutput {
+                draft_id: request.draft_id,
+                text: request.text,
+                result,
+            });
+        });
+    }
+
+    pub(crate) fn poll_task_fill(&mut self, ctx: &eframe::egui::Context) {
+        let Some(rx) = self.task_fill_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(output) => {
+                self.task_fill_rx = None;
+                crate::task_ui::receive_fill(
+                    &mut self.task_ui,
+                    &output.draft_id,
+                    &output.text,
+                    output.result,
+                );
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.task_fill_rx = None;
+                if self.task_ui.fill_busy {
+                    self.task_ui.fill_busy = false;
+                    self.task_ui.fill_discard = false;
+                    self.task_ui.fill_error = Some("识别线程意外退出，请重试。".into());
+                }
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+    }
     pub(crate) fn enqueue_task_materials(&mut self, materials: Vec<(String, String, String)>) {
         let mut bytes: usize = self
             .task_auto_queue

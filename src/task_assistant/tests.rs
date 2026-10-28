@@ -1,3 +1,4 @@
+use super::extract::{MAX_OUTPUT_BYTES, auto_title, parse_fill, prompt_fill};
 use super::*;
 use tempfile::tempdir;
 
@@ -231,6 +232,176 @@ fn auto_organize_preference_persists_and_defaults_off() {
     }
 }
 
+#[test]
+fn task_assistant_fill_validates_fields_individually() {
+    let source = "办公室牵头编制方案，完成测算后报审，2026-02-30，交领导复核。";
+    let raw = serde_json::json!({"fields":{
+        "name":{"value":" 编制方案 ","evidence":"办公室牵头编制方案"},
+        "goal":{"value":"报审","evidence":"并不存在"},
+        "next_step":{"value":"完成测算","evidence":"完成测算后报审"},
+        "deadline":{"value":"2026-02-30","evidence":"2026-02-30"},
+        "next_deadline":{"value":"2026-11-01","evidence":"完成测算后报审"},
+        "role":{"value":"审批","evidence":"交领导复核"},
+        "category":{"value":"虚构分类","evidence":"编制方案"},
+        "parent_id":{"value":"外部ID","evidence":"编制方案"},
+        "collaborators":{"value":"办公室","evidence":"办公室牵头"}
+    },"others":2})
+    .to_string();
+    let fill = parse_fill(&raw, source, &["未分类".into()], &[]).unwrap();
+    assert_eq!(fill.name.unwrap().value, "编制方案");
+    assert_eq!(fill.next_step.unwrap().value, "完成测算");
+    assert!(fill.next_deadline.is_some());
+    assert!(fill.collaborators.is_some());
+    assert!(
+        fill.goal.is_none()
+            && fill.deadline.is_none()
+            && fill.role.is_none()
+            && fill.category.is_none()
+            && fill.parent_id.is_none()
+    );
+    assert_eq!((fill.dropped, fill.others), (5, 2));
+}
+
+#[test]
+fn task_assistant_fill_rejects_protocol_and_keeps_only_eligible_context() {
+    for raw in [
+        "不是JSON",
+        r#"{"fields":{},"others":0,"extra":1}"#,
+        r#"{"fields":{"status":null},"others":0}"#,
+        r#"{"fields":{},"others":31}"#,
+    ] {
+        assert!(parse_fill(raw, "原文", &[], &[]).is_err());
+    }
+    assert!(parse_fill(&"x".repeat(MAX_OUTPUT_BYTES + 1), "原文", &[], &[]).is_err());
+    let mut parent = task("父任务");
+    parent.archived = true;
+    let raw=serde_json::json!({"fields":{"parent_id":{"value":parent.id,"evidence":"原文"}},"others":0}).to_string();
+    let result = parse_fill(&raw, "原文", &[], std::slice::from_ref(&parent)).unwrap();
+    assert!(result.parent_id.is_none());
+    assert_eq!(result.dropped, 1);
+    parent.archived = false;
+    assert!(
+        parse_fill(&raw, "原文", &[], &[parent])
+            .unwrap()
+            .parent_id
+            .is_some()
+    );
+    let malformed = r#"{"fields":{"name":3,"goal":{"value":" ","evidence":"原文"}},"others":0}"#;
+    assert_eq!(parse_fill(malformed, "原文", &[], &[]).unwrap().dropped, 2);
+}
+
+#[test]
+fn task_assistant_fill_prompt_has_today_and_bounded_context() {
+    let mut tasks = (0..60)
+        .map(|i| task(&format!("上下文{i}")))
+        .collect::<Vec<_>>();
+    tasks[0].deleted = true;
+    tasks[1].archived = true;
+    let (system, user) = prompt_fill(
+        "交办原文",
+        "2026-10-28",
+        &["专项协调".into()],
+        &tasks,
+        &task("当前任务"),
+    );
+    assert!(
+        user.contains("2026-10-28")
+            && user.contains("专项协调")
+            && user.contains("当前任务")
+            && user.contains("交办原文")
+    );
+    assert_eq!(
+        user.lines()
+            .filter(|l| tasks.iter().any(|t| l.starts_with(&t.id)))
+            .count(),
+        50
+    );
+    assert!(
+        !user.contains(&tasks[0].id)
+            && !user.contains(&tasks[1].id)
+            && !user.contains(&tasks[52].id)
+    );
+    assert!(system.contains("下周") && system.contains("原文连续摘录"));
+}
+
+#[test]
+fn task_assistant_auto_title_is_trimmed_bounded_and_stable() {
+    use chrono::TimeZone;
+    let now = chrono::Local
+        .with_ymd_and_hms(2026, 10, 28, 9, 30, 0)
+        .single()
+        .unwrap();
+    let source = "\n  《办公室关于开展专项协调工作的通知》。\n正文";
+    assert_eq!(auto_title(source, now), "办公室关于开展专项协调工作的通知");
+    assert_eq!(auto_title(&"长".repeat(50), now).chars().count(), 30);
+    assert_eq!(auto_title("\n （好）。", now), "粘贴材料 10-28 09:30");
+    assert_eq!(
+        auto_title(source, now),
+        auto_title(source, now + chrono::Duration::hours(1))
+    );
+}
+
+#[test]
+fn task_assistant_fill_save_source_is_atomic_reused_and_separate_from_batch() {
+    use sha2::{Digest, Sha256};
+    let mut store = Store::open(":memory:").unwrap();
+    let t = task("任务");
+    let title = "办公室交办事项";
+    let source = "办公室要求形成方案报审。";
+    store
+        .save_with_source(&t, "创建", "填表", title, source)
+        .unwrap();
+    let first = store.history_entries(&t.id).unwrap().remove(0);
+    assert!(first.source_id.is_some());
+    assert_eq!(
+        store.source(first.source_id.as_ref().unwrap()).unwrap().0,
+        title
+    );
+    let batch = Sha256::digest(format!("{title}\0{source}").as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    assert!(!store.has_source(&batch).unwrap());
+    let mut current = store.list(true).unwrap().remove(0);
+    current.next_step = "送审".into();
+    store
+        .save_with_source(&current, "编辑", "填表", title, source)
+        .unwrap();
+    let after = store.history_entries(&t.id).unwrap();
+    assert_eq!(after[0].source_id, first.source_id);
+    let count = || {
+        store
+            .conn
+            .query_row("SELECT count(*) FROM task_sources", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(count(), 1);
+    let mut invalid = task("无效");
+    invalid.category = "不存在".into();
+    assert!(
+        store
+            .save_with_source(&invalid, "创建", "", "另份材料", "另一份原文")
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row("SELECT count(*) FROM task_sources", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    invalid.name.clear();
+    assert!(
+        store
+            .save_with_source(&invalid, "创建", "", "其它", "原文")
+            .is_err()
+    );
+    assert_eq!(store.list(true).unwrap().len(), 1);
+}
+
 fn latest(s: &Store, id: &str) -> Task {
     s.list(true)
         .unwrap()
@@ -440,4 +611,12 @@ fn invalid_candidate_rolls_back_entire_material_and_acceptance() {
         serde_json::from_str(&s.candidates().unwrap()[0].2).unwrap();
     oversized.note = Some("x".repeat(super::model::MAX_TEXT + 1));
     assert!(s.edit_candidate(&id, &oversized).is_err());
+}
+
+#[test]
+fn task_assistant_fill_tolerates_missing_others_count() {
+    let raw = r#"{"fields":{"name":{"value":"形成方案","evidence":"形成方案"}}}"#;
+    let fill = super::extract::parse_fill(raw, "要求形成方案", &[], &[]).unwrap();
+    assert_eq!(fill.others, 0);
+    assert_eq!(fill.name.unwrap().value, "形成方案");
 }

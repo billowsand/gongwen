@@ -216,6 +216,7 @@ pub struct GongwenApp {
     task_ui: crate::task_ui::State,
     task_extraction_rx:
         Option<std::sync::mpsc::Receiver<anyhow::Result<task_assistant::Extraction>>>,
+    task_fill_rx: Option<std::sync::mpsc::Receiver<task_assistant::TaskFillOutput>>,
     task_auto_queue: VecDeque<(String, String, String)>,
     manuscript_error: Option<String>,
     manuscript_filter: ManuscriptFilter,
@@ -601,6 +602,7 @@ impl GongwenApp {
             task_error,
             task_ui: crate::task_ui::State::default(),
             task_extraction_rx: None,
+            task_fill_rx: None,
             task_auto_queue: VecDeque::new(),
             manuscript_error,
             manuscript_filter: ManuscriptFilter::default(),
@@ -794,6 +796,10 @@ impl eframe::App for GongwenApp {
         self.handle_shortcuts(&ctx);
         self.poll_worker(&ctx);
         self.poll_task_extraction(&ctx);
+        self.poll_task_fill(&ctx);
+        if self.task_fill_rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         self.poll_writing_tasks(&ctx);
         // 系统文件对话框在后台线程开窗，这里问一次结果；用户挑完再接着做那件事。
         self.poll_file_dialogs(&ctx);
@@ -935,6 +941,9 @@ impl eframe::App for GongwenApp {
             self.start_help_pdf(&ctx);
         }
         self.auto_create_touched_doc();
+        if let Some(request) = self.task_ui.request_fill.take() {
+            self.start_task_fill(request);
+        }
         if let Some(id) = self.task_ui.request_knowledge.take() {
             self.start_task_knowledge_extraction(id);
         } else if let Some((title, text, source_ref)) = self.task_ui.request_extract.take() {

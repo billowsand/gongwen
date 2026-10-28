@@ -455,6 +455,7 @@ impl GongwenApp {
         };
         // 恢复后不能继续展示旧库的候选或保存旧编辑草稿。
         self.task_ui = crate::task_ui::State::default();
+        self.task_fill_rx = None;
         self.manuscript_dirty = true;
         self.knowledge_dirty = true;
         self.lexicon_dirty = true;

@@ -41,76 +41,43 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let current = load_tasks(&tx, true)?;
-        if let Some(old) = current.iter().find(|old| old.id == t.id) {
-            if old.archived || old.deleted {
-                bail!("已归档或已删除任务只读，请先恢复");
-            }
-            if old.revision != t.revision {
-                bail!("任务在编辑后已变化，请重新打开编辑，避免覆盖新内容");
-            }
-        } else if t.revision != 0 {
-            bail!("任务不存在，不能用旧草稿重建");
+        save_task(&tx, t, action, detail, None)?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// 填表来源与任务原子保存，指纹空间与批量整理分离。
+    pub fn save_with_source(
+        &mut self,
+        t: &Task,
+        action: &str,
+        detail: &str,
+        title: &str,
+        content: &str,
+    ) -> Result<()> {
+        valid_task(t).map_err(anyhow::Error::msg)?;
+        if title.trim().is_empty()
+            || title.chars().count() > 200
+            || content.trim().is_empty()
+            || content.len() > super::extract::MAX_SOURCE_BYTES
+        {
+            bail!("填表来源为空或超过长度上限");
         }
-        if t.deleted {
-            bail!("删除须走回收站确认流程");
-        }
-        if t.archived && !t.status.terminal() {
-            bail!("仅已完成或取消的任务可以归档");
-        }
-        super::relations::validate_graph(&current, t).map_err(anyhow::Error::msg)?;
-        super::relations::can_enter(&current, t, t.status).map_err(anyhow::Error::msg)?;
-        let category_exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM task_categories WHERE name=?1)",
-            [&t.category],
+        use sha2::{Digest, Sha256};
+        let fingerprint = Sha256::digest(format!("fill\0{title}\0{content}").as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let new_id = uuid::Uuid::new_v4().to_string();
+        tx.execute("INSERT OR IGNORE INTO task_sources(id,title,content,fingerprint,source_ref,created_at) VALUES(?1,?2,?3,?4,'fill',?5)",params![new_id,title,content,fingerprint,chrono::Local::now().to_rfc3339()])?;
+        let source_id: String = tx.query_row(
+            "SELECT id FROM task_sources WHERE fingerprint=?1",
+            [fingerprint],
             |r| r.get(0),
         )?;
-        if !category_exists {
-            bail!("所选分类不存在，请重新选择");
-        }
-        let old: Option<i64> = tx
-            .query_row("SELECT revision FROM tasks WHERE id=?1", [&t.id], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        let old_status: Option<String> = tx
-            .query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        if t.status == super::model::Status::Cancelled
-            && old_status.as_deref() != Some("已取消")
-            && detail.trim().is_empty()
-        {
-            bail!("取消任务必须填写理由");
-        }
-        let revision = old.unwrap_or(0) + 1;
-        let now = chrono::Local::now().to_rfc3339();
-        tx.execute("INSERT INTO tasks(id,name,category,role,collaborators,goal,next_step,next_deadline,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) ON CONFLICT(id) DO UPDATE SET name=excluded.name,category=excluded.category,role=excluded.role,collaborators=excluded.collaborators,goal=excluded.goal,next_step=excluded.next_step,next_deadline=excluded.next_deadline,deadline=excluded.deadline,status=excluded.status,parent_id=excluded.parent_id,needs_review=excluded.needs_review,archived=excluded.archived,deleted=excluded.deleted,revision=excluded.revision,updated_at=excluded.updated_at",params![t.id,t.name,t.category,t.role.as_str(),t.collaborators,t.goal,t.next_step,t.next_deadline,t.deadline,t.status.as_str(),t.parent_id,t.needs_review,t.archived,t.deleted,revision,now])?;
-        tx.execute("DELETE FROM task_prerequisites WHERE task_id=?1", [&t.id])?;
-        for p in &t.prerequisites {
-            tx.execute(
-                "INSERT INTO task_prerequisites(task_id,prerequisite_id) VALUES(?1,?2)",
-                params![t.id, p],
-            )?;
-        }
-        if old_status.as_deref() == Some("已完成")
-            && (t.status != super::model::Status::Done || t.needs_review)
-        {
-            for (id, dependency) in super::relations::reopening_impact(&current, &t.id) {
-                tx.execute("UPDATE tasks SET needs_review=CASE WHEN status='已完成' OR ?1 THEN 1 ELSE needs_review END,status=CASE WHEN ?1 AND status='进行中' THEN '阻塞' ELSE status END,revision=revision+1,updated_at=?2 WHERE id=?3",params![dependency,now,id])?;
-                tx.execute("INSERT INTO task_history(task_id,happened_at,action,detail) VALUES(?1,?2,'依赖复核',?3)",params![id,now,format!("关联任务「{}」已重开或待核对，请重新检查安排",t.name)])?;
-            }
-        }
-        tx.execute(
-            "INSERT INTO task_history(task_id,happened_at,action,detail) VALUES(?1,?2,?3,?4)",
-            params![
-                t.id,
-                now,
-                action,
-                change_detail(current.iter().find(|old| old.id == t.id), t, detail)
-            ],
-        )?;
+        save_task(&tx, t, action, detail, Some(&source_id))?;
         tx.commit()?;
         Ok(())
     }
@@ -630,4 +597,86 @@ fn change_detail(old: Option<&Task>, t: &Task, note: &str) -> String {
         changes.push(format!("{}；完成条件：{}", t.name, t.goal));
     }
     changes.join("\n")
+}
+
+fn save_task(
+    tx: &rusqlite::Transaction<'_>,
+    t: &Task,
+    action: &str,
+    detail: &str,
+    source_id: Option<&str>,
+) -> Result<()> {
+    valid_task(t).map_err(anyhow::Error::msg)?;
+    let current = load_tasks(tx, true)?;
+    if let Some(old) = current.iter().find(|old| old.id == t.id) {
+        if old.archived || old.deleted {
+            bail!("已归档或已删除任务只读，请先恢复");
+        }
+        if old.revision != t.revision {
+            bail!("任务在编辑后已变化，请重新打开编辑，避免覆盖新内容");
+        }
+    } else if t.revision != 0 {
+        bail!("任务不存在，不能用旧草稿重建");
+    }
+    if t.deleted {
+        bail!("删除须走回收站确认流程");
+    }
+    if t.archived && !t.status.terminal() {
+        bail!("仅已完成或取消的任务可以归档");
+    }
+    super::relations::validate_graph(&current, t).map_err(anyhow::Error::msg)?;
+    super::relations::can_enter(&current, t, t.status).map_err(anyhow::Error::msg)?;
+    let category_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_categories WHERE name=?1)",
+        [&t.category],
+        |r| r.get(0),
+    )?;
+    if !category_exists {
+        bail!("所选分类不存在，请重新选择");
+    }
+    let old: Option<i64> = tx
+        .query_row("SELECT revision FROM tasks WHERE id=?1", [&t.id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let old_status: Option<String> = tx
+        .query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if t.status == super::model::Status::Cancelled
+        && old_status.as_deref() != Some("已取消")
+        && detail.trim().is_empty()
+    {
+        bail!("取消任务必须填写理由");
+    }
+    let revision = old.unwrap_or(0) + 1;
+    let now = chrono::Local::now().to_rfc3339();
+    tx.execute("INSERT INTO tasks(id,name,category,role,collaborators,goal,next_step,next_deadline,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) ON CONFLICT(id) DO UPDATE SET name=excluded.name,category=excluded.category,role=excluded.role,collaborators=excluded.collaborators,goal=excluded.goal,next_step=excluded.next_step,next_deadline=excluded.next_deadline,deadline=excluded.deadline,status=excluded.status,parent_id=excluded.parent_id,needs_review=excluded.needs_review,archived=excluded.archived,deleted=excluded.deleted,revision=excluded.revision,updated_at=excluded.updated_at",params![t.id,t.name,t.category,t.role.as_str(),t.collaborators,t.goal,t.next_step,t.next_deadline,t.deadline,t.status.as_str(),t.parent_id,t.needs_review,t.archived,t.deleted,revision,now])?;
+    tx.execute("DELETE FROM task_prerequisites WHERE task_id=?1", [&t.id])?;
+    for p in &t.prerequisites {
+        tx.execute(
+            "INSERT INTO task_prerequisites(task_id,prerequisite_id) VALUES(?1,?2)",
+            params![t.id, p],
+        )?;
+    }
+    if old_status.as_deref() == Some("已完成")
+        && (t.status != super::model::Status::Done || t.needs_review)
+    {
+        for (id, dependency) in super::relations::reopening_impact(&current, &t.id) {
+            tx.execute("UPDATE tasks SET needs_review=CASE WHEN status='已完成' OR ?1 THEN 1 ELSE needs_review END,status=CASE WHEN ?1 AND status='进行中' THEN '阻塞' ELSE status END,revision=revision+1,updated_at=?2 WHERE id=?3",params![dependency,now,id])?;
+            tx.execute("INSERT INTO task_history(task_id,happened_at,action,detail) VALUES(?1,?2,'依赖复核',?3)",params![id,now,format!("关联任务「{}」已重开或待核对，请重新检查安排",t.name)])?;
+        }
+    }
+    tx.execute(
+            "INSERT INTO task_history(task_id,happened_at,action,detail,source_id) VALUES(?1,?2,?3,?4,?5)",
+            params![
+                t.id,
+                now,
+                action,
+                change_detail(current.iter().find(|old| old.id == t.id), t, detail),
+                source_id
+            ],
+        )?;
+    Ok(())
 }

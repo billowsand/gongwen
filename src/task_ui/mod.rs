@@ -10,11 +10,16 @@ mod cache;
 mod categories;
 mod date;
 mod detail;
+mod fill;
 mod form;
 mod inbox;
 mod list;
 mod nav;
 
+use crate::task_assistant::extract::FilledValue;
+#[cfg(test)]
+pub(crate) use fill::apply_fill;
+pub(crate) use fill::{FillField, FillRequest, receive_fill};
 pub(crate) use nav::View;
 
 /// 视图栏固定宽度；窗口窄于 `NAV_MIN_PAGE` 时视图栏收成列表上方的下拉框。
@@ -77,6 +82,18 @@ pub(crate) struct State {
     pub request_knowledge: Option<i64>,
     pub history_candidates: bool,
     pub extraction_error: Option<String>,
+    pub request_fill: Option<FillRequest>,
+    pub fill_text: String,
+    pub fill_busy: bool,
+    pub fill_discard: bool,
+    pub fill_error: Option<String>,
+    pub fill_marks: HashMap<FillField, FilledValue>,
+    pub fill_suggestions: HashMap<FillField, FilledValue>,
+    pub fill_before: Option<Task>,
+    pub fill_source: Option<String>,
+    pub fill_summary: Option<(usize, usize)>,
+    fill_open_more: bool,
+    fill_focus: bool,
     cache: cache::Cache,
 }
 
@@ -99,11 +116,13 @@ impl State {
         self.apply_replace(replace);
     }
     fn apply_replace(&mut self, replace: Replace) {
+        self.clear_fill();
         self.form_error = None;
         self.prerequisite_query.clear();
         self.cancel_reason.clear();
         match replace {
             Replace::Blank => {
+                self.fill_focus = true;
                 self.candidate_create_id = None;
                 self.draft = Some(Task::blank());
                 self.selected = None;
@@ -120,11 +139,26 @@ impl State {
         }
     }
     fn close_draft(&mut self) {
+        self.clear_fill();
         self.draft = None;
         self.candidate_create_id = None;
         self.form_error = None;
         self.prerequisite_query.clear();
         self.cancel_reason.clear();
+    }
+    fn clear_fill(&mut self) {
+        self.request_fill = None;
+        self.fill_text.clear();
+        self.fill_busy = false;
+        self.fill_discard = false;
+        self.fill_error = None;
+        self.fill_marks.clear();
+        self.fill_suggestions.clear();
+        self.fill_before = None;
+        self.fill_source = None;
+        self.fill_summary = None;
+        self.fill_open_more = false;
+        self.fill_focus = false;
     }
 }
 

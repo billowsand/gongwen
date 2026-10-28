@@ -4,7 +4,7 @@
 //! 选了目标任务的候选会把右栏切到该任务，采纳前能对照它的当前内容。
 use super::{Replace, Snapshot, State};
 use crate::task_assistant::Store;
-use crate::task_assistant::extract::Proposal;
+use crate::task_assistant::extract::{Proposal, auto_title};
 use crate::theme;
 
 const FIELDS: [(&str, &str); 8] = [
@@ -139,7 +139,7 @@ fn material(
         ui.add_space(4.0);
         ui.add(theme::field(
             &mut state.source_title,
-            "材料标题，如：10月28日调度会纪要",
+            "材料标题（选填，留空取首行）",
             ui.available_width(),
         ));
         ui.add_space(4.0);
@@ -172,6 +172,9 @@ fn material(
             )
             .clicked()
             {
+                if state.source_title.trim().is_empty() {
+                    state.source_title = auto_title(&state.source_text, chrono::Local::now());
+                }
                 state.request_extract = Some((
                     state.source_title.clone(),
                     state.source_text.clone(),

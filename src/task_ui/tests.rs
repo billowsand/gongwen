@@ -81,6 +81,228 @@ fn saved(store: &mut Store, name: &str, edit: impl FnOnce(&mut Task)) -> Task {
         .unwrap()
 }
 
+fn filled(value: &str) -> crate::task_assistant::extract::FilledValue {
+    crate::task_assistant::extract::FilledValue {
+        value: value.into(),
+        evidence: "办公室要求形成方案报审".into(),
+    }
+}
+
+#[test]
+fn task_assistant_fill_empty_fields_suggestions_replace_and_undo() {
+    let store = Store::open(":memory:").unwrap();
+    let mut draft = Task::blank();
+    draft.goal = "人工保留的完成条件".into();
+    let mut state = State {
+        fill_text: "办公室要求形成方案报审".into(),
+        ..Default::default()
+    };
+    apply_fill(
+        &mut state,
+        &mut draft,
+        crate::task_assistant::extract::Fill {
+            name: Some(filled("形成方案")),
+            goal: Some(filled("方案报审")),
+            others: 2,
+            ..Default::default()
+        },
+    );
+    assert_eq!(draft.goal, "人工保留的完成条件");
+    assert_eq!(draft.name, "形成方案");
+    assert!(state.fill_marks.contains_key(&FillField::Name));
+    assert!(state.fill_suggestions.contains_key(&FillField::Goal));
+    state.draft = Some(draft);
+    let mut h = bench(state, store);
+    h.get_by_label("替换").scroll_to_me();
+    h.run();
+    h.get_by_label("替换").click();
+    h.run();
+    assert_eq!(h.state().state.draft.as_ref().unwrap().goal, "方案报审");
+    assert!(h.state().state.fill_marks.contains_key(&FillField::Goal));
+    h.state_mut().state.draft.as_mut().unwrap().name = "人工重新命名".into();
+    h.run();
+    assert!(!h.state().state.fill_marks.contains_key(&FillField::Name));
+    h.get_by_label("全部撤销").scroll_to_me();
+    h.run();
+    h.get_by_label("全部撤销").click();
+    h.run();
+    let state = &h.state().state;
+    let task = state.draft.as_ref().unwrap();
+    assert_eq!(task.name, "人工重新命名");
+    assert_eq!(task.goal, "人工保留的完成条件");
+    assert!(state.fill_marks.is_empty() && state.fill_suggestions.is_empty());
+}
+
+#[test]
+fn task_assistant_fill_save_attaches_source_only_with_remaining_marks() {
+    for keep_marks in [true, false] {
+        let store = Store::open(":memory:").unwrap();
+        let mut draft = Task::blank();
+        draft.goal = "完成条件".into();
+        let mut state = State {
+            fill_text: "办公室要求形成方案报审".into(),
+            ..Default::default()
+        };
+        apply_fill(
+            &mut state,
+            &mut draft,
+            crate::task_assistant::extract::Fill {
+                name: Some(filled("形成方案")),
+                ..Default::default()
+            },
+        );
+        if !keep_marks {
+            draft.name = "改成手工任务".into();
+        }
+        let id = draft.id.clone();
+        state.draft = Some(draft);
+        let mut h = bench(state, store);
+        h.get_by_label("保存").click();
+        h.run();
+        assert!(
+            h.state().state.draft.is_none(),
+            "{:?}",
+            h.state().state.form_error
+        );
+        let history = h.state().store.history_entries(&id).unwrap();
+        assert_eq!(history[0].source_id.is_some(), keep_marks);
+        assert!(h.state().state.fill_source.is_none() && h.state().state.fill_marks.is_empty());
+    }
+}
+
+#[test]
+fn task_assistant_fill_late_cancelled_and_reopened_results_are_discarded() {
+    let draft = Task::blank();
+    let id = draft.id.clone();
+    let mut state = State {
+        draft: Some(draft),
+        fill_busy: true,
+        ..Default::default()
+    };
+    let result = || crate::task_assistant::extract::Fill {
+        name: Some(filled("不该填入")),
+        ..Default::default()
+    };
+    receive_fill(
+        &mut state,
+        "另一个ID",
+        "办公室要求形成方案报审",
+        Ok(result()),
+    );
+    assert!(state.draft.as_ref().unwrap().name.is_empty());
+    state.fill_discard = true;
+    receive_fill(&mut state, &id, "办公室要求形成方案报审", Ok(result()));
+    assert!(!state.fill_busy && state.draft.as_ref().unwrap().name.is_empty());
+    state.fill_busy = true;
+    state.close_draft();
+    let mut reopened = Task::blank();
+    reopened.id = id.clone();
+    state.apply_replace(Replace::Edit(Box::new(reopened)));
+    receive_fill(&mut state, &id, "办公室要求形成方案报审", Ok(result()));
+    assert!(state.draft.as_ref().unwrap().name.is_empty());
+}
+
+#[test]
+fn task_assistant_fill_keeps_request_source_and_transfers_other_matters_to_inbox() {
+    let mut state = State {
+        draft: Some(Task::blank()),
+        fill_busy: true,
+        fill_text: "用户识别期间另写的文字".into(),
+        ..Default::default()
+    };
+    let id = state.draft.as_ref().unwrap().id.clone();
+    receive_fill(
+        &mut state,
+        &id,
+        "办公室要求形成方案报审",
+        Ok(crate::task_assistant::extract::Fill {
+            name: Some(filled("方案")),
+            others: 2,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(state.fill_source.as_deref(), Some("办公室要求形成方案报审"));
+    assert_eq!(state.fill_text, "用户识别期间另写的文字");
+    let mut h = bench(state, Store::open(":memory:").unwrap());
+    h.get_by_label("转到批量整理").click();
+    h.run();
+    assert_eq!(h.state().state.view, View::Inbox);
+    assert!(h.state().state.source_title.is_empty());
+    assert!(h.state().state.draft.is_some());
+}
+
+#[test]
+fn task_assistant_material_title_can_be_omitted_and_is_filled_before_request() {
+    let state = State {
+        view: View::Inbox,
+        source_text: "  《办公室关于开展专项协调工作的通知》。\n请办公室跟进。".into(),
+        ..Default::default()
+    };
+    let mut h = bench(state, Store::open(":memory:").unwrap());
+    h.get_by_label("识别").click();
+    h.run();
+    let state = &h.state().state;
+    assert_eq!(state.source_title, "办公室关于开展专项协调工作的通知");
+    assert_eq!(
+        state.request_extract.as_ref().unwrap().0,
+        state.source_title
+    );
+}
+
+#[test]
+fn task_assistant_fill_repeated_sources_keep_evidence_and_limit_total_size() {
+    use crate::task_assistant::extract::{Fill, MAX_SOURCE_BYTES};
+    let mut state = State {
+        fill_text: "办公室要求形成方案报审".into(),
+        ..Default::default()
+    };
+    let mut draft = Task::blank();
+    apply_fill(
+        &mut state,
+        &mut draft,
+        Fill {
+            name: Some(filled("方案报审")),
+            ..Default::default()
+        },
+    );
+    state.fill_text = "各科室反馈后汇总意见".into();
+    apply_fill(
+        &mut state,
+        &mut draft,
+        Fill {
+            next_step: Some(crate::task_assistant::extract::FilledValue {
+                value: "汇总意见".into(),
+                evidence: "各科室反馈后汇总意见".into(),
+            }),
+            ..Default::default()
+        },
+    );
+    for value in state.fill_marks.values() {
+        assert!(
+            state
+                .fill_source
+                .as_ref()
+                .unwrap()
+                .contains(&value.evidence)
+        );
+    }
+    let source = state.fill_source.clone();
+    state.fill_text = "x".repeat(MAX_SOURCE_BYTES);
+    apply_fill(
+        &mut state,
+        &mut draft,
+        Fill {
+            goal: Some(filled("不得填入")),
+            ..Default::default()
+        },
+    );
+    assert!(draft.goal.is_empty());
+    assert_eq!(state.fill_source, source);
+    assert!(state.fill_error.is_some());
+    fill::undo_fill(&mut state, &mut draft);
+    assert!(draft.name.is_empty() && draft.next_step.is_empty());
+}
+
 #[test]
 fn task_assistant_detail_review_banner_clears_needs_review() {
     let mut store = Store::open(":memory:").unwrap();
@@ -173,4 +395,27 @@ fn task_assistant_short_dates_drop_current_year() {
     assert_eq!(short_date("2026-11-05", "2026-10-28"), "11-05");
     assert_eq!(short_date("2027-01-05", "2026-10-28"), "2027-01-05");
     assert_eq!(days_from("2026-10-28", "2026-10-26"), Some(-2));
+}
+
+#[test]
+fn task_assistant_fill_never_makes_a_task_its_own_parent() {
+    let mut draft = Task::blank();
+    let mut state = State {
+        fill_text: "办公室要求形成方案报审".into(),
+        ..Default::default()
+    };
+    let own = crate::task_assistant::extract::FilledValue {
+        value: draft.id.clone(),
+        evidence: "办公室要求形成方案报审".into(),
+    };
+    apply_fill(
+        &mut state,
+        &mut draft,
+        crate::task_assistant::extract::Fill {
+            parent_id: Some(own),
+            ..Default::default()
+        },
+    );
+    assert!(draft.parent_id.is_none());
+    assert_eq!(state.fill_summary, Some((1, 0)));
 }

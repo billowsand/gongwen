@@ -1,5 +1,5 @@
 //! 新建 / 编辑任务表单：字段分三组，保存与放弃固定在底栏，表单内容自己滚动。
-use super::{Snapshot, State};
+use super::{FillField, Snapshot, State, fill};
 use crate::task_assistant::{Role, Status, Store, Task};
 use crate::theme;
 
@@ -16,6 +16,7 @@ pub(super) fn show(
     height: f32,
 ) -> bool {
     let mut keep = true;
+    fill::prune_marks(state, d);
     ui.horizontal(|ui| {
         ui.heading(if d.revision == 0 {
             "新建任务"
@@ -62,6 +63,19 @@ pub(super) fn show(
             };
             let result = if let Some(candidate_id) = state.candidate_create_id.as_deref() {
                 store.create_from_candidate(candidate_id, d)
+            } else if let Some(src) = state
+                .fill_source
+                .as_deref()
+                .filter(|_| !state.fill_marks.is_empty())
+            {
+                let title = crate::task_assistant::extract::auto_title(src, chrono::Local::now());
+                store.save_with_source(
+                    d,
+                    if d.revision == 0 { "创建" } else { "编辑" },
+                    &detail,
+                    &title,
+                    src,
+                )
             } else {
                 store.save(d, if d.revision == 0 { "创建" } else { "编辑" }, &detail)
             };
@@ -102,26 +116,84 @@ fn label(ui: &mut egui::Ui, text: &str) {
 
 fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
     let full = ui.available_width();
+    fill::show(ui, d, state);
     group(ui, "要做什么");
-    label(ui, "名称（必填）");
-    ui.add(theme::field(&mut d.name, "如：牵头起草年度工作总结", full));
-    label(ui, "目标 / 完成条件（必填）");
-    ui.add(
-        egui::TextEdit::multiline(&mut d.goal)
-            .hint_text("做到什么程度算完成，如：形成初稿报分管领导审定")
-            .desired_rows(3)
-            .desired_width(full),
+    fill::field(
+        ui,
+        state,
+        d,
+        data,
+        FillField::Name,
+        "名称（必填）",
+        |ui, d| {
+            ui.add(theme::field(
+                &mut d.name,
+                "如：牵头起草年度工作总结",
+                ui.available_width(),
+            ));
+        },
+    );
+    fill::field(
+        ui,
+        state,
+        d,
+        data,
+        FillField::Goal,
+        "目标 / 完成条件（必填）",
+        |ui, d| {
+            ui.add(
+                egui::TextEdit::multiline(&mut d.goal)
+                    .hint_text("做到什么程度算完成，如：形成初稿报分管领导审定")
+                    .desired_rows(3)
+                    .desired_width(ui.available_width()),
+            );
+        },
     );
 
     group(ui, "怎么安排");
-    label(ui, "下一步");
-    ui.add(theme::field(&mut d.next_step, "眼下最近的一个动作", full));
+    fill::field(
+        ui,
+        state,
+        d,
+        data,
+        FillField::NextStep,
+        "下一步",
+        |ui, d| {
+            ui.add(theme::field(
+                &mut d.next_step,
+                "眼下最近的一个动作",
+                ui.available_width(),
+            ));
+        },
+    );
     ui.columns(2, |cols| {
-        let w = cols[0].available_width();
-        label(&mut cols[0], "下一步期限");
-        super::date::field(&mut cols[0], "next_deadline", &mut d.next_deadline, w);
-        label(&mut cols[1], "任务期限");
-        super::date::field(&mut cols[1], "deadline", &mut d.deadline, w);
+        fill::field(
+            &mut cols[0],
+            state,
+            d,
+            data,
+            FillField::NextDeadline,
+            "下一步期限",
+            |ui, d| {
+                super::date::field(
+                    ui,
+                    "next_deadline",
+                    &mut d.next_deadline,
+                    ui.available_width(),
+                );
+            },
+        );
+        fill::field(
+            &mut cols[1],
+            state,
+            d,
+            data,
+            FillField::Deadline,
+            "任务期限",
+            |ui, d| {
+                super::date::field(ui, "deadline", &mut d.deadline, ui.available_width());
+            },
+        );
     });
     if d.next_deadline
         .as_ref()
@@ -154,19 +226,28 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
                     ui.selectable_value(&mut d.status, status, status.as_str());
                 }
             });
-        label(&mut cols[1], "我的角色");
-        egui::ComboBox::from_id_salt("task_role")
-            .selected_text(d.role.as_str())
-            .show_ui(&mut cols[1], |ui| {
-                for r in [
-                    Role::Responsible,
-                    Role::Collaborate,
-                    Role::Follow,
-                    Role::Watch,
-                ] {
-                    ui.selectable_value(&mut d.role, r, r.as_str());
-                }
-            });
+        fill::field(
+            &mut cols[1],
+            state,
+            d,
+            data,
+            FillField::Role,
+            "我的角色",
+            |ui, d| {
+                egui::ComboBox::from_id_salt("task_role")
+                    .selected_text(d.role.as_str())
+                    .show_ui(ui, |ui| {
+                        for r in [
+                            Role::Responsible,
+                            Role::Collaborate,
+                            Role::Follow,
+                            Role::Watch,
+                        ] {
+                            ui.selectable_value(&mut d.role, r, r.as_str());
+                        }
+                    });
+            },
+        );
     });
     if d.status == Status::Cancelled {
         label(ui, "取消理由（必填）");
@@ -184,6 +265,7 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
         || d.parent_id.is_some()
         || !d.prerequisites.is_empty();
     ui.add_space(4.0);
+    let open_more = std::mem::take(&mut state.fill_open_more).then_some(true);
     egui::CollapsingHeader::new(
         egui::RichText::new("更多设置")
             .strong()
@@ -191,6 +273,7 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
     )
     .id_salt(("task_form_more", &d.id))
     .default_open(has_more)
+    .open(open_more)
     .show_unindented(ui, |ui| more(ui, d, state, data));
 }
 
@@ -205,42 +288,69 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 fn more(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
     let full = ui.available_width();
     ui.columns(2, |cols| {
-        label(&mut cols[0], "分类");
-        egui::ComboBox::from_id_salt("task_edit_cat")
-            .selected_text(&d.category)
-            .show_ui(&mut cols[0], |ui| {
-                for c in &data.categories {
-                    ui.selectable_value(&mut d.category, c.clone(), c);
-                }
-            });
-        label(&mut cols[1], "上级任务");
-        egui::ComboBox::from_id_salt("task_parent")
-            .selected_text(
-                d.parent_id
-                    .as_deref()
-                    .and_then(|id| data.task(id))
-                    .map(|t| t.name.as_str())
-                    .unwrap_or("无上级"),
-            )
-            .width(cols[1].available_width() - 8.0)
-            .truncate()
-            .show_ui(&mut cols[1], |ui| {
-                ui.selectable_value(&mut d.parent_id, None, "无上级");
-                for t in data
-                    .tasks
-                    .iter()
-                    .filter(|t| t.id != d.id && !t.deleted && !t.archived)
-                {
-                    ui.selectable_value(&mut d.parent_id, Some(t.id.clone()), &t.name);
-                }
-            });
+        fill::field(
+            &mut cols[0],
+            state,
+            d,
+            data,
+            FillField::Category,
+            "分类",
+            |ui, d| {
+                egui::ComboBox::from_id_salt("task_edit_cat")
+                    .selected_text(&d.category)
+                    .show_ui(ui, |ui| {
+                        for c in &data.categories {
+                            ui.selectable_value(&mut d.category, c.clone(), c);
+                        }
+                    });
+            },
+        );
+        fill::field(
+            &mut cols[1],
+            state,
+            d,
+            data,
+            FillField::Parent,
+            "上级任务",
+            |ui, d| {
+                egui::ComboBox::from_id_salt("task_parent")
+                    .selected_text(
+                        d.parent_id
+                            .as_deref()
+                            .and_then(|id| data.task(id))
+                            .map(|t| t.name.as_str())
+                            .unwrap_or("无上级"),
+                    )
+                    .width(ui.available_width() - 8.0)
+                    .truncate()
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut d.parent_id, None, "无上级");
+                        for t in data
+                            .tasks
+                            .iter()
+                            .filter(|t| t.id != d.id && !t.deleted && !t.archived)
+                        {
+                            ui.selectable_value(&mut d.parent_id, Some(t.id.clone()), &t.name);
+                        }
+                    });
+            },
+        );
     });
-    label(ui, "协作分工");
-    ui.add(theme::field(
-        &mut d.collaborators,
-        "如：办公室统筹，信息中心提供数据",
-        full,
-    ));
+    fill::field(
+        ui,
+        state,
+        d,
+        data,
+        FillField::Collaborators,
+        "协作分工",
+        |ui, d| {
+            ui.add(theme::field(
+                &mut d.collaborators,
+                "如：办公室统筹，信息中心提供数据",
+                ui.available_width(),
+            ));
+        },
+    );
     label(
         ui,
         "前置任务（全部完成并核对后，本任务才能进入进行中或完成）",
