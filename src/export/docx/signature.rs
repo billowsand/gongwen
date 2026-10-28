@@ -69,20 +69,18 @@ pub(crate) fn signature_date_runs(input: &DraftInput, elements: &ElementMarks) -
     }
 }
 
-/// 附件概要：正文结束后、落款之前，与正文之间空两行、首行缩进两个汉字，
+/// 附件概要：正文结束后、落款之前，与正文之间空一行、首行缩进两个汉字，
 /// 按顺序列出附件名称。单个附件写“附件：名称”；多个附件只有第一行写“附件N：名称”，
 /// 其余行的“附件”二字用两个全角空格占位对齐、不再重复。
 pub(crate) fn add_attachment_summary(mut doc: Docx, names: &[String], bold: BoldFont<'_>) -> Docx {
-    // 与正文之间空两行。
-    for _ in 0..2 {
-        doc = doc.add_paragraph(
-            Paragraph::new().line_spacing(
-                LineSpacing::new()
-                    .line(super::body_line_twips() as i32)
-                    .line_rule(LineSpacingType::Exact),
-            ),
-        );
-    }
+    // 与正文之间空一行。
+    doc = doc.add_paragraph(
+        Paragraph::new().line_spacing(
+            LineSpacing::new()
+                .line(super::body_line_twips() as i32)
+                .line_rule(LineSpacingType::Exact),
+        ),
+    );
     for (index, name) in names.iter().enumerate() {
         // 多个附件只有第一行保留“附件”二字，其余行用两个全角空格占位，使序号列对齐。
         let label = if names.len() == 1 {

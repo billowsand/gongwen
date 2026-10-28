@@ -659,9 +659,9 @@ pub(crate) fn official_preview(
             numbering,
             markdown,
         );
-        // 正文之后的附件概要：空两行再逐条列出（与导出一致）。
+        // 正文之后的附件概要：空一行再逐条列出（与导出一致）。
         if !names.is_empty() {
-            ui.add_space(metrics.line * 2.0);
+            ui.add_space(metrics.line);
             for (index, name) in names.iter().enumerate() {
                 // 多个附件只有第一行保留“附件”二字，其余行用两个全角空格占位对齐。
                 let label = if names.len() == 1 {

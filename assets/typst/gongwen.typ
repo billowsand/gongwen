@@ -294,9 +294,9 @@
   line-par(text(font: kai, runs(doc.recipient) + "："))
 }
 
-// 附件说明：空两行，各行首行缩进两字。多个附件时序号对齐（\phantom{附件}）。
+// 附件说明：空一行（GB/T 9704），各行首行缩进两字。多个附件时序号对齐（\phantom{附件}）。
 #let summary-block = if doc.summary.len() > 0 {
-  v(2 * pitch, weak: false)
+  v(pitch, weak: false)
   for (i, line) in doc.summary.enumerate() {
     let prefix = if doc.summary.len() == 1 or i == 0 { [附件] } else { hide[附件] }
     par(prefix + body-runs(line))
@@ -676,7 +676,7 @@
   })
   pagebreak()
   red-render-rest(parts.rest)
-  // 附件说明统一从第二页起排（含两行固定留白，首页额度判断不了）。
+  // 附件说明统一从第二页起排（含一行固定留白，首页额度判断不了）。
   summary-block
   // 落款不得出现在首页：正文续排了就紧随正文，否则另起一页标「此页无正文」。
   let closing = signature-of(doc.closing)

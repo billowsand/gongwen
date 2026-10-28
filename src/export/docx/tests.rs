@@ -502,7 +502,7 @@ fn official_letter_docx_numbers_headings_and_starts_attachments_on_a_new_page() 
     assert!(xml.contains("附件2"));
     assert_eq!(xml.matches("一、填报说明").count(), 1);
     assert_eq!(xml.matches(r#"w:type="page""#).count(), 2, "{xml}");
-    // 附件概要：正文结束后、落款前按顺序列出附件名称，与正文空两行、首行缩进两个汉字。
+    // 附件概要：正文结束后、落款前按顺序列出附件名称，与正文空一行、首行缩进两个汉字。
     assert!(xml.contains("附件1：统计表"), "{xml}");
     assert!(xml.contains("　　2：说明材料"), "{xml}");
     let summary = paragraph_containing(&xml, "附件1：统计表");
@@ -510,7 +510,7 @@ fn official_letter_docx_numbers_headings_and_starts_attachments_on_a_new_page() 
     assert!(!summary.contains("w:eastAsia=\"黑体\""));
     assert!(summary.contains(r#"w:firstLine="640""#), "{summary}");
     let gap = gap_between(&xml, "正文。", "附件1：统计表");
-    assert_eq!(gap.matches("<w:p ").count(), 2, "概要前应空两行：{gap}");
+    assert_eq!(gap.matches("<w:p ").count(), 1, "概要前应空一行：{gap}");
     assert!(!gap.contains("<w:t"));
     let after_summary = &xml[xml.find("附件1：统计表").unwrap()..];
     let signature = paragraph_containing(after_summary, "某单位");
