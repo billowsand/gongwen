@@ -1,4 +1,5 @@
-//! 右栏任务详情：头部操作、待核对横条、关键信息、关系、记进展与历史。
+//! 右栏任务详情：标题与操作、提醒横条、事实条（负责人 / 期限 / 分类），
+//! 正文三块（当前进展可就地更新、下一步、风险与措施），关系，历史时间线。
 use super::{Replace, Snapshot, State, View, banner, days_from, short_time};
 use crate::task_assistant::{Status, Store, Task};
 use crate::theme;
@@ -56,9 +57,6 @@ pub(super) fn show(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data
             }
         }
     }
-    ui.add_space(8.0);
-    info(ui, &t, &data.today, data.vocabulary);
-    relations(ui, state, &t, data);
     let pending = data
         .candidates
         .iter()
@@ -81,13 +79,25 @@ pub(super) fn show(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data
             state.view = View::Inbox;
         }
     }
+    ui.add_space(12.0);
+    info(ui, &t, &data.today, data.vocabulary);
     if !readonly {
-        ui.add_space(10.0);
         sync_progress_box(state, &t);
-        progress(ui, store, state, &t);
     }
-    ui.add_space(10.0);
+    progress(ui, store, state, &t, readonly);
+    section(ui, "下一步工作", |_| {});
+    body(ui, &t.next_step, "还没有安排下一步。");
+    section(ui, "风险问题及应对措施", |ui| {
+        if !t.risks.trim().is_empty() {
+            theme::chip(ui, "有风险", theme::warn(), theme::warn_soft());
+        }
+    });
+    body(ui, &t.risks, "未填");
+    relations(ui, state, &t, data);
+    ui.add_space(14.0);
+    theme::hairline(ui);
     history(ui, store, state, &t);
+    ui.add_space(12.0);
 }
 
 fn header_actions(
@@ -98,9 +108,6 @@ fn header_actions(
     readonly: bool,
 ) {
     ui.horizontal_wrapped(|ui| {
-        if !t.risks.trim().is_empty() {
-            theme::chip(ui, "有风险", theme::warn(), theme::warn_soft());
-        }
         if readonly {
             let (label, action) = if t.deleted {
                 ("在回收站 · 只读", "从回收站恢复")
@@ -238,34 +245,14 @@ fn status_feedback(ui: &mut egui::Ui, store: &mut Store, state: &mut State, t: &
 }
 
 fn info(ui: &mut egui::Ui, t: &Task, today: &str, vocabulary: &[crate::models::VocabularyEntry]) {
-    let empty = |s: &str| {
-        if s.trim().is_empty() {
-            egui::RichText::new("未填").color(theme::text_muted())
-        } else {
-            egui::RichText::new(s.to_owned())
-        }
-    };
     let (owner, found) = super::owner::label(vocabulary, t.owner_id, &t.owner_name);
-    info_row(
-        ui,
-        "负责人",
-        if found || t.owner_id.is_none() {
-            egui::RichText::new(owner)
-        } else {
-            egui::RichText::new(owner).color(theme::warn())
-        },
-    );
-    info_row(ui, "当前进展", empty(&t.progress));
-    info_row(ui, "下一步工作", empty(&t.next_step));
-    info_row(
-        ui,
-        "风险问题及应对措施",
-        if t.risks.is_empty() {
-            empty("")
-        } else {
-            egui::RichText::new(t.risks.clone()).color(theme::warn())
-        },
-    );
+    let owner = if t.owner_name.trim().is_empty() {
+        muted("未指定")
+    } else if found || t.owner_id.is_none() {
+        egui::RichText::new(owner)
+    } else {
+        egui::RichText::new(owner).color(theme::warn())
+    };
     let deadline = match &t.deadline {
         Some(d) => match days_from(today, d) {
             Some(n) if n < 0 && !t.status.terminal() => {
@@ -276,24 +263,46 @@ fn info(ui: &mut egui::Ui, t: &Task, today: &str, vocabulary: &[crate::models::V
             }
             _ => egui::RichText::new(d.clone()),
         },
-        None => empty(""),
+        None => muted("未定"),
     };
-    info_row(ui, "任务期限", deadline);
-    info_row(ui, "分类", egui::RichText::new(t.category.clone()));
+    // 「谁、何时、归哪类」是一眼要看的事实，横排成一条；窄了自动折行。
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(28.0, 8.0);
+        fact(ui, "负责人", owner);
+        fact(ui, "任务期限", deadline);
+        fact(ui, "分类", egui::RichText::new(t.category.clone()));
+    });
 }
 
-fn info_row(ui: &mut egui::Ui, label: &str, value: egui::RichText) {
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(76.0, 18.0),
-            egui::Layout::left_to_right(egui::Align::Min),
-            |ui| {
-                ui.set_width(76.0);
-                theme::caption(ui, label);
-            },
-        );
-        ui.vertical(|ui| ui.add(egui::Label::new(value).wrap()));
+fn fact(ui: &mut egui::Ui, label: &str, value: egui::RichText) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        theme::caption(ui, label);
+        ui.label(value);
     });
+}
+
+fn muted(text: &str) -> egui::RichText {
+    egui::RichText::new(text).color(theme::text_muted())
+}
+
+/// 正文区块的标题行：左边标题，右边可放一个就地操作。
+fn section(ui: &mut egui::Ui, title: &str, trailing: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
+    });
+    ui.add_space(2.0);
+}
+
+/// 区块正文：有内容按正文字号换行显示，没有就给一句淡色提示。
+fn body(ui: &mut egui::Ui, text: &str, empty: &str) {
+    if text.trim().is_empty() {
+        ui.label(muted(empty));
+    } else {
+        ui.add(egui::Label::new(text.trim()).wrap().selectable(true));
+    }
 }
 
 fn relations(ui: &mut egui::Ui, state: &mut State, t: &Task, data: &Snapshot) {
@@ -322,34 +331,24 @@ fn relations(ui: &mut egui::Ui, state: &mut State, t: &Task, data: &Snapshot) {
     if links.is_empty() {
         return;
     }
-    ui.add_space(4.0);
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(76.0, 18.0),
-            egui::Layout::left_to_right(egui::Align::Min),
-            |ui| {
-                ui.set_width(76.0);
-                theme::caption(ui, "关系");
-            },
-        );
-        ui.horizontal_wrapped(|ui| {
-            for (kind, other) in links {
-                let done = other.status == Status::Done;
-                let text = format!("{kind} · {} · {}", other.name, other.status.as_str());
-                let text = if done {
-                    egui::RichText::new(text).color(theme::success())
-                } else {
-                    egui::RichText::new(text)
-                };
-                if ui
-                    .add(egui::Button::new(text).small())
-                    .on_hover_text("跳到这项任务")
-                    .clicked()
-                {
-                    state.selected = Some(other.id.clone());
-                }
+    section(ui, "关系", |_| {});
+    ui.horizontal_wrapped(|ui| {
+        for (kind, other) in links {
+            let done = other.status == Status::Done;
+            let text = format!("{kind} · {} · {}", other.name, other.status.as_str());
+            let text = if done {
+                egui::RichText::new(text).color(theme::success())
+            } else {
+                egui::RichText::new(text)
+            };
+            if ui
+                .add(egui::Button::new(text).small())
+                .on_hover_text("跳到这项任务")
+                .clicked()
+            {
+                state.selected = Some(other.id.clone());
             }
-        });
+        }
     });
 }
 
@@ -372,39 +371,75 @@ pub(super) fn sync_progress_box(state: &mut State, t: &Task) {
     }
 }
 
-fn progress(ui: &mut egui::Ui, store: &mut Store, state: &mut State, t: &Task) {
-    ui.label(egui::RichText::new("更新进展").strong());
-    theme::caption(ui, "更新后旧进展保留在历史里");
+/// 当前进展：平时按正文显示，点「更新进展」就地变成编辑框，不再另起一个重复的框。
+fn progress(ui: &mut egui::Ui, store: &mut Store, state: &mut State, t: &Task, readonly: bool) {
+    let editing = !readonly && state.progress_editing.as_deref() == Some(t.id.as_str());
+    section(ui, "当前进展", |ui| {
+        if !readonly
+            && !editing
+            && ui
+                .add(theme::icon_text_button(theme::Icon::PencilLine, "更新进展"))
+                .on_hover_text("改写当前进展，旧进展留在历史里")
+                .clicked()
+        {
+            state.progress_editing = Some(t.id.clone());
+            state.progress_text = t.progress.clone();
+            state.progress_task = Some((t.id.clone(), t.progress.clone()));
+            state.progress_focus = true;
+        }
+    });
+    if !editing {
+        body(ui, &t.progress, "还没有记录进展。");
+        return;
+    }
     let response = ui.add(
         egui::TextEdit::multiline(&mut state.progress_text)
             .hint_text("如：已收到两家单位反馈，还差三家")
             .desired_rows(3)
             .desired_width(f32::INFINITY),
     );
+    if std::mem::take(&mut state.progress_focus) {
+        response.request_focus();
+    }
     // 没改动就不更新，免得 Ctrl+Enter 连按在历史里堆出一串相同的进展。
     let changed = state.progress_text.trim() != t.progress;
-    let submit_key = changed
-        && response.has_focus()
-        && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+    let (submit_key, cancel_key) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::Enter) && i.modifiers.command,
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+    let focused = response.has_focus() || response.lost_focus();
     ui.horizontal(|ui| {
         let clicked =
             theme::primary_icon_button_enabled(ui, changed, theme::Icon::Check, "更新").clicked();
-        theme::caption(ui, &format!("{} 更新", theme::primary_shortcut("Enter")));
-        if clicked || submit_key {
+        let cancel = ui.button("取消").clicked();
+        theme::caption(
+            ui,
+            &format!(
+                "{} 更新 · Esc 取消 · 旧进展留在历史里",
+                theme::primary_shortcut("Enter")
+            ),
+        );
+        if clicked || (changed && submit_key && focused) {
             let text = state.progress_text.trim().to_owned();
             match store.record_progress(&t.id, &text) {
                 Ok(()) => {
                     state.progress_text = text;
+                    state.progress_editing = None;
                     state.ok("进展已更新，旧进展保留在历史里");
                 }
                 Err(e) => state.fail(format!("记录进展失败：{e:#}")),
             }
+        } else if cancel || (cancel_key && focused) {
+            state.progress_editing = None;
+            state.progress_text = t.progress.clone();
         }
     });
 }
 
+/// 历史按时间线排：左列时间，右边动作与说明，扫一眼就能看出先后。
 fn history(ui: &mut egui::Ui, store: &mut Store, state: &mut State, t: &Task) {
-    ui.label(egui::RichText::new("历史").strong());
     let entries = match state.cache.history(store, &t.id) {
         Ok(entries) => entries
             .iter()
@@ -422,39 +457,61 @@ fn history(ui: &mut egui::Ui, store: &mut Store, state: &mut State, t: &Task) {
             return;
         }
     };
+    let count = entries.len();
+    section(ui, "历史", |ui| {
+        if count > 0 {
+            theme::caption(ui, &format!("{count} 条，新的在前"));
+        }
+    });
     if entries.is_empty() {
         theme::caption(ui, "还没有记录。");
         return;
     }
     for (index, (at, action, detail, source)) in entries.into_iter().enumerate() {
+        ui.add_space(if index == 0 { 2.0 } else { 8.0 });
         ui.push_id(("task_history", index), |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(&action).strong());
-                theme::caption(ui, &at);
-                if let Some(source) = &source
-                    && ui
-                        .small_button("原文")
-                        .on_hover_text("查看当时依据的材料快照")
-                        .clicked()
-                {
-                    match store.source(source) {
-                        Ok(view) => state.source_view = Some(view),
-                        Err(e) => state.fail(format!("读取来源失败：{e:#}")),
-                    }
-                }
-            });
-            let detail = detail.trim();
-            if !detail.is_empty() {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(detail)
-                            .size(theme::font_sizes::SMALL)
-                            .color(theme::text_soft()),
-                    )
-                    .wrap(),
+            // 时间列与动作那一行同高、同样居中，两者落在一条基线上。
+            let line = ui.spacing().interact_size.y;
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(84.0, line),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_width(84.0);
+                        ui.set_min_height(line);
+                        theme::caption(ui, &at);
+                    },
                 );
-            }
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(line);
+                        ui.label(egui::RichText::new(&action).strong());
+                        if let Some(source) = &source
+                            && ui
+                                .small_button("原文")
+                                .on_hover_text("查看当时依据的材料快照")
+                                .clicked()
+                        {
+                            match store.source(source) {
+                                Ok(view) => state.source_view = Some(view),
+                                Err(e) => state.fail(format!("读取来源失败：{e:#}")),
+                            }
+                        }
+                    });
+                    let detail = detail.trim();
+                    if !detail.is_empty() {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(detail)
+                                    .size(theme::font_sizes::SMALL)
+                                    .color(theme::text_soft()),
+                            )
+                            .wrap(),
+                        );
+                    }
+                });
+            });
         });
-        ui.add_space(6.0);
     }
 }

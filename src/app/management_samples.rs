@@ -681,6 +681,10 @@ fn task_assistant_samples() {
         if view == View::Materials {
             app.task_ui.material_selected = Some(material.id.clone());
         }
+        if width == 600.0 && view == View::Active {
+            // 窄窗口顺带看一眼「当前进展」就地更新的样子。
+            app.task_ui.progress_editing = Some(child.id.clone());
+        }
         app.task_ui.draft = if editing {
             app.task_store
                 .as_ref()

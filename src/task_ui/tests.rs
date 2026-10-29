@@ -897,6 +897,14 @@ fn task_assistant_detail_updates_current_progress_and_history() {
     };
     let mut h = bench(state, store);
     assert_eq!(h.state().state.progress_text, "原进展");
+    // 平时按正文显示，点「更新进展」才就地变成编辑框。
+    assert!(h.query_by_label("原进展").is_some());
+    h.get_by_label("更新进展").click();
+    h.run();
+    assert_eq!(
+        h.state().state.progress_editing.as_deref(),
+        Some(task.id.as_str())
+    );
     h.state_mut().state.progress_text = "已完成现场核查".into();
     h.run();
     h.get_by_role_and_label(egui::accesskit::Role::Button, "更新")
@@ -913,6 +921,19 @@ fn task_assistant_detail_updates_current_progress_and_history() {
         "进展更新"
     );
     assert!(h.query_by_label("当前进展").is_some());
+    // 更新完回到显示状态；再进编辑，点「取消」不写库。
+    assert!(h.state().state.progress_editing.is_none());
+    h.get_by_label("更新进展").click();
+    h.run();
+    h.state_mut().state.progress_text = "不要了".into();
+    h.run();
+    h.get_by_label("取消").click();
+    h.run();
+    assert!(h.state().state.progress_editing.is_none());
+    assert_eq!(
+        h.state().store.list(true).unwrap().remove(0).progress,
+        "已完成现场核查"
+    );
 }
 
 #[test]

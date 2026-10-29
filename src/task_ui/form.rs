@@ -184,21 +184,27 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
         },
     );
     ui.columns(2, |cols| {
-        label(&mut cols[0], "状态");
-        egui::ComboBox::from_id_salt("task_edit_status")
-            .selected_text(d.status.as_str())
-            .show_ui(&mut cols[0], |ui| {
-                for s in [
-                    Status::Todo,
-                    Status::InProgress,
-                    Status::Waiting,
-                    Status::Blocked,
-                    Status::Done,
-                    Status::Cancelled,
-                ] {
-                    ui.selectable_value(&mut d.status, s, s.as_str());
-                }
-            });
+        // 与右边「任务期限」（`fill::field`）同样的标签行与 2px 外框，两栏控件才对齐。
+        let ui = &mut cols[0];
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| theme::caption(ui, "状态"));
+        egui::Frame::new().inner_margin(2.0).show(ui, |ui| {
+            egui::ComboBox::from_id_salt("task_edit_status")
+                .selected_text(d.status.as_str())
+                .width(ui.available_width().min(200.0))
+                .show_ui(ui, |ui| {
+                    for s in [
+                        Status::Todo,
+                        Status::InProgress,
+                        Status::Waiting,
+                        Status::Blocked,
+                        Status::Done,
+                        Status::Cancelled,
+                    ] {
+                        ui.selectable_value(&mut d.status, s, s.as_str());
+                    }
+                });
+        });
         fill::field(
             &mut cols[1],
             state,

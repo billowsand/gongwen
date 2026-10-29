@@ -58,6 +58,9 @@ pub(crate) struct State {
     pub progress_text: String,
     /// 「更新进展」框对应的任务与预填时的进展。
     progress_task: Option<(String, String)>,
+    /// 正在就地更新进展的任务；不在编辑时详情里按正文显示当前进展。
+    pub progress_editing: Option<String>,
+    progress_focus: bool,
     pub candidate_targets: HashMap<String, String>,
     pub candidate_edits: HashMap<String, crate::task_assistant::extract::Proposal>,
     /// 候选卡里负责人搜索框的文字，按候选 id 分开。
@@ -340,7 +343,7 @@ fn middle(
             .max_height(ui.available_height().min(height))
             .show(ui, |ui| materials::list(ui, state, data));
     } else {
-        list::show(ui, store, state, data);
+        list::show(ui, store, state, data, compact_nav);
     }
 }
 
