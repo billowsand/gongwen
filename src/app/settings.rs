@@ -492,8 +492,9 @@ impl GongwenApp {
     /// 手动点选任何一套配色都意味着「不再跟随系统明暗」；想重新跟随，勾回
     /// 上面的「明暗跟随系统」开关即可。
     ///
-    /// 「跟随 Omarchy」每点一次就重读一次 Omarchy 当前主题，Omarchy 那边换了
-    /// 主题，再点一下卡片就跟上。读失败而手里还有上一份配色时照用上一份。
+    /// 「跟随 Omarchy」每点一次就重读一次 Omarchy 当前主题；平时 Omarchy 换主题
+    /// 由后台轮询跟上（见 [`Self::sync_omarchy_theme`]），点一下是手动兜底。
+    /// 读失败而手里还有上一份配色时照用上一份。
     pub(crate) fn apply_theme(&mut self, ctx: &egui::Context, name: ThemeName) {
         let omarchy_error = if name == ThemeName::Omarchy {
             match theme::omarchy::refresh() {
@@ -510,6 +511,7 @@ impl GongwenApp {
         self.config.theme = name;
         self.config.theme_follows_system = false;
         self.applied_theme = name;
+        self.omarchy_generation = theme::omarchy::generation();
         theme::set_current(name);
         theme::reconfigure_style(ctx);
         theme::apply_app_icon(ctx, name);
@@ -577,6 +579,25 @@ impl GongwenApp {
         theme::set_current(name);
         theme::reconfigure_style(ctx);
         theme::apply_app_icon(ctx, name);
+    }
+
+    /// 后台轮询读到 Omarchy 换了主题（版本号变了），且界面正跟随 Omarchy 时重套
+    /// 样式并在状态栏说一声。不写配置：配置里记的只是「跟随 Omarchy」。版本号没变
+    /// 是空操作，每帧调用无开销。
+    pub(crate) fn sync_omarchy_theme(&mut self, ctx: &egui::Context) {
+        let generation = theme::omarchy::generation();
+        if generation == self.omarchy_generation {
+            return;
+        }
+        self.omarchy_generation = generation;
+        if self.applied_theme != ThemeName::Omarchy {
+            return;
+        }
+        theme::set_current(ThemeName::Omarchy);
+        theme::reconfigure_style(ctx);
+        if let Some(omarchy) = theme::omarchy::theme_name() {
+            self.status = format!("Omarchy 换了主题，界面已跟上：「{omarchy}」。");
+        }
     }
 
     /// 切换纸面显示模式并立即生效。只影响屏幕预览，导出结果不变。

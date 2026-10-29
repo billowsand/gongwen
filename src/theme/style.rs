@@ -5,7 +5,7 @@
 
 use crate::theme::{
     CONTROL_HEIGHT, accent, accent_active, accent_soft, anim, border, border_strong, canvas,
-    chrome_radius, current, danger, font_sizes, is_mdex, smartisan, surface, surface_active,
+    chrome_radius, current, danger, font_sizes, smartisan, square_chrome, surface, surface_active,
     surface_hover, surface_sunk, text, text_soft, warn,
 };
 use eframe::egui;
@@ -100,7 +100,7 @@ pub(crate) fn configure_style(ctx: &egui::Context) {
         spread: 0,
         color: Color32::from_black_alpha(if dark { 96 } else { 24 }),
     };
-    if is_mdex() {
+    if square_chrome() {
         visuals.window_shadow = egui::epaint::Shadow::NONE;
     }
     visuals.popup_shadow = visuals.window_shadow;

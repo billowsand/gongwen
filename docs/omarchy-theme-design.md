@@ -293,7 +293,7 @@ src/theme/omarchy/
   「画布用原色、卡片提亮 6%」那条路。
 - 查找命中衬底按 28% → 10% 逐档减淡，直到正文压在上面仍有 4.5:1（`everforest`
   的黄色混 28% 时只有 4.24）。
-- 外壳直角（4.6）放到第二期，第一期 Omarchy 主题仍是默认圆角。
+- 外壳直角（4.6）放到第二期，第一期 Omarchy 主题仍是默认圆角（第二期已做）。
 
 在 Windows / macOS 上调色：设环境变量 `GONGWEN_OMARCHY_THEME_DIR` 指向一个含
 `colors.toml` 的目录（可拷 `tests/fixtures/omarchy/<主题>.toml` 改名），目录的上一级
@@ -307,7 +307,43 @@ src/theme/omarchy/
 4. 选着「跟随 Omarchy」时退出，删掉或改坏 `colors.toml` 再启动：状态栏说明、界面
    为 Claude 奶油；恢复文件再启动自动回来。
 
-### 下一步：第二期
+### 第二期（已完成，2026-10-29，待真机验收）
 
-后台轮询 `theme.generation`（4.7）、主线程按版本号重套样式、中途缺文件保留旧配色、
-`theme::square_chrome()` 直角外壳（4.6）。
+- **后台轮询**：`src/theme/omarchy/watch.rs`。`GongwenApp::new` 在启动换算之后调
+  `omarchy::start_watcher`，启动时读到过 Omarchy 配色才起线程（没有 Omarchy 的机器
+  不空转），重复调用只起一条。每秒 `stat` 一次，比对指纹：主题目录 `canonicalize`
+  后的真实路径、`colors.toml` 的修改时间与长度、`theme.name` 的修改时间。指纹变了才
+  `refresh()`，成功后 `ctx.request_repaint()`。
+- **版本号**：`omarchy::generation()`，每成功换算一次加一。`GongwenApp` 记
+  `omarchy_generation`，`ui` 每帧在 `sync_system_theme` 之后调
+  `sync_omarchy_theme`：版本号变了且界面正跟随 Omarchy，就 `set_current` +
+  `reconfigure_style`，状态栏说「Omarchy 换了主题，界面已跟上：「X」」；不写配置。
+  `apply_theme` 自己重读后同步记下版本号，免得下一帧再套一遍、状态栏被改写。
+- **中途缺文件**：读失败时缓存不动，也不记这次指纹，下一秒重试；界面停在上一套，
+  不闪回 Claude 奶油。
+- **直角外壳**：`theme::square_chrome()`（`src/theme/icons.rs`）= MDEX 两套或当前
+  label 是「跟随 Omarchy」。原来所有 `is_mdex()` 调用点都换成它，`is_mdex()` 降为
+  私有，只剩标题栏品牌图标一处用。Omarchy 主题的 label 固定是 `LABEL`，测试逐套核对。
+
+与方案的出入：
+
+- 不看 `theme.generation`：没核实到 Omarchy 会写这个文件，指纹改用上面三项，
+  覆盖「换符号链接」「原地覆写 colors.toml」「只改主题名」三种换法。`gongwen.toml`
+  覆盖还没做（第三期），做时把它的修改时间加进指纹。
+- 直角外壳不只是圆角归零，而是整套沿用 MDEX 的平面外壳：浮层与窗口不投影、功能区
+  用淡色工具带加强调色短标记、文档标签选中用淡强调底加底线、纸边减淡、对照分栏的
+  拖动点。这些原来都挂在 `is_mdex()` 上，本来就是「平面工具区」这一个意思，与
+  Hyprland 平铺窗口的观感一致，没有逐项拆开。
+- Omarchy 换主题时不重设窗口图标：「跟随 Omarchy」用的一直是 Claude 那张。
+
+### 待真机验收（第二期）
+
+1. 选着「跟随 Omarchy」，`omarchy theme set <另一套>`：一两秒内界面换色，状态栏说明
+   新主题名；切换过程中不闪回 Claude 奶油。
+2. 连切几套（含明暗互切），每次都跟上；纸面家族随明暗换。
+3. 选着别的主题时 Omarchy 换主题：界面不动，设置页 Omarchy 卡片的副标题跟着变。
+4. 外壳：圆角全部为直角，浮层无投影，功能区、文档标签是 MDEX 那种平面样式。
+
+### 下一步：第三期
+
+`gongwen.toml` 覆盖（加进指纹）、23 套色卡拼板样张、使用帮助「外观」与 README。

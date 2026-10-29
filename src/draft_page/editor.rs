@@ -705,7 +705,7 @@ impl DraftPage<'_> {
                     .size_range(280.0..=900.0)
                     .frame(theme::comparison_pane(false))
                     .show(ui, |ui| self.markdown_editor(ui));
-                if theme::is_mdex() || theme::smartisan::active() {
+                if theme::square_chrome() || theme::smartisan::active() {
                     // 面板保留原生分隔线与调宽热区，三个小点仅提示它可以拖动。
                     let center = source.response.rect.right_center();
                     for offset in [-4.0, 0.0, 4.0] {
@@ -961,7 +961,7 @@ impl DraftPage<'_> {
             galley
         };
 
-        // MDEX 外层窗格已描边，正文只保留填色与留白，避免双层边框。
+        // 直角外壳的外层窗格已描边，正文只保留填色与留白，避免双层边框。
         let source_frame = if theme::smartisan::active() && source_mode {
             // 源码模式外层已是一整张稿本，正文不再加第二层纸框和阴影。
             egui::Frame::NONE.inner_margin(egui::Margin {
@@ -972,7 +972,7 @@ impl DraftPage<'_> {
             })
         } else if theme::smartisan::active() {
             theme::smartisan::source_frame()
-        } else if theme::is_mdex() {
+        } else if theme::square_chrome() {
             theme::card().stroke(egui::Stroke::NONE)
         } else {
             theme::card()

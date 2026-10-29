@@ -216,8 +216,9 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 
 - **跟随 Omarchy 主题**（读 Omarchy 当前主题的 `colors.toml` 现算界面配色，分三期）：
   **第一期（探测、解析、换算、`Theme::on_accent`、`ThemeName::Omarchy` 与设置页 / 菜单入口、
-  23 套官方样本对比度测试）已完成，待 Omarchy 真机验收**；第二期（后台轮询即时跟随、直角外壳）
-  未开工。代码在 `src/theme/omarchy/`，样本在 `tests/fixtures/omarchy/`。方案、出入与交接见
+  23 套官方样本对比度测试）、第二期（后台每秒轮询即时跟随 `omarchy/watch.rs`、
+  `theme::square_chrome()` 直角平面外壳）已完成，待 Omarchy 真机验收**；第三期（`gongwen.toml`
+  覆盖、色卡样张、使用帮助）未开工。代码在 `src/theme/omarchy/`，样本在 `tests/fixtures/omarchy/`。方案、出入与交接见
   `docs/omarchy-theme-design.md`（单文件，第九节是交接）。只读用户的 Omarchy 配置，不写钩子与模板。
 
 - **任务助手界面改版与「粘贴填表」**（三栏布局 + 视图栏、表单内「从文字填写」、待整理建议视图，

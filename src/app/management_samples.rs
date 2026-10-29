@@ -35,6 +35,7 @@ pub(super) fn fixture() -> GongwenApp {
     let task_store = crate::task_assistant::Store::open(std::path::Path::new(":memory:")).ok();
     let mut app = GongwenApp {
         applied_theme: config.theme,
+        omarchy_generation: theme::omarchy::generation(),
         config,
         ime,
         metrics: crate::metrics::Metrics::default(),

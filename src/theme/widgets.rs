@@ -5,7 +5,7 @@
 
 use crate::theme::{
     Icon, Theme, accent, accent_active, accent_hover, border, border_strong, chrome_radius,
-    current, danger, font_sizes, is_mdex, smartisan, surface, surface_active, surface_hover,
+    current, danger, font_sizes, smartisan, square_chrome, surface, surface_active, surface_hover,
     surface_sunk, text, text_muted, text_soft, warn,
 };
 use eframe::egui;
@@ -552,7 +552,7 @@ pub(crate) fn notice(
     let bar = egui::Rect::from_min_size(response.rect.min, egui::vec2(3.0, response.rect.height()));
     ui.painter().rect_filled(
         bar,
-        if is_mdex() {
+        if square_chrome() {
             CornerRadius::ZERO
         } else {
             CornerRadius {

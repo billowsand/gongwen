@@ -132,6 +132,9 @@ pub struct GongwenApp {
     /// `config.theme` 里记住的手动主题不同；设置页的「当前」标记与菜单勾选
     /// 都认这一项，切换系统明暗时会跟着改。
     applied_theme: ThemeName,
+    /// 界面上套用过的那一版 Omarchy 配色（`theme::omarchy::generation`）；
+    /// 后台轮询读到新主题后版本号变了，下一帧重套样式。
+    omarchy_generation: u64,
     /// 应用内词表输入法：引擎在本进程里，接管键盘时系统输入法被关掉。
     ime: crate::ime::Ime,
     /// 模态对话框的帧首守卫：收走模态下面的焦点，并据此停用应用级快捷键。
@@ -470,6 +473,7 @@ impl GongwenApp {
         theme::configure_fonts(&cc.egui_ctx, &config.fonts);
         theme::configure_icons(&cc.egui_ctx);
         theme::configure_style(&cc.egui_ctx);
+        theme::omarchy::start_watcher(&cc.egui_ctx);
         // 全局界面缩放要赶在测量原生标题栏之前应用：macOS 的避让宽度按
         // 当前 zoom_factor 折算（见 macos_window.rs），晚一步会按 100% 算错。
         let ui_scale = config.clamped_ui_scale();
@@ -558,6 +562,7 @@ impl GongwenApp {
         let mut app = Self {
             config,
             applied_theme,
+            omarchy_generation: theme::omarchy::generation(),
             ime,
             metrics: crate::metrics::load(),
             print_dialog: None,
@@ -779,6 +784,8 @@ impl eframe::App for GongwenApp {
         // 跟随系统明暗：窗口刚建好时首帧才拿到系统主题，这里校正一次配色与图标；
         // 之后系统在深浅模式之间切换（winit 的 ThemeChanged）也走同一条路。
         self.sync_system_theme(&ctx);
+        // 跟随 Omarchy：后台轮询读到 Omarchy 换了主题，这里重套样式。
+        self.sync_omarchy_theme(&ctx);
         // 模态守卫最先跑：焦点要在输入法接管键盘之前从模态下面收走。
         self.modal_guard.begin_frame(&ctx);
         // 输入法要在所有控件之前接管键盘：该吃的按键在这里吃掉、该上屏的塞回事件队列。

@@ -4,7 +4,7 @@
 //! `theme` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::models::ThemeName;
-use crate::theme::{current, mdex, smartisan};
+use crate::theme::{current, mdex, omarchy, smartisan};
 use eframe::egui;
 use eframe::egui::{Color32, CornerRadius};
 use std::sync::Arc;
@@ -343,16 +343,22 @@ impl Icon {
     }
 }
 
-/// MDEX 的外壳使用直角与细描边，配色仍由统一主题接口提供。
-pub(crate) fn is_mdex() -> bool {
+/// 当前是不是 MDEX 两套之一；只用来挑标题栏的品牌图标，外壳形状看 [`square_chrome`]。
+fn is_mdex() -> bool {
     matches!(current().label, mdex::LABEL | mdex::DARK_LABEL)
+}
+
+/// 直角、细描边、不投影的平面外壳，配色仍由统一主题接口提供。MDEX 两套与
+/// 「跟随 Omarchy」（Hyprland 默认是直角细线边框）用它。
+pub(crate) fn square_chrome() -> bool {
+    is_mdex() || current().label == omarchy::LABEL
 }
 
 pub(crate) fn chrome_radius(default: u8) -> CornerRadius {
     if smartisan::active() {
         return CornerRadius::same(default.min(4));
     }
-    CornerRadius::same(if is_mdex() { 0 } else { default })
+    CornerRadius::same(if square_chrome() { 0 } else { default })
 }
 
 /// 标题栏的品牌图标；MDEX 使用完整双色图标，不给绿色光标整体染色。

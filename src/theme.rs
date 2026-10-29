@@ -42,8 +42,8 @@ pub(crate) use fonts::{FONT_RESEARCH_BIAOSONG, FONT_RESEARCH_KAI, FONT_RESEARCH_
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use fonts::line_gap_offset_factor;
 pub(crate) use icons::{
-    Icon, app_icon, apply_app_icon, brand_image, chrome_radius, configure_icons, is_mdex,
-    primary_shortcut,
+    Icon, app_icon, apply_app_icon, brand_image, chrome_radius, configure_icons, primary_shortcut,
+    square_chrome,
 };
 pub(crate) use palette::{
     MdPalette, PaperFamily, Theme, accent, accent_active, accent_hover, accent_soft, border,
@@ -339,7 +339,7 @@ pub mod paper {
     /// 纸边与纸底一起取色；没有专属纸边的纸面保留原有主题边框。
     pub fn border() -> Color32 {
         sheet().border.unwrap_or_else(|| {
-            if super::is_mdex() {
+            if super::square_chrome() {
                 super::border().gamma_multiply(0.55)
             } else {
                 super::border()

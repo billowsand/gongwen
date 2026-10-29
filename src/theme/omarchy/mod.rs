@@ -4,15 +4,21 @@
 //! 终端、Waybar、Hyprland 边框一起换色。这里不做固定预设，而是读当前主题的
 //! 真源 `colors.toml` 现算一套 [`Theme`]。只读，不往用户的 Omarchy 配置里写任何东西。
 //!
-//! 第一期只在启动与点选主题卡片时读一次（[`refresh`]），换算结果缓存在本模块；
-//! Omarchy 切主题后要再点一次卡片才跟上。方案与分期见 `docs/omarchy-theme-design.md`。
+//! 启动与点选主题卡片时各读一次（[`refresh`]），之后由后台线程每秒看一眼
+//! （[`start_watcher`]），Omarchy 换了主题就重读；换算结果缓存在本模块，每成功换算
+//! 一次 [`generation`] 加一，界面线程据此重套样式。方案与分期见
+//! `docs/omarchy-theme-design.md`。
 
 mod colors;
 mod derive;
 mod detect;
+mod watch;
 
 use crate::theme::Theme;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub(crate) use watch::start as start_watcher;
 
 /// 设置页与菜单里的主题名。
 pub(crate) const LABEL: &str = "跟随 Omarchy";
@@ -26,6 +32,9 @@ struct Loaded {
 /// 最近一次成功换算的结果。读失败时保留上一份，不清空。
 static LOADED: RwLock<Option<Loaded>> = RwLock::new(None);
 
+/// 缓存的版本号，每成功换算一次加一。
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
 /// 重新读 Omarchy 当前主题并换算。找不到目录或解析失败时返回原因，
 /// 已缓存的上一份配色保持不变。
 pub(crate) fn refresh() -> Result<(), String> {
@@ -38,7 +47,13 @@ pub(crate) fn refresh() -> Result<(), String> {
     *LOADED
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(loaded);
+    GENERATION.fetch_add(1, Ordering::SeqCst);
     Ok(())
+}
+
+/// 缓存的版本号。界面线程记下自己套用过的那一版，变了就重套样式。
+pub(crate) fn generation() -> u64 {
+    GENERATION.load(Ordering::SeqCst)
 }
 
 /// 是否读到过一份可用的 Omarchy 配色；没有时界面上不出现「跟随 Omarchy」。
@@ -245,6 +260,14 @@ mod tests {
         assert_ne!(theme.text_muted, raw);
         assert!(luminance(theme.text_muted) > luminance(raw));
         assert_eq!(theme.paper_family, crate::theme::PaperFamily::NightBlue);
+    }
+
+    /// 外壳形状靠 label 认出「跟随 Omarchy」（`theme::square_chrome`），每套都得带上它。
+    #[test]
+    fn every_builtin_theme_carries_the_omarchy_label() {
+        for (name, colors) in fixtures() {
+            assert_eq!(derive::derive(&colors).label, LABEL, "{name}");
+        }
     }
 
     /// 纯黑主题没有更暗的底，卡片往前景提一点，与画布分开。

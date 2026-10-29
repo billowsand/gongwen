@@ -1394,11 +1394,11 @@ impl GongwenApp {
             TAB_SELECT_ANIM,
         );
 
-        // MDEX 选中态使用浅强调底与底部标记；其它主题保持实心胶囊。
+        // 直角外壳选中态使用浅强调底与底部标记；其它主题保持实心胶囊。
         // 未选中从沉色经悬停色到按下的更深色。
         // 导航页标签（词库、设置等）用更浅的 surface 底 + 实色描边，与文档标签的
         // 沉色底区分——一眼看出「这是导航页，不是打开的文档」。
-        let rectangular = theme::is_mdex() || theme::smartisan::active();
+        let rectangular = theme::square_chrome() || theme::smartisan::active();
         let selected_fill = if theme::smartisan::active() {
             theme::surface()
         } else if rectangular {
@@ -1425,7 +1425,7 @@ impl GongwenApp {
         .lerp_to_gamma(selected_fill, sel_t);
         bg = bg.lerp_to_gamma(theme::surface_hover(), hover_t * (1.0 - sel_t));
         bg = bg.lerp_to_gamma(theme::surface_active(), press_t * (1.0 - sel_t));
-        // 边框：悬停加深；MDEX 常显细线，其它主题选中时与底色同色。
+        // 边框：悬停加深；直角外壳常显细线，其它主题选中时与底色同色。
         let border = (if is_page {
             theme::border_strong()
         } else {
@@ -1464,7 +1464,7 @@ impl GongwenApp {
             );
         }
 
-        if theme::is_mdex() && sel_t > 0.0 {
+        if theme::square_chrome() && sel_t > 0.0 {
             ui.painter().line_segment(
                 [
                     rect.left_bottom() - egui::vec2(0.0, 1.0),

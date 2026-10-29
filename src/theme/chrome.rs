@@ -4,8 +4,8 @@
 //! `theme` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::theme::{
-    accent, accent_soft, anim, border, border_strong, canvas, chrome_radius, is_mdex, smartisan,
-    surface, surface_active, surface_hover,
+    accent, accent_soft, anim, border, border_strong, canvas, chrome_radius, smartisan,
+    square_chrome, surface, surface_active, surface_hover,
 };
 use eframe::egui;
 use eframe::egui::{Color32, Margin, Stroke};
@@ -104,7 +104,7 @@ pub const PANE_PADDING: i8 = 8;
 
 /// 浮起元素（浮板、纸面）统一的一档投影；`alpha` 由调用方按纸面明暗给。
 pub(crate) fn float_shadow(alpha: u8) -> egui::epaint::Shadow {
-    if is_mdex() {
+    if square_chrome() {
         return egui::epaint::Shadow::NONE;
     }
     egui::epaint::Shadow {
@@ -115,9 +115,9 @@ pub(crate) fn float_shadow(alpha: u8) -> egui::epaint::Shadow {
     }
 }
 
-/// 纸张保留轻微离底的投影；MDEX 的其它界面仍是平面工具区。
+/// 纸张保留轻微离底的投影；直角外壳的其它界面仍是平面工具区。
 pub(crate) fn paper_shadow(alpha: u8) -> egui::epaint::Shadow {
-    if is_mdex() {
+    if square_chrome() {
         egui::epaint::Shadow {
             offset: [0, 3],
             blur: 12,
@@ -134,7 +134,7 @@ pub(crate) fn comparison_pane(preview: bool) -> egui::Frame {
     if smartisan::active() {
         return egui::Frame::new().inner_margin(Margin::same(16));
     }
-    if !is_mdex() {
+    if !square_chrome() {
         return pane();
     }
     egui::Frame::new()
@@ -144,7 +144,7 @@ pub(crate) fn comparison_pane(preview: bool) -> egui::Frame {
 
 /// 对照区的浮动滚动条不占内容宽度，空闲时隐藏，悬停时仍可抓住拖动。
 pub(crate) fn configure_comparison_scroll(ui: &mut egui::Ui) {
-    if is_mdex() {
+    if square_chrome() {
         ui.spacing_mut().scroll = egui::style::ScrollStyle {
             bar_width: 6.0,
             floating_width: 3.0,
@@ -183,7 +183,7 @@ pub(crate) fn ribbon_tray_layout() -> egui::Frame {
         .outer_margin(Margin::symmetric(2, 2))
 }
 
-/// MDEX 用淡色工具带、底线与同色短标记关联上下两行；其它主题保持闭合曲线。
+/// 直角外壳（MDEX、跟随 Omarchy）用淡色工具带、底线与同色短标记关联上下两行；其它主题保持闭合曲线。
 pub(crate) fn connected_ribbon_shape(
     tab_rect: egui::Rect,
     tray_outer_rect: egui::Rect,
@@ -191,7 +191,7 @@ pub(crate) fn connected_ribbon_shape(
     if smartisan::active() {
         return smartisan::ribbon_shape(tab_rect, tray_outer_rect);
     }
-    if is_mdex() {
+    if square_chrome() {
         let tray = tray_outer_rect.shrink(2.0);
         let fill = mix_color(surface(), accent_soft(), 0.18);
         return egui::Shape::Vec(vec![
@@ -248,9 +248,9 @@ pub(crate) fn connected_ribbon_shape(
     egui::Shape::Vec(shapes)
 }
 
-/// 仅在 MDEX 下层工具条内弱化常态按钮，悬停、按下与主按钮仍保留明确反馈。
+/// 仅在直角外壳的下层工具条内弱化常态按钮，悬停、按下与主按钮仍保留明确反馈。
 pub(crate) fn configure_ribbon_controls(ui: &mut egui::Ui) {
-    if !is_mdex() {
+    if !square_chrome() {
         return;
     }
     let stroke = Stroke::new(1.0, border().gamma_multiply(0.3));
