@@ -45,6 +45,7 @@ pub(crate) const FILES: &[(&str, &str)] = &[
     help_file!("20-settings.md"),
     help_file!("21-data.md"),
     help_file!("22-send-package.md"),
+    help_file!("23-task-assistant.md"),
     help_file!("a-shortcuts.md"),
     help_file!("b-faq.md"),
     help_file!("c-glossary.md"),

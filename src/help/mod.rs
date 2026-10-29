@@ -474,8 +474,8 @@ mod tests {
             .filter(|e| e.kind == EntryKind::Chapter)
             .count();
         assert_eq!(parts, 5, "五个部分");
-        // 摘要 + 22 章 + 3 篇附录。
-        assert_eq!(chapters, 26);
+        // 摘要 + 23 章 + 3 篇附录。
+        assert_eq!(chapters, 27);
         assert!(toc().iter().any(|e| e.label.contains("附录A")));
         for (index, entry) in toc().iter().enumerate() {
             if entry.kind == EntryKind::Section {
