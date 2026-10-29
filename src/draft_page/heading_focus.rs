@@ -4,6 +4,10 @@
 //! 默认只列同一个上级标题下的兄弟标题（「二、」下面的（一）到（四）），可以切到
 //! 全文这一级。对话框里只改标题文字：`#` 层级、手写的旧编号、研究报告行尾的
 //! 锚点 `{#…}` 都原样留在源码里，编号仍由程序生成。
+//!
+//! 还能调整同一上级下标题的先后：上移、下移搬的是整节，连同下面的子标题与
+//! 正文；编号跟着位置走。中间隔着区段标记（附件、附录、参考文献等）的两节
+//! 不能互换。
 
 use crate::draft_page::{
     DraftPage, PreviewMode, editor_cursor, line_at_byte, line_ranges, markdown_heading_level,
@@ -41,6 +45,13 @@ pub(crate) struct FocusItem {
     excerpt: String,
     /// 这条标题在纸上的字面，大字模式按它排，领导看到的就是印出来的样子。
     family: &'static str,
+    /// 整节在源码里的字节范围：标题行（连同紧贴其上的不编号标记）到下一个
+    /// 同级或更高一级标题、或区段标记之前。调整顺序时整段搬。
+    section: Range<usize>,
+    /// 能互换顺序的一串：同一上级、源码里首尾相接的几节。
+    run: usize,
+    /// 打开时的先后，调整顺序后据此认出哪一串换过。
+    order: usize,
 }
 
 impl FocusItem {
@@ -93,6 +104,76 @@ impl HeadingFocus {
         self.items.iter().any(|item| item.cleaned().is_empty())
     }
 
+    /// 顺序换过的那几串。
+    fn reordered_runs(&self) -> Vec<usize> {
+        let mut runs = self
+            .items
+            .windows(2)
+            .filter(|pair| pair[0].run == pair[1].run && pair[0].order > pair[1].order)
+            .map(|pair| pair[0].run)
+            .collect::<Vec<_>>();
+        runs.dedup();
+        runs
+    }
+
+    fn has_changes(&self) -> bool {
+        self.modified_count() > 0 || !self.reordered_runs().is_empty()
+    }
+
+    /// `index` 那条与上一条（`up`）或下一条能否互换：同属一串才行。
+    fn can_move(&self, index: usize, up: bool) -> bool {
+        let other = if up {
+            index.checked_sub(1)
+        } else {
+            Some(index + 1)
+        };
+        other
+            .and_then(|other| self.items.get(other))
+            .is_some_and(|other| other.run == self.items[index].run)
+    }
+
+    /// 把 `index` 那条上移或下移一位，返回它的新下标。编号跟着位置走：换完
+    /// 再把两条的编号换回来，「（一）」仍显示在第一位。
+    fn move_item(&mut self, index: usize, up: bool) -> Option<usize> {
+        if !self.can_move(index, up) {
+            return None;
+        }
+        let other = if up { index - 1 } else { index + 1 };
+        self.items.swap(index, other);
+        if self.items[index].number.is_some() && self.items[other].number.is_some() {
+            let number = self.items[index].number.take();
+            self.items[index].number = self.items[other].number.take();
+            self.items[other].number = number;
+        }
+        if self.current == index {
+            self.current = other;
+        } else if self.current == other {
+            self.current = index;
+        }
+        Some(other)
+    }
+
+    /// 写回要做的全部替换：顺序换过的一串整块重排（块里的标题改字一并带上），
+    /// 其余改过字的标题只换文字。
+    fn edits(&self) -> Vec<Edit> {
+        let runs = self.reordered_runs();
+        let mut edits = self
+            .items
+            .iter()
+            .filter(|item| item.modified() && !runs.contains(&item.run))
+            .map(|item| Edit::text(item.text_range.clone(), item.cleaned()))
+            .collect::<Vec<_>>();
+        for run in runs {
+            let members = self
+                .items
+                .iter()
+                .filter(|item| item.run == run)
+                .collect::<Vec<_>>();
+            edits.push(reorder_run(&self.snapshot, &members, self.cursor));
+        }
+        edits
+    }
+
     /// 同组（同一上级）的中位字数，用来标出长短明显不齐的标题。
     fn typical_length(&self, parent: Option<usize>) -> Option<usize> {
         let mut lengths = self
@@ -107,6 +188,20 @@ impl HeadingFocus {
         lengths.sort_unstable();
         Some(lengths[lengths.len() / 2])
     }
+}
+
+/// 改动一句话说清：「改写 2 条标题，调整 1 处顺序」。
+fn change_summary(focus: &HeadingFocus) -> String {
+    let mut parts = Vec::new();
+    let modified = focus.modified_count();
+    if modified > 0 {
+        parts.push(format!("改写 {modified} 条标题"));
+    }
+    let reordered = focus.reordered_runs().len();
+    if reordered > 0 {
+        parts.push(format!("调整 {reordered} 处顺序"));
+    }
+    parts.join("，")
 }
 
 /// 排到纸上的字数：不计 Markdown 标记与空白。
@@ -172,6 +267,26 @@ fn section_excerpt(markdown: &str, ranges: &[Range<usize>], heading_line: usize)
     String::new()
 }
 
+/// 一节从哪里起：标题行，连同紧贴其上（中间只隔空行）的不编号标记——标记管的
+/// 是它下面那个标题，搬节时得跟着走。
+fn section_start(markdown: &str, ranges: &[Range<usize>], heading_line: usize) -> usize {
+    let mut start = ranges[heading_line].start;
+    for range in ranges[..heading_line].iter().rev() {
+        let line = markdown[range.clone()].trim();
+        if export::parse_unnumbered_marker(line) {
+            start = range.start;
+        } else if !line.is_empty() {
+            break;
+        }
+    }
+    start
+}
+
+/// 区段标记（正文、附件、附录、参考文献等）是节的硬边界，搬节不能跨过它。
+fn is_region_marker(line: &str) -> bool {
+    export::parse_section_marker(line).is_some() || export::parse_research_marker(line).is_some()
+}
+
 /// 按光标位置切出一次聚焦编辑。`entries` 取自导航（与目录、预览同一套编号）。
 ///
 /// 光标之前没有标题时返回 None。只收源码里确实以 `#` 起头的条目：研究报告
@@ -215,8 +330,12 @@ pub(crate) fn collect(
     let (current_index, _) = headings[current];
     let level = entries[current_index].level;
     let current_parent = parents[current];
+    let starts = headings
+        .iter()
+        .map(|&(_, line)| section_start(markdown, &ranges, line))
+        .collect::<Vec<_>>();
 
-    let mut items = Vec::new();
+    let mut items: Vec<FocusItem> = Vec::new();
     let mut current_item = 0;
     for (position, &(index, line)) in headings.iter().enumerate() {
         let entry = &entries[index];
@@ -226,11 +345,38 @@ pub(crate) fn collect(
         if position == current {
             current_item = items.len();
         }
+        // 节尾：下一个同级或更高一级标题，或者区段标记，取先到的。
+        let next_heading = (position + 1..headings.len())
+            .find(|&next| entries[headings[next].0].level <= level)
+            .map(|next| starts[next]);
+        let next_marker = ranges[line + 1..]
+            .iter()
+            .find(|range| is_region_marker(&markdown[(*range).clone()]))
+            .map(|range| range.start);
+        let section_end = match (next_heading, next_marker) {
+            (Some(heading), Some(marker)) => heading.min(marker),
+            (heading, marker) => heading.or(marker).unwrap_or(markdown.len()),
+        };
+        let section = starts[position]..section_end;
+        let parent = parents[position];
+        // 同一上级、与上一节首尾相接（中间至多空白）才算一串，才能互换。
+        let run = match items.last() {
+            Some(previous)
+                if previous.parent == parent
+                    && markdown[previous.section.end..section.start]
+                        .trim()
+                        .is_empty() =>
+            {
+                previous.run
+            }
+            Some(previous) => previous.run + 1,
+            None => 0,
+        };
         let line_range = ranges[line].clone();
         let local = editable_range(&markdown[line_range.clone()], entry.number.is_some());
         let text_range = line_range.start + local.start..line_range.start + local.end;
         let original = markdown[text_range.clone()].to_string();
-        let parent = parents[position];
+        let order = items.len();
         items.push(FocusItem {
             text_range,
             number: entry.number.clone(),
@@ -241,6 +387,9 @@ pub(crate) fn collect(
             sibling: parent == current_parent,
             excerpt: section_excerpt(markdown, &ranges, line),
             family: entry.family,
+            section,
+            run,
+            order,
         });
     }
 
@@ -266,24 +415,91 @@ pub(crate) fn collect(
     })
 }
 
+/// 写回时的一段替换。
+#[derive(Debug, Clone)]
+struct Edit {
+    range: Range<usize>,
+    text: String,
+    /// 光标原先落在这段里时，它在新文字里的位置；None 放到新文字末尾。
+    cursor: Option<usize>,
+}
+
+impl Edit {
+    fn text(range: Range<usize>, text: String) -> Self {
+        Self {
+            range,
+            text,
+            cursor: None,
+        }
+    }
+}
+
+/// 把一串换过顺序的节按新顺序整块重排，块里改过字的标题一并改掉。
+///
+/// `members` 是新顺序。节与节之间的空行留在原来的位置，搬走的只是内容，
+/// 末一节后面没有空行时换到前面也不会和下一节粘在一起。光标落在哪一节里，
+/// 就跟着那一节走。
+fn reorder_run(snapshot: &str, members: &[&FocusItem], cursor: usize) -> Edit {
+    let mut slots = members
+        .iter()
+        .map(|item| item.section.clone())
+        .collect::<Vec<_>>();
+    slots.sort_by_key(|slot| slot.start);
+    let range = slots[0].start..slots[slots.len() - 1].end;
+    let mut text = String::with_capacity(range.len());
+    let mut new_cursor = None;
+    for (slot, item) in slots.iter().zip(members) {
+        let section = &snapshot[item.section.clone()];
+        let content = section.trim_end();
+        let local_cursor = item
+            .section
+            .contains(&cursor)
+            .then(|| (cursor - item.section.start).min(content.len()));
+        let heading = item.modified().then(|| {
+            Edit::text(
+                item.text_range.start - item.section.start
+                    ..item.text_range.end - item.section.start,
+                item.cleaned(),
+            )
+        });
+        let (content, local) = apply_edits(content, heading.as_slice(), local_cursor.unwrap_or(0));
+        if local_cursor.is_some() {
+            new_cursor = Some(text.len() + local);
+        }
+        text.push_str(&content);
+        let gap = &snapshot[slot.clone()];
+        text.push_str(&gap[gap.trim_end().len()..]);
+    }
+    Edit {
+        range,
+        text,
+        cursor: new_cursor,
+    }
+}
+
 /// 把若干段替换写回正文，并把光标折算到改后的位置：改动在光标前面的按长度差
-/// 平移，光标落在被改的那段里就放到新文字末尾。
-fn apply_edits(text: &str, edits: &[(Range<usize>, String)], cursor: usize) -> (String, usize) {
+/// 平移，光标落在被改的那段里就按那段记的位置放，没记就放到新文字末尾。
+fn apply_edits(text: &str, edits: &[Edit], cursor: usize) -> (String, usize) {
     let mut sorted = edits.iter().collect::<Vec<_>>();
-    sorted.sort_by_key(|(range, _)| range.start);
+    sorted.sort_by_key(|edit| edit.range.start);
     let cursor = cursor.min(text.len());
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
     let mut new_cursor = None;
-    for (range, replacement) in sorted {
+    for edit in sorted {
+        let range = &edit.range;
         let gap_start = out.len();
         out.push_str(&text[last..range.start]);
         if new_cursor.is_none() && cursor < range.start {
             new_cursor = Some(gap_start + cursor - last);
         }
-        out.push_str(replacement);
+        let replacement_start = out.len();
+        out.push_str(&edit.text);
         if new_cursor.is_none() && cursor <= range.end {
-            new_cursor = Some(out.len());
+            new_cursor = Some(
+                edit.cursor
+                    .map_or(out.len(), |offset| replacement_start + offset),
+            );
         }
         last = range.end;
     }
@@ -312,7 +528,7 @@ impl DraftPage<'_> {
                 theme::icon_text_button(theme::Icon::Heading, "标题聚焦"),
             )
             .on_hover_text(format!(
-                "把光标所在这一级的标题集中到一个框里统一改，改完一次写回（{shortcut}）"
+                "把光标所在这一级的标题集中到一个框里统一改、调整顺序，改完一次写回（{shortcut}）"
             ))
             .on_disabled_hover_text(if self.doc.read_only() {
                 "只读稿件不能修改".to_string()
@@ -355,20 +571,15 @@ impl DraftPage<'_> {
             *self.status = "正文在编辑期间有变动，没有写回；请重新打开标题聚焦编辑。".into();
             return true;
         }
-        let edits = focus
-            .items
-            .iter()
-            .filter(|item| item.modified())
-            .map(|item| (item.text_range.clone(), item.cleaned()))
-            .collect::<Vec<_>>();
-        if edits.is_empty() {
+        if !focus.has_changes() {
             return true;
         }
-        let (updated, cursor) = apply_edits(&self.doc.generated_markdown, &edits, focus.cursor);
+        let (updated, cursor) =
+            apply_edits(&self.doc.generated_markdown, &focus.edits(), focus.cursor);
         self.doc.generated_markdown = updated;
         self.doc.pending_source_selection = None;
         self.doc.pending_source_jump = Some(cursor);
-        *self.status = format!("已改写 {} 条标题。", edits.len());
+        *self.status = format!("已{}。", change_summary(focus));
         true
     }
 
@@ -405,7 +616,7 @@ impl DraftPage<'_> {
                     ui.add_space(6.0);
                     theme::caption(
                         ui,
-                        "编号由程序生成，这里只改文字；字数与同组多数相差较大的会标黄，便于对仗。                         回车跳到下一条。",
+                        "编号由程序生成，这里只改文字；字数与同组多数相差较大的会标黄，便于对仗。                         回车跳到下一条；上移、下移（Alt+↑ / Alt+↓）连同子标题与正文整节调整顺序。",
                     );
                 }
                 ui.add_space(10.0);
@@ -419,7 +630,7 @@ impl DraftPage<'_> {
         let escape = response.is_top_modal
             && !response.any_popup_open
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-        let backdrop = response.backdrop_response.clicked() && focus.modified_count() == 0;
+        let backdrop = response.backdrop_response.clicked() && !focus.has_changes();
         if apply && !focus.has_empty() {
             self.apply_heading_focus(&focus);
             return;
@@ -497,6 +708,8 @@ fn heading_focus_header(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: &mut
 fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) {
     const COUNT_WIDTH: f32 = 44.0;
     const REVERT_WIDTH: f32 = 24.0;
+    /// 上移、下移两个图标按钮。
+    const MOVE_WIDTH: f32 = 60.0;
     // 大字模式：编号栏按字号放宽，行距拉开，字数与下方的提示行都不画。
     let number_width = if large { LARGE_FONT_SIZE * 4.2 } else { 64.0 };
     let row_height = if large {
@@ -507,6 +720,8 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
     let visible = focus.visible().collect::<Vec<_>>();
     let focus_row = focus.focus_row.take();
     let mut next_focus = None;
+    // (哪一条, 是否上移)；画完这一帧再挪，免得边画边改下标。
+    let mut move_request = None;
     let mut last_parent = None;
     theme::popup_scroll(ui.ctx().content_rect().height() * if large { 0.7 } else { 0.55 })
         .id_salt("heading_focus_rows")
@@ -517,6 +732,8 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
             }
             for (position, &index) in visible.iter().enumerate() {
                 let typical = focus.typical_length(focus.items[index].parent);
+                let can_up = focus.can_move(index, true);
+                let can_down = focus.can_move(index, false);
                 let item = &mut focus.items[index];
                 if focus.whole_document && (position == 0 || last_parent != Some(item.parent)) {
                     ui.add_space(if position == 0 { 0.0 } else { 6.0 });
@@ -574,14 +791,29 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
                             },
                         );
                         let reserved = if large {
-                            REVERT_WIDTH
+                            REVERT_WIDTH + MOVE_WIDTH
                         } else {
-                            COUNT_WIDTH + REVERT_WIDTH
+                            COUNT_WIDTH + REVERT_WIDTH + MOVE_WIDTH
                         };
                         let width =
-                            (ui.available_width() - reserved - ui.spacing().item_spacing.x * 2.0)
+                            (ui.available_width() - reserved - ui.spacing().item_spacing.x * 3.0)
                                 .max(120.0);
-                        let id = ui.id().with(("heading_focus_text", index));
+                        // 输入框按打开时的先后起名：调整顺序后光标与焦点仍跟着这一条。
+                        let id = ui.id().with(("heading_focus_text", item.order));
+                        // 先于输入框认下 Alt+↑ / Alt+↓，单行输入框见上下键会自己挪光标。
+                        if ui.memory(|memory| memory.has_focus(id)) {
+                            let (up, down) = ui.input_mut(|input| {
+                                (
+                                    input.consume_key(egui::Modifiers::ALT, egui::Key::ArrowUp),
+                                    input.consume_key(egui::Modifiers::ALT, egui::Key::ArrowDown),
+                                )
+                            });
+                            if up && can_up {
+                                move_request = Some((index, true));
+                            } else if down && can_down {
+                                move_request = Some((index, false));
+                            }
+                        }
                         let mut field = theme::field(&mut item.text, "标题文字", width).id(id);
                         if let Some(font) = &font {
                             field = field.font(font.clone());
@@ -617,6 +849,29 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
                         } else {
                             ui.add_space(REVERT_WIDTH);
                         }
+                        let blocked = "已到这一组的头尾，或中间隔着附件、附录等区段，不能再挪";
+                        if theme::icon_button_enabled(
+                            ui,
+                            can_up,
+                            theme::Icon::ArrowUp,
+                            "上移（Alt+↑）：连同子标题与正文整节前移",
+                        )
+                        .on_disabled_hover_text(blocked)
+                        .clicked()
+                        {
+                            move_request = Some((index, true));
+                        }
+                        if theme::icon_button_enabled(
+                            ui,
+                            can_down,
+                            theme::Icon::ArrowDown,
+                            "下移（Alt+↓）：连同子标题与正文整节后移",
+                        )
+                        .on_disabled_hover_text(blocked)
+                        .clicked()
+                        {
+                            move_request = Some((index, false));
+                        }
                     });
                     if !large {
                         note_line(ui, item, number_width);
@@ -625,6 +880,13 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
             }
         });
     focus.focus_row = next_focus;
+    if let Some((index, up)) = move_request
+        && let Some(moved) = focus.move_item(index, up)
+    {
+        // 挪完焦点仍在这一条上，接着按 Alt+↑ / Alt+↓ 可以连续挪。
+        focus.focus_row = Some(moved);
+        focus.last_row = Some(moved);
+    }
 }
 
 /// 常规模式右侧的字数：清空标红，与同组中位数相差较大的标黄。
@@ -679,23 +941,23 @@ fn heading_focus_footer(
     cancel: &mut bool,
 ) {
     ui.horizontal(|ui| {
-        let modified = focus.modified_count();
+        let changed = focus.has_changes();
         if focus.has_empty() {
             ui.colored_label(theme::danger(), "有标题被清空了，补上文字才能写回");
-        } else if modified == 0 {
+        } else if !changed {
             theme::caption(ui, "还没有改动");
         } else {
-            ui.label(format!("已改 {modified} 条"));
+            ui.label(format!("已{}", change_summary(focus)));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let enter = theme::primary_shortcut("Enter");
             if theme::primary_icon_button_enabled(
                 ui,
-                modified > 0 && !focus.has_empty(),
+                changed && !focus.has_empty(),
                 theme::Icon::SquareCheck,
                 "写回正文",
             )
-            .on_hover_text(format!("把改过的标题一次写回源码（{enter}）"))
+            .on_hover_text(format!("把改过的标题与调整后的顺序一次写回源码（{enter}）"))
             .clicked()
             {
                 *apply = true;
@@ -801,13 +1063,7 @@ mod tests {
         let mut focus = focus_at(text, "正文乙", TemplateKind::OfficialLetter);
         focus.items[0].text = "  总的要求  ".to_string();
         focus.items[1].text = "重点任务和工作安排".to_string();
-        let edits = focus
-            .items
-            .iter()
-            .filter(|item| item.modified())
-            .map(|item| (item.text_range.clone(), item.cleaned()))
-            .collect::<Vec<_>>();
-        let (out, cursor) = apply_edits(text, &edits, focus.cursor);
+        let (out, cursor) = apply_edits(text, &focus.edits(), focus.cursor);
         assert_eq!(
             out,
             "## 一、总的要求\n正文甲。\n## 重点任务和工作安排\n正文乙。\n"
@@ -821,7 +1077,10 @@ mod tests {
         let at = text.find("要求").unwrap();
         let (out, cursor) = apply_edits(
             text,
-            &[(3..3 + "总体要求".len(), "总的要求和原则".to_string())],
+            &[Edit::text(
+                3..3 + "总体要求".len(),
+                "总的要求和原则".to_string(),
+            )],
             at,
         );
         assert_eq!(&out[..cursor], "## 总的要求和原则");
@@ -840,9 +1099,91 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["背景", "方法"]
         );
-        let edits = vec![(focus.items[0].text_range.clone(), "研究背景".to_string())];
+        let edits = vec![Edit::text(
+            focus.items[0].text_range.clone(),
+            "研究背景".to_string(),
+        )];
         let (out, _) = apply_edits(text, &edits, 0);
         assert!(out.contains("## 研究背景 {#sec:bg}\n"));
+    }
+
+    /// 上移搬的是整节：子标题与正文跟着走，节间空行留在原处，编号跟着位置。
+    #[test]
+    fn moving_a_heading_carries_its_subheadings_and_body() {
+        let mut focus = focus_at(DOC, "## 保障措施", TemplateKind::OfficialLetter);
+        assert_eq!(focus.current, 2);
+        assert!(focus.can_move(2, true));
+        assert!(!focus.can_move(2, false), "末一条不能再下移");
+        assert!(!focus.can_move(0, true), "首一条不能再上移");
+        assert_eq!(focus.move_item(2, true), Some(1));
+        assert_eq!(focus.current, 1);
+        assert_eq!(focus.items[1].original, "保障措施");
+        assert_eq!(
+            focus.items[1].number.as_deref().map(str::trim),
+            Some("二、")
+        );
+        assert_eq!(
+            focus.items[2].number.as_deref().map(str::trim),
+            Some("三、")
+        );
+        assert!(focus.has_changes());
+        assert_eq!(focus.modified_count(), 0);
+
+        let (out, cursor) = apply_edits(DOC, &focus.edits(), focus.cursor);
+        assert_eq!(
+            out,
+            "# 关于做好某项工作的通知\n\n\
+             ## 总体要求\n\n总体要求正文。\n\n\
+             ## 保障措施\n\n### 加强督促检查\n\n定期调度。\n\n\
+             ## 主要任务\n\n### 强化组织领导\n\n各地要高度重视。\n\n### 完善制度机制\n\n健全制度。\n"
+        );
+        assert!(out[cursor..].starts_with("## 保障措施"), "光标跟着那一节走");
+    }
+
+    #[test]
+    fn moving_and_renaming_in_one_go() {
+        let text = "## 甲\n甲文。\n\n## 乙\n乙文。";
+        let mut focus = focus_at(text, "乙文", TemplateKind::OfficialLetter);
+        focus.items[0].text = "甲改".to_string();
+        focus.items[1].text = "乙改".to_string();
+        focus.move_item(1, true);
+        let (out, cursor) = apply_edits(text, &focus.edits(), focus.cursor);
+        // 原文末一节没有收尾换行，换到前面后仍与下一节隔着原来的空行。
+        assert_eq!(out, "## 乙改\n乙文。\n\n## 甲改\n甲文。");
+        assert!(out[cursor..].starts_with("乙文。"));
+        assert_eq!(change_summary(&focus), "改写 2 条标题，调整 1 处顺序");
+
+        // 换回原样就不算调整顺序。
+        focus.move_item(0, false);
+        assert!(focus.reordered_runs().is_empty());
+    }
+
+    #[test]
+    fn moves_stay_under_the_same_parent() {
+        let focus = focus_at(DOC, "健全制度", TemplateKind::OfficialLetter);
+        // 「完善制度机制」与「加强督促检查」同级但上级不同，不能互换。
+        assert!(focus.can_move(1, true));
+        assert!(!focus.can_move(1, false));
+        assert!(!focus.can_move(2, true));
+    }
+
+    #[test]
+    fn region_markers_block_moves_and_unnumbered_markers_travel_along() {
+        let text = "<!-- [正文] -->\n\n## 背景\n\n背景正文。\n\n\
+                    <!-- [不编号] -->\n## 结语\n\n结语正文。\n\n\
+                    <!-- [附录] -->\n\n## 数据说明\n\n附录正文。\n";
+        let mut focus = focus_at(text, "背景正文", TemplateKind::ResearchReport);
+        assert_eq!(focus.items.len(), 3);
+        assert!(focus.can_move(0, false));
+        assert!(!focus.can_move(1, false), "隔着附录标记不能互换");
+        focus.move_item(0, false);
+        let (out, _) = apply_edits(text, &focus.edits(), focus.cursor);
+        assert_eq!(
+            out,
+            "<!-- [正文] -->\n\n<!-- [不编号] -->\n## 结语\n\n结语正文。\n\n\
+             ## 背景\n\n背景正文。\n\n\
+             <!-- [附录] -->\n\n## 数据说明\n\n附录正文。\n"
+        );
     }
 
     #[test]
@@ -1004,6 +1345,26 @@ mod tests {
             .pending_source_jump
             .expect("光标应回到原来那一节");
         assert!(markdown[jump..].starts_with("健全制度"));
+    }
+
+    /// 端到端：焦点在某条上按 Alt+↑ 整节前移，焦点留在原条上，主快捷键+回车写回。
+    #[test]
+    fn alt_up_moves_the_focused_heading_and_writes_back() {
+        let mut harness = DialogHarness::new(DOC, "健全制度", false);
+        harness.frame(Vec::new(), true);
+        harness.frame(Vec::new(), false);
+        harness.frame(vec![key(egui::Key::ArrowUp, egui::Modifiers::ALT)], false);
+        let focus = harness.doc.heading_focus.as_ref().expect("对话框仍开着");
+        assert_eq!(focus.items[0].original, "完善制度机制");
+        assert_eq!(focus.current, 0);
+        harness.frame(Vec::new(), false);
+
+        harness.frame(vec![key(egui::Key::Enter, egui::Modifiers::COMMAND)], false);
+        assert!(harness.doc.heading_focus.is_none(), "写回后对话框应关闭");
+        assert!(harness.doc.generated_markdown.contains(
+            "## 主要任务\n\n### 完善制度机制\n\n健全制度。\n\n### 强化组织领导\n\n各地要高度重视。\n\n## 保障措施"
+        ));
+        assert_eq!(harness.status, "已调整 1 处顺序。");
     }
 
     /// 大字模式给投屏用：标题放大，字数、正文开头与说明一概不画；常规模式照常都有。
