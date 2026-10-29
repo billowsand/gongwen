@@ -243,17 +243,31 @@ impl ExportLinks {
                     let name = entry.file_name().to_string_lossy().into_owned();
                     let path = entry.path();
                     // 同一个版本覆盖导出时，目录自身的修改时间可能不变，必须也看成品。
-                    let modified = [
-                        format!("{name}.pdf"),
-                        format!("{name}.docx"),
-                        format!("{name}-源码包.zip"),
-                        format!("{name}-Typst包.zip"),
-                    ]
-                    .iter()
-                    .filter_map(|file| std::fs::metadata(path.join(file)).ok()?.modified().ok())
-                    .chain(meta.modified().ok())
-                    .max()
-                    .unwrap_or(std::time::UNIX_EPOCH);
+                    // 标题截短后，文件名可能不同于目录名，按实际产物扫描。
+                    let modified = std::fs::read_dir(&path)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .filter_map(|file| {
+                            let file_path = file.path();
+                            let file_name = file.file_name();
+                            let file_name = file_name.to_string_lossy();
+                            let is_product = ExportKind::ALL
+                                .into_iter()
+                                .any(|kind| kind.matches_file(&file_path))
+                                || file_name.ends_with("-源码包.zip");
+                            if !is_product {
+                                return None;
+                            }
+                            let metadata = file.metadata().ok()?;
+                            metadata
+                                .is_file()
+                                .then(|| metadata.modified().ok())
+                                .flatten()
+                        })
+                        .chain(meta.modified().ok())
+                        .max()
+                        .unwrap_or(std::time::UNIX_EPOCH);
                     dirs.push((modified, name, path));
                 }
             } else if self.matches(&entry.file_name()) {
