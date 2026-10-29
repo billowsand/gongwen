@@ -11,6 +11,7 @@ mod frame;
 mod injection_tests;
 mod math;
 pub(crate) mod package;
+pub(crate) mod receipt;
 pub(crate) mod research;
 pub(crate) mod research_body;
 mod research_redline;

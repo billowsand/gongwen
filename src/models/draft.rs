@@ -340,6 +340,11 @@ pub struct ExportSelection {
     /// Typst 包：模板、数据与插图打成 zip，装有常见中文字体的机器可用 typst CLI 编译。
     /// 与 PDF 分开勾选——它只准备数据，不依赖本机字体。
     pub typst: bool,
+    /// 公函同时导出《公文签收记录单》：勾选后随本次选中的 PDF / Word 各出一份独立
+    /// 文件（`<主干名>_签收记录单.pdf` / `.docx`），与原公函分开成文件，不拼进公函。
+    /// 默认关闭；旧配置没有这一项时按关闭处理。
+    #[serde(default)]
+    pub receipt: bool,
     /// 反复导出同一篇稿件时覆盖同名文件，而不是不断生成 `-2`、`-3` 副本。
     pub overwrite: bool,
 }
@@ -376,12 +381,15 @@ impl Default for ExportSelection {
             docx: true,
             pdf: true,
             typst: false,
+            receipt: false,
             overwrite: false,
         }
     }
 }
 
 impl ExportSelection {
+    /// 有没有要产出的格式。签收记录单不算一种格式：它只是随 PDF / Word 附带出来的
+    /// 附属件，只勾它不导出任何东西。
     pub(crate) fn any(&self) -> bool {
         self.markdown || self.docx || self.pdf || self.typst
     }

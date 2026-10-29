@@ -9,7 +9,9 @@
 - PDF 全部由 **Typst** 进程内排版（`typst` 0.15.1，World 在 `src/typst_engine.rs`；
   `typst-layout` vendor 在 `vendor/typst-layout/` 打了标点收缩补丁）。公文模板
   `assets/typst/gongwen.typ`、数据由 `src/export/typst/` 生成；研究报告模板
-  `assets/typst/research.typ`、数据由 mdx 的 `typst_research` 整理（`src/export/typst/research.rs`）。
+  `assets/typst/research.typ`、数据由 mdx 的 `typst_research` 整理（`src/export/typst/research.rs`）；
+  公函签收记录单模板 `assets/typst/receipt.typ`、数据由 `src/export/typst/receipt.rs` 生成
+  （Word 侧同一份数据，见 `src/export/docx/receipt.rs`）。
   原 Tectonic / TeX 链路已移除。改版式前先读 `docs/typst-engine.md`，改完出样张
   （`cargo test --locked typst_samples -- --ignored`）目视检查。
 - 导出链：Markdown → DOCX（`docx-rs`；研究报告的 Word 由 vendor 的 mdx 生成）/ PDF（Typst）、
@@ -93,7 +95,8 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   出入与已知坑见 `docs/offline-sync-redesign.md`（单文件）。核心是稿件 UUID +
   不可变版本图（UUID、双父、SHA-256），旧 ZIP 仍可读；改同步/导入逻辑前先读它。
 - **Typst 排版引擎**（分支 `feat/typst-engine`，已替代 Tectonic）：六个文种与研究报告、附件、
-  横页、联合发文、份号、花脸稿、孤行探针都已接入，移除 TeX 前逐行对照过，**待真机验收**
+  横页、联合发文、份号、花脸稿、孤行探针、公函签收记录单（第三套模板
+  `assets/typst/receipt.typ`）都已接入，移除 TeX 前逐行对照过，**待真机验收**
   （打印、送批材料合并、本机字体、研究报告公式与文献）。设计、对照结论、已知差异与坑见
   `docs/typst-engine.md`（单文件）。
 - **AI 工作台智能体化**（已替代 AI 起草工作台）：右侧 AI 侧栏 + 流式输出 + SKILL.md 技能

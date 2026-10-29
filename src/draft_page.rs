@@ -124,28 +124,32 @@ impl ExportKind {
     }
 
     /// 只出这一种格式的导出选项；覆盖策略沿用设置。
-    pub(crate) fn selection(self, overwrite: bool) -> ExportSelection {
+    ///
+    /// 签收记录单随 PDF / Word 一起出：单格式快捷导出继承设置里的勾选，Typst 包
+    /// 不含签收单（包里只有公文模板与数据），所以不继承。
+    pub(crate) fn selection(self, overwrite: bool, receipt: bool) -> ExportSelection {
         ExportSelection {
             markdown: false,
             docx: self == Self::Word,
             pdf: self == Self::Pdf,
             typst: self == Self::Typst,
+            receipt: receipt && matches!(self, Self::Pdf | Self::Word),
             overwrite,
         }
     }
 
-    /// 文件是不是这种成品。zip 只认 Typst 包，源码包也是 zip，不能混进来。
+    /// 文件是不是这种成品。zip 只认 Typst 包，源码包与签收记录单都不能混进来。
     fn matches_file(self, path: &Path) -> bool {
+        let name = path.file_name().and_then(|name| name.to_str());
+        if name.is_some_and(|name| name.contains("_签收记录单.")) {
+            return false;
+        }
         let extension_matches = path
             .extension()
             .and_then(|ext| ext.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case(self.extension()));
         extension_matches
-            && (self != Self::Typst
-                || path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.ends_with("-Typst包.zip")))
+            && (self != Self::Typst || name.is_some_and(|name| name.ends_with("-Typst包.zip")))
     }
 
     /// 一次导出产出的文件里这种成品的那一份。

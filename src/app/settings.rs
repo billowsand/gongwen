@@ -1701,6 +1701,13 @@ impl GongwenApp {
         }
         ui.add_space(6.0);
         ui.checkbox(
+            &mut self.config.export.receipt,
+            "同时导出公文签收记录单（仅公函）",
+        )
+        .on_hover_text(
+            "公函勾选后随本次选中的 PDF / Word 各出一份《公文签收记录单》，与原公函分开成文件；其他文种不生成",
+        );
+        ui.checkbox(
             &mut self.config.auto_export,
             "AI 起草或优化完成后自动导出一次",
         )

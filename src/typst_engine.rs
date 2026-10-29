@@ -2,7 +2,7 @@
 //! 中间文件。整体分工：
 //!
 //! - 版式全部写在随二进制编译进来的模板里：公文 `assets/typst/gongwen.typ`，研究
-//!   报告 `assets/typst/research.typ`；
+//!   报告 `assets/typst/research.typ`，公函签收记录单 `assets/typst/receipt.typ`；
 //! - 模板只认一份 JSON（`export::typst` 生成）：编号、标题断行、表格列宽、
 //!   压缩比例、要素显示值都由 Rust 算好，模板只负责排；
 //! - 这里实现 Typst 的 `World`：主文件是模板，`/doc.json` 是数据，其余相对
@@ -31,6 +31,8 @@ use crate::models::{FontConfig, FontRole};
 pub const TEMPLATE: &str = include_str!("../assets/typst/gongwen.typ");
 /// 研究报告模板（对应 mdx 的 `md2tex.cls` + `template.tex`）。
 pub const RESEARCH_TEMPLATE: &str = include_str!("../assets/typst/research.typ");
+/// 公函签收记录单模板：公函的附属件，与原公函分开成文件。
+pub const RECEIPT_TEMPLATE: &str = include_str!("../assets/typst/receipt.typ");
 
 const DATA_PATH: &str = "/doc.json";
 
@@ -40,6 +42,7 @@ pub enum Template {
     #[default]
     Official,
     Research,
+    Receipt,
 }
 
 impl Template {
@@ -47,6 +50,7 @@ impl Template {
         match self {
             Self::Official => "/gongwen.typ",
             Self::Research => "/research.typ",
+            Self::Receipt => "/receipt.typ",
         }
     }
 
@@ -54,6 +58,7 @@ impl Template {
         match self {
             Self::Official => TEMPLATE,
             Self::Research => RESEARCH_TEMPLATE,
+            Self::Receipt => RECEIPT_TEMPLATE,
         }
     }
 }
@@ -76,6 +81,16 @@ impl<'a> TypstJob<'a> {
             data,
             base_dir,
             template: Template::Official,
+            files: HashMap::new(),
+        }
+    }
+
+    /// 公函签收记录单：与公文同一套字体，只是换一份模板与数据。
+    pub fn receipt(data: String, base_dir: &'a Path) -> Self {
+        Self {
+            data,
+            base_dir,
+            template: Template::Receipt,
             files: HashMap::new(),
         }
     }

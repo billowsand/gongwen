@@ -1,30 +1,35 @@
 # Typst 排版引擎
 
-全部 PDF（六个公文文种与研究报告）都由进程内的 Typst 排版：不起子进程、不落中间文件，
+全部 PDF（六个公文文种、研究报告与公函的《公文签收记录单》）都由进程内的 Typst 排版：
+不起子进程、不落中间文件，
 一份公文 5–50 ms。原先的 Tectonic（XeLaTeX）链路已整体移除——`gonghan-gwa.cls`、
 mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都不在了，要看旧实现
 翻 git 历史（移除前最后一版见 `feat: 研究报告改用 Typst 排版` 那次提交）。
 
-两套模板都是对着当年内置 Tectonic 的 PDF 逐行对照调出来的；模板里凡标「实测」的数值，
+公文与研究报告两套模板都是对着当年内置 Tectonic 的 PDF 逐行对照调出来的；模板里凡标
+「实测」的数值，
 都是在 TeX 产物上量出来的落点，注释里提到的 `\GwaTail`、`\gwa@placeclosing`、
-`\clearemptydoublepage` 之类指的是原 TeX 实现里对应的宏。
+`\clearemptydoublepage` 之类指的是原 TeX 实现里对应的宏。签收记录单是第三套模板，
+自成一体（黑白表单，不套公文版式），没有 TeX 对照。
 
 ## 结构
 
 ```text
 公文：     Markdown ─ export::parse ─ export::typst ─ JSON ─┐
+签收单：   Markdown ─ export::typst::receipt ─ JSON ─────────┤
 研究报告： Markdown ─ export::research（frontmatter、插图、文献装进临时目录）    ├─ typst_engine ─ PDF
                     ─ mdx::typst_research ─ research_redline ─ math ─ JSON ─┘
 ```
 
 - 入口：`export::export_artifacts`（起草页导出）、`export::write_pdf` /
   `export::write_pdf_for_kind`（稿件库批量导出、送批材料、花脸稿）。研究报告在这里分流到
-  `export::typst::research`。
+  `export::typst::research`，公函的签收记录单分流到 `export::typst::receipt`。
 - `src/typst_engine.rs`：Typst 的 `World`（模板是主文件，`/doc.json` 是数据，插图按用户
   目录解析且不许越界，公式 SVG 等内存文件另挂；字体 = 随包 `runtime/fonts` + 设置里生效的
-  本机字体，按路径缓存）、编译、诊断翻译、孤行探针报告、横页结构调整。模板二选一：
+  本机字体，按路径缓存）、编译、诊断翻译、孤行探针报告、横页结构调整。模板三选一：
   `Template::Official`（`assets/typst/gongwen.typ`）、`Template::Research`
-  （`assets/typst/research.typ`），都编进二进制。
+  （`assets/typst/research.typ`）、`Template::Receipt`
+  （`assets/typst/receipt.typ`），都编进二进制。
 - 随包字体：中文统一用覆盖 GBK 的方正系列（仿宋 / 楷体 / 黑体 / 书宋 / 小标宋，公文
   与研究报告共用同一套文件）。仿宋、楷体是合成字体 `GWFangSong.ttf`（公文仿宋，
   家族名 `GW FangSong`）与 `GWKai.ttf`（公文楷体，`GW Kai`）：汉字与全角标点取方正
@@ -50,6 +55,24 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
   - `body.rs`：正文与附件分区、附件说明、横向附件判定；
   - `frame.rs`：各文种的版头、落款、版记、红头呈批件承办区、份号；
   - `table.rs` 里的 `to_typst_table`：表格。
+
+### 公函签收记录单
+
+公函勾了「同时导出公文签收记录单」时，随 PDF / Word 各多出一份**独立文件**
+（`<主干名>_签收记录单.pdf` / `.docx`，与原公函同目录，绝不拼进公函正文）。
+
+- 模板：`assets/typst/receipt.typ`（`Template::Receipt`），黑白表单，不套公文版式。
+  A4 纵向、156mm 版心；题名「公文签收记录单」小标宋二号居中；要素行黑体标签 + 仿宋取值，
+  基线距 22pt；签收表六列（序号 / 签收单位 / 签收方式 / 签收日期 / 签收人 / 密级），
+  表头黑体四号、内容仿宋四号，外框 1.2pt、内部 0.5pt，内容行最小约 16mm，
+  长单位名换行时整行增高；跨页重复表头、行不拆分；页码「— N —」每页都印（公文首页不印）。
+- 数据入口：`src/export/typst/receipt.rs`。要素显示值取 `element_display`（函号由
+  `number_display_parts` 拼「代字〔年份〕序号号」、日期用 `date_display_line`、密级用
+  `security_display`），签收单位按主送在前、抄送在后、按最终显示名去重。**Word 侧复用
+  同一份数据**（`src/export/docx/receipt.rs`），两端字段与去重规则不会漂移。
+- 留白：PDF 侧是行内 `box` 的下边线，Word 侧是带下划线的全角空格，两端长度一致。
+- 表格边框逐格给 `stroke` 字典（`cell-stroke`）：表格级的 `stroke` 回调分不出某一格的
+  左边还是右边，用回调做「外框粗、内部细」会把第一列的右边也画粗。
 
 ### 研究报告
 
@@ -188,11 +211,13 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
 ```bash
 cargo test --locked typst_samples -- --ignored --nocapture          # 各文种、花脸稿、标题紧缩
 cargo test --locked typst_samples_research -- --ignored --nocapture # 研究报告：封面、部分、公式……
+cargo test --locked typst_samples_receipt -- --ignored --nocapture  # 公函签收记录单：PDF、Word、doc.json、逐页 PNG
 ```
 
 PDF 与模板数据（`doc.json`）在 `tmp/typst-samples/<用例>/`。改模板后对着样张目视检查；
 `typst_samples_real_docs` 可用 `GW_SAMPLE_DOCS` 指向一批真实稿件出样张。发布流程另跑
-`shipped_runtime_typesets_every_kind`，用随包 runtime 把每个文种排一遍。
+`shipped_runtime_typesets_every_kind`，用随包 runtime 把每个文种排一遍。签收记录单的样张
+落在 `tmp/typst-samples/receipt/`（`typst.pdf`、`word.docx`、`doc.json`、`page-1.png`）。
 
 ## 移除 Tectonic 前的对照结论
 

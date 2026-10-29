@@ -23,6 +23,7 @@ mod header;
 mod minutes;
 mod paragraphs;
 mod phone_record;
+mod receipt;
 pub(crate) mod record;
 mod red;
 mod runs;
@@ -47,6 +48,7 @@ pub(crate) use paragraphs::{
     joint_signature_cell_paragraph, letter_security_paragraph, ordered_list_paragraph,
     red_approval_title_paragraph, red_record_paragraph,
 };
+pub(crate) use receipt::write as write_receipt_docx;
 pub(crate) use record::add_footer_record;
 pub(crate) use red::{
     red_approval_frame_table, red_approval_record_table, red_approval_top_rule_table,

@@ -108,7 +108,9 @@ impl DraftPage<'_> {
     /// 调用方的标记会挂到那个任务后面的某次导出上。
     fn start_export_only(&mut self, kind: ExportKind) -> bool {
         let was_busy = self.doc.busy;
-        self.start_export_with(kind.selection(self.config.export.overwrite));
+        self.start_export_with(
+            kind.selection(self.config.export.overwrite, self.config.export.receipt),
+        );
         !was_busy && self.doc.busy
     }
 

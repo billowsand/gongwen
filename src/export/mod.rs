@@ -356,8 +356,6 @@ pub(crate) fn export_artifacts(
     numbering: &NumberingConfig,
     version_name: Option<&str>,
 ) -> Result<ExportArtifacts> {
-    fs::create_dir_all(output_dir)
-        .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
     let title = document_title(input, markdown);
     // 文件夹与各格式共用主干：文种前缀后追加对应的提交版本名称，未匹配版本时为“待提交”。
     let stem = document_stem(input, &title, version_name);
@@ -369,6 +367,9 @@ pub(crate) fn export_artifacts(
     } else {
         unique_directory_stem(output_dir, &stem)
     };
+    let receipt = selection.receipt && input.kind == TemplateKind::OfficialLetter;
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
     let document_dir = output_dir.join(&export_stem);
     fs::create_dir_all(&document_dir)
         .with_context(|| format!("无法创建文稿导出目录：{}", document_dir.display()))?;
@@ -379,6 +380,8 @@ pub(crate) fn export_artifacts(
         write_markdown_archive(&path, input, markdown, export_stem.as_str(), numbering)?;
         files.push(path);
     }
+    // 公函的《公文签收记录单》：独立文件，随本次选中的 Word / PDF 各出一份，
+    // 与原公函同目录，绝不拼进公函正文。别的文种一律忽略。
     if selection.docx {
         let path = document_dir.join(format!("{export_stem}.docx"));
         if input.kind.is_research() {
@@ -395,6 +398,12 @@ pub(crate) fn export_artifacts(
             )?;
         }
         files.push(path);
+        if receipt {
+            let path = document_dir.join(format!("{export_stem}_签收记录单.docx"));
+            docx::write_receipt_docx(&path, input, markdown, display)
+                .context("生成《公文签收记录单》Word 失败")?;
+            files.push(path);
+        }
     }
     let mut typst = None;
     let mut compile_error = None;
@@ -415,6 +424,25 @@ pub(crate) fn export_artifacts(
                 typst = Some(outcome);
             }
             Err(error) => compile_error = Some(format!("{error:#}")),
+        }
+        if receipt {
+            let path = document_dir.join(format!("{export_stem}_签收记录单.pdf"));
+            match typst::receipt::write_pdf(&path, input, markdown, display, fonts) {
+                Ok(outcome) => {
+                    files.push(path);
+                    if let Some(main) = typst.as_mut() {
+                        main.warnings.extend(outcome.warnings);
+                    }
+                }
+                Err(error) => {
+                    // 签收单排版失败只追加错误，不抹掉主 PDF 的错误。
+                    let message = format!("《公文签收记录单》排版失败：{error:#}");
+                    compile_error = Some(match compile_error.take() {
+                        Some(existing) => format!("{existing}\n{message}"),
+                        None => message,
+                    });
+                }
+            }
         }
     }
     if selection.typst {
@@ -1758,6 +1786,7 @@ mod tests {
             docx: false,
             pdf: false,
             typst: false,
+            receipt: false,
             overwrite: true,
         };
         let files = export_all(
@@ -1800,6 +1829,7 @@ mod tests {
             docx: false,
             pdf: false,
             typst: false,
+            receipt: false,
             overwrite: true,
         };
         let markdown = format!("# 标题\n\n正文。\n\n![图](images/{name})");
@@ -1834,6 +1864,7 @@ mod tests {
             docx: false,
             pdf: false,
             typst: false,
+            receipt: false,
             overwrite: true,
         };
         let files = export_all(
@@ -1872,6 +1903,7 @@ mod tests {
             docx: false,
             pdf: false,
             typst: false,
+            receipt: false,
             overwrite: true,
         };
         let first = export_all(
@@ -1940,6 +1972,7 @@ mod tests {
             docx: true,
             pdf: fonts_available,
             typst: false,
+            receipt: false,
             overwrite: false,
         };
         let run = || {
@@ -2222,5 +2255,146 @@ mod tests {
             "# 测试函\n<!-- [附件] -->\n内容。\n<!-- [附件] -->\n# 说明材料\n内容。",
         );
         assert_eq!(attachment_names(&blocks), ["说明材料"]);
+    }
+
+    /// 公函的《公文签收记录单》：默认关闭；勾上后随 Word / PDF 各出一份独立文件，
+    /// 与原公函同目录，绝不拼进公函。
+    #[test]
+    fn receipt_signoff_sheet_is_opt_in_and_kept_separate() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        input.profile.issuing_unit = "某某市民政局".into();
+        input.profile.department_code = "某民函".into();
+        input.profile.document_year = "2026".into();
+        input.profile.document_number = "18".into();
+        input.profile.recipient = "甲单位、乙单位".into();
+        input.profile.copies_to = "丙单位".into();
+        let markdown = "# 关于商洽的函\n\n甲单位、乙单位：\n\n现就有关事项函告如下。\n\n特此函告。";
+        let run = |selection: &ExportSelection| {
+            export_all(
+                temp.path(),
+                &input,
+                markdown,
+                selection,
+                &UnitDisplay::new(&[]),
+                &FontConfig::default(),
+            )
+            .unwrap()
+        };
+        let has_receipt = |files: &[std::path::PathBuf]| {
+            files
+                .iter()
+                .any(|path| path.to_string_lossy().contains("签收记录单"))
+        };
+
+        // 默认关闭：不生成签收单。
+        assert!(!ExportSelection::default().receipt);
+        let selection = ExportSelection {
+            markdown: false,
+            docx: true,
+            pdf: false,
+            typst: false,
+            receipt: false,
+            overwrite: true,
+        };
+        let files = run(&selection);
+        assert!(!has_receipt(&files));
+
+        // 勾上后：多出一份独立的 Word，命名是「<主干名>_签收记录单.docx」，与公函同目录。
+        let selection = ExportSelection {
+            receipt: true,
+            ..selection
+        };
+        let files = run(&selection);
+        let receipt = files
+            .iter()
+            .find(|path| path.to_string_lossy().contains("签收记录单"))
+            .expect("没有生成签收记录单");
+        assert!(receipt.to_string_lossy().ends_with("_签收记录单.docx"));
+        assert_eq!(receipt.parent().unwrap(), files[0].parent().unwrap());
+
+        // 只勾签收单（没有主格式）不算要导出。
+        let only_receipt = ExportSelection {
+            markdown: false,
+            docx: false,
+            pdf: false,
+            typst: false,
+            receipt: true,
+            overwrite: true,
+        };
+        assert!(!only_receipt.any());
+    }
+
+    /// 别的文种一律不生成签收记录单。
+    #[test]
+    fn receipt_signoff_sheet_is_ignored_for_other_kinds() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = DraftInput {
+            kind: TemplateKind::PlainDocument,
+            ..Default::default()
+        };
+        let selection = ExportSelection {
+            markdown: false,
+            docx: true,
+            pdf: false,
+            typst: false,
+            receipt: true,
+            overwrite: true,
+        };
+        let files = export_all(
+            temp.path(),
+            &input,
+            "# 通知\n\n正文。",
+            &selection,
+            &UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            files
+                .iter()
+                .all(|path| !path.to_string_lossy().contains("签收记录单"))
+        );
+    }
+
+    /// 公函勾了签收单且选了 PDF：多出一份独立的签收记录单 PDF。
+    #[test]
+    fn receipt_signoff_sheet_is_produced_alongside_the_pdf() {
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        input.profile.issuing_unit = "某某市民政局".into();
+        input.profile.recipient = "甲单位".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            pdf: true,
+            typst: false,
+            receipt: true,
+            overwrite: true,
+        };
+        let files = export_all(
+            temp.path(),
+            &input,
+            "# 关于商洽的函\n\n甲单位：\n\n现就有关事项函告如下。",
+            &selection,
+            &UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let receipt = files
+            .iter()
+            .find(|path| path.to_string_lossy().ends_with("_签收记录单.pdf"))
+            .expect("没有生成签收记录单 PDF");
+        assert!(receipt.metadata().unwrap().len() > 0);
+        assert_eq!(receipt.parent().unwrap(), files[0].parent().unwrap());
     }
 }

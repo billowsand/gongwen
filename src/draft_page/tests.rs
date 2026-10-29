@@ -237,6 +237,28 @@ fn export_links_distinguishes_typst_package_from_markdown_archive() {
     assert!(links.path(ExportKind::Typst).is_none());
 }
 
+#[test]
+fn export_links_never_treat_receipt_as_the_main_document() {
+    let root = tempfile::tempdir().unwrap();
+    let stem = "某函〔2026〕1号-关于测试的函";
+    let folder = root.path().join(format!("{stem}-待提交"));
+    std::fs::create_dir(&folder).unwrap();
+    for extension in ["pdf", "docx"] {
+        touch_export(&folder, extension);
+        std::fs::write(
+            folder.join(format!("{stem}-待提交_签收记录单.{extension}")),
+            b"receipt",
+        )
+        .unwrap();
+    }
+    let mut links = ExportLinks::default();
+    links.refresh(root.path().to_str().unwrap(), Some(stem));
+    for kind in [ExportKind::Pdf, ExportKind::Word] {
+        let path = links.path(kind).unwrap();
+        assert!(!path.to_string_lossy().contains("签收记录单"));
+    }
+}
+
 /// 覆盖旧版本的成品时，即使目录自身时间不变，“最近导出”也必须跟上。
 #[test]
 fn export_links_recognizes_overwritten_version_directory() {

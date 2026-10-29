@@ -631,6 +631,7 @@ mod tests {
             docx: false,
             pdf: false,
             typst: true,
+            receipt: false,
             overwrite: true,
         };
         let artifacts = crate::export::export_artifacts(
@@ -676,6 +677,7 @@ mod tests {
             docx: false,
             pdf: false,
             typst: true,
+            receipt: false,
             overwrite: true,
         };
         let first = crate::export::export_artifacts(
