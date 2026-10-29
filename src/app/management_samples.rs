@@ -646,26 +646,41 @@ fn task_assistant_samples() {
     app.tabs = vec![TabRef::Page(NavPage::TaskAssistant)];
     app.active_tab = 0;
     let mut canvas = crate::ui_snapshot::Canvas::default();
-    for (index, (width, editing, inbox, filling)) in [
-        (1280.0, false, false, false),
-        (1280.0, true, false, false),
-        (1280.0, false, true, false),
-        (900.0, false, false, false),
-        (760.0, true, false, false),
-        (600.0, false, false, false),
-        (1280.0, false, false, true),
-        (760.0, false, false, true),
+    use crate::task_ui::View;
+    let material = app
+        .task_store
+        .as_ref()
+        .unwrap()
+        .sources()
+        .unwrap()
+        .remove(0);
+    for (index, (width, editing, view, filling)) in [
+        (1280.0, false, View::Active, false),
+        (1280.0, true, View::Active, false),
+        (1280.0, false, View::Inbox, false),
+        (1280.0, false, View::Materials, false),
+        (900.0, false, View::Active, false),
+        (760.0, true, View::Active, false),
+        (600.0, false, View::Active, false),
+        (600.0, false, View::Materials, false),
+        (1280.0, false, View::Active, true),
+        (760.0, false, View::Active, true),
     ]
     .into_iter()
     .enumerate()
     {
         app.task_ui = crate::task_ui::State::default();
         app.task_ui.selected = Some(child.id.clone());
-        app.task_ui.view = if inbox {
-            crate::task_ui::View::Inbox
-        } else {
-            crate::task_ui::View::Active
-        };
+        app.task_ui.view = view;
+        if view == View::Inbox {
+            // 粘贴了识别过的材料：卡片给出查看与重新识别；成功提示浮在底部，不挤动三栏。
+            app.task_ui.source_text = "（与上次相同的调度会纪要原文）".into();
+            app.task_ui.known_source = Some(material.clone());
+            app.task_ui.notice = Some("已采纳建议，任务已更新".into());
+        }
+        if view == View::Materials {
+            app.task_ui.material_selected = Some(material.id.clone());
+        }
         app.task_ui.draft = if editing {
             app.task_store
                 .as_ref()
@@ -744,8 +759,10 @@ fn task_assistant_samples() {
                             "-fill"
                         } else if editing {
                             "-edit"
-                        } else if inbox {
+                        } else if view == View::Inbox {
                             "-inbox"
+                        } else if view == View::Materials {
+                            "-materials"
                         } else {
                             ""
                         }

@@ -954,6 +954,8 @@ impl eframe::App for GongwenApp {
         }
         if let Some(id) = self.task_ui.request_knowledge.take() {
             self.start_task_knowledge_extraction(id);
+        } else if let Some(source_id) = self.task_ui.request_rerun.take() {
+            self.start_task_rerun(source_id);
         } else if let Some((title, text, source_ref)) = self.task_ui.request_extract.take() {
             self.start_task_extraction(title, text, source_ref);
         } else if self.task_extraction_rx.is_none()

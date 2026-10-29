@@ -231,6 +231,8 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   进度与出入见 `docs/task-assistant-ui-redesign.md`（单文件，第六节是交接）；数据规则见
   `docs/personal-task-assistant.md`。代码在 `src/task_ui/`。本次要素精简已按第七节改为
   名称唯一必填、词库负责人、当前进展、下一步、风险与应对，保留状态与任务期限，待真机验收。
+  第八节材料库（视图栏「材料」、重新识别只替换未处理建议、识别过的材料出卡片、删除时被引用的
+  快照只隐藏，`src/task_ui/materials.rs`）已实现，待真机验收。
 
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 

@@ -2,7 +2,7 @@
 //!
 //! egui 每次鼠标移动都会重绘；不缓存时任务、候选、分类、历史每帧各查一遍，
 //! 搜索还要逐任务查一次材料来源。改成代号不变就不查库，写入后下一帧整体重取。
-use crate::task_assistant::{CandidateRow, HistoryEntry, Store, Task};
+use crate::task_assistant::{CandidateRow, HistoryEntry, SourceRow, Store, Task};
 use std::collections::HashSet;
 
 #[derive(Default)]
@@ -11,6 +11,7 @@ pub(super) struct Cache {
     pub tasks: Vec<Task>,
     pub categories: Vec<String>,
     pub candidates: Vec<CandidateRow>,
+    pub sources: Vec<SourceRow>,
     pub auto: bool,
     hits: Option<(String, HashSet<String>)>,
     history: Option<(String, Vec<HistoryEntry>)>,
@@ -38,6 +39,10 @@ impl Cache {
         match store.candidates() {
             Ok(v) => self.candidates = v,
             Err(e) => errors.push(format!("读取待整理建议失败：{e:#}")),
+        }
+        match store.sources() {
+            Ok(v) => self.sources = v,
+            Err(e) => errors.push(format!("读取材料失败：{e:#}")),
         }
         match store.auto() {
             Ok(v) => self.auto = v,

@@ -264,6 +264,272 @@ fn task_assistant_material_title_can_be_omitted_and_is_filled_before_request() {
     );
 }
 
+fn source_row(
+    id: &str,
+    title: &str,
+    pending: usize,
+    accepted: usize,
+) -> crate::task_assistant::SourceRow {
+    crate::task_assistant::SourceRow {
+        id: id.into(),
+        title: title.into(),
+        source_ref: "pasted".into(),
+        created_at: chrono::Local::now().to_rfc3339(),
+        hidden: false,
+        pending,
+        accepted,
+        ignored: 0,
+    }
+}
+
+/// 一份带一条新任务建议的材料；`evidence` 必须出现在 `content` 里。
+fn store_with_material(store: &mut Store, title: &str, content: &str, evidence: &str) -> String {
+    let p: crate::task_assistant::extract::Proposal = serde_json::from_value(serde_json::json!({
+        "kind": "new_task", "task_id": null, "name": evidence, "next_step": null,
+        "deadline": null, "evidence": evidence
+    }))
+    .unwrap();
+    let fingerprint = format!("fp-{title}");
+    store
+        .commit_extraction(title, content, &fingerprint, "pasted", &[p], &[])
+        .unwrap();
+    store
+        .source_by_fingerprint(&fingerprint)
+        .unwrap()
+        .unwrap()
+        .id
+}
+
+#[test]
+fn task_assistant_extraction_result_names_the_material_and_offers_a_filter() {
+    // 新材料：说新增几条，不再挂「同版材料不重复生成」；框里还是交出去的原文就清空。
+    let mut state = State {
+        view: View::Inbox,
+        source_title: "第一份纪要".into(),
+        source_text: "第一份原文".into(),
+        source_title_auto: Some("第一份纪要".into()),
+        extraction_error: Some("上一次失败".into()),
+        ..Default::default()
+    };
+    receive_extraction(
+        &mut state,
+        ExtractionOutcome::Saved {
+            source_id: "s1".into(),
+            title: "第一份纪要".into(),
+            text: "第一份原文".into(),
+            added: 3,
+        },
+    );
+    let result = state.extraction_result.clone().unwrap();
+    assert!(result.contains("「第一份纪要」") && result.contains("新增 3 条"));
+    assert!(!result.contains("不重复"), "{result}");
+    assert!(state.source_text.is_empty() && state.source_title.is_empty());
+    assert!(state.extraction_error.is_none());
+    assert_eq!(state.extraction_source.as_deref(), Some("s1"));
+    // 在「待整理建议」里结果就写在按钮旁边，不再弹提示。
+    assert!(state.notice.is_none());
+
+    // 识别期间用户已经贴了另一份：不动输入框。
+    state.source_text = "第二份原文".into();
+    receive_extraction(
+        &mut state,
+        ExtractionOutcome::Saved {
+            source_id: "s2".into(),
+            title: "知识库资料".into(),
+            text: "资料正文".into(),
+            added: 0,
+        },
+    );
+    assert_eq!(state.source_text, "第二份原文");
+    assert!(
+        state
+            .extraction_result
+            .as_ref()
+            .unwrap()
+            .contains("没有需要核对")
+    );
+    assert!(state.extraction_source.is_none());
+
+    // 重新识别：说清新增、替换与跳过各几条。
+    receive_extraction(
+        &mut state,
+        ExtractionOutcome::Rerun {
+            source_id: "s1".into(),
+            title: "第一份纪要".into(),
+            result: crate::task_assistant::Rerun {
+                replaced: 2,
+                added: 1,
+                skipped: 1,
+            },
+        },
+    );
+    let result = state.extraction_result.clone().unwrap();
+    assert!(
+        result.contains("新增 1 条")
+            && result.contains("替换了 2 条")
+            && result.contains("1 条与已采纳或已忽略的相同"),
+        "{result}"
+    );
+
+    // 识别过：不清框、不只回一句话，留卡片让人选查看或重新识别。
+    receive_extraction(
+        &mut state,
+        ExtractionOutcome::Known {
+            source: source_row("s2", "第二份", 2, 1),
+            text: "第二份原文".into(),
+        },
+    );
+    assert_eq!(state.source_text, "第二份原文");
+    assert_eq!(state.known_source.as_ref().unwrap().id, "s2");
+    assert!(state.extraction_result.is_none());
+    assert!(state.notice.is_none());
+
+    // 不在本视图时另给底部提示，指回「待整理建议」。
+    state.view = View::Today;
+    receive_extraction(
+        &mut state,
+        ExtractionOutcome::Saved {
+            source_id: "s3".into(),
+            title: "第三份".into(),
+            text: "第三份原文".into(),
+            added: 1,
+        },
+    );
+    assert!(state.notice.as_ref().unwrap().contains("待整理建议"));
+}
+
+#[test]
+fn task_assistant_known_material_card_offers_rerun_and_its_suggestions() {
+    let mut store = Store::open(":memory:").unwrap();
+    let id = store_with_material(&mut store, "周报", "本周周报原文已完成。", "周报原文已完成");
+    let source = store.sources().unwrap().remove(0);
+    let state = State {
+        view: View::Inbox,
+        source_text: "本周周报原文已完成。".into(),
+        known_source: Some(source.clone()),
+        ..Default::default()
+    };
+    let mut h = bench(state, store);
+    assert!(h.query_by_label_contains("待核对 1 · 已采纳 0").is_some());
+    h.get_by_label("查看这批建议").click();
+    h.run();
+    assert_eq!(h.state().state.inbox_source.as_deref(), Some(id.as_str()));
+    assert!(h.state().state.known_source.is_none());
+    assert!(h.query_by_label("只看「周报」的建议").is_some());
+
+    h.state_mut().state.known_source = Some(source);
+    h.run();
+    h.get_by_label("重新识别").click();
+    h.run();
+    assert_eq!(h.state().state.request_rerun.as_deref(), Some(id.as_str()));
+    assert!(h.state().state.known_source.is_none());
+}
+
+#[test]
+fn task_assistant_inbox_can_show_one_material_and_back_to_all() {
+    let mut store = Store::open(":memory:").unwrap();
+    let first = store_with_material(&mut store, "周报", "本周周报原文已完成。", "周报原文已完成");
+    store_with_material(&mut store, "纪要", "会议纪要原文已印发。", "纪要原文已印发");
+    let state = State {
+        view: View::Inbox,
+        inbox_source: Some(first),
+        ..Default::default()
+    };
+    let mut h = bench(state, store);
+    assert!(h.query_by_label("待核对的建议 · 1 条").is_some());
+    h.get_by_label("显示全部").click();
+    h.run();
+    assert!(h.state().state.inbox_source.is_none());
+    assert!(h.query_by_label("待核对的建议 · 2 条").is_some());
+}
+
+#[test]
+fn task_assistant_materials_view_shows_the_snapshot_and_deletes() {
+    let mut store = Store::open(":memory:").unwrap();
+    let id = store_with_material(
+        &mut store,
+        "周报",
+        "第一段。本周周报原文已完成。",
+        "周报原文已完成",
+    );
+    store_with_material(&mut store, "纪要", "会议纪要原文已印发。", "纪要原文已印发");
+    let state = State {
+        view: View::Materials,
+        ..Default::default()
+    };
+    let mut h = bench(state, store);
+    assert!(h.query_by_label_contains("识别过的材料 · 2 份").is_some());
+    // 卡片与里面的标题文字各有一个同名节点，点哪个都落在卡片上。
+    h.get_all_by_label("周报").next().unwrap().click();
+    h.run();
+    assert_eq!(
+        h.state().state.material_selected.as_deref(),
+        Some(id.as_str())
+    );
+    assert!(h.query_by_label("第一段。本周周报原文已完成。").is_some());
+
+    h.get_by_label("重新识别").click();
+    h.run();
+    assert_eq!(h.state().state.request_rerun.as_deref(), Some(id.as_str()));
+
+    h.get_by_label("删除").click();
+    h.run();
+    h.get_by_label("删除材料").click();
+    h.run();
+    assert_eq!(h.state().store.sources().unwrap().len(), 1);
+    assert!(h.state().state.material_selected.is_none());
+}
+
+#[test]
+fn task_assistant_new_paste_drops_the_auto_title_but_keeps_a_typed_one() {
+    let state = State {
+        view: View::Inbox,
+        source_text: "关于机房搬迁的通知\n请信息中心准备方案。".into(),
+        ..Default::default()
+    };
+    let mut h = bench(state, Store::open(":memory:").unwrap());
+    h.get_by_label("识别").click();
+    h.run();
+    assert_eq!(h.state().state.source_title, "关于机房搬迁的通知");
+    // 识别失败、原文还在框里，用户换贴一份：自动取的旧标题不能挂到新材料上。
+    h.state_mut().state.request_extract = None;
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput)
+        .focus();
+    h.run();
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput)
+        .type_text("另一份");
+    h.run();
+    assert!(h.state().state.source_title.is_empty());
+
+    // 人自己写的标题不清。
+    h.state_mut().state.source_title = "人工标题".into();
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput)
+        .focus();
+    h.run();
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput)
+        .type_text("再改");
+    h.run();
+    assert_eq!(h.state().state.source_title, "人工标题");
+}
+
+#[test]
+fn task_assistant_success_notice_floats_without_moving_the_columns() {
+    let state = State {
+        view: View::Inbox,
+        ..Default::default()
+    };
+    let mut h = bench(state, Store::open(":memory:").unwrap());
+    let before = h.get_by_label("识别").rect();
+    h.state_mut().state.notice = Some("已保存任务".into());
+    h.run();
+    assert_eq!(h.get_by_label("识别").rect(), before);
+    let toast = h.get_by_label("已保存任务").rect();
+    assert!(toast.min.y > before.max.y, "提示应在页面下方：{toast:?}");
+    h.get_by_label("已保存任务").click();
+    h.run();
+    assert!(h.state().state.notice.is_none());
+}
+
 #[test]
 fn task_assistant_fill_repeated_sources_keep_evidence_and_limit_total_size() {
     use crate::task_assistant::extract::{Fill, MAX_SOURCE_BYTES};

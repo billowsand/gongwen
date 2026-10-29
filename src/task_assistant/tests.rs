@@ -134,7 +134,7 @@ fn responsibility_legacy_kind_uses_owner_only_when_person_is_resolved() {
                 std::slice::from_ref(&target),
             )
             .unwrap();
-        let (id, _, payload, _, _) = store.candidates().unwrap().remove(0);
+        let (id, _, payload, _, _, _) = store.candidates().unwrap().remove(0);
         let mut p: super::extract::Proposal = serde_json::from_str(&payload).unwrap();
         p.kind = "responsibility".into();
         if resolved {
@@ -185,7 +185,7 @@ fn old_scope_candidates_apply_only_name_and_keep_legacy_columns() {
             std::slice::from_ref(&t),
         )
         .unwrap();
-    let (id, _, payload, _, _) = store.candidates().unwrap().remove(0);
+    let (id, _, payload, _, _, _) = store.candidates().unwrap().remove(0);
     let p = serde_json::from_str(&payload).unwrap();
     store.edit_candidate(&id, &p).unwrap();
     store.apply_candidate(&id, &t.id).unwrap();
@@ -534,7 +534,7 @@ fn task_assistant_fill_save_source_is_atomic_reused_and_separate_from_batch() {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    assert!(!store.has_source(&batch).unwrap());
+    assert!(store.source_by_fingerprint(&batch).unwrap().is_none());
     let mut current = store.list(true).unwrap().remove(0);
     current.next_step = "送审".into();
     store
@@ -771,7 +771,7 @@ fn invalid_candidate_rolls_back_entire_material_and_acceptance() {
         s.commit_extraction("材料", "原文", "invalid", "test", &[p], &tasks)
             .is_err()
     );
-    assert!(!s.has_source("invalid").unwrap());
+    assert!(s.source_by_fingerprint("invalid").unwrap().is_none());
     assert!(s.candidates().unwrap().is_empty());
     let p = proposal("completion_evidence", Some(t.id.clone()), "报称完成");
     s.commit_extraction("报告", "报称完成", "valid", "test", &[p], &tasks)
@@ -879,4 +879,114 @@ fn task_assistant_batch_drops_deadlines_with_invented_years() {
     wrong.deadline = Some("2026-12-15".into());
     let kept = super::extract::check_proposal_dates(vec![wrong], source, "2026-10-29");
     assert_eq!(kept[0].deadline.as_deref(), Some("2026-12-15"));
+}
+
+fn named(evidence: &str) -> super::extract::Proposal {
+    let mut p = proposal("new_task", None, evidence);
+    p.name = Some(evidence.into());
+    p
+}
+
+#[test]
+fn rerun_replaces_open_suggestions_and_keeps_handled_ones() {
+    let dir = tempdir().unwrap();
+    let mut s = Store::open(dir.path().join("db.sqlite")).unwrap();
+    let content = "甲事项办理。乙事项办理。丙事项办理。丁事项办理。";
+    s.commit_extraction(
+        "纪要",
+        content,
+        "fp",
+        "pasted",
+        &[
+            named("甲事项办理"),
+            named("乙事项办理"),
+            named("丙事项办理"),
+        ],
+        &[],
+    )
+    .unwrap();
+    let rows = s.candidates().unwrap();
+    let row = |e: &str| rows.iter().find(|c| c.3 == e).unwrap().clone();
+    let source_id = rows[0].5.clone();
+    // 甲采纳、乙忽略、丙还待核对。
+    let jia = row("甲事项办理");
+    let mut t = super::extract::proposal_task(&serde_json::from_str(&jia.2).unwrap());
+    t.needs_review = false;
+    s.create_from_candidate(&jia.0, &t).unwrap();
+    s.candidate_done(&row("乙事项办理").0, "ignored").unwrap();
+
+    let r = s
+        .rerun_extraction(
+            &source_id,
+            &[
+                named("甲事项办理"),
+                named("乙事项办理"),
+                named("丁事项办理"),
+            ],
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        r,
+        Rerun {
+            replaced: 1,
+            added: 1,
+            skipped: 2
+        }
+    );
+    let states = s
+        .candidates()
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.3, c.4))
+        .collect::<std::collections::BTreeSet<_>>();
+    let want = [
+        ("丁事项办理", "pending"),
+        ("乙事项办理", "ignored"),
+        ("甲事项办理", "accepted"),
+    ]
+    .into_iter()
+    .map(|(a, b)| (a.to_owned(), b.to_owned()))
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(states, want);
+    let listed = s.sources().unwrap();
+    assert_eq!(
+        (listed[0].pending, listed[0].accepted, listed[0].ignored),
+        (1, 1, 1)
+    );
+
+    // 删掉：被任务历史引用，快照留着、只从材料库消失，没采纳的建议一并删除。
+    assert!(s.delete_source(&source_id).unwrap());
+    assert!(s.sources().unwrap().is_empty());
+    assert_eq!(s.source(&source_id).unwrap().1, content);
+    assert!(s.source_by_fingerprint("fp").unwrap().unwrap().hidden);
+    assert_eq!(s.candidates().unwrap().len(), 1);
+    // 重新识别后回到材料库。
+    s.rerun_extraction(&source_id, &[], &[]).unwrap();
+    assert_eq!(s.sources().unwrap().len(), 1);
+}
+
+#[test]
+fn deleting_an_unused_material_frees_it_and_fill_snapshots_are_not_listed() {
+    let dir = tempdir().unwrap();
+    let mut s = Store::open(dir.path().join("db.sqlite")).unwrap();
+    let material = "请于本周报送材料。";
+    s.commit_extraction("通知", material, "fp", "pasted", &[named("报送材料")], &[])
+        .unwrap();
+    let id = s.sources().unwrap()[0].id.clone();
+    assert!(!s.delete_source(&id).unwrap());
+    assert!(s.source_by_fingerprint("fp").unwrap().is_none());
+    assert!(s.candidates().unwrap().is_empty());
+    // 没人引用就真删了：同一份材料能再识别一次。
+    assert_eq!(
+        s.commit_extraction("通知", material, "fp", "pasted", &[named("报送材料")], &[])
+            .unwrap(),
+        1
+    );
+    // 表单「从文字填写」的快照不进材料库。
+    let mut t = task("填表任务");
+    t.progress = "已启动".into();
+    s.save_with_source(&t, "创建", "", "填表材料", "已启动")
+        .unwrap();
+    assert_eq!(s.sources().unwrap().len(), 1);
 }

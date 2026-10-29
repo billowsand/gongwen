@@ -9,11 +9,17 @@ pub(super) struct Extraction {
     items: Vec<Proposal>,
     tasks: Vec<crate::task_assistant::Task>,
     source_ref: String,
+    /// 同标题同正文的材料之前识别过：没调模型，`items` 为空，交给界面让人选查看还是重新识别。
+    known: Option<crate::task_assistant::SourceRow>,
+    /// 重新识别：结果替换这份已存材料的未处理建议，不另存一份。
+    rerun: Option<String>,
 }
 
 enum Material {
     Text(String, String, String),
     Knowledge(i64),
+    /// 按材料库里存的快照重新识别。
+    Rerun(String),
 }
 
 pub(super) struct TaskFillOutput {
@@ -146,28 +152,55 @@ impl super::GongwenApp {
                 self.task_extraction_rx = None;
                 self.task_ui.extraction_busy = false;
                 if std::mem::take(&mut self.task_ui.discard_extraction) {
-                    self.task_ui.notice = Some("本次识别结果已丢弃，材料可重新整理。".into());
+                    crate::task_ui::receive_extraction(
+                        &mut self.task_ui,
+                        crate::task_ui::ExtractionOutcome::Discarded,
+                    );
                 } else {
                     let outcome = result.and_then(|data| {
+                        use crate::task_ui::ExtractionOutcome;
                         let store = self
                             .task_store
                             .as_mut()
                             .ok_or_else(|| anyhow::anyhow!("任务数据库不可用"))?;
-                        store.commit_extraction(
+                        if let Some(source) = data.known {
+                            // 识别过的材料不落库：选「重新识别」才调模型。
+                            return Ok(ExtractionOutcome::Known {
+                                source,
+                                text: data.source_text,
+                            });
+                        }
+                        if let Some(source_id) = data.rerun {
+                            let result =
+                                store.rerun_extraction(&source_id, &data.items, &data.tasks)?;
+                            return Ok(ExtractionOutcome::Rerun {
+                                source_id,
+                                title: data.source_title,
+                                result,
+                            });
+                        }
+                        let added = store.commit_extraction(
                             &data.source_title,
                             &data.source_text,
                             &data.source_fingerprint,
                             &data.source_ref,
                             &data.items,
                             &data.tasks,
-                        )
+                        )?;
+                        let source_id = store
+                            .source_by_fingerprint(&data.source_fingerprint)?
+                            .map(|row| row.id)
+                            .unwrap_or_default();
+                        Ok(ExtractionOutcome::Saved {
+                            source_id,
+                            title: data.source_title,
+                            text: data.source_text,
+                            added,
+                        })
                     });
                     match outcome {
-                        Ok(n) => {
-                            self.task_ui.notice = Some(format!(
-                                "识别完成，新增 {n} 条待核变化（同版材料不重复生成）。"
-                            ));
-                            self.task_ui.extraction_error = None;
+                        Ok(outcome) => {
+                            crate::task_ui::receive_extraction(&mut self.task_ui, outcome)
                         }
                         Err(e) => {
                             self.task_ui.extraction_error =
@@ -199,6 +232,10 @@ impl super::GongwenApp {
 
     pub(crate) fn start_task_knowledge_extraction(&mut self, id: i64) {
         self.start_task_material(Material::Knowledge(id));
+    }
+
+    pub(crate) fn start_task_rerun(&mut self, source_id: String) {
+        self.start_task_material(Material::Rerun(source_id));
     }
 
     fn start_task_material(&mut self, material: Material) {
@@ -238,8 +275,16 @@ impl super::GongwenApp {
         self.task_ui.extraction_error = None;
         std::thread::spawn(move || {
             let result = (|| -> Result<Extraction> {
+                let mut rerun = None;
                 let (title, source, source_ref) = match material {
                     Material::Text(title, text, source_ref) => (title, text, source_ref),
+                    Material::Rerun(id) => {
+                        let (title, text) = crate::task_assistant::Store::open(&path)?
+                            .source(&id)
+                            .map_err(|_| anyhow::anyhow!("这份材料已不存在"))?;
+                        rerun = Some(id);
+                        (title, text, String::new())
+                    }
                     Material::Knowledge(id) => {
                         let mut store = crate::knowledge::KnowledgeStore::open(&path)?;
                         let (title, text) = store
@@ -259,9 +304,13 @@ impl super::GongwenApp {
                     .iter()
                     .map(|b| format!("{b:02x}"))
                     .collect::<String>();
-                let processed =
-                    crate::task_assistant::Store::open(&path)?.has_source(&fingerprint)?;
-                let items = if processed {
+                let known = if rerun.is_some() {
+                    None
+                } else {
+                    crate::task_assistant::Store::open(&path)?
+                        .source_by_fingerprint(&fingerprint)?
+                };
+                let items = if known.is_some() {
                     Vec::new()
                 } else {
                     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -277,6 +326,8 @@ impl super::GongwenApp {
                     source_ref,
                     items,
                     tasks,
+                    known,
+                    rerun,
                 })
             })();
             let _ = tx.send(result);

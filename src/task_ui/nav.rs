@@ -11,18 +11,20 @@ pub(crate) enum View {
     Waiting,
     Review,
     Inbox,
+    Materials,
     Done,
     Cancelled,
     Archived,
     Deleted,
 }
 
-pub(super) const MAIN: [View; 5] = [
+pub(super) const MAIN: [View; 6] = [
     View::Today,
     View::Active,
     View::Waiting,
     View::Review,
     View::Inbox,
+    View::Materials,
 ];
 pub(super) const CLOSED: [View; 4] = [View::Done, View::Cancelled, View::Archived, View::Deleted];
 
@@ -34,6 +36,7 @@ impl View {
             Self::Waiting => "等待 · 阻塞",
             Self::Review => "待核对",
             Self::Inbox => "待整理建议",
+            Self::Materials => "材料",
             Self::Done => "已完成",
             Self::Cancelled => "已取消",
             Self::Archived => "归档",
@@ -47,6 +50,7 @@ impl View {
             Self::Waiting => theme::Icon::History,
             Self::Review => theme::Icon::TriangleAlert,
             Self::Inbox => theme::Icon::Sparkles,
+            Self::Materials => theme::Icon::Paperclip,
             Self::Done => theme::Icon::SquareCheck,
             Self::Cancelled => theme::Icon::X,
             Self::Archived => theme::Icon::Archive,
@@ -62,7 +66,7 @@ impl View {
             Self::Active => open,
             Self::Waiting => open && (t.status == Status::Waiting || held_up(all, t)),
             Self::Review => live && t.needs_review,
-            Self::Inbox => false,
+            Self::Inbox | Self::Materials => false,
             Self::Done => live && t.status == Status::Done,
             Self::Cancelled => live && t.status == Status::Cancelled,
             Self::Archived => t.archived && !t.deleted,
@@ -89,6 +93,9 @@ pub(super) fn pending_candidate(state: &str) -> bool {
 }
 
 fn count(view: View, data: &Snapshot) -> usize {
+    if view == View::Materials {
+        return data.sources.len();
+    }
     if view == View::Inbox {
         return data
             .candidates
@@ -157,7 +164,7 @@ pub(super) fn sidebar(ui: &mut egui::Ui, state: &mut State, data: &Snapshot) {
             } else {
                 name.clone()
             };
-            if state.view == View::Inbox {
+            if matches!(state.view, View::Inbox | View::Materials) {
                 state.view = View::Active;
             }
         }
@@ -172,6 +179,10 @@ fn view_row(ui: &mut egui::Ui, state: &mut State, data: &Snapshot, view: View) {
     let shown = (n > 0 && !CLOSED.contains(&view)).then(|| (n, count_color(view, data)));
     if row(ui, state.view == view, view.icon(), view.label(), shown).clicked() {
         state.view = view;
+        // 从视图栏进「待整理建议」看的是全部建议，不沿用「只看某份材料」。
+        if view == View::Inbox {
+            state.inbox_source = None;
+        }
     }
 }
 

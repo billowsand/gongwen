@@ -14,6 +14,7 @@ mod fill;
 mod form;
 mod inbox;
 mod list;
+mod materials;
 mod nav;
 mod owner;
 
@@ -21,6 +22,7 @@ use crate::task_assistant::extract::FilledValue;
 #[cfg(test)]
 pub(crate) use fill::apply_fill;
 pub(crate) use fill::{FillField, FillRequest, receive_fill};
+pub(crate) use inbox::{ExtractionOutcome, receive_extraction};
 pub(crate) use nav::View;
 
 /// 视图栏固定宽度；窗口窄于 `NAV_MIN_PAGE` 时视图栏收成列表上方的下拉框。
@@ -79,6 +81,23 @@ pub(crate) struct State {
     pub new_category: String,
     pub source_title: String,
     pub source_text: String,
+    /// 标题留空时程序取首行填进去的那个值；原文再改时若标题没被人动过就一起清掉。
+    source_title_auto: Option<String>,
+    /// 最近一次材料识别的结果，写在材料卡「识别」按钮旁边。
+    pub extraction_result: Option<String>,
+    /// 上面那条结果对应的材料（有新建议时），结果旁的「只看这批」按它筛选。
+    extraction_source: Option<String>,
+    /// 刚粘贴的材料之前识别过：材料卡里显示「查看 / 重新识别」卡片。
+    pub known_source: Option<crate::task_assistant::SourceRow>,
+    /// 待应用层开始的重新识别（材料 id）。
+    pub request_rerun: Option<String>,
+    /// 「待整理建议」只看这份材料的建议。
+    pub inbox_source: Option<String>,
+    /// 「材料」视图里选中的材料。
+    pub material_selected: Option<String>,
+    /// 选中材料的原文快照（id、标题、正文）；快照不会改，按 id 缓存一份。
+    material_text: Option<(String, String, String)>,
+    material_delete: Option<String>,
     focus_material: bool,
     pub knowledge_id: Option<i64>,
     knowledge_docs: Option<Vec<(i64, String)>>,
@@ -181,6 +200,7 @@ pub(super) struct Snapshot<'a> {
     pub tasks: Vec<Task>,
     pub categories: Vec<String>,
     pub candidates: Vec<crate::task_assistant::CandidateRow>,
+    pub sources: Vec<crate::task_assistant::SourceRow>,
     pub today: String,
     /// 借用配置里的标准词库：每帧都要重绘，不复制整份词库。
     pub vocabulary: &'a [crate::models::VocabularyEntry],
@@ -220,6 +240,7 @@ pub(crate) fn show(
         tasks: std::mem::take(&mut state.cache.tasks),
         categories: std::mem::take(&mut state.cache.categories),
         candidates: std::mem::take(&mut state.cache.candidates),
+        sources: std::mem::take(&mut state.cache.sources),
         today: chrono::Local::now()
             .date_naive()
             .format("%Y-%m-%d")
@@ -230,6 +251,7 @@ pub(crate) fn show(
     state.cache.tasks = data.tasks;
     state.cache.categories = data.categories;
     state.cache.candidates = data.candidates;
+    state.cache.sources = data.sources;
 }
 
 fn page(
@@ -239,6 +261,7 @@ fn page(
     state: &mut State,
     data: &Snapshot,
 ) {
+    let page_rect = ui.max_rect();
     top_bar(ui, store, state);
     messages(ui, state);
     ui.add_space(6.0);
@@ -258,7 +281,7 @@ fn page(
                 ui.separator();
             }
             let rest = ui.available_width();
-            let share = if state.view == View::Inbox {
+            let share = if matches!(state.view, View::Inbox | View::Materials) {
                 0.55
             } else {
                 0.42
@@ -275,6 +298,7 @@ fn page(
         });
     }
     dialogs(ui, store, state, data);
+    toast(ui, state, page_rect);
 }
 
 fn column(ui: &mut egui::Ui, width: f32, height: f32, add: impl FnOnce(&mut egui::Ui)) {
@@ -309,6 +333,12 @@ fn middle(
             .auto_shrink([false, false])
             .max_height(ui.available_height().min(height))
             .show(ui, |ui| inbox::show(ui, store, knowledge, state, data));
+    } else if state.view == View::Materials {
+        egui::ScrollArea::vertical()
+            .id_salt("task_materials")
+            .auto_shrink([false, false])
+            .max_height(ui.available_height().min(height))
+            .show(ui, |ui| materials::list(ui, state, data));
     } else {
         list::show(ui, store, state, data);
     }
@@ -322,6 +352,11 @@ fn right(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data: &Snapsho
         if keep && state.draft.is_none() {
             state.draft = Some(draft);
         }
+    } else if state.view == View::Materials {
+        egui::ScrollArea::vertical()
+            .id_salt("task_material_detail")
+            .auto_shrink([false, false])
+            .show(ui, |ui| materials::detail(ui, store, state, data));
     } else {
         egui::ScrollArea::vertical()
             .id_salt("task_detail")
@@ -339,17 +374,28 @@ fn single_column(
     data: &Snapshot,
     height: f32,
 ) {
-    let showing_task = state
-        .selected
-        .as_deref()
-        .is_some_and(|id| data.task(id).is_some());
-    if state.draft.is_some() || showing_task {
+    let showing = if state.view == View::Materials {
+        state
+            .material_selected
+            .as_deref()
+            .is_some_and(|id| data.sources.iter().any(|s| s.id == id))
+    } else {
+        state
+            .selected
+            .as_deref()
+            .is_some_and(|id| data.task(id).is_some())
+    };
+    if state.draft.is_some() || showing {
         if state.draft.is_none()
             && ui
                 .add(theme::icon_text_button(theme::Icon::Undo, "返回列表"))
                 .clicked()
         {
-            state.selected = None;
+            if state.view == View::Materials {
+                state.material_selected = None;
+            } else {
+                state.selected = None;
+            }
         }
         let height = ui.available_height().min(height);
         right(ui, store, state, data, height);
@@ -425,7 +471,7 @@ fn more_menu(ui: &mut egui::Ui, store: &mut Store, state: &mut State) {
     ui.checkbox(&mut state.history_candidates, "显示已处理的建议");
 }
 
-/// 页顶的一行提示：错误常驻可关，成功提示几秒后自己消失。
+/// 页顶只放常驻可关的错误；成功提示在 [`toast`] 里浮在页面底部，几秒后自己消失。
 fn messages(ui: &mut egui::Ui, state: &mut State) {
     let now = ui.input(|i| i.time);
     match (&state.notice, &state.notice_since) {
@@ -471,15 +517,48 @@ fn messages(ui: &mut egui::Ui, state: &mut State) {
             state.view = View::Inbox;
         }
     }
-    if let Some(n) = &state.notice {
-        ui.add_space(4.0);
-        theme::notice(
-            ui,
-            theme::Icon::Check,
-            theme::success(),
-            theme::success_soft(),
-            n.clone(),
-        );
+}
+
+/// 成功提示浮在页面底部居中，不占布局：出现和消失都不会把三栏往下挤一下再弹回。
+/// 点一下提前关掉。
+fn toast(ui: &mut egui::Ui, state: &mut State, page: egui::Rect) {
+    let Some(text) = state.notice.clone() else {
+        return;
+    };
+    let width = (page.width() - 32.0).clamp(160.0, 460.0);
+    let clicked = egui::Area::new(egui::Id::new("task_toast"))
+        .order(egui::Order::Foreground)
+        .movable(false)
+        .pivot(egui::Align2::CENTER_BOTTOM)
+        .fixed_pos(page.center_bottom() - egui::vec2(0.0, 16.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .fill(theme::success_soft())
+                .corner_radius(theme::chrome_radius(8))
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_max_width(width);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 7.0;
+                        ui.add(theme::Icon::Check.image_sized(14.0).tint(theme::success()));
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(text)
+                                    .color(theme::success())
+                                    .size(theme::font_sizes::SMALL),
+                            )
+                            .wrap(),
+                        );
+                    });
+                })
+                .response
+                .interact(egui::Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+        })
+        .inner;
+    if clicked {
+        state.notice = None;
     }
 }
 
@@ -638,6 +717,7 @@ fn dialogs(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data: &Snaps
         }
     }
     categories::window(ui, store, state, data);
+    materials::delete_dialog(ui, store, state, data);
 }
 
 #[cfg(test)]

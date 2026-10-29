@@ -3,8 +3,8 @@
 //! 候选的识别、采纳与过期保护都在 `task_assistant::Store`；这里只负责摆放。
 //! 选了目标任务的候选会把右栏切到该任务，采纳前能对照它的当前内容。
 use super::{Replace, Snapshot, State};
-use crate::task_assistant::Store;
 use crate::task_assistant::extract::{Proposal, auto_title};
+use crate::task_assistant::{SourceRow, Store};
 use crate::theme;
 
 const FIELDS: [(&str, &str); 11] = [
@@ -82,6 +82,183 @@ pub(super) fn kind_label(kind: &str) -> &str {
     }
 }
 
+/// 一次材料识别的结果，由应用层的后台轮询交回界面。
+pub(crate) enum ExtractionOutcome {
+    /// 新材料已存进材料库。
+    Saved {
+        source_id: String,
+        title: String,
+        text: String,
+        added: usize,
+    },
+    /// 同标题同正文的材料之前识别过：这次没调模型，让人选查看还是重新识别。
+    Known { source: SourceRow, text: String },
+    /// 重新识别了一份已存的材料。
+    Rerun {
+        source_id: String,
+        title: String,
+        result: crate::task_assistant::Rerun,
+    },
+    /// 用户点了「取消本次结果」，迟到的结果已丢弃。
+    Discarded,
+}
+
+/// 收下识别结果：结果写在材料卡「识别」按钮旁边，不在页顶插提示条挤动三栏；
+/// 不在「待整理建议」视图时另弹一条底部浮动提示。新材料识别成功、输入框还是刚交出去
+/// 的那份原文就清空，下一次粘贴从空框开始；识别过的材料不清，留着卡片让人选怎么办。
+pub(crate) fn receive_extraction(state: &mut State, outcome: ExtractionOutcome) {
+    state.extraction_error = None;
+    state.known_source = None;
+    state.extraction_source = None;
+    let message = match outcome {
+        ExtractionOutcome::Saved {
+            source_id,
+            title,
+            text,
+            added,
+        } => {
+            if state.source_text == text {
+                state.source_text.clear();
+                state.source_title.clear();
+                state.source_title_auto = None;
+            }
+            let title = short_title(&title);
+            if added > 0 {
+                state.extraction_source = Some(source_id);
+            }
+            if added == 0 {
+                format!("「{title}」识别完成，没有需要核对的变化，材料已存进「材料」。")
+            } else {
+                format!("「{title}」识别完成，新增 {added} 条待核对的建议。")
+            }
+        }
+        ExtractionOutcome::Known { source, text } => {
+            let title = short_title(&source.title);
+            let still_there = state.source_text == text;
+            state.extraction_result = None;
+            if state.view != super::View::Inbox || !still_there {
+                state.ok(format!(
+                    "「{title}」之前识别过，可在「材料」里查看或重新识别。"
+                ));
+            }
+            if still_there {
+                state.known_source = Some(source);
+            }
+            return;
+        }
+        ExtractionOutcome::Rerun {
+            source_id,
+            title,
+            result,
+        } => {
+            if result.added > 0 {
+                state.extraction_source = Some(source_id);
+            }
+            rerun_message(&short_title(&title), result)
+        }
+        ExtractionOutcome::Discarded => "本次识别结果已丢弃，材料可重新整理。".to_owned(),
+    };
+    if state.view != super::View::Inbox {
+        state.ok(format!("{message}见「待整理建议」。"));
+    }
+    state.extraction_result = Some(message);
+}
+
+fn rerun_message(title: &str, r: crate::task_assistant::Rerun) -> String {
+    let mut out = if r.added == 0 {
+        format!("「{title}」重新识别完成，没有新的建议")
+    } else {
+        format!("「{title}」重新识别完成，新增 {} 条待核对的建议", r.added)
+    };
+    if r.replaced > 0 {
+        out.push_str(&format!("，替换了 {} 条未处理的旧建议", r.replaced));
+    }
+    if r.skipped > 0 {
+        out.push_str(&format!(
+            "；{} 条与已采纳或已忽略的相同，没有重复生成",
+            r.skipped
+        ));
+    }
+    out.push('。');
+    out
+}
+
+/// 「之前识别过」卡片：说清是哪一份、上次的结果如何，给出查看与重新识别两条路。
+fn known_card(ui: &mut egui::Ui, state: &mut State, data: &Snapshot, stored: &SourceRow) {
+    // 计数取当前数据，卡片停留期间采纳或忽略了也对得上。
+    let source = data
+        .sources
+        .iter()
+        .find(|s| s.id == stored.id)
+        .unwrap_or(stored);
+    egui::Frame::new()
+        .fill(theme::accent_soft())
+        .corner_radius(theme::chrome_radius(7))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.add(theme::Icon::History.image_sized(14.0).tint(theme::accent()));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "这份材料 {} 识别过（标题与正文都相同），这次没有调用模型。",
+                        super::short_time(&source.created_at)
+                    ))
+                    .color(theme::accent()),
+                );
+            });
+            theme::caption(
+                ui,
+                &format!(
+                    "上次的建议：{}{}",
+                    super::materials::counts(source),
+                    if source.hidden {
+                        "。这份材料已从「材料」中删除，重新识别会恢复它。"
+                    } else {
+                        ""
+                    }
+                ),
+            );
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if theme::primary_icon_button(ui, theme::Icon::Refresh, "重新识别")
+                    .on_hover_text(
+                        "按存下的原文再调一次模型，替换还没处理的建议；已采纳、已忽略的保留",
+                    )
+                    .clicked()
+                {
+                    state.request_rerun = Some(source.id.clone());
+                    state.known_source = None;
+                }
+                if source.pending + source.accepted + source.ignored > 0
+                    && ui.button("查看这批建议").clicked()
+                {
+                    state.inbox_source = Some(source.id.clone());
+                    state.history_candidates = source.pending == 0;
+                    state.known_source = None;
+                }
+                if !source.hidden && ui.button("打开材料").clicked() {
+                    state.view = super::View::Materials;
+                    state.material_selected = Some(source.id.clone());
+                    state.known_source = None;
+                }
+                if ui.button("关闭").clicked() {
+                    state.known_source = None;
+                }
+            });
+        });
+}
+
+pub(super) fn short_title(title: &str) -> String {
+    let mut chars = title.trim().chars();
+    let head = chars.by_ref().take(20).collect::<String>();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 pub(super) fn show(
     ui: &mut egui::Ui,
     store: &mut Store,
@@ -89,13 +266,33 @@ pub(super) fn show(
     state: &mut State,
     data: &Snapshot,
 ) {
-    material(ui, knowledge, state);
+    material(ui, knowledge, state, data);
     ui.add_space(10.0);
     let rows = data
         .candidates
         .iter()
         .filter(|c| state.history_candidates != super::nav::pending_candidate(&c.4))
+        .filter(|c| state.inbox_source.as_ref().is_none_or(|id| &c.5 == id))
         .collect::<Vec<_>>();
+    if let Some(id) = state.inbox_source.clone() {
+        let title = data
+            .sources
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| short_title(&s.title))
+            .unwrap_or_else(|| "所选材料".into());
+        if super::banner(
+            ui,
+            theme::Icon::Paperclip,
+            theme::accent(),
+            theme::accent_soft(),
+            &format!("只看「{title}」的建议"),
+            "显示全部",
+        ) {
+            state.inbox_source = None;
+        }
+        ui.add_space(4.0);
+    }
     theme::caption(
         ui,
         &if state.history_candidates {
@@ -119,7 +316,7 @@ pub(super) fn show(
         );
         return;
     }
-    for (id, kind, payload, evidence, candidate_state) in rows {
+    for (id, kind, payload, evidence, candidate_state, _) in rows {
         ui.add_space(6.0);
         ui.push_id(("task_candidate", id), |ui| {
             theme::card().show(ui, |ui| {
@@ -144,6 +341,7 @@ fn material(
     ui: &mut egui::Ui,
     knowledge: Option<&mut crate::knowledge::KnowledgeStore>,
     state: &mut State,
+    data: &Snapshot,
 ) {
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -168,6 +366,15 @@ fn material(
         if std::mem::take(&mut state.focus_material) {
             text.request_focus();
         }
+        if text.changed() {
+            // 原文换了：上次的结果不再对应框里的内容，自动取的标题也跟着作废。
+            state.extraction_result = None;
+            state.known_source = None;
+            if state.source_title_auto.as_deref() == Some(state.source_title.as_str()) {
+                state.source_title.clear();
+            }
+            state.source_title_auto = None;
+        }
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             if state.extraction_busy {
@@ -190,14 +397,44 @@ fn material(
             {
                 if state.source_title.trim().is_empty() {
                     state.source_title = auto_title(&state.source_text, chrono::Local::now());
+                    state.source_title_auto = Some(state.source_title.clone());
                 }
+                state.extraction_result = None;
+                state.known_source = None;
                 state.request_extract = Some((
                     state.source_title.clone(),
                     state.source_text.clone(),
                     "pasted".into(),
                 ));
             }
+            if !state.extraction_busy
+                && let Some(result) = &state.extraction_result
+            {
+                // 与按钮同一行，出现和消失都不改变卡片高度。
+                ui.add(theme::Icon::Check.image_sized(14.0).tint(theme::success()));
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(result)
+                            .color(theme::success())
+                            .size(theme::font_sizes::SMALL),
+                    )
+                    .wrap(),
+                );
+                if let Some(id) = state.extraction_source.clone()
+                    && state.inbox_source.as_deref() != Some(id.as_str())
+                    && ui.small_button("只看这批").clicked()
+                {
+                    state.inbox_source = Some(id);
+                    state.history_candidates = false;
+                }
+            }
         });
+        if !state.extraction_busy
+            && let Some(source) = state.known_source.clone()
+        {
+            ui.add_space(4.0);
+            known_card(ui, state, data, &source);
+        }
         if let Some(e) = state.extraction_error.clone() {
             ui.add_space(4.0);
             if super::banner(
@@ -264,6 +501,7 @@ fn knowledge_picker(
             .clicked()
             && let Some(id) = state.knowledge_id
         {
+            state.extraction_result = None;
             state.request_knowledge = Some(id);
         }
         refresh = theme::icon_button(ui, theme::Icon::Refresh, "刷新知识库列表").clicked();
