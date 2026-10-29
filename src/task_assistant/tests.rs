@@ -5,8 +5,189 @@ use tempfile::tempdir;
 fn task(name: &str) -> Task {
     let mut t = Task::blank();
     t.name = name.into();
-    t.goal = format!("{name}完成条件");
+    t.progress = format!("{name}目前进展");
     t
+}
+
+#[test]
+fn old_task_table_migrates_repeatedly_and_remains_writable() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("old.sqlite");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE tasks(id TEXT PRIMARY KEY,name TEXT NOT NULL,category TEXT NOT NULL,role TEXT NOT NULL,collaborators TEXT NOT NULL,goal TEXT NOT NULL,next_step TEXT NOT NULL,next_deadline TEXT,deadline TEXT,status TEXT NOT NULL,parent_id TEXT,needs_review INTEGER NOT NULL DEFAULT 0,archived INTEGER NOT NULL DEFAULT 0,deleted INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL); INSERT INTO tasks(id,name,category,role,collaborators,goal,next_step,next_deadline,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at) VALUES('old','旧任务','未分类','负责','','旧目标','旧下一步',NULL,NULL,'未开始',NULL,0,0,0,1,'2026-10-01T00:00:00+08:00');") .unwrap();
+    drop(conn);
+    {
+        let mut store = Store::open(&path).unwrap();
+        let old = store.list(true).unwrap().remove(0);
+        assert_eq!(old.name, "旧任务");
+        assert_eq!(old.next_step, "旧下一步");
+        assert_eq!(old.progress, "");
+        store.save(&old, "编辑", "迁移后保存").unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.list(true).unwrap()[0].name, "旧任务");
+    let columns = store
+        .conn
+        .prepare("PRAGMA table_info(tasks)")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    for column in ["owner_id", "owner_name", "progress", "risks"] {
+        assert!(columns.iter().any(|x| x == column));
+    }
+}
+
+#[test]
+fn only_name_is_required_and_progress_replaces_with_history() {
+    let mut store = Store::open(":memory:").unwrap();
+    let mut t = Task::blank();
+    t.name = "只填名称".into();
+    store.save(&t, "创建", "").unwrap();
+    let mut empty = t.clone();
+    empty.name.clear();
+    assert!(store.save(&empty, "编辑", "").is_err());
+    store.record_progress(&t.id, "第一次").unwrap();
+    store.record_progress(&t.id, "第二次").unwrap();
+    assert_eq!(latest(&store, &t.id).progress, "第二次");
+    let history = store.history_entries(&t.id).unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .filter(|e| e.action == "进展更新")
+            .rev()
+            .take(2)
+            .map(|e| e.detail.as_str())
+            .collect::<Vec<_>>(),
+        ["第一次", "第二次"]
+    );
+    store
+        .conn
+        .execute("UPDATE tasks SET archived=1 WHERE id=?1", [&t.id])
+        .unwrap();
+    assert!(store.record_progress(&t.id, "只读").is_err());
+}
+
+#[test]
+fn evidence_accepts_whitespace_and_fullwidth_punctuation_differences() {
+    use super::extract::evidence_in;
+    assert!(evidence_in("办公室，牵头 形成方案", "办公室,牵头形成方案"));
+    assert!(evidence_in("任务　正在推进", "任务正在推进"));
+    assert!(!evidence_in("任务正在推进", "任务已经完成"));
+    assert!(!evidence_in("任务正在推进", ""));
+    assert!(!evidence_in("任务正在推进", " \n"));
+    let response = r#"{"items":[{"kind":"progress","task_id":null,"name":null,"goal":null,"next_step":"牵头","deadline":null,"collaborators":null,"evidence":"办公室,牵头"}]}"#;
+    assert!(super::extract::parse_response(response, "办公室，牵头", &[]).is_ok());
+    let fill = r#"{"fields":{"progress":{"value":"办公室","evidence":"不匹配"}},"others":0}"#;
+    let parsed = parse_fill(fill, "办公室牵头").unwrap();
+    assert_eq!(parsed.progress.unwrap().evidence, "办公室");
+    let fill = r#"{"fields":{"progress":{"value":"办公室,牵头","evidence":"办公室,牵头"}}}"#;
+    assert!(parse_fill(fill, "办公室，牵头").unwrap().progress.is_some());
+
+    let mut store = Store::open(":memory:").unwrap();
+    let mut target = task("负责人任务");
+    target.owner_id = Some(7);
+    target.owner_name = "旧负责人".into();
+    store.save(&target, "创建", "").unwrap();
+    let target = latest(&store, &target.id);
+    let mut candidate = proposal("owner", Some(target.id.clone()), "办公室,牵头");
+    candidate.owner = Some("王敏".into());
+    store
+        .commit_extraction(
+            "材料",
+            "办公室，牵头",
+            "punct-fp",
+            "test",
+            &[candidate],
+            std::slice::from_ref(&target),
+        )
+        .unwrap();
+    let id = store.candidates().unwrap()[0].0.clone();
+    store.apply_candidate(&id, &target.id).unwrap();
+    assert_eq!(latest(&store, &target.id).owner_name, "旧负责人");
+}
+
+#[test]
+fn responsibility_legacy_kind_uses_owner_only_when_person_is_resolved() {
+    for resolved in [false, true] {
+        let mut store = Store::open(":memory:").unwrap();
+        let mut target = task("任务");
+        target.owner_id = Some(1);
+        target.owner_name = "原负责人".into();
+        store.save(&target, "创建", "").unwrap();
+        let target = latest(&store, &target.id);
+        let mut candidate = proposal("owner", Some(target.id.clone()), "王敏牵头");
+        candidate.owner = Some("王敏".into());
+        store
+            .commit_extraction(
+                "材料",
+                "王敏牵头",
+                if resolved { "resolved" } else { "unresolved" },
+                "test",
+                &[candidate],
+                std::slice::from_ref(&target),
+            )
+            .unwrap();
+        let (id, _, payload, _, _) = store.candidates().unwrap().remove(0);
+        let mut p: super::extract::Proposal = serde_json::from_str(&payload).unwrap();
+        p.kind = "responsibility".into();
+        if resolved {
+            p.owner_id = Some(8);
+        }
+        store
+            .conn
+            .execute(
+                "UPDATE task_candidates SET kind='responsibility' WHERE id=?1",
+                [&id],
+            )
+            .unwrap();
+        store.edit_candidate(&id, &p).unwrap();
+        store.apply_candidate(&id, &target.id).unwrap();
+        let after = latest(&store, &target.id);
+        if resolved {
+            assert_eq!(
+                (after.owner_id, after.owner_name.as_str()),
+                (Some(8), "王敏")
+            );
+        } else {
+            assert_eq!(
+                (after.owner_id, after.owner_name.as_str()),
+                (Some(1), "原负责人")
+            );
+        }
+    }
+}
+
+#[test]
+fn old_scope_candidates_apply_only_name_and_keep_legacy_columns() {
+    let mut store = Store::open(":memory:").unwrap();
+    let mut t = task("旧名称");
+    t.next_step = "人工安排".into();
+    store.save(&t, "创建", "").unwrap();
+    let t = latest(&store, &t.id);
+    let mut p = proposal("scope", Some(t.id.clone()), "调整名称");
+    p.name = Some("新名称".into());
+    p.goal = Some("旧目标".into());
+    p.next_step = Some("不得采纳的旧字段".into());
+    store
+        .commit_extraction(
+            "旧材料",
+            "调整名称",
+            "old-scope",
+            "test",
+            &[p],
+            std::slice::from_ref(&t),
+        )
+        .unwrap();
+    let (id, _, payload, _, _) = store.candidates().unwrap().remove(0);
+    let p = serde_json::from_str(&payload).unwrap();
+    store.edit_candidate(&id, &p).unwrap();
+    store.apply_candidate(&id, &t.id).unwrap();
+    let after = latest(&store, &t.id);
+    assert_eq!(after.name, "新名称");
+    assert_eq!(after.next_step, "人工安排");
+    assert_eq!(after.progress, t.progress);
 }
 #[test]
 fn sqlite_reopen_and_category_migration_preserve_tasks() {
@@ -29,12 +210,12 @@ fn sqlite_reopen_and_category_migration_preserve_tasks() {
     }
 }
 #[test]
-fn invalid_real_calendar_date_and_empty_goal_are_rejected() {
+fn invalid_real_calendar_date_and_name_only_is_valid() {
     let mut t = task("A");
     t.deadline = Some("2026-02-30".into());
     assert!(super::model::valid_task(&t).is_err());
     t.deadline = Some("2024-02-29".into());
-    t.goal.clear();
+    t.name.clear();
     assert!(super::model::valid_task(&t).is_err());
 }
 #[test]
@@ -73,7 +254,9 @@ fn model_output_requires_existing_ids_and_real_evidence() {
     );
     let got = super::extract::parse_response(&raw, text, &[t.clone()]).unwrap();
     assert_eq!(got.len(), 1);
-    let fake = raw.replace("2026年12月完成试点验收", "假摘录");
+    let fake = raw
+        .replace("2026年12月完成试点验收", "假摘录")
+        .replace("\"验收\"", "\"无关内容\"");
     assert!(super::extract::parse_response(&fake, text, &[t.clone()]).is_err());
     let alien = raw.replace(&t.id, "unknown");
     assert!(super::extract::parse_response(&alien, text, &[t]).is_err());
@@ -92,6 +275,10 @@ fn extraction_snapshot_and_candidates_commit_together_and_dedupe() {
         next_step: Some("落实".into()),
         deadline: None,
         collaborators: None,
+        owner: None,
+        owner_id: None,
+        progress: None,
+        risks: None,
         speaker: None,
         about: None,
         note: None,
@@ -129,6 +316,10 @@ fn stale_candidate_requires_explicit_recheck_and_never_overwrites_edits() {
         next_step: Some("模型建议".into()),
         deadline: None,
         collaborators: None,
+        owner: None,
+        owner_id: None,
+        progress: None,
+        risks: None,
         speaker: None,
         about: None,
         note: None,
@@ -166,10 +357,14 @@ fn new_task_candidate_and_source_history_are_applied_together() {
         kind: "new_task".into(),
         task_id: None,
         name: Some("建议任务".into()),
-        goal: Some("完成条件".into()),
+        goal: None,
         next_step: Some("下一步".into()),
         deadline: None,
         collaborators: None,
+        owner: None,
+        owner_id: None,
+        progress: None,
+        risks: None,
         speaker: None,
         about: None,
         note: None,
@@ -237,29 +432,21 @@ fn task_assistant_fill_validates_fields_individually() {
     let source = "办公室牵头编制方案，完成测算后报审，2026-02-30，交领导复核。";
     let raw = serde_json::json!({"fields":{
         "name":{"value":" 编制方案 ","evidence":"办公室牵头编制方案"},
-        "goal":{"value":"报审","evidence":"并不存在"},
+        "owner":{"value":"办公室","evidence":"办公室牵头"},
+        "progress":{"value":"方案已编制","evidence":"编制方案"},
         "next_step":{"value":"完成测算","evidence":"完成测算后报审"},
         "deadline":{"value":"2026-02-30","evidence":"2026-02-30"},
-        "next_deadline":{"value":"2026-11-01","evidence":"完成测算后报审"},
-        "role":{"value":"审批","evidence":"交领导复核"},
-        "category":{"value":"虚构分类","evidence":"编制方案"},
-        "parent_id":{"value":"外部ID","evidence":"编制方案"},
-        "collaborators":{"value":"办公室","evidence":"办公室牵头"}
+        "risks":{"value":"暂无","evidence":"交领导复核"}
     },"others":2})
     .to_string();
-    let fill = parse_fill(&raw, source, &["未分类".into()], &[]).unwrap();
+    let fill = parse_fill(&raw, source).unwrap();
     assert_eq!(fill.name.unwrap().value, "编制方案");
     assert_eq!(fill.next_step.unwrap().value, "完成测算");
-    assert!(fill.next_deadline.is_some());
-    assert!(fill.collaborators.is_some());
-    assert!(
-        fill.goal.is_none()
-            && fill.deadline.is_none()
-            && fill.role.is_none()
-            && fill.category.is_none()
-            && fill.parent_id.is_none()
-    );
-    assert_eq!((fill.dropped, fill.others), (5, 2));
+    assert!(fill.owner.is_some() && fill.progress.is_some() && fill.risks.is_some());
+    assert!(fill.deadline.is_none());
+    assert_eq!((fill.dropped, fill.others), (1, 2));
+    let legacy = r#"{"fields":{"goal":{"value":"旧栏","evidence":"编制方案"}},"others":0}"#;
+    assert!(parse_fill(legacy, source).is_err());
 }
 
 #[test]
@@ -270,58 +457,36 @@ fn task_assistant_fill_rejects_protocol_and_keeps_only_eligible_context() {
         r#"{"fields":{"status":null},"others":0}"#,
         r#"{"fields":{},"others":31}"#,
     ] {
-        assert!(parse_fill(raw, "原文", &[], &[]).is_err());
+        assert!(parse_fill(raw, "原文").is_err());
     }
-    assert!(parse_fill(&"x".repeat(MAX_OUTPUT_BYTES + 1), "原文", &[], &[]).is_err());
-    let mut parent = task("父任务");
-    parent.archived = true;
-    let raw=serde_json::json!({"fields":{"parent_id":{"value":parent.id,"evidence":"原文"}},"others":0}).to_string();
-    let result = parse_fill(&raw, "原文", &[], std::slice::from_ref(&parent)).unwrap();
-    assert!(result.parent_id.is_none());
-    assert_eq!(result.dropped, 1);
-    parent.archived = false;
-    assert!(
-        parse_fill(&raw, "原文", &[], &[parent])
-            .unwrap()
-            .parent_id
-            .is_some()
-    );
-    let malformed = r#"{"fields":{"name":3,"goal":{"value":" ","evidence":"原文"}},"others":0}"#;
-    assert_eq!(parse_fill(malformed, "原文", &[], &[]).unwrap().dropped, 2);
+    assert!(parse_fill(&"x".repeat(MAX_OUTPUT_BYTES + 1), "原文").is_err());
+    let malformed = r#"{"fields":{"name":3},"others":0}"#;
+    assert_eq!(parse_fill(malformed, "原文").unwrap().dropped, 1);
 }
 
 #[test]
-fn task_assistant_fill_prompt_has_today_and_bounded_context() {
+fn task_assistant_fill_prompt_has_today_and_only_six_fields() {
     let mut tasks = (0..60)
         .map(|i| task(&format!("上下文{i}")))
         .collect::<Vec<_>>();
     tasks[0].deleted = true;
     tasks[1].archived = true;
-    let (system, user) = prompt_fill(
-        "交办原文",
-        "2026-10-28",
-        &["专项协调".into()],
-        &tasks,
-        &task("当前任务"),
-    );
+    let (system, user) = prompt_fill("交办原文", "2026-10-28", &task("当前任务"));
+    assert!(user.contains("2026-10-28") && user.contains("当前任务") && user.contains("交办原文"));
+    assert!(!user.contains("专项协调") && tasks.iter().all(|t| !user.contains(&t.id)));
+    for field in [
+        "name",
+        "owner",
+        "progress",
+        "next_step",
+        "risks",
+        "deadline",
+    ] {
+        assert!(system.contains(field));
+    }
     assert!(
-        user.contains("2026-10-28")
-            && user.contains("专项协调")
-            && user.contains("当前任务")
-            && user.contains("交办原文")
+        !system.contains("goal") && !system.contains("collaborators") && system.contains("下周")
     );
-    assert_eq!(
-        user.lines()
-            .filter(|l| tasks.iter().any(|t| l.starts_with(&t.id)))
-            .count(),
-        50
-    );
-    assert!(
-        !user.contains(&tasks[0].id)
-            && !user.contains(&tasks[1].id)
-            && !user.contains(&tasks[52].id)
-    );
-    assert!(system.contains("下周") && system.contains("原文连续摘录"));
 }
 
 #[test]
@@ -418,6 +583,10 @@ fn proposal(kind: &str, id: Option<String>, evidence: &str) -> super::extract::P
         next_step: None,
         deadline: None,
         collaborators: None,
+        owner: None,
+        owner_id: None,
+        progress: None,
+        risks: None,
         speaker: None,
         about: None,
         note: None,
@@ -616,7 +785,19 @@ fn invalid_candidate_rolls_back_entire_material_and_acceptance() {
 #[test]
 fn task_assistant_fill_tolerates_missing_others_count() {
     let raw = r#"{"fields":{"name":{"value":"形成方案","evidence":"形成方案"}}}"#;
-    let fill = super::extract::parse_fill(raw, "要求形成方案", &[], &[]).unwrap();
+    let fill = super::extract::parse_fill(raw, "要求形成方案").unwrap();
     assert_eq!(fill.others, 0);
     assert_eq!(fill.name.unwrap().value, "形成方案");
+}
+
+#[test]
+fn task_assistant_batch_evidence_fallback_needs_a_long_body_field() {
+    let source = "张三负责，信息中心于十一月前完成数据汇总并报送办公室。";
+    // 摘录对不上、只有人名能在原文里找到：不能拿人名当出处。
+    let short = r#"{"items":[{"kind":"owner","task_id":null,"name":null,"next_step":null,"deadline":null,"owner":"张三","evidence":"杜撰的摘录"}]}"#;
+    assert!(super::extract::parse_response(short, source, &[]).is_err());
+    // 足够长、原样出现在原文里的下一步可以顶替摘录。
+    let long = r#"{"items":[{"kind":"progress","task_id":null,"name":null,"next_step":"完成数据汇总并报送办公室","deadline":null,"evidence":"杜撰的摘录"}]}"#;
+    let items = super::extract::parse_response(long, source, &[]).unwrap();
+    assert_eq!(items[0].evidence, "完成数据汇总并报送办公室");
 }

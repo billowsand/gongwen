@@ -1,60 +1,40 @@
 //! 单任务草稿的文字填写、建议、出处与撤销；这里不写数据库。
 use super::{Snapshot, State, View};
+use crate::task_assistant::Task;
 use crate::task_assistant::extract::{Fill, MAX_SOURCE_BYTES};
-use crate::task_assistant::{Role, Task};
 use crate::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum FillField {
     Name,
-    Goal,
+    Owner,
+    Progress,
     NextStep,
-    NextDeadline,
     Deadline,
-    Collaborators,
-    Role,
-    Category,
-    Parent,
+    Risks,
 }
 impl FillField {
     pub fn value(self, t: &Task) -> String {
         match self {
             Self::Name => t.name.clone(),
-            Self::Goal => t.goal.clone(),
+            Self::Owner => t.owner_name.clone(),
+            Self::Progress => t.progress.clone(),
             Self::NextStep => t.next_step.clone(),
-            Self::NextDeadline => t.next_deadline.clone().unwrap_or_default(),
             Self::Deadline => t.deadline.clone().unwrap_or_default(),
-            Self::Collaborators => t.collaborators.clone(),
-            Self::Role => t.role.as_str().into(),
-            Self::Category => t.category.clone(),
-            Self::Parent => t.parent_id.clone().unwrap_or_default(),
+            Self::Risks => t.risks.clone(),
         }
     }
     fn empty(self, t: &Task) -> bool {
-        match self {
-            Self::Role => t.role == Role::Responsible,
-            Self::Category => t.category == "未分类",
-            _ => self.value(t).trim().is_empty(),
-        }
+        self.value(t).trim().is_empty()
     }
     fn write(self, t: &mut Task, value: &str) {
         match self {
             Self::Name => t.name = value.into(),
-            Self::Goal => t.goal = value.into(),
+            Self::Owner => t.owner_name = value.into(),
+            Self::Progress => t.progress = value.into(),
             Self::NextStep => t.next_step = value.into(),
-            Self::NextDeadline => t.next_deadline = (!value.is_empty()).then(|| value.into()),
             Self::Deadline => t.deadline = (!value.is_empty()).then(|| value.into()),
-            Self::Collaborators => t.collaborators = value.into(),
-            Self::Category => t.category = value.into(),
-            Self::Parent => t.parent_id = (!value.is_empty()).then(|| value.into()),
-            Self::Role => {
-                t.role = match value {
-                    "配合" => Role::Collaborate,
-                    "跟进" => Role::Follow,
-                    "关注" => Role::Watch,
-                    _ => Role::Responsible,
-                }
-            }
+            Self::Risks => t.risks = value.into(),
         }
     }
 }
@@ -66,25 +46,37 @@ pub(crate) struct FillRequest {
 }
 
 pub(crate) fn prune_marks(state: &mut State, draft: &Task) {
-    state
-        .fill_marks
-        .retain(|field, v| field.value(draft) == v.value);
+    let owner_id = state.fill_owner_id;
+    state.fill_marks.retain(|field, v| {
+        if *field == FillField::Owner {
+            owner_id.is_some() && draft.owner_id == owner_id && draft.owner_name == v.value
+        } else {
+            field.value(draft) == v.value
+        }
+    });
 }
 
 /// 以填写框里的文字为原文应用结果（样张与测试用；后台结果走 `apply_from`）。
 #[cfg(test)]
-pub(crate) fn apply_fill(state: &mut State, draft: &mut Task, fill: Fill) {
+pub(crate) fn apply_fill(
+    state: &mut State,
+    draft: &mut Task,
+    fill: Fill,
+    vocab: &[crate::models::VocabularyEntry],
+) {
     let source = state.fill_text.clone();
-    apply_from(state, draft, &source, fill);
+    apply_from(state, draft, &source, fill, vocab);
 }
 
 /// `source` 是发请求那一刻的原文：识别期间用户改了填写框，出处仍按当时的文字核对。
-fn apply_from(state: &mut State, draft: &mut Task, source: &str, mut fill: Fill) {
-    // 编辑已有任务时上下文里有它自己；把自己设成上级只会在保存时报循环。
-    if fill.parent_id.as_ref().is_some_and(|v| v.value == draft.id) {
-        fill.parent_id = None;
-        fill.dropped += 1;
-    }
+fn apply_from(
+    state: &mut State,
+    draft: &mut Task,
+    source: &str,
+    fill: Fill,
+    vocab: &[crate::models::VocabularyEntry],
+) {
+    state.fill_owner_note = None;
     // 多次识别仍保留旧标记的出处，以原文合集保存；每段原文保持完整。
     let combined = match state.fill_source.as_deref() {
         Some(old) if old != source && !old.contains(source) => {
@@ -103,18 +95,64 @@ fn apply_from(state: &mut State, draft: &mut Task, source: &str, mut fill: Fill)
     state.fill_summary = Some((fill.dropped, fill.others));
     for (field, value) in [
         (FillField::Name, fill.name),
-        (FillField::Goal, fill.goal),
+        (FillField::Owner, fill.owner),
+        (FillField::Progress, fill.progress),
         (FillField::NextStep, fill.next_step),
-        (FillField::NextDeadline, fill.next_deadline),
         (FillField::Deadline, fill.deadline),
-        (FillField::Collaborators, fill.collaborators),
-        (FillField::Role, fill.role),
-        (FillField::Category, fill.category),
-        (FillField::Parent, fill.parent_id),
+        (FillField::Risks, fill.risks),
     ] {
         let Some(v) = value else {
             continue;
         };
+        if field == FillField::Owner {
+            let matches = super::owner::match_name(vocab, &v.value);
+            if matches.len() == 1 {
+                let person = matches[0];
+                let canonical = person.canonical.clone();
+                if draft.owner_id.is_none() && draft.owner_name.is_empty() {
+                    draft.owner_id = Some(person.id);
+                    draft.owner_name = canonical.clone();
+                    state.fill_owner_id = Some(person.id);
+                    state.fill_suggestions.remove(&field);
+                    state.fill_owner_suggestion_id = None;
+                    state.fill_marks.insert(
+                        field,
+                        crate::task_assistant::extract::FilledValue {
+                            value: canonical,
+                            evidence: v.evidence,
+                        },
+                    );
+                } else if draft.owner_id != Some(person.id) {
+                    state.fill_owner_suggestion_id = Some(person.id);
+                    state.fill_suggestions.insert(
+                        field,
+                        crate::task_assistant::extract::FilledValue {
+                            value: canonical,
+                            evidence: v.evidence,
+                        },
+                    );
+                } else {
+                    state.fill_suggestions.remove(&field);
+                    state.fill_owner_suggestion_id = None;
+                }
+            } else if matches.len() > 1 {
+                state.owner_query = v.value.clone();
+                state.fill_owner_note = Some(format!(
+                    "原文提到『{}』，词库里有 {} 位同名人员，请在负责人里选。",
+                    v.value,
+                    matches.len()
+                ));
+                state
+                    .fill_summary
+                    .get_or_insert((fill.dropped, fill.others));
+            } else {
+                state.fill_owner_note = Some(format!(
+                    "原文提到『{}』，标准词库里没有此人，未填。",
+                    v.value
+                ));
+            }
+            continue;
+        }
         if field.empty(draft) {
             field.write(draft, &v.value);
             state.fill_suggestions.remove(&field);
@@ -123,23 +161,21 @@ fn apply_from(state: &mut State, draft: &mut Task, source: &str, mut fill: Fill)
             state.fill_suggestions.insert(field, v);
         }
     }
-    state.fill_open_more = state
-        .fill_marks
-        .keys()
-        .chain(state.fill_suggestions.keys())
-        .any(|f| {
-            matches!(
-                f,
-                FillField::Category | FillField::Parent | FillField::Collaborators
-            )
-        });
+    state.fill_open_more = false;
 }
 
 pub(crate) fn undo_fill(state: &mut State, draft: &mut Task) {
     if let Some(before) = state.fill_before.take() {
         for (field, v) in &state.fill_marks {
-            if field.value(draft) == v.value {
+            if (*field == FillField::Owner
+                && state.fill_owner_id == draft.owner_id
+                && draft.owner_name == v.value)
+                || (*field != FillField::Owner && field.value(draft) == v.value)
+            {
                 field.write(draft, &field.value(&before));
+                if *field == FillField::Owner {
+                    draft.owner_id = before.owner_id;
+                }
             }
         }
     }
@@ -147,6 +183,9 @@ pub(crate) fn undo_fill(state: &mut State, draft: &mut Task) {
     state.fill_suggestions.clear();
     state.fill_source = None;
     state.fill_summary = None;
+    state.fill_owner_id = None;
+    state.fill_owner_suggestion_id = None;
+    state.fill_owner_note = None;
 }
 
 /// 忙状态也属于请求身份；关闭再打开同一任务不应接收旧请求的结果。
@@ -159,6 +198,7 @@ pub(crate) fn receive_fill(
     id: &str,
     source: &str,
     result: Result<Fill, String>,
+    vocab: &[crate::models::VocabularyEntry],
 ) {
     if !fill_result_matches(state, id) {
         if state.draft.as_ref().is_some_and(|d| d.id == id) {
@@ -172,7 +212,7 @@ pub(crate) fn receive_fill(
         Ok(fill) => {
             state.fill_error = None;
             if let Some(mut draft) = state.draft.take() {
-                apply_from(state, &mut draft, source, fill);
+                apply_from(state, &mut draft, source, fill, vocab);
                 state.draft = Some(draft);
             }
         }
@@ -239,6 +279,9 @@ fn card(ui: &mut egui::Ui, draft: &mut Task, state: &mut State) {
         if let Some(e) = &state.fill_error {
             ui.colored_label(theme::warn(), e);
         }
+        if let Some(note) = &state.fill_owner_note {
+            ui.colored_label(theme::warn(), note);
+        }
         if let Some((dropped, others)) = state.fill_summary {
             ui.horizontal_wrapped(|ui| {
                 theme::caption(
@@ -254,10 +297,7 @@ fn card(ui: &mut egui::Ui, draft: &mut Task, state: &mut State) {
                 }
             });
             if dropped > 0 {
-                theme::caption(
-                    ui,
-                    &format!("另有 {dropped} 栏因无法核对出处或值不合规则已丢弃"),
-                );
+                theme::caption(ui, &format!("另有 {dropped} 栏没能核对出处，已略过"));
             }
             if others > 0 {
                 ui.horizontal_wrapped(|ui| {
@@ -303,11 +343,11 @@ pub(super) fn field(
         .show(ui, |ui| body(ui, draft));
     prune_marks(state, draft);
     if let Some(v) = state.fill_suggestions.get(&field).cloned() {
-        let readable = if field == FillField::Parent {
-            data.task(&v.value)
-                .map(|t| t.name.as_str())
-                .unwrap_or("上下文任务已不存在")
-                .to_owned()
+        let readable = if field == FillField::Owner {
+            super::owner::match_name(data.vocabulary, &v.value)
+                .first()
+                .map(|e| super::owner::label(data.vocabulary, Some(e.id), &e.canonical).0)
+                .unwrap_or(v.value.clone())
         } else {
             v.value.clone()
         };
@@ -324,6 +364,73 @@ pub(super) fn field(
             }
             if ui.small_button("忽略").clicked() {
                 state.fill_suggestions.remove(&field);
+            }
+        });
+    }
+}
+
+pub(super) fn owner_field(ui: &mut egui::Ui, draft: &mut Task, state: &mut State, data: &Snapshot) {
+    ui.add_space(2.0);
+    ui.horizontal_wrapped(|ui| {
+        theme::caption(ui, "负责人");
+        if let Some(v) = state.fill_marks.get(&FillField::Owner) {
+            theme::chip(ui, "AI", theme::accent(), theme::accent_soft())
+                .on_hover_text(format!("原文：{}", v.evidence));
+        }
+    });
+    let stroke = if state.fill_marks.contains_key(&FillField::Owner) {
+        egui::Stroke::new(1.0, theme::accent())
+    } else {
+        egui::Stroke::NONE
+    };
+    let changed = egui::Frame::new()
+        .stroke(stroke)
+        .corner_radius(theme::chrome_radius(7))
+        .inner_margin(2.0)
+        .show(ui, |ui| {
+            super::owner::picker(
+                ui,
+                ("task_owner", &draft.id),
+                data.vocabulary,
+                &mut draft.owner_id,
+                &mut draft.owner_name,
+                &mut state.owner_query,
+            )
+        })
+        .inner;
+    if changed {
+        state.fill_marks.remove(&FillField::Owner);
+        state.fill_suggestions.remove(&FillField::Owner);
+        state.fill_owner_id = None;
+        state.fill_owner_suggestion_id = None;
+    }
+    if let Some(v) = state.fill_suggestions.get(&FillField::Owner).cloned() {
+        let proposed = state.fill_owner_suggestion_id.and_then(|id| {
+            data.vocabulary
+                .iter()
+                .find(|e| e.id == id && e.category == crate::models::VocabularyCategory::Person)
+        });
+        let shown = proposed
+            .map(|person| {
+                super::owner::label(data.vocabulary, Some(person.id), &person.canonical).0
+            })
+            .unwrap_or_else(|| v.value.clone());
+        ui.horizontal_wrapped(|ui| {
+            theme::caption(ui, &format!("AI 建议负责人：{shown}"));
+            if ui
+                .add_enabled(proposed.is_some(), egui::Button::new("替换").small())
+                .clicked()
+                && let Some(person) = proposed
+            {
+                draft.owner_id = Some(person.id);
+                draft.owner_name = person.canonical.clone();
+                state.fill_suggestions.remove(&FillField::Owner);
+                state.fill_marks.insert(FillField::Owner, v.clone());
+                state.fill_owner_id = Some(person.id);
+                state.fill_owner_suggestion_id = None;
+            }
+            if ui.small_button("忽略").clicked() {
+                state.fill_suggestions.remove(&FillField::Owner);
             }
         });
     }

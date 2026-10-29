@@ -40,24 +40,17 @@ impl super::GongwenApp {
             self.task_ui.fill_error = Some("上一次识别还没结束，请等待后重试。".into());
             return;
         }
+        // 单任务填表不给模型任务上下文与分类：它只填六个描述栏，负责人由界面按词库匹配。
         let setup = (|| -> Result<_> {
-            let store = self
-                .task_store
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("任务数据库不可用"))?;
-            let tasks = store
-                .list(false)?
-                .into_iter()
-                .filter(|t| !t.archived && !t.deleted)
-                .take(50)
-                .collect::<Vec<_>>();
-            let categories = store.categories()?;
+            if self.task_store.is_none() {
+                bail!("任务数据库不可用");
+            }
             let mut cfg = self.config.assist_chat()?;
             cfg.temperature = 0.0;
             cfg.max_tokens = cfg.max_tokens.clamp(1024, 4096);
-            Ok((tasks, categories, cfg))
+            Ok(cfg)
         })();
-        let (tasks, categories, cfg) = match setup {
+        let cfg = match setup {
             Ok(v) => v,
             Err(e) => {
                 self.task_ui.fill_error = Some(format!("无法开始填写：{e:#}"));
@@ -78,12 +71,10 @@ impl super::GongwenApp {
                 let (system, user) = crate::task_assistant::extract::prompt_fill(
                     &request.text,
                     &today,
-                    &categories,
-                    &tasks,
                     &request.current,
                 );
                 let raw = crate::lmstudio::generate(&cfg, &system, &user)?;
-                crate::task_assistant::extract::parse_fill(&raw, &request.text, &categories, &tasks)
+                crate::task_assistant::extract::parse_fill(&raw, &request.text)
             })()
             .map_err(|e| format!("识别失败，可重试：{e:#}"));
             let _ = tx.send(TaskFillOutput {
@@ -106,6 +97,7 @@ impl super::GongwenApp {
                     &output.draft_id,
                     &output.text,
                     output.result,
+                    &self.config.vocabulary,
                 );
                 ctx.request_repaint();
             }

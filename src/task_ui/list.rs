@@ -1,10 +1,10 @@
 //! 中栏任务列表：筛选条 + 整行可点的任务行。
 use super::{Replace, Snapshot, State, View, days_from, short_date};
-use crate::task_assistant::{Role, Store, Task};
+use crate::task_assistant::{Store, Task};
 use crate::theme;
 
 pub(super) fn show(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data: &Snapshot) {
-    toolbar(ui, state);
+    toolbar(ui, state, &data.tasks);
     let query = state.query.trim().to_lowercase();
     let hits = if query.is_empty() {
         None
@@ -29,14 +29,15 @@ pub(super) fn show(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data
             };
             in_scope
                 && (state.category.is_empty() || state.category == t.category)
-                && (state.role_filter.is_empty() || state.role_filter == t.role.as_str())
+                && (state.owner_filter.is_empty() || state.owner_filter == t.owner_name)
                 && (query.is_empty()
                     || [
                         &t.name,
                         &t.next_step,
-                        &t.collaborators,
+                        &t.owner_name,
+                        &t.progress,
+                        &t.risks,
                         &t.category,
-                        &t.goal,
                     ]
                     .iter()
                     .any(|s| s.to_lowercase().contains(&query))
@@ -74,7 +75,7 @@ pub(super) fn show(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             for t in rows {
-                if row(ui, t, data, state.selected.as_deref() == Some(&t.id), state) {
+                if row(ui, t, data, state.selected.as_deref() == Some(&t.id)) {
                     clicked = Some(t.id.clone());
                 }
             }
@@ -84,23 +85,23 @@ pub(super) fn show(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data
     }
 }
 
-fn toolbar(ui: &mut egui::Ui, state: &mut State) {
+fn toolbar(ui: &mut egui::Ui, state: &mut State, tasks: &[Task]) {
     ui.horizontal_wrapped(|ui| {
-        egui::ComboBox::from_id_salt("task_filter_role")
-            .selected_text(if state.role_filter.is_empty() {
-                "全部角色"
+        egui::ComboBox::from_id_salt("task_filter_owner")
+            .selected_text(if state.owner_filter.is_empty() {
+                "全部负责人"
             } else {
-                &state.role_filter
+                &state.owner_filter
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut state.role_filter, String::new(), "全部角色");
-                for r in [
-                    Role::Responsible,
-                    Role::Collaborate,
-                    Role::Follow,
-                    Role::Watch,
-                ] {
-                    ui.selectable_value(&mut state.role_filter, r.as_str().into(), r.as_str());
+                ui.selectable_value(&mut state.owner_filter, String::new(), "全部负责人");
+                let names = tasks
+                    .iter()
+                    .map(|t| t.owner_name.trim())
+                    .filter(|n| !n.is_empty())
+                    .collect::<std::collections::BTreeSet<_>>();
+                for name in names {
+                    ui.selectable_value(&mut state.owner_filter, name.to_owned(), name);
                 }
             });
         theme::segmented(ui, |ui| {
@@ -153,7 +154,7 @@ fn empty(ui: &mut egui::Ui, state: &mut State, data: &Snapshot, searching: bool)
 }
 
 /// 一行任务。返回是否被点选。
-fn row(ui: &mut egui::Ui, t: &Task, data: &Snapshot, selected: bool, state: &State) -> bool {
+fn row(ui: &mut egui::Ui, t: &Task, data: &Snapshot, selected: bool) -> bool {
     let frame = egui::Frame::new()
         .fill(if selected {
             theme::accent_soft()
@@ -174,26 +175,15 @@ fn row(ui: &mut egui::Ui, t: &Task, data: &Snapshot, selected: bool, state: &Sta
             });
         });
         let next = if t.next_step.is_empty() {
-            "下一步：未安排".to_owned()
+            "下一步：未填".to_owned()
         } else {
-            match &t.next_deadline {
-                Some(d) => format!("下一步：{} · {}", t.next_step, short_date(d, &data.today)),
-                None => format!("下一步：{}", t.next_step),
-            }
+            format!("下一步：{}", t.next_step)
         };
-        let next_late = !t.status.terminal()
-            && t.next_deadline
-                .as_deref()
-                .is_some_and(|d| d < data.today.as_str());
         ui.add(
             egui::Label::new(
                 egui::RichText::new(next)
                     .size(theme::font_sizes::SMALL)
-                    .color(if next_late {
-                        theme::danger()
-                    } else {
-                        theme::text_muted()
-                    }),
+                    .color(theme::text_muted()),
             )
             .truncate(),
         );
@@ -207,8 +197,29 @@ fn row(ui: &mut egui::Ui, t: &Task, data: &Snapshot, selected: bool, state: &Sta
             } else {
                 neutral(ui, t.status.as_str());
             }
-            neutral(ui, t.role.as_str());
-            if state.category.is_empty() && t.category != "未分类" {
+            if !t.owner_name.trim().is_empty() {
+                let (label, found) =
+                    super::owner::label(data.vocabulary, t.owner_id, &t.owner_name);
+                theme::chip(
+                    ui,
+                    &t.owner_name,
+                    if found {
+                        theme::text_soft()
+                    } else {
+                        theme::warn()
+                    },
+                    if found {
+                        theme::surface_sunk()
+                    } else {
+                        theme::warn_soft()
+                    },
+                )
+                .on_hover_text(label);
+            }
+            if !t.risks.trim().is_empty() {
+                theme::chip(ui, "有风险", theme::warn(), theme::warn_soft());
+            }
+            if t.category != "未分类" {
                 neutral(ui, &t.category);
             }
         });

@@ -7,33 +7,45 @@ use crate::task_assistant::Store;
 use crate::task_assistant::extract::{Proposal, auto_title};
 use crate::theme;
 
-const FIELDS: [(&str, &str); 8] = [
+const FIELDS: [(&str, &str); 11] = [
     ("name", "建议名称"),
-    ("goal", "建议完成条件"),
+    ("owner", "建议负责人"),
+    ("progress", "当前进展"),
     ("next_step", "建议下一步"),
     ("deadline", "建议期限"),
-    ("collaborators", "建议协作分工"),
+    ("risks", "风险与应对措施"),
     ("speaker", "意见提出主体"),
     ("about", "意见针对事项"),
     ("note", "意见 / 待决内容"),
+    ("goal", "旧候选说明"),
+    ("collaborators", "旧候选责任说明"),
 ];
 
 /// 各类候选默认显示的字段；其它字段有值时也照样显示，不藏模型给的内容。
 fn relevant(kind: &str) -> &'static [&'static str] {
     match kind {
-        "new_task" => &["name", "goal", "next_step", "deadline", "collaborators"],
-        "progress" => &["next_step", "note"],
+        "new_task" => &[
+            "name",
+            "owner",
+            "progress",
+            "next_step",
+            "deadline",
+            "risks",
+        ],
+        "progress" => &["progress", "next_step", "note"],
         "deadline" => &["deadline"],
-        "responsibility" => &["collaborators"],
-        "scope" => &["name", "goal"],
+        "responsibility" | "owner" => &["owner"],
+        "risk" => &["risks"],
+        "scope" => &["name"],
         "completion_evidence" => &["note"],
         "opinion" | "decision" => &["speaker", "about", "note"],
         _ => &[
             "name",
-            "goal",
+            "owner",
+            "progress",
             "next_step",
             "deadline",
-            "collaborators",
+            "risks",
             "note",
         ],
     }
@@ -42,9 +54,12 @@ fn relevant(kind: &str) -> &'static [&'static str] {
 fn slot<'a>(p: &'a mut Proposal, key: &str) -> &'a mut Option<String> {
     match key {
         "name" => &mut p.name,
-        "goal" => &mut p.goal,
+        "owner" => &mut p.owner,
+        "progress" => &mut p.progress,
         "next_step" => &mut p.next_step,
         "deadline" => &mut p.deadline,
+        "risks" => &mut p.risks,
+        "goal" => &mut p.goal,
         "collaborators" => &mut p.collaborators,
         "speaker" => &mut p.speaker,
         "about" => &mut p.about,
@@ -58,7 +73,8 @@ pub(super) fn kind_label(kind: &str) -> &str {
         "progress" => "进展反馈",
         "decision" => "待决事项",
         "opinion" => "相关意见",
-        "responsibility" => "分工调整",
+        "responsibility" | "owner" => "负责人调整",
+        "risk" => "风险变化",
         "deadline" => "期限调整",
         "scope" => "范围调整",
         "completion_evidence" => "完成证据",
@@ -307,12 +323,70 @@ fn candidate(
         .unwrap_or_else(|| original.clone());
     ui.add_space(4.0);
     let wanted = relevant(kind);
+    let previous_owner = proposal.owner.clone();
     for (key, label) in FIELDS {
         let value = slot(&mut proposal, key);
         if !wanted.contains(&key) && value.is_none() {
             continue;
         }
         optional_line(ui, label, value);
+    }
+    if proposal.owner != previous_owner {
+        proposal.owner_id = None;
+    }
+    if let Some(name) = proposal.owner.as_deref() {
+        let selected = proposal.owner_id.and_then(|id| {
+            data.vocabulary.iter().find(|e| {
+                e.id == id
+                    && e.category == crate::models::VocabularyCategory::Person
+                    && e.canonical.trim() == name.trim()
+            })
+        });
+        let matches = super::owner::match_name(data.vocabulary, name);
+        if let Some(person) = selected.or_else(|| (matches.len() == 1).then(|| matches[0])) {
+            proposal.owner_id = Some(person.id);
+            proposal.owner = Some(person.canonical.clone());
+            theme::caption(
+                ui,
+                &format!(
+                    "负责人：{}",
+                    super::owner::label(data.vocabulary, Some(person.id), &person.canonical).0
+                ),
+            );
+        } else {
+            proposal.owner_id = None;
+            theme::caption(
+                ui,
+                if matches.is_empty() {
+                    "原文提到的负责人不在标准词库中，请选择".into()
+                } else {
+                    format!(
+                        "原文提到『{name}』，词库里有 {} 位同名人员，请选择",
+                        matches.len()
+                    )
+                }
+                .as_str(),
+            );
+            let mut owner_id = None;
+            let mut owner_name = String::new();
+            // 每张候选卡各有一个搜索框，和表单的负责人搜索也分开。
+            let query = state
+                .candidate_owner_queries
+                .entry(id.to_owned())
+                .or_insert_with(|| name.to_owned());
+            let _ = super::owner::picker(
+                ui,
+                ("candidate_owner", id),
+                data.vocabulary,
+                &mut owner_id,
+                &mut owner_name,
+                query,
+            );
+            if owner_id.is_some() {
+                proposal.owner_id = owner_id;
+                proposal.owner = Some(owner_name);
+            }
+        }
     }
     ui.add_space(4.0);
     if kind == "new_task" {

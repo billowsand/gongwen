@@ -530,15 +530,53 @@ fn task_assistant_samples() {
     theme::configure_icons(&ctx);
     theme::configure_style(&ctx);
     let mut app = fixture();
+    app.config.vocabulary = vec![
+        VocabularyEntry {
+            id: 1,
+            category: VocabularyCategory::Unit,
+            canonical: "办公室".into(),
+            code: "0001".into(),
+            abbr: "办公室".into(),
+            ..Default::default()
+        },
+        VocabularyEntry {
+            id: 2,
+            category: VocabularyCategory::Unit,
+            canonical: "信息中心".into(),
+            code: "0002".into(),
+            abbr: "信息中心".into(),
+            ..Default::default()
+        },
+        VocabularyEntry {
+            id: 11,
+            category: VocabularyCategory::Person,
+            canonical: "张宁".into(),
+            position: "主任".into(),
+            unit: "0001".into(),
+            ..Default::default()
+        },
+        VocabularyEntry {
+            id: 12,
+            category: VocabularyCategory::Person,
+            canonical: "李明".into(),
+            position: "处长".into(),
+            unit: "0002".into(),
+            ..Default::default()
+        },
+    ];
     let mut parent = crate::task_assistant::Task::blank();
     parent.name = "跨部门专项推进与验收准备工作任务".into();
-    parent.goal = "完成跨部门试点并经负责人复核验收".into();
-    parent.collaborators = "办公室统筹，业务处配合，信息中心跟进".into();
+    parent.owner_id = Some(11);
+    parent.owner_name = "张宁".into();
+    parent.progress = "试点已启动".into();
+    parent.risks = "个别单位反馈滞后；逐一提醒并预留两天补报".into();
     parent.next_step = "汇总各单位意见并形成验收清单".into();
     parent.deadline = Some("2026-11-30".into());
     let mut child = crate::task_assistant::Task::blank();
     child.name = "收集试点单位反馈".into();
-    child.goal = "反馈材料齐备并核对来源".into();
+    child.owner_id = Some(12);
+    child.owner_name = "李明".into();
+    child.progress = "已收到两家单位反馈".into();
     child.parent_id = Some(parent.id.clone());
     child.needs_review = true;
     child.next_step = "催报三家未交单位".into();
@@ -549,8 +587,7 @@ fn task_assistant_samples() {
     );
     let mut other = crate::task_assistant::Task::blank();
     other.name = "数字政府建设年度总结".into();
-    other.goal = "形成总结初稿报分管领导审定".into();
-    other.role = crate::task_assistant::Role::Collaborate;
+    other.progress = "正在汇总年度数据".into();
     other.status = crate::task_assistant::Status::Waiting;
     if let Some(store) = app.task_store.as_mut() {
         store.add_category("专项推进").unwrap();
@@ -569,6 +606,10 @@ fn task_assistant_samples() {
                 task_id,
                 name: None,
                 goal: None,
+                owner: None,
+                owner_id: None,
+                progress: None,
+                risks: None,
                 next_step: None,
                 deadline: None,
                 collaborators: None,
@@ -586,7 +627,9 @@ fn task_assistant_samples() {
         deadline.deadline = Some("2026-11-05".into());
         let mut fresh = proposal("new_task", None, "办公室牵头起草数字政府建设年度总结");
         fresh.name = Some("起草数字政府建设年度总结".into());
-        fresh.collaborators = Some("办公室牵头".into());
+        fresh.owner = Some("张宁".into());
+        fresh.progress = Some("已牵头启动".into());
+        fresh.owner_id = Some(11);
         let tasks = store.list(false).unwrap();
         store
             .commit_extraction(
@@ -638,7 +681,8 @@ fn task_assistant_samples() {
             use crate::task_assistant::extract::{Fill, FilledValue};
             let source = "办公室要求形成方案报审，下一步征求各科室意见。另安排会议筹备。";
             let mut draft = crate::task_assistant::Task::blank();
-            draft.goal = "形成可执行的工作安排".into();
+            draft.owner_id = Some(11);
+            draft.owner_name = "张宁".into();
             app.task_ui.fill_text = source.into();
             let value = |value: &str| {
                 Some(FilledValue {
@@ -651,7 +695,9 @@ fn task_assistant_samples() {
                 &mut draft,
                 Fill {
                     name: value("形成方案报审"),
-                    goal: value("形成方案报审"),
+                    owner: None,
+                    progress: value("形成方案报审"),
+                    risks: None,
                     next_step: Some(FilledValue {
                         value: "征求各科室意见".into(),
                         evidence: "下一步征求各科室意见".into(),
@@ -660,6 +706,7 @@ fn task_assistant_samples() {
                     dropped: 1,
                     ..Default::default()
                 },
+                &app.config.vocabulary,
             );
             app.task_ui.draft = Some(draft);
         }
@@ -677,6 +724,7 @@ fn task_assistant_samples() {
                             ui,
                             app.task_store.as_mut(),
                             app.knowledge_store.as_mut(),
+                            &app.config.vocabulary,
                             &mut app.task_ui,
                         )
                     });

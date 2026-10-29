@@ -15,6 +15,7 @@ mod form;
 mod inbox;
 mod list;
 mod nav;
+mod owner;
 
 use crate::task_assistant::extract::FilledValue;
 #[cfg(test)]
@@ -46,14 +47,19 @@ pub(crate) struct State {
     pub query: String,
     pub category: String,
     pub view: View,
-    pub role_filter: String,
+    pub owner_filter: String,
+    pub owner_query: String,
     pub sort_deadline: bool,
     pub error: Option<String>,
     pub notice: Option<String>,
     notice_since: Option<(String, f64)>,
     pub progress_text: String,
+    /// 「更新进展」框对应的任务与预填时的进展。
+    progress_task: Option<(String, String)>,
     pub candidate_targets: HashMap<String, String>,
     pub candidate_edits: HashMap<String, crate::task_assistant::extract::Proposal>,
+    /// 候选卡里负责人搜索框的文字，按候选 id 分开。
+    candidate_owner_queries: HashMap<String, String>,
     /// 采纳时报过「过期 / 已变化」的候选；只有它们显示「以当前版本重新核对」。
     expired_candidates: HashSet<String>,
     pub delete_confirm: Option<String>,
@@ -87,6 +93,9 @@ pub(crate) struct State {
     pub fill_busy: bool,
     pub fill_discard: bool,
     pub fill_error: Option<String>,
+    pub fill_owner_note: Option<String>,
+    pub fill_owner_id: Option<u64>,
+    pub fill_owner_suggestion_id: Option<u64>,
     pub fill_marks: HashMap<FillField, FilledValue>,
     pub fill_suggestions: HashMap<FillField, FilledValue>,
     pub fill_before: Option<Task>,
@@ -119,7 +128,9 @@ impl State {
         self.clear_fill();
         self.form_error = None;
         self.prerequisite_query.clear();
+        self.owner_query.clear();
         self.cancel_reason.clear();
+        self.progress_task = None;
         match replace {
             Replace::Blank => {
                 self.fill_focus = true;
@@ -152,6 +163,9 @@ impl State {
         self.fill_busy = false;
         self.fill_discard = false;
         self.fill_error = None;
+        self.fill_owner_note = None;
+        self.fill_owner_id = None;
+        self.fill_owner_suggestion_id = None;
         self.fill_marks.clear();
         self.fill_suggestions.clear();
         self.fill_before = None;
@@ -163,14 +177,16 @@ impl State {
 }
 
 /// 缓存里取出的一帧数据：渲染期间与 `State` 分开借用，帧末放回。
-pub(super) struct Snapshot {
+pub(super) struct Snapshot<'a> {
     pub tasks: Vec<Task>,
     pub categories: Vec<String>,
     pub candidates: Vec<crate::task_assistant::CandidateRow>,
     pub today: String,
+    /// 借用配置里的标准词库：每帧都要重绘，不复制整份词库。
+    pub vocabulary: &'a [crate::models::VocabularyEntry],
 }
 
-impl Snapshot {
+impl Snapshot<'_> {
     pub fn task(&self, id: &str) -> Option<&Task> {
         self.tasks.iter().find(|t| t.id == id)
     }
@@ -180,6 +196,7 @@ pub(crate) fn show(
     ui: &mut egui::Ui,
     store: Option<&mut Store>,
     knowledge: Option<&mut crate::knowledge::KnowledgeStore>,
+    vocabulary: &[crate::models::VocabularyEntry],
     state: &mut State,
 ) {
     let Some(store) = store else {
@@ -207,6 +224,7 @@ pub(crate) fn show(
             .date_naive()
             .format("%Y-%m-%d")
             .to_string(),
+        vocabulary,
     };
     page(ui, store, knowledge, state, &data);
     state.cache.tasks = data.tasks;
@@ -347,7 +365,7 @@ fn top_bar(ui: &mut egui::Ui, store: &mut Store, state: &mut State) {
         let width = (ui.available_width() - 300.0).clamp(140.0, 460.0);
         ui.add(theme::field(
             &mut state.query,
-            "搜索任务、下一步、协作方、材料原文",
+            "搜索任务、负责人、进展、材料原文",
             width,
         ));
         if !state.query.is_empty()

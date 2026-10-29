@@ -1,5 +1,5 @@
 //! 右栏任务详情：头部操作、待核对横条、关键信息、关系、记进展与历史。
-use super::{Replace, Snapshot, State, View, banner, days_from, short_date, short_time};
+use super::{Replace, Snapshot, State, View, banner, days_from, short_time};
 use crate::task_assistant::{Status, Store, Task};
 use crate::theme;
 
@@ -57,7 +57,7 @@ pub(super) fn show(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data
         }
     }
     ui.add_space(8.0);
-    info(ui, &t, &data.today);
+    info(ui, &t, &data.today, data.vocabulary);
     relations(ui, state, &t, data);
     let pending = data
         .candidates
@@ -83,6 +83,7 @@ pub(super) fn show(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data
     }
     if !readonly {
         ui.add_space(10.0);
+        sync_progress_box(state, &t);
         progress(ui, store, state, &t);
     }
     ui.add_space(10.0);
@@ -97,6 +98,9 @@ fn header_actions(
     readonly: bool,
 ) {
     ui.horizontal_wrapped(|ui| {
+        if !t.risks.trim().is_empty() {
+            theme::chip(ui, "有风险", theme::warn(), theme::warn_soft());
+        }
         if readonly {
             let (label, action) = if t.deleted {
                 ("在回收站 · 只读", "从回收站恢复")
@@ -233,28 +237,35 @@ fn status_feedback(ui: &mut egui::Ui, store: &mut Store, state: &mut State, t: &
     }
 }
 
-fn info(ui: &mut egui::Ui, t: &Task, today: &str) {
+fn info(ui: &mut egui::Ui, t: &Task, today: &str, vocabulary: &[crate::models::VocabularyEntry]) {
     let empty = |s: &str| {
         if s.trim().is_empty() {
-            egui::RichText::new("未设").color(theme::text_muted())
+            egui::RichText::new("未填").color(theme::text_muted())
         } else {
             egui::RichText::new(s.to_owned())
         }
     };
-    info_row(ui, "完成条件", empty(&t.goal));
-    let next = match (&t.next_step, &t.next_deadline) {
-        (s, Some(d)) if !s.is_empty() => {
-            let late = !t.status.terminal() && d.as_str() < today;
-            let text = egui::RichText::new(format!("{s} · {}", short_date(d, today)));
-            if late {
-                text.color(theme::danger())
-            } else {
-                text
-            }
-        }
-        (s, _) => empty(s),
-    };
-    info_row(ui, "下一步", next);
+    let (owner, found) = super::owner::label(vocabulary, t.owner_id, &t.owner_name);
+    info_row(
+        ui,
+        "负责人",
+        if found || t.owner_id.is_none() {
+            egui::RichText::new(owner)
+        } else {
+            egui::RichText::new(owner).color(theme::warn())
+        },
+    );
+    info_row(ui, "当前进展", empty(&t.progress));
+    info_row(ui, "下一步工作", empty(&t.next_step));
+    info_row(
+        ui,
+        "风险问题及应对措施",
+        if t.risks.is_empty() {
+            empty("")
+        } else {
+            egui::RichText::new(t.risks.clone()).color(theme::warn())
+        },
+    );
     let deadline = match &t.deadline {
         Some(d) => match days_from(today, d) {
             Some(n) if n < 0 && !t.status.terminal() => {
@@ -268,12 +279,7 @@ fn info(ui: &mut egui::Ui, t: &Task, today: &str) {
         None => empty(""),
     };
     info_row(ui, "任务期限", deadline);
-    info_row(ui, "协作分工", empty(&t.collaborators));
-    info_row(
-        ui,
-        "分类 · 角色",
-        egui::RichText::new(format!("{} · {}", t.category, t.role.as_str())),
-    );
+    info_row(ui, "分类", egui::RichText::new(t.category.clone()));
 }
 
 fn info_row(ui: &mut egui::Ui, label: &str, value: egui::RichText) {
@@ -347,30 +353,49 @@ fn relations(ui: &mut egui::Ui, state: &mut State, t: &Task, data: &Snapshot) {
     });
 }
 
+/// 「更新进展」框预填当前进展。换了任务就重填；同一任务的进展被别处改了（编辑表单、
+/// 采纳建议）而用户还没动过框里的字时也重填，免得点「更新」用旧文字覆盖新进展。
+pub(super) fn sync_progress_box(state: &mut State, t: &Task) {
+    match &state.progress_task {
+        Some((id, base)) if id == &t.id => {
+            if base != &t.progress {
+                if state.progress_text == *base {
+                    state.progress_text = t.progress.clone();
+                }
+                state.progress_task = Some((t.id.clone(), t.progress.clone()));
+            }
+        }
+        _ => {
+            state.progress_task = Some((t.id.clone(), t.progress.clone()));
+            state.progress_text = t.progress.clone();
+        }
+    }
+}
+
 fn progress(ui: &mut egui::Ui, store: &mut Store, state: &mut State, t: &Task) {
-    ui.label(egui::RichText::new("记进展").strong());
+    ui.label(egui::RichText::new("更新进展").strong());
+    theme::caption(ui, "更新后旧进展保留在历史里");
     let response = ui.add(
         egui::TextEdit::multiline(&mut state.progress_text)
-            .hint_text("今天的进展，如：已收到两家单位反馈，还差三家")
-            .desired_rows(2)
+            .hint_text("如：已收到两家单位反馈，还差三家")
+            .desired_rows(3)
             .desired_width(f32::INFINITY),
     );
-    let submit_key = response.has_focus()
+    // 没改动就不更新，免得 Ctrl+Enter 连按在历史里堆出一串相同的进展。
+    let changed = state.progress_text.trim() != t.progress;
+    let submit_key = changed
+        && response.has_focus()
         && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
     ui.horizontal(|ui| {
-        let clicked = theme::primary_icon_button_enabled(
-            ui,
-            !state.progress_text.trim().is_empty(),
-            theme::Icon::Check,
-            "记录",
-        )
-        .clicked();
-        theme::caption(ui, &format!("{} 记录", theme::primary_shortcut("Enter")));
+        let clicked =
+            theme::primary_icon_button_enabled(ui, changed, theme::Icon::Check, "更新").clicked();
+        theme::caption(ui, &format!("{} 更新", theme::primary_shortcut("Enter")));
         if clicked || submit_key {
-            match store.record_progress(&t.id, state.progress_text.trim()) {
+            let text = state.progress_text.trim().to_owned();
+            match store.record_progress(&t.id, &text) {
                 Ok(()) => {
-                    state.progress_text.clear();
-                    state.ok("进展已记入历史");
+                    state.progress_text = text;
+                    state.ok("进展已更新，旧进展保留在历史里");
                 }
                 Err(e) => state.fail(format!("记录进展失败：{e:#}")),
             }

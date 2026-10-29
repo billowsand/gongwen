@@ -58,12 +58,7 @@ impl View {
         let live = !t.archived && !t.deleted;
         let open = live && !t.status.terminal();
         match self {
-            Self::Today => {
-                open && [&t.deadline, &t.next_deadline]
-                    .into_iter()
-                    .flatten()
-                    .any(|d| d.as_str() <= today)
-            }
+            Self::Today => open && t.deadline.as_deref().is_some_and(|d| d <= today),
             Self::Active => open,
             Self::Waiting => open && (t.status == Status::Waiting || held_up(all, t)),
             Self::Review => live && t.needs_review,

@@ -2,7 +2,7 @@ use super::model::{Task, valid_task};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
-const DDL: &str = "CREATE TABLE IF NOT EXISTS task_categories(name TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,name TEXT NOT NULL,category TEXT NOT NULL,role TEXT NOT NULL,collaborators TEXT NOT NULL,goal TEXT NOT NULL,next_step TEXT NOT NULL,next_deadline TEXT,deadline TEXT,status TEXT NOT NULL,parent_id TEXT,needs_review INTEGER NOT NULL DEFAULT 0,archived INTEGER NOT NULL DEFAULT 0,deleted INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS task_prerequisites(task_id TEXT NOT NULL, prerequisite_id TEXT NOT NULL, PRIMARY KEY(task_id,prerequisite_id)); CREATE TABLE IF NOT EXISTS task_history(id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, happened_at TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, source_id TEXT); CREATE TABLE IF NOT EXISTS task_sources(id TEXT PRIMARY KEY,title TEXT NOT NULL,content TEXT NOT NULL,fingerprint TEXT NOT NULL UNIQUE,source_ref TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS task_candidates(id TEXT PRIMARY KEY,source_id TEXT NOT NULL,task_id TEXT,task_revision INTEGER,kind TEXT NOT NULL,payload TEXT NOT NULL,evidence TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL,FOREIGN KEY(source_id) REFERENCES task_sources(id)); CREATE TABLE IF NOT EXISTS task_preferences(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT OR IGNORE INTO task_categories(name) VALUES('未分类');";
+const DDL: &str = "CREATE TABLE IF NOT EXISTS task_categories(name TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,name TEXT NOT NULL,category TEXT NOT NULL,role TEXT NOT NULL DEFAULT '',collaborators TEXT NOT NULL DEFAULT '',goal TEXT NOT NULL DEFAULT '',next_step TEXT NOT NULL,next_deadline TEXT,deadline TEXT,status TEXT NOT NULL,parent_id TEXT,needs_review INTEGER NOT NULL DEFAULT 0,archived INTEGER NOT NULL DEFAULT 0,deleted INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL,owner_id INTEGER,owner_name TEXT NOT NULL DEFAULT '',progress TEXT NOT NULL DEFAULT '',risks TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS task_prerequisites(task_id TEXT NOT NULL, prerequisite_id TEXT NOT NULL, PRIMARY KEY(task_id,prerequisite_id)); CREATE TABLE IF NOT EXISTS task_history(id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, happened_at TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, source_id TEXT); CREATE TABLE IF NOT EXISTS task_sources(id TEXT PRIMARY KEY,title TEXT NOT NULL,content TEXT NOT NULL,fingerprint TEXT NOT NULL UNIQUE,source_ref TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS task_candidates(id TEXT PRIMARY KEY,source_id TEXT NOT NULL,task_id TEXT,task_revision INTEGER,kind TEXT NOT NULL,payload TEXT NOT NULL,evidence TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL,FOREIGN KEY(source_id) REFERENCES task_sources(id)); CREATE TABLE IF NOT EXISTS task_preferences(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT OR IGNORE INTO task_categories(name) VALUES('未分类');";
 pub type CandidateRow = (String, String, String, String, String);
 pub struct Store {
     pub(super) conn: Connection,
@@ -24,6 +24,7 @@ impl Store {
         conn.execute_batch("PRAGMA foreign_keys=ON;")
             .context("启用任务助手外键失败")?;
         conn.execute_batch(DDL).context("初始化任务助手表失败")?;
+        migrate_task_columns(&conn)?;
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let instance = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Self { conn, instance })
@@ -144,13 +145,22 @@ impl Store {
             .unwrap_or(false))
     }
 }
-fn parse_role(s: &str) -> super::model::Role {
-    match s {
-        "配合" => super::model::Role::Collaborate,
-        "跟进" => super::model::Role::Follow,
-        "关注" => super::model::Role::Watch,
-        _ => super::model::Role::Responsible,
+fn migrate_task_columns(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(tasks)")?;
+    let columns = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+    for (name, ddl) in [
+        ("owner_id", "INTEGER"),
+        ("owner_name", "TEXT NOT NULL DEFAULT ''"),
+        ("progress", "TEXT NOT NULL DEFAULT ''"),
+        ("risks", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if !columns.contains(name) {
+            conn.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {name} {ddl}"))?;
+        }
     }
+    Ok(())
 }
 fn parse_status(s: &str) -> super::model::Status {
     match s {
@@ -188,7 +198,7 @@ impl Store {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         use super::extract::Proposal;
         let (recorded_task, recorded_revision, payload, evidence, source_id, source_content): (Option<String>,Option<i64>,String,String,String,String)=tx.query_row("SELECT c.task_id,c.task_revision,c.payload,c.evidence,c.source_id,s.content FROM task_candidates c JOIN task_sources s ON s.id=c.source_id WHERE c.id=?1 AND c.state!='accepted'",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
-        if evidence.trim().is_empty() || !source_content.contains(&evidence) {
+        if evidence.trim().is_empty() || !super::extract::evidence_in(&source_content, &evidence) {
             bail!("来源摘录校验失败，不能采纳");
         }
         if recorded_task
@@ -213,17 +223,23 @@ impl Store {
         if let Some(name) = proposal.name {
             task.name = name;
         }
-        if let Some(goal) = proposal.goal {
-            task.goal = goal;
-        }
-        if let Some(next) = proposal.next_step {
-            task.next_step = next;
-        }
-        if let Some(deadline) = proposal.deadline {
-            task.deadline = Some(deadline);
-        }
-        if let Some(collaborators) = proposal.collaborators {
-            task.collaborators = collaborators;
+        if proposal.kind != "scope" {
+            if let Some(progress) = proposal.progress {
+                task.progress = progress;
+            }
+            if let Some(risks) = proposal.risks {
+                task.risks = risks;
+            }
+            if let Some(owner_id) = proposal.owner_id {
+                task.owner_id = Some(owner_id);
+                task.owner_name = proposal.owner.unwrap_or_default();
+            }
+            if let Some(next) = proposal.next_step {
+                task.next_step = next;
+            }
+            if let Some(deadline) = proposal.deadline {
+                task.deadline = Some(deadline);
+            }
         }
         if proposal.kind == "completion_evidence" {
             task.status = super::model::Status::Done;
@@ -265,7 +281,7 @@ impl Store {
             tx.commit()?;
             return Ok(());
         }
-        tx.execute("UPDATE tasks SET name=?1,category=?2,role=?3,collaborators=?4,goal=?5,next_step=?6,next_deadline=?7,deadline=?8,status=?9,parent_id=?10,needs_review=?14,revision=?11,updated_at=?12 WHERE id=?13",params![task.name,task.category,task.role.as_str(),task.collaborators,task.goal,task.next_step,task.next_deadline,task.deadline,task.status.as_str(),task.parent_id,next_revision,now,chosen_task_id,task.needs_review])?;
+        tx.execute("UPDATE tasks SET name=?1,owner_id=?2,owner_name=?3,progress=?4,risks=?5,next_step=?6,deadline=?7,status=?8,category=?9,parent_id=?10,needs_review=?11,revision=?12,updated_at=?13 WHERE id=?14",params![task.name,task.owner_id.map(|id| id as i64),task.owner_name,task.progress,task.risks,task.next_step,task.deadline,task.status.as_str(),task.category,task.parent_id,task.needs_review,next_revision,now,chosen_task_id])?;
         tx.execute("INSERT INTO task_history(task_id,happened_at,action,detail,source_id) VALUES(?1,?2,'采纳材料建议',?3,?4)",params![chosen_task_id,now,change_detail(Some(&tasks[index]), &task, &evidence),source_id])?;
         tx.execute(
             "UPDATE task_candidates SET state='accepted' WHERE id=?1",
@@ -297,7 +313,9 @@ impl Store {
     }
     pub fn edit_candidate(&self, id: &str, proposal: &super::extract::Proposal) -> Result<()> {
         let (old_kind,evidence,source):(String,String,String)=self.conn.query_row("SELECT c.kind,c.evidence,s.content FROM task_candidates c JOIN task_sources s ON s.id=c.source_id WHERE c.id=?1 AND c.state!='accepted'",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
-        if proposal.kind != old_kind || proposal.evidence != evidence || !source.contains(&evidence)
+        if proposal.kind != old_kind
+            || proposal.evidence != evidence
+            || !super::extract::evidence_in(&source, &evidence)
         {
             bail!("候选类型或来源证据不一致，不能保存");
         }
@@ -332,22 +350,22 @@ impl Store {
     /// 关键词命中材料来源或历史说明的任务集合，一条查询取全，取代逐任务查询。
     pub fn source_hits(&self, query: &str) -> Result<std::collections::HashSet<String>> {
         let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
-        let mut q = self.conn.prepare("SELECT DISTINCT h.task_id FROM task_history h LEFT JOIN task_sources s ON s.id=h.source_id WHERE s.title LIKE ?1 ESCAPE '\\' OR s.content LIKE ?1 ESCAPE '\\' OR h.detail LIKE ?1 ESCAPE '\\'")?;
+        let mut q = self.conn.prepare("SELECT DISTINCT h.task_id FROM task_history h LEFT JOIN task_sources s ON s.id=h.source_id WHERE s.title LIKE ?1 ESCAPE '\\' OR s.content LIKE ?1 ESCAPE '\\' OR h.detail LIKE ?1 ESCAPE '\\' UNION SELECT id FROM tasks WHERE owner_name LIKE ?1 ESCAPE '\\' OR progress LIKE ?1 ESCAPE '\\' OR risks LIKE ?1 ESCAPE '\\'")?;
         Ok(q.query_map([pattern], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     }
     pub fn record_progress(&self, task_id: &str, detail: &str) -> Result<()> {
-        if detail.trim().is_empty() || detail.chars().count() > 2000 {
-            bail!("进展内容不能为空且最多 2000 字");
+        if detail.chars().count() > super::model::MAX_TEXT {
+            bail!("当前进展不能超过 {} 字", super::model::MAX_TEXT);
         }
         let tx = self.conn.unchecked_transaction()?;
         let now = chrono::Local::now().to_rfc3339();
-        let changed=tx.execute("UPDATE tasks SET revision=revision+1,updated_at=?1 WHERE id=?2 AND archived=0 AND deleted=0",params![now,task_id])?;
+        let changed=tx.execute("UPDATE tasks SET progress=?1,revision=revision+1,updated_at=?2 WHERE id=?3 AND archived=0 AND deleted=0",params![detail,now,task_id])?;
         if changed == 0 {
             bail!("任务不存在或只读，不能记进展");
         }
         tx.execute(
-            "INSERT INTO task_history(task_id,happened_at,action,detail) VALUES(?1,?2,'进展',?3)",
+            "INSERT INTO task_history(task_id,happened_at,action,detail) VALUES(?1,?2,'进展更新',?3)",
             [task_id, &now, detail],
         )?;
         tx.commit()?;
@@ -412,7 +430,7 @@ impl Store {
         if kind != "new_task" || proposal.task_id.is_some() {
             bail!("此候选不是待人工创建的新任务");
         }
-        if evidence.trim().is_empty() || !source_content.contains(&evidence) {
+        if evidence.trim().is_empty() || !super::extract::evidence_in(&source_content, &evidence) {
             bail!("来源摘录校验失败，不能采纳");
         }
         if task.status == super::model::Status::Cancelled {
@@ -431,7 +449,7 @@ impl Store {
             bail!("所选分类不存在");
         }
         let now = chrono::Local::now().to_rfc3339();
-        tx.execute("INSERT INTO tasks(id,name,category,role,collaborators,goal,next_step,next_deadline,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,0,1,?13)",params![task.id,task.name,task.category,task.role.as_str(),task.collaborators,task.goal,task.next_step,task.next_deadline,task.deadline,task.status.as_str(),task.parent_id,task.needs_review,now])?;
+        tx.execute("INSERT INTO tasks(id,name,category,role,collaborators,goal,next_step,next_deadline,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at,owner_id,owner_name,progress,risks) VALUES(?1,?2,?3,'','', '',?4,NULL,?5,?6,?7,?8,0,0,1,?9,?10,?11,?12,?13)",params![task.id,task.name,task.category,task.next_step,task.deadline,task.status.as_str(),task.parent_id,task.needs_review,now,task.owner_id.map(|id| id as i64),task.owner_name,task.progress,task.risks])?;
         for prerequisite in &task.prerequisites {
             tx.execute(
                 "INSERT INTO task_prerequisites(task_id,prerequisite_id) VALUES(?1,?2)",
@@ -494,27 +512,27 @@ impl Store {
 }
 
 fn load_tasks(conn: &Connection, include_closed: bool) -> Result<Vec<Task>> {
-    let mut s=conn.prepare("SELECT id,name,category,role,collaborators,goal,next_step,next_deadline,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at FROM tasks WHERE (?1=1 OR (archived=0 AND deleted=0)) ORDER BY updated_at DESC")?;
+    let mut s=conn.prepare("SELECT id,name,category,next_step,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at,owner_id,owner_name,progress,risks FROM tasks WHERE (?1=1 OR (archived=0 AND deleted=0)) ORDER BY updated_at DESC")?;
     let rows = s.query_map([include_closed], |r| {
         let id: String = r.get(0)?;
         let mut t = Task {
             id: id.clone(),
             name: r.get(1)?,
             category: r.get(2)?,
-            role: parse_role(&r.get::<_, String>(3)?),
-            collaborators: r.get(4)?,
-            goal: r.get(5)?,
-            next_step: r.get(6)?,
-            next_deadline: r.get(7)?,
-            deadline: r.get(8)?,
-            status: parse_status(&r.get::<_, String>(9)?),
-            parent_id: r.get(10)?,
+            next_step: r.get(3)?,
+            deadline: r.get(4)?,
+            status: parse_status(&r.get::<_, String>(5)?),
+            parent_id: r.get(6)?,
             prerequisites: vec![],
-            needs_review: r.get(11)?,
-            archived: r.get(12)?,
-            deleted: r.get(13)?,
-            revision: r.get(14)?,
-            updated_at: r.get(15)?,
+            needs_review: r.get(7)?,
+            archived: r.get(8)?,
+            deleted: r.get(9)?,
+            revision: r.get(10)?,
+            updated_at: r.get(11)?,
+            owner_id: r.get::<_, Option<i64>>(12)?.map(|id| id as u64),
+            owner_name: r.get(13)?,
+            progress: r.get(14)?,
+            risks: r.get(15)?,
         };
         let _ = &mut t;
         Ok(t)
@@ -554,30 +572,21 @@ fn change_detail(old: Option<&Task>, t: &Task, note: &str) -> String {
     if let Some(old) = old {
         for (label, a, b) in [
             ("名称", old.name.clone(), t.name.clone()),
-            ("分类", old.category.clone(), t.category.clone()),
-            (
-                "角色",
-                old.role.as_str().to_owned(),
-                t.role.as_str().to_owned(),
-            ),
+            ("负责人", old.owner_name.clone(), t.owner_name.clone()),
+            ("当前进展", old.progress.clone(), t.progress.clone()),
+            ("下一步", old.next_step.clone(), t.next_step.clone()),
+            ("风险与措施", old.risks.clone(), t.risks.clone()),
             (
                 "状态",
                 old.status.as_str().to_owned(),
                 t.status.as_str().to_owned(),
             ),
-            ("完成条件", old.goal.clone(), t.goal.clone()),
-            ("下一步", old.next_step.clone(), t.next_step.clone()),
             (
                 "任务期限",
                 old.deadline.clone().unwrap_or_default(),
                 t.deadline.clone().unwrap_or_default(),
             ),
-            (
-                "下一步期限",
-                old.next_deadline.clone().unwrap_or_default(),
-                t.next_deadline.clone().unwrap_or_default(),
-            ),
-            ("分工", old.collaborators.clone(), t.collaborators.clone()),
+            ("分类", old.category.clone(), t.category.clone()),
             (
                 "上级",
                 old.parent_id.clone().unwrap_or_default(),
@@ -594,7 +603,7 @@ fn change_detail(old: Option<&Task>, t: &Task, note: &str) -> String {
             }
         }
     } else {
-        changes.push(format!("{}；完成条件：{}", t.name, t.goal));
+        changes.push(t.name.clone());
     }
     changes.join("\n")
 }
@@ -652,7 +661,7 @@ fn save_task(
     }
     let revision = old.unwrap_or(0) + 1;
     let now = chrono::Local::now().to_rfc3339();
-    tx.execute("INSERT INTO tasks(id,name,category,role,collaborators,goal,next_step,next_deadline,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) ON CONFLICT(id) DO UPDATE SET name=excluded.name,category=excluded.category,role=excluded.role,collaborators=excluded.collaborators,goal=excluded.goal,next_step=excluded.next_step,next_deadline=excluded.next_deadline,deadline=excluded.deadline,status=excluded.status,parent_id=excluded.parent_id,needs_review=excluded.needs_review,archived=excluded.archived,deleted=excluded.deleted,revision=excluded.revision,updated_at=excluded.updated_at",params![t.id,t.name,t.category,t.role.as_str(),t.collaborators,t.goal,t.next_step,t.next_deadline,t.deadline,t.status.as_str(),t.parent_id,t.needs_review,t.archived,t.deleted,revision,now])?;
+    tx.execute("INSERT INTO tasks(id,name,category,role,collaborators,goal,next_step,next_deadline,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at,owner_id,owner_name,progress,risks) VALUES(?1,?2,?3,'','', '',?4,NULL,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) ON CONFLICT(id) DO UPDATE SET name=excluded.name,category=excluded.category,next_step=excluded.next_step,deadline=excluded.deadline,status=excluded.status,parent_id=excluded.parent_id,needs_review=excluded.needs_review,archived=excluded.archived,deleted=excluded.deleted,revision=excluded.revision,updated_at=excluded.updated_at,owner_id=excluded.owner_id,owner_name=excluded.owner_name,progress=excluded.progress,risks=excluded.risks",params![t.id,t.name,t.category,t.next_step,t.deadline,t.status.as_str(),t.parent_id,t.needs_review,t.archived,t.deleted,revision,now,t.owner_id.map(|id| id as i64),t.owner_name,t.progress,t.risks])?;
     tx.execute("DELETE FROM task_prerequisites WHERE task_id=?1", [&t.id])?;
     for p in &t.prerequisites {
         tx.execute(

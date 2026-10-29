@@ -920,6 +920,7 @@ impl eframe::App for GongwenApp {
                                 ui,
                                 self.task_store.as_mut(),
                                 self.knowledge_store.as_mut(),
+                                &self.config.vocabulary,
                                 &mut self.task_ui,
                             )
                         })

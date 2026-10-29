@@ -176,7 +176,7 @@ impl GongwenApp {
                         entries.push(Entry::new(
                             task.name,
                             format!("任务助手 · {} · {}", task.status.as_str(), task.next_step),
-                            &format!("{} {}", task.collaborators, task.category),
+                            &format!("{} {}", task.owner_name, task.category),
                             Target::Task(task.id),
                         ));
                     }

@@ -1,6 +1,6 @@
 //! 新建 / 编辑任务表单：字段分三组，保存与放弃固定在底栏，表单内容自己滚动。
 use super::{FillField, Snapshot, State, fill};
-use crate::task_assistant::{Role, Status, Store, Task};
+use crate::task_assistant::{Status, Store, Task};
 use crate::theme;
 
 /// 前置任务搜索一次最多列出的条数。
@@ -124,7 +124,7 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
         d,
         data,
         FillField::Name,
-        "名称（必填）",
+        "任务名称（必填）",
         |ui, d| {
             ui.add(theme::field(
                 &mut d.name,
@@ -133,56 +133,72 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
             ));
         },
     );
+    fill::owner_field(ui, d, state, data);
+    group(ui, "进展与安排");
     fill::field(
         ui,
         state,
         d,
         data,
-        FillField::Goal,
-        "目标 / 完成条件（必填）",
+        FillField::Progress,
+        "当前进展",
         |ui, d| {
             ui.add(
-                egui::TextEdit::multiline(&mut d.goal)
-                    .hint_text("做到什么程度算完成，如：形成初稿报分管领导审定")
+                egui::TextEdit::multiline(&mut d.progress)
+                    .hint_text("目前进展，有啥填啥")
                     .desired_rows(3)
                     .desired_width(ui.available_width()),
             );
         },
     );
-
-    group(ui, "怎么安排");
     fill::field(
         ui,
         state,
         d,
         data,
         FillField::NextStep,
-        "下一步",
+        "下一步工作",
         |ui, d| {
-            ui.add(theme::field(
-                &mut d.next_step,
-                "眼下最近的一个动作",
-                ui.available_width(),
-            ));
+            ui.add(
+                egui::TextEdit::multiline(&mut d.next_step)
+                    .hint_text("接下来要做什么")
+                    .desired_rows(2)
+                    .desired_width(ui.available_width()),
+            );
+        },
+    );
+    fill::field(
+        ui,
+        state,
+        d,
+        data,
+        FillField::Risks,
+        "风险问题及应对措施",
+        |ui, d| {
+            ui.add(
+                egui::TextEdit::multiline(&mut d.risks)
+                    .hint_text("风险以及应对措施")
+                    .desired_rows(3)
+                    .desired_width(ui.available_width()),
+            );
         },
     );
     ui.columns(2, |cols| {
-        fill::field(
-            &mut cols[0],
-            state,
-            d,
-            data,
-            FillField::NextDeadline,
-            "下一步期限",
-            |ui, d| {
-                super::date::field(
-                    ui,
-                    "next_deadline",
-                    &mut d.next_deadline,
-                    ui.available_width(),
-                );
-            },
-        );
+        label(&mut cols[0], "状态");
+        egui::ComboBox::from_id_salt("task_edit_status")
+            .selected_text(d.status.as_str())
+            .show_ui(&mut cols[0], |ui| {
+                for s in [
+                    Status::Todo,
+                    Status::InProgress,
+                    Status::Waiting,
+                    Status::Blocked,
+                    Status::Done,
+                    Status::Cancelled,
+                ] {
+                    ui.selectable_value(&mut d.status, s, s.as_str());
+                }
+            });
         fill::field(
             &mut cols[1],
             state,
@@ -195,13 +211,6 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
             },
         );
     });
-    if d.next_deadline
-        .as_ref()
-        .zip(d.deadline.as_ref())
-        .is_some_and(|(a, b)| a > b)
-    {
-        hint(ui, "下一步期限晚于任务期限，请核对。");
-    }
     if let Some(parent) = d.parent_id.as_deref().and_then(|id| data.task(id))
         && d.deadline
             .as_ref()
@@ -210,45 +219,6 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
     {
         hint(ui, "本任务期限晚于上级任务期限，请核对。");
     }
-    ui.columns(2, |cols| {
-        label(&mut cols[0], "状态");
-        egui::ComboBox::from_id_salt("task_edit_status")
-            .selected_text(d.status.as_str())
-            .show_ui(&mut cols[0], |ui| {
-                for status in [
-                    Status::Todo,
-                    Status::InProgress,
-                    Status::Waiting,
-                    Status::Blocked,
-                    Status::Done,
-                    Status::Cancelled,
-                ] {
-                    ui.selectable_value(&mut d.status, status, status.as_str());
-                }
-            });
-        fill::field(
-            &mut cols[1],
-            state,
-            d,
-            data,
-            FillField::Role,
-            "我的角色",
-            |ui, d| {
-                egui::ComboBox::from_id_salt("task_role")
-                    .selected_text(d.role.as_str())
-                    .show_ui(ui, |ui| {
-                        for r in [
-                            Role::Responsible,
-                            Role::Collaborate,
-                            Role::Follow,
-                            Role::Watch,
-                        ] {
-                            ui.selectable_value(&mut d.role, r, r.as_str());
-                        }
-                    });
-            },
-        );
-    });
     if d.status == Status::Cancelled {
         label(ui, "取消理由（必填）");
         ui.add(theme::field(
@@ -259,11 +229,7 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
     }
     ui.add_space(4.0);
     ui.checkbox(&mut d.needs_review, "标记为待核对");
-
-    let has_more = d.category != "未分类"
-        || !d.collaborators.is_empty()
-        || d.parent_id.is_some()
-        || !d.prerequisites.is_empty();
+    let has_more = d.category != "未分类" || d.parent_id.is_some() || !d.prerequisites.is_empty();
     ui.add_space(4.0);
     let open_more = std::mem::take(&mut state.fill_open_more).then_some(true);
     egui::CollapsingHeader::new(
@@ -286,76 +252,40 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 }
 
 fn more(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
-    let full = ui.available_width();
-    ui.columns(2, |cols| {
-        fill::field(
-            &mut cols[0],
-            state,
-            d,
-            data,
-            FillField::Category,
-            "分类",
-            |ui, d| {
-                egui::ComboBox::from_id_salt("task_edit_cat")
-                    .selected_text(&d.category)
-                    .show_ui(ui, |ui| {
-                        for c in &data.categories {
-                            ui.selectable_value(&mut d.category, c.clone(), c);
-                        }
-                    });
-            },
-        );
-        fill::field(
-            &mut cols[1],
-            state,
-            d,
-            data,
-            FillField::Parent,
-            "上级任务",
-            |ui, d| {
-                egui::ComboBox::from_id_salt("task_parent")
-                    .selected_text(
-                        d.parent_id
-                            .as_deref()
-                            .and_then(|id| data.task(id))
-                            .map(|t| t.name.as_str())
-                            .unwrap_or("无上级"),
-                    )
-                    .width(ui.available_width() - 8.0)
-                    .truncate()
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut d.parent_id, None, "无上级");
-                        for t in data
-                            .tasks
-                            .iter()
-                            .filter(|t| t.id != d.id && !t.deleted && !t.archived)
-                        {
-                            ui.selectable_value(&mut d.parent_id, Some(t.id.clone()), &t.name);
-                        }
-                    });
-            },
-        );
-    });
-    fill::field(
-        ui,
-        state,
-        d,
-        data,
-        FillField::Collaborators,
-        "协作分工",
-        |ui, d| {
-            ui.add(theme::field(
-                &mut d.collaborators,
-                "如：办公室统筹，信息中心提供数据",
-                ui.available_width(),
-            ));
-        },
-    );
+    label(ui, "分类");
+    egui::ComboBox::from_id_salt("task_edit_cat")
+        .selected_text(&d.category)
+        .show_ui(ui, |ui| {
+            for c in &data.categories {
+                ui.selectable_value(&mut d.category, c.clone(), c);
+            }
+        });
+    label(ui, "上级任务");
+    egui::ComboBox::from_id_salt("task_parent")
+        .selected_text(
+            d.parent_id
+                .as_deref()
+                .and_then(|id| data.task(id))
+                .map(|t| t.name.as_str())
+                .unwrap_or("无上级"),
+        )
+        .width(ui.available_width() - 8.0)
+        .truncate()
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut d.parent_id, None, "无上级");
+            for t in data
+                .tasks
+                .iter()
+                .filter(|t| t.id != d.id && !t.deleted && !t.archived)
+            {
+                ui.selectable_value(&mut d.parent_id, Some(t.id.clone()), &t.name);
+            }
+        });
     label(
         ui,
         "前置任务（全部完成并核对后，本任务才能进入进行中或完成）",
     );
-    prerequisites(ui, d, state, data, full);
+    prerequisites(ui, d, state, data, ui.available_width());
 }
 
 /// 已选前置以可删除标签显示，下面一个搜索框按名称添加。

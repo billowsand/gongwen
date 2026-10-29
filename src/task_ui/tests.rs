@@ -4,22 +4,24 @@ use egui_kittest::kittest::Queryable;
 struct Bench {
     store: Store,
     state: State,
+    vocabulary: Vec<crate::models::VocabularyEntry>,
 }
 fn harness() -> egui_kittest::Harness<'static, Bench> {
     let mut task = Task::blank();
     task.name = "测试任务".into();
-    task.goal = "交付说明".into();
+    task.progress = "已启动".into();
     let state = State {
         draft: Some(task),
         ..Default::default()
     };
     let mut h = egui_kittest::Harness::new_ui_state(
         |ui, b: &mut Bench| {
-            show(ui, Some(&mut b.store), None, &mut b.state);
+            show(ui, Some(&mut b.store), None, &b.vocabulary, &mut b.state);
         },
         Bench {
             store: Store::open(":memory:").unwrap(),
             state,
+            vocabulary: Vec::new(),
         },
     );
     h.set_size(egui::vec2(1280.0, 900.0));
@@ -58,9 +60,13 @@ fn task_assistant_editor_cancel_closes_without_writing() {
 fn bench(state: State, store: Store) -> egui_kittest::Harness<'static, Bench> {
     let mut h = egui_kittest::Harness::new_ui_state(
         |ui, b: &mut Bench| {
-            show(ui, Some(&mut b.store), None, &mut b.state);
+            show(ui, Some(&mut b.store), None, &b.vocabulary, &mut b.state);
         },
-        Bench { store, state },
+        Bench {
+            store,
+            state,
+            vocabulary: Vec::new(),
+        },
     );
     h.set_size(egui::vec2(1280.0, 900.0));
     h.run();
@@ -70,7 +76,7 @@ fn bench(state: State, store: Store) -> egui_kittest::Harness<'static, Bench> {
 fn saved(store: &mut Store, name: &str, edit: impl FnOnce(&mut Task)) -> Task {
     let mut t = Task::blank();
     t.name = name.into();
-    t.goal = "交付说明".into();
+    t.progress = "已启动".into();
     edit(&mut t);
     store.save(&t, "创建", "测试").unwrap();
     store
@@ -92,7 +98,7 @@ fn filled(value: &str) -> crate::task_assistant::extract::FilledValue {
 fn task_assistant_fill_empty_fields_suggestions_replace_and_undo() {
     let store = Store::open(":memory:").unwrap();
     let mut draft = Task::blank();
-    draft.goal = "人工保留的完成条件".into();
+    draft.progress = "人工保留的完成条件".into();
     let mut state = State {
         fill_text: "办公室要求形成方案报审".into(),
         ..Default::default()
@@ -102,23 +108,29 @@ fn task_assistant_fill_empty_fields_suggestions_replace_and_undo() {
         &mut draft,
         crate::task_assistant::extract::Fill {
             name: Some(filled("形成方案")),
-            goal: Some(filled("方案报审")),
+            progress: Some(filled("方案报审")),
             others: 2,
             ..Default::default()
         },
+        &[],
     );
-    assert_eq!(draft.goal, "人工保留的完成条件");
+    assert_eq!(draft.progress, "人工保留的完成条件");
     assert_eq!(draft.name, "形成方案");
     assert!(state.fill_marks.contains_key(&FillField::Name));
-    assert!(state.fill_suggestions.contains_key(&FillField::Goal));
+    assert!(state.fill_suggestions.contains_key(&FillField::Progress));
     state.draft = Some(draft);
     let mut h = bench(state, store);
     h.get_by_label("替换").scroll_to_me();
     h.run();
     h.get_by_label("替换").click();
     h.run();
-    assert_eq!(h.state().state.draft.as_ref().unwrap().goal, "方案报审");
-    assert!(h.state().state.fill_marks.contains_key(&FillField::Goal));
+    assert_eq!(h.state().state.draft.as_ref().unwrap().progress, "方案报审");
+    assert!(
+        h.state()
+            .state
+            .fill_marks
+            .contains_key(&FillField::Progress)
+    );
     h.state_mut().state.draft.as_mut().unwrap().name = "人工重新命名".into();
     h.run();
     assert!(!h.state().state.fill_marks.contains_key(&FillField::Name));
@@ -129,7 +141,7 @@ fn task_assistant_fill_empty_fields_suggestions_replace_and_undo() {
     let state = &h.state().state;
     let task = state.draft.as_ref().unwrap();
     assert_eq!(task.name, "人工重新命名");
-    assert_eq!(task.goal, "人工保留的完成条件");
+    assert_eq!(task.progress, "人工保留的完成条件");
     assert!(state.fill_marks.is_empty() && state.fill_suggestions.is_empty());
 }
 
@@ -138,7 +150,7 @@ fn task_assistant_fill_save_attaches_source_only_with_remaining_marks() {
     for keep_marks in [true, false] {
         let store = Store::open(":memory:").unwrap();
         let mut draft = Task::blank();
-        draft.goal = "完成条件".into();
+        draft.progress = "完成条件".into();
         let mut state = State {
             fill_text: "办公室要求形成方案报审".into(),
             ..Default::default()
@@ -150,6 +162,7 @@ fn task_assistant_fill_save_attaches_source_only_with_remaining_marks() {
                 name: Some(filled("形成方案")),
                 ..Default::default()
             },
+            &[],
         );
         if !keep_marks {
             draft.name = "改成手工任务".into();
@@ -188,17 +201,18 @@ fn task_assistant_fill_late_cancelled_and_reopened_results_are_discarded() {
         "另一个ID",
         "办公室要求形成方案报审",
         Ok(result()),
+        &[],
     );
     assert!(state.draft.as_ref().unwrap().name.is_empty());
     state.fill_discard = true;
-    receive_fill(&mut state, &id, "办公室要求形成方案报审", Ok(result()));
+    receive_fill(&mut state, &id, "办公室要求形成方案报审", Ok(result()), &[]);
     assert!(!state.fill_busy && state.draft.as_ref().unwrap().name.is_empty());
     state.fill_busy = true;
     state.close_draft();
     let mut reopened = Task::blank();
     reopened.id = id.clone();
     state.apply_replace(Replace::Edit(Box::new(reopened)));
-    receive_fill(&mut state, &id, "办公室要求形成方案报审", Ok(result()));
+    receive_fill(&mut state, &id, "办公室要求形成方案报审", Ok(result()), &[]);
     assert!(state.draft.as_ref().unwrap().name.is_empty());
 }
 
@@ -220,6 +234,7 @@ fn task_assistant_fill_keeps_request_source_and_transfers_other_matters_to_inbox
             others: 2,
             ..Default::default()
         }),
+        &[],
     );
     assert_eq!(state.fill_source.as_deref(), Some("办公室要求形成方案报审"));
     assert_eq!(state.fill_text, "用户识别期间另写的文字");
@@ -264,6 +279,7 @@ fn task_assistant_fill_repeated_sources_keep_evidence_and_limit_total_size() {
             name: Some(filled("方案报审")),
             ..Default::default()
         },
+        &[],
     );
     state.fill_text = "各科室反馈后汇总意见".into();
     apply_fill(
@@ -276,6 +292,7 @@ fn task_assistant_fill_repeated_sources_keep_evidence_and_limit_total_size() {
             }),
             ..Default::default()
         },
+        &[],
     );
     for value in state.fill_marks.values() {
         assert!(
@@ -292,11 +309,12 @@ fn task_assistant_fill_repeated_sources_keep_evidence_and_limit_total_size() {
         &mut state,
         &mut draft,
         Fill {
-            goal: Some(filled("不得填入")),
+            progress: Some(filled("不得填入")),
             ..Default::default()
         },
+        &[],
     );
-    assert!(draft.goal.is_empty());
+    assert!(draft.progress.is_empty());
     assert_eq!(state.fill_source, source);
     assert!(state.fill_error.is_some());
     fill::undo_fill(&mut state, &mut draft);
@@ -356,13 +374,13 @@ fn task_assistant_views_split_review_from_blocked() {
 }
 
 #[test]
-fn task_assistant_today_view_covers_both_deadlines() {
+fn task_assistant_today_view_uses_only_task_deadline() {
     let mut store = Store::open(":memory:").unwrap();
     let late = saved(&mut store, "逾期", |t| {
         t.deadline = Some("2026-10-20".into())
     });
-    let next = saved(&mut store, "下一步到期", |t| {
-        t.next_deadline = Some("2026-10-28".into())
+    let next = saved(&mut store, "无任务期限", |t| {
+        t.progress = "今天继续推进".into()
     });
     let later = saved(&mut store, "以后", |t| {
         t.deadline = Some("2026-12-01".into())
@@ -372,7 +390,7 @@ fn task_assistant_today_view_covers_both_deadlines() {
     let hit =
         |t: &Task| View::Today.matches(&all, all.iter().find(|x| x.id == t.id).unwrap(), today);
     assert!(hit(&late));
-    assert!(hit(&next));
+    assert!(!hit(&next));
     assert!(!hit(&later));
 }
 
@@ -398,24 +416,253 @@ fn task_assistant_short_dates_drop_current_year() {
 }
 
 #[test]
-fn task_assistant_fill_never_makes_a_task_its_own_parent() {
-    let mut draft = Task::blank();
-    let mut state = State {
-        fill_text: "办公室要求形成方案报审".into(),
-        ..Default::default()
-    };
-    let own = crate::task_assistant::extract::FilledValue {
-        value: draft.id.clone(),
-        evidence: "办公室要求形成方案报审".into(),
-    };
-    apply_fill(
-        &mut state,
-        &mut draft,
-        crate::task_assistant::extract::Fill {
-            parent_id: Some(own),
+fn task_assistant_fill_owner_matching_is_unique_or_explicitly_ambiguous() {
+    use crate::models::{VocabularyCategory as C, VocabularyEntry as E};
+    let vocab = vec![
+        E {
+            id: 1,
+            category: C::Unit,
+            canonical: "甲单位".into(),
+            code: "0001".into(),
             ..Default::default()
         },
+        E {
+            id: 2,
+            category: C::Unit,
+            canonical: "乙单位".into(),
+            code: "0002".into(),
+            ..Default::default()
+        },
+        E {
+            id: 11,
+            category: C::Person,
+            canonical: "张宁".into(),
+            aliases: vec!["小张".into()],
+            unit: "0001".into(),
+            ..Default::default()
+        },
+        E {
+            id: 12,
+            category: C::Person,
+            canonical: "张宁".into(),
+            unit: "0002".into(),
+            ..Default::default()
+        },
+        E {
+            id: 13,
+            category: C::Person,
+            canonical: "李明".into(),
+            unit: "0001".into(),
+            ..Default::default()
+        },
+    ];
+    let draft = Task::blank();
+    let id = draft.id.clone();
+    let mut state = State {
+        draft: Some(draft),
+        fill_busy: true,
+        ..Default::default()
+    };
+    receive_fill(
+        &mut state,
+        &id,
+        "由小张牵头",
+        Ok(crate::task_assistant::extract::Fill {
+            owner: Some(crate::task_assistant::extract::FilledValue {
+                value: "小张".into(),
+                evidence: "小张".into(),
+            }),
+            ..Default::default()
+        }),
+        &vocab,
     );
-    assert!(draft.parent_id.is_none());
-    assert_eq!(state.fill_summary, Some((1, 0)));
+    assert_eq!(state.draft.as_ref().unwrap().owner_id, Some(11));
+    assert!(state.fill_marks.contains_key(&FillField::Owner));
+
+    let draft = Task::blank();
+    let id = draft.id.clone();
+    let mut state = State {
+        draft: Some(draft),
+        fill_busy: true,
+        ..Default::default()
+    };
+    receive_fill(
+        &mut state,
+        &id,
+        "张宁牵头",
+        Ok(crate::task_assistant::extract::Fill {
+            owner: Some(crate::task_assistant::extract::FilledValue {
+                value: "张宁".into(),
+                evidence: "张宁".into(),
+            }),
+            ..Default::default()
+        }),
+        &vocab,
+    );
+    assert_eq!(state.draft.as_ref().unwrap().owner_id, None);
+    assert_eq!(state.owner_query, "张宁");
+    assert!(
+        state
+            .fill_owner_note
+            .as_deref()
+            .unwrap()
+            .contains("2 位同名")
+    );
+
+    let draft = Task::blank();
+    let id = draft.id.clone();
+    let mut state = State {
+        draft: Some(draft),
+        fill_busy: true,
+        ..Default::default()
+    };
+    receive_fill(
+        &mut state,
+        &id,
+        "王五牵头",
+        Ok(crate::task_assistant::extract::Fill {
+            owner: Some(crate::task_assistant::extract::FilledValue {
+                value: "王五".into(),
+                evidence: "王五".into(),
+            }),
+            ..Default::default()
+        }),
+        &vocab,
+    );
+    assert_eq!(state.draft.as_ref().unwrap().owner_id, None);
+    assert!(
+        state
+            .fill_owner_note
+            .as_deref()
+            .unwrap()
+            .contains("标准词库里没有此人")
+    );
+}
+
+#[test]
+fn task_assistant_owner_picker_keeps_same_name_people_separate() {
+    use crate::models::{VocabularyCategory as C, VocabularyEntry as E};
+    let vocabulary = vec![
+        E {
+            id: 1,
+            category: C::Unit,
+            canonical: "甲单位".into(),
+            code: "0001".into(),
+            ..Default::default()
+        },
+        E {
+            id: 2,
+            category: C::Unit,
+            canonical: "乙单位".into(),
+            code: "0002".into(),
+            ..Default::default()
+        },
+        E {
+            id: 11,
+            category: C::Person,
+            canonical: "张宁".into(),
+            position: "主任".into(),
+            unit: "0001".into(),
+            ..Default::default()
+        },
+        E {
+            id: 12,
+            category: C::Person,
+            canonical: "张宁".into(),
+            position: "主任".into(),
+            unit: "0002".into(),
+            ..Default::default()
+        },
+        E {
+            id: 13,
+            category: C::Person,
+            canonical: "李明".into(),
+            position: "副主任".into(),
+            unit: "0001".into(),
+            ..Default::default()
+        },
+    ];
+    let state = State {
+        draft: Some(Task::blank()),
+        ..Default::default()
+    };
+    let mut h = egui_kittest::Harness::new_ui_state(
+        |ui, b: &mut Bench| {
+            if let Some(d) = b.state.draft.as_mut() {
+                let _ = owner::picker(
+                    ui,
+                    "test-owner",
+                    &b.vocabulary,
+                    &mut d.owner_id,
+                    &mut d.owner_name,
+                    &mut b.state.owner_query,
+                );
+            }
+        },
+        Bench {
+            store: Store::open(":memory:").unwrap(),
+            state,
+            vocabulary,
+        },
+    );
+    h.set_size(egui::vec2(640.0, 480.0));
+    h.run();
+    h.get_by_role(egui::accesskit::Role::TextInput).click();
+    h.run();
+    h.get_by_role(egui::accesskit::Role::TextInput)
+        .type_text("张宁");
+    h.run();
+    h.get_by_label("张宁 · 主任 · 乙单位").click();
+    h.run();
+    assert_eq!(h.state().state.draft.as_ref().unwrap().owner_id, Some(12));
+    let (label, found) = owner::label(&h.state().vocabulary, Some(12), "张宁");
+    assert!(found && label.contains("乙单位"));
+}
+
+#[test]
+fn task_assistant_detail_updates_current_progress_and_history() {
+    let mut store = Store::open(":memory:").unwrap();
+    let task = saved(&mut store, "更新进展测试", |t| {
+        t.progress = "原进展".into()
+    });
+    let state = State {
+        selected: Some(task.id.clone()),
+        ..Default::default()
+    };
+    let mut h = bench(state, store);
+    assert_eq!(h.state().state.progress_text, "原进展");
+    h.state_mut().state.progress_text = "已完成现场核查".into();
+    h.run();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "更新")
+        .scroll_to_me();
+    h.run();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "更新")
+        .click();
+    h.run();
+    let updated = h.state().store.list(true).unwrap().remove(0);
+    assert_eq!(updated.progress, "已完成现场核查");
+    assert_eq!(h.state().state.progress_text, updated.progress);
+    assert_eq!(
+        h.state().store.history_entries(&task.id).unwrap()[0].action,
+        "进展更新"
+    );
+    assert!(h.query_by_label("当前进展").is_some());
+}
+
+#[test]
+fn task_assistant_progress_box_follows_changes_it_has_not_edited() {
+    let mut state = State::default();
+    let mut t = Task::blank();
+    t.progress = "旧进展".into();
+    detail::sync_progress_box(&mut state, &t);
+    assert_eq!(state.progress_text, "旧进展");
+    // 别处改了进展、框里没动过：跟着刷新，免得「更新」用旧字覆盖新进展。
+    t.progress = "编辑表单里改的新进展".into();
+    detail::sync_progress_box(&mut state, &t);
+    assert_eq!(state.progress_text, "编辑表单里改的新进展");
+    // 用户已经在框里改了字：保留用户的字。
+    state.progress_text = "我正在写的".into();
+    t.progress = "又一次外部修改".into();
+    detail::sync_progress_box(&mut state, &t);
+    assert_eq!(state.progress_text, "我正在写的");
 }
