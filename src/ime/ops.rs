@@ -49,7 +49,7 @@ impl Ime {
         }
         self.manager.dirty = true;
         self.table.rebuild();
-        self.refresh(true);
+        self.reload_candidates();
         Ok(())
     }
 
