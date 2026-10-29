@@ -641,4 +641,6 @@ fn dialogs(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data: &Snaps
 }
 
 #[cfg(test)]
+mod eval;
+#[cfg(test)]
 mod tests;

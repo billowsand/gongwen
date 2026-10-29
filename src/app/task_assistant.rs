@@ -74,7 +74,7 @@ impl super::GongwenApp {
                     &request.current,
                 );
                 let raw = crate::lmstudio::generate(&cfg, &system, &user)?;
-                crate::task_assistant::extract::parse_fill(&raw, &request.text)
+                crate::task_assistant::extract::parse_fill(&raw, &request.text, &today)
             })()
             .map_err(|e| format!("识别失败，可重试：{e:#}"));
             let _ = tx.send(TaskFillOutput {
@@ -264,9 +264,11 @@ impl super::GongwenApp {
                 let items = if processed {
                     Vec::new()
                 } else {
-                    let (system, user) = prompt(&title, &source, &tasks);
+                    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                    let (system, user) = prompt(&title, &source, &tasks, &today);
                     let raw = crate::lmstudio::generate(&cfg, &system, &user)?;
-                    parse_response(&raw, &source, &tasks)?
+                    let items = parse_response(&raw, &source, &tasks)?;
+                    crate::task_assistant::extract::check_proposal_dates(items, &source, &today)
                 };
                 Ok(Extraction {
                     source_fingerprint: fingerprint,

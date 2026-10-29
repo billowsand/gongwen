@@ -28,6 +28,19 @@
 
 模型最多看到最近 50 项未归档、未删除任务；任务多于此数量会明确提示，目标校验也只接受这同一上下文里的 ID。没有有用变化时可成功保存材料快照并产生零条候选；同标题、同正文版本不会重复生成候选。失败不会保存去重标记。
 
+## 真实模型评测
+
+评测集在 `tests/fixtures/task-eval/cases.json`（单任务填写与批量整理两组，附小词库），运行器是
+`src/task_ui/eval.rs` 里的 ignored 测试，走产品代码全链，报告写到 `tmp/task-eval/<模型>.md`（含逐例
+检查与原始输出）：
+
+```bash
+GONGWEN_TASK_EVAL_URL=http://127.0.0.1:12345/v1 GONGWEN_TASK_EVAL_MODEL=qwen/qwen3.5-9b cargo test --locked task_assistant_model_eval -- --ignored --nocapture
+```
+
+`GONGWEN_TASK_EVAL_ONLY` 填用例 id 前缀（如 `F05`、`B`）只跑一部分。最近一次结果与发现的问题见
+`docs/task-assistant-ui-redesign.md` 7.4。
+
 ## 数据安全与验收
 
 任务表使用 `manuscripts.db` 独立连接，可随数据库备份。数据库恢复前释放任务连接，恢复后重新打开；后台识别完成前恢复受忙状态拦截。SQLite 写锁等待最长 10 秒，数据库错误在页面显示。

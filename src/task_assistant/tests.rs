@@ -80,10 +80,15 @@ fn evidence_accepts_whitespace_and_fullwidth_punctuation_differences() {
     let response = r#"{"items":[{"kind":"progress","task_id":null,"name":null,"goal":null,"next_step":"牵头","deadline":null,"collaborators":null,"evidence":"办公室,牵头"}]}"#;
     assert!(super::extract::parse_response(response, "办公室，牵头", &[]).is_ok());
     let fill = r#"{"fields":{"progress":{"value":"办公室","evidence":"不匹配"}},"others":0}"#;
-    let parsed = parse_fill(fill, "办公室牵头").unwrap();
+    let parsed = parse_fill(fill, "办公室牵头", "2026-10-29").unwrap();
     assert_eq!(parsed.progress.unwrap().evidence, "办公室");
     let fill = r#"{"fields":{"progress":{"value":"办公室,牵头","evidence":"办公室,牵头"}}}"#;
-    assert!(parse_fill(fill, "办公室，牵头").unwrap().progress.is_some());
+    assert!(
+        parse_fill(fill, "办公室，牵头", "2026-10-29")
+            .unwrap()
+            .progress
+            .is_some()
+    );
 
     let mut store = Store::open(":memory:").unwrap();
     let mut target = task("负责人任务");
@@ -439,14 +444,14 @@ fn task_assistant_fill_validates_fields_individually() {
         "risks":{"value":"暂无","evidence":"交领导复核"}
     },"others":2})
     .to_string();
-    let fill = parse_fill(&raw, source).unwrap();
+    let fill = parse_fill(&raw, source, "2026-10-29").unwrap();
     assert_eq!(fill.name.unwrap().value, "编制方案");
     assert_eq!(fill.next_step.unwrap().value, "完成测算");
     assert!(fill.owner.is_some() && fill.progress.is_some() && fill.risks.is_some());
     assert!(fill.deadline.is_none());
     assert_eq!((fill.dropped, fill.others), (1, 2));
     let legacy = r#"{"fields":{"goal":{"value":"旧栏","evidence":"编制方案"}},"others":0}"#;
-    assert!(parse_fill(legacy, source).is_err());
+    assert!(parse_fill(legacy, source, "2026-10-29").is_err());
 }
 
 #[test]
@@ -457,11 +462,14 @@ fn task_assistant_fill_rejects_protocol_and_keeps_only_eligible_context() {
         r#"{"fields":{"status":null},"others":0}"#,
         r#"{"fields":{},"others":31}"#,
     ] {
-        assert!(parse_fill(raw, "原文").is_err());
+        assert!(parse_fill(raw, "原文", "2026-10-29").is_err());
     }
-    assert!(parse_fill(&"x".repeat(MAX_OUTPUT_BYTES + 1), "原文").is_err());
+    assert!(parse_fill(&"x".repeat(MAX_OUTPUT_BYTES + 1), "原文", "2026-10-29").is_err());
     let malformed = r#"{"fields":{"name":3},"others":0}"#;
-    assert_eq!(parse_fill(malformed, "原文").unwrap().dropped, 1);
+    assert_eq!(
+        parse_fill(malformed, "原文", "2026-10-29").unwrap().dropped,
+        1
+    );
 }
 
 #[test]
@@ -785,7 +793,7 @@ fn invalid_candidate_rolls_back_entire_material_and_acceptance() {
 #[test]
 fn task_assistant_fill_tolerates_missing_others_count() {
     let raw = r#"{"fields":{"name":{"value":"形成方案","evidence":"形成方案"}}}"#;
-    let fill = super::extract::parse_fill(raw, "要求形成方案").unwrap();
+    let fill = super::extract::parse_fill(raw, "要求形成方案", "2026-10-29").unwrap();
     assert_eq!(fill.others, 0);
     assert_eq!(fill.name.unwrap().value, "形成方案");
 }
@@ -800,4 +808,75 @@ fn task_assistant_batch_evidence_fallback_needs_a_long_body_field() {
     let long = r#"{"items":[{"kind":"progress","task_id":null,"name":null,"next_step":"完成数据汇总并报送办公室","deadline":null,"evidence":"杜撰的摘录"}]}"#;
     let items = super::extract::parse_response(long, source, &[]).unwrap();
     assert_eq!(items[0].evidence, "完成数据汇总并报送办公室");
+}
+
+#[test]
+fn task_assistant_dates_must_match_the_source_and_the_nearest_year() {
+    use super::extract::date_supported;
+    let today = "2026-10-29";
+    // 只写月日：必须是今天起最近的那一个，模型编的年份不认。
+    assert!(date_supported("12月15日前完成", "2026-12-15", today));
+    assert!(!date_supported("12月15日前完成", "2023-12-15", today));
+    // 已经过去的月日顺延到明年。
+    assert!(date_supported("3月1日前报送", "2027-03-01", today));
+    assert!(!date_supported("3月1日前报送", "2026-03-01", today));
+    // 原文写了年份或完整日期就照原文。
+    assert!(date_supported("2027年1月5日启动", "2027-01-05", today));
+    assert!(date_supported("截止 2026-11-15", "2026-11-15", today));
+    // 原文没有这个日期：不认（相对说法如「下周五」不能被换算成某一天）。
+    assert!(!date_supported("下周五前发出", "2026-11-06", today));
+}
+
+#[test]
+fn task_assistant_model_output_in_code_fences_and_bare_values_still_parse() {
+    let fenced = "```json\n{\"items\":[]}\n```";
+    assert!(
+        super::extract::parse_response(fenced, "原文", &[])
+            .unwrap()
+            .is_empty()
+    );
+    // 小模型只给值、不给摘录：值本身在原文里就接受，编出来的（如「待开始」）丢掉。
+    let source = "请李明牵头，11月15日前把全市政务数据目录梳理完。";
+    let bare = "```json\n{\"fields\":{\"name\":\"全市政务数据目录梳理\",\"owner\":\"李明\",\"progress\":\"待开始\",\"next_step\":null,\"risks\":null,\"deadline\":\"2026-11-15\"},\"others\":0}\n```";
+    let fill = parse_fill(bare, source, "2026-10-29").unwrap();
+    assert_eq!(fill.name.unwrap().value, "全市政务数据目录梳理");
+    assert_eq!(fill.owner.unwrap().value, "李明");
+    assert_eq!(fill.deadline.unwrap().value, "2026-11-15");
+    assert!(fill.progress.is_none());
+    assert_eq!(fill.dropped, 1);
+}
+
+#[test]
+fn task_assistant_batch_drops_deadlines_with_invented_years() {
+    let source = "会议确定由赵磊负责开展固定资产盘点，12月15日前完成。";
+    let mut wrong = super::extract::Proposal {
+        kind: "new_task".into(),
+        task_id: None,
+        name: Some("固定资产盘点".into()),
+        goal: None,
+        next_step: None,
+        deadline: Some("2023-12-15".into()),
+        collaborators: None,
+        owner: None,
+        owner_id: None,
+        progress: None,
+        risks: None,
+        speaker: None,
+        about: None,
+        note: None,
+        evidence: "12月15日前完成".into(),
+    };
+    let mut only_deadline = wrong.clone();
+    only_deadline.kind = "deadline".into();
+    let kept = super::extract::check_proposal_dates(
+        vec![wrong.clone(), only_deadline],
+        source,
+        "2026-10-29",
+    );
+    // 新任务保留、错年份的期限清空；纯「期限调整」候选没了期限就整条拿掉。
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].deadline.is_none());
+    wrong.deadline = Some("2026-12-15".into());
+    let kept = super::extract::check_proposal_dates(vec![wrong], source, "2026-10-29");
+    assert_eq!(kept[0].deadline.as_deref(), Some("2026-12-15"));
 }
