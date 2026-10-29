@@ -10,6 +10,7 @@ use crate::images;
 use crate::models::{DraftInput, NumberingConfig, TemplateKind};
 use crate::preview::cull::Cull;
 use crate::preview::gutter;
+use crate::preview::layout::clickable_table;
 use crate::preview::marks;
 use crate::preview::pdf_figure;
 use crate::preview::{
@@ -187,7 +188,8 @@ pub(crate) fn body_blocks(
 }
 
 /// 一个正文块的可点击渲染：段落、标题、列表这些成行的块按行贴着文字高亮，
-/// 行首缩进的空白不会被底色压住；表格、图片等整块图形仍按块矩形高亮。
+/// 行首缩进的空白不会被底色压住；表格按表格行高亮，一行表格对应一行源码；
+/// 图片等整块图形仍按块矩形高亮。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn clickable_content_block(
     ui: &mut egui::Ui,
@@ -257,6 +259,26 @@ pub(crate) fn clickable_content_block(
                 clicked,
             );
         }
+        MarkdownBlock::Table {
+            rows,
+            header_rows,
+            aligns,
+            spans,
+            numbered,
+        } => clickable_table(
+            ui,
+            metrics,
+            markdown,
+            &source,
+            rows,
+            aligns,
+            spans,
+            *header_rows,
+            *numbered,
+            anchor,
+            scroll_to_anchor,
+            clicked,
+        ),
         block => clickable(
             ui,
             metrics,

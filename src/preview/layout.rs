@@ -1903,6 +1903,147 @@ pub(crate) fn table_block(
     }
 }
 
+/// 表格每一行对应的那一行 Markdown 源码：表头是前 `header_rows` 行，分隔行
+/// 不进正文，其后一行一行对应。点击回跳、页边行号与命中底色都按它走。
+pub(crate) struct TableRowSources {
+    rows: Vec<Range<usize>>,
+    /// 分隔行（`|---|---|`）。它不对应纸面上的哪一行，但属于表头那一组：
+    /// 光标停在这里时亮表头，否则光标在表里上下移动经过它会闪一下。
+    separator: Option<Range<usize>>,
+    header_rows: usize,
+}
+
+impl TableRowSources {
+    pub(crate) fn new(
+        markdown: &str,
+        range: &Range<usize>,
+        row_count: usize,
+        header_rows: usize,
+    ) -> Self {
+        let mut lines = Vec::new();
+        let mut start = range.start;
+        for line in markdown
+            .get(range.clone())
+            .unwrap_or_default()
+            .split_inclusive('\n')
+        {
+            let content = line.trim_end_matches(['\r', '\n']);
+            lines.push(start..start + content.len());
+            start += line.len();
+        }
+        let rows = (0..row_count)
+            .map(|row| {
+                let line = if row < header_rows { row } else { row + 1 };
+                lines.get(line).cloned().unwrap_or_else(|| range.clone())
+            })
+            .collect();
+        Self {
+            rows,
+            separator: lines.get(header_rows).cloned(),
+            header_rows,
+        }
+    }
+
+    /// 第 `row` 行的源码。
+    pub(crate) fn row(&self, row: usize) -> &Range<usize> {
+        &self.rows[row]
+    }
+
+    /// `anchor` 是否落在第 `row` 行上；落在分隔行上算表头各行。
+    pub(crate) fn hit(&self, row: usize, anchor: &Range<usize>) -> bool {
+        let hit = |source: &Range<usize>| anchor.start < source.end && source.start < anchor.end;
+        hit(&self.rows[row]) || (row < self.header_rows && self.separator.as_ref().is_some_and(hit))
+    }
+}
+
+/// 连续版式里来自源码的表格：与 [`table_block`] 同量同画，但每一行各自对应一行
+/// Markdown 源码——悬停、点击、命中底色与页边行号都按行走，光标在哪一行就只亮
+/// 哪一行，不再整张表一起亮。红头呈批件的分页表格也是这样按行亮的。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn clickable_table(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    markdown: &str,
+    range: &Range<usize>,
+    rows: &[Vec<String>],
+    aligns: &[export::ColumnAlign],
+    spans: &[export::TableSpan],
+    header_rows: usize,
+    numbered: bool,
+    anchor: Option<&Range<usize>>,
+    scroll_to_anchor: &mut bool,
+    clicked: &mut Option<Range<usize>>,
+) {
+    let Some(table) = measure_table(
+        ui,
+        metrics,
+        rows,
+        aligns,
+        spans,
+        header_rows,
+        numbered,
+        metrics.content,
+    ) else {
+        return;
+    };
+    let row_count = table.row_heights.len();
+    let sources = TableRowSources::new(markdown, range, row_count, table.header_rows);
+    let total_height = table.row_heights.iter().sum::<f32>();
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(metrics.content, total_height),
+        egui::Sense::hover(),
+    );
+    // 底色压在表格线和字下面：先占位，量出各行的框再回填。
+    let backdrops = (0..row_count)
+        .map(|_| ui.painter().add(egui::Shape::Noop))
+        .collect::<Vec<_>>();
+    let all_rows = (0..row_count).collect::<Vec<_>>();
+    let placed = table.paint_rows(ui.painter(), metrics, rect.min, &all_rows);
+    let selection_active = text_selection(ui).is_some();
+    for ((row, row_rect, baseline), backdrop) in placed.into_iter().zip(backdrops) {
+        let source = sources.row(row);
+        metrics.mark_row(row_rect, baseline, Some(source.clone()));
+        let response = ui.interact(
+            row_rect,
+            egui::Id::new(("gw-preview-table-row", range.start, range.end, row)),
+            egui::Sense::click(),
+        );
+        if response.clicked() {
+            *clicked = Some(source.clone());
+        }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            note_hovered(ui, source);
+        }
+        let anchored = anchor.is_some_and(|anchor| !anchor.is_empty() && sources.hit(row, anchor));
+        if anchored && *scroll_to_anchor {
+            scroll_preview_to_rect(ui, row_rect);
+            *scroll_to_anchor = false;
+        }
+        let shape = if anchored && selection_active {
+            egui::Shape::rect_stroke(
+                row_rect,
+                0.0,
+                Stroke::new(2.0, theme::md::selection_bg()),
+                egui::StrokeKind::Inside,
+            )
+        } else if anchored || response.hovered() {
+            egui::Shape::from(egui::epaint::RectShape::filled(
+                row_rect,
+                egui::CornerRadius::ZERO,
+                if anchored {
+                    theme::accent_soft()
+                } else {
+                    theme::paper::hover_tint()
+                },
+            ))
+        } else {
+            continue;
+        };
+        ui.painter().set(backdrop, shape);
+    }
+}
+
 /// 画一个来自 Markdown 的块，并让它可以点：悬停时淡底提示，点击后把它在源码中的
 /// 范围报给调用方；`anchor` 命中的块常亮，与编辑器里的高亮一一对应。
 pub(crate) fn clickable(
@@ -2134,6 +2275,46 @@ pub(crate) fn sheet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 表格行按源码行对应：两行表头、分隔行跳过、CRLF 换行不算进行内；
+    /// 光标在分隔行上亮表头各行，正文行不亮。
+    #[test]
+    fn table_rows_map_to_source_lines_and_separator_lights_header() {
+        let markdown =
+            "前文\r\n| 甲 | 乙 |\r\n| 丙 | 丁 |\r\n| --- | --- |\r\n| 1 | 2 |\r\n| 3 | 4 |";
+        let blocks = export::parse_markdown_located(markdown);
+        let located = blocks
+            .iter()
+            .find(|located| matches!(located.block, export::MarkdownBlock::Table { .. }))
+            .expect("应解析出表格");
+        let export::MarkdownBlock::Table {
+            rows, header_rows, ..
+        } = &located.block
+        else {
+            unreachable!();
+        };
+        assert_eq!(*header_rows, 2);
+        let sources = TableRowSources::new(markdown, &located.range, rows.len(), *header_rows);
+        let texts = (0..rows.len())
+            .map(|row| &markdown[sources.row(row).clone()])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            ["| 甲 | 乙 |", "| 丙 | 丁 |", "| 1 | 2 |", "| 3 | 4 |"]
+        );
+
+        let line = |text: &str| {
+            let start = markdown.find(text).unwrap();
+            start..start + text.len()
+        };
+        let body = line("| 3 | 4 |");
+        assert!(!sources.hit(2, &body));
+        assert!(sources.hit(3, &body));
+        let separator = line("| --- | --- |");
+        assert!(sources.hit(0, &separator));
+        assert!(sources.hit(1, &separator));
+        assert!(!sources.hit(2, &separator));
+    }
 
     #[test]
     fn serial_header_keeps_two_characters_on_one_line_like_pdf() {

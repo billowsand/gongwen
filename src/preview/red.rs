@@ -8,7 +8,7 @@ use crate::export::RedlineKind;
 use crate::export::{LocatedBlock, MarkdownBlock};
 use crate::models::{DraftInput, NumberingConfig};
 use crate::preview::gutter;
-use crate::preview::layout::{MeasuredTable, measure_table};
+use crate::preview::layout::{MeasuredTable, TableRowSources, measure_table};
 use crate::preview::marks;
 use crate::preview::{
     BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT,
@@ -90,7 +90,7 @@ impl RedPrintPage {
         }) || self
             .tables
             .iter()
-            .any(|slice| slice.rows.iter().any(|row| hit(&slice.sources[*row])))
+            .any(|slice| slice.rows.iter().any(|row| slice.sources.hit(*row, anchor)))
     }
 }
 
@@ -101,7 +101,7 @@ pub(crate) struct RedTableSlice {
     /// 这一段画哪几行（续页以表头各行打头），自上而下紧挨着排。
     pub(crate) rows: Vec<usize>,
     /// 每一行对应的那一行 Markdown 源码，点击回跳与页边行号都认它。
-    sources: Arc<Vec<Range<usize>>>,
+    sources: Arc<TableRowSources>,
     x: f32,
     pub(crate) y: f32,
 }
@@ -526,7 +526,12 @@ fn red_place_table(
     };
     let table = Arc::new(table);
     let header_rows = table.header_rows;
-    let sources = Arc::new(table_row_sources(markdown, &range, rows.len(), header_rows));
+    let sources = Arc::new(TableRowSources::new(
+        markdown,
+        &range,
+        rows.len(),
+        header_rows,
+    ));
     let heights = &table.row_heights;
     let height_of = |from: usize, to: usize| heights[from..to].iter().sum::<f32>();
     let header_height = height_of(0, header_rows);
@@ -575,29 +580,6 @@ fn red_place_table(
         }
         state.next_page(metrics);
     }
-}
-
-/// 表格第 `row` 行对应的那一行源码：表头是前 `header_rows` 行，分隔行不算，
-/// 其后一行一行对应。
-fn table_row_sources(
-    markdown: &str,
-    range: &Range<usize>,
-    row_count: usize,
-    header_rows: usize,
-) -> Vec<Range<usize>> {
-    let mut lines = Vec::new();
-    let mut start = range.start;
-    for line in markdown[range.clone()].split_inclusive('\n') {
-        let content = line.trim_end_matches(['\r', '\n']);
-        lines.push(start..start + content.len());
-        start += line.len();
-    }
-    (0..row_count)
-        .map(|row| {
-            let line = if row < header_rows { row } else { row + 1 };
-            lines.get(line).cloned().unwrap_or_else(|| range.clone())
-        })
-        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1720,7 +1702,7 @@ pub(crate) fn paint_red_print_pages(
                     .table
                     .paint_rows(ui.painter(), metrics, origin, &slice.rows);
                 for ((row, row_rect, baseline), backdrop) in placed.into_iter().zip(backdrops) {
-                    let source = slice.sources[row].clone();
+                    let source = slice.sources.row(row).clone();
                     metrics.mark_row(row_rect, baseline, Some(source.clone()));
                     let response = ui.interact(
                         row_rect,
@@ -1735,9 +1717,7 @@ pub(crate) fn paint_red_print_pages(
                     }
                     let anchored = !super::layout::has_text_selection(ui.ctx())
                         && anchor.is_some_and(|anchor| {
-                            !anchor.is_empty()
-                                && anchor.start < source.end
-                                && source.start < anchor.end
+                            !anchor.is_empty() && slice.sources.hit(row, anchor)
                         });
                     if anchored && *scroll_to_anchor {
                         scroll_preview_to_rect(ui, row_rect);
