@@ -63,8 +63,11 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
 
 - 模板：`assets/typst/receipt.typ`（`Template::Receipt`），黑白表单，不套公文版式。
   A4 纵向、156mm 版心；题名「公文签收记录单」小标宋二号居中；要素行黑体标签 + 仿宋取值，
-  基线距 22pt；签收表六列（序号 / 签收单位 / 签收方式 / 签收日期 / 签收人 / 密级），
-  表头黑体四号、内容仿宋四号，外框 1.2pt、内部 0.5pt，内容行最小约 16mm，
+  基线距 22pt，取值折行时悬挂缩进到标签之后；签收表五列（序号 13 / 签收单位 46 /
+  签收方式 24 / 签收人 41 / 签收日期 32，单位 mm），密级只在要素行印一次、不进表格；
+  签收方式两个勾选项上下叠放；表头黑体四号、内容仿宋四号，外框 1.2pt、内部 0.5pt，
+  内容行最低 18mm（序号格里一个定高块撑出来，Typst 的定长行不随内容增高，不能用；
+  Word 侧是 `atLeast` 行高），表下送文信息两行行距 12mm、整块不拆页，
   长单位名换行时整行增高；跨页重复表头、行不拆分；页码「— N —」每页都印（公文首页不印）。
 - 数据入口：`src/export/typst/receipt.rs`。要素显示值取 `element_display`（函号由
   `number_display_parts` 拼「代字〔年份〕序号号」、日期用 `date_display_line`、密级用
@@ -73,6 +76,8 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
 - 留白：PDF 侧是行内 `box` 的下边线，Word 侧是带下划线的全角空格，两端长度一致。
 - 表格边框逐格给 `stroke` 字典（`cell-stroke`）：表格级的 `stroke` 回调分不出某一格的
   左边还是右边，用回调做「外框粗、内部细」会把第一列的右边也画粗。
+- 页码画在 `page.background` 里，背景层坐标从纸边算起，`place` 要带 `dx: left-m`，
+  否则页码会偏左一个左边距、不在版心居中。
 
 ### 研究报告
 

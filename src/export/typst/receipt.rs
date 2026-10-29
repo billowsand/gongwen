@@ -2,9 +2,9 @@
 //!
 //! 签收记录单是公函的附属件，与原公函**分开成文件**（`<主干名>_签收记录单.pdf` 与
 //! `<主干名>_签收记录单.docx`），绝不拼进公函正文。版面按已确认的设计：A4 纵向、
-//! 黑白、156mm 版心；题名小标宋二号居中；表格六列（序号 / 签收单位 / 签收方式 /
-//! 签收日期 / 签收人 / 密级），表头黑体四号、内容仿宋四号，外框稍粗、内部细线；
-//! 跨页重复表头、行不拆分、有页码。
+//! 黑白、156mm 版心；题名小标宋二号居中；表格五列（序号 / 签收单位 / 签收方式 /
+//! 签收人 / 签收日期），表头黑体四号、内容仿宋四号，外框稍粗、内部细线；
+//! 跨页重复表头、行不拆分、有页码。密级只在表格上方的要素行印一次，不逐行重复。
 //!
 //! 数据构造放在本模块，Word（`export::docx::receipt`）与 PDF（这里）读同一份：
 //! 要素显示值、签收单位清单的顺序与去重规则、表格列宽都不会各说各话。
@@ -23,11 +23,18 @@ use crate::units::UnitDisplay;
 pub(crate) const RECEIPT_TITLE: &str = "公文签收记录单";
 
 /// 签收表列宽（毫米）。合计正好一个版心（156mm），Word 与 PDF 共用同一组宽度。
-pub(crate) const COLUMN_WIDTHS_MM: [f64; 6] = [12.0, 38.0, 36.0, 24.0, 18.0, 28.0];
+/// 签收人与签收日期是手写栏，给得最宽：签名约需 35mm，「2026年10月29日」约需 28mm；
+/// 签收方式的两个勾选项上下叠放，只要放得下表头「签收方式」四个字。
+pub(crate) const COLUMN_WIDTHS_MM: [f64; 5] = [13.0, 46.0, 24.0, 41.0, 32.0];
 
 /// 签收表列名，与 [`COLUMN_WIDTHS_MM`] 一一对应。
-pub(crate) const COLUMN_NAMES: [&str; 6] =
-    ["序号", "签收单位", "签收方式", "签收日期", "签收人", "密级"];
+pub(crate) const COLUMN_NAMES: [&str; 5] = ["序号", "签收单位", "签收方式", "签收人", "签收日期"];
+
+/// 签收内容行的最小行高（毫米）：手写签名与日期要有足够的上下余量。
+pub(crate) const ROW_MIN_HEIGHT_MM: f64 = 18.0;
+
+/// 主送、抄送都没填时，签收表留出的空行数，供手工填写签收单位。
+const BLANK_ROWS: usize = 5;
 
 /// 签收表的版心宽（缇）：156mm。Word 各列宽之和要正好等于它。
 pub(crate) const CONTENT_WIDTH_TWIPS: usize = 8_844;
@@ -35,13 +42,12 @@ pub(crate) const CONTENT_WIDTH_TWIPS: usize = 8_844;
 /// 签收方式的可勾选项：电子、纸质。留空由收件人手工勾选。
 pub(crate) const SIGN_METHODS: [&str; 2] = ["电子", "纸质"];
 
-/// 签收方式格里的印法：两个可勾选项，PDF 与 Word 共用同一份文字。
-pub(crate) fn sign_method_text() -> String {
+/// 签收方式格里的印法：两个可勾选项上下各占一行，PDF 与 Word 共用同一份文字。
+pub(crate) fn sign_method_lines() -> Vec<String> {
     SIGN_METHODS
         .iter()
         .map(|method| format!("□{method}"))
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect()
 }
 
 /// 签收单上的一处「标签 + 取值」。
@@ -74,15 +80,27 @@ impl ReceiptField {
             blank_chars,
         }
     }
+
+    /// 有值就印值；取值为空（草稿期还没编号、没定日期）就留 `blank_chars` 个全角字的横线。
+    pub(crate) fn value_or_blank(
+        label: &str,
+        value: impl Into<String>,
+        blank_chars: usize,
+    ) -> Self {
+        let value = value.into().trim().to_string();
+        if value.is_empty() {
+            Self::blank(label, blank_chars)
+        } else {
+            Self::new(label, value)
+        }
+    }
 }
 
-/// 签收表的一行：序号、签收单位与该份的密级。
+/// 签收表的一行：序号与签收单位（单位为空时由人手填）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ReceiptRow {
     pub index: String,
     pub unit: String,
-    /// 该份的密级：与公文自身的密级相同，没有密级时为空。
-    pub security: Option<String>,
 }
 
 /// 签收单的全部数据。字段名与 `assets/typst/receipt.typ` 一一对应。
@@ -95,11 +113,13 @@ pub(crate) struct ReceiptDoc {
     pub fields: Vec<Vec<ReceiptField>>,
     /// 签收表列名。
     pub columns: Vec<String>,
-    /// 签收方式的可勾选项（电子、纸质），格子里印成「□电子 □纸质」。
+    /// 签收方式的可勾选项（电子、纸质），格子里上下叠印成「□电子」「□纸质」。
     pub sign_methods: Vec<String>,
     /// 签收表列宽（毫米）。
     pub column_widths_mm: Vec<f64>,
-    /// 签收单位清单：主送在前、抄送在后，按显示值去重。
+    /// 签收内容行的最小行高（毫米）。
+    pub row_min_height_mm: f64,
+    /// 签收单位清单：主送在前、抄送在后，按显示值去重；都没填时是若干空行。
     pub rows: Vec<ReceiptRow>,
     /// 表格下方的送文信息：送文人、联系电话、送文日期、备注。
     pub footer: Vec<Vec<ReceiptField>>,
@@ -110,8 +130,10 @@ pub(crate) struct ReceiptDoc {
 /// 字体角色只有 Typst 那边用得到，Word 侧不看这一项，所以这里先留空，
 /// 排 PDF 时再把 [`typst_engine::FontFamilies`] 填进去。
 pub(crate) fn build(input: &DraftInput, markdown: &str, display: &UnitDisplay) -> ReceiptDoc {
-    let security = element_display::security_display(input);
-    let units = signing_units(input, display);
+    let mut units = signing_units(input, display);
+    if units.is_empty() {
+        units = vec![String::new(); BLANK_ROWS];
+    }
     ReceiptDoc {
         fonts: empty_families(),
         title: RECEIPT_TITLE.to_string(),
@@ -119,13 +141,13 @@ pub(crate) fn build(input: &DraftInput, markdown: &str, display: &UnitDisplay) -
         columns: COLUMN_NAMES.iter().map(|name| name.to_string()).collect(),
         sign_methods: SIGN_METHODS.iter().map(|name| name.to_string()).collect(),
         column_widths_mm: COLUMN_WIDTHS_MM.to_vec(),
+        row_min_height_mm: ROW_MIN_HEIGHT_MM,
         rows: units
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(index, unit)| ReceiptRow {
                 index: (index + 1).to_string(),
-                unit: unit.clone(),
-                security: security.clone(),
+                unit,
             })
             .collect(),
         footer: footer_rows(),
@@ -147,7 +169,8 @@ fn empty_families() -> FontFamilies {
 }
 
 /// 表格上方的要素行。分三行排：文件名称独占一行，函号与发函单位一行，
-/// 成文日期与密级一行（没有密级时这一行只有成文日期）。
+/// 成文日期与密级一行（没有密级时这一行只有成文日期）。草稿期还没有的要素
+/// （函号、成文日期等）留出手写横线，不让标签后面空着。
 fn element_rows(
     input: &DraftInput,
     markdown: &str,
@@ -155,15 +178,16 @@ fn element_rows(
 ) -> Vec<Vec<ReceiptField>> {
     let file_name = crate::export::document_title(input, markdown);
     let mut rows = vec![
-        vec![ReceiptField::new("文件名称：", file_name)],
+        vec![ReceiptField::value_or_blank("文件名称：", file_name, 20)],
         vec![
-            ReceiptField::new("函号：", number_text(input)),
-            ReceiptField::new("发函单位：", issuing_unit_text(input, display)),
+            ReceiptField::value_or_blank("函号：", number_text(input), 8),
+            ReceiptField::value_or_blank("发函单位：", issuing_unit_text(input, display), 10),
         ],
     ];
-    let mut last = vec![ReceiptField::new(
+    let mut last = vec![ReceiptField::value_or_blank(
         "成文日期：",
         element_display::date_display_line(input),
+        8,
     )];
     if let Some(security) = element_display::security_display(input) {
         last.push(ReceiptField::new("密级：", security));
@@ -173,15 +197,16 @@ fn element_rows(
 }
 
 /// 表格下方的送文信息。送文人、联系电话、送文日期与备注都留白待填——
-/// 程序不替人编造这些内容。
+/// 程序不替人编造这些内容。横线长度按四号字凑满一个版心（约 31 个全角字）：
+/// 第一行 4+4 + 1 + 5+6 + 1 + 5+5，第二行 3+28；电话留 6 个全角字，够写 11 位手机号。
 fn footer_rows() -> Vec<Vec<ReceiptField>> {
     vec![
         vec![
-            ReceiptField::blank("送文人：", 3),
-            ReceiptField::blank("联系电话：", 4),
-            ReceiptField::blank("送文日期：", 4),
+            ReceiptField::blank("送文人：", 4),
+            ReceiptField::blank("联系电话：", 6),
+            ReceiptField::blank("送文日期：", 5),
         ],
-        vec![ReceiptField::blank("备注：", 20)],
+        vec![ReceiptField::blank("备注：", 28)],
     ]
 }
 
@@ -357,6 +382,7 @@ mod tests {
         assert_eq!(doc.fields[2].len(), 1);
         assert_eq!(doc.rows.len(), 3);
         assert_eq!(doc.rows[0].index, "1");
+        assert_eq!(doc.row_min_height_mm, ROW_MIN_HEIGHT_MM);
         assert_eq!(doc.rows[0].unit, "甲单位");
         assert_eq!(doc.columns, COLUMN_NAMES);
         assert_eq!(doc.column_widths_mm, COLUMN_WIDTHS_MM.to_vec());
@@ -369,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn security_is_shown_both_as_element_and_in_every_row() {
+    fn security_is_shown_once_above_the_table() {
         let display = UnitDisplay::new(&[]);
         let mut input = letter();
         input.profile.security_level = "秘密".into();
@@ -377,11 +403,46 @@ mod tests {
         let doc = build(&input, "# 关于商洽的函", &display);
         assert_eq!(doc.fields[2][1].label, "密级：");
         assert_eq!(doc.fields[2][1].value, "秘密★1年");
-        assert!(
-            doc.rows
+        // 密级只在要素行印一次，签收表不再逐行重复。
+        assert!(!doc.columns.iter().any(|name| name == "密级"));
+    }
+
+    #[test]
+    fn missing_elements_and_units_leave_room_to_write_by_hand() {
+        let display = UnitDisplay::new(&[]);
+        let mut input = letter();
+        input.profile.department_code.clear();
+        input.profile.document_number.clear();
+        input.profile.recipient.clear();
+        input.profile.copies_to.clear();
+        input.date.clear();
+        let doc = build(&input, "# 关于商洽的函", &display);
+        let number = &doc.fields[1][0];
+        assert!(number.value.is_empty() && number.blank_chars > 0);
+        let date = &doc.fields[2][0];
+        assert!(date.value.is_empty() && date.blank_chars > 0);
+        assert_eq!(doc.rows.len(), BLANK_ROWS);
+        assert!(doc.rows.iter().all(|row| row.unit.is_empty()));
+        assert_eq!(doc.rows[BLANK_ROWS - 1].index, BLANK_ROWS.to_string());
+    }
+
+    #[test]
+    fn column_widths_fill_the_text_block_and_footer_fits_one_line() {
+        assert_eq!(COLUMN_WIDTHS_MM.iter().sum::<f64>(), 156.0);
+        // 四号字 14pt，一个版心约 31.3 个全角字；送文信息每行都不能折行。
+        let per_line = 156.0 / (14.0 * 25.4 / 72.0);
+        for row in footer_rows() {
+            let chars = row
                 .iter()
-                .all(|row| row.security.as_deref() == Some("秘密★1年"))
-        );
+                .map(|f| f.label.chars().count() + f.blank_chars)
+                .sum::<usize>()
+                + row.len()
+                - 1;
+            assert!(
+                (chars as f64) <= per_line,
+                "送文信息一行 {chars} 字，会折行"
+            );
+        }
     }
 
     /// 外部行文时签收单位用外部名称。
@@ -405,6 +466,13 @@ mod tests {
     fn save_page_images(pdf: &[u8], dir: &Path) {
         use hayro::hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf};
         use hayro::{RenderCache, RenderSettings};
+        // 先清掉上一次留下的页图，页数变少时不留过期的尾页。
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("page-") && name.ends_with(".png") {
+                std::fs::remove_file(entry.path()).unwrap();
+            }
+        }
         let pdf = Pdf::new(std::sync::Arc::new(pdf.to_vec())).unwrap();
         for (index, page) in pdf.pages().iter().enumerate() {
             let scale = 1240.0 / page.render_dimensions().0;

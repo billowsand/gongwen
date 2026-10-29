@@ -2,8 +2,9 @@
 //!
 //! 数据来自 `export::typst::receipt`（与 PDF 端同一份），两端字段、签收单位顺序与
 //! 去重规则、表格列宽不会各说各话；这里只负责按 Word 版式排：题名小标宋二号居中，
-//! 要素行黑体标签 + 仿宋取值，签收表六列、表头黑体四号、内容仿宋四号，外框粗内部
-//! 细线，跨页重复表头、行不拆分，每页都印页码，手写处是带下划线的全角空格。
+//! 要素行黑体标签 + 仿宋取值，签收表五列、表头黑体四号、内容仿宋四号，外框粗内部
+//! 细线，内容行至少 18mm，跨页重复表头、行不拆分，每页都印页码，手写处是带下划线的
+//! 全角空格；表下送文信息行距放宽到 12mm。
 
 use std::fs::File;
 use std::path::Path;
@@ -16,17 +17,24 @@ use crate::export::docx::{
     table_run_sized, title_run,
 };
 use crate::export::typst::receipt::{
-    COLUMN_NAMES, COLUMN_WIDTHS_MM, CONTENT_WIDTH_TWIPS, sign_method_text,
+    COLUMN_NAMES, COLUMN_WIDTHS_MM, CONTENT_WIDTH_TWIPS, ROW_MIN_HEIGHT_MM, ReceiptField,
+    sign_method_lines,
 };
 use crate::models::DraftInput;
 use crate::units::UnitDisplay;
 
 /// 表格内容的行距（缇）：21 pt，与公文表格同。
 const ROW_LINE_TWIPS: i32 = 420;
-/// 签收内容行的最小行高（缇）：约 16 mm，给手写签名与日期留足空间。
-const RECEIPT_ROW_HEIGHT_TWIPS: f32 = 907.0;
+/// 表头行的最小行高（缇）：约 11.4mm，与 PDF 表头（一行字 + 上下各 2mm）一致。
+const HEADER_ROW_HEIGHT_TWIPS: f32 = 646.0;
+/// 毫米换缇。
+const TWIPS_PER_MM: f64 = 1440.0 / 25.4;
 /// 要素行的固定行高（缇）：21 pt。
 const FIELD_LINE_TWIPS: i32 = 420;
+/// 送文信息（手写）行的固定行高（缇）：12 mm，横线上方留足书写高度，与 PDF 一致。
+const FOOTER_LINE_TWIPS: i32 = 680;
+/// 四号字一个全角字的宽度（缇）：14 pt。
+const CHAR_TWIPS: i32 = 280;
 /// 题名行的固定行高（缇）：35 pt，二号字不至于贴住上一行。
 const TITLE_LINE_TWIPS: i32 = 700;
 /// 题名与要素行之间的空行高度（缇）。
@@ -55,27 +63,32 @@ pub(crate) fn write(
     let header: Vec<TableCell> = COLUMN_NAMES
         .iter()
         .enumerate()
-        .map(|(index, name)| cell(name, widths[index], true, AlignmentType::Center))
+        .map(|(index, name)| cell(&[name], widths[index], true, AlignmentType::Center))
         .collect();
-    rows.push(TableRow::new(header).cant_split());
-    // 内容行：仿宋四号；签收日期与签收人留白，密级随该份公文。
+    rows.push(
+        TableRow::new(header)
+            .row_height(HEADER_ROW_HEIGHT_TWIPS)
+            .height_rule(HeightRule::AtLeast)
+            .cant_split(),
+    );
+    // 内容行：仿宋四号；签收人与签收日期留白。
+    let row_height = (ROW_MIN_HEIGHT_MM * TWIPS_PER_MM).round() as f32;
     for row in &doc.rows {
         let cells = vec![
-            cell(&row.index, widths[0], false, AlignmentType::Center),
-            cell(&row.unit, widths[1], false, AlignmentType::Left),
-            cell(&sign_method_text(), widths[2], false, AlignmentType::Center),
-            cell("", widths[3], false, AlignmentType::Center),
-            cell("", widths[4], false, AlignmentType::Center),
+            cell(&[&row.index], widths[0], false, AlignmentType::Center),
+            cell(&[&row.unit], widths[1], false, AlignmentType::Left),
             cell(
-                row.security.as_deref().unwrap_or(""),
-                widths[5],
+                &sign_method_lines(),
+                widths[2],
                 false,
                 AlignmentType::Center,
             ),
+            cell(&[""], widths[3], false, AlignmentType::Center),
+            cell(&[""], widths[4], false, AlignmentType::Center),
         ];
         rows.push(
             TableRow::new(cells)
-                .row_height(RECEIPT_ROW_HEIGHT_TWIPS)
+                .row_height(row_height)
                 .height_rule(HeightRule::AtLeast)
                 .cant_split(),
         );
@@ -158,13 +171,18 @@ pub(crate) fn write(
     );
     docx = docx.add_paragraph(spacer(TITLE_GAP_TWIPS));
     for row in &doc.fields {
-        docx = docx.add_paragraph(field_line(row));
+        docx = docx.add_paragraph(field_line(row, FIELD_LINE_TWIPS));
     }
     docx = docx.add_paragraph(spacer(BLOCK_GAP_TWIPS));
     docx = docx.add_table(table);
-    docx = docx.add_paragraph(spacer(BLOCK_GAP_TWIPS));
-    for row in &doc.footer {
-        docx = docx.add_paragraph(field_line(row));
+    // 送文信息两行与表格之间不另垫空行：12mm 的固定行高本身就把横线推离表格底边。
+    let footer_rows = doc.footer.len();
+    for (index, row) in doc.footer.iter().enumerate() {
+        let mut paragraph = field_line(row, FOOTER_LINE_TWIPS);
+        if index + 1 < footer_rows {
+            paragraph = paragraph.keep_next(true);
+        }
+        docx = docx.add_paragraph(paragraph);
     }
 
     let file =
@@ -179,7 +197,7 @@ pub(crate) fn write(
 fn column_widths() -> Vec<usize> {
     let mut widths: Vec<usize> = COLUMN_WIDTHS_MM
         .iter()
-        .map(|mm| (mm * 1440.0 / 25.4).round() as usize)
+        .map(|mm| (mm * TWIPS_PER_MM).round() as usize)
         .collect();
     let sum: usize = widths.iter().sum();
     if let Some(last) = widths.last_mut() {
@@ -188,9 +206,18 @@ fn column_widths() -> Vec<usize> {
     widths
 }
 
-/// 要素行：标签黑体四号，取值仿宋四号；取值为空就留出手写空间。
-fn field_line(fields: &[crate::export::typst::receipt::ReceiptField]) -> Paragraph {
-    let mut paragraph = Paragraph::new();
+/// 要素行：标签黑体四号，取值仿宋四号；取值为空就留出手写空间。取值过长折行时
+/// 悬挂缩进到首个标签之后，续行与取值对齐（与 PDF 一致）。
+fn field_line(fields: &[ReceiptField], line_twips: i32) -> Paragraph {
+    let hang = fields
+        .first()
+        .map_or(0, |field| field.label.chars().count() as i32 * CHAR_TWIPS);
+    let mut paragraph = Paragraph::new().indent(
+        Some(hang),
+        Some(SpecialIndentType::Hanging(hang)),
+        None,
+        None,
+    );
     for (index, field) in fields.iter().enumerate() {
         paragraph = paragraph.add_run(table_run_sized(&field.label, true, false, TABLE_SIZE));
         if field.value.is_empty() {
@@ -204,7 +231,7 @@ fn field_line(fields: &[crate::export::typst::receipt::ReceiptField]) -> Paragra
     }
     paragraph.align(AlignmentType::Left).line_spacing(
         LineSpacing::new()
-            .line(FIELD_LINE_TWIPS)
+            .line(line_twips)
             .line_rule(LineSpacingType::Exact),
     )
 }
@@ -218,20 +245,22 @@ fn blank_run(chars: usize) -> Run {
         .underline("single")
 }
 
-/// 表格单元格：单行四号字，垂直居中。
-fn cell(text: &str, width: usize, header: bool, align: AlignmentType) -> TableCell {
-    TableCell::new()
-        .add_paragraph(
+/// 表格单元格：四号字，一项一段，垂直居中。
+fn cell<S: AsRef<str>>(lines: &[S], width: usize, header: bool, align: AlignmentType) -> TableCell {
+    let mut cell = TableCell::new();
+    for line in lines {
+        cell = cell.add_paragraph(
             Paragraph::new()
-                .add_run(table_run_sized(text, header, false, TABLE_SIZE))
+                .add_run(table_run_sized(line.as_ref(), header, false, TABLE_SIZE))
                 .align(align)
                 .line_spacing(
                     LineSpacing::new()
                         .line(ROW_LINE_TWIPS)
                         .line_rule(LineSpacingType::Exact),
                 ),
-        )
-        .width(width, WidthType::Dxa)
+        );
+    }
+    cell.width(width, WidthType::Dxa)
         .vertical_align(VAlignType::Center)
 }
 
@@ -324,7 +353,7 @@ mod tests {
         assert!(xml.contains("某民函〔2026〕18号"), "缺函号");
         assert!(xml.contains("某某市民政局"), "缺发函单位");
         assert!(xml.contains("2026年9月30日"), "缺成文日期");
-        // 表头六列与签收单位按主送在前、抄送在后的顺序出现。
+        // 表头五列与签收单位按主送在前、抄送在后的顺序出现。
         for name in COLUMN_NAMES {
             assert!(xml.contains(name), "缺表头 {name}");
         }
@@ -336,8 +365,8 @@ mod tests {
             })
             .collect();
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
-        // 签收方式给出可勾选项，日期与签收人留白。
-        assert!(xml.contains("□电子 □纸质"), "缺签收方式");
+        // 签收方式给出可勾选项（上下两段），签收人与签收日期留白。
+        assert!(xml.contains("□电子") && xml.contains("□纸质"), "缺签收方式");
     }
 
     #[test]
@@ -347,9 +376,11 @@ mod tests {
         assert!(xml.contains("<w:tblHeader />"), "首行没有重复表头标记");
         assert!(xml.contains("<w:cantSplit />"), "行没有设不拆分");
         assert!(
-            xml.contains("w:val=\"907\" w:hRule=\"atLeast\""),
-            "签收行应保留约 16mm 的最小手写高度"
+            xml.contains("w:val=\"1020\" w:hRule=\"atLeast\""),
+            "签收行应保留约 18mm 的最小手写高度"
         );
+        // 密级不在表格里逐行重复。
+        assert!(!xml.contains(">密级<"), "签收表不应再有密级列");
         // 重复表头只加在首行上。
         assert_eq!(xml.matches("<w:tblHeader />").count(), 1);
     }

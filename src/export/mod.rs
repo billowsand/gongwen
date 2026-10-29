@@ -346,166 +346,58 @@ pub(crate) struct ExportArtifacts {
 
 const MAX_EXPORT_FILENAME_CHARS: usize = 42;
 
-#[derive(Default)]
-struct ExportFilenames {
-    markdown: String,
-    docx: String,
-    pdf: String,
-    typst: String,
-    receipt_docx: String,
-    receipt_pdf: String,
-}
+/// 一次导出可能产出的全部文件后缀（主干名之后的部分）。主干名按其中最长的一个
+/// 预留长度，所以同一次导出的各个文件、以及只导一种格式的单独导出，都共用同一个
+/// 截短后的主干名，不会出现 Word 与 PDF 标题截到不同位置的情况。
+const EXPORT_FILE_SUFFIXES: [&str; 7] = [
+    "-源码包.zip",
+    ".docx",
+    ".pdf",
+    ".份号清单.txt",
+    "-Typst包.zip",
+    "_签收记录单.docx",
+    "_签收记录单.pdf",
+];
 
-/// 按每种产物的完整后缀预算标题长度；固定文种、函号、版本和重复编号始终保留。
-fn export_filenames(
+/// 文件名主干：与 [`document_stem`] 的组成相同（文种前缀、标题、会议时间、版本名称），
+/// 另带不覆盖时的重复编号；标题按 [`MAX_EXPORT_FILENAME_CHARS`] 截短，保证主干加上
+/// 任何一种产物后缀都不超限。文种、函号、会议时间、版本和编号始终完整保留。
+fn export_file_stem(
     input: &DraftInput,
     title: &str,
     version_name: Option<&str>,
     unique_suffix: &str,
-    selection: &ExportSelection,
-    receipt: bool,
-) -> Result<ExportFilenames> {
-    let mut names = ExportFilenames::default();
-    if selection.markdown {
-        names.markdown = filename_with_title_budget(
-            input,
-            title,
-            version_name,
-            unique_suffix,
-            "-源码包",
-            ".zip",
-        )?;
-    }
-    if selection.docx {
-        names.docx =
-            filename_with_title_budget(input, title, version_name, unique_suffix, "", ".docx")?;
-        if receipt {
-            names.receipt_docx = filename_with_title_budget(
-                input,
-                title,
-                version_name,
-                unique_suffix,
-                "_签收记录单",
-                ".docx",
-            )?;
-        }
-    }
-    if selection.pdf {
-        let has_roster = copy_roster(input).is_some();
-        let pdf_budget = filename_with_title_budget(
-            input,
-            title,
-            version_name,
-            unique_suffix,
-            "",
-            if has_roster {
-                ".份号清单.txt"
-            } else {
-                ".pdf"
-            },
-        )?;
-        names.pdf = if has_roster {
-            format!(
-                "{}.pdf",
-                pdf_budget
-                    .strip_suffix(".份号清单.txt")
-                    .unwrap_or(&pdf_budget)
-            )
-        } else {
-            pdf_budget
-        };
-        if receipt {
-            names.receipt_pdf = filename_with_title_budget(
-                input,
-                title,
-                version_name,
-                unique_suffix,
-                "_签收记录单",
-                ".pdf",
-            )?;
-        }
-    }
-    if selection.typst {
-        names.typst = filename_with_title_budget(
-            input,
-            title,
-            version_name,
-            unique_suffix,
-            "-Typst包",
-            ".zip",
-        )?;
-    }
-    Ok(names)
-}
-
-fn filename_with_title_budget(
-    input: &DraftInput,
-    title: &str,
-    version_name: Option<&str>,
-    unique_suffix: &str,
-    artifact_suffix: &str,
-    extension: &str,
 ) -> Result<String> {
-    let title = safe_filename(title);
-    let version = version_name
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(safe_filename)
-        .unwrap_or_else(|| "待提交".into());
-    let (before, after) = match input.kind {
-        TemplateKind::MeetingAgenda => (
-            String::new(),
-            if input.meeting_time.trim().is_empty() {
-                String::new()
-            } else {
-                format!("-{}", safe_filename(&input.meeting_time))
-            },
-        ),
-        TemplateKind::MeetingMinutes => ("会议纪要-".into(), String::new()),
-        TemplateKind::WhitePaper => ("白头-".into(), String::new()),
-        TemplateKind::RedHeadApproval => {
-            (format!("红头呈批-{}-", letter_prefix(input)), String::new())
-        }
-        TemplateKind::OfficialLetter => (format!("{}-", letter_prefix(input)), String::new()),
-        TemplateKind::PhoneNotice => ("电话通知".into(), String::new()),
-        TemplateKind::PhoneRecord => ("电话记录单".into(), String::new()),
-        TemplateKind::PlainDocument => ("普通公文-".into(), String::new()),
-        TemplateKind::ResearchReport => ("研究报告-".into(), String::new()),
-    };
-    let has_title = !matches!(
-        input.kind,
-        TemplateKind::PhoneNotice | TemplateKind::PhoneRecord
-    );
-    let mut fixed = before.clone();
-    if has_title {
-        fixed.push_str(&after);
-    }
-    fixed.push('-');
-    fixed.push_str(&version);
-    fixed.push_str(unique_suffix);
-    fixed.push_str(artifact_suffix);
-    fixed.push_str(extension);
-    let fixed_chars = fixed.chars().count();
+    let (before, has_title, after) = stem_parts(input);
+    let version = version_suffix(version_name);
+    let reserved = EXPORT_FILE_SUFFIXES
+        .iter()
+        .map(|suffix| suffix.chars().count())
+        .max()
+        .unwrap_or(0);
+    let tail = format!("-{version}{unique_suffix}");
+    let fixed_chars = before.chars().count()
+        + if has_title { after.chars().count() } else { 0 }
+        + tail.chars().count()
+        + reserved;
     anyhow::ensure!(
         fixed_chars <= MAX_EXPORT_FILENAME_CHARS,
         "导出文件名的固定部分已超过 {MAX_EXPORT_FILENAME_CHARS} 个字符（文种、函号、会议时间、版本名称或后缀过长），请缩短版本名称后重试"
     );
-    let shortened_title = title
-        .chars()
-        .take(MAX_EXPORT_FILENAME_CHARS - fixed_chars)
-        .collect::<String>();
-    let filename = if has_title {
-        format!(
-            "{before}{shortened_title}{after}-{version}{unique_suffix}{artifact_suffix}{extension}"
-        )
+    if !has_title {
+        return Ok(format!("{before}{tail}"));
+    }
+    let title = safe_filename(title);
+    let budget = MAX_EXPORT_FILENAME_CHARS - fixed_chars;
+    let shortened = if title.chars().count() > budget {
+        // 截断处不留半截的分隔符、开括号或空白，免得主干名以「-」「（」之类收尾。
+        let cut: String = title.chars().take(budget).collect();
+        cut.trim_end_matches(|c: char| c.is_whitespace() || "-_—、，,；;：（(《〈【“‘".contains(c))
+            .to_string()
     } else {
-        format!("{before}-{version}{unique_suffix}{artifact_suffix}{extension}")
+        title
     };
-    anyhow::ensure!(
-        filename.chars().count() <= MAX_EXPORT_FILENAME_CHARS,
-        "导出文件名超过 {MAX_EXPORT_FILENAME_CHARS} 个字符"
-    );
-    Ok(filename)
+    Ok(format!("{before}{shortened}{after}{tail}"))
 }
 
 /// 导出勾选的格式。PDF 由 Typst 在进程内直接排出（研究报告走 `typst::research`）。
@@ -533,14 +425,8 @@ pub(crate) fn export_artifacts(
     };
     let unique_suffix = &export_stem[stem.len()..];
     let receipt = selection.receipt && input.kind == TemplateKind::OfficialLetter;
-    let names = export_filenames(
-        input,
-        &title,
-        version_name,
-        unique_suffix,
-        selection,
-        receipt,
-    )?;
+    // 目录用完整主干名（“打开最近导出”靠它认文稿），目录里的文件用截短后的主干名。
+    let file_stem = export_file_stem(input, &title, version_name, unique_suffix)?;
     fs::create_dir_all(output_dir)
         .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
     let document_dir = output_dir.join(&export_stem);
@@ -549,18 +435,14 @@ pub(crate) fn export_artifacts(
     let mut files = Vec::new();
 
     if selection.markdown {
-        let path = document_dir.join(&names.markdown);
-        let archive_stem = names
-            .markdown
-            .strip_suffix("-源码包.zip")
-            .context("源码包文件名缺少预期后缀")?;
-        write_markdown_archive(&path, input, markdown, archive_stem, numbering)?;
+        let path = document_dir.join(format!("{file_stem}-源码包.zip"));
+        write_markdown_archive(&path, input, markdown, &file_stem, numbering)?;
         files.push(path);
     }
     // 公函的《公文签收记录单》：独立文件，随本次选中的 Word / PDF 各出一份，
     // 与原公函同目录，绝不拼进公函正文。别的文种一律忽略。
     if selection.docx {
-        let path = document_dir.join(&names.docx);
+        let path = document_dir.join(format!("{file_stem}.docx"));
         if input.kind.is_research() {
             research::write_docx(&path, input, markdown, numbering)?;
         } else {
@@ -576,7 +458,7 @@ pub(crate) fn export_artifacts(
         }
         files.push(path);
         if receipt {
-            let path = document_dir.join(&names.receipt_docx);
+            let path = document_dir.join(format!("{file_stem}_签收记录单.docx"));
             docx::write_receipt_docx(&path, input, markdown, display)
                 .context("生成《公文签收记录单》Word 失败")?;
             files.push(path);
@@ -585,7 +467,7 @@ pub(crate) fn export_artifacts(
     let mut typst = None;
     let mut compile_error = None;
     if selection.pdf {
-        let path = document_dir.join(&names.pdf);
+        let path = document_dir.join(format!("{file_stem}.pdf"));
         let outcome = write_pdf(
             &path,
             input,
@@ -603,7 +485,7 @@ pub(crate) fn export_artifacts(
             Err(error) => compile_error = Some(format!("{error:#}")),
         }
         if receipt {
-            let path = document_dir.join(&names.receipt_pdf);
+            let path = document_dir.join(format!("{file_stem}_签收记录单.pdf"));
             match typst::receipt::write_pdf(&path, input, markdown, display, fonts) {
                 Ok(outcome) => {
                     files.push(path);
@@ -623,7 +505,7 @@ pub(crate) fn export_artifacts(
         }
     }
     if selection.typst {
-        let path = document_dir.join(&names.typst);
+        let path = document_dir.join(format!("{file_stem}-Typst包.zip"));
         let warnings = typst::package::write_package(
             &path,
             input,
@@ -701,35 +583,54 @@ pub(crate) fn write_pdf_for_kind(
 /// - 普通公文：`普通公文` + 名称；
 /// - 会议纪要：`会议纪要` + 名称。
 pub(crate) fn document_stem_prefix(input: &DraftInput, title: &str) -> String {
-    let title = safe_filename(title);
+    let (before, has_title, after) = stem_parts(input);
+    if has_title {
+        format!("{before}{}{after}", safe_filename(title))
+    } else {
+        before
+    }
+}
+
+/// 主干前缀拆成三段：标题前的固定部分、有没有标题、标题后的固定部分（会议时间）。
+/// [`document_stem_prefix`] 与截短标题的 [`export_file_stem`] 共用这一份规则。
+fn stem_parts(input: &DraftInput) -> (String, bool, String) {
     match input.kind {
         TemplateKind::MeetingAgenda => {
-            if input.meeting_time.trim().is_empty() {
-                title
+            let after = if input.meeting_time.trim().is_empty() {
+                String::new()
             } else {
-                format!("{title}-{}", safe_filename(&input.meeting_time))
-            }
+                format!("-{}", safe_filename(&input.meeting_time))
+            };
+            (String::new(), true, after)
         }
-        TemplateKind::MeetingMinutes => format!("会议纪要-{title}"),
-        TemplateKind::WhitePaper => format!("白头-{title}"),
-        TemplateKind::RedHeadApproval => format!("红头呈批-{}-{title}", letter_prefix(input)),
-        TemplateKind::OfficialLetter => format!("{}-{title}", letter_prefix(input)),
-        TemplateKind::PhoneNotice => "电话通知".to_string(),
-        TemplateKind::PhoneRecord => "电话记录单".to_string(),
-        TemplateKind::PlainDocument => format!("普通公文-{title}"),
-        TemplateKind::ResearchReport => format!("研究报告-{title}"),
+        TemplateKind::MeetingMinutes => ("会议纪要-".into(), true, String::new()),
+        TemplateKind::WhitePaper => ("白头-".into(), true, String::new()),
+        TemplateKind::RedHeadApproval => (
+            format!("红头呈批-{}-", letter_prefix(input)),
+            true,
+            String::new(),
+        ),
+        TemplateKind::OfficialLetter => (format!("{}-", letter_prefix(input)), true, String::new()),
+        TemplateKind::PhoneNotice => ("电话通知".into(), false, String::new()),
+        TemplateKind::PhoneRecord => ("电话记录单".into(), false, String::new()),
+        TemplateKind::PlainDocument => ("普通公文-".into(), true, String::new()),
+        TemplateKind::ResearchReport => ("研究报告-".into(), true, String::new()),
     }
 }
 
 /// 导出文件名的主干：固定文种前缀 + 提交版本名称；无对应版本时为“待提交”。
 pub(crate) fn document_stem(input: &DraftInput, title: &str, version_name: Option<&str>) -> String {
-    let suffix = version_name
+    let prefix = document_stem_prefix(input, title);
+    format!("{prefix}-{}", version_suffix(version_name))
+}
+
+/// 主干名末尾的版本名称：净化后的提交版本名，没有时为“待提交”。
+fn version_suffix(version_name: Option<&str>) -> String {
+    version_name
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(safe_filename)
-        .unwrap_or_else(|| "待提交".into());
-    let prefix = document_stem_prefix(input, title);
-    format!("{prefix}-{suffix}")
+        .unwrap_or_else(|| "待提交".into())
 }
 
 /// 公函文件名的文号前缀：机关代字〔年〕序号号；草稿期未编序号时回落机关代字。
@@ -2287,7 +2188,83 @@ mod tests {
     }
 
     #[test]
-    fn export_filenames_limit_only_titles_and_keep_all_artifact_suffixes() {
+    fn export_file_stem_limits_only_titles_and_fits_every_artifact_suffix() {
+        let input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        let stem = export_file_stem(&input, &"标题字".repeat(80), Some("送审稿"), "-12").unwrap();
+        assert!(stem.starts_with("公函-标题字"), "{stem}");
+        assert!(stem.ends_with("-送审稿-12"), "{stem}");
+        for suffix in EXPORT_FILE_SUFFIXES {
+            let name = format!("{stem}{suffix}");
+            assert!(name.chars().count() <= MAX_EXPORT_FILENAME_CHARS, "{name}");
+        }
+        // 最长的后缀正好顶到上限：标题截得不多不少。
+        assert_eq!(
+            format!("{stem}_签收记录单.docx").chars().count(),
+            MAX_EXPORT_FILENAME_CHARS
+        );
+    }
+
+    #[test]
+    fn export_file_stem_preserves_short_names_and_rejects_overlong_fixed_parts() {
+        let input = DraftInput {
+            kind: TemplateKind::PlainDocument,
+            ..Default::default()
+        };
+        assert_eq!(
+            export_file_stem(&input, "通知", Some("初稿"), "").unwrap(),
+            "普通公文-通知-初稿"
+        );
+        // 短标题时与目录名（完整主干）一致。
+        assert_eq!(
+            export_file_stem(&input, "通知", Some("初稿"), "").unwrap(),
+            document_stem(&input, "通知", Some("初稿"))
+        );
+        assert!(export_file_stem(&input, "通知", Some(&"版本".repeat(40)), "-2").is_err());
+        let phone = DraftInput {
+            kind: TemplateKind::PhoneNotice,
+            ..Default::default()
+        };
+        assert_eq!(
+            export_file_stem(&phone, "任意标题", None, "-3").unwrap(),
+            "电话通知-待提交-3"
+        );
+    }
+
+    #[test]
+    fn export_file_stem_counts_each_unicode_character_once() {
+        let input = DraftInput {
+            kind: TemplateKind::PlainDocument,
+            ..Default::default()
+        };
+        // 普通公文-（5）+ 标题 + -送审稿（4）+ 最长后缀（11）= 42，标题最多 22 个字符。
+        let title = "中A，! 文".chars().cycle().take(22).collect::<String>();
+        let at_limit = export_file_stem(&input, &title, Some("送审稿"), "").unwrap();
+        assert_eq!(at_limit, format!("普通公文-{title}-送审稿"));
+
+        let over_limit =
+            export_file_stem(&input, &format!("{title}中"), Some("送审稿"), "").unwrap();
+        assert_eq!(over_limit, at_limit);
+    }
+
+    #[test]
+    fn truncated_title_does_not_end_with_a_dangling_separator() {
+        let input = DraftInput {
+            kind: TemplateKind::PlainDocument,
+            ..Default::default()
+        };
+        // 截到第 22 个字符时正好落在「（」上。
+        let title = format!("{}（第一阶段）的通知", "甲".repeat(21));
+        let stem = export_file_stem(&input, &title, Some("送审稿"), "").unwrap();
+        assert_eq!(stem, format!("普通公文-{}-送审稿", "甲".repeat(21)));
+    }
+
+    #[test]
+    fn one_export_shares_a_single_file_stem_across_formats() {
+        let temp = tempfile::tempdir().unwrap();
+        let title = "关于开展A计划、持续推进重点事项（第一阶段）并做好后续工作的通知".repeat(2);
         let input = DraftInput {
             kind: TemplateKind::OfficialLetter,
             ..Default::default()
@@ -2295,97 +2272,37 @@ mod tests {
         let selection = ExportSelection {
             markdown: true,
             docx: true,
-            pdf: true,
+            pdf: false,
             typst: true,
             receipt: true,
-            overwrite: false,
+            overwrite: true,
         };
-        let names = export_filenames(
+        let artifacts = export_artifacts(
+            temp.path(),
             &input,
-            &"标题字".repeat(80),
-            Some("送审稿"),
-            "-12",
+            &format!(
+                "# {title}
+
+正文。
+"
+            ),
             &selection,
-            true,
+            &UnitDisplay::new(&[]),
+            &FontConfig::default(),
+            &NumberingConfig::default(),
+            Some("送审稿"),
         )
         .unwrap();
-        for name in [
-            &names.markdown,
-            &names.docx,
-            &names.pdf,
-            &names.typst,
-            &names.receipt_docx,
-            &names.receipt_pdf,
-        ] {
+        let names = artifacts
+            .files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let stem = names[1].strip_suffix(".docx").unwrap().to_string();
+        for name in &names {
+            assert!(name.starts_with(&stem), "{name} 与 {stem} 主干不同");
             assert!(name.chars().count() <= MAX_EXPORT_FILENAME_CHARS, "{name}");
-            assert!(name.contains("-送审稿-12"), "{name}");
         }
-        assert!(names.markdown.ends_with("-源码包.zip"));
-        assert!(names.typst.ends_with("-Typst包.zip"));
-        assert!(names.receipt_docx.ends_with("_签收记录单.docx"));
-        assert!(names.receipt_pdf.ends_with("_签收记录单.pdf"));
-    }
-
-    #[test]
-    fn export_filenames_preserve_short_names_and_reject_overlong_fixed_parts() {
-        let input = DraftInput {
-            kind: TemplateKind::PlainDocument,
-            ..Default::default()
-        };
-        let selection = ExportSelection {
-            markdown: false,
-            docx: true,
-            pdf: false,
-            typst: false,
-            receipt: false,
-            overwrite: false,
-        };
-        let short = export_filenames(&input, "通知", Some("初稿"), "", &selection, false).unwrap();
-        assert_eq!(short.docx, "普通公文-通知-初稿.docx");
-        assert!(
-            export_filenames(
-                &input,
-                "通知",
-                Some(&"版本".repeat(40)),
-                "-2",
-                &selection,
-                false,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn export_filename_boundary_counts_each_unicode_character_once() {
-        let input = DraftInput {
-            kind: TemplateKind::PlainDocument,
-            ..Default::default()
-        };
-        let selection = ExportSelection {
-            markdown: false,
-            docx: true,
-            pdf: false,
-            typst: false,
-            receipt: false,
-            overwrite: false,
-        };
-        let title = "中A，! ".chars().cycle().take(28).collect::<String>();
-        let at_limit =
-            export_filenames(&input, &title, Some("送审稿"), "", &selection, false).unwrap();
-        assert_eq!(at_limit.docx.chars().count(), 42);
-        assert!(at_limit.docx.starts_with(&format!("普通公文-{title}")));
-
-        let over_limit_title = format!("{title}中");
-        let over_limit = export_filenames(
-            &input,
-            &over_limit_title,
-            Some("送审稿"),
-            "",
-            &selection,
-            false,
-        )
-        .unwrap();
-        assert_eq!(over_limit.docx, at_limit.docx);
     }
 
     #[test]

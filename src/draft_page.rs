@@ -285,8 +285,21 @@ impl ExportLinks {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 continue;
             };
-            for entry in entries.flatten() {
-                self.take(&entry.path());
+            // 同一目录里可能并存截短规则改动前后的两份同类成品（覆盖导出时旧名不会被盖掉），
+            // 目录内也按修改时间从新到旧取。
+            let mut files = entries
+                .flatten()
+                .map(|entry| {
+                    let modified = entry
+                        .metadata()
+                        .and_then(|meta| meta.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH);
+                    (modified, entry.path())
+                })
+                .collect::<Vec<_>>();
+            files.sort_by(|(a, _), (b, _)| b.cmp(a));
+            for (_, path) in files {
+                self.take(&path);
             }
         }
         // 兜底：有人把成品直接摊在输出目录根下时也认，但排在子目录之后。

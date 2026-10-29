@@ -3,8 +3,10 @@
 // 数据来自 /doc.json，由 src/export/typst/receipt.rs 生成：要素显示值、签收单位清单
 // （主送在前、抄送在后、按最终显示值去重）、表格列宽都在 Rust 侧算好，这里只负责排。
 // 版式：A4 纵向、黑白、156mm 版心；题名小标宋二号居中；要素行黑体标签 + 仿宋取值；
-// 签收表六列（序号 / 签收单位 / 签收方式 / 签收日期 / 签收人 / 密级），表头黑体四号、
-// 内容仿宋四号，外框稍粗、内部细线；跨页重复表头、行不拆分；页码「— N —」每页都印。
+// 签收表五列（序号 / 签收单位 / 签收方式 / 签收人 / 签收日期），表头黑体四号、
+// 内容仿宋四号，外框稍粗、内部细线，内容行至少 18mm 供手写签名；跨页重复表头、行不拆分；
+// 表下送文信息行距放宽到 12mm，横线上方留足书写高度；页码「— N —」每页都印。
+// 密级只在要素行印一次，不在表格里逐行重复。
 
 #let doc = json("/doc.json")
 #let F = doc.fonts
@@ -21,6 +23,7 @@
 #let title-size = 22pt          // 二号
 #let line-pitch = 22pt          // 要素行的基线距
 #let row-pitch = 21pt           // 表格行的基线距
+#let footer-pitch = 12mm        // 送文信息（手写）行的基线距
 
 // 字体角色在应用内是字符串，导出的 Typst 包里是一串系统字体别名（逐个别名回退）。
 #let fam(main) = if type(main) == array { (..main, ..F.fallback) } else { (main, ..F.fallback) }
@@ -36,7 +39,8 @@
 
 #let receipt-number = context {
   let n = counter(page).get().first()
-  place(top + left, dy: top-m + text-h + 30 * texpt,
+  // 背景层的坐标从纸边算起，要先平移一个左边距，页码才在版心里居中。
+  place(top + left, dx: left-m, dy: top-m + text-h + 30 * texpt,
     box(width: text-w, align(center, page-number-text(n))))
 }
 
@@ -67,14 +71,14 @@
   parts.join()
 }
 
-// 若干要素行排成一个段落：行距由 leading 控制（基线距 22pt），段与段之间不留空。
-#let field-lines(rows) = {
-  let parts = ()
-  for (i, row) in rows.enumerate() {
-    if i > 0 { parts.push(linebreak()) }
-    parts.push(field-content(row))
+// 若干要素行：一行一段，基线距 `pitch`。取值过长折行时悬挂缩进到首个标签之后，
+// 续行与取值对齐，不顶到标签底下。
+#let field-lines(rows, pitch: line-pitch) = {
+  set par(leading: pitch - table-size, spacing: pitch - table-size)
+  for row in rows {
+    let hang = row.at(0).label.clusters().len() * 1em
+    par(hanging-indent: hang, field-content(row))
   }
-  par(parts.join())
 }
 
 // ---------------- 签收表 ----------------
@@ -93,31 +97,34 @@
   if thick.len() == 0 { (rest: 0.5pt) } else { thick + (rest: 0.5pt) }
 }
 
-// 表头：黑体四号居中。
+// 表头：黑体四号居中，上下各 2mm。
 #let header-cells = doc.columns.enumerate().map(pair => table.cell(
+  inset: (x: 1mm, y: 2mm),
   align: center + horizon,
   stroke: cell-stroke(pair.at(0), 0),
   text(font: hei, size: table-size, pair.at(1)),
 ))
 
-// 一行签收记录：签收方式给出可勾选的电子 / 纸质，日期与签收人留白，密级随该份公文。
-#let sign-method-text = doc.sign_methods.map(m => "□" + m).join(" ")
+// 一行签收记录：签收方式的两个勾选项上下叠放，签收人与签收日期留白。
+#let sign-method-text = doc.sign_methods.map(m => "□" + m).join(linebreak())
+// 最小行高靠序号格里一个定高的块撑出来（定高块不会被内容撑大，其余格垂直居中）；
+// 长单位名换行超过最小行高时，整行随单位格继续增长。
+#let row-inset-y = 1mm
+#let row-strut(body) = block(width: 100%, height: doc.row_min_height_mm * 1mm - 2 * row-inset-y,
+  align(center + horizon, body))
 #let body-cells = doc.rows.enumerate().map(row-pair => {
   let y = row-pair.at(0) + 1
   let r = row-pair.at(1)
-  let security = if r.security != none { r.security } else { "" }
   let texts = (
-    text(font: fs, size: table-size, r.index),
+    row-strut(text(font: fs, size: table-size, r.index)),
     text(font: fs, size: table-size, r.unit),
     text(font: fs, size: table-size, sign-method-text),
     [],
     [],
-    text(font: fs, size: table-size, security),
   )
-  let aligns = (center, left, center, center, center, center)
+  let aligns = (center, left, center, center, center)
   texts.enumerate().map(cell-pair => table.cell(
-    // 上下各 4mm，单行内容约 16mm 高；长单位名换行时行高继续增长。
-    inset: (x: 1mm, y: 4mm),
+    inset: (x: 1mm, y: row-inset-y),
     align: aligns.at(cell-pair.at(0)) + horizon,
     stroke: cell-stroke(cell-pair.at(0), y),
     cell-pair.at(1),
@@ -144,5 +151,8 @@
 #field-lines(doc.fields)
 #v(4mm, weak: false)
 #receipt-table
-#v(6mm, weak: false)
-#field-lines(doc.footer)
+// 送文信息是手写栏：第一行横线距表格底边也留一个手写行距，两行整体不拆页。
+#block(breakable: false, above: 0pt, below: 0pt, {
+  v(footer-pitch - table-size, weak: false)
+  field-lines(doc.footer, pitch: footer-pitch)
+})
