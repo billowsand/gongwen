@@ -475,7 +475,10 @@ impl Store {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let (kind,payload,evidence,source_id,source_content):(String,String,String,String,String)=tx.query_row("SELECT c.kind,c.payload,c.evidence,c.source_id,s.content FROM task_candidates c JOIN task_sources s ON s.id=c.source_id WHERE c.id=?1 AND c.state IN ('pending','later')",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
         let proposal: super::extract::Proposal = serde_json::from_str(&payload)?;
-        if kind != "new_task" || proposal.task_id.is_some() {
+        // 没挂目标的进展、风险等候选也可以由人建成新任务：材料讲的工作还没有对应任务。
+        if proposal.task_id.is_some()
+            || !(kind == "new_task" || super::extract::converts_to_new_task(&kind))
+        {
             bail!("此候选不是待人工创建的新任务");
         }
         if evidence.trim().is_empty() || !super::extract::evidence_in(&source_content, &evidence) {

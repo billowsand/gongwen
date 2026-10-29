@@ -127,7 +127,9 @@ pub(crate) fn receive_extraction(state: &mut State, outcome: ExtractionOutcome) 
                 state.extraction_source = Some(source_id);
             }
             if added == 0 {
-                format!("「{title}」识别完成，没有需要核对的变化，材料已存进「材料」。")
+                format!(
+                    "「{title}」识别完成，但模型没有从中找出任务或进展。材料已存进「材料」，可在那里重新识别，或用「新建任务 → 从文字填写」。"
+                )
             } else {
                 format!("「{title}」识别完成，新增 {added} 条待核对的建议。")
             }
@@ -752,6 +754,16 @@ fn actions_existing(
                     }
                 }
             }
+        } else if crate::task_assistant::extract::converts_to_new_task(&p.kind)
+            && theme::primary_icon_button(ui, theme::Icon::Plus, "建成新任务")
+                .on_hover_text(
+                    "材料讲的工作还没有对应任务：带着这条建议的内容新建一项，补好名称再保存",
+                )
+                .clicked()
+        {
+            let mut draft = crate::task_assistant::extract::proposal_task(p);
+            draft.needs_review = false;
+            state.open_draft(Replace::Candidate(id.to_owned(), Box::new(draft)));
         }
         secondary_actions(ui, store, state, id, candidate_state, p);
     });

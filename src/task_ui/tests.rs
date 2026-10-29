@@ -346,7 +346,7 @@ fn task_assistant_extraction_result_names_the_material_and_offers_a_filter() {
             .extraction_result
             .as_ref()
             .unwrap()
-            .contains("没有需要核对")
+            .contains("没有从中找出任务或进展")
     );
     assert!(state.extraction_source.is_none());
 
@@ -931,4 +931,40 @@ fn task_assistant_progress_box_follows_changes_it_has_not_edited() {
     t.progress = "又一次外部修改".into();
     detail::sync_progress_box(&mut state, &t);
     assert_eq!(state.progress_text, "我正在写的");
+}
+
+#[test]
+fn task_assistant_untargeted_progress_can_be_built_into_a_new_task() {
+    let mut store = Store::open(":memory:").unwrap();
+    let mut other = Task::blank();
+    other.name = "别的任务".into();
+    store.save(&other, "创建", "").unwrap();
+    let p: crate::task_assistant::extract::Proposal = serde_json::from_value(serde_json::json!({
+        "kind": "progress", "task_id": null, "name": null, "next_step": null, "deadline": null,
+        "progress": "完成10项数据标准修订", "evidence": "完成10项数据标准修订"
+    }))
+    .unwrap();
+    store
+        .commit_extraction(
+            "总结",
+            "专项完成10项数据标准修订。",
+            "fp",
+            "pasted",
+            &[p],
+            &[other],
+        )
+        .unwrap();
+    let state = State {
+        view: View::Inbox,
+        ..Default::default()
+    };
+    let mut h = bench(state, store);
+    h.get_by_label("建成新任务").click();
+    h.run();
+    let state = &h.state().state;
+    assert_eq!(
+        state.draft.as_ref().unwrap().progress,
+        "完成10项数据标准修订"
+    );
+    assert!(state.candidate_create_id.is_some());
 }

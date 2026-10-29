@@ -301,6 +301,10 @@ fn run_batch(case: &BatchCase, today: &str) -> Outcome {
             "new_task_deadline" => items
                 .iter()
                 .any(|p| p.kind == "new_task" && p.deadline.as_deref() == want.as_str()),
+            // 新任务建议要带上材料里的完成情况，不能只有名称。
+            "new_task_progress" => items.iter().any(|p| {
+                p.kind == "new_task" && p.progress.as_deref().is_some_and(|v| !v.trim().is_empty())
+            }),
             _ => false,
         };
         outcome

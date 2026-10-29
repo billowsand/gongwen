@@ -990,3 +990,75 @@ fn deleting_an_unused_material_frees_it_and_fill_snapshots_are_not_listed() {
         .unwrap();
     assert_eq!(s.sources().unwrap().len(), 1);
 }
+
+#[test]
+fn bare_arrays_from_the_model_still_parse() {
+    // 实测 qwen 在无关材料上直接回 `[]`，在有内容时也会省掉外层对象。
+    assert!(
+        super::extract::parse_response("[]", "原文", &[])
+            .unwrap()
+            .is_empty()
+    );
+    let raw = r#"[{"kind":"new_task","task_id":null,"name":"目录梳理","next_step":null,"deadline":null,"evidence":"完成目录梳理"}]"#;
+    let items = super::extract::parse_response(raw, "请完成目录梳理。", &[]).unwrap();
+    assert_eq!(items[0].name.as_deref(), Some("目录梳理"));
+    assert!(super::extract::parse_response("好的", "原文", &[]).is_err());
+}
+
+#[test]
+fn progress_without_any_task_becomes_a_new_task_and_can_be_created() {
+    // 用户实测：一项任务都没有时贴阶段总结，模型给了不挂目标的进展，人选不出目标。
+    let content = "数据治理专项完成10项数据标准修订，建成高质量素材库。";
+    let raw = r#"{"items":[{"kind":"progress","task_id":null,"name":null,"progress":"完成10项数据标准修订","next_step":null,"deadline":null,"evidence":"完成10项数据标准修订"}]}"#;
+    let items = super::extract::parse_response(raw, content, &[]).unwrap();
+    assert_eq!(items[0].kind, "new_task");
+    assert_eq!(items[0].progress.as_deref(), Some("完成10项数据标准修订"));
+    // 有任务时照旧是进展，由人选目标或建成新任务。
+    let existing = task("别的任务");
+    let items =
+        super::extract::parse_response(raw, content, std::slice::from_ref(&existing)).unwrap();
+    assert_eq!(items[0].kind, "progress");
+
+    let dir = tempdir().unwrap();
+    let mut s = Store::open(dir.path().join("db.sqlite")).unwrap();
+    s.save(&existing, "创建", "").unwrap();
+    s.commit_extraction("总结", content, "fp", "pasted", &items, &[existing])
+        .unwrap();
+    let (id, _, payload, _, _, _) = s.candidates().unwrap().remove(0);
+    let mut t = super::extract::proposal_task(&serde_json::from_str(&payload).unwrap());
+    assert_eq!(t.progress, "完成10项数据标准修订");
+    t.name = "数据标准修订".into();
+    t.needs_review = false;
+    s.create_from_candidate(&id, &t).unwrap();
+    assert_eq!(s.candidates().unwrap()[0].4, "accepted");
+    assert_eq!(latest(&s, &t.id).progress, "完成10项数据标准修订");
+    // 意见、待决事项只是历史里的一句话，不能借此建任务。
+    let opinion = proposal("opinion", None, "数据治理专项");
+    s.commit_extraction("意见", content, "fp2", "pasted", &[opinion], &[])
+        .unwrap();
+    let opinion_id = s
+        .candidates()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.1 == "opinion")
+        .unwrap()
+        .0;
+    assert!(s.create_from_candidate(&opinion_id, &t).is_err());
+}
+
+#[test]
+fn missing_evidence_falls_back_and_same_excerpt_is_kept_once() {
+    // 实测：模型漏了 evidence 字段，整批曾因此作废。
+    let content = "机房搬迁存在停机窗口过长的风险，会议要求制定分批切换方案。";
+    let raw = r#"{"items":[{"kind":"new_task","task_id":null,"name":null,"progress":null,"next_step":null,"deadline":null,"risks":"机房搬迁存在停机窗口过长的风险"}]}"#;
+    let items = super::extract::parse_response(raw, content, &[]).unwrap();
+    assert_eq!(items[0].evidence, "机房搬迁存在停机窗口过长的风险");
+    // 进展与空壳完成证据摘同一段：改成新任务后只留一条。
+    let raw = r#"{"items":[
+        {"kind":"progress","task_id":null,"name":null,"progress":"制定分批切换方案","next_step":null,"deadline":null,"evidence":"会议要求制定分批切换方案"},
+        {"kind":"completion_evidence","task_id":null,"name":null,"next_step":null,"deadline":null,"evidence":"会议要求制定分批切换方案"}
+    ]}"#;
+    let items = super::extract::parse_response(raw, content, &[]).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].progress.as_deref(), Some("制定分批切换方案"));
+}
