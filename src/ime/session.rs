@@ -8,7 +8,7 @@ use eframe::egui;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 const SHIFT_TAP_MAX: Duration = Duration::from_millis(500);
-/// 逐码提示最多补几个候选。
+/// 逐码提示每批补几个候选。
 const PREFIX_HINT_LIMIT: usize = 18;
 
 /// 候选窗里的一格：候选、它所在的编码与附注。
@@ -79,6 +79,10 @@ pub(crate) struct Ime {
     pub(super) layout: Vec<Slot>,
     /// 布局前多少个是精确匹配的候选，后面是逐码提示补出来的。
     pub(super) exact: usize,
+    /// 逐码提示这次补到第几条：一批一批地补，翻到这批的最后一页再翻页就加一批。
+    hint_limit: usize,
+    /// 表里以当前编码开头的后续编码已经全部补进布局了。
+    hint_done: bool,
     pub(super) highlight: usize,
     /// 高亮是使用者用方向键、翻页挪过去的；只有这样空格才上屏逐码提示的候选。
     highlight_moved: bool,
@@ -145,6 +149,8 @@ impl Ime {
             load_error: None,
             layout: Vec::new(),
             exact: 0,
+            hint_limit: 0,
+            hint_done: true,
             highlight: 0,
             highlight_moved: false,
             preedit: Default::default(),
@@ -235,6 +241,8 @@ impl Ime {
         self.preedit = Default::default();
         self.layout.clear();
         self.exact = 0;
+        self.hint_limit = 0;
+        self.hint_done = true;
         self.highlight = 0;
         self.highlight_moved = false;
         self.pending_commit = None;
@@ -268,10 +276,26 @@ impl Ime {
                 }
             })
             .collect();
-        if self.settings.prefix_hint && (1..4).contains(&code.len()) {
-            for (full, candidate) in self.table.extended(&code, PREFIX_HINT_LIMIT) {
-                // 精确候选里已有的词不再补一遍。
-                if self.layout.iter().any(|slot| slot.text == candidate.text) {
+        // 逐码提示一次只补一小批：翻到这批的最后一页再翻页，由 `more_hints` 接着补。
+        // 一次装全部不行——一个字码开头能有几千条候选，每敲一个键都要重建一遍。
+        self.hint_limit = if self.settings.prefix_hint && (1..4).contains(&code.len()) {
+            if reset {
+                PREFIX_HINT_LIMIT
+            } else {
+                self.hint_limit.max(PREFIX_HINT_LIMIT)
+            }
+        } else {
+            0
+        };
+        self.hint_done = self.hint_limit == 0;
+        if self.hint_limit > 0 {
+            let hints = self.table.extended(&code, self.hint_limit);
+            self.hint_done = hints.len() < self.hint_limit;
+            // 精确候选与前面补过的提示里已有的词不再补一遍。
+            let mut known: HashSet<String> =
+                self.layout.iter().map(|slot| slot.text.clone()).collect();
+            for (full, candidate) in hints {
+                if !known.insert(candidate.text.clone()) {
                     continue;
                 }
                 self.layout.push(Slot {
@@ -286,6 +310,15 @@ impl Ime {
             self.highlight = 0;
             self.highlight_moved = false;
         }
+    }
+
+    /// 逐码提示翻到这批的最后一页还往后翻：从表里再补一批。
+    fn more_hints(&mut self) {
+        if self.hint_limit == 0 || self.hint_done {
+            return;
+        }
+        self.hint_limit += PREFIX_HINT_LIMIT;
+        self.refresh(false);
     }
     pub(crate) fn sync_lexicon(
         &mut self,
@@ -708,12 +741,35 @@ impl Ime {
                 }
                 match nav {
                     Highlight(delta) => {
+                        // 同词异码会在布局里去重；整批都重复时继续补，不能让方向键原地停住。
+                        while delta > 0
+                            && self.highlight + 1 >= self.layout.len()
+                            && !self.hint_done
+                        {
+                            let before = self.layout.len();
+                            self.more_hints();
+                            if self.layout.len() > before || self.hint_done {
+                                break;
+                            }
+                        }
                         self.highlight = (self.highlight as isize + delta)
                             .clamp(0, self.layout.len().saturating_sub(1) as isize)
                             as usize
                     }
                     Page(delta) => {
-                        let size = self.settings.page_size;
+                        let size = self.settings.page_size.max(1);
+                        // 逐码提示一批一批补：翻到这批的最后一页，再翻就从表里补下一批，
+                        // 翻页不会停在第一批（默认 18 条、每页 5 个时正好 4 页）。
+                        while delta > 0
+                            && !self.hint_done
+                            && self.layout.len().div_ceil(size).max(1) <= self.highlight / size + 1
+                        {
+                            let before = self.layout.len();
+                            self.more_hints();
+                            if self.layout.len() == before && self.hint_done {
+                                break;
+                            }
+                        }
                         let pages = self.layout.len().div_ceil(size).max(1);
                         let page = (self.highlight as isize / size as isize + delta)
                             .clamp(0, pages as isize - 1)
@@ -970,6 +1026,101 @@ mod tests {
         ime.handle(Key::Char('w'), &mut kept);
         ime.handle(Key::Char(' '), &mut kept);
         assert_eq!(ime.take_notice().as_deref(), Some("「公文」可直接打 ab"));
+    }
+    /// 逐码提示打开、以「ab」开头的四码候选有 41 条（另加一条精确简码）：
+    /// 一批只补 18 条，翻到这批的最后一页再翻页才接着补。
+    fn ime_with_many_prefix_hints() -> Ime {
+        let mut ime = ime();
+        ime.settings.prefix_hint = true;
+        let mut extra = String::from("ab,1=简码\n");
+        for i in 0..40u8 {
+            let second = char::from(b'a' + i / 26);
+            let third = char::from(b'a' + i % 26);
+            extra.push_str(&format!("ab{second}{third},1=词{i}\n"));
+        }
+        ime.table.base.extend(table::parse(&extra, false).entries);
+        ime.table.rebuild();
+        type_code(&mut ime, "ab");
+        ime
+    }
+    #[test]
+    fn prefix_hints_keep_paging_past_the_first_batch() {
+        let mut ime = ime_with_many_prefix_hints();
+        let nav = |ime: &mut Ime, page: isize| {
+            ime.execute_guarded(Action::Navigate(keys::Navigation::Page(page)))
+        };
+        // 精确候选 1 条 + 第一批提示 18 条 = 4 页（每页 5 个）。
+        assert_eq!(ime.exact, 1);
+        assert_eq!(ime.layout.len(), 1 + PREFIX_HINT_LIMIT);
+        assert_eq!(ime.layout.len().div_ceil(5), 4);
+        for _ in 0..3 {
+            nav(&mut ime, 1);
+        }
+        assert_eq!(ime.highlight, 15);
+        // 再翻一下：这批翻完了，从表里接着补一批，翻页不停在 4 页。
+        nav(&mut ime, 1);
+        assert_eq!(ime.highlight, 20);
+        assert_eq!(ime.layout.len(), 1 + 2 * PREFIX_HINT_LIMIT);
+        assert!(ime.layout.len().div_ceil(5) > 5);
+        // 一直翻到表尾：提示补完（精确 1 条 + 提示 41 条，共 9 页），停在最后一页。
+        for _ in 0..20 {
+            nav(&mut ime, 1);
+        }
+        assert_eq!(ime.layout.len(), 1 + 41);
+        assert_eq!(ime.layout.len().div_ceil(5), 9);
+        assert_eq!(ime.highlight, 40);
+        // 表里没有更多了：再翻也不动，也不会多补一遍。
+        nav(&mut ime, 1);
+        assert_eq!(ime.layout.len(), 1 + 41);
+        assert_eq!(ime.highlight, 40);
+        // 往回翻不受影响。
+        nav(&mut ime, -1);
+        assert_eq!(ime.highlight, 35);
+    }
+    #[test]
+    fn arrow_keys_load_more_prefix_hints_at_the_end() {
+        let mut ime = ime_with_many_prefix_hints();
+        let down =
+            |ime: &mut Ime| ime.execute_guarded(Action::Navigate(keys::Navigation::Highlight(1)));
+        for _ in 0..18 {
+            down(&mut ime);
+        }
+        assert_eq!(ime.highlight, 18); // 第一批的最后一个
+        assert_eq!(ime.layout.len(), 1 + PREFIX_HINT_LIMIT);
+        // 方向键接着往下挪，也要能补出后面的候选。
+        down(&mut ime);
+        assert_eq!(ime.highlight, 19);
+        assert_eq!(ime.layout.len(), 1 + 2 * PREFIX_HINT_LIMIT);
+    }
+    #[test]
+    fn arrow_keys_skip_a_fully_duplicated_prefix_hints_batch() {
+        let mut ime = Ime::bare(ImeSettings::default());
+        ime.settings.prefix_hint = true;
+        let mut extra = String::from("ab,1=简码\n");
+        for i in 0..(2 * PREFIX_HINT_LIMIT + 1) {
+            let second = char::from(b'a' + (i / 26) as u8);
+            let third = char::from(b'a' + (i % 26) as u8);
+            let word = if i < 2 * PREFIX_HINT_LIMIT {
+                format!("词{}", i % PREFIX_HINT_LIMIT)
+            } else {
+                "新词".into()
+            };
+            extra.push_str(&format!("ab{second}{third},1={word}\n"));
+        }
+        ime.table.base = table::parse(&extra, false).entries;
+        ime.table.rebuild();
+        type_code(&mut ime, "ab");
+        let down =
+            |ime: &mut Ime| ime.execute_guarded(Action::Navigate(keys::Navigation::Highlight(1)));
+        for _ in 0..PREFIX_HINT_LIMIT {
+            down(&mut ime);
+        }
+        assert_eq!(ime.layout.len(), 1 + PREFIX_HINT_LIMIT);
+        // 第二批全与第一批同词，应越过它直接补出第三批里的新候选。
+        down(&mut ime);
+        assert_eq!(ime.highlight, 1 + PREFIX_HINT_LIMIT);
+        assert_eq!(ime.layout.len(), 2 + PREFIX_HINT_LIMIT);
+        assert_eq!(ime.layout[ime.highlight].text, "新词");
     }
     #[test]
     fn recent_commits_feed_make_word_until_editing_keys() {
