@@ -2,6 +2,7 @@
 //! 可以逐条回到某次修改之前的状态。基础表另有 `base.previous.txt`，不在这里。
 use super::{data, table::Personal};
 use serde::{Deserialize, Serialize};
+use std::io;
 use std::path::Path;
 
 /// 最多保留几次。
@@ -21,12 +22,34 @@ fn index_path(dir: &Path) -> std::path::PathBuf {
 
 /// 最近的修改记录，新的在前。读不到就当没有。
 pub(super) fn list(dir: &Path) -> Vec<Record> {
-    let mut records: Vec<Record> = std::fs::read(index_path(dir))
+    let mut records: Vec<Record> = read_settled(&index_path(dir))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
     records.reverse();
     records
+}
+
+/// 读一个小文件，遇到「拒绝访问」重试几次。
+///
+/// Windows 上杀毒软件与索引服务会在文件刚落盘时短暂占住它（移动磁盘、沙箱里更明显），
+/// 这时 `fs::read` 报 `os error 5`。修改记录是刚写完就要读回的，一次共享冲突就把
+/// 快照读失败、甚至把索引读成空表，只能是偶发故障，所以重试几百毫秒。
+fn read_settled(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut last: Option<io::Error> = None;
+    for attempt in 0..6u32 {
+        match std::fs::read(path) {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    u64::from(attempt) * 20 + 10,
+                ));
+                last = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.expect("循环至少跑过一次"))
 }
 
 /// 把当前 `tables.json` 存为一条记录。没有当前文件时什么也不做。
@@ -67,7 +90,7 @@ pub(super) fn load(dir: &Path, id: &str) -> anyhow::Result<Personal> {
         id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
         "修改记录编号无效"
     );
-    let bytes = std::fs::read(dir.join("history").join(format!("{id}.json")))?;
+    let bytes = read_settled(&dir.join("history").join(format!("{id}.json")))?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 

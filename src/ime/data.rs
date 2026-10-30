@@ -17,8 +17,24 @@ pub(super) fn save_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write as _;
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
-    file.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    // Windows 上杀毒软件与索引服务会在目标文件刚被替换时短暂占住它，重命名覆盖会
+    // 报「拒绝访问」。重试几百毫秒就过去了，一次抖动不该让用户看到保存失败。
+    let mut pending = file;
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..6u32 {
+        match pending.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.error.kind() == std::io::ErrorKind::PermissionDenied => {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    u64::from(attempt) * 20 + 10,
+                ));
+                last = Some(error.error);
+                pending = error.file;
+            }
+            Err(error) => return Err(error.error.into()),
+        }
+    }
+    Err(last.expect("循环至少跑过一次").into())
 }
 pub(super) fn save_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
     save_bytes(path, &serde_json::to_vec_pretty(value)?)
