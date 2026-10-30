@@ -28,6 +28,13 @@ RUNTIME_DIR="${2:?missing runtime directory}"
 OUTPUT_DIR="${3:?missing output directory}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# 打技能包时要 cd 到 skills/ 再引用输出目录，传进来的相对路径先转绝对；
+# 相对路径在 `(cd ... && zip ...)` 里会相对新工作目录解析，报「No such file」。
+RUNTIME_DIR="$(cd "$RUNTIME_DIR" && pwd)"
+BINARY="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+
 if [ ! -x "$BINARY" ]; then
     echo "error: binary not found or not executable: $BINARY" >&2
     exit 1
@@ -47,7 +54,6 @@ is_retired_runtime_asset() {
     esac
 }
 
-mkdir -p "$OUTPUT_DIR"
 install -m 755 "$BINARY" "$OUTPUT_DIR/gongwen-assistant"
 
 runtime_out="$OUTPUT_DIR/runtime"
