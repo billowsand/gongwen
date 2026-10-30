@@ -292,8 +292,7 @@ impl Ime {
             }
         }
         if self.browser.open {
-            self.browser.all = std::mem::take(&mut self.layout);
-            self.filter_browser();
+            self.keep_characters();
         }
         let mut known = HashSet::new();
         self.layout.retain(|slot| known.insert(slot.text.clone()));
@@ -1015,11 +1014,9 @@ mod tests {
                 .commit
                 .is_none()
         );
-        ime.execute_guarded(Action::Navigate(keys::Navigation::Highlight(1)));
-        // 第一次向下只展开，再向右选择第二格。
-        ime.execute_guarded(Action::Navigate(keys::Navigation::CursorRight));
+        // 按数字才选得到提示出来的词。
         assert_eq!(
-            ime.execute_guarded(Action::CommitHighlighted)
+            ime.execute_guarded(Action::CommitIndex(1))
                 .commit
                 .as_deref(),
             Some("公式")
@@ -1042,14 +1039,19 @@ mod tests {
     }
     /// 逐码提示打开、以「ab」开头的四码候选有 41 条（另加一条精确简码）：
     /// 一批只补 18 条，翻到这批的最后一页再翻页才接着补。
+    /// 第 `i` 个测试用单字（从「一」起顺排）。
+    fn hanzi(i: u32) -> String {
+        char::from_u32(0x4E00 + i).unwrap().to_string()
+    }
+    /// 逐码提示打开、以「ab」开头：精确简码是词组「简码」，后面 41 个四码单字。
     fn ime_with_many_prefix_hints() -> Ime {
         let mut ime = ime();
         ime.settings.prefix_hint = true;
         let mut extra = String::from("ab,1=简码\n");
-        for i in 0..40u8 {
+        for i in 0..41u8 {
             let second = char::from(b'a' + i / 26);
             let third = char::from(b'a' + i % 26);
-            extra.push_str(&format!("ab{second}{third},1=词{i}\n"));
+            extra.push_str(&format!("ab{second}{third},1={}\n", hanzi(u32::from(i))));
         }
         ime.table.base.extend(table::parse(&extra, false).entries);
         ime.table.rebuild();
@@ -1065,17 +1067,21 @@ mod tests {
         ime.execute_guarded(Action::Navigate(keys::Navigation::Page(1)));
         assert!(ime.browser.open);
         assert_eq!(ime.highlight, 0);
-        assert_eq!(ime.layout.len(), 42);
+        // 展开只列单字：精确码的词组「简码」与以 ab 开头的「公文」都不在里面。
+        assert_eq!(ime.layout.len(), 41);
+        assert_eq!(ime.exact, 0);
+        assert!(ime.layout.iter().all(|slot| slot.text.chars().count() == 1));
+        assert_eq!(ime.layout[0].text, hanzi(0));
         // 每行 5 格，翻页一次翻 4 行（20 格），到表尾停住。
         ime.execute_guarded(Action::Navigate(keys::Navigation::Page(1)));
         assert_eq!(ime.highlight, 20);
         for _ in 0..20 {
             ime.execute_guarded(Action::Navigate(keys::Navigation::Page(1)));
         }
-        assert_eq!(ime.highlight, 41);
+        assert_eq!(ime.highlight, 40);
         assert_eq!(ime.browser.top_row, 5);
-        // 数字键只选高亮所在的那一行：这一行只有 40、41 两格。
-        assert_eq!(ime.execute_guarded(Action::CommitIndex(2)).commit, None);
+        // 数字键只选高亮所在的那一行：末行只有第 40 格一个字。
+        assert_eq!(ime.execute_guarded(Action::CommitIndex(1)).commit, None);
         assert_eq!(ime.execute_guarded(Action::CommitIndex(5)).commit, None);
         ime.execute_guarded(Action::Clear);
         assert!(!ime.browser.open);
@@ -1093,7 +1099,7 @@ mod tests {
             ime.execute_guarded(Action::CommitIndex(4))
                 .commit
                 .as_deref(),
-            Some("词3")
+            Some(hanzi(3).as_str())
         );
     }
 
