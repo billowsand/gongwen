@@ -28,8 +28,12 @@
 //!
 //! **当前行的号是一枚实心牌子。** 光标停在哪一行，那一行的号就从淡灰翻成主色底、
 //! 纸色字的小方牌——投屏时对面一眼就看见"现在说的是这一行"，不必再念一遍号码。
-//! 指针扫过某一行时同样亮，因为对稿时鼠标本来就是拿来指的。平时一个牌子都不亮：
-//! 常年亮着的高亮等于没有高亮。
+//! 正文段折成几行时亮的只有光标所在那一行：排版时按可见字对过位（
+//! [`GutterRow::precise`]），不是拿光标所在整条源码行去比段级范围——否则一个
+//! 长段五枚牌子一起亮，「现在说的是这一行」就成了空话。版面上没有文字光标时
+//! （纯纸面模式）退而求其次，按整条锚线与块的源码范围重叠点亮。指针扫过某一行
+//! 时同样亮，因为对稿时鼠标本来就是拿来指的。平时一个牌子都不亮：常年亮着的
+//! 高亮等于没有高亮。
 //!
 //! **号码与正文同一条基线。** 公文正文是固定行距 28 磅，比字高出一截，字实际上
 //! 靠在行的上半段；号码若按行框居中就会整体偏下，看着像挂在两行之间。这里取行内
@@ -94,6 +98,15 @@ pub(crate) struct GutterRow {
     /// 这一行的文字在 Markdown 源码里的范围。点号码跳转用；
     /// 认不到源码的行仍然照编号，只是点不动。
     source: Option<Range<usize>>,
+    /// 这一行知道自己承载着光标的哪几个字：排版时按可见字精确对位过
+    /// （`layout::clickable_justified_job`）。`true` 时「光标在这一行」以
+    /// `caret` 为准，不再拿块级源码范围比整条锚线——否则一个折成五行的长段
+    /// 会五枚牌子一起亮。走 `mark_sourced_row` 等粗粒度路径的行是 `false`，
+    /// 退回按块级范围与锚线重叠判断。
+    precise: bool,
+    /// 预览文字光标（编辑区光标在版面里的投影）正落在这一行。只有
+    /// `precise` 行会置它；cached 行重放时不带，一律 `false`。
+    caret: bool,
 }
 
 /// 本帧记下的全部行。`Metrics` 带着它走一遍版面，纸画完再统一标到页边。
@@ -131,6 +144,29 @@ impl Gutter {
 
     /// 记下一行。`source` 给 `None` 时沿用当前块的源码范围。
     pub(crate) fn push(&mut self, rect: egui::Rect, baseline: f32, source: Option<Range<usize>>) {
+        self.push_inner(rect, baseline, source, false, false);
+    }
+
+    /// 记下一行，并标明排版时精确对位过光标：光标是否落在这一行以
+    /// `caret` 为准，高亮不再退回块级范围比对。
+    pub(crate) fn push_precise(
+        &mut self,
+        rect: egui::Rect,
+        baseline: f32,
+        source: Option<Range<usize>>,
+        caret: bool,
+    ) {
+        self.push_inner(rect, baseline, source, true, caret);
+    }
+
+    fn push_inner(
+        &mut self,
+        rect: egui::Rect,
+        baseline: f32,
+        source: Option<Range<usize>>,
+        precise: bool,
+        caret: bool,
+    ) {
         if !self.on || !rect.is_finite() || !baseline.is_finite() {
             return;
         }
@@ -142,6 +178,8 @@ impl Gutter {
             baseline,
             page: self.page,
             source: source.or_else(|| self.sourced.clone()),
+            precise,
+            caret,
         });
     }
 
@@ -165,6 +203,7 @@ pub(crate) struct CachedRow {
     right: f32,
     baseline: f32,
     source: Option<Range<usize>>,
+    precise: bool,
 }
 
 impl Gutter {
@@ -189,11 +228,14 @@ impl Gutter {
                 source: row.source.as_ref().map(|source| {
                     source.start.saturating_sub(base)..source.end.saturating_sub(base)
                 }),
+                precise: row.precise,
             })
             .collect()
     }
 
     /// 把 [`Gutter::capture`] 取出的行按新的块位置补回来，记在当前这张纸上。
+    /// 缓存里不记光标落点：重放的行一律不带 `caret`， precise 行因此不亮牌，
+    /// 回到视野里重新排版那一帧才恢复——见 [`Gutter::push_precise`]。
     pub(crate) fn replay(&mut self, rows: &[CachedRow], origin: egui::Pos2, base: usize) {
         if !self.on {
             return;
@@ -211,6 +253,8 @@ impl Gutter {
                     .source
                     .as_ref()
                     .map(|source| source.start + base..source.end + base),
+                precise: row.precise,
+                caret: false,
             }
         }));
     }
@@ -228,6 +272,18 @@ pub(crate) fn row_baseline(row: &egui::epaint::text::Row, top: f32) -> f32 {
         Some(glyph) => top + glyph.pos.y,
         None => top + row.size.y * 0.75,
     }
+}
+
+/// 「光标正落在这一行」的牌子判定。版上有文字光标时（对照模式、编辑区有焦点），
+/// 精确对位的行只认光标本身：一个折成几行的长段，亮的只有光标所在那一行。
+/// 版上没有文字光标（纯纸面模式、编辑区没焦点）时，精确行也退回整条锚线与
+/// 块级源码范围重叠——粗粒度路径记下的行（标题、表格……）一向按这条走。
+fn caret_active(row: &GutterRow, caret_available: bool, anchor: Option<&Range<usize>>) -> bool {
+    if row.precise && caret_available {
+        return row.caret;
+    }
+    matches!((&row.source, anchor), (Some(source), Some(anchor))
+        if !anchor.is_empty() && anchor.start < source.end && source.start < anchor.end)
 }
 
 /// 把本帧记下的行逐条标到页边。返回被点中的行在源码里的范围。
@@ -259,6 +315,9 @@ pub(crate) fn paint(
         .filter(|pos| visible.contains(*pos));
     let chip_inset = metrics.pt(CHIP_INSET_PT);
     let chip_pad = metrics.pt(CHIP_PAD_PT);
+    // 版上有没有文字光标（编辑区光标在版面里的投影）决定精确行怎么认光标：
+    // 有时只亮光标那一行，没有时精确行也退回锚线重叠比对。
+    let caret_available = super::layout::has_text_cursor(ui.ctx());
     let mut clicked = None;
     for (index, row) in rows.iter().enumerate() {
         // 滚动区外的行照样编号，但不画也不登记热区：一份长稿有上千行，
@@ -316,15 +375,14 @@ pub(crate) fn paint(
         if response.clicked() {
             clicked = row.source.clone();
         }
-        // 亮牌子的三种情形：指针压在号上、指针停在这一行的正文上、左边编辑区的
-        // 光标正落在这一行。平时一个都不亮——常年亮着的高亮等于没有高亮。
+        // 亮牌子的三种情形：指针压在号上、指针停在这一行的正文上、光标正落在
+        // 这一行。平时一个都不亮——常年亮着的高亮等于没有高亮。
         let active = (clickable && response.hovered())
             || pointer.is_some_and(|at| {
                 at.y >= row.top && at.y <= row.bottom && at.x >= chip.left() && at.x <= row.right
             })
             || (!super::layout::has_text_selection(ui.ctx())
-                && matches!((&row.source, anchor), (Some(source), Some(anchor))
-                if !anchor.is_empty() && anchor.start < source.end && source.start < anchor.end));
+                && caret_active(row, caret_available, anchor));
         if active {
             ui.painter()
                 .rect_filled(chip, egui::CornerRadius::same(CHIP_RADIUS), theme::accent());
@@ -437,5 +495,42 @@ mod tests {
         gutter.push_sourced(row(400.0), 415.0);
         let pages = gutter.rows.iter().map(|row| row.page).collect::<Vec<_>>();
         assert_eq!(pages, vec![1, 1, 2]);
+    }
+
+    /// 光标牌子的判定口径：版上有文字光标时，精确对位的行（正文段）只亮光标
+    /// 所在那一行——一个折成几行的长段不该整段的号一起亮；版上没有文字光标时
+    /// （纯纸面模式），精确行退回整条锚线与块级源码范围重叠。
+    #[test]
+    fn caret_chip_lights_only_the_caret_row_of_a_precise_block() {
+        let line = 10..90;
+        let anchor = Some(30..30 + "一行".len());
+        let precise_row = |caret| GutterRow {
+            left: 100.0,
+            top: 0.0,
+            bottom: 20.0,
+            right: 400.0,
+            baseline: 15.0,
+            page: 0,
+            source: Some(line.clone()),
+            precise: true,
+            caret,
+        };
+        // 有光标：只有带光标的那一行亮，同段其余行不亮。
+        assert!(caret_active(&precise_row(true), true, anchor.as_ref()));
+        assert!(!caret_active(&precise_row(false), true, anchor.as_ref()));
+        // 没有光标（纯纸面模式）：精确行退回锚线重叠，光标行自然亮。
+        assert!(caret_active(&precise_row(false), false, anchor.as_ref()));
+        assert!(!caret_active(&precise_row(false), false, None));
+        // 粗粒度路径记下的行（标题、表格……）两种情形都按锚线重叠走。
+        let coarse = GutterRow {
+            precise: false,
+            caret: false,
+            ..precise_row(false)
+        };
+        assert!(caret_active(&coarse, true, anchor.as_ref()));
+        assert!(!caret_active(&coarse, true, None));
+        // 锚在段外也不影响：有光标时精确行只认光标本身，锚点不参与判定。
+        let outside = Some(0..5);
+        assert!(caret_active(&precise_row(true), true, outside.as_ref()));
     }
 }

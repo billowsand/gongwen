@@ -1217,8 +1217,22 @@ pub(crate) fn clickable_justified_job(
     for (row_index, (placed, row_galley)) in base.rows.iter().zip(&rows).enumerate() {
         let row_end = row_start + placed.glyphs.len();
         // 行号认的是纸面上的行：一段排成几行就记几笔，跳转认第一段压在这一行上的
-        // 源码行——一行文字横跨两条源码行时，报的号指向它起头的那一条。
-        metrics.mark_row(
+        // 源码行——一行文字横跨两条源码行时，报的号指向它起头的那一条。光标落在
+        // 哪一行是排版时按可见字对位出来的（`caret`），记给号栏：长段折行时只有
+        // 光标所在那一行的号亮，不是整段一起亮。
+        let caret_here = caret.is_some_and(|(index, _)| {
+            segments.get(index).is_some_and(|segment| {
+                caret_in_row(
+                    caret,
+                    index,
+                    segment,
+                    segment.chars.start.max(row_start),
+                    segment.chars.end.min(row_end),
+                )
+                .is_some()
+            })
+        });
+        metrics.mark_precise_row(
             egui::Rect::from_min_size(
                 egui::pos2(block_rect.left(), block_rect.top() + placed.pos.y),
                 egui::vec2(metrics.content, placed.size.y),
@@ -1228,6 +1242,7 @@ pub(crate) fn clickable_justified_job(
                 .iter()
                 .find(|segment| segment.chars.start < row_end && row_start < segment.chars.end)
                 .map(|segment| segment.source.clone()),
+            caret_here,
         );
         for (segment_index, segment) in segments.iter().enumerate() {
             let start = segment.chars.start.max(row_start);

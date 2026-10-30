@@ -442,6 +442,21 @@ impl Metrics {
         self.gutter.borrow_mut().push(rect, baseline, source);
     }
 
+    /// 同 [`Metrics::mark_row`]，但标明排版时精确对位过光标：`caret` 为真时
+    /// 这一行的行号牌子随光标点亮，不再按块级源码范围与整条锚线重叠判断——
+    /// 长段折行时只有光标所在那一行亮。见 [`gutter::Gutter::push_precise`]。
+    fn mark_precise_row(
+        &self,
+        rect: egui::Rect,
+        baseline: f32,
+        source: Option<Range<usize>>,
+        caret: bool,
+    ) {
+        self.gutter
+            .borrow_mut()
+            .push_precise(rect, baseline, source, caret);
+    }
+
     /// 记下纸面上的一行，但只在正在画来自源码的块时才记。抬头、主送、落款
     /// 共用的那些部件走这条路，表单要素因此不会拿到行号。
     fn mark_sourced_row(&self, rect: egui::Rect, baseline: f32) {
