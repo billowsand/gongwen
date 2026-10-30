@@ -1,0 +1,23 @@
+# 稿件包 .gwx 的 MIME 类型与图标是本包自带的，pacman 装第三方包不会跑
+# 系统触发器，桌面数据库要自己刷一次，否则双击 .gwx 不认这个类型。
+post_install() {
+  if command -v update-mime-database >/dev/null 2>&1; then
+    update-mime-database /usr/share/mime
+  fi
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor
+  fi
+}
+
+post_upgrade() {
+  post_install
+}
+
+post_remove() {
+  if command -v update-mime-database >/dev/null 2>&1; then
+    update-mime-database /usr/share/mime
+  fi
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor
+  fi
+}

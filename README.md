@@ -247,7 +247,7 @@
 | 导出 | Markdown、DOCX（Word）、PDF（内置 Typst 排版，公文与研究报告）、Typst 包（模板 + 数据 + 资源，用 typst CLI 编译）、花脸稿、送批材料合并 PDF、稿件包（.gwx） |
 | 校对 | 内置 155 条校对词表（错别字 / 近义混淆 / 语病 / 套话虚词 / 称谓规范 / 公文用语六组，必错一键替换）+ 20 条文档级规则（文号 / 日期 / 标题 / 附件 / 称谓 / 句末 / 行文语体），规则按文类收紧并在「校对词表」页可查编号、依据与适用范围 |
 | 导入 | 24 种格式文件新建文档（Word / Excel / PPT / ODF / RTF / EPUB / CSV / PDF 电子版…），词库与校对词表支持 Excel 导入导出 |
-| 平台 | Windows x64 安装程序、Linux ARM64 deb（GLIBC 2.28，兼容 Ubuntu 20.04 / 麒麟 V10，含国产系统打印兼容）（均附 SHA-256） |
+| 平台 | Windows x64 安装程序、Linux ARM64 deb（GLIBC 2.28，兼容 Ubuntu 20.04 / 麒麟 V10，含国产系统打印兼容）、Linux x86_64 Arch / Omarchy pacman 包（`pacman -U` 离线安装）（均附 SHA-256） |
 
 ## 快速开始
 
@@ -264,7 +264,7 @@
 ## 文档
 
 - [使用手册](docs/manual.md)：完整用户手册，23 章 + 3 附录，覆盖写作全流程、AI 能力、任务助手、词表知识库与设置。应用内也可读：菜单 →「使用帮助」或按 `F1`
-- [安装指南](docs/install.md)：各平台发布包、Arch/Omarchy 与 fcitx5 候选窗说明、从源码构建
+- [安装指南](docs/install.md)：各平台发布包、Arch / Omarchy 的 `pacman -U` 离线安装与 fcitx5 候选窗说明、从源码构建
 - [AI 架构设计](docs/ai-architecture.md)：三条红线、确定性闸门与修订建议总线的设计细节
 
 ## 项目结构与开发
@@ -292,7 +292,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-GitHub Actions：CI 在 Windows x64 与 Linux ARM64（GLIBC 2.28）两个平台执行格式、静态检查和测试；推送 `v*` 标签后自动构建 Windows x64 安装程序与 Linux ARM64 deb（兼容 Ubuntu 20.04）及 SHA-256 校验和并创建 Release。
+GitHub Actions：CI 在 Windows x64 与 Linux ARM64（GLIBC 2.28）两个平台执行格式、静态检查和测试；推送 `v*` 标签后自动构建 Windows x64 安装程序、Linux ARM64 deb（兼容 Ubuntu 20.04）与 Linux x86_64 的 Arch / Omarchy pacman 包（`pacman -U` 离线安装），连同 SHA-256 校验和创建 Release。
 
 ## 许可
 

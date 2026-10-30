@@ -47,7 +47,7 @@ cargo build --release --locked
 
 - 开发构建给依赖开 `opt-level = 3`（见 `Cargo.toml`），首次编译依赖约需一分钟，属正常。
 - `cargo test` 有**约 5 个与沙箱环境相关的失败，是预期结果**，不要为此改动测试。
-- Linux 变体：Arch/Omarchy 包（已不随 Release 发布，需自行构建）用
+- Linux 变体：Arch/Omarchy 包（随 Release 发布 x86_64 的 `.pkg.tar.zst`）用
   `cargo build --release --locked --no-default-features --features linux-portal-dialogs`。
 - **文件对话框不能占住主线程**。Wayland 合成器（Hyprland 等）每 1.5 秒给客户端发一次
   存活探测，主线程一停就弹「应用无响应」系统对话框。系统文件框一律走
@@ -265,9 +265,10 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 - 本机**没有 `pwsh`**，不要调用 `scripts/bump-version.ps1`，手动编辑上述两处。
 - `ci.yml` 在 push `main` 时触发（Windows x64 / Linux ARM64（GLIBC 2.28）两平台跑 fmt / clippy / test；
   另在干净的 Ubuntu 20.04 ARM64 里装 deb 并用 Xvfb 真正启动一次，见 `scripts/smoke-launch-linux.sh`）；
-  `release.yml` 在 push `v*` tag 时触发，只产出 4 个资产：Windows x64 setup.exe、
-  Linux ARM64 deb（Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）
-  及各自 `.sha256`。macOS、Linux AMD64、Arch/Omarchy 包不再发布。
+  `release.yml` 在 push `v*` tag 时触发，只产出 6 个资产：Windows x64 setup.exe、
+  Linux ARM64 deb（Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）、
+  Linux x86_64 的 Arch / Omarchy pacman 包（`archlinux:base` 容器构建，`makepkg` 打成
+  `.pkg.tar.zst`，供离线机器 `pacman -U`），及各自 `.sha256`。macOS、Linux AMD64 的 deb 不再发布。
 - Release workflow 全程约 20–30 分钟。
 - 完整发布流程（bump → tag → 监控 → 写中文 release notes → 验证）见 skill `release`。
   **硬性要求：release 正文必须手写，不能用 `--generate-notes` 的占位说明。**

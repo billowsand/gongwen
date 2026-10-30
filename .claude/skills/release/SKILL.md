@@ -13,15 +13,16 @@ description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与使�
 
 - 远程：`git@github.com:billowsand/gongwen.git`，发布分支 `main`。
 - 版本号只维护在 `Cargo.toml`（根包 `version`）+ `Cargo.lock`（根包 `gongwen-assistant` 的 `version`）。**注意 `Cargo.lock` 里另有若干同名版本的依赖**（`block2`、`type-map`、`windows-strings`、`zune-core` 等），只改 `name = "gongwen-assistant"` 那一条。
-- 工作流：`ci.yml` 在 push main 时触发（fmt / clippy / test：Windows x64 + Linux ARM64 两平台）；`release.yml` 在 push `v*` tag 时触发，共 5 个 job（build-windows、build-linux-arm64、package-linux-arm64、verify-deb、release）。
+- 工作流：`ci.yml` 在 push main 时触发（fmt / clippy / test：Windows x64 + Linux ARM64 两平台）；`release.yml` 在 push `v*` tag 时触发，共 7 个 job（build-windows、build-linux-arm64、package-linux-arm64、verify-deb、build-linux-x86_64-arch、verify-arch-pkg、release）。
 - **版本更新说明由工作流取仓库文件**：`release.yml` 的 `release` job 读 `docs/release-notes/${GITHUB_REF_NAME}.md`，有则 `gh release create --title "公文助手 vX.Y.Z" --notes-file <该文件>`；**缺文件才回退 `--generate-notes` 并打一条 `::warning::`**。所以说明必须在打 tag 前提交进仓库，不是发完再补。
 - **用户文档有三份，发版时都可能过期**（发版前必查，见步骤 3）：
   - `README.md`（根目录）：面向读者的宣发版，含成堆**会随版本漂移的硬数字**（文种 7 种、导入 24 种格式、校对词表 155 条、文档级规则 21 条、约 21.2 万行 Rust、1852 项自动化测试——括号里是 v0.9.1 的值，**每版都要重新数**，见步骤 3）。打包脚本会把它复制进发布包（`scripts/package-portable.ps1`、`scripts/package-dmg.sh`），所以它是**随包发行**的文档，不是仓库自留物。
   - 使用帮助：`assets/help/*.md` 是**一篇研究报告**（`00-front.md` 题名、目录、摘要，其后每章一个文件，按文件名升序拼接），应用内用研究报告预览排、「生成 PDF」走研究报告 Typst 链；示意图是正文里的 Mermaid 围栏，只有界面截图是位图（`assets/help/images/help-*.png`）。文件清单在 `src/help/content.rs` 的 `FILES` / `IMAGES`，测试会核对与目录一致。**只此一份，没有副本**。
   - `docs/install.md`（安装指南）与 `docs/manual.md`（手册目录页，分部表格列出全部章号章名）。
-- **Release 资产是 4 个**（v0.6.6 之后的口径；macOS、Linux AMD64、Arch/Omarchy 与 PKGBUILD 不再发布）：
+- **Release 资产是 6 个**（v0.9.10 起的口径；macOS 与 Linux AMD64 的 deb 不再发布）：
   - `gongwen-assistant-X.Y.Z-win-x64-setup.exe` + `.sha256`
   - `gongwen-assistant_X.Y.Z_arm64.deb` + `.sha256`（Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）
+  - `gongwen-assistant-X.Y.Z-1-x86_64.pkg.tar.zst` + `.sha256`（Arch / Omarchy 包：`archlinux:base` 容器构建，`makepkg` 打包，离线机器 `pacman -U` 安装）
 - 本机无 `pwsh`：不能跑 `scripts/bump-version.ps1`，版本号用手动编辑。
 - **提交预分诊（可选加速，用 eval 的 `judge_batch`）**：本机 omp 已接入 TypeSafe
   （judge 模型角色 = `typesafe/jev-latest`），一条 `judge_batch` 调用就能把本区间每条提交的
@@ -31,7 +32,7 @@ description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与使�
   **它不替代任何硬性要求**：版本更新说明仍要手写，README / 使用帮助仍要人工过目。
   没配 TypeSafe 凭据就跳过，流程完全不变。
 - 历史惯例：tag 为 **annotated tag**（消息为中文概述）；release 标题为「公文助手 vX.Y.Z」；版本号按 **patch** 递增（`v0.5.x` 系列）；发布前有一个 `chore: release vX.Y.Z` 提交（可同时带上说明文件）。
-- Release workflow 全程约 20–30 分钟（Windows + Linux ARM64 构建 + 打包），`gh run watch` 一轮就能等完。
+- Release workflow 全程约 30–45 分钟（Windows + Linux ARM64 + Arch x86_64 构建与打包），`gh run watch` 一轮就能等完。
 
 ## 工作流
 
@@ -207,7 +208,7 @@ gh run watch <run-id> --interval 60 --exit-status   # 可后台运行，两路�
 gh run view <run-id> --json status,conclusion,jobs --jq '"\(.status)/\(.conclusion)", (.jobs[] | "  \(.name): \(.conclusion)")'
 ```
 
-- 期望终态：CI 全部 job success；Release 的 5 个 job（Build Windows x64 / Build Linux ARM64 / Package Linux ARM64 / Verify deb install / Publish GitHub release）全 success。
+- 期望终态：CI 全部 job success；Release 的 7 个 job（Build Windows x64 / Build Linux ARM64 / Package Linux ARM64 / Verify deb install / Build Linux AMD64 / Arch / Verify pacman install / Publish GitHub release）全 success。
 - `gh run view --json jobs` 里 `Build …` 的 job 名带平台后缀（如 `Build Linux ARM64 / GLIBC 2.28`），按包含关键字筛选：
   `gh run view <id> --json jobs --jq '.jobs[] | select(.name | test("ARM64")) | .databaseId'`。
 - **CI 失败时**：先 `gh run cancel` 取消所有本次相关 run（CI + Release，避免浪费与旧 release 干扰）→ 本地修复（多数是 fmt 或环境假设类断言）→ 提交 → 移动 tag（步骤 6 的做法）→ 重新 `git push origin main` + `git push origin vX.Y.Z`。
@@ -242,12 +243,12 @@ gh run view <release-run-id> --json status,conclusion
 gh api repos/billowsand/gongwen/releases/tags/vX.Y.Z \
   --jq '{name, tag_name, draft, prerelease, html_url}'
 gh release list --limit 3                                            # 本版应为 Latest
-gh release view vX.Y.Z --json assets --jq '.assets[] | .name'         # 应为 4 个资产
+gh release view vX.Y.Z --json assets --jq '.assets[] | .name'         # 应为 6 个资产
 git rev-parse vX.Y.Z^{commit}; git rev-parse HEAD                     # 两者相等
 git status -sb                                                       # 与 origin/main 同步、工作区干净
 ```
 
-- release 必须：`draft=false`、`prerelease=false`、标题「公文助手 vX.Y.Z」、正文为手写说明（与仓库文件一致）、**4 个资产齐全**且各安装包都有对应 `.sha256`。
+- release 必须：`draft=false`、`prerelease=false`、标题「公文助手 vX.Y.Z」、正文为手写说明（与仓库文件一致）、**6 个资产齐全**且各安装包都有对应 `.sha256`。
 - 抽查一个校验和文件真的对得上（资产从同一轮 run 上传，抽查 deb 一个即可）：
 
 ```bash
@@ -307,7 +308,7 @@ cd - && rm -rf /tmp/kw
 | release 正文是 generate-notes 占位 | 缺 `docs/release-notes/vX.Y.Z.md`。先记下文件内容，`gh release edit vX.Y.Z --title "公文助手 vX.Y.Z" --notes-file …` 补正；同时把文件补提交，下次同 tag 重跑就不会再回退 |
 | release 标题/正文不对 | `gh release edit vX.Y.Z --title "..." --notes-file ...`（幂等，可重复执行） |
 | 发版后才发现 README / 使用帮助没跟上 | 别指望下版补：优先按步骤 6 移动 tag 重跑（代价是两平台构建再来一轮）；若只是文字补充、不值得重跑，就单独提 `docs:` 提交并用 `gh release edit vX.Y.Z --notes-file …` 把文档改动补进正文，**同时把步骤 3 的检查固化到下一次发版** |
-| 资产数不是 4 | `gh release view vX.Y.Z --json assets --jq '.assets[].name'` 对比上面清单；少平台包看对应 build/package job 的日志 |
+| 资产数不是 6 | `gh release view vX.Y.Z --json assets --jq '.assets[].name'` 对比上面清单；少平台包看对应 build/package job 的日志 |
 | `judge_batch` 的 `drain()` 取不到东西 | `drain` 是协程，必须 `await`；不 await 会静默不消费、循环立刻空转退出 |
 | 报 `unknown judge_batch "<id>"` | `close()` 之后作业引用失效，状态 / 结果 / 失败项必须在 close 前读完；真丢了结果用 `judge_batch.attach(<id>)` 拿回 |
 | 分诊结果模型不是 `typesafe/*` | 没配 TypeSafe 凭据时 judge 会退到 tiny/smol 对话模型，判定不可信。`/login typesafe` 或设 `TYPESAFE_API_KEY`，或直接跳过分诊走人工 |

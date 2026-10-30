@@ -2,13 +2,13 @@
 
 ## 获取发布版
 
-GitHub Releases 只提供两种发布包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）与 Linux ARM64 Debian 包（`gongwen-assistant_<版本>_arm64.deb`，按 GLIBC 2.28 构建，兼容 Ubuntu 20.04 / 麒麟 V10 及更新的系统）。macOS、Linux AMD64 与 Arch/Omarchy 不再提供发布包，需要时请按下文从源码构建。两种发布包都内含应用与字体（PDF 由程序内置的 Typst 引擎排版），安装后即可离线导出 Markdown、DOCX 与 PDF。
+GitHub Releases 提供三种发布包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）、Linux ARM64 Debian 包（`gongwen-assistant_<版本>_arm64.deb`，按 GLIBC 2.28 构建，兼容 Ubuntu 20.04 / 麒麟 V10 及更新的系统）与 Linux x86_64 的 Arch / Omarchy 包（`gongwen-assistant-<版本>-1-x86_64.pkg.tar.zst`，用 `pacman -U` 离线安装）。macOS 与 Linux AMD64 的 deb 不再提供，需要时请按下文从源码构建。三种发布包都内含应用与字体（PDF 由程序内置的 Typst 引擎排版），安装后即可离线导出 Markdown、DOCX 与 PDF。
 
 安装后稿件包（`.gwx`）已与本程序关联：双击直接打开导入流程，Linux 装了 deb 或 tar
 包也会注册对应的 MIME 类型与文档图标。程序已开着时，双击的稿件包交给已开的窗口
 处理，不再另开一个窗口（需要独立窗口时用启动参数 `--new-window`）。
 
-发布流水线从 `gongwen-runtime` 仓库下载平台 runtime，与 `scripts/package-portable.ps1` 一起组装为完整安装包：Windows 用 Inno Setup 打成安装程序，Debian Linux 用 `scripts/package-deb.sh` 打成 deb（安装到 `/opt/gongwen-assistant`）。相关资产受授权和体积限制，不进入源码仓库。
+发布流水线从 `gongwen-runtime` 仓库下载平台 runtime，与 `scripts/package-portable.ps1`（Linux 用 `scripts/stage-linux-portable.sh`）一起组装为完整安装包：Windows 用 Inno Setup 打成安装程序，Debian Linux 用 `scripts/package-deb.sh` 打成 deb（安装到 `/opt/gongwen-assistant`），Arch / Omarchy 用 `scripts/package-arch-pkg.sh` 打成 `.pkg.tar.zst`（安装到 `/usr/lib/gongwen-assistant`，`pacman -U` 离线安装）。相关资产受授权和体积限制，不进入源码仓库。
 
 本地打 Windows 安装包（`scripts/package-dev.ps1` / `scripts/package-installer.ps1`）需要
 Inno Setup **6.3 或更新**：`.iss` 与 `scripts/ChineseSimplified.isl` 都按 6.7.3 校对过，
@@ -17,9 +17,15 @@ Inno Setup **6.3 或更新**：`.iss` 与 `scripts/ChineseSimplified.isl` 都按
 
 ## 在 Omarchy / Arch Linux 安装
 
-Release 不再提供 Omarchy 运行包与 `PKGBUILD`，需从源码构建。该变体显式使用原生 Wayland、XDG Desktop Portal 与稳定的 `cn.localtools.GongwenAssistant` app id；在 Hyprland 平铺会话中会自动使用紧凑窗口控件。
+Release 提供 x86_64 的 Arch 软件包（Omarchy 4 的 amd64 机器直接用）。下载后离线安装：
 
-从源码构建相同变体时使用：
+```bash
+pacman -U ./gongwen-assistant-<版本>-1-x86_64.pkg.tar.zst
+```
+
+包里已经带好应用与字体（PDF 由内置 Typst 引擎排版），安装后不联网也能导出 Markdown、DOCX 与 PDF；菜单项、图标与稿件包 `.gwx` 的 MIME 类型一并登记。该变体显式使用原生 Wayland、XDG Desktop Portal 与稳定的 `cn.localtools.GongwenAssistant` app id；在 Hyprland 平铺会话中会自动使用紧凑窗口控件。
+
+要从源码构建相同变体时使用：
 
 ```bash
 cargo build --release --locked --no-default-features --features linux-portal-dialogs

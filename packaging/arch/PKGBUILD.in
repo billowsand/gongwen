@@ -1,0 +1,73 @@
+# 由 scripts/package-arch-pkg.sh 生成，请勿手工编辑。
+# 模板：packaging/arch/PKGBUILD.in
+pkgname=gongwen-assistant
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc='基于 egui 与本地模型服务的离线公文写作助手（Typst 进程内排版，离线可用）'
+arch=('@PKGARCH@')
+url='https://github.com/billowsand/gongwen'
+license=('GPL-3.0-or-later')
+depends=(
+@DEPS@
+)
+optdepends=(
+  'cups: 应用内直接打印 PDF（提供 lp 命令）'
+  'ollama: 使用本机 Ollama 模型服务'
+  'noto-fonts-cjk: 额外的系统中文字形（公文正文用字已随包携带）'
+  'xdg-desktop-portal-hyprland: Hyprland / Omarchy 的文件选择框后端'
+)
+provides=('gongwen-assistant')
+conflicts=('gongwen-assistant-bin')
+# 不 strip：出错时用户还能从包里的二进制拿到符号，配合 --debug 排查。
+options=('!strip')
+# 安装脚本：刷新 MIME 数据库与图标缓存（.gwx 双击要认）。
+install=gongwen-assistant.install
+
+package() {
+  local staging='@STAGING@'
+  local project_root='@PROJECT_ROOT@'
+  local appdir="${pkgdir}/usr/lib/gongwen-assistant"
+
+  install -dm755 "$appdir" "${pkgdir}/usr/bin" "${pkgdir}/usr/share/applications" \
+    "${pkgdir}/usr/share/mime/packages" "${pkgdir}/usr/share/licenses/${pkgname}"
+
+  # 便携目录：二进制 + runtime（字体、许可证）+ 文档 + AI 技能包
+  cp -a "$staging/." "$appdir/"
+  chmod 755 "$appdir/gongwen-assistant"
+
+  # 命令行入口
+  ln -s /usr/lib/gongwen-assistant/gongwen-assistant "${pkgdir}/usr/bin/gongwen-assistant"
+
+  # 桌面入口。文件名必须与 Wayland app id 一致。
+  install -m 644 "$project_root/assets/linux/cn.localtools.GongwenAssistant.desktop" \
+    "${pkgdir}/usr/share/applications/cn.localtools.GongwenAssistant.desktop"
+
+  # 应用图标
+  for size in 16 24 32 48 64 128 256 512; do
+    src="$project_root/assets/app-icon/app-icon-$size.png"
+    if [ -f "$src" ]; then
+      install -dm755 "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps"
+      install -m 644 "$src" \
+        "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps/cn.localtools.GongwenAssistant.png"
+    fi
+  done
+
+  # 稿件包 .gwx 的 MIME 类型与文档图标
+  install -m 644 "$project_root/assets/linux/cn.localtools.GongwenAssistant.xml" \
+    "${pkgdir}/usr/share/mime/packages/cn.localtools.GongwenAssistant.xml"
+  for size in 16 24 32 48 64 128 256 512; do
+    src="$project_root/assets/doc-icon/gwx-document-$size.png"
+    if [ -f "$src" ]; then
+      install -dm755 "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/mimetypes"
+      install -m 644 "$src" \
+        "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/mimetypes/application-x-gongwen-package.png"
+    fi
+  done
+
+  # 许可证
+  for doc in LICENSE THIRD_PARTY_NOTICES.md; do
+    if [ -f "$appdir/$doc" ]; then
+      install -m 644 "$appdir/$doc" "${pkgdir}/usr/share/licenses/${pkgname}/$doc"
+    fi
+  done
+}

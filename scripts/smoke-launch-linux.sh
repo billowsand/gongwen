@@ -148,6 +148,11 @@ if [ -n "$mesa_major" ] && [ "$mesa_major" -lt 20 ] 2>/dev/null; then
     glx_unsafe=1
     echo "== Mesa $mesa_major.x is too old for winit's GLX request; skipping default (with-GLX) scenario on this image."
 fi
+if [ "${SMOKE_SKIP_GLX:-0}" = "1" ]; then
+    # Arch 的 Xvfb + Mesa 组合不一定给得出合法的 GLX context；只跑 EGL 那条路。
+    glx_unsafe=1
+    echo "== SMOKE_SKIP_GLX=1: skipping the with-GLX scenario."
+fi
 if [ "$glx_unsafe" -eq 0 ]; then
     run_scenario default || failed=1
 fi

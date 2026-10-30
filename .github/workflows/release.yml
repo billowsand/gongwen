@@ -12,9 +12,10 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-# 只发布两个平台：Windows x64 安装程序，以及 Linux ARM64 deb（在 Debian buster
-# 容器里构建、锁死 GLIBC 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）。macOS、Linux AMD64
-# 与 Arch/Omarchy 包不再发布。
+# 只发布三个平台：Windows x64 安装程序、Linux ARM64 deb（在 Debian buster 容器里
+# 构建、锁死 GLIBC 2.28，兼容 Ubuntu 20.04 / 麒麟 V10），以及 Linux x86_64 的
+# Arch / Omarchy pacman 包（在 archlinux 容器里构建，makepkg 打成 .pkg.tar.zst，
+# 供离线机器 pacman -U 安装）。macOS 与 Linux AMD64 的 deb 仍不发布。
 #
 # Runtime assets are versioned independently of the app; bump this tag only
 # when the runtime contents actually change. The tagged release must provide
@@ -267,6 +268,143 @@ jobs:
             gongwen-assistant_*_arm64.deb*
           if-no-files-found: error
 
+  # Omarchy / Arch 用户要的是能离线 `pacman -U` 的包。在 Arch 容器里编译并用
+  # makepkg 打成 .pkg.tar.zst：二进制链接的是 Arch 自己的 glibc 与图形库，
+  # 依赖名从 pacman 数据库反查（写错一个包名，用户机器上 pacman -U 会直接拒装）。
+  build-linux-x86_64-arch:
+    name: Build Linux AMD64 / Arch (Omarchy)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install Arch build dependencies
+        run: |
+          set -euo pipefail
+          pacman -Syyu --noconfirm --needed --overwrite '*' \
+            base-devel cmake git curl unzip zip pkgconf fakeroot file zstd \
+            libx11 libxcursor libxrandr libxi libxinerama \
+            libxkbcommon libxkbcommon-x11 libglvnd wayland \
+            fontconfig dbus zlib
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Build release binary
+        run: |
+          set -euo pipefail
+          # Arch/Omarchy 变体：原生 Wayland + XDG Desktop Portal 文件选择框，
+          # 不依赖 GTK3（GTK3 那套留给 Debian / 麒麟）。
+          cargo build --release --locked --no-default-features --features linux-portal-dialogs
+
+      - name: Download runtime assets
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/runtime.zip" \
+            --output /tmp/runtime.zip
+          unzip -qo /tmp/runtime.zip -d runtime || {
+            status=$?
+            # Windows Compress-Archive 存的反斜杠，Info-ZIP 会警告但仍能解开。
+            test "$status" -eq 1
+          }
+          test -f runtime/fonts/GWFangSong.ttf
+          test -f runtime/SHA256SUMS.txt
+
+      - name: Assemble staging directory
+        run: |
+          set -euo pipefail
+          bash ./scripts/stage-linux-portable.sh \
+            target/release/gongwen-assistant runtime dist/staging-linux-x86_64
+
+      - name: Build pacman package
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          bash ./scripts/package-arch-pkg.sh \
+            "$version" dist/staging-linux-x86_64 dist amd64
+
+      - name: Upload Arch release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x86_64-arch
+          path: |
+            dist/gongwen-assistant-*-x86_64.pkg.tar.zst*
+          if-no-files-found: error
+
+  # 在干净的 Arch 容器里真装一次 pacman 包：依赖名写错、文件没落到位、属主不是
+  # root、动态库缺失，都在这里暴露，而不是等用户在离线机器上 pacman -U 才发现。
+  verify-arch-pkg:
+    name: Verify pacman install (Arch / x86_64)
+    needs: build-linux-x86_64-arch
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install packaging tools
+        run: |
+          set -euo pipefail
+          pacman -Sy --noconfirm --needed git
+
+      - uses: actions/checkout@v4
+
+      - name: Download Arch release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-x86_64-arch
+          path: dist
+
+      - name: Install package and check
+        run: |
+          set -euo pipefail
+          bash ./scripts/verify-arch-pkg-install.sh dist/gongwen-assistant-*-x86_64.pkg.tar.zst
+
+      # 装得上不等于打得开：dlopen 的库、GL 上下文、首帧 panic 只有真起窗口
+      # 才暴露。见 scripts/smoke-launch-linux.sh。
+      - name: Install virtual display
+        run: |
+          set -euo pipefail
+          # Arch 上的包名：Xvfb 在 xorg-server-xvfb，xwininfo 在 xorg-xwininfo，
+          # xwd 在 xorg-xwd。
+          pacman -S --noconfirm --needed \
+            xorg-server-xvfb xorg-xwininfo xorg-xwd imagemagick mesa
+
+      - name: Launch app under Xvfb
+        run: |
+          set -euo pipefail
+          # Arch 的 Xvfb + Mesa 未必给得出合法 GLX context；带 GLX 的场景没过时
+          # 退回只跑 EGL 那条路（软件照样要能开窗、不闪退）。
+          bash ./scripts/smoke-launch-linux.sh gongwen-assistant 20 launch-smoke \
+            || {
+              echo "::warning::带 GLX 的场景没过，改跑无 GLX 场景"
+              SMOKE_SKIP_GLX=1 bash ./scripts/smoke-launch-linux.sh gongwen-assistant 20 launch-smoke-noglx
+            }
+
+      - name: Upload launch logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: launch-smoke-arch-x86_64
+          path: launch-smoke
+          if-no-files-found: ignore
+          retention-days: 14
+
   # 在干净的 Ubuntu 20.04（麒麟 V10 的底子，也是发布包的目标系统）里真装一次
   # deb：包名写错（如 libgdk-pixbuf-2.0-0 在 20.04 上叫 libgdk-pixbuf2.0-0）
   # 会在这里失败，而不是等用户在离线机器上 dpkg -i 才发现。
@@ -315,7 +453,8 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: [build-windows, package-linux-arm64, verify-deb]
+    needs:
+      [build-windows, package-linux-arm64, verify-deb, build-linux-x86_64-arch, verify-arch-pkg]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
