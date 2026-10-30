@@ -1095,6 +1095,30 @@ pub(crate) fn strip_numbering(line: &str) -> &str {
     }
 }
 
+/// 要素专用候选：动作携带身份，名称和归属只供显示。正文缺口仍使用可读文字候选。
+pub(crate) fn vocabulary_reference_choices(
+    vocabulary: &[VocabularyEntry],
+    category: VocabularyCategory,
+    task: &str,
+) -> Vec<Choice> {
+    super::tools::vocab::suggest(vocabulary, category, task, 3)
+        .into_iter()
+        .map(|entry| Choice {
+            label: crate::units::identity::label(vocabulary, &entry.key()),
+            detail: format!(
+                "标准词库 · {}",
+                if category == VocabularyCategory::Unit {
+                    &entry.duties
+                } else {
+                    &entry.profile
+                }
+            ),
+            recommended: false,
+            action: Action::Fill(entry.key()),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

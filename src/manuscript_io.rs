@@ -25,10 +25,10 @@ use zip::{AesMode, CompressionMethod, ZipWriter};
 pub mod send_package;
 pub mod sync;
 
-pub const MANIFEST_SCHEMA: u32 = 2;
+pub const MANIFEST_SCHEMA: u32 = 3;
 const MANIFEST_NAME: &str = "manifests.json";
 /// 随稿件包导出的标准词库（全局一份，随包带走，导入时增量合并）。
-pub const VOCABULARY_SCHEMA: u32 = 1;
+pub const VOCABULARY_SCHEMA: u32 = 2;
 const VOCABULARY_NAME: &str = "vocabulary.json";
 /// 词库 JSON 体积上限（约 10 MB），远超正常词库规模，防恶意包撑爆内存。
 const VOCABULARY_MAX_BYTES: u64 = 10 * 1024 * 1024;
@@ -727,7 +727,7 @@ pub fn read_manifest(zip_path: &Path, password: &str) -> Result<Manifest> {
         bail!("稿件包清单解压后超过大小上限");
     }
     let manifest: Manifest = serde_json::from_str(&raw).context("manifests.json 格式无效")?;
-    if manifest.schema != 1 && manifest.schema != MANIFEST_SCHEMA {
+    if manifest.schema != 1 && manifest.schema != 2 && manifest.schema != MANIFEST_SCHEMA {
         bail!(
             "不支持的文件格式版本：v{}（当前支持 v1 / v{}）",
             manifest.schema,
@@ -773,7 +773,7 @@ pub fn read_vocabulary(zip_path: &Path, password: &str) -> Result<Option<Vocabul
         );
     }
     let vocab: VocabularyFile = serde_json::from_str(&raw).context("vocabulary.json 格式无效")?;
-    if vocab.schema != VOCABULARY_SCHEMA {
+    if vocab.schema != 1 && vocab.schema != VOCABULARY_SCHEMA {
         bail!(
             "不支持的词库格式版本：v{}（当前支持 v{}）",
             vocab.schema,

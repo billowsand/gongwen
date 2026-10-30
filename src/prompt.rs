@@ -283,6 +283,9 @@ pub fn build_draft_prompt(
 ) -> String {
     let rules = kind_rules(input.kind);
     if input.kind == TemplateKind::PhoneRecord {
+        let display = UnitDisplay::new(vocabulary).for_input(input);
+        let readable = crate::units::identity::readable_phone_record(input, &display);
+        let input = &readable;
         return format!(
             "{rules}\n{contract}\n【只读来电要素】\n本单位：{}\n来电单位：{}\n来电电话：{}\n谈话人：{}\n通话时间：{}\n密级：{}\n保密期限：{}\n拟办建议（不得代写或更改）：{}\n【用户素材与写作要求】\n{material}\n{reference}",
             input.phone_record.institution,
@@ -447,12 +450,14 @@ pub fn build_draft_prompt(
     };
     let joint_mode = input.kind == TemplateKind::OfficialLetter
         && input.profile.joint_issuance_mode == JointIssuanceMode::Mode1;
+    let display = UnitDisplay::new(vocabulary).for_input(input);
+    let single_contact_name = display.person_name(&input.profile.contact_person);
     let joint_contact_names = join_units(
         &input
             .profile
             .joint_contacts
             .iter()
-            .map(|contact| contact.name.clone())
+            .map(|contact| display.person_name(&contact.name))
             .collect::<Vec<_>>(),
     );
     let joint_contact_phones = join_units(
@@ -465,7 +470,6 @@ pub fn build_draft_prompt(
     );
 
     // 规格 §2.2/3.1：锁定元数据按层级展开与简称规则显示，让模型看到最终成品形式。
-    let display = UnitDisplay::new(vocabulary);
     let external_names = input.uses_external_unit_names();
     let issuing_display = if joint_mode {
         split_units(&input.profile.joint_issuing_units)
@@ -564,7 +568,10 @@ pub fn build_draft_prompt(
         attendees = value_or_infer(&input.attendees, "参加人员"),
         minutes_meta = minutes_meta,
         responsible = value_or_none(&responsible_display),
-        signing = value_or_none(&input.profile.signing_unit),
+        signing = value_or_none(&crate::units::identity::display_values(
+            &input.profile.vocabulary_snapshot,
+            &input.profile.signing_unit
+        )),
         document_number = value_or_none(&if input.kind.has_document_number() {
             format!(
                 "{}〔{}〕{}号",
@@ -578,7 +585,7 @@ pub fn build_draft_prompt(
         contact = value_or_none(if multiple_responsible {
             &joint_contact_names
         } else {
-            &input.profile.contact_person
+            &single_contact_name
         }),
         phone = value_or_none(if multiple_responsible {
             &joint_contact_phones
@@ -1014,7 +1021,17 @@ const MINUTES_PREFIXES: [&str; 8] = [
 /// 剔除模型重复输出的版式要素：密级、文号、主送抬头、抄送、版记、落款和成文日期。
 /// 只删除与锁定元数据完全对应的整行，正文一律保留。
 fn strip_metadata_echoes(input: &DraftInput, generated: &str) -> String {
-    let profile = &input.profile;
+    let mut readable = input.clone();
+    for value in [
+        &mut readable.profile.recipient,
+        &mut readable.profile.reporting_leaders,
+        &mut readable.profile.signing_unit,
+        &mut readable.profile.issuing_unit,
+        &mut readable.profile.joint_issuing_units,
+    ] {
+        *value = crate::units::identity::display_values(&input.profile.vocabulary_snapshot, value);
+    }
+    let profile = &readable.profile;
     let addressees = split_units(&profile.recipient)
         .into_iter()
         .chain(split_units(&profile.reporting_leaders))

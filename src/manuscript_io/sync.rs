@@ -576,7 +576,7 @@ pub fn import_with_actions(
                     continue;
                 }
                 ImportAction::New => {
-                    if manifest.schema == 2 && preview.relationship != Relationship::New
+                    if manifest.schema >= 2 && preview.relationship != Relationship::New
                         || manifest.schema == 1 && preview.relationship != Relationship::Legacy
                     {
                         bail!("稿件关系已变化，请重新预览");
@@ -931,7 +931,7 @@ fn read_images(
     let mut out = Vec::new();
     // 全部图片的解压总量上限：单张有上限还不够，成百上千张照样能吃光内存。
     let mut total: u64 = 0;
-    if manifest.schema == 2 {
+    if manifest.schema >= 2 {
         let mut needed = HashSet::new();
         for (record, action) in manifest.records.iter().zip(actions) {
             if matches!(action, ImportAction::Skip) {

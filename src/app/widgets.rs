@@ -289,11 +289,18 @@ pub(crate) fn unique_name(
     vocab: &[VocabularyEntry],
     category: VocabularyCategory,
     base: &str,
+    owner: &str,
 ) -> String {
     let taken = |candidate: &str| {
-        vocab
-            .iter()
-            .any(|entry| entry.category == category && entry.canonical.trim() == candidate)
+        vocab.iter().any(|entry| {
+            entry.category == category
+                && (if category == VocabularyCategory::Unit {
+                    entry.parent.trim() == owner
+                } else {
+                    entry.unit.trim() == owner
+                })
+                && entry.canonical.trim() == candidate
+        })
     };
     if !taken(base) {
         return base.to_string();
@@ -372,7 +379,7 @@ pub(crate) fn visible_rows(ui: &egui::Ui) -> usize {
 /// 人员、机关代字等没有层级的字段用 `plain_options` 生成，层级一律为 0。
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SelectOption {
-    /// 写入配置的值，即词库中的规范名称。
+    /// 写入配置的值；单位／人员使用带类别的永久身份引用，标签不参与关联。
     pub(crate) value: String,
     /// 下拉列表中显示的文字。
     pub(crate) label: String,
@@ -380,7 +387,7 @@ pub(crate) struct SelectOption {
     pub(crate) full: String,
     /// 只用于检索的简称、别名与编码，不参与显示或写值。
     pub(crate) search_terms: String,
-    /// 上级单位的规范名称，空串表示顶层；只有单位候选项会用到。
+    /// 上级单位的永久身份引用，空串表示顶层；只有单位候选项会用到。
     pub(crate) parent: String,
     /// 缩进层级，只相对本列表中可见的上级计算。
     pub(crate) depth: usize,
@@ -461,6 +468,12 @@ pub(crate) fn single_select(
     let mut changed = false;
     // 词库里没有候选项时只能手写，否则字段将无法填写。
     let manual = manual_fields.contains(id) || options.is_empty();
+    if manual
+        && crate::units::identity::is_ref(value)
+        && let Some(option) = options.iter().find(|o| o.value == *value)
+    {
+        *value = option.full.clone();
+    }
     // 收起状态显示完整名称，让下级单位也能一眼看出挂在哪个机关下面。
     let selected_text = if value.trim().is_empty() {
         "（未选择）".to_string()
@@ -469,7 +482,7 @@ pub(crate) fn single_select(
             .iter()
             .find(|option| option.value == *value)
             .map(|option| option.full.clone())
-            .unwrap_or_else(|| value.clone())
+            .unwrap_or_else(|| crate::units::identity::label(&[], value))
     };
     ui.horizontal(|ui| {
         if manual {
@@ -570,6 +583,7 @@ pub(crate) fn joint_responsible_editor(
     // 在副本上编辑，避免渲染中与 profile 反复借用冲突；结束后整体写回并同步两个字段。
     let mut entries = profile.joint_contacts.clone();
     let mut changed = false;
+    let mut refresh = Vec::new();
     let mut remove_index = None;
     // 该编辑器位于 Grid 的横向单元格中：必须用 vertical 包住，每行 ui.horizontal
     // 才会向下堆叠；否则多个承办单位会在同一行向右排开。
@@ -628,6 +642,8 @@ pub(crate) fn joint_responsible_editor(
                                 .clicked()
                             {
                                 entry.unit.clear();
+                                entry.name.clear();
+                                entry.phone.clear();
                                 changed = true;
                                 ui.close();
                             }
@@ -642,6 +658,11 @@ pub(crate) fn joint_responsible_editor(
                                     response.on_hover_text(&option.full)
                                 };
                                 if response.clicked() {
+                                    if entry.unit != option.value {
+                                        entry.name.clear();
+                                        entry.phone.clear();
+                                    }
+                                    refresh.push(option.value.clone());
                                     entry.unit = option.value.clone();
                                     changed = true;
                                     ui.close();
@@ -656,7 +677,7 @@ pub(crate) fn joint_responsible_editor(
                 let contact_selected = if entry.name.trim().is_empty() {
                     "（未选择）".to_string()
                 } else {
-                    entry.name.clone()
+                    crate::units::identity::label(vocabulary, &entry.name)
                 };
                 egui::ComboBox::from_id_salt(format!("joint_resp_contact_{index}"))
                     .selected_text(contact_selected)
@@ -675,9 +696,13 @@ pub(crate) fn joint_responsible_editor(
                         }
                         for (candidate, phone) in &people {
                             if ui
-                                .selectable_label(entry.name == *candidate, candidate)
+                                .selectable_label(
+                                    entry.name == *candidate,
+                                    crate::units::identity::label(vocabulary, candidate),
+                                )
                                 .clicked()
                             {
+                                refresh.push(candidate.clone());
                                 entry.name = candidate.clone();
                                 entry.phone = phone.clone();
                                 changed = true;
@@ -708,6 +733,9 @@ pub(crate) fn joint_responsible_editor(
             changed = true;
         }
     });
+    for key in refresh {
+        crate::units::identity::refresh_snapshot(profile, vocabulary, &key);
+    }
     if changed {
         sync_joint_responsible(
             profile,
@@ -740,6 +768,12 @@ pub(crate) fn multi_select(
 ) -> bool {
     let mut changed = false;
     let manual = manual_fields.contains(id) || options.is_empty();
+    if manual
+        && crate::units::identity::is_ref(value)
+        && let Some(option) = options.iter().find(|o| o.value == *value)
+    {
+        *value = option.full.clone();
+    }
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             if manual {
@@ -836,7 +870,10 @@ pub(crate) fn multi_select(
                     for (index, item) in selected.iter().enumerate() {
                         let known = options.iter().find(|option| option.value == *item);
                         // 已选标签显示完整名称，免得只看到“办公室”分不清是哪家的。
-                        let display = known.map(|option| option.full.as_str()).unwrap_or(item);
+                        let fallback = crate::units::identity::label(&[], item);
+                        let display = known
+                            .map(|option| option.full.as_str())
+                            .unwrap_or(&fallback);
                         let known = known.is_some();
                         let button = theme::removable_tag_button(display, !known);
                         let response = ui.add(button);
@@ -889,12 +926,20 @@ pub(crate) fn contact_pair(
     allow_free_text: bool,
     width: f32,
 ) {
-    let names = plain_options(
-        &contacts
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>(),
-    );
+    let names = contacts
+        .iter()
+        .map(|(key, _)| {
+            let label = crate::units::identity::label(vocabulary, key);
+            SelectOption {
+                value: key.clone(),
+                label: label.clone(),
+                full: label,
+                search_terms: key.clone(),
+                parent: String::new(),
+                depth: 0,
+            }
+        })
+        .collect::<Vec<_>>();
     let manual = manual_fields.contains("contact_person") || names.is_empty();
     ui.vertical(|ui| {
         if single_select(
@@ -931,7 +976,13 @@ pub(crate) fn contact_pair(
                     if profile.contact_person.trim().is_empty() {
                         "选择联系人后自动带出".to_string()
                     } else {
-                        format!("“{}”在词库中未维护电话", profile.contact_person.trim())
+                        format!(
+                            "“{}”在词库中未维护电话",
+                            crate::units::identity::display_values(
+                                vocabulary,
+                                &profile.contact_person
+                            )
+                        )
                     },
                 );
             } else {

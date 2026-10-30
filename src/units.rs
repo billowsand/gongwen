@@ -11,7 +11,11 @@
 //!   呈报领导候选取落款单位及其各级上级单位的领导。
 
 use crate::models::{VocabularyCategory, VocabularyEntry};
+use std::borrow::Cow;
 use std::collections::HashMap;
+pub(crate) mod identity;
+#[cfg(test)]
+mod identity_tests;
 
 /// 层级编码每一级占用的位数。超过 99 个同级单位时该级会自动加宽，
 /// 因此解析上下级关系一律用“最长前缀匹配”，不要按固定位数切片。
@@ -53,6 +57,7 @@ pub fn next_unit_code(vocab: &[VocabularyEntry], parent: &str) -> String {
 
 /// 给尚未编号（`id == 0`）的词条补号。
 pub fn assign_missing_ids(vocab: &mut [VocabularyEntry]) {
+    identity::assign(vocab);
     let mut next = vocab.iter().map(|entry| entry.id).max().unwrap_or(0) + 1;
     for entry in vocab.iter_mut() {
         if entry.id == 0 {
@@ -91,6 +96,8 @@ pub fn normalize_preserving_codes(vocab: &mut Vec<VocabularyEntry>) {
     {
         entry.code = format!("@{}", entry.id);
     }
+
+    identity::restore_owners(&mut source);
 
     // `parent` / `unit` 现在以单位编码关联。兼容旧配置：若字段不是现有编码，
     // 仅在单位名称唯一时把名称迁移为编码；同名旧数据无法可靠猜测，按未挂靠处理。
@@ -202,11 +209,11 @@ pub fn normalize_preserving_codes(vocab: &mut Vec<VocabularyEntry>) {
         }
     }
     for index in orphan_people {
-        if let Some(mut entry) = slots[index].take() {
-            entry.code.clear();
+        if let Some(entry) = slots[index].take() {
             output.push(entry);
         }
     }
+    identity::update_owners(&mut output);
     *vocab = output;
     // 整理完后再按编码前缀回填 parent（占位编码已被替换为真实编码，前缀关系可直接读出）。
     rebuild_parents_from_codes(vocab);
@@ -326,6 +333,18 @@ pub fn relocate_entry(
     destination: &str,
     position: SiblingPosition,
 ) -> Result<(), String> {
+    let mut staged = vocab.clone();
+    relocate_staged(&mut staged, id, destination, position)?;
+    *vocab = staged;
+    Ok(())
+}
+
+fn relocate_staged(
+    vocab: &mut Vec<VocabularyEntry>,
+    id: u64,
+    destination: &str,
+    position: SiblingPosition,
+) -> Result<(), String> {
     normalize(vocab);
     let destination = destination.trim().to_string();
     let index = vocab
@@ -333,6 +352,16 @@ pub fn relocate_entry(
         .position(|entry| entry.id == id)
         .ok_or_else(|| "找不到要移动的词条".to_string())?;
     let category = vocab[index].category;
+    if category == VocabularyCategory::Unit
+        && vocab.iter().any(|e| {
+            e.id != id
+                && e.category == VocabularyCategory::Unit
+                && e.parent.trim() == destination
+                && e.canonical.trim() == vocab[index].canonical.trim()
+        })
+    {
+        return Err("目标父节点下已有同名单位".into());
+    }
 
     if !destination.is_empty()
         && !vocab.iter().any(|entry| {
@@ -344,6 +373,12 @@ pub fn relocate_entry(
 
     match category {
         VocabularyCategory::Person => {
+            vocab[index].owner_identity = vocab
+                .iter()
+                .find(|e| e.category == VocabularyCategory::Unit && e.code == destination)
+                .map(|e| e.identity.clone())
+                .unwrap_or_default();
+            vocab[index].code.clear();
             vocab[index].unit = destination;
             vocab[index].sort_order = 0;
             normalize(vocab);
@@ -376,16 +411,50 @@ pub fn relocate_entry(
             let mut code_map = HashMap::new();
             code_map.insert(old_code.clone(), new_code.clone());
 
-            let mut descendants = subtree_unit_codes
-                .into_iter()
-                .filter(|code| code != &old_code)
-                .collect::<Vec<_>>();
-            descendants.sort_by_key(|code| code.len());
-            for code in descendants {
-                let replacement = code
+            let mut descendants: Vec<_> = subtree_unit_codes
+                .iter()
+                .filter(|code| *code != &old_code)
+                .cloned()
+                .collect();
+            while !descendants.is_empty() {
+                let Some(index) = descendants.iter().position(|code| {
+                    vocab
+                        .iter()
+                        .find(|e| e.category == VocabularyCategory::Unit && e.code == *code)
+                        .is_some_and(|e| code_map.contains_key(&e.parent))
+                }) else {
+                    return Err("下级单位关系成环或缺失，请先核对词库".into());
+                };
+                let code = descendants.remove(index);
+                let entry = vocab
+                    .iter()
+                    .find(|e| e.category == VocabularyCategory::Unit && e.code == code)
+                    .ok_or_else(|| "下级单位不存在".to_string())?;
+                let parent = &code_map[&entry.parent];
+                let occupied = |candidate: &str| {
+                    code_map.values().any(|v| v == candidate)
+                        || vocab.iter().any(|e| {
+                            e.category == VocabularyCategory::Unit
+                                && !subtree_unit_codes.contains(&e.code)
+                                && e.code == candidate
+                        })
+                };
+                let preferred = code
                     .strip_prefix(&old_code)
-                    .map(|suffix| format!("{new_code}{suffix}"))
-                    .ok_or_else(|| "下级单位编码与当前层级不一致，请先整理词库".to_string())?;
+                    .map(|suffix| format!("{new_code}{suffix}"));
+                let replacement =
+                    if let Some(preferred) = preferred.filter(|candidate| !occupied(candidate)) {
+                        preferred
+                    } else {
+                        let mut number = 1;
+                        loop {
+                            let candidate = format!("{parent}{number:02}");
+                            if !occupied(&candidate) {
+                                break candidate;
+                            }
+                            number += 1;
+                        }
+                    };
                 code_map.insert(code, replacement);
             }
             let subtree_ids = subtree
@@ -427,6 +496,7 @@ pub fn relocate_entry(
                     }
                 }
             }
+            identity::update_owners(vocab);
             normalize(vocab);
             place_sibling(vocab, id, position)
         }
@@ -446,14 +516,36 @@ fn walk(
         return;
     };
     let old_code = entry.code.trim().to_string();
-    entry.code = code.to_string();
-    entry.parent = parent_code.unwrap_or_default().to_string();
+    let code = if old_code.starts_with('@') {
+        fresh_code(slots, output, parent_code.unwrap_or_default(), code)
+    } else {
+        old_code.clone()
+    };
+    entry.code = code.clone();
+    if let Some(parent) = parent_code {
+        entry.parent = parent.to_string();
+    }
     output.push(entry);
 
     // 人员是单位的末端子节点，编码只表示其在本单位内的顺序。
-    for (order, person) in people.get(&old_code).into_iter().flatten().enumerate() {
+    let mut used: std::collections::HashSet<String> = people
+        .get(&old_code)
+        .into_iter()
+        .flatten()
+        .filter_map(|i| slots[*i].as_ref())
+        .map(|e| e.code.clone())
+        .filter(|c| !c.is_empty())
+        .collect();
+    for person in people.get(&old_code).into_iter().flatten() {
         if let Some(mut entry) = slots[*person].take() {
-            entry.code = format!("{:0width$}", order + 1, width = CODE_WIDTH);
+            if entry.code.trim().is_empty() {
+                let mut number = 1;
+                while used.contains(&format!("{number:02}")) {
+                    number += 1;
+                }
+                entry.code = format!("{number:02}");
+                used.insert(entry.code.clone());
+            }
             entry.unit = code.to_string();
             output.push(entry);
         }
@@ -466,7 +558,7 @@ fn walk(
             children,
             people,
             output,
-            Some(code),
+            Some(&code),
         );
     }
 }
@@ -488,17 +580,34 @@ fn walk_preserve_code(
     let old_code = entry.code.trim().to_string();
     let code = if old_code.starts_with('@') {
         // 占位：按位置生成（仅顶层 / 父级缺失时由 place_root 决定）
-        code.to_string()
+        fresh_code(slots, output, parent_code.unwrap_or_default(), code)
     } else {
         old_code.clone()
     };
     entry.code = code.clone();
-    entry.parent = parent_code.unwrap_or_default().to_string();
+    if let Some(parent) = parent_code {
+        entry.parent = parent.to_string();
+    }
     output.push(entry);
 
-    for (order, person) in people.get(&old_code).into_iter().flatten().enumerate() {
+    let mut used: std::collections::HashSet<String> = people
+        .get(&old_code)
+        .into_iter()
+        .flatten()
+        .filter_map(|i| slots[*i].as_ref())
+        .map(|e| e.code.clone())
+        .filter(|c| !c.is_empty())
+        .collect();
+    for person in people.get(&old_code).into_iter().flatten() {
         if let Some(mut entry) = slots[*person].take() {
-            entry.code = format!("{:0width$}", order + 1, width = CODE_WIDTH);
+            if entry.code.trim().is_empty() {
+                let mut number = 1;
+                while used.contains(&format!("{number:02}")) {
+                    number += 1;
+                }
+                entry.code = format!("{number:02}");
+                used.insert(entry.code.clone());
+            }
             entry.unit = code.clone();
             output.push(entry);
         }
@@ -527,6 +636,7 @@ fn walk_preserve_code(
 /// 依据层级编码重建上级关系：某个单位的上级，是编码为它最长真前缀的那个单位。
 /// Markdown 导入时用它把表格里的编码列还原成树。
 pub fn rebuild_parents_from_codes(vocab: &mut [VocabularyEntry]) {
+    identity::restore_owners(vocab);
     let units: Vec<(String, String)> = vocab
         .iter()
         .filter(|entry| entry.category == VocabularyCategory::Unit)
@@ -543,7 +653,10 @@ pub fn rebuild_parents_from_codes(vocab: &mut [VocabularyEntry]) {
         .filter(|entry| entry.category == VocabularyCategory::Unit)
     {
         let code = entry.code.trim().to_string();
-        if code.is_empty() {
+        if !entry.owner_identity.is_empty()
+            || code.is_empty()
+            || (!entry.parent.is_empty() && !units.iter().any(|(code, _)| *code == entry.parent))
+        {
             continue;
         }
         let parent = units
@@ -660,26 +773,29 @@ pub fn subtree_indices(vocab: &[VocabularyEntry], index: usize) -> Vec<usize> {
 }
 
 /// 词库层级解析器。`vocab` 仅借用，不持有。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct UnitDisplay<'a> {
-    vocab: &'a [VocabularyEntry],
+    vocab: Cow<'a, [VocabularyEntry]>,
+    labels: HashMap<String, String>,
+    ambiguous: std::collections::HashSet<String>,
+    internal_labels: std::sync::OnceLock<HashMap<String, String>>,
+    external_labels: std::sync::OnceLock<HashMap<String, String>>,
 }
 
 impl<'a> UnitDisplay<'a> {
     pub fn new(vocab: &'a [VocabularyEntry]) -> Self {
-        Self { vocab }
+        Self {
+            vocab: Cow::Borrowed(vocab),
+            labels: HashMap::new(),
+            ambiguous: std::collections::HashSet::new(),
+            internal_labels: std::sync::OnceLock::new(),
+            external_labels: std::sync::OnceLock::new(),
+        }
     }
 
     fn find(&self, key: &str) -> Option<&VocabularyEntry> {
         let key = key.trim();
-        self.vocab
-            .iter()
-            .find(|entry| entry.category == VocabularyCategory::Unit && entry.code.trim() == key)
-            .or_else(|| {
-                self.vocab.iter().find(|entry| {
-                    entry.category == VocabularyCategory::Unit && entry.canonical.trim() == key
-                })
-            })
+        identity::resolve(&self.vocab, VocabularyCategory::Unit, key)
     }
 
     fn name_entry(entry: &VocabularyEntry, external: bool) -> &str {
@@ -690,7 +806,28 @@ impl<'a> UnitDisplay<'a> {
         }
     }
 
-    /// 全称由词库独立维护，层级关系不参与名称拼接。
+    /// 候选池共用一次消歧计算；只查电话／代字时不构建名称缓存。
+    fn cached_name(&self, entry: &VocabularyEntry, external: bool) -> String {
+        let cache = if external {
+            &self.external_labels
+        } else {
+            &self.internal_labels
+        };
+        let labels = cache.get_or_init(|| {
+            let units: Vec<_> = self
+                .vocab
+                .iter()
+                .filter(|e| e.category == VocabularyCategory::Unit)
+                .collect();
+            identity::labels(&self.vocab, &units, external)
+        });
+        labels
+            .get(&entry.key())
+            .cloned()
+            .unwrap_or_else(|| Self::name_entry(entry, external).to_owned())
+    }
+
+    /// 完整名称；同名时补齐足以区分身份的祖先前缀。
     pub fn full_name(&self, key: &str) -> String {
         self.full_name_for(key, false)
     }
@@ -698,43 +835,51 @@ impl<'a> UnitDisplay<'a> {
     /// 外部模式优先使用本单位的外部全称，未设置则回退规范全称。
     pub fn full_name_for(&self, key: &str, external: bool) -> String {
         let Some(entry) = self.find(key) else {
-            return key.trim().to_string();
+            return if identity::is_ref(key) {
+                "〔单位失效，请重新选择〕".into()
+            } else {
+                key.trim().to_string()
+            };
         };
-        Self::name_entry(entry, external).to_string()
+        self.labels
+            .get(&entry.key())
+            .cloned()
+            .unwrap_or_else(|| self.cached_name(entry, external))
     }
 
     /// 本级显示名称，不拼接上级。
     pub fn name_for(&self, key: &str, external: bool) -> String {
         self.find(key)
-            .map(|entry| Self::name_entry(entry, external).to_string())
-            .unwrap_or_else(|| key.trim().to_string())
-    }
-
-    /// 上级单位的规范名称；顶层单位或词库中查不到时返回空串。
-    pub fn parent_of(&self, key: &str) -> String {
-        self.find(key)
-            .and_then(|entry| self.find(entry.parent.trim()))
-            .map(|entry| entry.canonical.trim().to_string())
-            .unwrap_or_default()
-    }
-
-    /// 把层级编码或旧的单位名称统一解析成当前单位编码。
-    pub fn code_of(&self, key: &str) -> String {
-        self.find(key)
-            .map(|entry| entry.code.trim().to_string())
-            .filter(|code| !code.is_empty())
-            .unwrap_or_else(|| key.trim().to_string())
+            .map(|entry| self.cached_name(entry, external))
+            .unwrap_or_else(|| identity::label(&[], key))
     }
 
     /// 两个引用是否指向同一单位；兼容“编码”和旧“名称”混用的配置。
     pub fn same_unit(&self, left: &str, right: &str) -> bool {
-        !left.trim().is_empty()
-            && !right.trim().is_empty()
-            && self.code_of(left) == self.code_of(right)
+        match (self.find(left), self.find(right)) {
+            (Some(left), Some(right)) => left.key() == right.key(),
+            _ => false,
+        }
     }
 
     /// 简称：优先取词条 `abbr`，空则回落规范名称。
     pub fn abbr(&self, key: &str) -> String {
+        if let Some(entry) = self.find(key) {
+            let short = if entry.abbr.is_empty() {
+                &entry.canonical
+            } else {
+                &entry.abbr
+            };
+            if self.vocab.iter().any(|other| {
+                other.category == VocabularyCategory::Unit
+                    && other.key() != entry.key()
+                    && (other.canonical == *short
+                        || other.abbr == *short
+                        || other.canonical == entry.canonical)
+            }) {
+                return self.full_name(key);
+            }
+        }
         self.find(key)
             .and_then(|entry| {
                 let abbr = entry.abbr.trim();
@@ -798,7 +943,10 @@ impl<'a> UnitDisplay<'a> {
             .map(|key| key.trim())
             .filter(|key| !key.is_empty())
         {
-            let identity = self.code_of(key);
+            let identity = self
+                .find(key)
+                .map(|e| e.key())
+                .unwrap_or_else(|| key.to_owned());
             if !items.iter().any(|(seen, _)| seen == &identity) {
                 items.push((identity, self.full_name_for(key, external)));
             }
@@ -808,7 +956,10 @@ impl<'a> UnitDisplay<'a> {
         while index < items.len() {
             let (key, full) = &items[index];
             let mut group = vec![full.clone()];
-            if let Some((next_key, next_full)) = items.get(index + 1)
+            if !self
+                .find(key)
+                .is_some_and(|e| self.full_name_for(key, external) != Self::name_entry(e, external))
+                && let Some((next_key, next_full)) = items.get(index + 1)
                 && let Some((ancestor, prefix)) =
                     self.shared_prefix(key, next_key, full, next_full, external)
             {
@@ -854,20 +1005,18 @@ impl<'a> UnitDisplay<'a> {
     /// parent 已由编码最长前缀重建；使用真实祖先链，不能把编码的字符公共前缀当祖先。
     fn ancestor_keys(&self, key: &str) -> Vec<String> {
         let mut ancestors = Vec::new();
-        let mut current = self.code_of(key);
+        let origin = self.find(key).map(|e| e.key());
+        let mut current = self.find(key);
         for _ in 0..MAX_DEPTH {
-            let Some(entry) = self.find(&current) else {
+            let Some(parent) = current.and_then(|e| identity::parent(&self.vocab, e)) else {
                 break;
             };
-            if entry.parent.trim().is_empty() {
+            let key = parent.key();
+            if origin.as_ref() == Some(&key) || ancestors.contains(&key) {
                 break;
             }
-            let parent = self.code_of(&entry.parent);
-            if parent == self.code_of(key) || ancestors.contains(&parent) {
-                break;
-            }
-            ancestors.push(parent.clone());
-            current = parent;
+            ancestors.push(key);
+            current = Some(parent);
         }
         ancestors
     }
@@ -1016,22 +1165,17 @@ impl<'a> UnitDisplay<'a> {
 
     /// 返回属于指定单位的人员（姓名、电话）对，用于“人随事走”过滤。
     pub fn people_of(&self, unit: &str) -> Vec<(String, String)> {
-        let unit = self
-            .find(unit)
-            .map(|entry| entry.code.trim())
-            .filter(|code| !code.is_empty())
-            .unwrap_or_else(|| unit.trim());
+        let Some(selected) = self.find(unit) else {
+            return Vec::new();
+        };
         self.vocab
             .iter()
-            .filter(|entry| entry.category == VocabularyCategory::Person)
-            .filter(|entry| entry.unit.trim() == unit)
-            .map(|entry| {
-                (
-                    entry.canonical.trim().to_string(),
-                    entry.phone.trim().to_string(),
-                )
+            .filter(|e| e.category == VocabularyCategory::Person)
+            .filter(|person| {
+                identity::parent(&self.vocab, person)
+                    .is_some_and(|owner| owner.key() == selected.key())
             })
-            .filter(|(name, _)| !name.is_empty())
+            .map(|person| (person.key(), person.phone.trim().to_string()))
             .collect()
     }
 
@@ -1040,51 +1184,29 @@ impl<'a> UnitDisplay<'a> {
     /// 直属人员始终可选；勾选“承办上级单位”的人员，还可在其所属单位的任一级
     /// 上级单位中被选中。该权限只用于公函版记，不影响白头件呈报领导过滤。
     pub fn responsible_people_of(&self, unit: &str) -> Vec<(String, String)> {
-        let selected = self
-            .find(unit)
-            .map(|entry| entry.code.trim())
-            .filter(|code| !code.is_empty())
-            .unwrap_or_else(|| unit.trim());
-
+        let Some(selected) = self.find(unit) else {
+            return Vec::new();
+        };
         self.vocab
             .iter()
-            .filter(|entry| entry.category == VocabularyCategory::Person)
+            .filter(|e| e.category == VocabularyCategory::Person)
             .filter(|person| {
-                let person_unit = self
-                    .find(&person.unit)
-                    .map(|entry| entry.code.trim())
-                    .filter(|code| !code.is_empty())
-                    .unwrap_or_else(|| person.unit.trim());
-                if person_unit == selected {
-                    return true;
-                }
-                if !person.can_handle_parent_unit || selected.is_empty() {
-                    return false;
-                }
-
-                let mut current = person_unit;
-                for _ in 0..MAX_DEPTH {
-                    let Some(entry) = self.find(current) else {
+                let mut current = identity::parent(&self.vocab, person);
+                for _ in 0..=MAX_DEPTH {
+                    let Some(owner) = current else {
                         return false;
                     };
-                    let parent = entry.parent.trim();
-                    if parent.is_empty() || parent == current {
-                        return false;
-                    }
-                    if parent == selected {
+                    if owner.key() == selected.key() {
                         return true;
                     }
-                    current = parent;
+                    if !person.can_handle_parent_unit {
+                        return false;
+                    }
+                    current = identity::parent(&self.vocab, owner);
                 }
                 false
             })
-            .map(|entry| {
-                (
-                    entry.canonical.trim().to_string(),
-                    entry.phone.trim().to_string(),
-                )
-            })
-            .filter(|(name, _)| !name.is_empty())
+            .map(|person| (person.key(), person.phone.trim().to_string()))
             .collect()
     }
 
@@ -1094,24 +1216,21 @@ impl<'a> UnitDisplay<'a> {
     pub fn leaders_of(&self, unit: &str) -> Vec<(String, String)> {
         let mut result = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let mut current = unit.trim().to_string();
+        let mut visited = std::collections::HashSet::new();
+        let mut current = self.find(unit);
         for _ in 0..=MAX_DEPTH {
-            if current.is_empty() {
-                break;
-            }
-            for (name, phone) in self.people_of(&current) {
-                if seen.insert(name.clone()) {
-                    result.push((name, phone));
-                }
-            }
-            let Some(entry) = self.find(&current) else {
+            let Some(owner) = current else {
                 break;
             };
-            let parent = entry.parent.trim();
-            if parent.is_empty() || parent == current {
+            if !visited.insert(owner.key()) {
                 break;
             }
-            current = parent.to_string();
+            for person in self.people_of(&owner.key()) {
+                if seen.insert(person.0.clone()) {
+                    result.push(person);
+                }
+            }
+            current = identity::parent(&self.vocab, owner);
         }
         result
     }
@@ -1129,24 +1248,31 @@ impl<'a> UnitDisplay<'a> {
             .vocab
             .iter()
             .filter(|entry| entry.category == VocabularyCategory::Person)
-            .filter(|entry| selected.iter().any(|name| name == entry.canonical.trim()))
+            .filter(|entry| {
+                selected.iter().any(|key| {
+                    identity::resolve(&self.vocab, VocabularyCategory::Person, key)
+                        .is_some_and(|person| person.key() == entry.key())
+                })
+            })
             .collect::<Vec<_>>();
-        let known = ordered
-            .iter()
-            .map(|entry| entry.canonical.trim())
-            .collect::<Vec<_>>();
-
         // 旧配置中的词库外值保持勾选/手填时的相对顺序，并排在已编码人员之后。
         let unknown = selected
             .iter()
-            .filter(|name| !known.contains(&name.as_str()))
+            .filter(|name| {
+                identity::resolve(&self.vocab, VocabularyCategory::Person, name).is_none()
+            })
             .cloned()
             .collect::<Vec<_>>();
 
         let mut groups: Vec<(String, Vec<String>)> = Vec::new();
         for entry in ordered.drain(..) {
-            let name = entry.canonical.trim();
-            let position = entry.position.trim();
+            let label = self.person_name(&entry.key());
+            let name = label.as_str();
+            let position = if label != entry.canonical {
+                ""
+            } else {
+                entry.position.trim()
+            };
             if position.is_empty() {
                 match groups.iter_mut().find(|(title, _)| title.is_empty()) {
                     Some((_, names)) => names.push(name.to_string()),
@@ -1154,13 +1280,31 @@ impl<'a> UnitDisplay<'a> {
                 }
                 continue;
             }
-            let surname = person_surname(name);
+            let surname = if self
+                .vocab
+                .iter()
+                .filter(|p| {
+                    p.category == VocabularyCategory::Person
+                        && selected.iter().any(|key| {
+                            identity::resolve(&self.vocab, VocabularyCategory::Person, key)
+                                .is_some_and(|e| e.key() == p.key())
+                        })
+                        && person_surname(&p.canonical) == person_surname(&entry.canonical)
+                })
+                .count()
+                > 1
+            {
+                name.to_string()
+            } else {
+                person_surname(name)
+            };
             match groups.iter_mut().find(|(title, _)| title == position) {
                 Some((_, names)) => names.push(surname),
                 None => groups.push((position.to_string(), vec![surname])),
             }
         }
         for name in unknown {
+            let name = identity::label(&[], &name);
             match groups.iter_mut().find(|(title, _)| title.is_empty()) {
                 Some((_, names)) => names.push(name),
                 None => groups.push((String::new(), vec![name])),
@@ -1186,9 +1330,9 @@ impl<'a> UnitDisplay<'a> {
     }
 
     fn department_code_of_kind(&self, key: &str, approval: bool) -> String {
-        let mut current = key.trim().to_string();
+        let mut current = self.find(key);
         for _ in 0..MAX_DEPTH {
-            let Some(entry) = self.find(&current) else {
+            let Some(entry) = current else {
                 return String::new();
             };
             let code = if approval {
@@ -1199,11 +1343,7 @@ impl<'a> UnitDisplay<'a> {
             if !code.is_empty() {
                 return code.to_string();
             }
-            let parent = entry.parent.trim();
-            if parent.is_empty() || parent == current {
-                return String::new();
-            }
-            current = parent.to_string();
+            current = identity::parent(&self.vocab, entry);
         }
         String::new()
     }
@@ -1246,6 +1386,33 @@ pub fn spread_gap(text: &str) -> Option<f32> {
 #[cfg(test)]
 #[path = "units/prefix_tests.rs"]
 mod prefix_tests;
+
+/// 给缺码单位补号时跳过已占用编码，不因排序位置而覆盖另一个节点。
+fn fresh_code(
+    slots: &[Option<VocabularyEntry>],
+    output: &[VocabularyEntry],
+    parent: &str,
+    preferred: &str,
+) -> String {
+    let occupied = |code: &str| {
+        slots
+            .iter()
+            .filter_map(Option::as_ref)
+            .chain(output.iter())
+            .any(|e| e.category == VocabularyCategory::Unit && e.code == code)
+    };
+    if !preferred.is_empty() && !occupied(preferred) {
+        return preferred.into();
+    }
+    let mut number = if parent.is_empty() { 0 } else { 1 };
+    loop {
+        let code = format!("{parent}{number:02}");
+        if !occupied(&code) {
+            return code;
+        }
+        number += 1;
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1808,8 +1975,8 @@ mod tests {
         normalize(&mut list);
         let display = UnitDisplay::new(&list);
         assert_eq!(display.full_name("000101"), "综合科");
-        assert_eq!(display.full_name("0101"), "办公室");
-        assert_eq!(display.people_of("0101")[0].0, "张三");
+        assert_eq!(display.full_name("0101"), "乙厅办公室");
+        assert_eq!(display.person_name(&display.people_of("0101")[0].0), "张三");
         let depths = list
             .iter()
             .filter(|entry| entry.category == VocabularyCategory::Unit)

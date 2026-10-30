@@ -527,6 +527,8 @@ pub(crate) fn official_preview(
     line_numbers: bool,
     elements: &ElementMarks,
 ) -> PreviewOutput {
+    let scoped_display = display.for_input(input);
+    let display = &scoped_display;
     super::layout::clear_hovered(ui.ctx());
     if input.kind == TemplateKind::PhoneRecord {
         return super::phone_record::show(

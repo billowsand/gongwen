@@ -3402,6 +3402,7 @@ mod field_card_cases {
 
     fn suggestion(field: FieldId, previous: &str, value: &str, conflict: bool) -> FieldSuggestion {
         FieldSuggestion {
+            display_value: String::new(),
             field,
             value: value.into(),
             previous: previous.into(),

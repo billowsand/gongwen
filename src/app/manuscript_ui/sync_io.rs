@@ -15,7 +15,6 @@ use crate::models::ManuscriptStatus;
 use crate::package_file;
 use crate::storage;
 use crate::theme;
-use crate::units;
 use crate::vocabulary_xlsx;
 use anyhow::Context;
 use std::path::PathBuf;
@@ -652,19 +651,25 @@ impl GongwenApp {
                 if preview.merge_vocabulary
                     && let Some(vocabulary) = &preview.vocabulary
                 {
+                    let mut staged_config = self.config.clone();
                     let report = vocabulary_xlsx::merge(
-                        &mut self.config.vocabulary,
+                        &mut staged_config.vocabulary,
                         vocabulary.entries.clone(),
                     );
-                    units::normalize(&mut self.config.vocabulary);
-                    match storage::save(&self.config) {
-                        Ok(()) => message.push_str(&format!(
-                            " 词库合并：新增 {}、更新 {}、不变 {} 条。",
-                            report.added, report.updated, report.unchanged
-                        )),
-                        Err(error) => message.push_str(&format!(
-                            " 词库已合并但保存失败：{error:#}（请检查配置目录权限）"
-                        )),
+                    match report {
+                        Err(error) => message.push_str(&format!(" 词库未合并：{error}")),
+                        Ok(report) => match storage::save(&staged_config) {
+                            Ok(()) => {
+                                self.config = staged_config;
+                                message.push_str(&format!(
+                                    " 词库合并：新增 {}、更新 {}、不变 {} 条。",
+                                    report.added, report.updated, report.unchanged
+                                ));
+                            }
+                            Err(error) => message.push_str(&format!(
+                                " 词库未合并，保存失败：{error:#}（请检查配置目录权限）"
+                            )),
+                        },
                     }
                 }
                 self.status = message;

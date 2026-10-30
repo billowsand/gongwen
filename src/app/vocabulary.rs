@@ -69,6 +69,7 @@ impl GongwenApp {
                 };
                 app.vocabulary_import_conflicts = None;
                 let result = (|| -> Result<(usize, vocabulary_xlsx::MergeReport), String> {
+                    let mut staged_config = app.config.clone();
                     let existing_codes: Vec<String> = app
                         .config
                         .vocabulary
@@ -80,13 +81,15 @@ impl GongwenApp {
                     let report = vocabulary_xlsx::parse(&path, &existing_codes)
                         .map_err(|error| error.summary)?;
                     let parsed_count = report.entries.len();
-                    let merge = vocabulary_xlsx::merge(&mut app.config.vocabulary, report.entries);
-                    units::normalize(&mut app.config.vocabulary);
-                    if !app.config.vocabulary.is_empty() {
-                        app.config.vocabulary_setup = VocabularySetupStatus::Completed;
+                    let merge =
+                        vocabulary_xlsx::merge(&mut staged_config.vocabulary, report.entries)?;
+                    units::normalize(&mut staged_config.vocabulary);
+                    if !staged_config.vocabulary.is_empty() {
+                        staged_config.vocabulary_setup = VocabularySetupStatus::Completed;
                     }
-                    storage::save(&app.config)
+                    storage::save(&staged_config)
                         .map_err(|error| format!("保存词库失败：{error:#}"))?;
+                    app.config = staged_config;
                     Ok((parsed_count, merge))
                 })();
                 match result {
@@ -183,6 +186,7 @@ impl GongwenApp {
     }
 
     pub(crate) fn renormalize_vocabulary(&mut self) {
+        units::identity::restore_owners(&mut self.config.vocabulary);
         units::rebuild_parents_from_codes(&mut self.config.vocabulary);
         units::normalize(&mut self.config.vocabulary);
     }
@@ -193,6 +197,9 @@ impl GongwenApp {
         {
             self.vocabulary_setup_ui(ui);
             return;
+        }
+        if let Err(error) = units::identity::validate(&self.config.vocabulary) {
+            ui.colored_label(warn(), format!("词库需核对：{error}"));
         }
         let mut action = None;
         if self
@@ -1246,6 +1253,7 @@ impl GongwenApp {
                 ui.separator();
                 ui.add_space(8.0);
 
+                ui.weak(format!("身份编码：{}", self.config.vocabulary[index].identity));
                 let canonical = self.config.vocabulary[index].canonical.trim().to_string();
                 let unit_code = self.config.vocabulary[index].code.trim().to_string();
                 if is_unit {
@@ -1354,6 +1362,25 @@ impl GongwenApp {
                     });
                 }
             });
+        if let Some(index) = self
+            .config
+            .vocabulary
+            .iter()
+            .position(|entry| entry.id == id)
+        {
+            let entry = &self.config.vocabulary[index];
+            if entry.category == VocabularyCategory::Unit
+                && self.config.vocabulary.iter().any(|other| {
+                    other.id != id
+                        && other.category == VocabularyCategory::Unit
+                        && other.parent == entry.parent
+                        && other.canonical.trim() == entry.canonical.trim()
+                })
+            {
+                self.config.vocabulary[index].canonical = before.canonical.clone();
+                self.status = "同一父节点下已有同名单位，名称未更改".into();
+            }
+        }
         if self
             .config
             .vocabulary
@@ -1775,6 +1802,7 @@ impl GongwenApp {
                         &self.config.vocabulary,
                         VocabularyCategory::Unit,
                         "新单位",
+                        &parent,
                     ),
                     parent,
                     ..Default::default()
@@ -1807,6 +1835,7 @@ impl GongwenApp {
                         &self.config.vocabulary,
                         VocabularyCategory::Person,
                         "新人员",
+                        &unit,
                     ),
                     unit,
                     ..Default::default()

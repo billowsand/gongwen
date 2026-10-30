@@ -111,6 +111,7 @@ fn apply_from(
                 let canonical = person.canonical.clone();
                 if draft.owner_id.is_none() && draft.owner_name.is_empty() {
                     draft.owner_id = Some(person.id);
+                    draft.owner_identity = person.identity.clone();
                     draft.owner_name = canonical.clone();
                     state.fill_owner_id = Some(person.id);
                     state.fill_suggestions.remove(&field);
@@ -175,6 +176,7 @@ pub(crate) fn undo_fill(state: &mut State, draft: &mut Task) {
                 field.write(draft, &field.value(&before));
                 if *field == FillField::Owner {
                     draft.owner_id = before.owner_id;
+                    draft.owner_identity = before.owner_identity.clone();
                 }
             }
         }
@@ -388,12 +390,13 @@ pub(super) fn owner_field(ui: &mut egui::Ui, draft: &mut Task, state: &mut State
         .corner_radius(theme::chrome_radius(7))
         .inner_margin(2.0)
         .show(ui, |ui| {
-            super::owner::picker(
+            super::owner::picker_bound(
                 ui,
                 ("task_owner", &draft.id),
                 data.vocabulary,
                 &mut draft.owner_id,
                 &mut draft.owner_name,
+                &mut draft.owner_identity,
                 &mut state.owner_query,
             )
         })
@@ -423,6 +426,7 @@ pub(super) fn owner_field(ui: &mut egui::Ui, draft: &mut Task, state: &mut State
                 && let Some(person) = proposed
             {
                 draft.owner_id = Some(person.id);
+                draft.owner_identity = person.identity.clone();
                 draft.owner_name = person.canonical.clone();
                 state.fill_suggestions.remove(&FillField::Owner);
                 state.fill_marks.insert(FillField::Owner, v.clone());

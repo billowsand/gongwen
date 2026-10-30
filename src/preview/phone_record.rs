@@ -74,6 +74,10 @@ pub(super) fn show(
     numbering: &crate::models::NumberingConfig,
     line_numbers: bool,
 ) -> PreviewOutput {
+    let record_display =
+        crate::units::UnitDisplay::new(&input.profile.vocabulary_snapshot).for_input(input);
+    let readable = crate::units::identity::readable_phone_record(input, &record_display);
+    let input = &readable;
     let visible = ui
         .clip_rect()
         .intersect(ui.ctx().input(|i| i.content_rect()));

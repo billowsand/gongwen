@@ -216,26 +216,25 @@ fn uses_joint_responsible(profile: &TemplateProfile, kind: TemplateKind) -> bool
 /// 先在承办单位可选的人里找（与表单联系人下拉的「人随事走」同一规则），词库里不同单位
 /// 有同名的人时才不会带错电话；承办单位下没有这个人再按全词库第一个同名的取。
 fn person_phone_of(vocabulary: &[VocabularyEntry], unit: &str, name: &str) -> String {
+    let Some(person) =
+        crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, name)
+    else {
+        return String::new();
+    };
     if !unit.trim().is_empty()
-        && let Some((_, phone)) = UnitDisplay::new(vocabulary)
+        && !UnitDisplay::new(vocabulary)
             .responsible_people_of(unit)
-            .into_iter()
-            .find(|(person, _)| person == name)
+            .iter()
+            .any(|(key, _)| key == &person.key())
     {
-        return phone.trim().to_string();
+        return String::new();
     }
-    vocabulary
-        .iter()
-        .find(|entry| {
-            entry.category == VocabularyCategory::Person && entry.canonical.trim() == name
-        })
-        .map(|entry| entry.phone.trim().to_string())
-        .unwrap_or_default()
+    person.phone.trim().to_string()
 }
 
 /// 统一的写值入口：表单下拉框与 AI 建议采纳都走这里。
 ///
-/// - 主送 / 抄送 / 发文互斥（规格 §2.4）：写入其中一个字段时，把同名单位从另外
+/// - 主送 / 抄送 / 发文互斥（规格 §2.4）：写入其中一个字段时，把同一身份单位从另外
 ///   两个字段剔除，新写入的值优先（下拉框本来就禁选已被占用的单位，剔除只在
 ///   手填重复、先选主送再选同一发文单位这类边角情形生效）。联合发文模式的
 ///   `joint_issuing_units` 不参与互斥。
@@ -249,7 +248,8 @@ pub(crate) fn apply_field(
     value: &str,
     vocabulary: &[VocabularyEntry],
 ) {
-    apply_profile_field(&mut draft.profile, draft.kind, field, value, vocabulary)
+    apply_profile_field(&mut draft.profile, draft.kind, field, value, vocabulary);
+    crate::units::identity::capture_input(draft, vocabulary)
 }
 
 /// 公函机关代字始终绑定当前发文单位；联合发文使用主发文单位。
@@ -280,7 +280,17 @@ pub(crate) fn apply_profile_field(
     value: &str,
     vocabulary: &[VocabularyEntry],
 ) {
+    crate::units::identity::capture(profile, vocabulary);
+    let value = split_units(value)
+        .iter()
+        .map(|key| {
+            crate::units::identity::resolve(vocabulary, field.category(), key)
+                .map_or_else(|| key.clone(), |e| e.key())
+        })
+        .collect::<Vec<_>>()
+        .join("、");
     let value = value.trim();
+    crate::units::identity::refresh_snapshot(profile, vocabulary, value);
     match field {
         FieldId::IssuingUnit => {
             profile.issuing_unit = value.to_string();
@@ -369,6 +379,31 @@ pub(crate) fn apply_profile_field(
             }
         }
     }
+    if field == FieldId::ResponsibleUnit {
+        let display = UnitDisplay::new(vocabulary);
+        if uses_joint_responsible(profile, kind) {
+            for row in profile.joint_contacts.iter_mut().take(1) {
+                if !row.unit.is_empty()
+                    && !display
+                        .responsible_people_of(&row.unit)
+                        .iter()
+                        .any(|(key, _)| key == &row.name)
+                {
+                    row.name.clear();
+                    row.phone.clear();
+                }
+            }
+        } else if !profile.responsible_unit.is_empty()
+            && !display
+                .responsible_people_of(&profile.responsible_unit)
+                .iter()
+                .any(|(key, _)| key == &profile.contact_person)
+        {
+            profile.contact_person.clear();
+            profile.contact_phone.clear();
+        }
+    }
+    crate::units::identity::capture(profile, vocabulary);
     if kind == TemplateKind::OfficialLetter
         && matches!(
             field,
@@ -407,7 +442,9 @@ fn exclude_issuing(profile: &mut TemplateProfile, picked: &[String]) {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FieldSuggestion {
     pub(crate) field: FieldId,
-    /// 建议值：词库词条的规范名；多值字段以顿号分隔。
+    #[serde(default)]
+    pub(crate) display_value: String,
+    /// 建议值：带类别的永久身份引用（兼容旧名称）；多值字段以顿号分隔。
     pub(crate) value: String,
     /// 生成建议那一刻的表单值：建议卡做过期检测、「替换」行标冲突用。
     pub(crate) previous: String,
@@ -490,10 +527,16 @@ pub(crate) fn filled_summary(draft: &DraftInput, suggestions: &[FieldSuggestion]
     for field in prompt_fields(draft) {
         let current = field.read(draft);
         let value = if !current.trim().is_empty() {
-            current.trim().to_string()
+            crate::units::identity::display_values(&draft.profile.vocabulary_snapshot, &current)
         } else {
             match suggestions.iter().find(|s| s.field == field && !s.conflict) {
-                Some(suggestion) => suggestion.value.clone(),
+                Some(suggestion) => {
+                    if suggestion.display_value.is_empty() {
+                        suggestion.value.clone()
+                    } else {
+                        suggestion.display_value.clone()
+                    }
+                }
                 None => continue,
             }
         };
@@ -646,24 +689,26 @@ fn person_choices(
             _ => "及其上级的领导",
         };
         for (name, _) in people {
-            if out.iter().any(|c| c.label == name) {
+            if out.iter().any(|c| c.action == Action::Fill(name.clone())) {
                 continue;
             }
             out.push(Choice {
-                label: name.clone(),
-                detail: format!("标准词库 · {unit}{role}"),
+                label: crate::units::identity::label(vocabulary, &name),
+                detail: format!(
+                    "标准词库 · {}{role}",
+                    crate::units::identity::label(vocabulary, unit)
+                ),
                 recommended: false,
                 action: Action::Fill(name),
             });
         }
     }
     // 单位定了：联系人严格按承办权限，不回落；单位还没定：两类都按简介匹配。
-    if out.is_empty() && (field != FieldId::ContactPerson || units.is_empty()) {
-        out.extend(crate::agent::clarify::vocabulary_choices(
+    if out.is_empty() && units.is_empty() {
+        out.extend(crate::agent::clarify::vocabulary_reference_choices(
             vocabulary,
             VocabularyCategory::Person,
             source,
-            false,
         ));
     }
     out.truncate(3);
@@ -696,7 +741,8 @@ fn contained_choices(
             .iter()
             .filter(|entry| entry.category == field.category())
         {
-            let canonical = entry.canonical.trim();
+            let key = entry.key();
+            let canonical = key.as_str();
             if canonical.is_empty()
                 || allowed
                     .as_ref()
@@ -722,7 +768,7 @@ fn contained_choices(
     hits.into_iter()
         .take(3)
         .map(|(_, name, excerpt)| Choice {
-            label: name.clone(),
+            label: crate::units::identity::label(vocabulary, &name),
             detail: format!("原文写的「{excerpt}」里含这个名称（标准词库）"),
             recommended: false,
             action: Action::Fill(name),
@@ -744,7 +790,7 @@ fn field_question(
     let mut choices: Vec<Choice> = matched
         .iter()
         .map(|name| Choice {
-            label: name.clone(),
+            label: crate::units::identity::label(vocabulary, name),
             detail: "材料原文里写的就是它（已对上标准词库）".into(),
             recommended: true,
             action: Action::Fill(name.clone()),
@@ -760,11 +806,10 @@ fn field_question(
             .collect::<Vec<_>>(),
     );
     let mut extra: Vec<Choice> = match field.category() {
-        VocabularyCategory::Unit => crate::agent::clarify::vocabulary_choices(
+        VocabularyCategory::Unit => crate::agent::clarify::vocabulary_reference_choices(
             vocabulary,
             VocabularyCategory::Unit,
             source,
-            false,
         ),
         _ => {
             let units = filter_units_for(field, draft, planned);
@@ -844,9 +889,27 @@ pub(crate) fn plan(
         let resolved: Vec<Vec<String>> = excerpts
             .iter()
             .map(|excerpt| {
+                let units = filter_units_for(field, draft, &out);
+                let display = UnitDisplay::new(vocabulary);
+                let allowed: Vec<_> = units
+                    .iter()
+                    .flat_map(|unit| {
+                        if field == FieldId::ContactPerson {
+                            display.responsible_people_of(unit)
+                        } else {
+                            display.leaders_of(unit)
+                        }
+                    })
+                    .map(|(key, _)| key)
+                    .collect();
                 resolve(vocabulary, field, excerpt)
                     .into_iter()
-                    .map(|entry| entry.canonical.trim().to_string())
+                    .filter(|entry| {
+                        field.category() == VocabularyCategory::Unit
+                            || units.is_empty()
+                            || allowed.contains(&entry.key())
+                    })
+                    .map(|entry| entry.key())
                     .collect()
             })
             .collect();
@@ -866,6 +929,7 @@ pub(crate) fn plan(
                 let value = join_units(&matched);
                 if !same_value(&value, &current) {
                     out.suggestions.push(FieldSuggestion {
+                        display_value: String::new(),
                         field,
                         value,
                         previous: current,
@@ -892,6 +956,7 @@ pub(crate) fn plan(
         }
         if all_unique {
             out.suggestions.push(FieldSuggestion {
+                display_value: String::new(),
                 field,
                 value: join_units(&matched),
                 previous: current,
@@ -919,6 +984,10 @@ pub(crate) fn plan(
     // 题号从 1 起；与方向题、六要素题同批时 merge_predraft 还会统一重排。
     for (index, question) in out.questions.iter_mut().enumerate() {
         question.id = index + 1;
+    }
+    for suggestion in &mut out.suggestions {
+        suggestion.display_value =
+            crate::units::identity::display_values(vocabulary, &suggestion.value);
     }
     out
 }
@@ -981,14 +1050,29 @@ pub(crate) fn resolve_answers(
                     let previous = field.read(draft);
                     let conflict = !previous.trim().is_empty() && !same_value(&previous, &value);
                     suggestions.push(FieldSuggestion {
+                        display_value: picked
+                            .iter()
+                            .filter_map(|value| {
+                                question
+                                    .choices
+                                    .iter()
+                                    .find(|c| c.action == Action::Fill(value.clone()))
+                            })
+                            .map(|c| c.label.clone())
+                            .collect::<Vec<_>>()
+                            .join("、"),
                         field,
                         value: value.clone(),
                         previous,
                         source: "起草人从标准词库选定".into(),
                         conflict,
                     });
+                    let label = suggestions
+                        .last()
+                        .map(|s| s.display_value.as_str())
+                        .unwrap_or("");
                     notes.push(format!(
-                        "{}：{value}（起草人从标准词库选定）",
+                        "{}：{label}（起草人从标准词库选定）",
                         field.label()
                     ));
                 }
@@ -1238,14 +1322,16 @@ mod tests {
             phone: "789".into(),
             ..Default::default()
         });
+        crate::units::normalize(&mut vocabulary);
+        let selected = vocabulary.iter().find(|e| e.phone == "789").unwrap().key();
         let mut draft = draft_of(TemplateKind::OfficialLetter);
         apply_field(&mut draft, FieldId::ResponsibleUnit, "乙局", &vocabulary);
-        apply_field(&mut draft, FieldId::ContactPerson, "张三", &vocabulary);
+        apply_field(&mut draft, FieldId::ContactPerson, &selected, &vocabulary);
         assert_eq!(draft.profile.contact_phone, "789");
 
         let mut draft = draft_of(TemplateKind::RedHeadApproval);
         apply_field(&mut draft, FieldId::ResponsibleUnit, "乙局", &vocabulary);
-        apply_field(&mut draft, FieldId::ContactPerson, "张三", &vocabulary);
+        apply_field(&mut draft, FieldId::ContactPerson, &selected, &vocabulary);
         assert_eq!(FieldId::ContactPhone.read(&draft), "789");
     }
 

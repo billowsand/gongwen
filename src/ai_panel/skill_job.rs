@@ -1632,7 +1632,11 @@ impl DraftPage<'_> {
             );
             row.after = Some(Box::new(doc.draft.profile.clone()));
             row.state = FieldCardState::Adopted;
-            format!("已采纳：{} → {}", field.label(), value)
+            format!(
+                "已采纳：{} → {}",
+                field.label(),
+                crate::units::identity::display_values(&self.config.vocabulary, &value)
+            )
         };
         let turn = self.doc.ai_panel.turn_mut(turn_id);
         if let Some(turn) = turn {

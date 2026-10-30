@@ -433,15 +433,27 @@
     place(top + right, dy: height, note)
   })
 }
+// 单位消歧后可能变长；量尺与实际版记必须复用完全相同的单元格和文字边界。
+#let record-row(i, row) = block(width: text-w, above: 0pt, below: 0pt, {
+  set text(size: 14pt, tracking: 0pt, top-edge: "baseline", bottom-edge: "baseline")
+  set par(first-line-indent: 0pt, justify: false, hanging-indent: 3em, leading: 22.56pt - 14pt)
+  let (lu, lc, lp) = if i == 0 { ([承办单位：], [联系人：], [联系电话：]) }
+    else { (h(5em), h(4em), []) }
+  grid(columns: (1fr, 1fr, 11em), align: (left, center, right),
+    lu + row.unit, lc + name-text(row.contact), lp + row.phone)
+})
 #let record-geometry(r) = {
   let k = calc.max(r.rows.len(), 1)
+  let row-extra = r.rows.enumerate().map(((i, row)) => measure(record-row(i, row)).height / 1mm)
+  let row-offsets = range(r.rows.len()).map(i => row-extra.slice(0, i).sum(default: 0))
+  let rows-extra = row-extra.sum(default: 0)
   // 量实际段落的首末基线距离，单行时为零；折行后所有下方横线和承办行同步下移。
   let extra = measure(copies-par(r)).height / 1mm
   if r.joint {
     let last = 15.20 + (k - 1) * 6.81
-    (copies: 6.41, mid: 9.24 + extra, first: 15.20 + extra, step: 6.81, bottom: last + 2.99 + extra)
+    (copies: 6.41, mid: 9.24 + extra, first: 15.20 + extra, step: 6.81, offsets: row-offsets, bottom: last + 2.99 + extra + rows-extra)
   } else {
-    (copies: 5.84, mid: 8.41 + extra, first: 13.80 + extra, step: 6.81, bottom: 16.52 + extra)
+    (copies: 5.84, mid: 8.41 + extra, first: 13.80 + extra, step: 6.81, offsets: row-offsets, bottom: 16.52 + extra + rows-extra)
   }
 }
 #let record-height(r) = (record-geometry(r).bottom - 1.46) * 1mm
@@ -460,10 +472,7 @@
     at(g.copies, copies-par(r))
     rule(g.mid, 0.3mm)
     for (i, row) in r.rows.enumerate() {
-      let (lu, lc, lp) = if i == 0 { ([承办单位：], [联系人：], [联系电话：]) }
-        else { (h(5em), h(4em), []) }
-      at(g.first + i * g.step, grid(columns: (1fr, 1fr, 11em), align: (left, center, right),
-        lu + row.unit, lc + name-text(row.contact), lp + row.phone))
+      at(g.first + i * g.step + g.offsets.at(i), record-row(i, row))
     }
     rule(g.bottom, 0.6mm)
   })

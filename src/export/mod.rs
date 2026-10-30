@@ -171,9 +171,15 @@ pub(crate) fn copy_roster(input: &DraftInput) -> Option<String> {
         "份号	单位	类别
 ",
     );
+    let display = UnitDisplay::new(&input.profile.vocabulary_snapshot).for_input(input);
     let mut serial = 0u32;
     for (label, value) in groups {
         for unit in split_units(value) {
+            let unit = if unit.starts_with("@person:") {
+                display.person_name(&unit)
+            } else {
+                display.full_name(&unit)
+            };
             serial += 1;
             out.push_str(&format!(
                 "{}	{unit}	{label}
@@ -412,6 +418,10 @@ pub(crate) fn export_artifacts(
     numbering: &NumberingConfig,
     version_name: Option<&str>,
 ) -> Result<ExportArtifacts> {
+    display
+        .for_input(input)
+        .ensure_resolved(input)
+        .map_err(anyhow::Error::msg)?;
     let title = document_title(input, markdown);
     // 文件夹与各格式共用主干：文种前缀后追加对应的提交版本名称，未匹配版本时为“待提交”。
     let stem = document_stem(input, &title, version_name);

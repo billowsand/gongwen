@@ -193,6 +193,7 @@ fn migrate_task_columns(conn: &Connection) -> Result<()> {
         .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
     for (name, ddl) in [
         ("owner_id", "INTEGER"),
+        ("owner_identity", "TEXT NOT NULL DEFAULT ''"),
         ("owner_name", "TEXT NOT NULL DEFAULT ''"),
         ("progress", "TEXT NOT NULL DEFAULT ''"),
         ("risks", "TEXT NOT NULL DEFAULT ''"),
@@ -280,6 +281,7 @@ impl Store {
             }
             if let Some(owner_id) = proposal.owner_id {
                 task.owner_id = Some(owner_id);
+                task.owner_identity = proposal.owner_identity.clone();
                 task.owner_name = proposal.owner.unwrap_or_default();
             }
             if let Some(next) = proposal.next_step {
@@ -330,6 +332,10 @@ impl Store {
             return Ok(());
         }
         tx.execute("UPDATE tasks SET name=?1,owner_id=?2,owner_name=?3,progress=?4,risks=?5,next_step=?6,deadline=?7,status=?8,category=?9,parent_id=?10,needs_review=?11,revision=?12,updated_at=?13 WHERE id=?14",params![task.name,task.owner_id.map(|id| id as i64),task.owner_name,task.progress,task.risks,task.next_step,task.deadline,task.status.as_str(),task.category,task.parent_id,task.needs_review,next_revision,now,chosen_task_id])?;
+        tx.execute(
+            "UPDATE tasks SET owner_identity=?1 WHERE id=?2",
+            params![task.owner_identity, chosen_task_id],
+        )?;
         tx.execute("INSERT INTO task_history(task_id,happened_at,action,detail,source_id) VALUES(?1,?2,'采纳材料建议',?3,?4)",params![chosen_task_id,now,change_detail(Some(&tasks[index]), &task, &evidence),source_id])?;
         tx.execute(
             "UPDATE task_candidates SET state='accepted' WHERE id=?1",
@@ -501,6 +507,10 @@ impl Store {
         }
         let now = chrono::Local::now().to_rfc3339();
         tx.execute("INSERT INTO tasks(id,name,category,role,collaborators,goal,next_step,next_deadline,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at,owner_id,owner_name,progress,risks) VALUES(?1,?2,?3,'','', '',?4,NULL,?5,?6,?7,?8,0,0,1,?9,?10,?11,?12,?13)",params![task.id,task.name,task.category,task.next_step,task.deadline,task.status.as_str(),task.parent_id,task.needs_review,now,task.owner_id.map(|id| id as i64),task.owner_name,task.progress,task.risks])?;
+        tx.execute(
+            "UPDATE tasks SET owner_identity=?1 WHERE id=?2",
+            params![task.owner_identity, task.id],
+        )?;
         for prerequisite in &task.prerequisites {
             tx.execute(
                 "INSERT INTO task_prerequisites(task_id,prerequisite_id) VALUES(?1,?2)",
@@ -677,7 +687,7 @@ impl Store {
 }
 
 fn load_tasks(conn: &Connection, include_closed: bool) -> Result<Vec<Task>> {
-    let mut s=conn.prepare("SELECT id,name,category,next_step,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at,owner_id,owner_name,progress,risks FROM tasks WHERE (?1=1 OR (archived=0 AND deleted=0)) ORDER BY updated_at DESC")?;
+    let mut s=conn.prepare("SELECT id,name,category,next_step,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at,owner_id,owner_name,progress,risks,owner_identity FROM tasks WHERE (?1=1 OR (archived=0 AND deleted=0)) ORDER BY updated_at DESC")?;
     let rows = s.query_map([include_closed], |r| {
         let id: String = r.get(0)?;
         let mut t = Task {
@@ -696,6 +706,7 @@ fn load_tasks(conn: &Connection, include_closed: bool) -> Result<Vec<Task>> {
             updated_at: r.get(11)?,
             owner_id: r.get::<_, Option<i64>>(12)?.map(|id| id as u64),
             owner_name: r.get(13)?,
+            owner_identity: r.get(16)?,
             progress: r.get(14)?,
             risks: r.get(15)?,
         };
@@ -827,6 +838,10 @@ fn save_task(
     let revision = old.unwrap_or(0) + 1;
     let now = chrono::Local::now().to_rfc3339();
     tx.execute("INSERT INTO tasks(id,name,category,role,collaborators,goal,next_step,next_deadline,deadline,status,parent_id,needs_review,archived,deleted,revision,updated_at,owner_id,owner_name,progress,risks) VALUES(?1,?2,?3,'','', '',?4,NULL,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) ON CONFLICT(id) DO UPDATE SET name=excluded.name,category=excluded.category,next_step=excluded.next_step,deadline=excluded.deadline,status=excluded.status,parent_id=excluded.parent_id,needs_review=excluded.needs_review,archived=excluded.archived,deleted=excluded.deleted,revision=excluded.revision,updated_at=excluded.updated_at,owner_id=excluded.owner_id,owner_name=excluded.owner_name,progress=excluded.progress,risks=excluded.risks",params![t.id,t.name,t.category,t.next_step,t.deadline,t.status.as_str(),t.parent_id,t.needs_review,t.archived,t.deleted,revision,now,t.owner_id.map(|id| id as i64),t.owner_name,t.progress,t.risks])?;
+    tx.execute(
+        "UPDATE tasks SET owner_identity=?1 WHERE id=?2",
+        params![t.owner_identity, t.id],
+    )?;
     tx.execute("DELETE FROM task_prerequisites WHERE task_id=?1", [&t.id])?;
     for p in &t.prerequisites {
         tx.execute(
@@ -853,4 +868,51 @@ fn save_task(
             ],
         )?;
     Ok(())
+}
+
+impl Store {
+    /// 只补旧本机负责人身份，不按同名人员重绑；已有永久身份绝不覆盖。
+    pub(crate) fn bind_legacy_owners(
+        &mut self,
+        vocabulary: &[crate::models::VocabularyEntry],
+    ) -> Result<()> {
+        let people: Vec<_> = vocabulary
+            .iter()
+            .filter(|e| {
+                e.category == crate::models::VocabularyCategory::Person && !e.identity.is_empty()
+            })
+            .collect();
+        if people.is_empty() {
+            return Ok(());
+        }
+        let mut query = self.conn.prepare("SELECT id,owner_id,owner_name FROM tasks WHERE owner_identity='' AND owner_id IS NOT NULL")?;
+        let rows = query
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(query);
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        for (task, id, name) in rows {
+            let matched: Vec<_> = people
+                .iter()
+                .filter(|e| e.id == id as u64 && e.canonical == name)
+                .collect();
+            if matched.len() == 1 {
+                tx.execute(
+                    "UPDATE tasks SET owner_identity=?1 WHERE id=?2 AND owner_identity=''",
+                    params![matched[0].identity, task],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }

@@ -285,6 +285,9 @@ pub fn validate(
     let mut warnings = Vec::new();
     let text = markdown.trim();
 
+    if let Some(notice) = crate::units::identity::snapshot_notice(input, vocabulary) {
+        warnings.push(notice);
+    }
     validate_metadata(input, vocabulary, rules, &mut warnings);
 
     if text.is_empty() {
@@ -639,7 +642,15 @@ fn validate_metadata(
         return;
     }
     let profile = &input.profile;
-    let unit_display = crate::units::UnitDisplay::new(vocabulary);
+    let unit_display = crate::units::UnitDisplay::new(vocabulary).for_input(input);
+    if let Err(error) = unit_display.ensure_resolved(input) {
+        warnings.push(error);
+    }
+    let vocabulary = if input.profile.vocabulary_snapshot.is_empty() {
+        vocabulary
+    } else {
+        &input.profile.vocabulary_snapshot
+    };
     let marking = profile.security_level.trim();
     let level = SecurityLevel::from_marking(marking);
     if marking.is_empty() {
@@ -693,10 +704,9 @@ fn validate_metadata(
             if entry.phone.trim().is_empty() {
                 warnings.push(format!("联系人“{}”缺少联系电话", entry.name.trim()));
             }
-            if let Some(vocab) = vocabulary.iter().find(|vocab| {
-                vocab.category == VocabularyCategory::Person
-                    && vocab.canonical.trim() == entry.name.trim()
-            }) && !vocab.phone.trim().is_empty()
+            if let Some(vocab) =
+                crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, &entry.name)
+                && !vocab.phone.trim().is_empty()
                 && vocab.phone.trim() != entry.phone.trim()
             {
                 warnings.push(format!(
@@ -707,10 +717,9 @@ fn validate_metadata(
                 ));
             }
             // 规格 §2.3/2.5：承办单位、联系人、电话一一对应，联系人应属于同行承办单位。
-            if let Some(vocab) = vocabulary.iter().find(|vocab| {
-                vocab.category == VocabularyCategory::Person
-                    && vocab.canonical.trim() == entry.name.trim()
-            }) {
+            if let Some(vocab) =
+                crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, &entry.name)
+            {
                 let bound = vocab.unit.trim();
                 let responsible = entry.unit.trim();
                 if !bound.is_empty()
@@ -740,9 +749,8 @@ fn validate_metadata(
             _ => {}
         }
         if !contact.is_empty()
-            && let Some(entry) = vocabulary.iter().find(|entry| {
-                entry.category == VocabularyCategory::Person && entry.canonical.trim() == contact
-            })
+            && let Some(entry) =
+                crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, contact)
             && !entry.phone.trim().is_empty()
             && entry.phone.trim() != phone
         {
@@ -753,9 +761,8 @@ fn validate_metadata(
         }
         // 规格 §2.3“人随事走”：联系人应属于承办单位。
         if !contact.is_empty()
-            && let Some(entry) = vocabulary.iter().find(|entry| {
-                entry.category == VocabularyCategory::Person && entry.canonical.trim() == contact
-            })
+            && let Some(entry) =
+                crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, contact)
         {
             let bound = entry.unit.trim();
             let responsible = profile.responsible_unit.trim();
@@ -983,19 +990,20 @@ fn check_units(
     vocabulary: &[VocabularyEntry],
     warnings: &mut Vec<String>,
 ) {
-    let known = vocabulary
+    if !vocabulary
         .iter()
-        .filter(|entry| categories.contains(&entry.category))
-        .map(|entry| entry.canonical.trim())
-        .filter(|canonical| !canonical.is_empty())
-        .collect::<Vec<_>>();
-    if known.is_empty() {
+        .any(|entry| categories.contains(&entry.category))
+    {
         return;
     }
-    for unit in split_units(value) {
-        if !known.iter().any(|canonical| *canonical == unit) {
+    for key in split_units(value) {
+        if !categories
+            .iter()
+            .any(|category| crate::units::identity::resolve(vocabulary, *category, &key).is_some())
+        {
             warnings.push(format!(
-                "{field}“{unit}”不在标准词库中，请核对全称或先补入词库"
+                "{field}“{}”不在标准词库中或存在同名歧义，请重新选择",
+                crate::units::identity::label(vocabulary, &key)
             ));
         }
     }

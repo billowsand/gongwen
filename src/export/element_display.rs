@@ -26,6 +26,8 @@ pub(crate) fn is_preview_version(input: &DraftInput) -> bool {
 /// 主送机关位的纸面显示值：函稿 / 电话通知是主送机关，白头件 / 红头呈批件是
 /// 呈报领导；其余文种没有这一位。返回值不含结尾的「：」（版式自己加）。
 pub(crate) fn addressee_display(input: &DraftInput, display: &UnitDisplay) -> String {
+    let scoped_display = display.for_input(input);
+    let display = &scoped_display;
     let text = match input.kind {
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => display.join_hierarchical_for(
             &split_units(&input.profile.recipient),
@@ -45,6 +47,8 @@ pub(crate) fn addressee_display(input: &DraftInput, display: &UnitDisplay) -> St
 
 /// 抄送机关的纸面显示值（不含「抄送：」标签，只有单位串）。
 pub(crate) fn copies_to_display(input: &DraftInput, display: &UnitDisplay) -> String {
+    let scoped_display = display.for_input(input);
+    let display = &scoped_display;
     display.join_hierarchical_for(
         &split_units(&input.profile.copies_to),
         input.uses_external_unit_names(),
@@ -94,6 +98,8 @@ pub(crate) fn number_display_parts(input: &DraftInput) -> (String, String, Strin
 /// 其余文种一行。行的显示按文种取全称或简称（规格 §2.5 / §3.1）；联合发文模式 1
 /// 只剩 1 个发文单位时回落右侧单列，单位取该唯一发文单位。
 pub(crate) fn signing_unit_display(input: &DraftInput, display: &UnitDisplay) -> Vec<String> {
+    let scoped_display = display.for_input(input);
+    let display = &scoped_display;
     match input.kind {
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
             display.white_paper_signature_units(input)

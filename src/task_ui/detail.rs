@@ -245,7 +245,8 @@ fn status_feedback(ui: &mut egui::Ui, store: &mut Store, state: &mut State, t: &
 }
 
 fn info(ui: &mut egui::Ui, t: &Task, today: &str, vocabulary: &[crate::models::VocabularyEntry]) {
-    let (owner, found) = super::owner::label(vocabulary, t.owner_id, &t.owner_name);
+    let (owner, found) =
+        super::owner::label_bound(vocabulary, t.owner_id, &t.owner_name, &t.owner_identity);
     let owner = if t.owner_name.trim().is_empty() {
         muted("未指定")
     } else if found || t.owner_id.is_none() {

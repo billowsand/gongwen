@@ -170,6 +170,10 @@ fn prepare(
     elements: &ElementMarks,
     base_dir: &Path,
 ) -> Result<(Doc, typst_engine::FontSet, Vec<String>)> {
+    display
+        .for_input(input)
+        .ensure_resolved(input)
+        .map_err(anyhow::Error::msg)?;
     let rendered = crate::mermaid::materialize(
         markdown,
         crate::mermaid::Style::Official,

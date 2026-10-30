@@ -282,6 +282,7 @@ fn extraction_snapshot_and_candidates_commit_together_and_dedupe() {
         collaborators: None,
         owner: None,
         owner_id: None,
+        owner_identity: String::new(),
         progress: None,
         risks: None,
         speaker: None,
@@ -323,6 +324,7 @@ fn stale_candidate_requires_explicit_recheck_and_never_overwrites_edits() {
         collaborators: None,
         owner: None,
         owner_id: None,
+        owner_identity: String::new(),
         progress: None,
         risks: None,
         speaker: None,
@@ -368,6 +370,7 @@ fn new_task_candidate_and_source_history_are_applied_together() {
         collaborators: None,
         owner: None,
         owner_id: None,
+        owner_identity: String::new(),
         progress: None,
         risks: None,
         speaker: None,
@@ -593,6 +596,7 @@ fn proposal(kind: &str, id: Option<String>, evidence: &str) -> super::extract::P
         collaborators: None,
         owner: None,
         owner_id: None,
+        owner_identity: String::new(),
         progress: None,
         risks: None,
         speaker: None,
@@ -859,6 +863,7 @@ fn task_assistant_batch_drops_deadlines_with_invented_years() {
         collaborators: None,
         owner: None,
         owner_id: None,
+        owner_identity: String::new(),
         progress: None,
         risks: None,
         speaker: None,
@@ -1061,4 +1066,26 @@ fn missing_evidence_falls_back_and_same_excerpt_is_kept_once() {
     let items = super::extract::parse_response(raw, content, &[]).unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].progress.as_deref(), Some("制定分批切换方案"));
+}
+
+#[test]
+fn owner_identity_round_trips_and_legacy_binding_never_overwrites_it() {
+    let mut store = Store::open(":memory:").unwrap();
+    let mut task = Task::blank();
+    task.name = "身份回归任务".into();
+    task.owner_id = Some(7);
+    task.owner_name = "张宁".into();
+    task.owner_identity = uuid::Uuid::new_v4().to_string();
+    store.save(&task, "创建", "回归").unwrap();
+    let mut entries = vec![crate::models::VocabularyEntry {
+        id: 7,
+        canonical: "张宁".into(),
+        category: crate::models::VocabularyCategory::Person,
+        ..Default::default()
+    }];
+    crate::units::identity::assign(&mut entries);
+    store.bind_legacy_owners(&entries).unwrap();
+    let restored = store.list(false).unwrap().remove(0);
+    assert_eq!(restored.owner_identity, task.owner_identity);
+    assert_ne!(restored.owner_identity, entries[0].identity);
 }

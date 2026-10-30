@@ -48,6 +48,10 @@ pub(super) fn write(
     numbering: &NumberingConfig,
     elements: &crate::visual_diff::ElementMarks,
 ) -> Result<()> {
+    let record_display =
+        crate::units::UnitDisplay::new(&input.profile.vocabulary_snapshot).for_input(input);
+    let readable = crate::units::identity::readable_phone_record(input, &record_display);
+    let input = &readable;
     let r = &input.phone_record;
     let (level, period) = crate::export::element_display::security_parts(input);
     let mut security = Paragraph::new();
@@ -196,8 +200,8 @@ pub(super) fn write(
                 .add_run(
                     body_run(format!(
                         "承办单位：{}　联系人：{}　电话：{}",
-                        input.profile.responsible_unit,
-                        input.profile.contact_person,
+                        record_display.abbr(&input.profile.responsible_unit),
+                        record_display.person_name(&input.profile.contact_person),
                         input.profile.contact_phone
                     ))
                     .size(28),

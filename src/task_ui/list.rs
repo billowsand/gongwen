@@ -260,8 +260,12 @@ fn row(ui: &mut egui::Ui, t: &Task, data: &Snapshot, selected: bool, show_catego
             if t.owner_name.trim().is_empty() {
                 ui.label(small("未指定负责人", theme::text_muted()));
             } else {
-                let (label, found) =
-                    super::owner::label(data.vocabulary, t.owner_id, &t.owner_name);
+                let (label, found) = super::owner::label_bound(
+                    data.vocabulary,
+                    t.owner_id,
+                    &t.owner_name,
+                    &t.owner_identity,
+                );
                 let color = if found || t.owner_id.is_none() {
                     theme::text_soft()
                 } else {

@@ -444,8 +444,11 @@ impl GongwenApp {
             }
         };
         self.task_store = match crate::task_assistant::Store::open(&path) {
-            Ok(store) => {
-                self.task_error = None;
+            Ok(mut store) => {
+                self.task_error = store
+                    .bind_legacy_owners(&self.config.vocabulary)
+                    .err()
+                    .map(|e| format!("负责人身份迁移失败：{e:#}"));
                 Some(store)
             }
             Err(error) => {

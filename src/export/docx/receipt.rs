@@ -55,6 +55,10 @@ pub(crate) fn write(
     markdown: &str,
     display: &UnitDisplay,
 ) -> Result<()> {
+    display
+        .for_input(input)
+        .ensure_resolved(input)
+        .map_err(anyhow::Error::msg)?;
     let doc = crate::export::typst::receipt::build(input, markdown, display);
     let widths = column_widths();
 

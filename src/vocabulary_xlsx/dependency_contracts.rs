@@ -116,7 +116,7 @@ fn exported_vocabulary_keeps_codes_layout_and_validation() {
     assert!(
         attributes(&unit_xml, "col")
             .iter()
-            .any(|col| col.get("min").map(String::as_str) == Some("11")
+            .any(|col| col.get("min").map(String::as_str) == Some("13")
                 && col.get("hidden").map(String::as_str) == Some("1"))
     );
 

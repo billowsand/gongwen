@@ -439,3 +439,8 @@ docx-rs 不写这个属性，打包前由 `export::docx::record::with_record_gap
 回归 `letter_record_after_landscape_attachment_uses_a_portrait_page_bottom` 检查纸张数量、
 竖页尺寸、版记只出现一次及其位置；`letter_record_landscape_preview_sample`（ignored）
 生成 `tmp/preview-samples/letter-record-after-landscape.png` 供目视检查。
+
+
+### 2026-10-30 标准词库身份修复
+
+公函普通／联合版记改为复用 `record-row` 测量实际折行高度；同名单位逐级补前缀后长名称不会越过底线，短单行保留原几何。专门样张为 `typst_samples_identity`，完整交接见 `docs/vocabulary-identity-design.md` 第十节。

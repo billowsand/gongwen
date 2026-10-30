@@ -288,6 +288,9 @@ pub(crate) fn format_copy_number(value: u32) -> String {
 pub struct TemplateProfile {
     pub kind: TemplateKind,
     pub profile_name: String,
+    /// 身份引用使用的词条与祖先快照；空时保持旧版本序列化结果。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub vocabulary_snapshot: Vec<crate::models::VocabularyEntry>,
     /// 仅函稿使用：内部行文使用正常名称，外部行文优先使用单位外部名称。
     pub correspondence_scope: CorrespondenceScope,
     pub joint_issuance_mode: JointIssuanceMode,
@@ -346,6 +349,7 @@ impl Default for TemplateProfile {
         Self {
             kind: TemplateKind::OfficialLetter,
             profile_name: "默认配置".into(),
+            vocabulary_snapshot: Vec::new(),
             correspondence_scope: CorrespondenceScope::Internal,
             joint_issuance_mode: JointIssuanceMode::Single,
             issuing_unit: String::new(),

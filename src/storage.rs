@@ -152,6 +152,16 @@ pub fn load() -> Result<(AppConfig, Option<PathBuf>)> {
     if config.migrate_providers() && path.exists() {
         let _ = save(&config);
     }
+    if crate::units::identity::assign(&mut config.vocabulary) && path.exists() {
+        let backup = path.with_extension("json.身份迁移前备份");
+        if !backup.exists() {
+            fs::copy(&path, &backup)?;
+        }
+        // 旧词库可能已有同级重名或悬空关系，保留供界面核对，不能因此启动成空配置。
+        atomic_write(&path, |file| {
+            serde_json::to_writer_pretty(file, &config).context("保存身份迁移失败")
+        })?;
+    }
     Ok((config, None))
 }
 
@@ -173,6 +183,7 @@ fn corrupted_config_path(path: &std::path::Path) -> PathBuf {
 }
 
 pub fn save(config: &AppConfig) -> Result<()> {
+    crate::units::identity::validate(&config.vocabulary).map_err(anyhow::Error::msg)?;
     let path = config_path()?;
     atomic_write(&path, |file| {
         serde_json::to_writer_pretty(file, config)?;

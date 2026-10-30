@@ -915,6 +915,7 @@ mod tests {
         panel.push_turn("起草".into(), "写稿".into(), vec![], None);
         panel.turns[0].field_cards = vec![
             FieldCardRow::new(FieldSuggestion {
+                display_value: String::new(),
                 field: FieldId::Recipient,
                 value: "甲局".into(),
                 previous: String::new(),
@@ -923,6 +924,7 @@ mod tests {
             }),
             FieldCardRow {
                 suggestion: FieldSuggestion {
+                    display_value: String::new(),
                     field: FieldId::ContactPerson,
                     value: "张三".into(),
                     previous: String::new(),

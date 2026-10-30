@@ -30,9 +30,15 @@ pub struct VocabularyEntry {
     /// 词条稳定标识。树形界面用它记录展开与选中状态，重排序、改名都不受影响。
     /// `0` 表示尚未分配，载入词库时统一补号。
     pub id: u64,
+    /// 永久身份编码。改名、改业务编码、移动与跨机交换均保留。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub identity: String,
+    /// 单位的父身份／人员的所属单位身份，旧格式缺省为空。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub owner_identity: String,
     pub category: VocabularyCategory,
-    /// 单位专属：层级编码，每级两位，下级以上级编码为前缀（`00` → `0001`）。
-    /// 由树形结构自动生成；同级显示顺序由 `sort_order` 独立维护。
+    /// 单位的业务／层级编码，人员在其所属单位内的编号；用户填写值保留，空值才补号。
+    /// 旧两位层级编码仍兼容，永久关联使用 identity / owner_identity，不靠编号或排序辨人。
     pub code: String,
     pub canonical: String,
     /// 单位专属：对外行文时使用的名称；为空时回退正常名称并由审核给出提醒。
@@ -43,12 +49,12 @@ pub struct VocabularyEntry {
     pub phone: String,
     /// 人员专属：职务。姓名与职务分开维护，便于白头件按职务合并呈报称谓。
     pub position: String,
-    /// 单位专属：上级单位的层级编码，空串表示顶层单位。
+    /// 单位专属：上级单位的业务编码兼容列，空串表示顶层；永久关联以 owner_identity 为准。
     /// 旧配置中可能仍是规范名称，载入后由 `units::normalize` 自动迁移。
     pub parent: String,
     /// 单位专属：本单位简称（如“新舆处”），空串时回落规范名称。
     pub abbr: String,
-    /// 人员专属：所属单位的层级编码，用于“人随事走”过滤。
+    /// 人员专属：所属单位的业务编码兼容列；“人随事走”按 owner_identity 解析。
     /// 旧配置中可能仍是规范名称，载入后由 `units::normalize` 自动迁移。
     pub unit: String,
     /// 人员专属：允许该人员在公函版记中担任所属单位各级上级单位的承办联系人。
@@ -82,4 +88,22 @@ pub enum VocabularySetupStatus {
     Pending,
     Completed,
     Skipped,
+}
+
+impl VocabularyEntry {
+    /// 带类别的持久引用，不与名称、业务编码混用。旧测试／旧数据未补号前保留名称。
+    pub(crate) fn key(&self) -> String {
+        if self.identity.is_empty() {
+            return self.canonical.trim().to_owned();
+        }
+        format!(
+            "@{}:{}",
+            if self.category == VocabularyCategory::Unit {
+                "unit"
+            } else {
+                "person"
+            },
+            self.identity
+        )
+    }
 }

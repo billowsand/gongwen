@@ -242,6 +242,12 @@ pub fn write_docx_with_numbering(
     numbering: &NumberingConfig,
     elements: &crate::visual_diff::ElementMarks,
 ) -> Result<()> {
+    display
+        .for_input(input)
+        .ensure_resolved(input)
+        .map_err(anyhow::Error::msg)?;
+    let scoped_display = display.for_input(input);
+    let display = &scoped_display;
     if !input.kind.uses_official_docx() {
         bail!("研究报告的 Word 由 mdx research 转换器生成，不走公文 Word 排版");
     }

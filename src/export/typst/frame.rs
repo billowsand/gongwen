@@ -323,7 +323,7 @@ fn letter_frame(input: &DraftInput, display: &UnitDisplay, elements: &ElementMar
                 let entry = entries.get(index);
                 RecordRow {
                     unit: display.abbr(entry.map_or("", |value| value.unit.as_str())),
-                    contact: entry.map_or(String::new(), |value| value.name.clone()),
+                    contact: entry.map_or(String::new(), |value| display.person_name(&value.name)),
                     phone: entry.map_or(String::new(), |value| value.phone.clone()),
                 }
             })
@@ -331,7 +331,7 @@ fn letter_frame(input: &DraftInput, display: &UnitDisplay, elements: &ElementMar
     } else {
         vec![RecordRow {
             unit: responsible_display,
-            contact: input.profile.contact_person.clone(),
+            contact: display.person_name(&input.profile.contact_person),
             phone: input.profile.contact_phone.clone(),
         }]
     };
@@ -470,6 +470,8 @@ pub(crate) fn document(
     elements: &ElementMarks,
     fonts: FontFamilies,
 ) -> Doc {
+    let scoped_display = display.for_input(input);
+    let display = &scoped_display;
     let kind = input.kind;
     // 会议议程事项固定「1. 2. 3.」，不随设置里的列表编号样式变化。
     let mut numbering = *numbering;
@@ -573,10 +575,11 @@ pub(crate) fn document(
         copies: Vec::new(),
         red: None,
         minutes: None,
-        phone_record: (kind == TemplateKind::PhoneRecord).then(|| input.phone_record.clone()),
+        phone_record: (kind == TemplateKind::PhoneRecord)
+            .then(|| crate::units::identity::readable_phone_record(input, display).phone_record),
         phone_record_contact: (kind == TemplateKind::PhoneRecord).then(|| RecordRow {
-            unit: input.profile.responsible_unit.clone(),
-            contact: input.profile.contact_person.clone(),
+            unit: display.abbr(&input.profile.responsible_unit),
+            contact: display.person_name(&input.profile.contact_person),
             phone: input.profile.contact_phone.clone(),
         }),
     };

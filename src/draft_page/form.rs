@@ -742,6 +742,7 @@ pub(crate) fn thumbnail_marks(
 
 impl DraftPage<'_> {
     pub(crate) fn revalidate(&mut self) {
+        crate::units::identity::capture_input(&mut self.doc.draft, &self.config.vocabulary);
         self.doc.warnings = validator::validate(
             &self.doc.draft,
             &self.doc.generated_markdown,
@@ -855,12 +856,17 @@ impl DraftPage<'_> {
             .vocabulary
             .iter()
             .filter(|entry| entry.category == VocabularyCategory::Unit)
-            .filter(|entry| !entry.canonical.trim().is_empty())
+            .filter(|entry| {
+                !entry.canonical.trim().is_empty()
+                    && crate::units::identity::available(&self.config.vocabulary, entry)
+            })
             .map(|entry| SelectOption {
-                full: display.full_name_for(&entry.canonical, external),
-                parent: display.parent_of(&entry.canonical),
-                label: display.name_for(&entry.canonical, external),
-                value: entry.canonical.trim().to_string(),
+                full: display.full_name_for(&entry.key(), external),
+                parent: crate::units::identity::parent(&self.config.vocabulary, entry)
+                    .map(|p| p.key())
+                    .unwrap_or_default(),
+                label: display.name_for(&entry.key(), external),
+                value: entry.key(),
                 search_terms: format!(
                     "{} {} {} {}",
                     entry.external_name,
@@ -879,12 +885,7 @@ impl DraftPage<'_> {
             .vocabulary
             .iter()
             .filter(|entry| entry.category == VocabularyCategory::Person)
-            .map(|entry| {
-                (
-                    entry.canonical.trim().to_string(),
-                    entry.phone.trim().to_string(),
-                )
-            })
+            .map(|entry| (entry.key(), entry.phone.trim().to_string()))
             .filter(|(name, _)| !name.is_empty())
             .collect()
     }
@@ -928,8 +929,7 @@ impl DraftPage<'_> {
                 // 公函版记严格执行承办权限，不能因候选为空而回落显示未授权人员。
                 (matched, true)
             } else {
-                // 白头件沿用原有兜底，避免呈报领导下拉框没有候选项。
-                (self.contacts(), true)
+                (matched, true)
             }
         } else {
             (matched, true)
@@ -1118,6 +1118,12 @@ impl DraftPage<'_> {
     }
 
     pub(crate) fn form_ui(&mut self, ui: &mut egui::Ui, available_width: f32) {
+        crate::units::identity::capture_input(&mut self.doc.draft, &self.config.vocabulary);
+        if let Some(notice) =
+            crate::units::identity::snapshot_notice(&self.doc.draft, &self.config.vocabulary)
+        {
+            ui.colored_label(warn(), notice);
+        }
         // 左侧是输入表单，不使用表格的交替行底色。所有可交互控件统一为白色表面和
         // 相同最小高度，避免下拉框与条纹背景融在一起。
         {
@@ -1132,6 +1138,7 @@ impl DraftPage<'_> {
         }
         if self.doc.draft.kind == TemplateKind::PhoneRecord {
             self.phone_record_form_ui(ui, available_width);
+            crate::units::identity::capture_input(&mut self.doc.draft, &self.config.vocabulary);
             return;
         }
         let free_text = self.config.allow_free_text;
@@ -1180,7 +1187,10 @@ impl DraftPage<'_> {
                 }
                 TemplateKind::OfficialLetter => Some(format!(
                     "联系人已按承办单位“{}”过滤。",
-                    self.doc.draft.profile.responsible_unit.trim()
+                    crate::units::identity::display_values(
+                        &self.config.vocabulary,
+                        &self.doc.draft.profile.responsible_unit
+                    )
                 )),
                 TemplateKind::WhitePaper => {
                     let units = split_units(&self.doc.draft.profile.signing_unit);
@@ -1189,7 +1199,10 @@ impl DraftPage<'_> {
                     } else {
                         Some(format!(
                             "呈报领导已按落款单位“{}”及其上级领导过滤。",
-                            units.join("、")
+                            crate::units::identity::display_values(
+                                &self.config.vocabulary,
+                                &units.join("、")
+                            )
                         ))
                     }
                 }
@@ -1200,7 +1213,10 @@ impl DraftPage<'_> {
                     } else {
                         Some(format!(
                             "呈报领导已按落款单位“{}”及其上级领导过滤；承办联系人在各承办条目内按单位过滤。",
-                            units.join("、")
+                            crate::units::identity::display_values(
+                                &self.config.vocabulary,
+                                &units.join("、")
+                            )
                         ))
                     }
                 }
@@ -1212,15 +1228,18 @@ impl DraftPage<'_> {
         let leader_options = contacts
             .iter()
             .map(|(name, _)| {
-                let entry = self.config.vocabulary.iter().find(|entry| {
-                    entry.category == VocabularyCategory::Person && entry.canonical.trim() == name
-                });
+                let entry = crate::units::identity::resolve(
+                    &self.config.vocabulary,
+                    VocabularyCategory::Person,
+                    name,
+                );
                 let position = entry.map(|entry| entry.position.trim()).unwrap_or_default();
                 let code = entry.map(|entry| entry.code.trim()).unwrap_or_default();
+                let label = crate::units::identity::label(&self.config.vocabulary, name);
                 let full = if position.is_empty() {
-                    name.clone()
+                    label
                 } else {
-                    format!("{name} {position}")
+                    format!("{label} {position}")
                 };
                 let label = if code.is_empty() {
                     full.clone()
@@ -1404,7 +1423,7 @@ impl DraftPage<'_> {
                                 == JointIssuanceMode::Mode1;
                             required_row_label(ui, "发文单位", Some("印在红头上的发文机关标志。"));
                             if joint {
-                                multi_select(
+                                if multi_select(
                                     ui,
                                     "joint_issuing_units",
                                     &mut self.doc.draft.profile.joint_issuing_units,
@@ -1414,7 +1433,10 @@ impl DraftPage<'_> {
                                     &mut self.doc.manual_fields,
                                     free_text,
                                     field_width,
-                                );
+                                ) {
+                                    let value = self.doc.draft.profile.joint_issuing_units.clone();
+                                    crate::units::identity::refresh_snapshot(&mut self.doc.draft.profile, &self.config.vocabulary, &value);
+                                }
                             } else if single_select(
                                 ui,
                                 "issuing_unit",
@@ -2142,7 +2164,7 @@ impl DraftPage<'_> {
                                 "印发机关",
                                 Some("留空时取发文单位，一般填办公室。"),
                             );
-                            single_select(
+                            if single_select(
                                 ui,
                                 "minutes_printing_unit",
                                 &mut self.doc.draft.minutes.printing_unit,
@@ -2151,7 +2173,10 @@ impl DraftPage<'_> {
                                 free_text,
                                 field_width,
                                 "留空取发文单位",
-                            );
+                            ) {
+                                let value = self.doc.draft.minutes.printing_unit.clone();
+                                crate::units::identity::refresh_snapshot(&mut self.doc.draft.profile, &self.config.vocabulary, &value);
+                            }
                             ui.end_row();
                             field_error(ui, &check, "minutes_printing_unit");
                         }
@@ -2262,6 +2287,7 @@ impl DraftPage<'_> {
             });
         }
         ui.add_space(8.0);
+        crate::units::identity::capture_input(&mut self.doc.draft, &self.config.vocabulary);
     }
 }
 

@@ -141,7 +141,7 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
                 ctx.board.notes.push(format!(
                     "{}：{}（{}；要素建议，待采纳进表单）",
                     suggestion.field.label(),
-                    suggestion.value,
+                    suggestion.display_value,
                     suggestion.source
                 ));
             }

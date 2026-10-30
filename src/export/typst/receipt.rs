@@ -130,6 +130,8 @@ pub(crate) struct ReceiptDoc {
 /// 字体角色只有 Typst 那边用得到，Word 侧不看这一项，所以这里先留空，
 /// 排 PDF 时再把 [`typst_engine::FontFamilies`] 填进去。
 pub(crate) fn build(input: &DraftInput, markdown: &str, display: &UnitDisplay) -> ReceiptDoc {
+    let scoped_display = display.for_input(input);
+    let display = &scoped_display;
     let mut units = signing_units(input, display);
     if units.is_empty() {
         units = vec![String::new(); BLANK_ROWS];
@@ -228,6 +230,8 @@ pub(crate) fn number_text(input: &DraftInput) -> String {
 /// 发函单位：联合发文取联合单位，否则取发文单位；显示名称与公文一致
 /// （外部行文优先用单位外部名称）。
 pub(crate) fn issuing_unit_text(input: &DraftInput, display: &UnitDisplay) -> String {
+    let scoped_display = display.for_input(input);
+    let display = &scoped_display;
     let external = input.uses_external_unit_names();
     let joint = split_units(&input.profile.joint_issuing_units);
     let units =
@@ -246,6 +250,8 @@ pub(crate) fn issuing_unit_text(input: &DraftInput, display: &UnitDisplay) -> St
 
 /// 签收单位清单：主送在前、抄送在后；按最终显示值去重。
 pub(crate) fn signing_units(input: &DraftInput, display: &UnitDisplay) -> Vec<String> {
+    let scoped_display = display.for_input(input);
+    let display = &scoped_display;
     let external = input.uses_external_unit_names();
     let mut units: Vec<String> = Vec::new();
     for unit in split_units(&input.profile.recipient)
@@ -282,6 +288,10 @@ pub(crate) fn write_pdf_with_base(
     fonts: &FontConfig,
     base_dir: &Path,
 ) -> Result<TypstOutcome> {
+    display
+        .for_input(input)
+        .ensure_resolved(input)
+        .map_err(anyhow::Error::msg)?;
     let set = typst_engine::font_set(fonts)?;
     let mut doc = build(input, markdown, display);
     doc.fonts = set.families.clone();

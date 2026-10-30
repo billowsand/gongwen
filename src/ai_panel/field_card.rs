@@ -95,7 +95,10 @@ pub(crate) fn sort_by_vocabulary(value: &str, vocabulary: &[VocabularyEntry]) ->
     names.sort_by_key(|name| {
         vocabulary
             .iter()
-            .position(|entry| entry.canonical.trim() == name.trim())
+            .position(|entry| {
+                entry.key() == *name
+                    || (entry.identity.is_empty() && entry.canonical.trim() == name.trim())
+            })
             .unwrap_or(usize::MAX)
     });
     crate::models::join_units(&names)
@@ -114,11 +117,7 @@ pub(crate) fn missing_in_vocabulary(
     };
     crate::models::split_units(value)
         .into_iter()
-        .filter(|name| {
-            !vocabulary
-                .iter()
-                .any(|entry| entry.category == category && entry.canonical.trim() == name.trim())
-        })
+        .filter(|name| crate::units::identity::resolve(vocabulary, category, name).is_none())
         .collect()
 }
 
@@ -143,10 +142,47 @@ pub(crate) fn adoption_blocker(
     if !force && field.read(draft) != row.suggestion.previous {
         return Some("表单已改动：不覆盖。仍要采纳请再点一次「仍然采纳」。".into());
     }
-    // 词库校验：每一项都仍是当前词库里的规范名称。
+    if !row.suggestion.display_value.is_empty()
+        && row.suggestion.value.contains("@")
+        && crate::units::identity::display_values(vocabulary, &row.suggestion.value)
+            != row.suggestion.display_value
+    {
+        return Some("词库名称或归属已改变，请重新生成建议并核对人员／单位".into());
+    }
+    // 词库校验：每一项都仍是当前词库里的有效身份。
     let missing = missing_in_vocabulary(field, &row.suggestion.value, vocabulary);
     if !missing.is_empty() {
         return Some(format!("{}已不在标准词库", missing.join("、")));
+    }
+    if matches!(field, FieldId::ContactPerson | FieldId::ReportingLeaders) {
+        let units = if field == FieldId::ContactPerson {
+            FieldId::ResponsibleUnit.read(draft)
+        } else {
+            FieldId::SigningUnit.read(draft)
+        };
+        if !units.is_empty() {
+            let display = crate::units::UnitDisplay::new(vocabulary);
+            let allowed: Vec<_> = crate::models::split_units(&units)
+                .iter()
+                .flat_map(|unit| {
+                    if field == FieldId::ContactPerson {
+                        display.responsible_people_of(unit)
+                    } else {
+                        display.leaders_of(unit)
+                    }
+                })
+                .map(|(key, _)| key)
+                .collect();
+            if crate::models::split_units(&row.suggestion.value)
+                .iter()
+                .any(|key| {
+                    crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, key)
+                        .is_none_or(|p| !allowed.contains(&p.key()))
+                })
+            {
+                return Some("所属单位或承办权限已改变，请重新选择人员".into());
+            }
+        }
     }
     None
 }
@@ -198,7 +234,17 @@ pub(crate) fn proposal_reminder(rows: &[FieldCardRow], draft: &DraftInput) -> Op
         pending
             .iter()
             .filter(|row| row.suggestion.conflict == conflict)
-            .map(|row| format!("{}：{}", row.suggestion.field.label(), row.suggestion.value))
+            .map(|row| {
+                format!(
+                    "{}：{}",
+                    row.suggestion.field.label(),
+                    if row.suggestion.display_value.is_empty() {
+                        &row.suggestion.value
+                    } else {
+                        &row.suggestion.display_value
+                    }
+                )
+            })
             .collect::<Vec<_>>()
     };
     let (written, conflicting) = (list(false), list(true));
@@ -264,9 +310,19 @@ pub(super) fn field_card_ui(
                         if row.suggestion.previous.trim().is_empty() {
                             "（空）".to_string()
                         } else {
-                            row.suggestion.previous.clone()
+                            crate::units::identity::display_values(
+                                &draft.profile.vocabulary_snapshot,
+                                &row.suggestion.previous,
+                            )
                         },
-                        row.suggestion.value
+                        if row.suggestion.display_value.is_empty() {
+                            crate::units::identity::display_values(
+                                &draft.profile.vocabulary_snapshot,
+                                &row.suggestion.value,
+                            )
+                        } else {
+                            row.suggestion.display_value.clone()
+                        }
                     ))
                     .strong(),
                 );
@@ -325,6 +381,7 @@ mod tests {
 
     fn suggestion(field: FieldId, value: &str) -> FieldSuggestion {
         FieldSuggestion {
+            display_value: String::new(),
             field,
             value: value.into(),
             previous: String::new(),

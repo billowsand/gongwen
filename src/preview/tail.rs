@@ -459,7 +459,7 @@ fn draw_footer_record(
                 let entry = entries.get(index);
                 [
                     display.abbr(entry.map_or("", |value| value.unit.as_str())),
-                    entry.map_or(String::new(), |value| value.name.clone()),
+                    entry.map_or(String::new(), |value| display.person_name(&value.name)),
                     entry.map_or(String::new(), |value| value.phone.clone()),
                 ]
             })
@@ -467,7 +467,7 @@ fn draw_footer_record(
     } else {
         vec![[
             display.abbr(&input.profile.responsible_unit),
-            input.profile.contact_person.trim().to_string(),
+            display.person_name(&input.profile.contact_person),
             input.profile.contact_phone.trim().to_string(),
         ]]
     };

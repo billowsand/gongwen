@@ -46,6 +46,8 @@ const UNIT_HEADERS: &[&str] = &[
     "备注",
     "呈批代字",
     "职能任务",
+    "身份编码",
+    "上级单位身份编码",
 ];
 
 const PERSON_HEADERS: &[&str] = &[
@@ -58,10 +60,16 @@ const PERSON_HEADERS: &[&str] = &[
     "别名/常见错写",
     "备注",
     "个人简介",
+    "身份编码",
+    "所属单位身份编码",
 ];
 
-const UNIT_COLUMN_WIDTHS: &[f64] = &[14.0, 28.0, 28.0, 16.0, 14.0, 10.0, 28.0, 28.0, 14.0, 48.0];
-const PERSON_COLUMN_WIDTHS: &[f64] = &[14.0, 10.0, 18.0, 14.0, 16.0, 12.0, 28.0, 28.0, 48.0];
+const UNIT_COLUMN_WIDTHS: &[f64] = &[
+    14.0, 28.0, 28.0, 16.0, 14.0, 10.0, 28.0, 28.0, 14.0, 48.0, 38.0, 38.0,
+];
+const PERSON_COLUMN_WIDTHS: &[f64] = &[
+    14.0, 10.0, 18.0, 14.0, 16.0, 12.0, 28.0, 28.0, 48.0, 38.0, 38.0,
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflict {
@@ -165,6 +173,10 @@ fn read_sheet(
     let range = workbook
         .worksheet_range(sheet_name)
         .map_err(|error| anyhow::anyhow!("读取 Sheet「{sheet_name}」失败：{error}"))?;
+    let has_identities = range
+        .rows()
+        .next()
+        .is_some_and(|row| row.iter().any(|c| cell_to_string(c) == "身份编码"));
     let mut rows = Vec::new();
     for row in range.rows() {
         let mut cells = Vec::with_capacity(width);
@@ -173,6 +185,12 @@ fn read_sheet(
         }
         while cells.len() < width {
             cells.push(String::new());
+        }
+        if !has_identities {
+            let start = if sheet_name == UNIT_SHEET { 10 } else { 9 };
+            for cell in cells.iter_mut().skip(start) {
+                cell.clear();
+            }
         }
         rows.push(cells);
     }
@@ -225,6 +243,8 @@ fn parse_unit_row(row: &[String], row_num: usize) -> Result<VocabularyEntry> {
     let _ = row_num; // 行号仅在出错时用，目前 parse_unit_row 不主动报冲突
     Ok(VocabularyEntry {
         id: 0,
+        identity: row.get(10).cloned().unwrap_or_default(),
+        owner_identity: row.get(11).cloned().unwrap_or_default(),
         category: VocabularyCategory::Unit,
         code,
         canonical,
@@ -259,6 +279,8 @@ fn parse_person_row(row: &[String], _row_num: usize) -> Result<VocabularyEntry> 
     let profile = row[8].trim().to_string();
     Ok(VocabularyEntry {
         id: 0,
+        identity: row.get(9).cloned().unwrap_or_default(),
+        owner_identity: row.get(10).cloned().unwrap_or_default(),
         category: VocabularyCategory::Person,
         code,
         canonical,
@@ -416,6 +438,38 @@ pub fn validate(entries: &[VocabularyEntry], existing_unit_codes: &[String]) -> 
         // 应该被允许；因此这里不再按长度拒绝。
     }
 
+    let mut sibling_names = HashMap::new();
+    let mut identities = HashSet::new();
+    for (row, entry) in &unit_rows {
+        if let Some(previous) =
+            sibling_names.insert((entry.parent.trim(), entry.canonical.trim()), *row)
+        {
+            conflicts.push(Conflict {
+                sheet: UNIT_SHEET,
+                row: *row,
+                field: "单位名称",
+                current_value: entry.canonical.clone(),
+                message: format!("同一父节点下与第 {previous} 行重名"),
+            });
+        }
+    }
+    for (sheet, rows) in [(UNIT_SHEET, &unit_rows), (PERSON_SHEET, &person_rows)] {
+        for (row, entry) in rows {
+            if !entry.identity.is_empty()
+                && (uuid::Uuid::parse_str(&entry.identity).is_err()
+                    || !identities.insert(entry.identity.clone()))
+            {
+                conflicts.push(Conflict {
+                    sheet,
+                    row: *row,
+                    field: "身份编码",
+                    current_value: entry.identity.clone(),
+                    message: "永久身份编码无效或重复".into(),
+                });
+            }
+        }
+    }
+
     // 6. 两类代字各自查重；跨类型相同不构成冲突。
     for (field, code_of) in [
         (
@@ -492,22 +546,98 @@ fn has_strict_prefix_in(code: &str, candidates: &HashSet<String>) -> bool {
         .any(|c| c.len() < code.len() && code.starts_with(c.as_str()))
 }
 
-/// 合并两个 vocab：按 code / （unit + canonical）匹配。
-pub fn merge(target: &mut Vec<VocabularyEntry>, incoming: Vec<VocabularyEntry>) -> MergeReport {
+/// 在暂存副本合并：新格式按永久身份，旧格式按单位编码／所属单位与人员编号匹配。
+pub fn merge(
+    target: &mut Vec<VocabularyEntry>,
+    incoming: Vec<VocabularyEntry>,
+) -> Result<MergeReport, String> {
+    let mut staged = target.clone();
+    let mut incoming_ids = HashSet::new();
+    for entry in &incoming {
+        if entry.category == VocabularyCategory::Person
+            && entry.identity.is_empty()
+            && entry.code.is_empty()
+            && staged.iter().any(|e| {
+                e.category == VocabularyCategory::Person
+                    && e.unit == entry.unit
+                    && e.canonical == entry.canonical
+            })
+        {
+            return Err(format!(
+                "人员缺少编码且已有同名条目，请补齐人员编码后核对导入：{}",
+                entry.canonical
+            ));
+        }
+        if !entry.identity.is_empty()
+            && (!incoming_ids.insert(&entry.identity)
+                || staged
+                    .iter()
+                    .any(|e| e.identity == entry.identity && e.category != entry.category))
+        {
+            return Err("导入身份重复或类别冲突，词库未修改".into());
+        }
+        if !entry.identity.is_empty()
+            && staged.iter().any(|e| {
+                e.identity != entry.identity
+                    && e.category == entry.category
+                    && (if entry.category == VocabularyCategory::Unit {
+                        !entry.code.is_empty() && e.code == entry.code
+                    } else {
+                        !entry.code.is_empty() && e.code == entry.code && e.unit == entry.unit
+                    })
+            })
+        {
+            return Err(format!(
+                "编码相同但永久身份不同，请先核对关联：{} / {}",
+                entry.code, entry.canonical
+            ));
+        }
+    }
+    let report = merge_staged(&mut staged, incoming);
+    units::normalize(&mut staged);
+    units::identity::validate(&staged)?;
+    *target = staged;
+    Ok(report)
+}
+
+fn merge_staged(target: &mut Vec<VocabularyEntry>, incoming: Vec<VocabularyEntry>) -> MergeReport {
     let mut report = MergeReport::default();
     for mut entry in incoming {
-        if let Some(existing) = target.iter_mut().find(|existing| match entry.category {
-            VocabularyCategory::Unit => {
-                existing.category == VocabularyCategory::Unit
-                    && existing.code.trim() == entry.code.trim()
+        if let Some(existing) = target.iter_mut().find(|existing| {
+            if !entry.identity.is_empty() {
+                return existing.identity == entry.identity;
             }
-            VocabularyCategory::Person => {
-                existing.category == VocabularyCategory::Person
-                    && existing.canonical.trim() == entry.canonical.trim()
-                    && existing.unit.trim() == entry.unit.trim()
+            match entry.category {
+                VocabularyCategory::Unit => {
+                    existing.category == VocabularyCategory::Unit
+                        && existing.code.trim() == entry.code.trim()
+                }
+                VocabularyCategory::Person => {
+                    existing.category == VocabularyCategory::Person
+                        && !entry.code.trim().is_empty()
+                        && existing.code.trim() == entry.code.trim()
+                        && existing.unit.trim() == entry.unit.trim()
+                }
             }
         }) {
             let mut changed = false;
+            if existing.category != entry.category {
+                continue;
+            }
+            if !entry.identity.is_empty() {
+                for (slot, value) in [
+                    (&mut existing.canonical, &entry.canonical),
+                    (&mut existing.code, &entry.code),
+                    (&mut existing.parent, &entry.parent),
+                    (&mut existing.unit, &entry.unit),
+                    (&mut existing.owner_identity, &entry.owner_identity),
+                ] {
+                    if *slot != *value {
+                        *slot = value.clone();
+                        changed = true;
+                    }
+                }
+            }
             for alias in entry.aliases {
                 if !existing.aliases.iter().any(|value| value == &alias) {
                     existing.aliases.push(alias);
@@ -615,13 +745,13 @@ pub fn to_xlsx(
         ) {
             write_unit_row(sheet, row_index, entry)?;
         }
-        // 单位编码写到 K 列（隐藏），供人员表"所属单位编码"下拉引用。
-        sheet.set_column_hidden(10)?;
+        // 单位编码写到 M 列（隐藏），供人员表"所属单位编码"下拉引用。
+        sheet.set_column_hidden(12)?;
         for (i, code) in existing_unit_codes.iter().enumerate() {
             if code.trim().is_empty() {
                 continue;
             }
-            sheet.write_string(1 + i as u32, 10, code.trim())?;
+            sheet.write_string(1 + i as u32, 12, code.trim())?;
         }
         // 是否代章下拉：是 / 否 / -
         let daizhang_dv = DataValidation::new()
@@ -737,6 +867,8 @@ fn write_unit_row(sheet: &mut Worksheet, row: u32, entry: &VocabularyEntry) -> R
     sheet.write_string(row, 7, entry.note.trim())?;
     sheet.write_string(row, 8, entry.approval_department_code.trim())?;
     sheet.write_string(row, 9, entry.duties.trim())?;
+    sheet.write_string(row, 10, &entry.identity)?;
+    sheet.write_string(row, 11, &entry.owner_identity)?;
     Ok(())
 }
 
@@ -755,6 +887,8 @@ fn write_person_row(sheet: &mut Worksheet, row: u32, entry: &VocabularyEntry) ->
     sheet.write_string(row, 6, entry.aliases.join("、"))?;
     sheet.write_string(row, 7, entry.note.trim())?;
     sheet.write_string(row, 8, entry.profile.trim())?;
+    sheet.write_string(row, 9, &entry.identity)?;
+    sheet.write_string(row, 10, &entry.owner_identity)?;
     Ok(())
 }
 
@@ -798,6 +932,8 @@ mod tests {
     fn some_unit(code: &str, canonical: &str) -> VocabularyEntry {
         VocabularyEntry {
             id: 0,
+            identity: String::new(),
+            owner_identity: String::new(),
             category: VocabularyCategory::Unit,
             code: code.into(),
             canonical: canonical.into(),
@@ -808,6 +944,8 @@ mod tests {
     fn some_person(unit: &str, canonical: &str) -> VocabularyEntry {
         VocabularyEntry {
             id: 0,
+            identity: String::new(),
+            owner_identity: String::new(),
             category: VocabularyCategory::Person,
             unit: unit.into(),
             canonical: canonical.into(),
@@ -1049,7 +1187,7 @@ mod tests {
             ..Default::default()
         }];
         let incoming = vec![some_unit("00", "甲")];
-        let report = merge(&mut target, incoming);
+        let report = merge(&mut target, incoming).unwrap();
         assert_eq!(report.added, 0);
         assert_eq!(report.unchanged, 1);
         assert_eq!(target[0].id, 7, "已有 id 不被覆盖");

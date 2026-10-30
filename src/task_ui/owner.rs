@@ -11,26 +11,28 @@ fn people(vocab: &[VocabularyEntry]) -> impl Iterator<Item = &VocabularyEntry> {
 }
 
 fn person_label(vocab: &[VocabularyEntry], entry: &VocabularyEntry) -> String {
-    let unit = UnitDisplay::new(vocab).name_for(&entry.unit, false);
-    let unit = vocab
+    if vocab
         .iter()
-        .find(|u| {
-            u.category == VocabularyCategory::Unit
-                && (u.code == entry.unit || u.canonical == entry.unit)
+        .filter(|e| {
+            e.category == VocabularyCategory::Person
+                && e.canonical == entry.canonical
+                && e.unit == entry.unit
         })
-        .map(|u| {
-            if u.abbr.trim().is_empty() {
-                u.canonical.as_str()
-            } else {
-                u.abbr.as_str()
-            }
-        })
-        .unwrap_or(&unit);
-    [entry.canonical.as_str(), entry.position.as_str(), unit]
-        .into_iter()
-        .filter(|s| !s.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ")
+        .count()
+        > 1
+    {
+        return crate::units::identity::person_label(vocab, entry);
+    }
+    let unit = UnitDisplay::new(vocab).abbr(&entry.unit);
+    [
+        entry.canonical.as_str(),
+        entry.position.as_str(),
+        unit.as_str(),
+    ]
+    .into_iter()
+    .filter(|s| !s.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
 pub(super) fn label(
@@ -106,6 +108,56 @@ pub(super) fn picker(
             query.clear();
             changed = true;
         }
+    }
+    changed
+}
+
+pub(super) fn label_bound(
+    vocab: &[VocabularyEntry],
+    owner_id: Option<u64>,
+    owner_name: &str,
+    identity: &str,
+) -> (String, bool) {
+    if identity.is_empty() {
+        return label(vocab, owner_id, owner_name);
+    }
+    if let Some(entry) = people(vocab).find(|e| e.identity == identity) {
+        (crate::units::identity::person_label(vocab, entry), true)
+    } else {
+        (format!("{owner_name}（人员身份已失效，请重新选择）"), false)
+    }
+}
+
+pub(super) fn picker_bound(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    vocab: &[VocabularyEntry],
+    owner_id: &mut Option<u64>,
+    owner_name: &mut String,
+    identity: &mut String,
+    query: &mut String,
+) -> bool {
+    if !identity.is_empty() {
+        *owner_id = people(vocab)
+            .find(|e| e.identity == *identity)
+            .map(|e| e.id);
+    }
+    if !identity.is_empty()
+        && owner_id.is_none()
+        && ui
+            .small_button(format!("{}（身份已失效，点此清除）", owner_name))
+            .clicked()
+    {
+        identity.clear();
+        owner_name.clear();
+        return true;
+    }
+    let changed = picker(ui, id_salt, vocab, owner_id, owner_name, query);
+    if changed {
+        *identity = owner_id
+            .and_then(|id| people(vocab).find(|e| e.id == id))
+            .map(|e| e.identity.clone())
+            .unwrap_or_default();
     }
     changed
 }

@@ -236,6 +236,9 @@ pub(crate) fn show(
         );
         return;
     };
+    if let Err(e) = store.bind_legacy_owners(vocabulary) {
+        state.error = Some(format!("负责人身份迁移失败：{e:#}"));
+    }
     if let Err(e) = state.cache.refresh(store) {
         state.error = Some(e);
     }

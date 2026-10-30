@@ -522,7 +522,13 @@ impl GongwenApp {
         };
         let (task_store, task_error) = match storage::manuscript_db_path() {
             Ok(path) => match crate::task_assistant::Store::open(path) {
-                Ok(s) => (Some(s), None),
+                Ok(mut s) => {
+                    let error = s
+                        .bind_legacy_owners(&config.vocabulary)
+                        .err()
+                        .map(|e| format!("负责人身份迁移失败：{e:#}"));
+                    (Some(s), error)
+                }
                 Err(e) => (None, Some(format!("任务助手数据库打开失败：{e:#}"))),
             },
             Err(e) => (None, Some(format!("任务助手数据库路径不可用：{e:#}"))),

@@ -578,13 +578,17 @@ fn candidate(
         let selected = proposal.owner_id.and_then(|id| {
             data.vocabulary.iter().find(|e| {
                 e.id == id
+                    && (proposal.owner_identity.is_empty() || e.identity == proposal.owner_identity)
                     && e.category == crate::models::VocabularyCategory::Person
                     && e.canonical.trim() == name.trim()
             })
         });
         let matches = super::owner::match_name(data.vocabulary, name);
-        if let Some(person) = selected.or_else(|| (matches.len() == 1).then(|| matches[0])) {
+        if let Some(person) = selected.or_else(|| {
+            (proposal.owner_identity.is_empty() && matches.len() == 1).then(|| matches[0])
+        }) {
             proposal.owner_id = Some(person.id);
+            proposal.owner_identity = person.identity.clone();
             proposal.owner = Some(person.canonical.clone());
             theme::caption(
                 ui,
@@ -595,6 +599,7 @@ fn candidate(
             );
         } else {
             proposal.owner_id = None;
+            proposal.owner_identity.clear();
             theme::caption(
                 ui,
                 if matches.is_empty() {
@@ -623,6 +628,10 @@ fn candidate(
                 query,
             );
             if owner_id.is_some() {
+                proposal.owner_identity = owner_id
+                    .and_then(|id| data.vocabulary.iter().find(|e| e.id == id))
+                    .map(|e| e.identity.clone())
+                    .unwrap_or_default();
                 proposal.owner_id = owner_id;
                 proposal.owner = Some(owner_name);
             }

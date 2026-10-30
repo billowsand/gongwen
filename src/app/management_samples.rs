@@ -608,6 +608,7 @@ fn task_assistant_samples() {
                 goal: None,
                 owner: None,
                 owner_id: None,
+                owner_identity: String::new(),
                 progress: None,
                 risks: None,
                 next_step: None,

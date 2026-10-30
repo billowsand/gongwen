@@ -989,3 +989,20 @@ fn task_assistant_untargeted_progress_can_be_built_into_a_new_task() {
     );
     assert!(state.candidate_create_id.is_some());
 }
+
+#[test]
+fn permanent_owner_identity_wins_over_a_reused_local_id_and_same_name() {
+    use crate::models::{VocabularyCategory as C, VocabularyEntry as E};
+    let original = uuid::Uuid::new_v4().to_string();
+    let other = E {
+        id: 12,
+        identity: uuid::Uuid::new_v4().to_string(),
+        category: C::Person,
+        canonical: "张宁".into(),
+        ..Default::default()
+    };
+    let entries = vec![other];
+    let (shown, valid) = owner::label_bound(&entries, Some(12), "张宁", &original);
+    assert!(!valid);
+    assert!(shown.contains("身份已失效"));
+}

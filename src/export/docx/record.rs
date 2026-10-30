@@ -210,7 +210,10 @@ pub(crate) fn single_record_row(input: &DraftInput, display: &UnitDisplay) -> Ta
         RECORD_PHONE_COLUMN_TWIPS,
     ];
     let responsible = display.abbr(&input.profile.responsible_unit);
-    let (contact_text, contact_size) = docx_name(&input.profile.contact_person, FOOTER_SIZE);
+    let (contact_text, contact_size) = docx_name(
+        &display.person_name(&input.profile.contact_person),
+        FOOTER_SIZE,
+    );
     TableRow::new(vec![
         record_cell(
             &format!("承办单位：{responsible}"),

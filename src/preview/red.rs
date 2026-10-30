@@ -692,7 +692,7 @@ pub(crate) fn red_responsible_rows(input: &DraftInput, display: &UnitDisplay) ->
         .map(|entry| {
             [
                 display.abbr(&entry.unit),
-                entry.name.clone(),
+                display.person_name(&entry.name),
                 entry.phone.clone(),
             ]
         })
@@ -1761,6 +1761,8 @@ pub(crate) fn red_approval_print_preview(
     markdown: &str,
     elements: &ElementMarks,
 ) {
+    let scoped_display = display.for_input(input);
+    let display = &scoped_display;
     // 分页要把整篇正文量一遍，长稿每帧好几毫秒。结果只取决于下面这些输入，
     // 没变就复用上一次的版面。版面里存着 galley，字体图集一重建字形坐标就作废，
     // 所以图集的「代」也进键（`memo::font_epoch`）。

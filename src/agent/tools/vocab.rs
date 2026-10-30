@@ -15,6 +15,8 @@ const MAX_ROWS: usize = 30;
 /// 「要素抽取」（`element_fields`）把原文摘录解析成词库词条用的也是这一套。
 pub(crate) fn matches(entry: &VocabularyEntry, query: &str) -> bool {
     query.is_empty()
+        || entry.key() == query
+        || entry.code == query
         || entry.canonical.contains(query)
         || entry.external_name.contains(query)
         || entry.abbr.contains(query)
@@ -123,16 +125,9 @@ impl Tool for Units {
     ) -> Result<ToolOutput, String> {
         let vocabulary = ctx.env.vocabulary;
         let query = arg_str(args, "query").unwrap_or_default();
-        let parent_code = match arg_str(args, "parent") {
-            Some(name) => Some(
-                vocabulary
-                    .iter()
-                    .find(|e| e.category == VocabularyCategory::Unit && matches(e, &name))
-                    .map(|e| e.code.clone())
-                    .ok_or_else(|| format!("标准词库里没有单位「{name}」"))?,
-            ),
-            None => None,
-        };
+        let parent_code = arg_str(args, "parent")
+            .map(|name| unique_unit(vocabulary, &name).map(|e| e.code.clone()))
+            .transpose()?;
         let rows: Vec<Value> = vocabulary
             .iter()
             .filter(|e| {
@@ -142,6 +137,8 @@ impl Tool for Units {
             .take(MAX_ROWS)
             .map(|e| {
                 json!({
+                    "identity": e.key(),
+                    "label": crate::units::identity::label(vocabulary, &e.key()),
                     "canonical": e.canonical,
                     "external_name": if e.external_name.is_empty() { &e.canonical } else { &e.external_name },
                     "abbr": e.abbr,
@@ -191,12 +188,9 @@ impl Tool for Persons {
         let vocabulary = ctx.env.vocabulary;
         let with_phone = ctx.env.skill.allows_tool("vocab.persons.phone");
         let query = arg_str(args, "query").unwrap_or_default();
-        let unit_code = arg_str(args, "unit").and_then(|name| {
-            vocabulary
-                .iter()
-                .find(|e| e.category == VocabularyCategory::Unit && matches(e, &name))
-                .map(|e| e.code.clone())
-        });
+        let unit_code = arg_str(args, "unit")
+            .map(|name| unique_unit(vocabulary, &name).map(|e| e.code.clone()))
+            .transpose()?;
         let rows: Vec<Value> = vocabulary
             .iter()
             .filter(|e| {
@@ -206,6 +200,10 @@ impl Tool for Persons {
             .take(MAX_ROWS)
             .map(|e| {
                 let mut row = json!({
+                    "identity": e.key(),
+                    "code": e.code,
+                    "unit_identity": crate::units::identity::parent(vocabulary, e).map(|u| u.key()),
+                    "label": crate::units::identity::label(vocabulary, &e.key()),
                     "name": e.canonical,
                     "position": e.position,
                     "unit": unit_name(vocabulary, &e.unit),
@@ -263,6 +261,14 @@ impl Tool for Normalize {
                     .map(move |alias| (alias.as_str(), e.canonical.as_str()))
             })
             .collect();
+        pairs.retain(|(alias, _)| {
+            ctx.env
+                .vocabulary
+                .iter()
+                .filter(|entry| entry.aliases.iter().any(|a| a == alias))
+                .count()
+                == 1
+        });
         pairs.sort_by_key(|(alias, _)| std::cmp::Reverse(alias.chars().count()));
         let mut changes = Vec::new();
         for (alias, canonical) in pairs {
@@ -388,6 +394,35 @@ impl Tool for Lexicon {
         Ok(ToolOutput::new(
             Value::Array(hits),
             format!("查校对词表 → {count} 条"),
+        ))
+    }
+}
+
+/// 模糊检索用于列候选；指定父单位／所属单位必须唯一解析。
+fn unique_unit<'a>(
+    vocabulary: &'a [VocabularyEntry],
+    value: &str,
+) -> Result<&'a VocabularyEntry, String> {
+    if let Some(entry) =
+        crate::units::identity::resolve(vocabulary, VocabularyCategory::Unit, value)
+    {
+        return Ok(entry);
+    }
+    let found: Vec<_> = vocabulary
+        .iter()
+        .filter(|e| {
+            e.category == VocabularyCategory::Unit
+                && [&e.canonical, &e.external_name, &e.abbr]
+                    .into_iter()
+                    .chain(&e.aliases)
+                    .any(|s| s == value)
+        })
+        .collect();
+    if found.len() == 1 {
+        Ok(found[0])
+    } else {
+        Err(format!(
+            "单位不存在或有同名歧义，请使用查询结果的身份编码：{value}"
         ))
     }
 }

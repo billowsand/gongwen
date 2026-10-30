@@ -1,7 +1,9 @@
 //! 电话记录单要素，与发文表单分开维护。
 use super::DraftPage;
 use super::form::{check_form, field_error};
-use crate::app::widgets::{contact_pair, layout_options, plain_options, single_select};
+use crate::app::widgets::{
+    SelectOption, contact_pair, layout_options, plain_options, single_select,
+};
 use crate::models::SecurityLevel;
 use eframe::egui;
 
@@ -15,22 +17,6 @@ impl DraftPage<'_> {
             crate::units::UnitDisplay::new(&self.config.vocabulary)
                 .people_of(&self.doc.draft.phone_record.caller_unit)
         };
-        let caller_contacts: Vec<_> = caller_contacts
-            .into_iter()
-            .map(|(name, phone)| {
-                let position = self
-                    .config
-                    .vocabulary
-                    .iter()
-                    .find(|entry| {
-                        entry.category == crate::models::VocabularyCategory::Person
-                            && entry.canonical.trim() == name
-                    })
-                    .map(|entry| entry.position.trim())
-                    .unwrap_or("");
-                (format!("{name}{position}"), phone)
-            })
-            .collect();
         let rules = self.config.security_rules.clone();
         let check = check_form(&self.doc.draft);
         let field_width = (width - 110.0).max(80.0);
@@ -40,7 +26,7 @@ impl DraftPage<'_> {
             .spacing([10.0, 8.0])
             .show(ui, |ui| {
                 ui.label("本单位名称 *");
-                single_select(
+                if single_select(
                     ui,
                     "record_institution",
                     &mut r.institution,
@@ -49,7 +35,13 @@ impl DraftPage<'_> {
                     self.config.allow_free_text,
                     field_width,
                     "记录单所属单位",
-                );
+                ) {
+                    crate::units::identity::refresh_snapshot(
+                        &mut self.doc.draft.profile,
+                        &self.config.vocabulary,
+                        &r.institution,
+                    );
+                }
                 ui.end_row();
                 field_error(ui, &check, "record_institution");
                 ui.label("来电单位 *");
@@ -63,18 +55,31 @@ impl DraftPage<'_> {
                     field_width,
                     "来电单位标准名称",
                 ) {
+                    crate::units::identity::refresh_snapshot(
+                        &mut self.doc.draft.profile,
+                        &self.config.vocabulary,
+                        &r.caller_unit,
+                    );
                     r.caller_person.clear();
                     r.caller_phone.clear();
                 }
                 ui.end_row();
                 field_error(ui, &check, "record_unit");
                 ui.label("谈话人及职务 *");
-                let names = plain_options(
-                    &caller_contacts
-                        .iter()
-                        .map(|(name, _)| name.clone())
-                        .collect::<Vec<_>>(),
-                );
+                let names = caller_contacts
+                    .iter()
+                    .map(|(key, _)| {
+                        let label = crate::units::identity::label(&self.config.vocabulary, key);
+                        SelectOption {
+                            value: key.clone(),
+                            full: label.clone(),
+                            label,
+                            search_terms: key.clone(),
+                            depth: 0,
+                            parent: String::new(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 let manual = self.doc.manual_fields.contains("record_person") || names.is_empty();
                 if single_select(
                     ui,
@@ -87,6 +92,11 @@ impl DraftPage<'_> {
                     "姓名及词库职务",
                 ) && !manual
                 {
+                    crate::units::identity::refresh_snapshot(
+                        &mut self.doc.draft.profile,
+                        &self.config.vocabulary,
+                        &r.caller_person,
+                    );
                     r.caller_phone = caller_contacts
                         .iter()
                         .find(|(name, _)| name == &r.caller_person)

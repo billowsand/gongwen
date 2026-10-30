@@ -119,6 +119,8 @@ pub struct Proposal {
     #[serde(default)]
     pub owner_id: Option<u64>,
     #[serde(default)]
+    pub owner_identity: String,
+    #[serde(default)]
     pub progress: Option<String>,
     #[serde(default)]
     pub risks: Option<String>,
@@ -178,6 +180,7 @@ pub fn parse_response(raw: &str, source: &str, known: &[Task]) -> Result<Vec<Pro
         {
             bail!("模型输出了不支持的候选类型");
         }
+        p.owner_identity.clear();
         p.owner_id = None; // 模型给出的词条 ID 不可信，只能由界面匹配标准词库。
         if !evidence_in(source, &p.evidence) || p.evidence.chars().count() > 500 {
             // 摘录对不上时，只允许一段足够长、原样出现在原文里的正文字段顶替摘录。
@@ -300,6 +303,7 @@ pub fn proposal_task(p: &Proposal) -> Task {
     }
     t.risks = p.risks.clone().unwrap_or_default();
     t.owner_id = p.owner_id;
+    t.owner_identity = p.owner_identity.clone();
     t.owner_name = p.owner_id.and_then(|_| p.owner.clone()).unwrap_or_default();
     t.deadline = p.deadline.clone();
     t.needs_review = true;
