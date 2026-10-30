@@ -506,13 +506,20 @@ fn browse_grid(
             .width();
     }
     let cell = grid_cell_size(ui, ime, look);
-    let stride = cell.y + GRID_ROW_GAP;
+    // 行高不等于格高：egui 的横向行带至少 `interact_size.y`（本主题 30 px）。候选字体
+    // 比界面字体小、或本机缺中文字体回退到默认字面时，一格（27 px）比行带矮，按格高算
+    // 高度就会把第 4 行裁掉一截，滚动的行距也会跟着错位。
+    let row_height = cell.y.max(ui.spacing().interact_size.y);
+    let stride = row_height + GRID_ROW_GAP;
     let bar = ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_inner_margin;
     let highlight_row = ime.highlight / cols;
     // 高度钉死在可见的那几行：码在字上方，一格比候选条高出一截，只给上限的话
     // 滚动区会按自己的最小高度缩，实测只露出两行多。
     let lines = total.div_ceil(cols);
     let height = stride * lines.min(VISIBLE_ROWS) as f32 - GRID_ROW_GAP;
+    // 行距先设在滚动区的外层 ui 上：`show_rows` 按调用时的 `item_spacing` 排行距，
+    // 若在闭包里才设，它会按旧行距摆行，与这里算的 `stride` 对不上。
+    ui.spacing_mut().item_spacing = egui::vec2(CELL_GAP, GRID_ROW_GAP);
     let mut scroll = egui::ScrollArea::vertical()
         .id_salt("gw-ime-browse")
         .max_height(height)
@@ -521,7 +528,7 @@ fn browse_grid(
     if let Some(top) = scroll_to {
         scroll = scroll.vertical_scroll_offset(top as f32 * stride);
     }
-    let output = scroll.show_rows(ui, cell.y, lines, |ui, range| {
+    let output = scroll.show_rows(ui, row_height, lines, |ui, range| {
         ui.spacing_mut().item_spacing = egui::vec2(CELL_GAP, GRID_ROW_GAP);
         for line in range {
             ui.horizontal(|ui| {
@@ -994,6 +1001,25 @@ mod tests {
     /// 曾经只给滚动区上限、不钉高度，真机上只露出两行多。
     #[test]
     fn grid_shows_four_full_rows_with_app_fonts() {
+        four_full_rows(|ctx| {
+            theme::configure_style(ctx);
+            theme::configure_fonts(ctx, &Default::default());
+        });
+    }
+
+    /// 一格比行带矮的情形：候选字体调小，或本机没有中文字体、候选窗回退到 egui 自带
+    /// 字面（Linux 构建机就是这样）。曾经按格高算行距，比实际行带少 3 px，第 4 行被裁
+    /// 掉一截。这里用随包固定字面复现，三平台量出来的数一致。
+    #[test]
+    fn grid_shows_four_full_rows_when_cells_are_shorter_than_the_row_band() {
+        four_full_rows(|ctx| {
+            theme::configure_style(ctx);
+            configure_test_fonts(ctx);
+        });
+    }
+
+    /// 展开找字网格必须整行露出 `VISIBLE_ROWS` 行，第 5 行在窗底之外。
+    fn four_full_rows(fonts: impl Fn(&egui::Context)) {
         let hanzi = |i: u32| char::from_u32(0x4E00 + i).unwrap().to_string();
         let mut text = String::new();
         for i in 0..40u8 {
@@ -1019,8 +1045,7 @@ mod tests {
         let mut harness = Harness::new_ui_state(
             move |ui, ime: &mut Ime| {
                 if !configured {
-                    theme::configure_style(ui.ctx());
-                    theme::configure_fonts(ui.ctx(), &Default::default());
+                    fonts(ui.ctx());
                     configured = true;
                     return;
                 }
