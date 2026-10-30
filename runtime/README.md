@@ -51,7 +51,9 @@ runtime/
   used: the packaging scripts skip them even when an archive's manifest lists
   them. v0.8.0 onwards ships only fonts; v0.8.0 itself still carried
   `FZFangSong.ttf`, `FZKai.ttf` and `GWFangSongLatin.ttf`, replaced by the
-  merged `GWFangSong.ttf` / `GWKai.ttf` in v0.8.1.
+  merged `GWFangSong.ttf` / `GWKai.ttf` in v0.8.1; both were re-typeset in v0.8.2
+  (newer outlines, hint tables and embedded bitmaps, GB2312 full-width
+  punctuation) with the same file names and family names.
 
 All binary assets are ignored by Git intentionally. Run
 `scripts/package-portable.ps1` after the assets have been placed here. The

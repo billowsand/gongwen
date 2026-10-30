@@ -23,14 +23,16 @@ concurrency:
 # the same archive).
 env:
   # v0.8.0 起中文字体统一为方正 GBK 系列（仿宋/楷体/黑体/书宋/小标宋），中易五支
-  # 与小标宋简体不再随包。v0.8.1 起仿宋、楷体换成合成字体 GWFangSong / GWKai
-  # （非汉字取仿宋_GB2312 / 楷体_GB2312），页码数字另用宋体字面的拉丁子集
+  # 与小标宋简体不再随包。v0.8.1 起仿宋、楷体换成合成字体 GWFangSong / GWKai：
+  # 汉字取方正 GBK，非汉字取仿宋_GB2312 / 楷体_GB2312。v0.8.2 起这两支换用重新
+  # 合成的一版（字形更新、带 hinting 与内嵌位图，全角标点改取 GB2312 字形），
+  # 文件名与家族名不变。页码数字另用宋体字面的拉丁子集
   # GWSimSunLatin（scripts/make-latin-subsets.py 生成）。
   # 研究报告另需 TeX Gyre Termes 与 JetBrains Mono。研究报告按文件名从 runtime
   # 加载字体，用户机器不必安装。
   # PDF 由 Typst 在进程内排版：runtime 包里旧有的 tectonic/、texbundle/ 不再随包
   # 分发（package-portable.ps1 按清单复制时跳过），只用其中的字体与许可证。
-  RUNTIME_RELEASE_TAG: v0.8.1
+  RUNTIME_RELEASE_TAG: v0.8.2
   RUNTIME_REPO: billowsand/gongwen-runtime
 
 jobs:
