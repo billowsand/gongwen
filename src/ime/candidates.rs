@@ -17,6 +17,11 @@ use super::browser::VISIBLE_ROWS;
 use super::session::{Hint, Ime, Preedit};
 use crate::theme::{self, Icon};
 
+/// 测量与绘制使用同一字体族，避免换字体后候选格尺寸失配。
+fn ime_font(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name(theme::IME_FONT_FAMILY.into()))
+}
+
 /// 候选窗离光标多远。
 const GAP: f32 = 6.0;
 
@@ -360,6 +365,7 @@ fn header(
             ui.add_space(EMPTY_GAP);
             ui.label(
                 egui::RichText::new("空码")
+                    .family(egui::FontFamily::Name(theme::IME_FONT_FAMILY.into()))
                     .size(look.small())
                     .color(theme::warn()),
             );
@@ -368,17 +374,16 @@ fn header(
             return;
         }
         let text = format!("{}/{}", page + 1, pages);
-        let galley = ui.painter().layout_no_wrap(
-            text.clone(),
-            egui::FontId::proportional(look.small()),
-            theme::text_muted(),
-        );
+        let galley =
+            ui.painter()
+                .layout_no_wrap(text.clone(), ime_font(look.small()), theme::text_muted());
         // 页码顶到右边：按上一帧量到的候选行宽度算空档。候选行的宽度不受表头影响，
         // 两者不会互相牵扯；候选变窄时页码最多晚一帧跟上来。
         let space = rows_width - ui.min_rect().width() - galley.size().x;
         ui.add_space(space.max(HEADER_GAP));
         ui.label(
             egui::RichText::new(text)
+                .family(egui::FontFamily::Name(theme::IME_FONT_FAMILY.into()))
                 .size(look.small())
                 .color(theme::text_muted()),
         );
@@ -493,6 +498,7 @@ fn browse_grid(
         return ui
             .label(
                 egui::RichText::new("没有可选的单字")
+                    .family(egui::FontFamily::Name(theme::IME_FONT_FAMILY.into()))
                     .size(look.small())
                     .color(theme::text_muted()),
             )
@@ -556,7 +562,7 @@ fn grid_cell_size(ui: &egui::Ui, ime: &Ime, look: Look) -> egui::Vec2 {
         .any(|slot| slot.sources.iter().any(|source| source != "基础表"));
     let measure = |text: String, size: f32| {
         ui.painter()
-            .layout_no_wrap(text, egui::FontId::proportional(size), theme::text())
+            .layout_no_wrap(text, ime_font(size), theme::text())
             .size()
     };
     let body = measure("国".into(), look.body());
@@ -604,7 +610,7 @@ fn grid_cell(
     } else {
         (theme::text(), theme::text_muted())
     };
-    let small = egui::FontId::proportional(look.small());
+    let small = ime_font(look.small());
     let inner = rect.shrink2(CELL_PADDING);
     let number_width = painter
         .layout_no_wrap("8".into(), small.clone(), muted)
@@ -629,7 +635,7 @@ fn grid_cell(
         egui::pos2(content.center().x, inner.bottom()),
         egui::Align2::CENTER_BOTTOM,
         &row.text,
-        egui::FontId::proportional(look.body()),
+        ime_font(look.body()),
         text_color,
     );
     if row.numbered {
@@ -693,7 +699,9 @@ fn code_strip(ui: &mut egui::Ui, preedit: &Preedit, look: Look) {
     let before: String = chars[..caret].iter().collect();
     let after: String = chars[caret..].iter().collect();
     let small = |text: String, color: egui::Color32| {
-        egui::RichText::new(text).size(look.small()).color(color)
+        egui::RichText::new(text)
+            .font(ime_font(look.small()))
+            .color(color)
     };
     ui.label(small(before, theme::text_muted()));
     ui.label(small("|".into(), theme::accent()));
@@ -704,7 +712,7 @@ fn code_strip(ui: &mut egui::Ui, preedit: &Preedit, look: Look) {
 /// 导入表、个人词条）在词后右上角带星标，简码与逐码提示的小字跟在最后。
 fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) -> egui::Response {
     let format = |size: f32, color: egui::Color32| egui::TextFormat {
-        font_id: egui::FontId::proportional(size),
+        font_id: ime_font(size),
         color,
         ..Default::default()
     };
@@ -831,6 +839,28 @@ mod tests {
     use super::*;
     use egui_kittest::{Harness, kittest::Queryable};
 
+    /// 候选窗依赖应用注册的字体族；轻量交互测试保留 egui 默认字面。
+    fn configure_test_fonts(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.families.insert(
+            egui::FontFamily::Name(theme::IME_FONT_FAMILY.into()),
+            fonts.families[&egui::FontFamily::Proportional].clone(),
+        );
+        ctx.set_fonts(fonts);
+    }
+
+    fn candidate_ui() -> impl FnMut(&mut egui::Ui, &mut Ime) {
+        let mut configured = false;
+        move |ui, ime| {
+            if !configured {
+                configure_test_fonts(ui.ctx());
+                configured = true;
+                return;
+            }
+            ime.candidates_ui(ui.ctx());
+        }
+    }
+
     fn ime(code: &str) -> Ime {
         let mut ime = Ime::bare(ImeSettings::default());
         ime.table.base = table::parse("abcd,1=公文\nab,1=公文", false).entries;
@@ -848,21 +878,18 @@ mod tests {
 
     #[test]
     fn window_shows_hints_and_empty_code() {
-        let mut harness =
-            Harness::new_ui_state(|ui, ime: &mut Ime| ime.candidates_ui(ui.ctx()), ime("abcd"));
+        let mut harness = Harness::new_ui_state(candidate_ui(), ime("abcd"));
         harness.run();
         // 简码提示跟在词后；个人词条带星标（画出来的，不在文字里）。
         harness.get_by_label_contains("‹ab›");
         harness.get_by_label_contains("个人词");
-        let mut harness =
-            Harness::new_ui_state(|ui, ime: &mut Ime| ime.candidates_ui(ui.ctx()), ime("zz"));
+        let mut harness = Harness::new_ui_state(candidate_ui(), ime("zz"));
         harness.run();
         harness.get_by_label("空码");
     }
     #[test]
     fn expanded_panel_lists_no_phrases_and_collapses_with_the_arrow() {
-        let mut harness =
-            Harness::new_ui_state(|ui, ime: &mut Ime| ime.candidates_ui(ui.ctx()), ime("ab"));
+        let mut harness = Harness::new_ui_state(candidate_ui(), ime("ab"));
         harness.run();
         harness.get_by_label("展开候选").click();
         harness.run();
@@ -878,8 +905,7 @@ mod tests {
 
     #[test]
     fn single_code_has_no_expand_button() {
-        let mut harness =
-            Harness::new_ui_state(|ui, ime: &mut Ime| ime.candidates_ui(ui.ctx()), ime("a"));
+        let mut harness = Harness::new_ui_state(candidate_ui(), ime("a"));
         harness.run();
         assert!(harness.query_by_label("展开候选").is_none());
     }
@@ -891,8 +917,10 @@ mod tests {
             |ui, (ime, text, started): &mut (Ime, String, bool)| {
                 ui.add(egui::TextEdit::singleline(text).id(editor));
                 if !*started {
+                    configure_test_fonts(ui.ctx());
                     ui.memory_mut(|memory| memory.request_focus(editor));
                     *started = true;
+                    return;
                 }
                 ime.candidates_ui(ui.ctx());
             },
@@ -938,8 +966,7 @@ mod tests {
             state.execute_guarded(Action::Push(c));
         }
         state.expand_browser();
-        let mut harness =
-            Harness::new_ui_state(|ui, ime: &mut Ime| ime.candidates_ui(ui.ctx()), state);
+        let mut harness = Harness::new_ui_state(candidate_ui(), state);
         harness.run();
         // 只列单字（词组「简码」不在），每行 5 格、露 4 行。第 5 行（第 21 个字起）
         // 滚动区备着画了，但被裁在可见区外，点不中。
@@ -995,6 +1022,7 @@ mod tests {
                     theme::configure_style(ui.ctx());
                     theme::configure_fonts(ui.ctx(), &Default::default());
                     configured = true;
+                    return;
                 }
                 ime.candidates_ui(ui.ctx());
             },

@@ -71,6 +71,9 @@ pub(crate) fn preview_uses_dedicated_bold(ctx: &egui::Context) -> bool {
 /// `Proportional`，编辑器换字体就不必给高亮布局函数加参数。
 pub const EDITOR_FONT_FAMILY: &str = "gongwen_editor";
 
+/// 应用内输入法候选窗的独立字体族。
+pub const IME_FONT_FAMILY: &str = "gongwen_ime";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UiFontCandidate {
     path: PathBuf,
@@ -388,6 +391,30 @@ pub(crate) fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
             .or_default()
             .insert(0, font);
     }
+
+    // 候选窗独立选字体，未选择或文件失效时沿用完整界面字体回退链。
+    let mut ime_family = Vec::new();
+    if config.ime_font.is_set()
+        && let Some(font) = load_font(
+            &mut fonts,
+            &mut loaded,
+            "gw-custom-ime",
+            &[PathBuf::from(config.ime_font.path.trim())],
+        )
+    {
+        center_loaded_line_gap(&mut fonts, &font);
+        ime_family.push(font);
+    }
+    ime_family.extend(
+        fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default(),
+    );
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(IME_FONT_FAMILY.into()), ime_family);
 
     // Markdown 源码编辑器用独立字体族：用户指定的编辑器字体排在最前，
     // 后面整份接上 Proportional 的回退链——没设编辑器字体时行为与直接用

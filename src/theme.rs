@@ -33,8 +33,8 @@ pub(crate) use fonts::font_definitions;
 pub(crate) use fonts::{
     EDITOR_FONT_FAMILY, FONT_BIAOSONG, FONT_BOLD, FONT_FANGSONG, FONT_HEITI, FONT_KAITI,
     FONT_RESEARCH_HEI, FONT_RESEARCH_HEI_PLAIN, FONT_RESEARCH_MONO, FONT_RESEARCH_TERMINAL,
-    FONT_SONGTI, configure_fonts, default_ui_font_label, editor_face_family, official_family,
-    preview_uses_dedicated_bold, research_family,
+    FONT_SONGTI, IME_FONT_FAMILY, configure_fonts, default_ui_font_label, editor_face_family,
+    official_family, preview_uses_dedicated_bold, research_family,
 };
 #[cfg(test)]
 pub(crate) use fonts::{FONT_RESEARCH_BIAOSONG, FONT_RESEARCH_KAI, FONT_RESEARCH_SONG};

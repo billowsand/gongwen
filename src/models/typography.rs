@@ -825,6 +825,8 @@ pub struct FontConfig {
     /// 应用界面（窗口、菜单、列表）字体。留空时使用当前平台的系统默认中文字体；
     /// 不受 `use_system_fonts` 编译开关控制。
     pub ui_font: FontChoice,
+    /// 应用内输入法候选窗字体。留空时跟随界面字体，不受编译字体总开关控制。
+    pub ime_font: FontChoice,
     /// Markdown 源码编辑器字体。留空时跟随界面字体；
     /// 与界面字体一样不受 `use_system_fonts` 编译开关控制。
     pub editor_font: FontChoice,

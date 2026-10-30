@@ -348,6 +348,8 @@ fn guide_section_ui(help: &mut crate::help::HelpState, ui: &mut egui::Ui) {
 enum FontSlot {
     /// 应用界面字体。
     Ui,
+    /// 应用内输入法候选窗字体。
+    Ime,
     /// Markdown 源码编辑器字体。
     Editor,
     /// 公文版式里的某个角色。
@@ -362,6 +364,7 @@ impl FontSlot {
     ) -> &mut crate::models::FontChoice {
         match self {
             FontSlot::Ui => &mut fonts.ui_font,
+            FontSlot::Ime => &mut fonts.ime_font,
             FontSlot::Editor => &mut fonts.editor_font,
             FontSlot::Role(role) => fonts.choice_mut(role),
         }
@@ -973,7 +976,8 @@ impl GongwenApp {
     }
 
     /// 打开字体文件对话框：用户挑完把字体写回对应槽位，挑到不支持的文件就提示一句。
-    fn browse_font_file(&mut self, slot: FontSlot, label: &str) {
+    fn browse_font_file(&mut self, ctx: &egui::Context, slot: FontSlot, label: &str) {
+        let ctx = ctx.clone();
         let label = label.to_string();
         self.request_file(
             FileDialogSpec::pick_file().filter("字体文件", system_fonts::SUPPORTED_EXTENSIONS),
@@ -982,7 +986,10 @@ impl GongwenApp {
                     return;
                 };
                 match system_fonts::read_font(&path) {
-                    Some(font) => *slot.slot_choice_mut(&mut app.config.fonts) = font.to_choice(),
+                    Some(font) => {
+                        *slot.slot_choice_mut(&mut app.config.fonts) = font.to_choice();
+                        theme::configure_fonts(&ctx, &app.config.fonts);
+                    }
                     None => {
                         app.status = format!(
                             "无法把「{}」用作{label}：只支持 ttf 与 otf，字体集合（ttc）需要额外指定字面序号，暂不支持。",
@@ -1024,7 +1031,23 @@ impl GongwenApp {
             )
         };
         if outcome == FontRowOutcome::Browse {
-            self.browse_font_file(FontSlot::Ui, "界面字体");
+            self.browse_font_file(ui.ctx(), FontSlot::Ui, "界面字体");
+        }
+        let outcome = {
+            let filter = self.font_filter.entry("ime").or_default();
+            font_choice_row(
+                ui,
+                "ime",
+                "输入法字体",
+                "跟随界面字体",
+                "应用内输入法候选窗使用的字体，包含候选字词、编码与提示",
+                &mut self.config.fonts.ime_font,
+                &self.system_fonts,
+                filter,
+            )
+        };
+        if outcome == FontRowOutcome::Browse {
+            self.browse_font_file(ui.ctx(), FontSlot::Ime, "输入法字体");
         }
         // Markdown 源码编辑器单独一项：留空即跟随界面字体。
         let outcome = {
@@ -1041,7 +1064,7 @@ impl GongwenApp {
             )
         };
         if outcome == FontRowOutcome::Browse {
-            self.browse_font_file(FontSlot::Editor, "编辑器字体");
+            self.browse_font_file(ui.ctx(), FontSlot::Editor, "编辑器字体");
         }
         // 字号紧挨着字体：同一件事（编辑器看着舒不舒服）不该拆到两个分区里找。
         setting_row(ui, "编辑器字号", None, |ui| {
@@ -1118,7 +1141,7 @@ impl GongwenApp {
                 )
             };
             if outcome == FontRowOutcome::Browse {
-                self.browse_font_file(FontSlot::Role(role), role.label());
+                self.browse_font_file(ui.ctx(), FontSlot::Role(role), role.label());
             }
         }
 
@@ -1138,7 +1161,7 @@ impl GongwenApp {
                     filter,
                 );
                 if outcome == FontRowOutcome::Browse {
-                    self.browse_font_file(FontSlot::Role(role), role.label());
+                    self.browse_font_file(ui.ctx(), FontSlot::Role(role), role.label());
                 }
             }
         }
