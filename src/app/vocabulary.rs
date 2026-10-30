@@ -59,6 +59,118 @@ pub(crate) struct TreeRow {
     has_children: bool,
 }
 
+/// 词库树的行高与列宽。每一行按同一套网格摆放：行首拖动手柄、逐级缩进、展开箭头槽、
+/// 类别图标、名称与说明、右侧编号列、最右的「＋」。展开箭头槽对所有行都预留，
+/// 有没有下级都不会让同级名称错位。
+const TREE_ROW_HEIGHT: f32 = 28.0;
+const TREE_INDENT: f32 = 18.0;
+const TREE_GRIP: f32 = 18.0;
+const TREE_CHEVRON: f32 = 16.0;
+const TREE_ICON: f32 = 16.0;
+const TREE_MENU: f32 = 22.0;
+const TREE_MIN_TEXT: f32 = 72.0;
+
+/// 行内「＋」与右键共用的菜单：新增下级、新增同级、本级内移动。
+fn vocabulary_row_menu(
+    ui: &mut egui::Ui,
+    row: &TreeRow,
+    code: &str,
+    parent_code: &str,
+    owner_code: &str,
+    action: &mut Option<VocabAction>,
+) {
+    let id = row.id;
+    let mut pick = |ui: &mut egui::Ui, label: &str, chosen: VocabAction| {
+        if ui.button(label).clicked() {
+            *action = Some(chosen);
+            ui.close();
+        }
+    };
+    if row.is_unit {
+        pick(
+            ui,
+            "添加下级单位",
+            VocabAction::AddUnit {
+                parent: code.to_string(),
+                position: SiblingPosition::Last,
+            },
+        );
+        pick(
+            ui,
+            "添加人员",
+            VocabAction::AddPerson {
+                unit: code.to_string(),
+                position: SiblingPosition::Last,
+            },
+        );
+        ui.separator();
+        pick(
+            ui,
+            "在本单位上方添加同级单位",
+            VocabAction::AddUnit {
+                parent: parent_code.to_string(),
+                position: SiblingPosition::Before(id),
+            },
+        );
+        pick(
+            ui,
+            "在本单位下方添加同级单位",
+            VocabAction::AddUnit {
+                parent: parent_code.to_string(),
+                position: SiblingPosition::After(id),
+            },
+        );
+    } else {
+        pick(
+            ui,
+            "在本人员上方添加人员",
+            VocabAction::AddPerson {
+                unit: owner_code.to_string(),
+                position: SiblingPosition::Before(id),
+            },
+        );
+        pick(
+            ui,
+            "在本人员下方添加人员",
+            VocabAction::AddPerson {
+                unit: owner_code.to_string(),
+                position: SiblingPosition::After(id),
+            },
+        );
+    }
+    ui.separator();
+    pick(
+        ui,
+        "移到本级最前",
+        VocabAction::Place {
+            id,
+            position: SiblingPosition::First,
+        },
+    );
+    pick(
+        ui,
+        "移到本级最后",
+        VocabAction::Place {
+            id,
+            position: SiblingPosition::Last,
+        },
+    );
+}
+
+/// 单行文字放进固定矩形；放不下时省略号截断，悬停看全文。
+fn tree_label(ui: &mut egui::Ui, rect: egui::Rect, text: egui::RichText, align: egui::Align) {
+    if rect.width() <= 0.0 {
+        return;
+    }
+    let layout = if align == egui::Align::Max {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
+    };
+    ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout))
+        .add(egui::Label::new(text).truncate().selectable(false));
+}
+
 impl GongwenApp {
     pub(crate) fn import_vocabulary_xlsx(&mut self) {
         self.request_file(
@@ -843,7 +955,7 @@ impl GongwenApp {
         ui.horizontal(|ui| {
             ui.strong("单位层级");
             ui.weak(if filter.is_empty() {
-                "拖动左侧手柄调整同级顺序；Esc 取消".to_string()
+                "悬停行首出现手柄，拖动调整同级顺序；右键行可新增或移动".to_string()
             } else {
                 format!("匹配 {} 行 · 清除搜索后可拖动排序", rows.len())
             });
@@ -884,6 +996,28 @@ impl GongwenApp {
             egui::DragAndDrop::clear_payload(ui.ctx());
             None
         };
+        let code_font = egui::TextStyle::Monospace.resolve(ui.style());
+        let body_font = egui::TextStyle::Body.resolve(ui.style());
+        let measure = |ui: &egui::Ui, text: &str, font: &egui::FontId| {
+            ui.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x
+            })
+        };
+        // 编号列按当前可见行里最长的编号定宽，所有行右对齐到同一条线。
+        let code_column_width = rows
+            .iter()
+            .map(|row| {
+                let code = self.config.vocabulary[row.index].code.trim();
+                measure(ui, if code.is_empty() { "--" } else { code }, &code_font)
+            })
+            .fold(0.0_f32, f32::max)
+            .min(ui.available_width() * 0.25);
+        // 行与行紧挨着排，缩进参考线才能上下连成一条；排完恢复原来的行距。
+        let row_spacing = ui.spacing().item_spacing.y;
+        ui.spacing_mut().item_spacing.y = 0.0;
         for row in drag::visible_rows(rows, dragged) {
             let entry = &self.config.vocabulary[row.index];
             let id = row.id;
@@ -929,141 +1063,252 @@ impl GongwenApp {
             };
             let orphan = !row.is_unit && entry.unit.trim().is_empty();
 
-            // 新行淡入 + 行悬停背景过渡。背景要垫在内容底下，所以先在绘制列表里
-            // 占一个槽位，等这一行排完拿到真实矩形再回填（`Frame` 也是这么做的）。
-            // 不能先 `allocate_exact_size` 一块 30px 高的矩形当悬停区再往里画：
-            // `Ui::scope_dyn` 收尾会 `advance_cursor_after_rect`，同一段高度被推进
-            // 两次，行距直接翻倍。
+            // 先按固定行高占住整行，再在子 Ui 里按坐标摆各列。子 Ui 不推进外层光标，
+            // 不会像在纵向布局里套 `right_to_left` 那样把剩余高度整个占掉，也不会重复推进行距。
+            let (row_rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), TREE_ROW_HEIGHT),
+                egui::Sense::hover(),
+            );
+            let row_response = ui.interact(
+                row_rect,
+                egui::Id::new(("vocab_row", id)),
+                egui::Sense::click(),
+            );
+            let mut row_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("vocab_row_ui", id))
+                    .max_rect(row_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            // 新行淡入。
             let seen_t = ui.ctx().animate_bool_with_time(
                 egui::Id::new(("vocab_row_seen", id)),
                 true,
                 theme::anim::SLOW,
             );
-            let row_bg = ui.painter().add(egui::Shape::Noop);
-            let row_rect = ui
-                .scope(|ui| {
-                    ui.set_opacity(seen_t);
-                    ui.horizontal(|ui| {
-                        ui.add_space(row.depth as f32 * 16.0);
-                        if filter.is_empty() {
-                            drag::handle(ui, id);
-                        } else {
-                            ui.add_space(16.0);
-                        }
-                        if row.is_unit && row.has_children {
-                            if theme::icon_button(
-                                ui,
-                                if collapsed {
-                                    theme::Icon::ChevronRight
-                                } else {
-                                    theme::Icon::ChevronDown
-                                },
-                                if collapsed { "展开" } else { "折叠" },
-                            )
-                            .clicked()
-                            {
-                                if collapsed {
-                                    self.vocabulary_collapsed.remove(&id);
-                                } else {
-                                    self.vocabulary_collapsed.insert(id);
-                                }
-                            }
-                        } else {
-                            ui.add_space(28.0);
-                        }
+            row_ui.multiply_opacity(seen_t);
+            // 悬停用几何判断而非 response.hovered()：行里的按钮会把交互抢走，
+            // 指针落在它们上面时整行反而算「未悬停」，背景会一闪一闪。
+            let hovered = ui.rect_contains_pointer(row_rect) || dragged == Some(id);
+            let hover_t = ui.ctx().animate_bool_with_time(
+                egui::Id::new(("vocab_row_hover", id)),
+                hovered,
+                theme::anim::FAST,
+            );
 
-                        ui.monospace(if code.is_empty() { "--" } else { code.as_str() });
-                        let label = if orphan {
-                            egui::RichText::new(&name).color(warn())
-                        } else {
-                            egui::RichText::new(&name)
-                        };
-                        let response =
-                            ui.selectable_label(selected && !theme::smartisan::active(), label);
-                        let response = if orphan {
-                            response.on_hover_text("该人员没有所属单位，请在右侧指定")
-                        } else {
-                            response
-                        };
-                        if response.clicked() {
-                            self.vocabulary_selected = Some(id);
-                            self.vocabulary_delete_confirm = None;
-                        }
-                        if !detail.is_empty() {
-                            ui.weak(detail);
-                        }
+            let painter = row_ui.painter().clone();
+            // 选中整行铺强调浅色；悬停从页面底色渐变过去，避免一进一出闪一下。
+            let background = if selected {
+                Some(theme::accent_soft())
+            } else if hover_t > 0.01 {
+                let base = if theme::smartisan::active() {
+                    theme::surface()
+                } else {
+                    theme::canvas()
+                };
+                Some(base.lerp_to_gamma(theme::surface_hover(), hover_t))
+            } else {
+                None
+            };
+            if let Some(fill) = background {
+                painter.rect_filled(row_rect.shrink2(egui::vec2(0.0, 1.0)), 6, fill);
+            }
+            theme::smartisan::index_row(&painter, row_rect, selected);
 
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.menu_button("＋", |ui| {
-                                if row.is_unit {
-                                    if ui.button("添加下级单位").clicked() {
-                                        *action = Some(VocabAction::AddUnit {
-                                            parent: code.clone(),
-                                            position: SiblingPosition::Last,
-                                        });
-                                        ui.close();
-                                    }
-                                    if ui.button("添加人员").clicked() {
-                                        *action = Some(VocabAction::AddPerson {
-                                            unit: code.clone(),
-                                            position: SiblingPosition::Last,
-                                        });
-                                        ui.close();
-                                    }
-                                    ui.separator();
-                                    if ui.button("在本单位上方添加同级单位").clicked() {
-                                        *action = Some(VocabAction::AddUnit {
-                                            parent: parent_code.clone(),
-                                            position: SiblingPosition::Before(id),
-                                        });
-                                        ui.close();
-                                    }
-                                    if ui.button("在本单位下方添加同级单位").clicked() {
-                                        *action = Some(VocabAction::AddUnit {
-                                            parent: parent_code.clone(),
-                                            position: SiblingPosition::After(id),
-                                        });
-                                        ui.close();
-                                    }
-                                } else {
-                                    if ui.button("在本人员上方添加人员").clicked() {
-                                        *action = Some(VocabAction::AddPerson {
-                                            unit: owner_code.clone(),
-                                            position: SiblingPosition::Before(id),
-                                        });
-                                        ui.close();
-                                    }
-                                    if ui.button("在本人员下方添加人员").clicked() {
-                                        *action = Some(VocabAction::AddPerson {
-                                            unit: owner_code.clone(),
-                                            position: SiblingPosition::After(id),
-                                        });
-                                        ui.close();
-                                    }
-                                }
-                                ui.separator();
-                                if ui.button("移到本级最前").clicked() {
-                                    *action = Some(VocabAction::Place {
-                                        id,
-                                        position: SiblingPosition::First,
-                                    });
-                                    ui.close();
-                                }
-                                if ui.button("移到本级最后").clicked() {
-                                    *action = Some(VocabAction::Place {
-                                        id,
-                                        position: SiblingPosition::Last,
-                                    });
-                                    ui.close();
-                                }
-                            })
-                            .response
-                            .on_hover_text("在指定位置新增或移动");
-                        });
-                    });
-                })
-                .response
-                .rect;
+            // 横向网格：缩进太深时压缩缩进，保证名称至少留出 TREE_MIN_TEXT。
+            let fixed = TREE_GRIP
+                + TREE_CHEVRON
+                + 2.0
+                + TREE_ICON
+                + 6.0
+                + TREE_MIN_TEXT
+                + 10.0
+                + code_column_width
+                + 6.0
+                + TREE_MENU;
+            let max_indent = (row_rect.width() - fixed).max(0.0);
+            let indent_step = if row.depth == 0 {
+                TREE_INDENT
+            } else {
+                TREE_INDENT.min(max_indent / row.depth as f32)
+            };
+            let left = row_rect.left() + 2.0;
+            let center_y = row_rect.center().y;
+            let column = |x: f32, width: f32| {
+                egui::Rect::from_min_max(
+                    egui::pos2(x, row_rect.top()),
+                    egui::pos2(x + width, row_rect.bottom()),
+                )
+            };
+            let grip_rect = column(left, TREE_GRIP);
+            let level_left = |level: usize| left + TREE_GRIP + level as f32 * indent_step;
+            let chevron_rect = column(level_left(row.depth), TREE_CHEVRON);
+            let icon_rect = egui::Rect::from_center_size(
+                egui::pos2(chevron_rect.right() + 2.0 + TREE_ICON / 2.0, center_y),
+                egui::Vec2::splat(TREE_ICON),
+            );
+            let menu_rect = column(row_rect.right() - TREE_MENU, TREE_MENU);
+            let code_rect = column(
+                menu_rect.left() - 6.0 - code_column_width,
+                code_column_width,
+            );
+            let text_left = icon_rect.right() + 6.0;
+            let text_right = (code_rect.left() - 10.0).max(text_left);
+
+            // 缩进参考线：每一级上级在它的展开箭头中线处画一条细竖线，层级一眼可数。
+            for level in 0..row.depth {
+                let x = level_left(level) + TREE_CHEVRON / 2.0;
+                painter.vline(
+                    x,
+                    row_rect.y_range(),
+                    egui::Stroke::new(1.0, theme::border()),
+                );
+            }
+
+            // 拖动手柄平时隐藏，悬停本行或拖动中才显出来；位置始终预留。
+            if filter.is_empty() {
+                let mut grip_ui =
+                    row_ui.new_child(egui::UiBuilder::new().max_rect(grip_rect).layout(
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                    ));
+                grip_ui.multiply_opacity(hover_t);
+                drag::handle(&mut grip_ui, id);
+            }
+
+            // 展开箭头：无边框，只在有下级的单位上画；搜索时折叠状态不起作用，一律画成展开。
+            if row.is_unit && row.has_children {
+                let toggle = row_ui.interact(
+                    chevron_rect,
+                    egui::Id::new(("vocab_toggle", id)),
+                    if filter.is_empty() {
+                        egui::Sense::click()
+                    } else {
+                        egui::Sense::hover()
+                    },
+                );
+                let icon = if collapsed && filter.is_empty() {
+                    theme::Icon::ChevronRight
+                } else {
+                    theme::Icon::ChevronDown
+                };
+                let tint = if toggle.hovered() {
+                    theme::text()
+                } else {
+                    theme::text_muted()
+                };
+                icon.image_sized(14.0).tint(tint).paint_at(
+                    &row_ui,
+                    egui::Rect::from_center_size(chevron_rect.center(), egui::Vec2::splat(14.0)),
+                );
+                let toggle = if filter.is_empty() {
+                    toggle.on_hover_text(if collapsed { "展开" } else { "折叠" })
+                } else {
+                    toggle
+                };
+                if toggle.clicked() || (row_response.double_clicked() && filter.is_empty()) {
+                    if collapsed {
+                        self.vocabulary_collapsed.remove(&id);
+                    } else {
+                        self.vocabulary_collapsed.insert(id);
+                    }
+                }
+            }
+
+            // 类别图标：单位是楼，人员是人；没挂单位的人员标警示色。
+            let icon_tint = if orphan {
+                warn()
+            } else if selected {
+                theme::accent()
+            } else {
+                theme::text_muted()
+            };
+            let icon = if row.is_unit {
+                theme::Icon::Building
+            } else {
+                theme::Icon::User
+            };
+            icon.image_sized(TREE_ICON)
+                .tint(icon_tint)
+                .paint_at(&row_ui, icon_rect);
+
+            // 名称优先：说明文字只用名称排完后剩下的宽度，但名称最多吃掉六成，
+            // 免得长名称把职务、代字整个挤没。
+            let text_width = text_right - text_left;
+            let name_full = measure(&row_ui, &name, &body_font);
+            let name_width = if detail.is_empty() {
+                text_width
+            } else {
+                let detail_full = measure(&row_ui, &detail, &body_font);
+                name_full
+                    .min((text_width - 12.0 - detail_full).max(text_width * 0.6))
+                    .min(text_width)
+            };
+            let mut name_text = egui::RichText::new(&name);
+            name_text = if orphan {
+                name_text.color(warn())
+            } else if selected {
+                name_text.color(theme::accent())
+            } else if row.depth == 0 && row.is_unit {
+                name_text.strong()
+            } else {
+                name_text.color(theme::text())
+            };
+            tree_label(
+                &mut row_ui,
+                column(text_left, name_width),
+                name_text,
+                egui::Align::Min,
+            );
+            if !detail.is_empty() {
+                let detail_left = text_left + name_width.min(name_full) + 12.0;
+                tree_label(
+                    &mut row_ui,
+                    column(detail_left, (text_right - detail_left).max(0.0)),
+                    egui::RichText::new(&detail)
+                        .size(theme::font_sizes::SMALL)
+                        .color(theme::text_muted()),
+                    egui::Align::Min,
+                );
+            }
+            tree_label(
+                &mut row_ui,
+                code_rect,
+                egui::RichText::new(if code.is_empty() { "--" } else { code.as_str() })
+                    .monospace()
+                    .color(theme::text_muted()),
+                egui::Align::Max,
+            );
+
+            // 「＋」平时隐藏，悬停或选中本行才显出来；菜单打开期间按钮一直在，弹出层不会被关掉。
+            let menu_opacity = if selected { 1.0 } else { hover_t };
+            let mut menu_ui = row_ui.new_child(egui::UiBuilder::new().max_rect(menu_rect).layout(
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+            ));
+            menu_ui.multiply_opacity(menu_opacity);
+            let plus = menu_ui
+                .add(
+                    egui::Button::image(theme::Icon::Plus.image_sized(14.0))
+                        .image_tint_follows_text_color(true)
+                        .frame_when_inactive(false),
+                )
+                .on_hover_text("新增或移动（也可右键本行）");
+            egui::Popup::menu(&plus).show(|ui| {
+                vocabulary_row_menu(ui, row, &code, &parent_code, &owner_code, action);
+            });
+
+            let row_response = if orphan {
+                row_response.on_hover_text("该人员没有所属单位，请在右侧指定")
+            } else {
+                row_response
+            };
+            row_response.context_menu(|ui| {
+                vocabulary_row_menu(ui, row, &code, &parent_code, &owner_code, action);
+            });
+            if row_response.clicked() {
+                self.vocabulary_selected = Some(id);
+                self.vocabulary_delete_confirm = None;
+            }
+
             // 拖到目标行上半部表示插到它前面，下半部表示插到它后面。
             // 只接受同级词条，跨层级移动必须走精确移动面板，避免误改组织关系。
             if filter.is_empty()
@@ -1071,35 +1316,8 @@ impl GongwenApp {
             {
                 *action = Some(drop);
             }
-            // 悬停用几何判断而非 response.hovered()：行里的按钮和标签会把交互抢走，
-            // 指针落在它们上面时整行反而算「未悬停」，背景会一闪一闪。
-            let hover_t = ui.ctx().animate_bool_with_time(
-                egui::Id::new(("vocab_row_hover", id)),
-                ui.rect_contains_pointer(row_rect),
-                theme::anim::FAST,
-            );
-            theme::smartisan::index_row(ui.painter(), row_rect, selected);
-            if hover_t > 0.01 || (theme::smartisan::active() && selected) {
-                let base = if theme::smartisan::active() {
-                    if selected {
-                        theme::accent_soft()
-                    } else {
-                        theme::surface()
-                    }
-                } else {
-                    theme::canvas()
-                };
-                let bg = base.lerp_to_gamma(theme::surface_hover(), hover_t);
-                ui.painter().set(
-                    row_bg,
-                    egui::epaint::RectShape::filled(
-                        row_rect.expand2(egui::vec2(4.0, 2.0)),
-                        egui::CornerRadius::same(6),
-                        bg.gamma_multiply(seen_t),
-                    ),
-                );
-            }
         }
+        ui.spacing_mut().item_spacing.y = row_spacing;
         if filter.is_empty() {
             let tree_rect = egui::Rect::from_min_max(
                 egui::pos2(ui.min_rect().left(), tree_top),

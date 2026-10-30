@@ -93,6 +93,7 @@ pub enum Icon {
     TriangleAlert,
     Type,
     Undo,
+    User,
     UserPlus,
     WandSparkles,
     X,
@@ -313,6 +314,7 @@ impl Icon {
             ),
             Self::Type => ("type", include_bytes!("../../assets/icons/type.svg")),
             Self::Undo => ("undo-2", include_bytes!("../../assets/icons/undo-2.svg")),
+            Self::User => ("user", include_bytes!("../../assets/icons/user.svg")),
             Self::UserPlus => (
                 "user-plus",
                 include_bytes!("../../assets/icons/user-plus.svg"),
