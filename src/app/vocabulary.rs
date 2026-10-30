@@ -1481,6 +1481,7 @@ impl GongwenApp {
                     ui.add_space(8.0);
                 }
 
+                let mut delete_button = None;
                 ui.horizontal_wrapped(|ui| {
                     if is_unit {
                         if ui
@@ -1527,20 +1528,25 @@ impl GongwenApp {
                         });
                     }
                     ui.add_space(12.0);
-                    if self.vocabulary_delete_confirm != Some(id)
-                        && ui
-                            .add(theme::warning_icon_button(
-                                theme::Icon::Trash,
-                                if is_unit { "删除单位" } else { "删除人员" },
-                            ))
-                            .clicked()
-                    {
-                        self.vocabulary_delete_confirm = Some(id);
+                    let response = ui.add(theme::warning_icon_button(
+                        theme::Icon::Trash,
+                        if is_unit { "删除单位" } else { "删除人员" },
+                    ));
+                    if response.clicked() {
+                        // 与稿件管理一致：再点一次删除按钮收起确认气泡。
+                        self.vocabulary_delete_confirm =
+                            if self.vocabulary_delete_confirm == Some(id) {
+                                None
+                            } else {
+                                Some(id)
+                            };
                     }
+                    delete_button = Some(response);
                 });
 
-                if self.vocabulary_delete_confirm == Some(id) {
-                    ui.add_space(8.0);
+                if self.vocabulary_delete_confirm == Some(id)
+                    && let Some(anchor) = delete_button
+                {
                     let (units_count, people_count) = if is_unit {
                         let indices = units::subtree_indices(&self.config.vocabulary, index);
                         let units_count = indices
@@ -1553,31 +1559,45 @@ impl GongwenApp {
                     } else {
                         (0, 1)
                     };
-                    ui.group(|ui| {
-                        ui.colored_label(
-                            warn(),
-                            if is_unit {
-                                format!(
-                                    "将删除本单位及其下级：共 {units_count} 个单位、{people_count} 名人员"
-                                )
-                            } else {
-                                format!("将删除人员“{canonical}”")
-                            },
-                        );
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add(egui::Button::new(
-                                    egui::RichText::new("确认删除").color(warn()),
-                                ))
-                                .clicked()
-                            {
-                                *action = Some(VocabAction::Delete(id));
-                            }
-                            if ui.button("取消").clicked() {
-                                self.vocabulary_delete_confirm = None;
-                            }
+                    let mut open = true;
+                    egui::Popup::from_response(&anchor)
+                        .id(anchor.id.with("delete_confirm"))
+                        .open_bool(&mut open)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .align(egui::RectAlign::BOTTOM_END)
+                        .align_alternatives(&[egui::RectAlign::TOP_END])
+                        .show(|ui| {
+                            ui.colored_label(
+                                warn(),
+                                if is_unit {
+                                    format!(
+                                        "将删除本单位及其下级：共 {units_count} 个单位、{people_count} 名人员"
+                                    )
+                                } else {
+                                    format!("将删除人员“{canonical}”")
+                                },
+                            );
+                            ui.weak("删除后不可恢复。");
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("取消").clicked() {
+                                    ui.close();
+                                }
+                                if ui
+                                    .add(theme::warning_icon_button(
+                                        theme::Icon::Trash,
+                                        "确认删除",
+                                    ))
+                                    .clicked()
+                                {
+                                    *action = Some(VocabAction::Delete(id));
+                                    ui.close();
+                                }
+                            });
                         });
-                    });
+                    if !open {
+                        self.vocabulary_delete_confirm = None;
+                    }
                 }
             });
         if let Some(index) = self
