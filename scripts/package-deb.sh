@@ -105,7 +105,7 @@ Description: 离线公文写作助手 (offline official-document writing assista
  离线公文写作桌面应用。内置 Typst 排版引擎与字体，
  可导出 Markdown、DOCX 与 PDF。
  .
- 此包针对 $PLATFORM_DESCRIPTION（glibc >= 2.28），安装在 /opt/gongwen-assistant。
+ 此包针对 ${PLATFORM_DESCRIPTION}（glibc >= 2.28），安装在 /opt/gongwen-assistant。
 EOF
 
 mkdir -p "$OUTPUT_DIR"

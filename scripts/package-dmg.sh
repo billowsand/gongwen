@@ -100,7 +100,7 @@ if [ -z "$VERSION" ]; then
 fi
 case "$VERSION" in
     [0-9]*\.[0-9]*\.[0-9]*) ;;
-    *) die "无法确定 x.y.z 版本号（得到：$VERSION）" ;;
+    *) die "无法确定 x.y.z 版本号（得到：${VERSION}）" ;;
 esac
 
 ARCH="$(uname -m)"
@@ -128,7 +128,7 @@ else
         (cd "$PROJECT_ROOT" && cargo build --release --locked)
     fi
     BIN="$PROJECT_ROOT/target/release/gongwen-assistant"
-    [ -f "$BIN" ] || die "找不到二进制：$BIN（去掉 --skip-build 或先构建）"
+    [ -f "$BIN" ] || die "找不到二进制：${BIN}（去掉 --skip-build 或先构建）"
     cp "$BIN" "$STAGE/gongwen-assistant"
 
     # 按 runtime 清单校验并组装；缺平台清单时回退 SHA256SUMS.txt（与
@@ -146,7 +146,7 @@ else
         [ -f "$src" ] || die "runtime 清单中的资产不存在：$src"
         actual="$(shasum -a 256 "$src" | awk '{print toupper($1)}')"
         expected="$(printf '%s' "$sum" | tr '[:lower:]' '[:upper:]')"
-        [ "$actual" = "$expected" ] || die "SHA-256 不匹配：$src（期望 $expected，实际 $actual）"
+        [ "$actual" = "$expected" ] || die "SHA-256 不匹配：${src}（期望 ${expected}，实际 ${actual}）"
         case "$rel" in
             ime/base.txt) dest="runtime/$rel" ;;
             # PDF 由 Typst 在进程内排版，旧 runtime 清单里的 TeX 资产不随包。
@@ -157,7 +157,7 @@ else
         cp "$src" "$STAGE/$dest"
     done <"$MANIFEST"
     [ -f "$STAGE/runtime/fonts/GWFangSong.ttf" ] ||
-        die "runtime 清单未提供字体，PDF 排版将不可用（$SUFFIX）"
+        die "runtime 清单未提供字体，PDF 排版将不可用（${SUFFIX}）"
 
     for doc in README.md THIRD_PARTY_NOTICES.md LICENSE config.example.json; do
         [ -f "$PROJECT_ROOT/$doc" ] && cp "$PROJECT_ROOT/$doc" "$STAGE/"
