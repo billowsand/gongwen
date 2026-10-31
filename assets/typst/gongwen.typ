@@ -166,12 +166,27 @@
   align(a, par(first-line-indent: 0pt, justify: false, body-runs(b.runs)))
 }
 
+// 图表题注：居中、与表格同为四号 14pt；标签「表 N」「图 N」黑体、题名仿宋，
+// 编号与题名之间空半字（与研究报告 caption-line 同一风格，字体随公文）。
+#let caption-line(tag, c) = align(center, {
+  text(font: hei, size: 14pt)[#tag#h(0.25em)#c.number]
+  h(0.5em)
+  text(font: fs, size: 14pt, runs(c.runs))
+})
+
 // 插图（TeX：\begin{center}\includegraphics[width=\textwidth]）。实测图前距上一行字底
 // 3.75mm、图后距下一行字顶 8.9mm。块之间夹了硬间距 v 时 Typst 不再插段间距，图前直接给。
 // 图先读成字节：格式按文件头识别而不是扩展名，PNG 存成 .jpg 也能排。
+// 有图题时排在图下方，与图保持在同一页。
 #let image-block(b) = {
   v(3.75mm, weak: false)
-  block(above: 0pt, below: 8.9mm, width: 100%, align(center, image(read(b.src, encoding: none), width: 100%)))
+  block(above: 0pt, below: 8.9mm, width: 100%, {
+    align(center, image(read(b.src, encoding: none), width: 100%))
+    if "caption" in b {
+      v(2.5mm)
+      caption-line([图], b.caption)
+    }
+  })
 }
 
 // ---------------- 表格（longtblr） ----------------
@@ -212,6 +227,12 @@
     // \fontsize{14bp}{21bp}：每行一个 21bp 的支柱（基线上 0.7、下 0.3），行距即 21bp。
     set text(font: fs, size: 14pt, tracking: 0pt, top-edge: 0.7 * 21pt, bottom-edge: -0.3 * 21pt)
     set par(leading: 0pt, spacing: 0pt, first-line-indent: 0pt, justify: false)
+    // 表题排在表格上方，不随跨页重复（续页只有表头与「下一页继续」）。
+    // block 不给 width 会收缩成内容宽，居中随之失效，必须占满版心。
+    if "caption" in t {
+      block(breakable: false, width: 100%, caption-line([表], t.caption))
+      v(2pt)
+    }
     table(
       columns: widths,
       // TeX 的横线占高度，Typst 的线压在格边上：补半根线宽。

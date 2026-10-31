@@ -398,11 +398,12 @@ mod tests {
         assert!(section.iter().all(|(f, _)| *f == termes), "{section:?}");
         assert!(section.iter().any(|(_, w)| *w == 700), "{section:?}");
         assert!(section.iter().any(|(_, w)| *w == 400), "{section:?}");
-        // 「1.1」三处：目录节条目（Regular）、节标题与表题标签「表 1.1」（Bold）。
+        // 「1.1」两处：目录节条目（Regular）与节标题（Bold）；表题标签是全篇
+        // 流水号「表 1」，不含「1.1」。
         let numbers = weights("1.1");
         assert_eq!(
             numbers.iter().filter(|(_, w)| *w == 700).count(),
-            2,
+            1,
             "{numbers:?}"
         );
         // 数字一律 Termes（页码、目录页码、封面版本号等）。
@@ -551,13 +552,14 @@ mod tests {
             })
             .collect();
         // 没有表题的表不编号、不占表号，与 Word 版和预览一致。
+        // 表号全篇连续，不按章清零、不拼章号 / 附录字母。
         assert_eq!(
             tables,
             [
-                Some("1.1".to_string()),
-                Some("2.1".to_string()),
+                Some("1".to_string()),
+                Some("2".to_string()),
                 None,
-                Some("A.1".to_string())
+                Some("3".to_string())
             ]
         );
     }
@@ -587,7 +589,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(numbers, ["1", "1", "1.1", "1.1", "1.1", "2"]);
+        assert_eq!(numbers, ["1", "1", "2", "1.1", "1.1", "3"]);
     }
 
     #[test]

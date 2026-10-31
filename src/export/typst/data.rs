@@ -91,6 +91,9 @@ pub(crate) enum Block {
     Table(Table),
     Image {
         src: String,
+        /// 图题（图 1 题名）：排在图下方；没有图题（alt 为空）时不编号。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        caption: Option<Caption>,
     },
     /// 红头呈批件：从这里起不进首页窄栏（第一个表格 / 图片之前）。
     Barrier,
@@ -138,10 +141,20 @@ fn is_unit_scale(value: &f64) -> bool {
     (*value - 1.0).abs() < f64::EPSILON
 }
 
+/// 图表题注：标签「表 N」「图 N」由模板按 number 排黑体，题名 runs 排仿宋。
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Caption {
+    pub number: usize,
+    pub runs: Runs,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Table {
     /// 文档内唯一，模板用它挂「表尾」标签判断表格是否跨页。
     pub id: String,
+    /// 表题（表 1 题名）：排在表格上方，跨页不重复。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caption: Option<Caption>,
     pub cols: Vec<TableColumn>,
     /// 表头行数（至少 1）：`rows` 的前几行进 `table.header`，续页整组重复。
     #[serde(rename = "header-rows")]

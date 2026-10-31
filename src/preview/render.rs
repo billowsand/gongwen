@@ -91,6 +91,14 @@ pub(crate) fn body_blocks(
     while index < body.len() {
         let located = body[index];
         index += 1;
+        // 已吸收为表题的段落：随表格上方排出，不再按普通段落出现。
+        if run
+            .captions
+            .as_ref()
+            .is_some_and(|captions| captions.caption_paragraphs.contains(&located.range.start))
+        {
+            continue;
+        }
         match &located.block {
             // 文档标题已在上面按版式排过，正文区不再重复。
             MarkdownBlock::Title(_) => {}
@@ -173,6 +181,7 @@ pub(crate) fn body_blocks(
                             anchor,
                             scroll_to_anchor,
                             clicked,
+                            run.captions.as_ref().map(|c| (c, located.range.start)),
                         )
                     },
                 );
@@ -202,6 +211,7 @@ pub(crate) fn clickable_content_block(
     anchor: Option<&Range<usize>>,
     scroll_to_anchor: &mut bool,
     clicked: &mut Option<Range<usize>>,
+    caption: Option<(&export::caption::OfficialCaptions, usize)>,
 ) {
     let source = located.range.clone();
     match &located.block {
@@ -265,20 +275,28 @@ pub(crate) fn clickable_content_block(
             aligns,
             spans,
             numbered,
-        } => clickable_table(
-            ui,
-            metrics,
-            markdown,
-            &source,
-            rows,
-            aligns,
-            spans,
-            *header_rows,
-            *numbered,
-            anchor,
-            scroll_to_anchor,
-            clicked,
-        ),
+        } => {
+            // 表题排在表格上方（编号在解析时已分配，不受裁剪影响）。
+            if let Some((captions, key)) = caption
+                && let Some((number, text)) = captions.tables.get(&key)
+            {
+                official_caption_line(ui, metrics, "表", *number, text);
+            }
+            clickable_table(
+                ui,
+                metrics,
+                markdown,
+                &source,
+                rows,
+                aligns,
+                spans,
+                *header_rows,
+                *numbered,
+                anchor,
+                scroll_to_anchor,
+                clicked,
+            )
+        }
         block => clickable(
             ui,
             metrics,
@@ -287,7 +305,7 @@ pub(crate) fn clickable_content_block(
             scroll_to_anchor,
             clicked,
             |ui| {
-                content_block(ui, metrics, block, counters, numbered, numbering);
+                content_block(ui, metrics, block, counters, numbered, numbering, caption);
             },
         ),
     }
@@ -339,6 +357,9 @@ struct OfficialParse {
     compact_headings: Vec<bool>,
     /// 正文首个 `# ` 的文字（保留花脸稿标记）与源码范围。
     title: Option<(String, Range<usize>)>,
+    /// 图表题注与全文流水编号，键是块的源码起点（`range.start`）。
+    /// 解析时一次算好：可视区裁剪只影响画不画，不影响编号。
+    captions: export::caption::OfficialCaptions,
 }
 
 impl OfficialParse {
@@ -400,6 +421,7 @@ impl OfficialParse {
             }
             _ => None,
         });
+        let captions = export::caption::official_captions(&located).rekey_by_source(&located);
         Self {
             located,
             body,
@@ -408,6 +430,7 @@ impl OfficialParse {
             names,
             compact_headings,
             title,
+            captions,
         }
     }
 }
@@ -433,6 +456,7 @@ pub(crate) fn attachment_sheet(
     clicked: &mut Option<Range<usize>>,
     numbering: &NumberingConfig,
     markdown: &str,
+    captions: Option<&export::caption::OfficialCaptions>,
 ) {
     // 纸面几何（竖页 / 横向附件页）可能逐份不同，裁剪器跟着当前几何重建：
     // 键里含版心宽，横纸上的表格不会误用竖页量到的高度。
@@ -454,6 +478,12 @@ pub(crate) fn attachment_sheet(
             Align::LEFT,
         );
         for located in attachment {
+            // 已吸收为表题的段落：随表格上方排出，不再按普通段落出现。
+            if captions
+                .is_some_and(|captions| captions.caption_paragraphs.contains(&located.range.start))
+            {
+                continue;
+            }
             // 附件正式标题与正文标题使用同一层级编码。
             if let MarkdownBlock::Title(text) = &located.block {
                 counters.fill(0);
@@ -498,6 +528,7 @@ pub(crate) fn attachment_sheet(
                         anchor,
                         scroll_to_anchor,
                         clicked,
+                        captions.map(|c| (c, located.range.start)),
                     )
                 },
             );
@@ -635,6 +666,7 @@ pub(crate) fn official_preview(
             numbering,
             markdown,
             elements,
+            &parsed.captions,
         );
         // 行号每帧都要画，不能写成 `clicked.or_else(…)`：那样点中正文的那一帧
         // 会连带把页边整列号码漏掉，看上去就是闪一下。
@@ -675,6 +707,7 @@ pub(crate) fn official_preview(
             &BodyRun {
                 compact_headings,
                 numbered,
+                captions: Some(parsed.captions.clone()),
             },
             anchor,
             &mut scroll_to_anchor,
@@ -739,6 +772,7 @@ pub(crate) fn official_preview(
             &mut clicked,
             numbering,
             markdown,
+            Some(&parsed.captions),
         );
         if let Some(saved) = saved {
             metrics.leave_attachment_landscape(saved);
@@ -909,6 +943,35 @@ pub(super) fn heading_job(
     Some(job)
 }
 
+/// 公文图表题注：标签「表 N」「图 N」黑体、题名仿宋（`metrics.body_family`），
+/// 与表格同为四号（`metrics.table_pt`），编号后空半字，整行居中——与 PDF 的
+/// `caption-line`、Word 的 `caption_paragraph` 同一风格。
+fn official_caption_line(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    tag: &str,
+    number: usize,
+    text: &str,
+) {
+    crate::preview::layout::line_block_runs(
+        ui,
+        metrics,
+        &[
+            crate::preview::layout::TextRun {
+                text: &format!("{tag} {number} "),
+                family: theme::FONT_HEITI,
+                size: metrics.table_pt,
+            },
+            crate::preview::layout::TextRun {
+                text,
+                family: metrics.body_family,
+                size: metrics.table_pt,
+            },
+        ],
+        Align::Center,
+    );
+}
+
 pub(crate) fn content_block(
     ui: &mut egui::Ui,
     metrics: &Metrics,
@@ -916,13 +979,19 @@ pub(crate) fn content_block(
     counters: &mut [usize; 4],
     numbered: bool,
     numbering: &NumberingConfig,
+    caption: Option<(&export::caption::OfficialCaptions, usize)>,
 ) {
     match block {
         MarkdownBlock::Heading(level, text) => {
             heading_block(ui, metrics, *level, text, counters, numbered, numbering);
         }
         MarkdownBlock::Paragraph(text) if is_renderable_paragraph(text) => {
-            body_block(ui, metrics, text, true);
+            // 已吸收为表题的段落不再按普通段落排（外层一般已跳过，这里兜底）。
+            let absorbed =
+                caption.is_some_and(|(captions, key)| captions.caption_paragraphs.contains(&key));
+            if !absorbed {
+                body_block(ui, metrics, text, true);
+            }
         }
         MarkdownBlock::OrderedListItem { number, text } => {
             let prefix = export::render_list_number(numbering.list2, *number);
@@ -940,15 +1009,37 @@ pub(crate) fn content_block(
             aligns,
             spans,
             numbered,
-        } => table_block(ui, metrics, rows, aligns, spans, *header_rows, *numbered),
-        MarkdownBlock::Image { alt, src } => image_block(ui, metrics, alt, src),
-        MarkdownBlock::Diagram { source, caption } => {
+        } => {
+            if let Some((captions, key)) = caption
+                && let Some((number, text)) = captions.tables.get(&key)
+            {
+                official_caption_line(ui, metrics, "表", *number, text);
+            }
+            table_block(ui, metrics, rows, aligns, spans, *header_rows, *numbered)
+        }
+        MarkdownBlock::Image { alt, src } => {
+            image_block(ui, metrics, alt, src);
+            if let Some((captions, key)) = caption
+                && let Some((number, text)) = captions.figures.get(&key)
+            {
+                official_caption_line(ui, metrics, "图", *number, text);
+            }
+        }
+        MarkdownBlock::Diagram {
+            source,
+            caption: title,
+        } => {
             diagram_image_block(ui, metrics, source, false);
-            if !caption.is_empty() {
+            if let Some((captions, key)) = caption
+                && let Some((number, text)) = captions.figures.get(&key)
+            {
+                official_caption_line(ui, metrics, "图", *number, text);
+            } else if !title.is_empty() {
+                // 没传题注参数的调用方保持旧行为（纯文字居中行）。
                 aligned_block(
                     ui,
                     metrics,
-                    &format!("图：{caption}"),
+                    &format!("图：{title}"),
                     export::LineAlign::Center,
                 );
             }

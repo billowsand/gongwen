@@ -2,7 +2,7 @@
 //! `official_letter_sections_to_tex_with_barrier_with_numbering`：同一套标题编号、
 //! 紧缩合并、附件分区与横页判定，只是产出模板数据。
 
-use super::data::{Attachment, Block, Runs, Title};
+use super::data::{Attachment, Block, Caption, Runs, Title};
 use super::runs::{body_runs, heading_runs, marked_runs, numbered_body_runs};
 use crate::export::table::requires_landscape;
 use crate::export::title::{self, TitlePlan};
@@ -101,6 +101,14 @@ pub(crate) fn sections(
     let mut counters = [0usize; 4];
     let compact_headings = crate::export::compact_heading_flags(blocks, lines, style_mode);
     let mut table_serial = 0usize;
+    // 图表题注与全文流水编号：与预览、Word 共用同一份分配结果。
+    let captions = crate::export::caption::official_captions(blocks);
+    let caption_data = |entry: Option<&(usize, String)>| {
+        entry.map(|(number, text)| Caption {
+            number: *number,
+            runs: body_runs(text),
+        })
+    };
 
     // 当前分区的块序列：正文直接写进 body，附件写进最后一个附件。
     fn target<'a>(
@@ -189,7 +197,9 @@ pub(crate) fn sections(
                 }
             }
             MarkdownBlock::Paragraph(text) => {
-                if is_plain_paragraph(text) {
+                if captions.caption_paragraphs.contains(&index) {
+                    // 已吸收为表题的段落：随表格上方排出，不再按普通段落出现。
+                } else if is_plain_paragraph(text) {
                     target(section, &mut body, &mut attachments).push(Block::Par {
                         runs: numbered_body_runs(text, numbers(index)),
                         line,
@@ -223,7 +233,7 @@ pub(crate) fn sections(
                 numbered,
             } => {
                 table_serial += 1;
-                if let Some(table) = crate::export::table::to_typst_table(
+                if let Some(mut table) = crate::export::table::to_typst_table(
                     rows,
                     aligns,
                     spans,
@@ -231,6 +241,7 @@ pub(crate) fn sections(
                     *numbered,
                     format!("t{table_serial}"),
                 ) {
+                    table.caption = caption_data(captions.tables.get(&index));
                     if section == MarkdownSection::Body && std::mem::take(&mut body_barrier) {
                         body.push(Block::Barrier);
                     }
@@ -243,6 +254,7 @@ pub(crate) fn sections(
                 }
                 target(section, &mut body, &mut attachments).push(Block::Image {
                     src: crate::images::normalize_ref(src),
+                    caption: caption_data(captions.figures.get(&index)),
                 });
             }
             // 引用块已由 `flatten_quotes` 拆成段落；Mermaid 已在调用方物化成图片引用；
@@ -289,4 +301,56 @@ pub(crate) fn attachment_landscape_flags(blocks: &[MarkdownBlock]) -> Vec<bool> 
         }
     }
     flags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::parse_markdown_with_lines_and_prefixes;
+
+    /// 公文表题 / 图题进入模板数据：全文流水编号，表题段落不再按正文出现。
+    #[test]
+    fn official_tables_and_images_carry_running_captions() {
+        let markdown = concat!(
+            "# 标题\n\n正文。\n\n",
+            "表：甲表\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n",
+            "![甲图](images/a.png)\n\n",
+            "![](images/b.png)\n\n",
+            "| c | d |\n| --- | --- |\n| 3 | 4 |\n\n表：乙表\n",
+        );
+        let numbering = NumberingConfig::default();
+        let (blocks, lines, prefixes) =
+            parse_markdown_with_lines_and_prefixes(markdown, &numbering);
+        let parts = sections(
+            &blocks,
+            &lines,
+            &prefixes,
+            StyleMode::default(),
+            false,
+            &numbering,
+            false,
+        );
+        let table_numbers: Vec<usize> = parts
+            .body
+            .iter()
+            .filter_map(|block| match block {
+                Block::Table(table) => table.caption.as_ref().map(|caption| caption.number),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(table_numbers, [1, 2]);
+        let figure_numbers: Vec<usize> = parts
+            .body
+            .iter()
+            .filter_map(|block| match block {
+                Block::Image { caption, .. } => caption.as_ref().map(|caption| caption.number),
+                _ => None,
+            })
+            .collect();
+        // 空 alt 的图片不编号、不占号。
+        assert_eq!(figure_numbers, [1]);
+        let json = serde_json::to_string(&parts.body).unwrap();
+        assert!(!json.contains("表："), "表题段落不应再按正文排：{json}");
+        assert!(json.contains("甲表") && json.contains("乙表") && json.contains("甲图"));
+    }
 }

@@ -1297,6 +1297,7 @@ mod tests {
                 &crate::models::NumberingConfig::default(),
                 &markdown,
                 &crate::visual_diff::ElementMarks::default(),
+                &Default::default(),
             );
             let heading = layout.pages[0]
                 .fragments
@@ -1367,6 +1368,7 @@ mod tests {
                 &crate::models::NumberingConfig::default(),
                 &markdown,
                 &crate::visual_diff::ElementMarks::default(),
+                &Default::default(),
             );
             let first = layout.pages[0]
                 .fragments
@@ -1466,6 +1468,7 @@ mod tests {
                 &crate::models::NumberingConfig::default(),
                 &markdown,
                 &crate::visual_diff::ElementMarks::default(),
+                &Default::default(),
             );
             assert!(layout.pages.len() > 1, "样例正文必须溢出到第二页");
             // 与 red_build_print_layout 同一套算式：承办区红线上方再留 2mm。
@@ -1523,6 +1526,7 @@ mod tests {
                         &crate::models::NumberingConfig::default(),
                         &markdown,
                         &crate::visual_diff::ElementMarks::default(),
+                        &Default::default(),
                     );
                     let record_height = metrics.mm(1.4) + metrics.line * rows.len() as f32;
                     let body_bottom = metrics.mm(37.0 + 225.0) - record_height - metrics.mm(2.0);
@@ -1586,6 +1590,7 @@ mod tests {
                 &numbering,
                 &markdown,
                 &crate::visual_diff::ElementMarks::default(),
+                &Default::default(),
             );
             assert!(layout.pages[0].tables.is_empty(), "表格不进首页批示窄栏");
             assert!(
@@ -2192,6 +2197,7 @@ mod tests {
                     &mut counters,
                     false,
                     &crate::models::NumberingConfig::default(),
+                    None,
                 );
             });
         }
@@ -2237,6 +2243,7 @@ mod tests {
                 &mut counters,
                 false,
                 &crate::models::NumberingConfig::default(),
+                None,
             );
         });
         // 后台线程解码需要时间与后续帧推进；等解码完成后重查。

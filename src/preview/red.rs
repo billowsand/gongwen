@@ -43,6 +43,8 @@ pub(crate) fn red_row_top(metrics: &Metrics, index: usize) -> f32 {
 pub(crate) struct BodyRun {
     pub(crate) compact_headings: Vec<bool>,
     pub(crate) numbered: bool,
+    /// 图表题注（键为源码起点）：正文区有表题 / 图题时由 `OfficialParse` 给出。
+    pub(crate) captions: Option<crate::export::caption::OfficialCaptions>,
 }
 
 /// 红头呈批件打印预览中的一段可见文字。正文段落可以被切成多个 fragment：
@@ -699,6 +701,50 @@ pub(crate) fn red_responsible_rows(input: &DraftInput, display: &UnitDisplay) ->
         .collect()
 }
 
+/// 红头打印分页里的图表题注：黑体标签「表 N」「图 N」+ 仿宋题名，四号，
+/// 整行居中——与普通预览的 `official_caption_line` 同一风格。
+fn red_caption_fragment(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    tag: &str,
+    number: usize,
+    text: &str,
+    range: Range<usize>,
+    y: f32,
+) -> RedPrintFragment {
+    let mut job = job(metrics.content);
+    job.halign = Align::Center;
+    marks::append_marked_text(
+        &mut job,
+        metrics,
+        &format!("{tag} {number} "),
+        text_format(
+            metrics.font(theme::FONT_HEITI, metrics.table_pt),
+            metrics.line,
+        ),
+    );
+    marks::append_marked_text(
+        &mut job,
+        metrics,
+        text,
+        text_format(
+            metrics.font(metrics.body_family, metrics.table_pt),
+            metrics.line,
+        ),
+    );
+    let galley = layout(ui, job);
+    let x = metrics.mm(28.0) + metrics.content / 2.0;
+    red_galley_fragment(
+        metrics,
+        galley,
+        metrics.content,
+        Align::Center,
+        Some(range),
+        x,
+        y,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn red_build_print_layout(
     ui: &egui::Ui,
@@ -711,6 +757,7 @@ pub(crate) fn red_build_print_layout(
     numbering: &NumberingConfig,
     markdown: &str,
     elements: &ElementMarks,
+    captions: &crate::export::caption::OfficialCaptions,
 ) -> (RedPrintLayout, Vec<[String; 3]>) {
     let rows = red_responsible_rows(input, display);
     // TeX 承办区 = 0.4mm 红线 + 1mm 间距 + 每条固定 28pt 基线。
@@ -785,6 +832,11 @@ pub(crate) fn red_build_print_layout(
     let mut index = 0usize;
     while index < body.len() {
         let located = body[index];
+        // 被表格吸收为表题的段落不再按正文排（表题随表格走，见下方 Table 分支）。
+        if captions.caption_paragraphs.contains(&located.range.start) {
+            index += 1;
+            continue;
+        }
         match &located.block {
             // 引用块已由 `OfficialParse` 拆成段落；代码块只有研究报告的解析出，
             // 都到不了这里
@@ -916,6 +968,20 @@ pub(crate) fn red_build_print_layout(
                 spans,
                 numbered,
             } => {
+                // 表题排在表上方，与表格同页的首块；表本身的分页仍由 red_place_table 决定。
+                if let Some((number, text)) = captions.tables.get(&located.range.start) {
+                    let fragment = red_caption_fragment(
+                        ui,
+                        metrics,
+                        "表",
+                        *number,
+                        text,
+                        located.range.clone(),
+                        state.cursor_y,
+                    );
+                    state.cursor_y += fragment.visible_height;
+                    state.push(fragment);
+                }
                 red_place_table(
                     ui,
                     metrics,
@@ -947,6 +1013,20 @@ pub(crate) fn red_build_print_layout(
                     }],
                     false,
                 );
+                // 图题排在图（这里是占位行）下方。
+                if let Some((number, text)) = captions.figures.get(&located.range.start) {
+                    let fragment = red_caption_fragment(
+                        ui,
+                        metrics,
+                        "图",
+                        *number,
+                        text,
+                        located.range.clone(),
+                        state.cursor_y,
+                    );
+                    state.cursor_y += fragment.visible_height;
+                    state.push(fragment);
+                }
             }
             MarkdownBlock::Diagram { caption, .. } => {
                 if state.page_index == 0 {
@@ -966,6 +1046,19 @@ pub(crate) fn red_build_print_layout(
                     }],
                     false,
                 );
+                if let Some((number, text)) = captions.figures.get(&located.range.start) {
+                    let fragment = red_caption_fragment(
+                        ui,
+                        metrics,
+                        "图",
+                        *number,
+                        text,
+                        located.range.clone(),
+                        state.cursor_y,
+                    );
+                    state.cursor_y += fragment.visible_height;
+                    state.push(fragment);
+                }
             }
             MarkdownBlock::Paragraph(_) => {}
         }
@@ -1760,6 +1853,7 @@ pub(crate) fn red_approval_print_preview(
     numbering: &NumberingConfig,
     markdown: &str,
     elements: &ElementMarks,
+    captions: &crate::export::caption::OfficialCaptions,
 ) {
     let scoped_display = display.for_input(input);
     let display = &scoped_display;
@@ -1793,6 +1887,7 @@ pub(crate) fn red_approval_print_preview(
             numbering,
             markdown,
             elements,
+            captions,
         )
     });
     let (layout_state, rows) = &*cached;
@@ -1832,6 +1927,7 @@ pub(crate) fn red_approval_print_preview(
             clicked,
             numbering,
             markdown,
+            Some(captions),
         );
         if let Some(saved) = saved {
             metrics.leave_attachment_landscape(saved);

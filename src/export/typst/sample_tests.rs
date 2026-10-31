@@ -104,6 +104,48 @@ const WITH_ATTACHMENT: &str = "# 关于印发社区养老服务设施改造任�
 | 2 | 西城区 | 助浴间、适老化卫生间 | 2026年8月 |
 ";
 
+/// 表题 / 图题样张：表前表题、Mermaid 图题、位图图题、无题注表不占号、表后表题兜底。
+/// 预期编号：表 1 任务分解、图 1 改造流程、图 2 站点分布、表 2 经费安排。
+const CAPTIONS: &str = r#"# 关于印发社区养老服务设施改造任务分解表的通知
+
+<!-- [正文] -->
+
+现将任务分解表印发给你们，请认真贯彻落实。
+
+表：2026年改造任务分解表
+
+| 序号 | 区域 | 改造内容 | 完成时限 |
+| --- | --- | --- | --- |
+| 1 | 东城区 | 无障碍通道、扶手、呼叫系统 | 2026年6月 |
+| 2 | 西城区 | 助浴间、适老化卫生间 | 2026年8月 |
+
+改造流程见下图。
+
+```mermaid
+flowchart LR
+  A[摸排] --> B[改造] --> C[验收]
+```
+图：设施提质改造流程
+
+站点分布见下图。
+
+![站点分布示意图](images/chart.png)
+
+下表没有表题，不编号。
+
+| 项目 | 数量 |
+| --- | --- |
+| 站点 | 312 |
+
+| 项目 | 金额 |
+| --- | --- |
+| 适老化改造 | 520万元 |
+
+表：经费安排表
+
+特此通知。
+"#;
+
 const LANDSCAPE: &str = "# 关于印发提质改造任务分解表的通知
 
 <!-- [正文] -->
@@ -212,6 +254,13 @@ fn cases() -> Vec<Case> {
             name: "letter-cell-breaks",
             kind: TemplateKind::OfficialLetter,
             markdown: CELL_BREAKS.into(),
+            tweak: |_| {},
+        },
+        Case {
+            // 表题 / 图题：全文流水编号，位图在下方临时生成，另出 Word 与逐页图对照。
+            name: "letter-captions",
+            kind: TemplateKind::OfficialLetter,
+            markdown: CAPTIONS.into(),
             tweak: |_| {},
         },
         Case {
@@ -414,6 +463,14 @@ fn sample_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/typst-samples")
 }
 
+/// letter-captions 用例的位图插图：纯色小图，写进指定 base 的 images/。
+fn caption_sample_image(dir: &Path) {
+    std::fs::create_dir_all(dir.join("images")).unwrap();
+    image::RgbImage::from_pixel(160, 90, image::Rgb([31, 78, 158]))
+        .save(dir.join("images/chart.png"))
+        .unwrap();
+}
+
 /// 每个文种都能用 Typst 排出 PDF、没有警告、带回探针报告。
 /// 本机没有 runtime/fonts 时跳过（CI）。
 #[test]
@@ -427,6 +484,9 @@ fn every_kind_compiles_with_typst() {
     for case in cases() {
         let mut input = base_input(case.kind);
         (case.tweak)(&mut input);
+        if case.name == "letter-captions" {
+            caption_sample_image(dir.path());
+        }
         let path = dir.path().join(format!("{}.pdf", case.name));
         let outcome = super::write_pdf_with_base(
             &path,
@@ -591,7 +651,10 @@ fn typst_samples() {
         )
         .unwrap();
         std::fs::write(dir.join("doc.json"), data).unwrap();
-        if matches!(case.name, "letter-cell-breaks" | "letter-record-pushed") {
+        if matches!(
+            case.name,
+            "letter-cell-breaks" | "letter-record-pushed" | "letter-captions"
+        ) {
             crate::export::docx::write_docx(
                 &dir.join("word.docx"),
                 &input,
@@ -618,6 +681,9 @@ fn typst_samples() {
             )
             .unwrap();
         }
+        if case.name == "letter-captions" {
+            caption_sample_image(&dir);
+        }
         let outcome = super::write_pdf_with_base(
             &dir.join("typst.pdf"),
             &input,
@@ -632,7 +698,8 @@ fn typst_samples() {
             // 会议纪要逐页出图，对照 examples/huiyijiyao.docx 目视检查。
             Ok(outcome)
                 if case.kind == TemplateKind::MeetingMinutes
-                    || case.name == "plain-multi-header" =>
+                    || case.name == "plain-multi-header"
+                    || case.name == "letter-captions" =>
             {
                 save_page_images(&outcome.pdf, &dir);
             }

@@ -39,11 +39,8 @@ pub(crate) struct Walk {
     unnumbered_pending: bool,
     /// 不编号子树的根标题层级（源码里的 `#` 数）。
     unnumbered_root: Option<u8>,
-    /// 当前在不编号章里：图表题注是不带章号的流水号（`\mdxfreenumbers`）。
+    /// 当前在不编号章里：文框题注是不带章号的流水号（`\mdxfreenumbers`）。
     free: bool,
-    /// 不编号章的图、表流水号，全篇共用。
-    free_figure: usize,
-    free_table: usize,
     free_boxes: HashMap<String, usize>,
 }
 
@@ -67,8 +64,6 @@ impl Default for Walk {
             unnumbered_pending: false,
             unnumbered_root: None,
             free: false,
-            free_figure: 0,
-            free_table: 0,
             free_boxes: HashMap::new(),
         }
     }
@@ -85,7 +80,7 @@ impl Walk {
         }
     }
 
-    /// 开新章：节、图、表的计数器都跟着归零，与 LaTeX 的 `\chapter` 一致。
+    /// 开新章：节的计数器跟着归零，与 LaTeX 的 `\chapter` 一致。
     /// 返回（纸面前缀，`\thechapter`）。
     pub(crate) fn open_chapter(&mut self) -> (String, String) {
         self.free = false;
@@ -93,8 +88,6 @@ impl Walk {
         self.section_no = 0;
         self.subsection = 0;
         self.subsubsection = 0;
-        self.figure = 0;
-        self.table = 0;
         self.boxes.clear();
         let number = self.chapter_number();
         // ctex 的 `name = {第,章}` 是直接和 `\thechapter` 拼起来的，中间不插空格，
@@ -138,24 +131,15 @@ impl Walk {
         }
     }
 
-    /// `\thefigure` / `\thetable`：都是"章号.序号"，跟着章归零。不编号章里
-    /// 是全篇共用的流水号，不带章号（md2tex.cls 的 `\mdxfreenumbers`）。
+    /// 图、表各自全篇连续编号，不按章清零，也不拼章号 / 附录字母。
     pub(crate) fn open_figure(&mut self) -> String {
-        if self.free {
-            self.free_figure += 1;
-            return self.free_figure.to_string();
-        }
         self.figure += 1;
-        format!("{}.{}", self.chapter_number(), self.figure)
+        self.figure.to_string()
     }
 
     pub(crate) fn open_table(&mut self) -> String {
-        if self.free {
-            self.free_table += 1;
-            return self.free_table.to_string();
-        }
         self.table += 1;
-        format!("{}.{}", self.chapter_number(), self.table)
+        self.table.to_string()
     }
 
     /// 文框编号：与图表同一口径，每种名称各编各的。

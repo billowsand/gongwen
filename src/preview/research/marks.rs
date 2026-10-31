@@ -9,11 +9,12 @@ use crate::export::crossref::ResearchMarks;
 use crate::export::{LocatedBlock, MarkdownBlock};
 use crate::models::NumberingConfig;
 use crate::preview::research::{CHAPTER_GAP, Kind, SECTION_GAP, walk};
-use regex::Regex;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::OnceLock;
+
+// 表题配对与识别已提升到 export::caption（公文三端共用），这里继续转发，
+// 让 preview::research 根模块的 re-export 保持不变。
+pub(crate) use crate::export::caption::{caption_text, table_captions};
 
 /// 这一块定义的锚点 `{#id}`。锚点写在源码行尾，排版前已被剥掉，所以回原文去取。
 /// 文框的锚点写在首行行尾，不在块尾。
@@ -26,92 +27,6 @@ pub(crate) fn anchor_of<'a>(markdown: &'a str, located: &LocatedBlock) -> Option
         _ => raw,
     };
     crossref::split_label(raw).1
-}
-
-/// 「表格块下标 → 表题块下标」。表题写在表前或表后都认，表前优先——与 mdx 的
-/// `take_leading_table_caption().or(parse_trailing_table_caption())` 一致。
-pub(crate) fn table_captions(blocks: &[LocatedBlock]) -> HashMap<usize, usize> {
-    let mut pairs = HashMap::new();
-    let mut used = std::collections::HashSet::new();
-    for (index, located) in blocks.iter().enumerate() {
-        if !matches!(located.block, MarkdownBlock::Table { .. }) {
-            continue;
-        }
-        // 表题与表格之间可以夹一行序号表标记：它不落版面，mdx 也不把它当块。
-        let mut before = index.checked_sub(1);
-        while let Some(marker) = before.filter(|marker| {
-            matches!(&blocks[*marker].block, MarkdownBlock::Html(line)
-                if export::parse_numbered_table_marker(line))
-        }) {
-            before = marker.checked_sub(1);
-        }
-        let leading = before
-            .filter(|before| !used.contains(before))
-            .filter(|before| caption_text(&blocks[*before]).is_some());
-        let trailing = (index + 1 < blocks.len())
-            .then_some(index + 1)
-            .filter(|after| !used.contains(after))
-            .filter(|after| caption_text(&blocks[*after]).is_some());
-        if let Some(caption) = leading.or(trailing) {
-            used.insert(caption);
-            pairs.insert(index, caption);
-        }
-    }
-    pairs
-}
-
-/// 这一块是不是一条表题；是就给出题名。
-pub(crate) fn caption_text(located: &LocatedBlock) -> Option<String> {
-    let MarkdownBlock::Paragraph(text) = &located.block else {
-        return None;
-    };
-    // 第一遍解析拿到的文字还带着行尾锚点，剥掉再认。
-    parse_table_caption(crossref::split_label(text).0)
-}
-
-/// 表题行：`表：题名`、`表 1.2 题名`、`Table: 题名`、`：题名`。
-/// 编号由 LaTeX 的表格计数器生成，源码里写的旧编号一律剥掉，免得印两遍。
-/// 写法与正则都照 mdx 的 `parser::parse_table_caption_marker`。
-pub(crate) fn parse_table_caption(line: &str) -> Option<String> {
-    static NUMBERED: OnceLock<Regex> = OnceLock::new();
-    let numbered = NUMBERED.get_or_init(|| {
-        Regex::new(
-            r"^(?i:表|table)\s*(?:[A-Za-z]?\d+|[A-Za-z][.\-]\d+)(?:[.\-][A-Za-z0-9]+)*\s*(?:[:：]\s*|\s+)(.+)$",
-        )
-        .expect("带编号表题正则")
-    });
-    let trimmed = line.trim();
-    if let Some(caps) = numbered.captures(trimmed) {
-        let caption = strip_caption_number(caps[1].trim());
-        if !caption.is_empty() {
-            return Some(caption);
-        }
-    }
-    let caption = trimmed
-        .strip_prefix("Table:")
-        .or_else(|| trimmed.strip_prefix("table:"))
-        .or_else(|| trimmed.strip_prefix("TABLE:"))
-        .or_else(|| trimmed.strip_prefix("表:"))
-        .or_else(|| trimmed.strip_prefix("表："))
-        .or_else(|| trimmed.strip_prefix(':'))?;
-    let caption = strip_caption_number(caption.trim());
-    (!caption.is_empty()).then_some(caption)
-}
-
-/// 剥掉表题开头残留的旧编号（`4.6 题名`、`E.1 题名`、`附录E 题名`）。
-pub(crate) fn strip_caption_number(caption: &str) -> String {
-    static APPENDIX: OnceLock<Regex> = OnceLock::new();
-    let appendix = APPENDIX.get_or_init(|| {
-        Regex::new(r"^附录\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?\s*")
-            .expect("附录表题正则")
-    });
-    static LEADING_NUM: OnceLock<Regex> = OnceLock::new();
-    let leading = LEADING_NUM.get_or_init(|| {
-        Regex::new(r"^(?:\d+(?:\.\d+)*|[A-Za-z][.\-]\d+(?:[.\-]\d+)*)[.．、]?\s+([^\d\s])")
-            .expect("表题编号正则")
-    });
-    let caption = appendix.replace(caption, "");
-    leading.replace(&caption, "$1").trim().to_string()
 }
 
 /// 第一遍：给全文的锚点和文献引用编号。`bib` 是文献库（`.bib` 内容）：叙述式

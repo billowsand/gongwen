@@ -22,6 +22,8 @@ mod headings;
 mod marks;
 mod numbering;
 
+#[cfg(test)]
+pub(crate) use crate::export::caption::parse_table_caption;
 pub(crate) use blocks::body_item;
 pub(crate) use body::research_preview;
 pub(crate) use cover::cover_sheet;
@@ -29,8 +31,6 @@ pub(crate) use headings::{
     CAPTION_GAP_PT, CHAPTER_GAP, FLOAT_SEP_PT, SECTION_GAP, caption_line, chapter_title,
     part_title, section_title, space_after_float, title_line,
 };
-#[cfg(test)]
-pub(crate) use marks::parse_table_caption;
 pub(crate) use marks::{
     LabelKind, LabelTarget, anchor_of, caption_text, citations, collect_marks, label_targets,
     outline, report_title, table_captions,
@@ -423,12 +423,12 @@ mod tests {
 
         assert!(text.contains("第1章　研究背景"), "{text}");
         assert!(
-            text.contains("见第1章、表1.1与图1.1，另见[1,2]。"),
+            text.contains("见第1章、表1与图1，另见[1,2]。"),
             "行内标记都应换成纸面编号：{text}"
         );
-        assert!(text.contains("表 1.1 "), "表题应带自动编号：{text}");
+        assert!(text.contains("表 1 "), "表题应带自动编号：{text}");
         assert!(text.contains("样本分布"), "表题题名应排出：{text}");
-        assert!(text.contains("图 1.1 总体架构"), "图题应带自动编号：{text}");
+        assert!(text.contains("图 1 总体架构"), "图题应带自动编号：{text}");
         for symbol in ["{@", "{#", "[@", "表：样本分布"] {
             assert!(
                 !text.contains(symbol),
@@ -528,14 +528,14 @@ mod tests {
         assert!(!text.contains("第2章"), "附录不再占用正文章号：{text}");
     }
 
-    /// 附录里的图表跟着字母章号走，与 LaTeX 的 `\thefigure` 一致。
+    /// 附录里的图表也按全篇流水编号，不拼附录字母。
     #[test]
-    fn appendix_figures_are_numbered_against_the_letter_chapter() {
+    fn appendix_figures_keep_the_running_number() {
         let text = drawn(concat!(
             "<!-- [附件] -->\n\n## 调查问卷\n\n",
             "![问卷样张](images/a.png)\n",
         ));
-        assert!(text.contains("图 A.1 问卷样张"), "{text}");
+        assert!(text.contains("图 1 问卷样张"), "{text}");
     }
 
     /// 引了不存在的锚点，就按 LaTeX 的办法印 `??`：预览里一眼看得出来，不必
@@ -579,8 +579,8 @@ mod tests {
                 sections[sections.len() - 1].format.font_id.clone(),
             )
         };
-        let figure = caption_fonts("图 1.1");
-        let table = caption_fonts("表 1.1");
+        let figure = caption_fonts("图 1");
+        let table = caption_fonts("表 1");
         assert_eq!(figure, table, "图题与表题应同一套字面");
         let metrics = Metrics::research(1000.0, Some(1.0));
         assert_eq!(
@@ -670,7 +670,7 @@ mod tests {
         let shapes = frame();
         let caption = drawn_texts(&shapes)
             .into_iter()
-            .find(|text| text.galley.text().starts_with("图 1.1"))
+            .find(|text| text.galley.text().starts_with("图 1"))
             .map(|text| text.pos.x)
             .expect("图题");
         // 图题是画在版心正中的 galley，原点横坐标就是版心中线。
@@ -699,8 +699,8 @@ mod tests {
                 .pos
                 .y
         };
-        let figure_caption = top_of("图 1.1");
-        let table_caption = top_of("表 1.1");
+        let figure_caption = top_of("图 1");
+        let table_caption = top_of("表 1");
         let after = top_of("表后正文");
         // 图片找不到时画占位框，表格画格线：都是描边矩形，按位置区分。
         let bottom_of_rects_in = |from: f32, to: f32| {
@@ -730,7 +730,7 @@ mod tests {
     #[test]
     fn a_table_caption_written_after_the_table_still_prints_above_it() {
         let text = drawn("## 章\n\n| 项 | 数 |\n| --- | --- |\n| 甲 | 1 |\n\n表：样本分布\n");
-        assert!(text.contains("表 1.1 "), "{text}");
+        assert!(text.contains("表 1 "), "{text}");
         let caption = text.find("样本分布").expect("表题");
         let cell = text.find('甲').expect("表格内容");
         assert!(caption < cell, "表题排在表格上方：{text}");
@@ -845,7 +845,7 @@ mod tests {
         assert!(!text.contains("某某问题研究报告\n第一部分"), "{text}");
     }
 
-    /// 不编号子树：标题不带号、不占号；不编号章的表题用全篇共用的流水号。
+    /// 不编号子树：标题不带号、不占号；表题全篇连续编号，不随章变化。
     #[test]
     fn an_unnumbered_subtree_prints_without_numbers_and_captions_run_apart() {
         let table = "| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n";
@@ -866,8 +866,8 @@ mod tests {
             text.contains("表 1 \n前言表") || text.contains("表 1 前言表"),
             "{text}"
         );
-        assert!(text.contains("表 1.1 "), "{text}");
-        assert!(text.contains("表 2 "), "结束语接着前言的流水号：{text}");
+        assert!(text.contains("表 2 "), "{text}");
+        assert!(text.contains("表 3 "), "结束语接着全篇流水号：{text}");
     }
 
     /// 导航大纲：部分与章同级，带"第一部分"；不编号的章与节没有编号。
@@ -925,8 +925,8 @@ mod tests {
                 (s("b"), LabelKind::Chapter, s("第1章"), s("研究背景")),
                 (s("c"), LabelKind::Section, s("1.1"), s("研究方法，见第1章")),
                 (s("d"), LabelKind::Subsection, s("1.1.1"), s("数据来源")),
-                (s("e"), LabelKind::Figure, s("图 1.1"), s("总体架构")),
-                (s("f"), LabelKind::Table, s("表 1.1"), s("样本分布")),
+                (s("e"), LabelKind::Figure, s("图 1"), s("总体架构")),
+                (s("f"), LabelKind::Table, s("表 1"), s("样本分布")),
                 (s("g"), LabelKind::Chapter, s("附录A"), s("调研问卷")),
                 (s("h"), LabelKind::Section, s("A.1"), s("问卷说明")),
             ]

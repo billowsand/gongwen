@@ -43,7 +43,7 @@ pub(crate) use paragraphs::image_paragraph_from_bytes;
 pub(crate) use paragraphs::{
     agenda_blank_line, agenda_body_paragraph, aligned_paragraph,
     attachment_document_title_paragraph, attachment_label_paragraph, body_paragraph,
-    compact_heading_paragraph, document_title_paragraph, heading_paragraph,
+    caption_paragraph, compact_heading_paragraph, document_title_paragraph, heading_paragraph,
     heading_paragraph_with_number, image_paragraph, joint_closing_paragraph,
     joint_signature_cell_paragraph, letter_security_paragraph, ordered_list_paragraph,
     red_approval_title_paragraph, red_record_paragraph,
@@ -270,6 +270,8 @@ pub fn write_docx_with_numbering(
     }
 
     let (blocks, block_lines) = parse_markdown_with_lines_with_numbering(markdown, numbering);
+    // 图表题注与全文流水编号：与预览、Typst 共用同一份分配结果。
+    let captions = crate::export::caption::official_captions(&blocks);
     let markdown_title = blocks.iter().find_map(|b| match b {
         MarkdownBlock::Title(t) => Some(t.as_str()),
         _ => None,
@@ -544,11 +546,16 @@ pub fn write_docx_with_numbering(
                     in_attachment = matches!(section, MarkdownSection::Attachment);
                     counters = [0; 4];
                     if in_attachment {
-                        attachment_blocks.push(block);
+                        attachment_blocks.push((index, block));
                     }
                 }
-                _ if in_attachment => attachment_blocks.push(block),
+                _ if in_attachment => attachment_blocks.push((index, block)),
                 _ => {
+                    // 已吸收为表题的段落：随表格上方排出，不再按普通段落出现。
+                    if captions.caption_paragraphs.contains(&index) {
+                        index += 1;
+                        continue;
+                    }
                     // 紧缩风格：正文区 # 号最多的那一级标题后紧跟正文段落时合并为一行。
                     let next_is_paragraph = blocks.get(index + 1).is_some_and(|next| {
                         matches!(next, MarkdownBlock::Paragraph(text)
@@ -606,6 +613,8 @@ pub fn write_docx_with_numbering(
                                 numbering,
                                 bold,
                                 content_width,
+                                &captions,
+                                index,
                             ),
                         };
                     }
@@ -614,7 +623,7 @@ pub fn write_docx_with_numbering(
             index += 1;
         }
     } else {
-        for block in &blocks {
+        for (index, block) in blocks.iter().enumerate() {
             match block {
                 // 引用块已由 `flatten_quotes` 拆成段落；代码块只有研究报告的解析出，
                 // 都到不了这里
@@ -628,12 +637,19 @@ pub fn write_docx_with_numbering(
                     if let Some(paragraph) = image_paragraph(alt, src, content_width) {
                         doc = doc.add_paragraph(paragraph);
                     }
+                    if let Some((number, text)) = captions.figures.get(&index) {
+                        doc = doc.add_paragraph(caption_paragraph("图", *number, text, false));
+                    }
                 }
                 MarkdownBlock::Heading(level, text) => {
                     doc = doc.add_paragraph(heading_paragraph(*level, text));
                 }
                 MarkdownBlock::Paragraph(text) => {
-                    if text.trim().is_empty() || text.contains("<div") || text.contains("</div") {
+                    if text.trim().is_empty()
+                        || text.contains("<div")
+                        || text.contains("</div")
+                        || captions.caption_paragraphs.contains(&index)
+                    {
                         continue;
                     }
                     doc = doc.add_paragraph(body_paragraph(text, bold));
@@ -656,6 +672,9 @@ pub fn write_docx_with_numbering(
                     spans,
                     numbered,
                 } => {
+                    if let Some((number, text)) = captions.tables.get(&index) {
+                        doc = doc.add_paragraph(caption_paragraph("表", *number, text, true));
+                    }
                     doc = add_smart_table_with_width(
                         doc,
                         rows,
@@ -796,10 +815,12 @@ pub fn write_docx_with_numbering(
         let mut counters = [0usize; 4];
         let attachment_count = attachment_blocks
             .iter()
-            .filter(|block| matches!(block, MarkdownBlock::Marker(MarkdownSection::Attachment)))
+            .filter(|(_, block)| {
+                matches!(block, MarkdownBlock::Marker(MarkdownSection::Attachment))
+            })
             .count();
         let mut attachment_index = 0usize;
-        for block in attachment_blocks {
+        for (index, block) in attachment_blocks {
             match block {
                 MarkdownBlock::Marker(MarkdownSection::Attachment) => {
                     if attachment_index > 0 {
@@ -828,6 +849,8 @@ pub fn write_docx_with_numbering(
                         numbering,
                         bold,
                         content_width,
+                        &captions,
+                        index,
                     )
                 }
             }

@@ -92,9 +92,10 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
   封面先剥离；代码、独立公式、表题与表格、图片、引文、文框、对齐区和区段标记保留
   源码，由 mdx 专门解析。此规范入口只用于 PDF，不改 Word 的转换入口。
 - `vendor/mdx/src/typst_research.rs`：沿用 mdx 的解析与区段规则（摘要、目录、正文、部分、
-  附录、版本变更记录、参考文献、不编号子树），章节号、图表号（不编号章的流水号、附录的
-  A.1）、文框号、列表序号都按原 `md2tex.cls` 的计数器规则算好；交叉引用的编号由模板按
-  锚点处的 metadata 查。文献键、交叉引用的校验与原 TeX 路径相同，不过就报错。
+  附录、版本变更记录、参考文献、不编号子树），章节号、图表号（全文连续流水，不按章节）、
+  文框号（不编号章的流水号、附录的 A.1）、列表序号都按原 `md2tex.cls` 的计数器规则算好；
+  交叉引用的编号由模板按锚点处的 metadata 查。文献键、交叉引用的校验与原 TeX 路径相同，
+  不过就报错。
 - `src/export/typst/research_redline.rs`：花脸稿哨兵 → 片段上的 `m`（删除 / 新增）。
 - `src/export/typst/math.rs`：公式由 latex-rust 进程内排版成 SVG（字形转路径，STIX Two
   Math；`\text{中文}` 回退随包方正书宋），与预览同一排版器。尺寸折成 em，模板按所在字号

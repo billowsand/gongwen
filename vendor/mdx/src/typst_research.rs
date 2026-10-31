@@ -442,8 +442,6 @@ struct Counters {
     subsubsection: usize,
     figure: usize,
     table: usize,
-    free_figure: usize,
-    free_table: usize,
     /// 每种文框名称一对计数器：(随章, 全篇共用)。
     boxes: Vec<(String, usize, usize)>,
 }
@@ -464,7 +462,7 @@ struct Builder {
     /// 已经输出过 `\appendix`：章号改用字母。
     appendix: bool,
     appendix_saw_h1: bool,
-    /// 当前在不编号章里：图表、文框用全篇共用的流水号。
+    /// 当前在不编号章里：文框用全篇共用的流水号。
     free: bool,
     star_heading_done: bool,
     counters: Counters,
@@ -764,8 +762,6 @@ impl Builder {
         c.section = 0;
         c.subsection = 0;
         c.subsubsection = 0;
-        c.figure = 0;
-        c.table = 0;
         for (_, chapter, _) in &mut c.boxes {
             *chapter = 0;
         }
@@ -879,24 +875,15 @@ impl Builder {
         Some((path.replace('\\', "/"), page))
     }
 
+    /// 图、表各自全篇连续编号，不按章清零，也不拼章号 / 附录字母。
     fn step_figure(&mut self) -> String {
-        if self.free {
-            self.counters.free_figure += 1;
-            self.counters.free_figure.to_string()
-        } else {
-            self.counters.figure += 1;
-            format!("{}.{}", self.chapter_number(), self.counters.figure)
-        }
+        self.counters.figure += 1;
+        self.counters.figure.to_string()
     }
 
     fn step_table(&mut self) -> String {
-        if self.free {
-            self.counters.free_table += 1;
-            self.counters.free_table.to_string()
-        } else {
-            self.counters.table += 1;
-            format!("{}.{}", self.chapter_number(), self.counters.table)
-        }
+        self.counters.table += 1;
+        self.counters.table.to_string()
     }
 
     fn step_box(&mut self, name: &str) -> String {

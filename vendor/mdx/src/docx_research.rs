@@ -851,11 +851,8 @@ struct MainEmitter {
     part: usize,
     /// 下一个标题不编号（`Block::Unnumbered` 设置，标题消费）
     pending_unnumbered: bool,
-    /// 当前在不编号章里：图表题注用不带章号的流水号
+    /// 当前在不编号章里：文框题注用不带章号的流水号
     free_numbers: bool,
-    /// 不编号章的图、表流水号，全篇共用
-    free_table: usize,
-    free_figure: usize,
     free_boxes: HashMap<String, usize>,
     image_base_dir: PathBuf,
     /// 目录已经排过：`<!-- [目录] -->` 写了多处时只认第一处
@@ -900,8 +897,6 @@ impl MainEmitter {
             part: 0,
             pending_unnumbered: false,
             free_numbers: false,
-            free_table: 0,
-            free_figure: 0,
             free_boxes: HashMap::new(),
             image_base_dir,
             toc_done: false,
@@ -1094,9 +1089,7 @@ impl MainEmitter {
                 (1, _) | (2, false) => {
                     self.free_numbers = false;
                     self.appendix_idx += 1;
-                    self.table_counter = 0;
                     self.box_counters.clear();
-                    self.figure_counter = 0;
                     let letter = (b'A' + (self.appendix_idx - 1) as u8) as char;
                     let label = format!("附录 {} {}", letter, text);
                     docx = page_break(docx);
@@ -1130,9 +1123,7 @@ impl MainEmitter {
                 self.chapter += 1;
                 self.section = 0;
                 self.subsection = 0;
-                self.table_counter = 0;
                 self.box_counters.clear();
-                self.figure_counter = 0;
                 let label = format!("第{}章 {}", chinese_chapter(self.chapter), text);
                 docx = page_break(docx);
                 docx.add_paragraph(heading_chapter_paragraph(&label))
@@ -1209,13 +1200,10 @@ impl MainEmitter {
         }
     }
 
+    /// 图、表各自全篇连续编号，不按章清零，也不拼章号 / 附录字母。
     fn next_table_number(&mut self) -> String {
-        if self.free_numbers {
-            self.free_table += 1;
-            return self.free_table.to_string();
-        }
         self.table_counter += 1;
-        self.object_number(self.table_counter)
+        self.table_counter.to_string()
     }
 
     fn next_box_number(&mut self, name: &str) -> String {
@@ -1231,12 +1219,8 @@ impl MainEmitter {
     }
 
     fn next_figure_number(&mut self) -> String {
-        if self.free_numbers {
-            self.free_figure += 1;
-            return self.free_figure.to_string();
-        }
         self.figure_counter += 1;
-        self.object_number(self.figure_counter)
+        self.figure_counter.to_string()
     }
 
     fn object_number(&self, counter: usize) -> String {
@@ -2491,8 +2475,8 @@ mod tests {
         let texts = paragraph_texts(&docx);
 
         assert!(texts.iter().any(|text| text == "第三章 第三章标题"));
-        assert!(texts.iter().any(|text| text == "表 3.1 数据表"));
-        assert!(texts.iter().any(|text| text == "图 3.1 结构图"));
+        assert!(texts.iter().any(|text| text == "表 1 数据表"));
+        assert!(texts.iter().any(|text| text == "图 1 结构图"));
         assert!(docx.document.children.iter().any(|child| match child {
             DocumentChild::Paragraph(paragraph) => paragraph.children.iter().any(|child| {
                 matches!(child, ParagraphChild::Run(run) if run.children.iter().any(|child| matches!(child, RunChild::Drawing(_))))
@@ -2558,7 +2542,7 @@ mod tests {
         assert!(texts.iter().any(|t| t == "第二章 总体思路"), "{texts:?}");
     }
 
-    /// 不编号子树不占章节号；不编号章的表题用不带章号的流水号。
+    /// 不编号子树不占章节号；表题全篇连续编号，不随章变化。
     #[test]
     fn unnumbered_subtree_skips_numbers_and_uses_free_captions() {
         let texts = main_texts(concat!(
@@ -2578,10 +2562,10 @@ mod tests {
             "表 1 前言表",
             "编写说明",
             "第一章 研究背景",
-            "表 1.1 背景表",
+            "表 2 背景表",
             "1.1 基本情况",
             "结束语",
-            "表 2 结束表",
+            "表 3 结束表",
         ] {
             assert!(
                 texts.iter().any(|t| t == expected),

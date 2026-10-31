@@ -1561,6 +1561,53 @@ fn red_head_approval_body_table_starts_on_a_new_page() {
     assert!(!xml.contains("（此页无正文）"), "{xml}");
 }
 
+/// 公文表题：自动配全文流水号，居中、与表格同页（keepNext），
+/// 被吸收的「表：」行不再按正文段落出现。
+#[test]
+fn table_caption_exports_centered_keep_next_paragraph() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("captions.docx");
+    let mut input = DraftInput::default();
+    input.kind = TemplateKind::PlainDocument;
+    write_docx_ok(
+        &path,
+        &input,
+        "# 题注测试\n\n表：甲表\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n正文。\n\n| c | d |\n| --- | --- |\n| 3 | 4 |\n\n表：乙表\n",
+    )
+    .unwrap();
+    let xml = zip_text(&path, "word/document.xml");
+    let caption = paragraph_containing(&xml, "甲表");
+    assert!(caption.contains("表 1"), "{caption}");
+    assert!(caption.contains(r#"<w:jc w:val="center" />"#), "{caption}");
+    assert!(caption.contains("keepNext"), "表题应与表格同页：{caption}");
+    let second = paragraph_containing(&xml, "乙表");
+    assert!(second.contains("表 2"), "{second}");
+    assert!(!xml.contains("表：甲表"), "表题行不应再按正文出现：{xml}");
+}
+
+/// 图题段落：黑体「图 N」标签 + 仿宋题名，居中；图题在图下方，不带 keepNext。
+#[test]
+fn figure_caption_paragraph_is_centered_without_keep_next() {
+    let temp = tempfile::tempdir().unwrap();
+    let doc = Docx::new().add_paragraph(caption_paragraph("图", 3, "流程图", false));
+    let path = temp.path().join("figure-caption.docx");
+    doc.build().pack(File::create(&path).unwrap()).unwrap();
+    let xml = zip_text(&path, "word/document.xml");
+    let caption = paragraph_containing(&xml, "流程图");
+    assert!(caption.contains("图 3"), "{caption}");
+    assert!(caption.contains(r#"<w:jc w:val="center" />"#), "{caption}");
+    assert!(!caption.contains("keepNext"), "{caption}");
+    let label = bold_run(&xml, "图 3");
+    assert!(label.contains("w:eastAsia=\"黑体\""), "{label}");
+    let title_at = xml.find("流程图").unwrap();
+    let start = xml[..title_at].rfind("<w:r>").unwrap();
+    let title_run = &xml[start..title_at];
+    assert!(
+        title_run.contains("w:eastAsia=\"仿宋_GB2312\""),
+        "{title_run}"
+    );
+}
+
 fn zip_text(path: &Path, entry: &str) -> String {
     let file = File::open(path).unwrap();
     let mut archive = zip::ZipArchive::new(file).unwrap();

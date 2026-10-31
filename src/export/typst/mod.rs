@@ -51,7 +51,7 @@ pub(crate) fn document_json(
 fn drop_missing_images(doc: &mut Doc, base_dir: &Path) -> Vec<String> {
     let mut missing = Vec::new();
     let mut keep = |block: &Block| match block {
-        Block::Image { src } => {
+        Block::Image { src, .. } => {
             let ok = crate::images::resolve_from_base(base_dir, src).is_ok_and(|p| p.is_file());
             if !ok {
                 missing.push(src.clone());
@@ -142,7 +142,10 @@ pub(crate) fn prepare_package(
     elements: &ElementMarks,
     base_dir: &Path,
 ) -> Result<(String, String, Vec<String>)> {
-    let rendered = crate::mermaid::materialize(
+    // 物化与插图解析用同一个 base：真机是配置目录；样张 / 测试用临时目录时
+    // Mermaid 缓存也落在那里，不会被当成缺图略过。
+    let rendered = crate::mermaid::materialize_with_base(
+        base_dir,
         markdown,
         crate::mermaid::Style::Official,
         crate::mermaid::Format::Pdf,
@@ -174,7 +177,10 @@ fn prepare(
         .for_input(input)
         .ensure_resolved(input)
         .map_err(anyhow::Error::msg)?;
-    let rendered = crate::mermaid::materialize(
+    // 物化与插图解析用同一个 base：真机是配置目录；样张 / 测试用临时目录时
+    // Mermaid 缓存也落在那里，不会被当成缺图略过。
+    let rendered = crate::mermaid::materialize_with_base(
+        base_dir,
         markdown,
         crate::mermaid::Style::Official,
         crate::mermaid::Format::Pdf,

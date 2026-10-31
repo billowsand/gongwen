@@ -90,6 +90,7 @@ pub(super) fn show(
     let mut clicked = None;
     let mut counters = [0; 4];
     let blocks = export::parse_markdown_located_with_numbering(markdown, numbering);
+    let captions = export::caption::official_captions(&blocks).rekey_by_source(&blocks);
     let attachment = blocks
         .iter()
         .position(|b| {
@@ -191,7 +192,8 @@ pub(super) fn show(
                     if matches!(
                         located.block,
                         export::MarkdownBlock::Title(_) | export::MarkdownBlock::Marker(_)
-                    ) {
+                    ) || captions.caption_paragraphs.contains(&located.range.start)
+                    {
                         continue;
                     }
                     clickable_content_block(
@@ -205,6 +207,7 @@ pub(super) fn show(
                         anchor,
                         &mut scroll,
                         &mut clicked,
+                        Some((&captions, located.range.start)),
                     );
                 }
                 let suggestion = format!("建议：{}", r.suggestion);
@@ -251,7 +254,9 @@ pub(super) fn show(
             egui::Align::Min,
         );
         for located in &blocks[attachment..] {
-            if matches!(located.block, export::MarkdownBlock::Marker(_)) {
+            if matches!(located.block, export::MarkdownBlock::Marker(_))
+                || captions.caption_paragraphs.contains(&located.range.start)
+            {
                 continue;
             }
             clickable_content_block(
@@ -265,6 +270,7 @@ pub(super) fn show(
                 anchor,
                 &mut scroll,
                 &mut clicked,
+                Some((&captions, located.range.start)),
             );
         }
         clicked = clicked.take().or(gutter::paint(ui, &body_m, anchor));

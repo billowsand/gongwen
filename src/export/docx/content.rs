@@ -6,8 +6,9 @@
 use crate::export::docx::{
     AGENDA_NUMBERING_ID, BoldFont, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE, agenda_blank_line,
     agenda_body_paragraph, aligned_paragraph, apply_bold, body_paragraph, body_runs, body_size,
-    chinese_fonts, document_title_paragraph, docx_name, heading_paragraph_with_number,
-    image_paragraph, ordered_list_paragraph, security_runs, table_run_sized, table_runs_sized,
+    caption_paragraph, chinese_fonts, document_title_paragraph, docx_name,
+    heading_paragraph_with_number, image_paragraph, ordered_list_paragraph, security_runs,
+    table_run_sized, table_runs_sized,
 };
 use crate::export::table::{
     CellPlan, ColumnAlignment, cell_plan, resolve_cell_alignment, to_docx_grid,
@@ -192,6 +193,7 @@ pub(crate) fn add_smart_table_with_width(
     doc
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_official_content_block(
     mut doc: Docx,
     block: &MarkdownBlock,
@@ -199,6 +201,8 @@ pub(crate) fn add_official_content_block(
     numbering: &NumberingConfig,
     bold: BoldFont<'_>,
     width_twips: usize,
+    captions: &crate::export::caption::OfficialCaptions,
+    index: usize,
 ) -> Docx {
     match block {
         MarkdownBlock::Heading(level, text) => {
@@ -210,7 +214,10 @@ pub(crate) fn add_official_content_block(
             }
         }
         MarkdownBlock::Paragraph(text)
-            if !text.trim().is_empty() && !text.contains("<div") && !text.contains("</div") =>
+            if !text.trim().is_empty()
+                && !text.contains("<div")
+                && !text.contains("</div")
+                && !captions.caption_paragraphs.contains(&index) =>
         {
             doc = doc.add_paragraph(body_paragraph(text, bold));
         }
@@ -227,6 +234,10 @@ pub(crate) fn add_official_content_block(
             spans,
             numbered,
         } => {
+            // 表题排在表格上方，keep_next 与表格同页。
+            if let Some((number, text)) = captions.tables.get(&index) {
+                doc = doc.add_paragraph(caption_paragraph("表", *number, text, true));
+            }
             doc = add_smart_table_with_width(
                 doc,
                 rows,
@@ -241,6 +252,10 @@ pub(crate) fn add_official_content_block(
         MarkdownBlock::Image { alt, src } => {
             if let Some(paragraph) = image_paragraph(alt, src, width_twips) {
                 doc = doc.add_paragraph(paragraph);
+            }
+            // 图题排在图下方；PDF 附件说明分支不编号（official_captions 已排除）。
+            if let Some((number, text)) = captions.figures.get(&index) {
+                doc = doc.add_paragraph(caption_paragraph("图", *number, text, false));
             }
         }
         _ => {}
@@ -362,8 +377,10 @@ pub(crate) fn write_meeting_agenda_docx(
     agenda_numbering_config.list2 = ListNumbering::DecimalDot;
 
     let mut counters = [0; 4];
-    for block in crate::export::parse_markdown_with_numbering(markdown, &agenda_numbering_config) {
-        match &block {
+    let blocks = crate::export::parse_markdown_with_numbering(markdown, &agenda_numbering_config);
+    let captions = crate::export::caption::official_captions(&blocks);
+    for (index, block) in blocks.iter().enumerate() {
+        match block {
             MarkdownBlock::Title(_) => {}
             // “一、时间地点”等三节在 TeX/预览里都是普通正文段（仿宋三号、首行缩进
             // 两字），不另作黑体标签处理。
@@ -379,11 +396,13 @@ pub(crate) fn write_meeting_agenda_docx(
             _ => {
                 doc = add_official_content_block(
                     doc,
-                    &block,
+                    block,
                     &mut counters,
                     &agenda_numbering_config,
                     bold,
                     TABLE_CONTENT_WIDTH_TWIPS,
+                    &captions,
+                    index,
                 )
             }
         }

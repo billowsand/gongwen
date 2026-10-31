@@ -275,5 +275,6 @@ pub(crate) fn plain(
         anchor,
         scroll_to_anchor,
         clicked,
+        None,
     );
 }

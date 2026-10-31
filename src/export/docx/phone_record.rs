@@ -59,10 +59,11 @@ pub(super) fn write(
         security = security.add_run(run.size(24));
     }
     let (blocks, _) = parse_markdown_with_lines_with_numbering(markdown, numbering);
+    let captions = crate::export::caption::official_captions(&blocks);
     let mut content = Docx::new();
     let mut counters = [0; 4];
     let mut in_attachment = false;
-    for block in &blocks {
+    for (index, block) in blocks.iter().enumerate() {
         if matches!(block, MarkdownBlock::Marker(MarkdownSection::Attachment)) {
             in_attachment = true;
         }
@@ -75,6 +76,10 @@ pub(super) fn write(
                 numbered,
             } = block
             {
+                if let Some((number, text)) = captions.tables.get(&index) {
+                    content =
+                        content.add_paragraph(super::caption_paragraph("表", *number, text, true));
+                }
                 content::add_smart_table_with_width(
                     content,
                     rows,
@@ -93,6 +98,8 @@ pub(super) fn write(
                     numbering,
                     fonts.bold_family_docx(),
                     super::TABLE_CONTENT_WIDTH_TWIPS,
+                    &captions,
+                    index,
                 )
             };
         }
@@ -208,7 +215,7 @@ pub(super) fn write(
                 ),
         );
     in_attachment = false;
-    for block in &blocks {
+    for (index, block) in blocks.iter().enumerate() {
         if matches!(block, MarkdownBlock::Marker(MarkdownSection::Attachment)) {
             in_attachment = true;
             counters = [0; 4];
@@ -228,6 +235,8 @@ pub(super) fn write(
                     numbering,
                     fonts.bold_family_docx(),
                     super::TABLE_CONTENT_WIDTH_TWIPS,
+                    &captions,
+                    index,
                 );
             }
         }

@@ -839,6 +839,7 @@ pub(super) fn to_typst_table(
     }
     Some(Table {
         id,
+        caption: None,
         cols,
         header_rows,
         rows: out_rows,

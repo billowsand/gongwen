@@ -4,8 +4,8 @@
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::docx::{
-    BoldFont, RED_APPROVAL_TITLE_SIZE, TITLE_SIZE, body_run, body_runs, body_size, chinese_fonts,
-    closing_gap_twips, marked_runs, security_runs, title_run,
+    BoldFont, RED_APPROVAL_TITLE_SIZE, TITLE_SIZE, body_font, body_run, body_runs, body_size,
+    chinese_fonts, closing_gap_twips, marked_runs, security_runs, title_run,
 };
 use crate::export::title;
 use crate::export::title::TitlePlan;
@@ -264,6 +264,34 @@ pub(crate) fn compact_heading_paragraph(
         .widow_control(false);
     for body_run in body_runs(body, bold) {
         paragraph = paragraph.add_run(body_run);
+    }
+    paragraph
+}
+
+/// 图表题注：居中、与表格同为四号 14pt，标签「表 N」「图 N」黑体、题名仿宋，
+/// 编号与题名之间空半字（与 Typst 的 caption-line 同一风格）。
+/// 表题排在表格上方（`keep_next`），图题排在图下方。
+pub(crate) fn caption_paragraph(
+    tag: &str,
+    number: usize,
+    text: &str,
+    keep_next: bool,
+) -> Paragraph {
+    let label = Run::new()
+        .add_text(format!("{tag} {number} "))
+        .fonts(chinese_fonts("黑体"))
+        .size(super::TABLE_SIZE);
+    let mut paragraph = Paragraph::new()
+        .add_run(label)
+        .align(AlignmentType::Center)
+        .keep_next(keep_next);
+    for run in marked_runs(text, |piece| {
+        Run::new()
+            .add_text(piece)
+            .fonts(chinese_fonts(body_font()))
+            .size(super::TABLE_SIZE)
+    }) {
+        paragraph = paragraph.add_run(run);
     }
     paragraph
 }

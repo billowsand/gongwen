@@ -1154,6 +1154,20 @@ pub(crate) fn materialize(markdown: &str, style: Style, format: Format) -> Resul
     )
 }
 
+/// 同 `materialize`，但缓存写到指定 base：样张 / 测试里与插图解析同目录，
+/// 物化图不会因 base 不同被当成缺图略过。
+pub(crate) fn materialize_with_base(
+    base: &Path,
+    markdown: &str,
+    style: Style,
+    format: Format,
+) -> Result<String> {
+    if !markdown.lines().any(is_open) {
+        return Ok(markdown.to_string());
+    }
+    materialize_at(base, markdown, style, current_theme(), format)
+}
+
 fn materialize_at(
     base: &Path,
     markdown: &str,
@@ -1205,11 +1219,9 @@ fn materialize_at(
                 out.push('\n');
             }
             Style::Official => {
-                out.push_str(&format!("![]({path})\n"));
-                if !title.is_empty() {
-                    // 居中区到空行为止：图题后补一个空行，紧跟着写的正文不会被一起居中。
-                    out.push_str(&format!("\n<!-- [居中] -->\n图：{title}\n\n"));
-                }
+                // 图题写进 alt：公文与研究报告一样「alt 即图题」，导出时由
+                // 公文题注通道统一编号、排在图下方，与预览的 Diagram 图题一致。
+                out.push_str(&format!("![{title}]({path})\n"));
             }
         }
     }
@@ -1829,8 +1841,8 @@ mod tests {
             Format::Png,
         )
         .unwrap();
-        assert!(official.contains("![](mermaid-cache/"));
-        assert!(official.contains(".png)\n\n<!-- [居中] -->\n图：办理流程\n\n"));
+        assert!(official.contains("![办理流程](mermaid-cache/"));
+        assert!(official.contains(".png)\n"));
     }
 
     #[test]
@@ -1865,7 +1877,7 @@ mod tests {
             .find(|b| b["k"] == "figure")
             .expect("图表应排成插图");
         assert_eq!(figure["width"], 1.0, "图表宽度必须保持满版心");
-        assert_eq!(figure["number"], "1.1");
+        assert_eq!(figure["number"], "1");
         assert_eq!(figure["label"], "fig:flow");
 
         // Word。
