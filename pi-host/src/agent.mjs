@@ -19,7 +19,8 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import { WorkspaceGuard, WorkspaceEnv } from "./paths.mjs";
-import { SUBMIT_TOOL_NAME, systemPrompt, userPrompt } from "./prompt.mjs";
+import { createDomainTools, createToolBridge, BridgeError } from "./bridge.mjs";
+import { REPORT_TOOL_NAME, SUBMIT_TOOL_NAME, systemPrompt, userPrompt } from "./prompt.mjs";
 
 const PROVIDER_ID = "gongwen";
 const CANDIDATE_INTERVAL_MS = 400;
@@ -78,17 +79,50 @@ function sha256(text) {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
-/** 只给测试用的注入点：faux provider 也走同一套 harness / 工具 / 提交。 */
+/** 可暂停的计时器：等用户回答时停表，回答后按剩余时间继续。 */
+function makePausableTimer(ms, onExpire) {
+  let remaining = ms;
+  let started = Date.now();
+  let paused = false;
+  let cleared = false;
+  let handle = setTimeout(() => {
+    if (!paused && !cleared) onExpire();
+  }, remaining);
+  return {
+    pause() {
+      if (paused || cleared) return;
+      paused = true;
+      clearTimeout(handle);
+      remaining = Math.max(0, remaining - (Date.now() - started));
+    },
+    resume() {
+      if (!paused || cleared) return;
+      paused = false;
+      started = Date.now();
+      handle = setTimeout(() => {
+        if (!paused && !cleared) onExpire();
+      }, remaining);
+    },
+    clear() {
+      cleared = true;
+      clearTimeout(handle);
+    },
+  };
+}
+
 function createSubmitTool({ guard, limits, state, onSubmitted, emit }) {
   return defineTool({
     name: SUBMIT_TOOL_NAME,
     description:
-      "提交本轮的一份完整 UTF-8 Markdown 成品。path 必须是 work/ 下的 Markdown 文件；提交内容在调用时固定，之后的文件修改不再影响已交付结果。",
+      "提交本轮的一份完整 UTF-8 Markdown 成品。path 必须是 work/ 下的 Markdown 文件；提交内容在调用时固定，之后的文件修改不再影响已交付结果。与 finish_report 只能选一个。",
     parameters: Type.Object({
       path: Type.String({ description: "work/ 下的 Markdown 文件路径" }),
-      summary: Type.String({ description: "一句话说明本轮改了什么" }),
+      summary: Type.String({ description: "一句话说明本轮改了什么、依据了哪些材料" }),
     }),
     execute: async (args, _api, _context) => {
+      if (state.report) {
+        throw new AgentError("本轮已经交了侧栏清单；同一轮不能再提交正文。", "submit_duplicate");
+      }
       const read = guard.readSubmission(args.path, { maxFileBytes: limits.maxFileBytes });
       if (!read.ok) {
         throw new AgentError(`提交失败：${read.error.message}`, "submit_invalid");
@@ -127,26 +161,65 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit }) {
   });
 }
 
-function createExtension({ guard, limits, state, onSubmitted, emit }) {
+/** 审核 / 找资料的清单：只进侧栏，不产生正文提案。 */
+function createReportTool({ state, emit }) {
+  return defineTool({
+    name: REPORT_TOOL_NAME,
+    description:
+      "交一份结构化审核或资料清单（只进侧栏，不替换正文）。只在用户只要审核 / 找资料、明确不要改正文时使用；与 submit_document 只能选一个。",
+    parameters: Type.Object({
+      summary: Type.String({ description: "一句话说明审了什么 / 找了什么" }),
+      items: Type.Array(
+        Type.Object({
+          title: Type.String({ description: "问题或资料名称" }),
+          detail: Type.Optional(Type.String({ description: "位置、依据与建议" })),
+          severity: Type.Optional(Type.String({ description: "必改 / 建议 / 提示" })),
+        }),
+      ),
+    }),
+    execute: async (args) => {
+      if (state.snapshot) {
+        throw new AgentError("本轮已经提交了正文；同一轮不能再交清单。", "report_conflict");
+      }
+      const items = Array.isArray(args.items)
+        ? args.items.slice(0, 100).map((item) => ({
+            title: String(item.title ?? "").slice(0, 2_000),
+            detail: String(item.detail ?? "").slice(0, 4_000),
+            severity: String(item.severity ?? "").slice(0, 50),
+          }))
+        : [];
+      state.report = { summary: String(args.summary ?? "").slice(0, 2_000), items };
+      emit({ type: "report", summary: state.report.summary, items });
+      return {
+        output: [{ type: "text", text: `已交回侧栏清单（${items.length} 项），正文没有改变。` }],
+        control: { terminate: true },
+      };
+    },
+  });
+}
+
+function createExtension({ guard, limits, state, onSubmitted, emit, bridge }) {
   const tools = [
+    ...createDomainTools(bridge),
     createReadTool(),
     createWriteTool(),
     createEditTool(),
     createSubmitTool({ guard, limits, state, onSubmitted, emit }),
+    createReportTool({ state, emit }),
   ];
   return defineExtension({ name: "gongwen-writing", tools });
 }
 
 /**
- * 跑一轮。返回 `{ snapshot }`（提交了）或 `{ snapshot: undefined }`（模型结束但没提交）。
- * `onCancel` 交给 main 注册取消；取消只结束本轮，不假装完成。
+ * 跑一轮。返回 `{ snapshot }`（提交了）、`{ report }`（只交清单）或 `{ snapshot: undefined }`
+ * （模型结束但都没交）。`onCancel` 交给 main 注册取消；取消只结束本轮，不假装完成。
  */
-export async function runAgentJob({ config, models, model, emit, onCancel, testProvider }) {
+export async function runAgentJob({ config, models, model, emit, onCancel, onBridge }) {
   const controller = withCancel(BACKGROUND_CONTEXT);
   onCancel?.(() => controller.cancel(new AgentError("已取消", "cancelled")));
 
   const guard = new WorkspaceGuard(config.workspace.root);
-  const state = { snapshot: undefined };
+  const state = { snapshot: undefined, report: undefined };
   let submitResolve;
   const submitted = new Promise((resolve) => {
     submitResolve = resolve;
@@ -156,10 +229,16 @@ export async function runAgentJob({ config, models, model, emit, onCancel, testP
   let harness;
   let stream;
   let timedOut = false;
-  const timer = setTimeout(() => {
+  const timer = makePausableTimer(config.limits.timeoutMs, () => {
     timedOut = true;
     controller.cancel(new AgentError("运行超时", "timeout"));
-  }, config.limits.timeoutMs);
+  });
+  const bridge = createToolBridge({
+    emit,
+    pause: () => timer.pause(),
+    resume: () => timer.resume(),
+  });
+  onBridge?.(bridge);
   const candidateScan = makeCandidateScanner({ guard, state, emit, limits: config.limits });
 
   try {
@@ -173,6 +252,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, testP
         limits: config.limits,
         state,
         emit,
+        bridge,
         onSubmitted: (snapshot) => submitResolve(snapshot),
       }),
     );
@@ -202,7 +282,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, testP
       agent: {
         model: { provider: selectedModel.provider, modelId: selectedModel.id },
         thinkingLevel: config.model.reasoning ? (config.model.thinkingLevel ?? "high") : "off",
-        instructions: systemPrompt(config.workspace),
+        instructions: systemPrompt(config.workspace, config.task),
         cwd: config.workspace.root,
       },
     });
@@ -213,7 +293,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, testP
         if (event.type === "tool_execution_start") {
           emit({ type: "tool", name: event.toolName, message: `正在使用 ${event.toolName}` });
         } else if (event.type === "tool_execution_end") {
-          if (event.toolName !== SUBMIT_TOOL_NAME) {
+          if (event.toolName !== SUBMIT_TOOL_NAME && event.toolName !== REPORT_TOOL_NAME) {
             candidateScan();
           }
         } else if (event.type === "auto_retry_start") {
@@ -227,7 +307,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, testP
       }
     });
 
-    emit({ type: "progress", message: "正在读取正文与写作要求…" });
+    emit({ type: "progress", message: "正在读取正文、材料与写作要求…" });
     const submission = await root.submit(
       {
         type: "input",
@@ -249,24 +329,34 @@ export async function runAgentJob({ config, models, model, emit, onCancel, testP
     if (outcome.kind === "failed") {
       throw outcome.error;
     }
+    if (state.snapshot) {
+      return { snapshot: state.snapshot };
+    }
+    if (state.report) {
+      return { report: state.report };
+    }
     if (outcome.value.status === "unanswered") {
       throw new AgentError(
         `模型没有完成本轮：${outcome.value.reason}${outcome.value.detail ? `（${JSON.stringify(outcome.value.detail)}）` : ""}`,
         "unanswered",
       );
     }
-    if (!state.snapshot) {
-      throw new AgentError("模型结束了本轮但没有提交成品（未调用 submit_document）。", "not_submitted");
-    }
-    return { snapshot: state.snapshot };
+    throw new AgentError(
+      "模型结束了本轮但没有提交成品（未调用 submit_document 或 finish_report）。",
+      "not_submitted",
+    );
   } catch (error) {
     if (timedOut) throw new AgentError("Pi 智能写作超时，未交付任何提案。", "timeout");
-    if (controller.context.abortSignal?.aborted && !state.snapshot) {
+    if (controller.context.abortSignal?.aborted && !state.snapshot && !state.report) {
       throw new AgentError("已停止，未交付任何提案。", "cancelled");
+    }
+    if (error instanceof BridgeError) {
+      throw new AgentError(`工具调用失败：${error.message}`, "tool_failed");
     }
     throw error;
   } finally {
-    clearTimeout(timer);
+    timer.clear();
+    bridge.abortAll(new AgentError("本轮已结束", "cancelled"));
     if (!closed) {
       closed = true;
       try {
@@ -295,7 +385,7 @@ function makeCandidateScanner({ guard, state, emit, limits }) {
   let lastAt = 0;
   let pending = false;
   const scan = () => {
-    if (state.snapshot) return;
+    if (state.snapshot || state.report) return;
     const candidate = guard.latestCandidate({ maxBytes: limits.maxCandidateBytes });
     if (!candidate) return;
     const hash = sha256(candidate.text);

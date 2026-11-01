@@ -34,6 +34,24 @@ fn change_containing(report: &ManuscriptDiff, markdown: &str, text: &str) -> Opt
         })
 }
 
+/// 下一轮 Pi 的写作基准：有未采纳且仍对当前正文有效的提案时，用**排除块之后**
+/// 的候选稿；否则用当前正式正文。旧候选里的无来源事实不会因此变成事实来源——
+/// 交付闸门只拿正式正文、用户材料与工具证据比对。
+pub(crate) fn pi_base(doc: &DraftSession) -> String {
+    let normalize = crate::export::normalize_ordered_list_punctuation;
+    let Some(proposal) = doc.ai_proposal.as_ref() else {
+        return doc.generated_markdown.clone();
+    };
+    if normalize(&proposal.before) != normalize(&doc.generated_markdown) {
+        return doc.generated_markdown.clone();
+    }
+    merged_markdown(
+        &proposal.before,
+        &proposal.result.markdown,
+        &proposal.excluded,
+    )
+}
+
 impl GongwenApp {
     pub(crate) fn ai_proposal_window(&mut self, ctx: &egui::Context) {
         if self.docs.is_empty() || !self.showing_doc() {
@@ -482,6 +500,43 @@ mod tests {
     #[test]
     fn excluding_unknown_hunks_keeps_the_proposal() {
         assert_eq!(merged_markdown(BEFORE, PROPOSAL, &excluded(&[9])), PROPOSAL);
+    }
+
+    #[test]
+    fn pi_follow_up_starts_from_the_unaccepted_candidate_but_keeps_the_real_body() {
+        let config = crate::models::AppConfig::default();
+        let mut doc = crate::draft_page::DraftSession::blank(1, &config);
+        let before = "第一段原样。\n\n中间甲不变。\n\n第二段原样。\n\n中间乙不变。\n\n第三段原样。";
+        let proposal = "第一段改。\n\n中间甲不变。\n\n第二段改。\n\n中间乙不变。\n\n第三段改。";
+        doc.generated_markdown = before.into();
+        assert_eq!(pi_base(&doc), before, "没有提案时以正式正文为基准");
+        doc.ai_proposal = Some(crate::draft_page::AiProposal {
+            before: before.into(),
+            result: crate::models::GeneratedDraft {
+                markdown: proposal.into(),
+                title: String::new(),
+                warnings: Vec::new(),
+                proof_warnings: Vec::new(),
+                proof_measured: false,
+                files: Vec::new(),
+            },
+            label: "Pi".into(),
+            fact_changes: Vec::new(),
+            fact_changes_confirmed: false,
+            confirmed_facts: Vec::new(),
+            excluded: [1].into_iter().collect(),
+            view: crate::diff_view::DiffViewState::default(),
+            open: false,
+            locate: None,
+        });
+        assert_eq!(
+            pi_base(&doc),
+            "第一段改。\n\n中间甲不变。\n\n第二段原样。\n\n中间乙不变。\n\n第三段改。",
+            "未采纳时下一轮以排除块之后的候选稿为基准"
+        );
+        // 部分采纳 / 正文被改动后，提案过期，下一轮回到真实正文。
+        doc.generated_markdown = "用户自己改过的正文。".into();
+        assert_eq!(pi_base(&doc), "用户自己改过的正文。");
     }
 
     #[test]

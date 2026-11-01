@@ -27,7 +27,8 @@ pub(crate) mod field_card;
 mod history;
 mod mention;
 mod paste;
-mod pi_job;
+pub(crate) mod pi_ask;
+pub(crate) mod pi_job;
 mod provenance;
 pub(crate) use provenance::source_line as proposal_source;
 pub(crate) mod session;
@@ -71,6 +72,14 @@ pub(crate) struct Composer {
     pub(crate) style: crate::agent::style::StyleChoice,
     /// 用户说了「把工作稿提交到正文」（`commit_intent`）：输入框上方出「写入正文？」确认卡。
     pub(crate) commit_prompt: bool,
+    /// Pi 入口用哪份标准技能（`assets/pi-skills/`）；None 表示自动。
+    pub(crate) pi_skill: Option<String>,
+    /// Pi 本轮材料的用途：事实材料 / 写法样稿 / 结构范文 / 来函。
+    pub(crate) pi_material_role: crate::pi_agent::MaterialRole,
+    /// `@` 引用的用途。默认事实材料，可改成样稿让模型只学写法。
+    pub(crate) pi_ref_role: crate::pi_agent::MaterialRole,
+    /// Pi 追问时保留的已确认回答（只来自用户点选 / 填写，不是模型总结）。
+    pub(crate) pi_notes: Vec<String>,
 }
 
 /// 一轮请求的原始参数，「重新生成」照它再发一次。
@@ -252,6 +261,16 @@ pub(crate) struct AiPanel {
     next_id: u64,
     /// 当前会话：随稿件存进稿件库（16.15 B）。
     pub(crate) session: session::Session,
+    /// Pi 正在等用户回答的题；只活在本轮，不写会话 JSON、不跨重启恢复。
+    pub(crate) pi_ask: Option<pi_ask::PiAsk>,
+    /// Pi 审核 / 找资料交回的侧栏清单。
+    pub(crate) pi_report: Option<pi_ask::PiReportView>,
+    /// 未采纳 Pi 提案的原始依据；与正式基线和候选稿绑定，不以候选稿自身作证。
+    pub(crate) pi_sources: Option<pi_job::PiProposalSources>,
+    /// 提问卡上点了「停止本轮」：交给应用层回收任务。
+    pub(crate) pi_cancel: bool,
+    /// 本轮 Pi 的回答通道；题卡靠它把答案送回后台进程。
+    pub(crate) pi_bridge: Option<Arc<crate::pi_agent::PiBridge>>,
     /// 当前在左侧查看的工作稿轮次；None 表示查看正式正文。
     pub(crate) workspace_view: Option<u64>,
     pub(crate) workspace_compare: bool,

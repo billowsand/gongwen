@@ -30,7 +30,7 @@ use std::sync::mpsc::{Receiver, Sender};
 mod agent_settings;
 mod ai_manage;
 mod ai_prompts;
-mod ai_proposal;
+pub(crate) mod ai_proposal;
 mod api_settings;
 mod chrome;
 mod data_safety;

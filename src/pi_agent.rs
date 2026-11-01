@@ -9,14 +9,25 @@
 //! 进程崩溃都按失败处理。协议与工作区细节见 `docs/pi-implementation/phase-1-report.md`。
 
 mod delivery;
+mod materials;
 mod process;
 mod protocol;
 mod runtime;
+pub(crate) mod skills;
+mod tools;
 mod workspace;
 
 #[cfg(test)]
 pub(crate) use delivery::sha256_hex;
-pub(crate) use delivery::{check_delivery, verify_submission};
-pub(crate) use process::{PiDelivery, PiEvent, PiJob, PiModel, PiTask, run};
+pub(crate) use delivery::{DeliveryCheck, PiSelection, check_delivery, verify_submission};
+pub(crate) use materials::{MaterialRole, PiMaterialInput};
+pub(crate) use process::{
+    PiAnswer, PiBridge, PiEvent, PiJob, PiModel, PiOutcome, PiQuestionBatch, PiTask, run,
+};
+#[cfg(test)]
+pub(crate) use process::{PiDelivery, PiQuestion, PiReport};
+pub(crate) use protocol::PiReportItem;
 pub(crate) use runtime::PiRuntime;
+pub(crate) use skills as pi_skills;
+pub(crate) use tools::PiToolContext;
 pub(crate) use workspace::{PiWorkspace, base_dir};

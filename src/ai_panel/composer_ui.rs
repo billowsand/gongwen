@@ -16,6 +16,7 @@ use crate::agent::router::{self, Route, RouteContext};
 use crate::agent::skill::{Skill, TextNeed};
 use crate::draft_page::DraftPage;
 use crate::models::TemplateKind;
+use crate::pi_agent::MaterialRole;
 use crate::theme;
 use eframe::egui;
 use egui::text::{CCursor, CCursorRange};
@@ -385,12 +386,68 @@ impl DraftPage<'_> {
                                     .corner_radius(egui::CornerRadius::same(255)),
                                 )
                                 .on_hover_text(
-                                    "智能写作（Pi Durable 文件工作区）：用当前输入的要求与正文，在专属工作区里写作并提交一份成品；结果仍是待审提案。本阶段不支持选区、@ 引用与粘贴材料。",
+                                    "智能写作（Pi Durable 文件工作区）：用当前输入的要求、锁定选区、@ 引用和粘贴材料，在专属工作区里写作；结果仍是待审提案或侧栏清单。模型与生成参数在「AI 管理 → 模型服务 → 智能写作（Pi）」单独选。",
                                 )
                                 .on_disabled_hover_text("当前有任务在跑；先停止或等它结束");
                             if pi.clicked() {
                                 actions.pi = true;
                             }
+                            let pi_settings = ui
+                                .add(pill(
+                                    "Pi 设置",
+                                    composer.pi_skill.is_some()
+                                        || composer.pi_material_role != MaterialRole::default()
+                                        || composer.pi_ref_role != MaterialRole::default(),
+                                ))
+                                .on_hover_text("Pi 用哪份技能，以及本轮材料与 @ 引用的用途");
+                            egui::Popup::menu(&pi_settings).show(|ui| {
+                                ui.label("技能");
+                                if ui
+                                    .add(theme::menu_selectable_item(composer.pi_skill.is_none(), "自动"))
+                                    .clicked()
+                                {
+                                    composer.pi_skill = None;
+                                }
+                                for name in crate::pi_agent::pi_skills::names() {
+                                    let selected = composer.pi_skill.as_deref() == Some(name);
+                                    if ui
+                                        .add(theme::menu_selectable_item(
+                                            selected,
+                                            crate::pi_agent::pi_skills::label(name),
+                                        ))
+                                        .on_hover_text(name)
+                                        .clicked()
+                                    {
+                                        composer.pi_skill = Some(name.to_string());
+                                    }
+                                }
+                                ui.separator();
+                                ui.label("粘贴材料用途（事实材料可被引用；样稿与范文只提供写法）");
+                                for role in MaterialRole::ALL {
+                                    if ui
+                                        .add(theme::menu_selectable_item(
+                                            composer.pi_material_role == role,
+                                            role.label(),
+                                        ))
+                                        .clicked()
+                                    {
+                                        composer.pi_material_role = role;
+                                    }
+                                }
+                                ui.separator();
+                                ui.label("@ 引用用途");
+                                for role in MaterialRole::ALL {
+                                    if ui
+                                        .add(theme::menu_selectable_item(
+                                            composer.pi_ref_role == role,
+                                            role.label(),
+                                        ))
+                                        .clicked()
+                                    {
+                                        composer.pi_ref_role = role;
+                                    }
+                                }
+                            });
 
                             let skill_button = ui
                                 .add(pill(&chip.label, composer.skill.is_some()))

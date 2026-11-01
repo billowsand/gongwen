@@ -1,4 +1,4 @@
-# Pi 写作宿主机（阶段一）
+# Pi 写作宿主机（阶段二）
 
 公文助手随包的 Node 侧运行层：用 **Pi Durable** 在专属文件工作区里写作，最后只交出
 一份固定版本的 Markdown。Rust 主程序负责收集正文与要求、启动本进程、校验交付并复用
@@ -32,7 +32,11 @@ node --test
 - `test/paths.test.mjs`：绝对路径 / `..` / 符号链接与 Windows junction 越界、只写
   `work/`、原子提交快照。
 - `test/agent.test.mjs`：**测试专用** faux provider，走真实 Durable harness、文件工具与
-  `submit_document`；验证显式提交、提交后改文件不影响快照、未提交不算完成。
+  `submit_document`；验证显式提交、提交后改文件不影响快照、未提交不算完成，以及
+  「检索（工具桥）→ 写文件 → 提交」和 `finish_report` 只交清单。
+- `test/bridge.test.mjs`：工具桥按 `callId` 往返、错 ID / 迟到回复丢弃、结构化失败、
+  取消清空等待者；`ask_user` 暂停计时、批次 / 题数上限；`doc_elements` 在工具清单里；
+  init 携带技能 / 选区 / 材料角色，非法材料路径被丢弃。
 - `test/openai-e2e.test.mjs`：在本机起一个 OpenAI 兼容 HTTP 桩，让生产入口
   `src/main.mjs` 走真实的 `openai-completions` + Durable 路径，不访问公网。
 
@@ -76,12 +80,14 @@ runtime/pi/
 
 密钥只从 stdin 的 `init` 消息进入本进程，不写 argv、不写日志、不进事件。
 
-## 协议（阶段一）
+## 协议（阶段二）
 
 Rust → host（stdin，一行一条）：
 
 ```json
 {"type":"init","protocol":1,"requestId":"…","runId":"…","workspace":{…},"model":{…},"task":{…},"limits":{…}}
+{"type":"tool_result","callId":"c1","ok":true,"result":{…}}
+{"type":"tool_result","callId":"q1","ok":true,"result":{"answers":[{"id":1,"value":"…"}]}}
 {"type":"cancel"}
 ```
 
@@ -92,14 +98,31 @@ host → Rust（stdout，一行一条；stderr 只放诊断）：
 | `ready` | 协议版本、host / Node 版本、模型名 |
 | `progress` | 侧栏阶段提示 |
 | `tool` | 一次工具调用（名称 + 简短说明，不含参数） |
+| `tool_request` | 领域工具请求：`callId`、工具名、参数；Rust 校验后回 `tool_result` |
+| `questions` | `ask_user` 的题：`callId`、1–3 道题与选项；Rust 校验授权要素后回答案 |
 | `candidate` | `work/` 里最新 Markdown 候选，只作预览 |
+| `report` | `finish_report` 的结构化清单，只进侧栏，不替换正文 |
 | `submitted` | 提交的固定版本：路径、内容、SHA-256、字节数、说明 |
-| `completed` | 本轮结束；`submitted: false` 表示没有交付 |
-| `cancelled` / `error` | 停止 / 失败，均不算完成 |
+| `completed` | 本轮结束；`submitted: false` 表示没有交付正文 |
+| `cancelled` / `error` | 停止 / 失败，均算完成 |
+
+工具清单：`kb_search` / `kb_read`、`ms_search` / `ms_read`、`vocab_search`、
+`check_document`、`doc_elements`、`ask_user`；正文交付仍是 `submit_document`，只审核 /
+找资料用 `finish_report`。工具不写正文、不写表单、不提供 shell。
 
 限制：单行输出 16 MiB、最多 50 000 条消息、提交 8 MiB、候选 2 MiB；Rust 侧再核对
-`requestId` / `runId`、哈希、字节数与路径。EOF、退出码非零、取消、超时都不会被当成
-成功交付。
+`requestId` / `runId`、工具名 / 参数上限 / 调用次数、哈希、字节数与路径。错 `callId`
+或迟到回复直接丢弃；RAG 在 Rust 后台线程执行，取消与超时不被检索堵住。
+
+## 材料与技能
+
+- 工作区中的 `input/materials/` 由 Rust 生成：程序编号文件名（`01.md`…）+
+  `index.json`（标题、来源、角色、哈希、字节数），用户文字不进路径。
+- 角色：`fact`（事实材料）、`incoming_letter`（来函）、`style_sample`（写法样稿）、
+  `structure_sample`（结构范文）。只有前两种能作为事实来源。
+- `skills/pi-skills/` 下有 5 份标准技能（gongwen-draft / revise / review / imitate /
+  research），是 frontmatter + 自然语言步骤，不是流程解释器。
+- `ask_user` 等待时间不计执行超时；取消会回收本轮进程。
 
 ## 文件环境
 

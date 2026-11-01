@@ -1,24 +1,41 @@
-//! 后台进程：启动 Node host、双向 JSONL、取消与回收。
+//! 后台进程：启动 Node host、双向 JSONL、工具桥、提问、取消与回收。
 //!
 //! UI 线程只收事件；这里从不阻塞界面。stdin 只写协议，密钥不出现在 argv，也不
 //! 出现在错误文本里。stdout 的 EOF、进程退出、协议错、取消和超时都按失败返回，
 //! 不会把最后一段聊天或半截文件当成交付。
+//!
+//! 领域工具、提问与审核清单都走同一条 `callId` 关联的请求 / 结果通道；Rust 在
+//! 后台线程执行工具，协议循环继续收事件、检查取消与超时，检索慢不会把取消卡住。
+//! 停下来的任务再收到的工具结果一律丢弃。
 
 use super::PiRuntime;
 use super::PiWorkspace;
-use super::delivery::{safe_work_path, sha256_hex, verify_submission};
+use super::delivery::{PiSelection, safe_work_path, sha256_hex, verify_submission};
+use super::materials::PiMaterialMeta;
 use super::protocol::{
-    HostEvent, InitLimits, InitMessage, InitModel, InitTask, InitWorkspace, MAX_CANDIDATE_BYTES,
-    MAX_DELIVERY_BYTES, MAX_EVENTS, MAX_HOST_LINE_BYTES, MAX_MESSAGE_CHARS, PROTOCOL_VERSION,
+    HostEvent, InitLimits, InitMessage, InitModel, InitSelection, InitTask, InitWorkspace,
+    MAX_CANDIDATE_BYTES, MAX_DELIVERY_BYTES, MAX_EVENTS, MAX_HOST_LINE_BYTES, MAX_MESSAGE_CHARS,
+    PROTOCOL_VERSION, PiReportItem, RawQuestion,
 };
-use crate::pi_agent::runtime::hidden_command;
+use super::runtime::hidden_command;
+use super::tools::PiToolContext;
+use crate::agent::clarify::{Question, Reply};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// 一条工具请求参数的上限。
+const MAX_TOOL_ARGS_BYTES: usize = 1024 * 1024;
+/// 一轮最多执行多少次工具调用。
+const MAX_TOOL_CALLS: usize = 60;
+/// 一批最多几题（与 `clarify::agent_questions` 一致）。
+const MAX_QUESTIONS_PER_BATCH: u32 = 3;
+/// 一轮最多几批提问。
+const MAX_QUESTION_BATCHES: u32 = 2;
 
 /// 交给 host 的模型参数。`api_key` 只进 stdin，不进 argv / 日志。
 pub(crate) struct PiModel {
@@ -35,6 +52,10 @@ pub(crate) struct PiTask {
     pub(crate) request: String,
     pub(crate) kind: String,
     pub(crate) system_date: String,
+    /// 用户选择的 Pi 技能（5 份标准技能之一）；None 表示自动。
+    pub(crate) skill: Option<String>,
+    pub(crate) selection: Option<PiSelection>,
+    pub(crate) materials: Vec<PiMaterialMeta>,
 }
 
 pub(crate) struct PiJob {
@@ -42,8 +63,12 @@ pub(crate) struct PiJob {
     pub(crate) workspace: PiWorkspace,
     pub(crate) model: PiModel,
     pub(crate) task: PiTask,
-    /// 发起本轮时的正文快照；以后接受提案时还要用它保护过期提案。
+    /// 发起本轮时的正式正文快照；接受提案时还要用它保护过期提案。
     pub(crate) before: String,
+    /// 本轮写作基准：可能是未采纳的候选稿（排除块之后）。
+    pub(crate) base: String,
+    pub(crate) tools: Arc<PiToolContext>,
+    pub(crate) bridge: Arc<PiBridge>,
     pub(crate) request_id: String,
     pub(crate) run_id: String,
     pub(crate) timeout: Duration,
@@ -53,21 +78,156 @@ pub(crate) struct PiJob {
 pub(crate) enum PiEvent {
     Progress(String),
     Tool(String),
-    Candidate { path: String, content: String },
+    Candidate {
+        path: String,
+        content: String,
+    },
+    /// 模型在等用户回答。答案由界面通过 [`PiBridge::answer`] 送回。
+    Questions(PiQuestionBatch),
+    /// 工具返回的证据已登记（侧栏「过程」里一行）。
+    Evidence(String),
+}
+
+/// 一道已经过 `clarify::agent_questions` 校验的题。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PiQuestion {
+    pub(crate) id: usize,
+    pub(crate) text: String,
+    pub(crate) options: Vec<String>,
+    pub(crate) custom: bool,
+    pub(crate) skippable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PiQuestionBatch {
+    pub(crate) call_id: String,
+    pub(crate) batch: u32,
+    pub(crate) questions: Vec<PiQuestion>,
+}
+
+/// 用户对一道题的回答。空 `value` 表示跳过；`question` 只用于会话里的已确认记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PiAnswer {
+    pub(crate) id: usize,
+    pub(crate) question: String,
+    pub(crate) value: String,
+}
+
+/// 界面 ↔ 后台进程的受控通道：只允许送回答与读已确认答案，不暴露 stdin 原文。
+#[derive(Debug, Default)]
+pub(crate) struct PiBridge {
+    tx: Mutex<Option<mpsc::SyncSender<String>>>,
+    answered: AtomicU64,
+    confirmed: Mutex<Vec<String>>,
+    confirmed_values: Mutex<Vec<String>>,
+}
+
+impl PiBridge {
+    fn install(&self, tx: mpsc::SyncSender<String>) {
+        *self.tx.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(tx);
+    }
+
+    fn answered(&self) -> u64 {
+        self.answered.load(Ordering::Relaxed)
+    }
+
+    fn confirmed(&self) -> Vec<String> {
+        self.confirmed
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    /// 回答一批题。题目 ID 绑定本轮问题，旧轮 / 重复的回答会被 host 忽略；
+    /// 这里也拒绝空 ID 列表，避免看似“答了”其实没答。
+    pub(crate) fn answer(&self, call_id: &str, answers: &[PiAnswer]) -> Result<(), String> {
+        if call_id.trim().is_empty() || answers.is_empty() {
+            return Err("没有可提交的回答".into());
+        }
+        let mut payload = serde_json::Map::new();
+        payload.insert("type".into(), "tool_result".into());
+        payload.insert("callId".into(), call_id.into());
+        payload.insert("ok".into(), true.into());
+        payload.insert(
+            "result".into(),
+            serde_json::json!({
+                "answers": answers
+                    .iter()
+                    .map(|answer| serde_json::json!({
+                        "id": answer.id,
+                        "value": answer.value.chars().take(2_000).collect::<String>(),
+                    }))
+                    .collect::<Vec<_>>()
+            }),
+        );
+        let mut line =
+            serde_json::to_string(&payload).map_err(|error| format!("组装回答失败：{error}"))?;
+        line.push('\n');
+        self.send(line)?;
+        for answer in answers {
+            if !answer.value.trim().is_empty() {
+                self.confirmed_values
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push(answer.value.chars().take(2_000).collect());
+                self.confirmed
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push(format!(
+                        "{}：{}",
+                        answer.question.trim(),
+                        answer.value.trim()
+                    ));
+            }
+        }
+        self.answered.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn send(&self, line: String) -> Result<(), String> {
+        let guard = self.tx.lock().unwrap_or_else(|poison| poison.into_inner());
+        let Some(tx) = guard.as_ref() else {
+            return Err("Pi 进程已经结束，回答没有送到。".into());
+        };
+        tx.send(line)
+            .map_err(|_| "Pi 进程已经结束，回答没有送到。".to_string())
+    }
 }
 
 /// 成功交付的固定版本。
 #[derive(Debug)]
 pub(crate) struct PiDelivery {
     pub(crate) before: String,
+    pub(crate) base: String,
     pub(crate) request: String,
     pub(crate) content: String,
     pub(crate) path: String,
     pub(crate) summary: String,
     pub(crate) sha256: String,
     pub(crate) bytes: usize,
+    pub(crate) selection: Option<PiSelection>,
+    /// 用户材料与工具实际返回的资料全文；交付闸门只认这些，不认模型自报。
+    pub(crate) fact_sources: Vec<String>,
+    /// 已确认的回答（追问时随上下文保存）。
+    pub(crate) confirmed: Vec<String>,
     pub(crate) workspace_label: String,
     pub(crate) elapsed: Duration,
+}
+
+/// 审核 / 找资料交的清单：只进侧栏，不产生正文提案。
+#[derive(Debug)]
+pub(crate) struct PiReport {
+    pub(crate) summary: String,
+    pub(crate) items: Vec<PiReportItem>,
+    pub(crate) confirmed: Vec<String>,
+    pub(crate) workspace_label: String,
+    pub(crate) elapsed: Duration,
+}
+
+#[derive(Debug)]
+pub(crate) enum PiOutcome {
+    Document(PiDelivery),
+    Report(PiReport),
 }
 
 struct Submission {
@@ -106,13 +266,18 @@ enum StdoutMsg {
     Eof,
 }
 
-/// 跑一轮 host，直到提交成功或失败。`on_event` 在调用线程里同步执行，界面侧只
-/// 投消息，不在这里做重活。
+struct ToolDone {
+    call_id: String,
+    evidence_before: usize,
+    result: Result<serde_json::Value, String>,
+}
+
+/// 跑一轮 host，直到提交成功、交回报告或失败。
 pub(crate) fn run(
     job: PiJob,
     cancel: Arc<AtomicBool>,
     mut on_event: impl FnMut(PiEvent),
-) -> Result<PiDelivery, String> {
+) -> Result<PiOutcome, String> {
     let started = Instant::now();
     if cancel.load(Ordering::Relaxed) {
         return Err("已停止 Pi 智能写作，未交付任何提案。".into());
@@ -122,6 +287,11 @@ pub(crate) fn run(
     }
     if job.task.request.len() > 200_000 {
         return Err("本轮要求太长（超过 200000 字节），请拆成几轮再写。".into());
+    }
+    if let Some(selection) = job.task.selection
+        && let Err(error) = selection.validate(&job.before)
+    {
+        return Err(error);
     }
     let mut command = hidden_command(&job.runtime.node);
     command
@@ -230,6 +400,8 @@ pub(crate) fn run(
             current: "input/current.md".into(),
             request: "input/request.md".into(),
             skills: "skills/gongwen-markdown".into(),
+            pi_skills: "skills/pi-skills".into(),
+            materials: "input/materials".into(),
         },
         model: InitModel {
             base_url: job.model.base_url.clone(),
@@ -244,37 +416,54 @@ pub(crate) fn run(
             request: job.task.request.clone(),
             kind: job.task.kind.clone(),
             system_date: job.task.system_date.clone(),
+            skill: job.task.skill.clone(),
+            selection: job.task.selection.map(|selection| InitSelection {
+                start: selection.start,
+                end: selection.end,
+                text: selection.text(&job.before).to_string(),
+            }),
+            materials: job.task.materials.clone(),
         },
         limits: InitLimits {
             max_file_bytes: MAX_DELIVERY_BYTES as u64,
             max_candidate_bytes: MAX_CANDIDATE_BYTES as u64,
             timeout_seconds: job.timeout.as_secs().max(1),
+            max_question_batches: MAX_QUESTION_BATCHES,
+            max_questions: MAX_QUESTIONS_PER_BATCH,
         },
     };
     let mut payload =
         serde_json::to_vec(&init).map_err(|error| format!("组装 Pi init 消息失败：{error}"))?;
     payload.push(b'\n');
     // stdin 也可能被不读输入的 host 堵住；写线程只持管道，主循环仍能超时并回收进程。
-    let (control_tx, control_rx) = mpsc::sync_channel(1);
+    let (control_tx, control_rx) = mpsc::sync_channel(4);
+    job.bridge.install(control_tx.clone());
     std::thread::spawn(move || {
         if stdin.write_all(&payload).is_err() || stdin.flush().is_err() {
             let _ = stdin_errors.send(StdoutMsg::Protocol("Pi host 没有接收初始配置".into()));
             return;
         }
-        while let Ok(()) = control_rx.recv() {
-            if stdin.write_all(b"{\"type\":\"cancel\"}\n").is_err() || stdin.flush().is_err() {
+        while let Ok(line) = control_rx.recv() {
+            if stdin.write_all(line.as_bytes()).is_err() || stdin.flush().is_err() {
                 break;
             }
         }
     });
 
+    let (tool_tx, tool_rx) = mpsc::channel::<ToolDone>();
+    let mut pending_tool: Option<(String, Instant)> = None;
+    let mut tool_calls = 0usize;
+    let mut question_batches = 0u32;
+    let mut waiting: Option<(String, u64, Instant)> = None;
+    let mut paused = Duration::ZERO;
     let mut submitted: Option<Submission> = None;
+    let mut report: Option<(String, Vec<PiReportItem>)> = None;
     let mut ready = false;
     let mut events = 0usize;
     let mut cancel_sent: Option<Instant> = None;
     loop {
         if cancel.load(Ordering::Relaxed) && cancel_sent.is_none() {
-            let _ = control_tx.try_send(());
+            let _ = control_tx.try_send("{\"type\":\"cancel\"}\n".into());
             cancel_sent = Some(Instant::now());
         }
         if let Some(at) = cancel_sent
@@ -282,15 +471,67 @@ pub(crate) fn run(
         {
             return Err("已停止 Pi 智能写作，未交付任何提案。".into());
         }
-        if started.elapsed() > job.timeout {
-            let _ = control_tx.try_send(());
+        // 人在看题时不计执行超时；回答之后接着按剩余时间算。
+        if let Some((_, answered, since)) = &waiting {
+            if job.bridge.answered() != *answered {
+                let values = job
+                    .bridge
+                    .confirmed_values
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .clone();
+                job.tools.confirm_answers(&values);
+                paused += since.elapsed();
+                waiting = None;
+            } else if since.elapsed() > Duration::from_secs(30 * 60) {
+                return Err("等用户回答超过 30 分钟，已停止本轮。".into());
+            }
+        }
+        if waiting.is_none() && started.elapsed().saturating_sub(paused) > job.timeout {
+            let _ = control_tx.try_send("{\"type\":\"cancel\"}\n".into());
             return Err(format!(
                 "Pi 智能写作超时（{} 秒），未交付任何提案。",
                 job.timeout.as_secs()
             ));
         }
-        if !ready && cancel_sent.is_none() && started.elapsed() > Duration::from_secs(30) {
+        if !ready
+            && cancel_sent.is_none()
+            && started.elapsed().saturating_sub(paused) > Duration::from_secs(30)
+        {
             return Err("Pi host 启动后 30 秒内没有就绪，已停止。".into());
+        }
+        // 工具在独立线程执行：检索慢也不能让取消、超时和 host 输出停摆。
+        match tool_rx.try_recv() {
+            Ok(done) => {
+                pending_tool = None;
+                if cancel_sent.is_some() || cancel.load(Ordering::Relaxed) {
+                    return Err("已停止 Pi 智能写作，未交付任何提案。".into());
+                }
+                let (ok, result, error) = match done.result {
+                    Ok(value) => (true, value, String::new()),
+                    Err(error) => (false, serde_json::Value::Null, error),
+                };
+                if ok {
+                    let ledger = job.tools.evidence();
+                    if let Some(item) = ledger.get(done.evidence_before) {
+                        on_event(PiEvent::Evidence(item.line()));
+                    }
+                }
+                let line = serde_json::json!({
+                    "type": "tool_result",
+                    "callId": done.call_id,
+                    "ok": ok,
+                    "result": result,
+                    "error": error,
+                })
+                .to_string()
+                    + "\n";
+                if control_tx.try_send(line).is_err() {
+                    return Err("Pi host 不再接收工具结果，已停止。".into());
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {}
         }
         let message = match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(message) => message,
@@ -382,6 +623,137 @@ pub(crate) fn run(
                 }
                 on_event(PiEvent::Candidate { path, content });
             }
+            HostEvent::ToolRequest {
+                call_id,
+                name,
+                args,
+                ..
+            } => {
+                if !ready {
+                    return Err("Pi host 还没有报告就绪就调用了工具，已拒绝。".into());
+                }
+                if pending_tool.is_some() {
+                    return Err("Pi host 同时发起了多个工具调用，已停止。".into());
+                }
+                if call_id.trim().is_empty() || call_id.len() > 64 {
+                    return Err("Pi host 的工具调用 ID 不合法".into());
+                }
+                tool_calls += 1;
+                if tool_calls > MAX_TOOL_CALLS {
+                    return Err("本轮工具调用次数过多，已停止。".into());
+                }
+                let args_text = serde_json::to_vec(&args)
+                    .map_err(|error| format!("工具参数无法序列化：{error}"))?;
+                if args_text.len() > MAX_TOOL_ARGS_BYTES {
+                    return Err("工具参数超过上限，已拒绝。".into());
+                }
+                if !PiToolContext::known(&name) {
+                    let line = serde_json::json!({
+                        "type": "tool_result",
+                        "callId": call_id,
+                        "ok": false,
+                        "error": format!("未知工具：{name}"),
+                    })
+                    .to_string()
+                        + "\n";
+                    let _ = control_tx.try_send(line);
+                    on_event(PiEvent::Tool(format!("Pi · 拒绝未知工具 {name}")));
+                    continue;
+                }
+                let tools = job.tools.clone();
+                let tx = tool_tx.clone();
+                on_event(PiEvent::Tool(format!("Pi · {name}：执行中")));
+                let evidence_before = job.tools.evidence().len();
+                pending_tool = Some((call_id.clone(), Instant::now()));
+                std::thread::spawn(move || {
+                    let result = tools.call(&name, &args);
+                    let _ = tx.send(ToolDone {
+                        call_id,
+                        evidence_before,
+                        result,
+                    });
+                });
+            }
+            HostEvent::Questions {
+                call_id,
+                questions,
+                batch,
+                ..
+            } => {
+                if !ready {
+                    return Err("Pi host 还没有报告就绪就出题，已拒绝。".into());
+                }
+                question_batches += 1;
+                let raw: Vec<(String, Vec<String>)> = questions
+                    .into_iter()
+                    .map(|RawQuestion { question, options }| (question, options))
+                    .collect();
+                let accepted =
+                    if batch > MAX_QUESTION_BATCHES || question_batches > MAX_QUESTION_BATCHES {
+                        Err("本轮提问批次已用完（最多 2 批）".to_string())
+                    } else if raw.len() as u32 > MAX_QUESTIONS_PER_BATCH {
+                        Err("一次最多问 3 道".to_string())
+                    } else {
+                        crate::agent::clarify::agent_questions(&raw)
+                    };
+                match accepted {
+                    Ok(questions) => {
+                        let questions = questions
+                            .into_iter()
+                            .map(|question: Question| PiQuestion {
+                                id: question.id,
+                                text: question.text,
+                                options: question
+                                    .choices
+                                    .iter()
+                                    .map(|choice| choice.label.clone())
+                                    .collect(),
+                                custom: question.custom_hint.is_some(),
+                                skippable: question.skippable,
+                            })
+                            .collect();
+                        waiting = Some((call_id.clone(), job.bridge.answered(), Instant::now()));
+                        on_event(PiEvent::Progress(
+                            "模型在等你的回答（等待时间不占用执行超时）".into(),
+                        ));
+                        on_event(PiEvent::Questions(PiQuestionBatch {
+                            call_id,
+                            batch: batch.max(question_batches),
+                            questions,
+                        }));
+                    }
+                    Err(error) => {
+                        let line = serde_json::json!({
+                            "type": "tool_result",
+                            "callId": call_id,
+                            "ok": false,
+                            "error": error,
+                        })
+                        .to_string()
+                            + "\n";
+                        let _ = control_tx.try_send(line);
+                        on_event(PiEvent::Tool(format!("Pi · 提问被拒：{error}")));
+                    }
+                }
+            }
+            HostEvent::Report { summary, items, .. } => {
+                if !ready {
+                    return Err("Pi host 还没有报告就绪就交了清单，已拒绝。".into());
+                }
+                if submitted.is_some() {
+                    return Err("Pi host 既提交了正文又交了审核清单，已拒绝。".into());
+                }
+                let items = items
+                    .into_iter()
+                    .take(100)
+                    .map(|item| PiReportItem {
+                        title: short(&item.title),
+                        detail: short(&item.detail),
+                        severity: short(&item.severity),
+                    })
+                    .collect();
+                report = Some((short(&summary), items));
+            }
             HostEvent::Submitted {
                 path,
                 summary,
@@ -392,6 +764,9 @@ pub(crate) fn run(
             } => {
                 if !ready {
                     return Err("Pi host 还没有报告就绪就送来了成品，已拒绝。".into());
+                }
+                if report.is_some() {
+                    return Err("Pi host 既交了清单又提交正文，已拒绝。".into());
                 }
                 verify_submission(&path, bytes, &sha256, &content)?;
                 if content.len() > MAX_DELIVERY_BYTES {
@@ -416,6 +791,9 @@ pub(crate) fn run(
                     let Some(submission) = submitted else {
                         return Err("Pi host 报告已提交，但没有送来成品内容".into());
                     };
+                    if report.is_some() {
+                        return Err("Pi host 前后矛盾：交清单的同时报告已提交正文".into());
+                    }
                     verify_submission(
                         &submission.path,
                         submission.bytes,
@@ -424,25 +802,39 @@ pub(crate) fn run(
                     )?;
                     // 完成事件之后仍须确认进程正常退出，不能接受“先报成功再崩溃”。
                     successful_exit(&mut guard, &cancel)?;
-                    return Ok(PiDelivery {
+                    return Ok(PiOutcome::Document(PiDelivery {
                         before: job.before,
+                        base: job.base,
                         request: job.task.request,
                         content: submission.content,
                         path: submission.path,
                         summary: submission.summary,
                         sha256: submission.sha256,
                         bytes: submission.bytes,
+                        selection: job.task.selection,
+                        fact_sources: job.tools.fact_sources(),
+                        confirmed: job.bridge.confirmed(),
                         workspace_label: job.workspace.label,
-                        elapsed: started.elapsed(),
-                    });
+                        elapsed: started.elapsed().saturating_sub(paused),
+                    }));
                 }
                 if submitted.is_some() {
                     return Err("Pi host 前后矛盾：送来了成品却报告未提交".into());
                 }
-                return Err(
-                    "模型结束了本轮但没有提交成品（未调用 submit_document），未交付任何提案。"
-                        .into(),
-                );
+                let Some((summary, items)) = report else {
+                    return Err(
+                        "模型结束了本轮但没有提交成品（未调用 submit_document 或 finish_report），未交付任何结果。"
+                            .into(),
+                    );
+                };
+                successful_exit(&mut guard, &cancel)?;
+                return Ok(PiOutcome::Report(PiReport {
+                    summary,
+                    items,
+                    confirmed: job.bridge.confirmed(),
+                    workspace_label: job.workspace.label,
+                    elapsed: started.elapsed().saturating_sub(paused),
+                }));
             }
             HostEvent::Cancelled { message, .. } => {
                 let message = if message.trim().is_empty() {
@@ -577,6 +969,27 @@ fn path_text(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// 把已确认的回答交给追问上下文；`Reply` 只为与旧 `clarify` 的题面结构对齐，
+/// 这里不调用 `engine::apply_answers`。
+#[allow(dead_code)]
+fn answer_text(question: &Question, reply: &Reply) -> String {
+    match reply {
+        Reply::Choice(index) => question
+            .choices
+            .get(*index)
+            .map(|choice| choice.label.clone())
+            .unwrap_or_default(),
+        Reply::Custom(text) => text.clone(),
+        Reply::Many(indexes) => indexes
+            .iter()
+            .filter_map(|index| question.choices.get(*index))
+            .map(|choice| choice.label.clone())
+            .collect::<Vec<_>>()
+            .join("、"),
+        Reply::Skip => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,17 +1000,27 @@ mod tests {
 import { createHash } from "node:crypto";
 import readline from "node:readline";
 const rl = readline.createInterface({ input: process.stdin });
+let initRaw;
 let handled = false;
+const waiters = new Map();
+const emit = (o) => process.stdout.write(JSON.stringify({ ...base(o), ...o }) + "\n");
+let init;
+function base(o) { return { protocol: 1, requestId: init?.requestId ?? "r", runId: init?.runId ?? "u" }; }
+const content = "# 成品\n\n正文。\n";
+const sha256 = createHash("sha256").update(content, "utf8").digest("hex");
+const submit = () => {
+  emit({ type: "candidate", path: "work/final.md", content, sha256, bytes: Buffer.byteLength(content) });
+  emit({ type: "submitted", path: "work/final.md", summary: "夹具", content, sha256, bytes: Buffer.byteLength(content) });
+  emit({ type: "completed", submitted: true });
+  setTimeout(() => process.exit(0), 20);
+};
 rl.on("line", (line) => {
-  if (!handled) {
+  const value = JSON.parse(line);
+  if (value.type === "init" && !handled) {
     handled = true;
-    const init = JSON.parse(line);
-    const base = { protocol: 1, requestId: init.requestId, runId: init.runId };
-    const emit = (o) => process.stdout.write(JSON.stringify({ ...base, ...o }) + "\n");
+    init = value;
     emit({ type: "ready", hostVersion: "test", nodeVersion: process.versions.node, model: init.model.modelId });
     const mode = init.task.request;
-    const content = "# 成品\n\n正文。\n";
-    const sha256 = createHash("sha256").update(content, "utf8").digest("hex");
     if (mode === "error") {
       emit({ type: "error", code: "boom", message: "失败且包含密钥 " + init.model.apiKey });
       setTimeout(() => process.exit(1), 20);
@@ -612,17 +1035,43 @@ rl.on("line", (line) => {
       process.stdout.write(JSON.stringify({ type: "progress", requestId: "other", runId: init.runId, message: "x" }) + "\n");
       return;
     }
-    if (mode === "hang") {
+    if (mode === "hang") return;
+    if (mode === "badargs") {
+      emit({ type: "tool_request", callId: "c1", name: "kb_search", args: { query: "x" } });
       return;
     }
-    emit({ type: "candidate", path: "work/final.md", content, sha256, bytes: Buffer.byteLength(content) });
-    emit({ type: "submitted", path: "work/final.md", summary: "夹具", content, sha256, bytes: Buffer.byteLength(content) });
-    emit({ type: "completed", submitted: true });
-    setTimeout(() => process.exit(mode === "badexit" ? 7 : 0), 20);
-  } else {
-    try {
-      if (JSON.parse(line).type === "cancel") process.exit(3);
-    } catch {}
+    if (mode === "tool") {
+      emit({ type: "tool_request", callId: "c1", name: "kb_search", args: { query: "防火" } });
+      return;
+    }
+    if (mode === "ask") {
+      emit({ type: "questions", callId: "q1", batch: 1, questions: [{ question: "想强调哪方面", options: ["责任", "时限"] }] });
+      return;
+    }
+    if (mode === "report") {
+      emit({ type: "report", summary: "审完", items: [{ title: "称谓", detail: "第二条", severity: "建议" }] });
+      emit({ type: "completed", submitted: false });
+      setTimeout(() => process.exit(0), 20);
+      return;
+    }
+    submit();
+    return;
+  }
+  if (value.type === "cancel") { process.exit(3); }
+  if (value.type === "tool_result") {
+    const resolve = waiters.get(value.callId);
+    if (resolve) { waiters.delete(value.callId); resolve(value); return; }
+    if (value.ok && value.callId === "c1" && init.task.request === "tool") { submit(); }
+    if (value.ok && value.callId === "q1") {
+      emit({ type: "report", summary: "答完了", items: [{ title: "已按回答处理", detail: "", severity: "提示" }] });
+      emit({ type: "completed", submitted: false });
+      setTimeout(() => process.exit(0), 20);
+    }
+    if (!value.ok) {
+      emit({ type: "report", summary: "工具被拒：" + value.error, items: [] });
+      emit({ type: "completed", submitted: false });
+      setTimeout(() => process.exit(0), 20);
+    }
   }
 });
 "##;
@@ -642,12 +1091,62 @@ rl.on("line", (line) => {
         path
     }
 
+    struct NoKb;
+    impl super::super::tools::PiKnowledge for NoKb {
+        fn enabled(&self) -> bool {
+            true
+        }
+        fn search(
+            &self,
+            _query: &str,
+            _top: usize,
+        ) -> Result<Vec<super::super::tools::PiChunk>, String> {
+            Ok(vec![super::super::tools::PiChunk {
+                doc_id: 1,
+                title: "防火规定".into(),
+                section: "第一条".into(),
+                text: "各单位应于每年十月开展一次检查。".into(),
+            }])
+        }
+        fn read(&self, _doc_id: i64) -> Result<Option<(String, String)>, String> {
+            Ok(None)
+        }
+    }
+
+    struct NoMs;
+    impl super::super::tools::PiManuscripts for NoMs {
+        fn search(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<super::super::tools::PiManuscriptRow>, String> {
+            Ok(Vec::new())
+        }
+        fn read(
+            &self,
+            _id: i64,
+            _version: Option<i64>,
+        ) -> Result<Option<super::super::tools::PiManuscriptRow>, String> {
+            Ok(None)
+        }
+    }
+
     fn job(dir: &Path, mode: &str) -> PiJob {
         let root = dir.join("workspace");
         std::fs::create_dir_all(root.join("input")).unwrap();
         std::fs::create_dir_all(root.join("work")).unwrap();
         std::fs::write(root.join("input/current.md"), "# 当前\n").unwrap();
         std::fs::write(root.join("input/request.md"), mode).unwrap();
+        let config = Arc::new(crate::models::AppConfig::default());
+        let tools = PiToolContext::with_sources(
+            config,
+            crate::models::DraftInput::default(),
+            "# 当前\n".into(),
+            mode.into(),
+            Vec::new(),
+            Arc::new(NoKb),
+            Arc::new(NoMs),
+        );
         PiJob {
             runtime: PiRuntime {
                 node: PathBuf::from("node"),
@@ -671,12 +1170,26 @@ rl.on("line", (line) => {
                 request: mode.into(),
                 kind: "通知".into(),
                 system_date: "2026-11-01".into(),
+                skill: None,
+                selection: None,
+                materials: Vec::new(),
             },
             before: "# 当前\n".into(),
+            base: "# 当前\n".into(),
+            tools: Arc::new(tools),
+            bridge: Arc::new(PiBridge::default()),
             request_id: "req-1".into(),
             run_id: "run-1".into(),
             timeout: Duration::from_secs(10),
         }
+    }
+
+    fn outcome(
+        job: PiJob,
+        cancel: Arc<AtomicBool>,
+        mut on: impl FnMut(PiEvent),
+    ) -> Result<PiOutcome, String> {
+        run(job, cancel, &mut on)
     }
 
     #[test]
@@ -688,7 +1201,7 @@ rl.on("line", (line) => {
         let temp = tempfile::tempdir().unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
-        let delivery = run(
+        let outcome = outcome(
             job(temp.path(), "ok"),
             Arc::new(AtomicBool::new(false)),
             |event| {
@@ -696,6 +1209,9 @@ rl.on("line", (line) => {
             },
         )
         .unwrap();
+        let PiOutcome::Document(delivery) = outcome else {
+            panic!("应交付文档");
+        };
         assert_eq!(delivery.content, "# 成品\n\n正文。\n");
         assert_eq!(delivery.path, "work/final.md");
         assert!(delivery.bytes > 0);
@@ -722,7 +1238,7 @@ rl.on("line", (line) => {
         stalled.task.request = "x".repeat(150_000);
         stalled.timeout = Duration::from_millis(200);
         let started = Instant::now();
-        let error = run(stalled, Arc::new(AtomicBool::new(false)), |_| {}).unwrap_err();
+        let error = outcome(stalled, Arc::new(AtomicBool::new(false)), |_| {}).unwrap_err();
         assert!(error.contains("超时"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(3));
     }
@@ -733,12 +1249,12 @@ rl.on("line", (line) => {
             return;
         }
         let temp = tempfile::tempdir().unwrap();
-        let error = run(
-            job(temp.path(), "badexit"),
-            Arc::new(AtomicBool::new(false)),
-            |_| {},
-        )
-        .unwrap_err();
+        let job = job(temp.path(), "badexit");
+        let script = std::fs::read_to_string(&job.runtime.host)
+            .unwrap()
+            .replace("process.exit(0), 20", "process.exit(7), 20");
+        std::fs::write(&job.runtime.host, script).unwrap();
+        let error = outcome(job, Arc::new(AtomicBool::new(false)), |_| {}).unwrap_err();
         assert!(error.contains("异常退出"), "{error}");
     }
 
@@ -750,7 +1266,7 @@ rl.on("line", (line) => {
         let temp = tempfile::tempdir().unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
-        let error = run(job(temp.path(), "ok"), cancel, |event| {
+        let error = outcome(job(temp.path(), "ok"), cancel, |event| {
             if matches!(event, PiEvent::Progress(ref message) if message.starts_with("已提交 "))
             {
                 flag.store(true, Ordering::Relaxed);
@@ -761,13 +1277,13 @@ rl.on("line", (line) => {
     }
 
     #[test]
-    fn a_run_without_submit_is_a_failure() {
+    fn a_run_without_submit_or_report_is_a_failure() {
         if !node_available() {
             eprintln!("跳过：本机没有 Node");
             return;
         }
         let temp = tempfile::tempdir().unwrap();
-        let error = run(
+        let error = outcome(
             job(temp.path(), "nosubmit"),
             Arc::new(AtomicBool::new(false)),
             |_| {},
@@ -783,7 +1299,7 @@ rl.on("line", (line) => {
             return;
         }
         let temp = tempfile::tempdir().unwrap();
-        let error = run(
+        let error = outcome(
             job(temp.path(), "error"),
             Arc::new(AtomicBool::new(false)),
             |_| {},
@@ -800,7 +1316,7 @@ rl.on("line", (line) => {
             return;
         }
         let temp = tempfile::tempdir().unwrap();
-        let error = run(
+        let error = outcome(
             job(temp.path(), "wrongid"),
             Arc::new(AtomicBool::new(false)),
             |_| {},
@@ -819,7 +1335,7 @@ rl.on("line", (line) => {
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
         let start = Instant::now();
-        let handle = std::thread::spawn(move || run(job(temp.path(), "hang"), cancel, |_| {}));
+        let handle = std::thread::spawn(move || outcome(job(temp.path(), "hang"), cancel, |_| {}));
         std::thread::sleep(Duration::from_millis(300));
         flag.store(true, Ordering::Relaxed);
         let error = handle.join().unwrap().unwrap_err();
@@ -839,7 +1355,289 @@ rl.on("line", (line) => {
         let empty = temp.path().join("empty-host.mjs");
         std::fs::write(&empty, "process.exit(0);\n").unwrap();
         job.runtime.host = empty;
-        let error = run(job, Arc::new(AtomicBool::new(false)), |_| {}).unwrap_err();
+        let error = outcome(job, Arc::new(AtomicBool::new(false)), |_| {}).unwrap_err();
         assert!(error.contains("提前退出"), "{error}");
+    }
+
+    #[test]
+    fn tool_request_round_trip_registers_evidence_and_can_submit() {
+        if !node_available() {
+            eprintln!("跳过：本机没有 Node");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let outcome = outcome(
+            job(temp.path(), "tool"),
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .unwrap();
+        let PiOutcome::Document(delivery) = outcome else {
+            panic!("工具跑通后应交付文档");
+        };
+        assert!(
+            delivery
+                .fact_sources
+                .iter()
+                .any(|text| text.contains("每年十月")),
+            "{:?}",
+            delivery.fact_sources
+        );
+    }
+
+    #[test]
+    fn unknown_or_oversized_tool_requests_are_rejected_structurally() {
+        if !node_available() {
+            eprintln!("跳过：本机没有 Node");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let tool_job = job(temp.path(), "tool");
+        let script = std::fs::read_to_string(&tool_job.runtime.host)
+            .unwrap()
+            .replace("\"kb_search\"", "\"bash\"");
+        std::fs::write(&tool_job.runtime.host, script).unwrap();
+        let outcome = outcome(tool_job, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        let PiOutcome::Report(report) = outcome else {
+            panic!("未知工具应以结构化失败回到模型");
+        };
+        assert!(report.summary.contains("未知工具"), "{:?}", report.summary);
+
+        // 参数超限：直接构造事件走同一套校验。
+        let mut args_job = job(temp.path(), "badargs");
+        args_job.task.request = "x".into();
+        let error = run_with_tool_args(
+            args_job,
+            serde_json::json!({"query": "x".repeat(1_200_000)}),
+        )
+        .unwrap_err();
+        assert!(error.contains("参数超过上限"), "{error}");
+    }
+
+    /// 把 host 换成一个发指定工具参数、然后结束的脚本。
+    fn run_with_tool_args(mut job: PiJob, args: serde_json::Value) -> Result<(), String> {
+        let script = format!(
+            r##"
+import readline from "node:readline";
+const rl = readline.createInterface({{ input: process.stdin }});
+let init;
+const emit = (o) => process.stdout.write(JSON.stringify({{ protocol: 1, requestId: init.requestId, runId: init.runId, ...o }}) + "\n");
+rl.on("line", (line) => {{
+  const value = JSON.parse(line);
+  if (value.type === "init") {{
+    init = value;
+    emit({{ type: "ready", hostVersion: "test", nodeVersion: process.versions.node, model: init.model.modelId }});
+    emit({{ type: "tool_request", callId: "c1", name: "kb_search", args: {args} }});
+  }}
+  if (value.type === "tool_result") {{ setTimeout(() => process.exit(0), 10); }}
+}});
+"##
+        );
+        let path = job.workspace.root.parent().unwrap().join("args-host.mjs");
+        std::fs::write(&path, script).unwrap();
+        job.runtime.host = path;
+        match run(job, Arc::new(AtomicBool::new(false)), |_| {}) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[test]
+    fn questions_are_paused_answered_and_reported_only() {
+        if !node_available() {
+            eprintln!("跳过：本机没有 Node");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let job = job(temp.path(), "ask");
+        let bridge = job.bridge.clone();
+        let (question_tx, question_rx) = mpsc::channel();
+        let handle = std::thread::spawn({
+            let job = job;
+            move || {
+                run(job, Arc::new(AtomicBool::new(false)), |event| {
+                    if let PiEvent::Questions(batch) = event {
+                        let _ = question_tx.send(batch.call_id);
+                    }
+                })
+            }
+        });
+        let call_id = question_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("应收到提问事件");
+        bridge
+            .answer(
+                &call_id,
+                &[PiAnswer {
+                    id: 1,
+                    question: "想强调哪方面？".into(),
+                    value: "责任".into(),
+                }],
+            )
+            .unwrap();
+        let outcome = handle.join().unwrap().unwrap();
+        let PiOutcome::Report(report) = outcome else {
+            panic!("只交清单，不应有正文提案");
+        };
+        assert_eq!(report.summary, "答完了");
+        assert!(report.confirmed.iter().any(|line| line.contains("责任")));
+    }
+
+    #[test]
+    fn cancelling_during_a_slow_tool_stops_promptly_and_discards_its_late_result() {
+        if !node_available() {
+            eprintln!("跳过：本机没有 Node");
+            return;
+        }
+        struct SlowKb;
+        impl super::super::tools::PiKnowledge for SlowKb {
+            fn enabled(&self) -> bool {
+                true
+            }
+            fn search(
+                &self,
+                _query: &str,
+                _top: usize,
+            ) -> Result<Vec<super::super::tools::PiChunk>, String> {
+                std::thread::sleep(Duration::from_millis(400));
+                Ok(vec![super::super::tools::PiChunk {
+                    doc_id: 1,
+                    title: "防火规定".into(),
+                    section: "第一条".into(),
+                    text: "各单位应于每年十月开展一次检查。".into(),
+                }])
+            }
+            fn read(&self, _doc_id: i64) -> Result<Option<(String, String)>, String> {
+                Ok(None)
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut job = job(temp.path(), "tool");
+        job.tools = Arc::new(PiToolContext::with_sources(
+            Arc::new(crate::models::AppConfig::default()),
+            crate::models::DraftInput::default(),
+            "# 当前\n".into(),
+            "tool".into(),
+            Vec::new(),
+            Arc::new(SlowKb),
+            Arc::new(NoMs),
+        ));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let started = Instant::now();
+        let error = outcome(job, cancel, |event| {
+            if matches!(event, PiEvent::Tool(ref line) if line.contains("执行中")) {
+                flag.store(true, Ordering::Relaxed);
+            }
+        })
+        .unwrap_err();
+        assert!(error.contains("已停止"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "检索阻塞不能拖住取消"
+        );
+    }
+
+    #[test]
+    fn a_report_never_becomes_a_document() {
+        if !node_available() {
+            eprintln!("跳过：本机没有 Node");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let outcome = outcome(
+            job(temp.path(), "report"),
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .unwrap();
+        let PiOutcome::Report(report) = outcome else {
+            panic!("finish_report 只进侧栏");
+        };
+        assert_eq!(report.items[0].title, "称谓");
+        assert_eq!(report.items[0].severity, "建议");
+    }
+
+    #[test]
+    fn authorized_question_is_rejected_without_stopping_the_run() {
+        if !node_available() {
+            eprintln!("跳过：本机没有 Node");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let job = job(temp.path(), "ask");
+        let script = std::fs::read_to_string(&job.runtime.host).unwrap().replace(
+            "想强调哪方面\", options: [\"责任\", \"时限\"]",
+            "文号用几号\", options: [\"3号\", \"4号\"]",
+        );
+        std::fs::write(&job.runtime.host, script).unwrap();
+        let outcome = outcome(job, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        let PiOutcome::Report(report) = outcome else {
+            panic!("拒绝提问后模型应改用清单交付");
+        };
+        assert!(report.summary.contains("授权要素"), "{}", report.summary);
+    }
+
+    #[test]
+    fn an_answer_for_a_finished_run_is_rejected() {
+        let bridge = PiBridge::default();
+        assert!(
+            bridge
+                .answer(
+                    "q1",
+                    &[PiAnswer {
+                        id: 1,
+                        question: "哪方面".into(),
+                        value: "x".into()
+                    }]
+                )
+                .is_err()
+        );
+        let (tx, rx) = mpsc::sync_channel(1);
+        bridge.install(tx);
+        bridge
+            .answer(
+                "q1",
+                &[PiAnswer {
+                    id: 1,
+                    question: "哪方面".into(),
+                    value: "责任".into(),
+                }],
+            )
+            .unwrap();
+        let line = rx.recv().unwrap();
+        assert!(line.contains("\"callId\":\"q1\""));
+        assert!(line.contains("责任"));
+        assert!(
+            bridge
+                .answer(
+                    "",
+                    &[PiAnswer {
+                        id: 1,
+                        question: "q".into(),
+                        value: "x".into()
+                    }]
+                )
+                .is_err()
+        );
+        assert!(bridge.answer("q1", &[]).is_err());
+    }
+
+    /// 只为让测试断言「登记过的证据能授权日期」：工具台账在交付里原样带出。
+    #[test]
+    fn evidence_ledger_is_carried_into_the_delivery() {
+        let temp = tempfile::tempdir().unwrap();
+        let job = job(temp.path(), "ok");
+        let context = job.tools.clone();
+        context
+            .call("kb_search", &serde_json::json!({"query": "防火"}))
+            .unwrap();
+        assert!(!context.evidence().is_empty());
+        assert!(
+            context
+                .fact_sources()
+                .iter()
+                .any(|text| text.contains("每年十月"))
+        );
     }
 }

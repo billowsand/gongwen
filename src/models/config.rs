@@ -25,6 +25,10 @@ pub struct AppConfig {
     pub draft_model: ModelRef,
     /// 起草服务不可用且尚未输出时，本次调用使用的备用对话模型。
     pub draft_backup_model: ModelRef,
+    /// 智能写作（Pi）独立选择的模型。旧配置没有该字段时为空；为空就明确提示，
+    /// 不偷偷回落到起草模型。地址与密钥仍只存在 providers 里。
+    #[serde(default)]
+    pub pi_model: ModelRef,
     pub output_dir: String,
     pub vocabulary: Vec<VocabularyEntry>,
     /// 首次建库引导的完成状态；旧配置会根据是否已有词条在启动时自动迁移。
@@ -121,6 +125,7 @@ impl Default for AppConfig {
             providers: Vec::new(),
             draft_model: ModelRef::default(),
             draft_backup_model: ModelRef::default(),
+            pi_model: ModelRef::default(),
             output_dir: String::new(),
             vocabulary: vec![],
             vocabulary_setup: VocabularySetupStatus::Pending,
@@ -245,6 +250,23 @@ impl AppConfig {
         config.base_url = provider.base_url.clone();
         config.api_key = provider.api_key.clone();
         config.model = self.draft_model.model.trim().to_string();
+        Ok(config)
+    }
+
+    /// 智能写作（Pi）的接入配置：只认 `pi_model`，不回落起草模型。生成参数沿用现有
+    /// 起草设置（温度不参与——host 只发送模型与窗口），输出上限按真实窗口收紧。
+    pub(crate) fn pi_chat(&self) -> Result<LmStudioConfig, ModelRefError> {
+        if self.pi_model.is_empty() {
+            return Err(ModelRefError(
+                "还没有选择智能写作（Pi）模型：请到「AI 管理 → 模型服务 → 智能写作（Pi）」选择。"
+                    .into(),
+            ));
+        }
+        let mut config = self.lm_studio.clone();
+        let provider = self.require_provider(&self.pi_model.provider_id, "智能写作（Pi）")?;
+        config.base_url = provider.base_url.clone();
+        config.api_key = provider.api_key.clone();
+        config.model = self.pi_model.model.trim().to_string();
         Ok(config)
     }
 

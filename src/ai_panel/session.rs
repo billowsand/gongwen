@@ -1048,6 +1048,31 @@ mod tests {
     }
 
     #[test]
+    fn pi_report_text_survives_session_reload() {
+        let (mut store, id) = store();
+        let mut panel = AiPanel::default();
+        panel.session.loaded_for = Some(id);
+        panel.push_turn("Pi 审核".into(), "检查正文".into(), vec![], None);
+        let turn = panel.running_turn_mut().unwrap();
+        turn.content = "审核完成\n\n- ［建议］称谓：第二条需要核对".into();
+        turn.is_workspace = false;
+        panel.finish(TurnState::Reported { fixes: 0 });
+        assert!(
+            panel
+                .save_session(Some(id), Some(&mut store), None, true)
+                .is_none()
+        );
+        let record = store.list_ai_sessions(id).unwrap().remove(0);
+        let rows = store.load_ai_session_turns(&panel.session.id).unwrap();
+        let mut after = AiPanel::default();
+        let (_, problems) = after.load_session(id, &record, rows, "正式正文");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(after.turns[0].content, panel.turns[0].content);
+        assert_eq!(after.turns[0].state, TurnState::Reported { fixes: 0 });
+        assert!(!after.turns[0].is_workspace);
+    }
+
+    #[test]
     fn closing_flushes_the_latest_running_output() {
         let (mut store, id) = store();
         let mut panel = AiPanel::default();

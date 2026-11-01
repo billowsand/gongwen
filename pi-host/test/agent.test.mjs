@@ -153,3 +153,118 @@ test("an empty submitted file is refused", async () => {
     (error) => error instanceof AgentError && error.code === "not_submitted",
   );
 });
+
+test("search, write and submit round-trip through the Rust tool bridge", async () => {
+  const workspace = makeWorkspace();
+  const config = makeConfig(workspace);
+  const { faux, models, model } = fakeBackend();
+  faux.setResponses([
+    fauxAssistantMessage(
+      [fauxToolCall("kb_search", { query: "防火 责任" })],
+      { stopReason: "toolUse" },
+    ),
+    fauxAssistantMessage(
+      [
+        fauxToolCall("write", {
+          path: "work/final.md",
+          content: "# 通知\n\n各单位应于每年十月开展一次检查。\n",
+        }),
+      ],
+      { stopReason: "toolUse" },
+    ),
+    fauxAssistantMessage(
+      [fauxToolCall("submit_document", { path: "work/final.md", summary: "依据知识库" })],
+      { stopReason: "toolUse" },
+    ),
+    fauxAssistantMessage([fauxText("已提交。")]),
+  ]);
+  const events = [];
+  let bridge;
+  const result = await runAgentJob({
+    config,
+    models,
+    model,
+    emit: (event) => {
+      events.push(event);
+      if (event.type === "tool_request") {
+        // 模拟 Rust：验证工具名后返回带证据编号的结果（不联网）。
+        assert.equal(event.name, "kb_search");
+        queueMicrotask(() =>
+          bridge.handle({
+            type: "tool_result",
+            callId: event.callId,
+            ok: true,
+            result: {
+              results: [
+                {
+                  evidence: "E1",
+                  doc_id: 1,
+                  title: "防火规定",
+                  section: "第三条",
+                  text: "各单位应于每年十月开展一次检查。",
+                },
+              ],
+            },
+          }),
+        );
+      }
+    },
+    onBridge: (value) => {
+      bridge = value;
+    },
+  });
+  assert.ok(result.snapshot, "检索后写文件再提交应交付快照");
+  assert.match(result.snapshot.content, /每年十月/);
+  assert.ok(events.some((event) => event.type === "tool_request" && event.name === "kb_search"));
+  assert.ok(events.some((event) => event.type === "tool" && event.name === "kb_search"));
+});
+
+test("finish_report returns a sidebar report, never a document snapshot", async () => {
+  const workspace = makeWorkspace();
+  const config = makeConfig(workspace);
+  const { faux, models, model } = fakeBackend();
+  faux.setResponses([
+    fauxAssistantMessage(
+      [
+        fauxToolCall("finish_report", {
+          summary: "审完",
+          items: [{ title: "称谓", detail: "第二条", severity: "建议" }],
+        }),
+      ],
+      { stopReason: "toolUse" },
+    ),
+    fauxAssistantMessage([fauxText("已交清单。")]),
+  ]);
+  const events = [];
+  const result = await runAgentJob({ config, models, model, emit: (event) => events.push(event) });
+  assert.equal(result.snapshot, undefined);
+  assert.ok(result.report, "finish_report 应返回报告");
+  assert.equal(result.report.items[0].title, "称谓");
+  assert.ok(events.some((event) => event.type === "report"));
+});
+
+test("a report and a submitted document cannot both be delivered", async () => {
+  const workspace = makeWorkspace();
+  const config = makeConfig(workspace);
+  const { faux, models, model } = fakeBackend();
+  fs.writeFileSync(path.join(workspace.root, "work", "final.md"), "# 成品\n");
+  faux.setResponses([
+    fauxAssistantMessage(
+      [
+        fauxToolCall("finish_report", {
+          summary: "审完",
+          items: [{ title: "称谓" }],
+        }),
+      ],
+      { stopReason: "toolUse" },
+    ),
+    fauxAssistantMessage(
+      [fauxToolCall("submit_document", { path: "work/final.md", summary: "也交正文" })],
+      { stopReason: "toolUse" },
+    ),
+    fauxAssistantMessage([fauxText("结束")]),
+  ]);
+  const result = await runAgentJob({ config, models, model, emit: () => {} });
+  assert.equal(result.snapshot, undefined, "清单已经终止本轮，不能再交正文");
+  assert.ok(result.report);
+});

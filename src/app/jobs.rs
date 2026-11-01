@@ -206,9 +206,11 @@ pub(crate) enum DocJob {
         path: String,
         content: String,
     },
-    /// Pi 本轮结束。成功时是一份固定版本，失败时报原因；
+    /// Pi 本轮结束。成功时是一份固定版本或侧栏清单，失败时报原因；
     /// 未提交、超时、取消、崩溃都不会走到成功分支。
-    PiDone(Result<crate::pi_agent::PiDelivery, String>),
+    PiDone(Result<crate::pi_agent::PiOutcome, String>),
+    /// Pi 在等用户回答；题目只活在本轮。
+    PiQuestions(crate::pi_agent::PiQuestionBatch),
     AiUsage {
         turn_id: u64,
         usage: crate::agent::backend::UsageTotals,
@@ -1568,6 +1570,7 @@ impl GongwenApp {
                 | DocJob::PiProgress(_)
                 | DocJob::PiTool(_)
                 | DocJob::PiCandidate { .. }
+                | DocJob::PiQuestions(_)
                 | DocJob::AiWorkspace(_)
                 | DocJob::AiWriteBegin { .. }
                 | DocJob::AiSessionSummary { .. }
@@ -1647,6 +1650,27 @@ impl GongwenApp {
                     .pi_progress(&format!("候选文件已更新：{path}"));
             }
             DocJob::PiDone(result) => self.apply_pi_done(index, &prefix, result),
+            DocJob::PiQuestions(batch) => {
+                let bridge = self.docs[index].ai_panel.pi_bridge.clone();
+                match bridge {
+                    Some(bridge) => {
+                        self.docs[index].ai_panel.pi_ask =
+                            Some(crate::ai_panel::pi_ask::PiAsk::new(batch, bridge));
+                        if let Some(turn) = self.docs[index].ai_panel.running_turn_mut() {
+                            // Pi 等待回答期间进程仍活着，按 Streaming 保持「运行中」：
+                            // 停止按钮、计时和新的并发保护都以它为准；题卡另有状态。
+                            turn.state = TurnState::Streaming;
+                        }
+                        self.status = format!("{prefix}Pi 在等你回答必要问题。");
+                    }
+                    None => {
+                        self.docs[index].ai_panel.finish(TurnState::Failed(
+                            "Pi 提问时任务已结束，回答没有送回。".into(),
+                        ));
+                        self.docs[index].busy = false;
+                    }
+                }
+            }
             // 用量按原轮次回投，这一支不该走到这里；真走到就忽略，不让任务崩掉。
             DocJob::AiUsage { .. } => {}
             DocJob::AiWorkspace(text) => self.docs[index].ai_panel.replace_content(text),

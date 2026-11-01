@@ -85,10 +85,16 @@ async function main() {
 
   let cancel;
   let cancelled = false;
+  let bridge;
   const requestCancel = (reason) => {
     if (cancelled) return;
     cancelled = true;
     writeError(`收到取消：${reason}`);
+    try {
+      bridge?.abortAll(new Error("本轮已取消"));
+    } catch {
+      // 取消只影响本轮。
+    }
     try {
       cancel?.();
     } catch {
@@ -96,13 +102,16 @@ async function main() {
     }
   };
 
-  // init 之后 stdin 只接受 cancel / ping；Rust 进程崩溃导致 EOF 时也停下模型调用。
+  // init 之后 stdin 只接受 cancel / ping / tool_result；Rust 进程崩溃导致 EOF 时也停下模型调用。
   readJsonLines(process.stdin, {
     onValue(value) {
       if (value?.type === "cancel") {
         requestCancel("收到 cancel");
       } else if (value?.type === "ping") {
         send({ type: "pong" });
+      } else if (value?.type === "tool_result") {
+        // 错 run / 错 call ID 或迟到回复：handle 返回 false，直接丢弃。
+        bridge?.handle(value);
       }
       return true;
     },
@@ -121,11 +130,18 @@ async function main() {
     const result = await runAgentJob({
       config,
       emit: send,
+      onBridge: (value) => {
+        bridge = value;
+      },
       onCancel: (fn) => {
         cancel = fn;
       },
     });
-    if (result.snapshot) {
+    if (result.report) {
+      // 清单事件已在工具调用时发出；这里只补完成事件，不带 submitted。
+      send({ type: "completed", submitted: false });
+      finish(0);
+    } else if (result.snapshot) {
       send({
         type: "submitted",
         path: result.snapshot.path,

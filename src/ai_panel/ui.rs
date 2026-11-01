@@ -302,6 +302,21 @@ impl DraftPage<'_> {
     }
 
     fn ai_turns_ui(&mut self, ui: &mut egui::Ui) {
+        // Pi 提问卡 / 审核清单放在任务流上方：它们是本轮的一部分，不是一组历史轮次。
+        let running = self.doc.ai_panel.running();
+        if self.doc.ai_panel.pi_ask.is_some() {
+            crate::ai_panel::pi_ask::pi_ask_ui(ui, &mut self.doc.ai_panel, running);
+            ui.add_space(6.0);
+        }
+        if let Some(report) = self.doc.ai_panel.pi_report.clone()
+            && crate::ai_panel::pi_ask::pi_report_ui(ui, &report, running)
+        {
+            self.doc.ai_panel.pi_report = None;
+        }
+        if self.doc.ai_panel.pi_cancel {
+            self.doc.ai_panel.pi_cancel = false;
+            self.stop_ai_task();
+        }
         if self.doc.ai_panel.turns.is_empty() {
             if theme::smartisan::active() {
                 let can_fill = self.doc.ai_panel.composer.text.trim().is_empty() && !self.doc.busy;
@@ -345,7 +360,6 @@ impl DraftPage<'_> {
         // 「从这里重跑」的候选：先把各轮存下的检查点读出来（绘制里不查库）。
         let checkpoints = self.checkpoint_index();
         let doc = &mut *self.doc;
-        let running = doc.ai_panel.running();
         let scroll = egui::ScrollArea::vertical()
             .id_salt(("ai_panel_turns", doc.key))
             .auto_shrink([false, false])
@@ -531,6 +545,10 @@ impl DraftPage<'_> {
         if let Some(cancel) = self.doc.ai_panel.cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
+        // 正在等回答的 Pi 题卡属于已停的那一轮；回答不能再送到下一轮。
+        self.doc.ai_panel.pi_ask = None;
+        self.doc.ai_panel.pi_bridge = None;
+        self.doc.ai_panel.pi_cancel = false;
         if !self.doc.ai_panel.running() {
             return;
         }

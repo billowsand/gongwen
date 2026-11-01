@@ -542,7 +542,7 @@ impl GongwenApp {
             provider_ref_chip(ui, &self.config, &mref);
         });
         ui.label(
-            egui::RichText::new("AI 侧栏的技能都用这里的模型。")
+            egui::RichText::new("分阶段写作与普通技能使用这里的模型；Pi 在下方单独选择。")
                 .size(theme::font_sizes::SMALL)
                 .color(theme::text_muted()),
         );
@@ -656,6 +656,43 @@ impl GongwenApp {
                 egui::DragValue::new(&mut self.config.lm_studio.timeout_seconds).range(5..=1800),
             );
         });
+
+        // ── 智能写作（Pi） ──────────────────────────────────────────
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            sub_heading(ui, "智能写作（Pi）", None);
+            let mref = self.config.pi_model.clone();
+            provider_ref_chip(ui, &self.config, &mref);
+        });
+        ui.label(
+            egui::RichText::new(
+                "侧栏「智能写作（Pi 试用）」专用模型，与文字起草分开选。不选就不启动 Pi，\
+                 不会偷偷回落到起草模型。地址与密钥仍在「模型服务商管理」里维护；\
+                 窗口与思考深度沿用上方文字起草的设置；每轮执行上限 15 分钟，等用户回答时暂停计时。",
+            )
+            .size(theme::font_sizes::SMALL)
+            .color(theme::text_muted()),
+        );
+        setting_row(
+            ui,
+            "模型",
+            Some("不配置时 Pi 入口给出明确的配置提示"),
+            |ui| {
+                let (mut filter, mut show_all) = self.picker_state("pi");
+                model_picker(
+                    ui,
+                    "pi",
+                    &providers,
+                    &mut self.config.pi_model,
+                    Some("未选择"),
+                    &["chat"],
+                    ModelKind::Chat,
+                    &mut filter,
+                    &mut show_all,
+                );
+                self.store_picker_state("pi", filter, show_all);
+            },
+        );
 
         // ── 文字复核 ────────────────────────────────────────────────
         ui.add_space(10.0);

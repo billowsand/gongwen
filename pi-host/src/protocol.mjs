@@ -132,15 +132,63 @@ export function validateInit(value) {
       current: typeof workspace.current === "string" ? workspace.current : "input/current.md",
       request: typeof workspace.request === "string" ? workspace.request : "input/request.md",
       skills: typeof workspace.skills === "string" ? workspace.skills : "skills/gongwen-markdown",
+      piSkills: typeof workspace.piSkills === "string" ? workspace.piSkills : "skills/pi-skills",
+      materials: typeof workspace.materials === "string" ? workspace.materials : "input/materials",
     },
     model: { baseUrl, apiKey, modelId, contextWindow, maxTokens, reasoning, thinkingLevel },
-    task: { request, kind, systemDate },
+    task: {
+      request,
+      kind,
+      systemDate,
+      skill: optionalText(task.skill, "task.skill", 100),
+      selection: optionalSelection(task.selection),
+      materials: optionalMaterials(task.materials),
+    },
     limits: {
       maxFileBytes: optionalLimit(limits.maxFileBytes, 8 * 1024 * 1024),
       maxCandidateBytes: optionalLimit(limits.maxCandidateBytes, 2 * 1024 * 1024),
       timeoutMs: optionalLimit(limits.timeoutSeconds, 900) * 1000,
+      maxQuestionBatches: optionalLimit(limits.maxQuestionBatches, 2),
+      maxQuestions: optionalLimit(limits.maxQuestions, 3),
     },
   };
+}
+
+const MATERIAL_ROLES = new Set(["fact", "style_sample", "structure_sample", "incoming_letter"]);
+
+function optionalText(value, name, max) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  return sanitizeShort(value, max);
+}
+
+function optionalSelection(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const start = Number(value.start);
+  const end = Number(value.end);
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) return undefined;
+  return { start, end, text: sanitizeShort(value.text ?? "", 200_000) };
+}
+
+/** 只收程序写的编号文件路径与已知角色；用户文字只放在标题 / 来源里。 */
+function optionalMaterials(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 20).flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const file = typeof item.file === "string" ? item.file : "";
+    if (!/^input\/materials\/\d{2}\.md$/.test(file)) return [];
+    const role = MATERIAL_ROLES.has(item.role) ? item.role : "fact";
+    return [
+      {
+        file,
+        title: sanitizeShort(item.title ?? "", 200),
+        source: sanitizeShort(item.source ?? "", 200),
+        role,
+        sha256: typeof item.sha256 === "string" ? item.sha256.slice(0, 64) : "",
+        bytes: Number.isInteger(item.bytes) ? item.bytes : 0,
+      },
+    ];
+  });
 }
 
 function optionalThinkingLevel(value) {
