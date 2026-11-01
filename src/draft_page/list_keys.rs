@@ -336,6 +336,15 @@ fn in_fenced_code(markdown: &str, target: usize) -> bool {
     fence.is_some()
 }
 
+/// 光标是否位于 Markdown 围栏代码块内，供输入事件按源码位置避开代码内容。
+pub(super) fn cursor_is_in_fenced_code(markdown: &str, cursor: usize) -> bool {
+    if cursor > markdown.len() || !markdown.is_char_boundary(cursor) {
+        return false;
+    }
+    let ranges = line_ranges(markdown);
+    in_fenced_code(markdown, line_at_byte(&ranges, cursor))
+}
+
 fn line_ranges(text: &str) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
     let mut start = 0;

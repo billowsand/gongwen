@@ -849,6 +849,8 @@ impl DraftPage<'_> {
         // 是无穷大，拿进去算会得到 usize::MAX 行，整个界面将无法布局。
         let rows = visible_rows(ui);
         let editable = !self.doc.read_only();
+        // 规范键入的列表编号标点，由 TextEdit 正常写入正文并管理光标与撤销。
+        super::list_period::normalize_editor_events(ui, &self.doc.generated_markdown, editable);
         // 智能粘贴要在编辑框绘制之前：把本帧的 `Event::Paste` 换成转换结果，
         // 否则 TextEdit 会再插一遍纯文本。Shift 按着时这里不接管，原样粘贴。
         self.smart_paste(ui, editable);

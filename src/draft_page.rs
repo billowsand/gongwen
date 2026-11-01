@@ -37,6 +37,7 @@ mod form;
 mod format_clean;
 mod heading_focus;
 mod list_keys;
+mod list_period;
 mod markdown;
 mod navigator;
 mod page;
