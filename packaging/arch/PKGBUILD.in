@@ -2,7 +2,7 @@
 # 模板：packaging/arch/PKGBUILD.in
 pkgname=gongwen-assistant
 pkgver=@PKGVER@
-pkgrel=1
+pkgrel=@PKGREL@
 pkgdesc='基于 egui 与本地模型服务的离线公文写作助手（Typst 进程内排版，离线可用）'
 arch=('@PKGARCH@')
 url='https://github.com/billowsand/gongwen'

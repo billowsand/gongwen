@@ -6,6 +6,10 @@
 #   staging-dir  scripts/stage-linux-portable.sh 组装出来的便携目录
 #   output-dir   .pkg.tar.zst 与 .sha256 的输出位置
 #
+# 环境变量：
+#   GONGWEN_PKGREL  pkgrel（默认为 1）。本机重装同版本时把它加一，否则 pacman -U
+#                   会因版本相同而跳过（“up to date -- skipping”）。
+#
 # 只能在有 pacman / makepkg 的环境里跑（CI 用 archlinux:base 容器，本机可用
 # Arch / Omarchy 机器）。依赖列表不是手抄的：ldd 出来的动态库用 pacman -Qoq
 # 反查归属包，再补上 winit 运行时 dlopen 的那几个（ldd 看不到）与桌面集成需要
@@ -17,6 +21,7 @@ VERSION="${1:?usage: package-arch-pkg.sh <version> <staging-dir> <output-dir> [a
 STAGING="${2:?missing staging directory}"
 OUTPUT_DIR="${3:?missing output directory}"
 ARCH="${4:-amd64}"
+PKGREL="${GONGWEN_PKGREL:-1}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 case "$ARCH" in
@@ -121,6 +126,7 @@ done
 # 用 awk 替换占位符：依赖列表是多行的，sed 的替换里带裸换行不可移植。
 awk \
     -v ver="$VERSION" \
+    -v rel="$PKGREL" \
     -v arch="$PKG_ARCH" \
     -v depsfile="$DEPS_BLOCK_FILE" \
     -v staging="$STAGING" \
@@ -134,6 +140,7 @@ BEGIN {
 {
     line = $0
     gsub(/@PKGVER@/, ver, line)
+    gsub(/@PKGREL@/, rel, line)
     gsub(/@PKGARCH@/, arch, line)
     gsub(/@PROJECT_ROOT@/, root, line)
     gsub(/@STAGING@/, staging, line)

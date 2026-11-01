@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
 # 在干净的 Arch 环境里真装一次 pacman 包，确认它能装上、文件落在该落的地方。
 #
-# Usage: verify-arch-pkg-install.sh <path-to-pkg.tar.zst>
+# Usage: verify-arch-pkg-install.sh [--no-install] <path-to-pkg.tar.zst>
+#
+#   --no-install  只做静态校验，不执行 pacman -U（用于「已经装好了再验一遍」
+#                 或本地无管理员口令时先看包对不对）。默认行为不变：装一次再验。
 #
 # 以 root 在一次性容器里跑（见 release.yml 的 verify-arch-pkg）。装得上不等于
 # 打得开，所以这个脚本只做"静态"检查：依赖能不能解析、文件在不在、属主对不对、
 # 动态库有没有缺的。真正起一次窗口的是 scripts/smoke-launch-linux.sh。
 set -euo pipefail
 
-PKG="${1:?usage: verify-arch-pkg-install.sh <path-to-pkg.tar.zst>}"
+DO_INSTALL=1
+if [ "${1:-}" = "--no-install" ]; then
+    DO_INSTALL=0
+    shift
+fi
+PKG="${1:?usage: verify-arch-pkg-install.sh [--no-install] <path-to-pkg.tar.zst>}"
 PKG="$(cd "$(dirname "$PKG")" && pwd)/$(basename "$PKG")"
 
 if [ ! -f "$PKG" ]; then
@@ -20,8 +28,12 @@ echo "== Target: Arch Linux ($(uname -m)), $(pacman --version | head -1)"
 
 # 依赖解析：pacman -U 时如果缺依赖会从仓库补装；仓库里没有的依赖名会在这里
 # 直接暴露出来（写错包名时 pacman -U 在用户机器上会拒装）。
-pacman -Sy --noconfirm
-pacman -U --noconfirm "$PKG"
+if [ "$DO_INSTALL" -eq 1 ]; then
+    pacman -Sy --noconfirm
+    pacman -U --noconfirm "$PKG"
+else
+    echo "== --no-install: 跳过 pacman -U，只校验已安装状态"
+fi
 
 status="$(pacman -Q gongwen-assistant 2>/dev/null || true)"
 echo "== pacman -Q: $status"

@@ -285,6 +285,14 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   `%LOCALAPPDATA%\Programs\GongwenAssistant\SHA256SUMS.txt`，给别人做包传
   `-BaselineDir`/`-BaselineManifest`。注意 Inno 的 `#include` 与 `#if` 只认字符串，
   include 路径要正斜杠。
+- **本机打 pacman 包**（Arch / Omarchy）：`scripts/package-arch-local.sh` 在本机一次
+  跑完「编译 → 组装便携目录 → makepkg 打 `.pkg.tar.zst` → `pacman -U` 安装 → 静态
+  校验」，口径与 `release.yml` 的 `build-linux-x86_64-arch` + `verify-arch-pkg` 一致
+  （`--no-default-features --features linux-portal-dialogs`，依赖名由 `pacman -Qoq`
+  反查）。提权优先用免密 `sudo`，没有就走 `pkexec`；本机已装同版本时自动把 `pkgrel`
+  加一（`GONGWEN_PKGREL` 可指定），否则 `pacman -U` 会因版本相同而跳过。字体来自
+  `gongwen-runtime` 的 `runtime.zip`，解到 `runtime/`（清单用仓库里的
+  `runtime/SHA256SUMS.txt` 核对校验值，字体目录本身不入库）。
 
 ## 约定
 
