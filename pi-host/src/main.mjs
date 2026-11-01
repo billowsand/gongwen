@@ -12,6 +12,9 @@ import {
   validateInit,
 } from "./protocol.mjs";
 import { AgentError, runAgentJob } from "./agent.mjs";
+import { acquireOwner } from "./owner.mjs";
+import { receiptEvents } from "./delivery.mjs";
+import path from "node:path";
 
 // 先捕获真正的 stdout，再把其他写 stdout 的代码改道 stderr；协议只用 capturedWrite。
 const capturedWrite = process.stdout.write.bind(process.stdout);
@@ -40,10 +43,18 @@ async function readInit() {
   return init;
 }
 
-function finish(code) {
+function finish(code, owner) {
   // 给 stdout 一点时间把最后一条协议行写完，再结束进程；Durable 的计时器与
   // SQLite 句柄不必逐个拆，Rust 已在收到终止事件后回收子进程。
-  setTimeout(() => process.exit(code), 50);
+  setTimeout(() => {
+    try {
+      owner?.release();
+    } catch {
+      // 释放失败不影响退出；OS 会在进程结束时回收。
+    }
+    // 完成事件之后发生的未捕获异常仍应让 Rust 拒绝交付，不能被成功定时器抹掉。
+    process.exit(Number(process.exitCode) || code);
+  }, 50);
 }
 
 async function main() {
@@ -82,6 +93,20 @@ async function main() {
       throw error;
     }
   };
+
+  // 同一轮工作区只能有一个 host：用 SQLite 独占锁，不靠界面 busy 或残留文件。
+  let owner;
+  try {
+    owner = acquireOwner(path.join(config.workspace.delivery, "host-owner.sqlite"), {
+      runId: config.runId,
+    });
+  } catch (error) {
+    const code = error?.code === "owner_busy" ? "owner_busy" : "owner_failed";
+    send({ type: "error", code, message: error?.message ?? "占用 Pi 工作区失败" });
+    writeError(error?.message ?? "占用 Pi 工作区失败");
+    finish(1, undefined);
+    return;
+  }
 
   let cancel;
   let cancelled = false;
@@ -137,10 +162,16 @@ async function main() {
         cancel = fn;
       },
     });
-    if (result.report) {
+    if (result.receipt) {
+      // 恢复时找到已经落盘的回执：原样交回，不再调用模型。
+      for (const event of receiptEvents(config.workspace.delivery, result.receipt)) {
+        send(event);
+      }
+      finish(0, owner);
+    } else if (result.report) {
       // 清单事件已在工具调用时发出；这里只补完成事件，不带 submitted。
       send({ type: "completed", submitted: false });
-      finish(0);
+      finish(0, owner);
     } else if (result.snapshot) {
       send({
         type: "submitted",
@@ -151,23 +182,23 @@ async function main() {
         bytes: result.snapshot.bytes,
       });
       send({ type: "completed", submitted: true });
-      finish(0);
+      finish(0, owner);
     } else {
       send({ type: "completed", submitted: false });
-      finish(0);
+      finish(0, owner);
     }
   } catch (error) {
     const code = error instanceof AgentError ? error.code : "agent_failed";
     if (code === "cancelled" || cancelled) {
       send({ type: "cancelled", message: "已停止，未交付任何提案。" });
-      finish(3);
+      finish(3, owner);
     } else {
       send({
         type: "error",
         code,
         message: error?.message || "智能写作失败",
       });
-      finish(1);
+      finish(1, owner);
     }
   }
 }

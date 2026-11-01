@@ -12,7 +12,7 @@
 #     之前一直叫 libgdk-pixbuf2.0-0（麒麟 V10 上就是这个名字）。
 #   - libgcc：Debian bullseye / Ubuntu 20.04 起才叫 libgcc-s1，buster 上是 libgcc1。
 # 用 "新名 | 旧名" 两者择一，新旧系统都能满足。
-DEPENDS="libc6 (>= 2.28), libgcc-s1 | libgcc1, libglib2.0-0, libgtk-3-0, \
+DEPENDS="libc6 (>= 2.28), libgcc-s1 | libgcc1, libstdc++6 (>= 8.1), libglib2.0-0, libgtk-3-0, \
 libgdk-pixbuf-2.0-0 | libgdk-pixbuf2.0-0, libpango-1.0-0, libcairo2, libatk1.0-0, libx11-6, \
 libx11-xcb1, libxcb1, libxcb-render0, libxcb-shape0, libxcb-xfixes0, \
 libxkbcommon0, libxkbcommon-x11-0, libxrender1, libxrandr2, libxcursor1, \

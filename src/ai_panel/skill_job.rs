@@ -506,7 +506,9 @@ impl DraftPage<'_> {
         let preset = request
             .preset
             .filter(|_| candidates.iter().any(|skill| skill.uses_preset()))
-            .and_then(|id| self.config.ai_prompt(id));
+            .and_then(|id| self.config.ai_prompt(id))
+            // 旧会话重跑也要核对适用文种，不能再依赖已移除的输入区下拉过滤。
+            .filter(|preset| preset.applies_to(self.doc.draft.kind));
         if text.trim().is_empty() && preset.is_none() && request.materials.is_empty() {
             return Err(if candidates.iter().any(|skill| skill.uses_preset()) {
                 "写下要求，或选一个润色预设。".into()

@@ -80,6 +80,31 @@ while read -r expected relative; do
     install -m 644 "$source_file" "$runtime_out/$relative"
 done < "$RUNTIME_DIR/SHA256SUMS.txt"
 
+# 随包 Pi 运行时：必须先由 scripts/stage-pi-runtime.sh 组装好，manifest 与当前
+# 架构一致，缺文件 / 哈希不符 / 不是 npm ci 产物都直接失败。
+pi_platform=""
+case "$(uname -m)" in
+    aarch64|arm64) pi_platform="linux-arm64" ;;
+    x86_64|amd64) pi_platform="linux-x64" ;;
+    *) echo "error: unsupported architecture for Pi runtime" >&2; exit 1 ;;
+esac
+pi_source="$PROJECT_ROOT/runtime/pi"
+pi_node="$pi_source/bin/node"
+if [ ! -x "$pi_node" ]; then
+    echo "error: Pi runtime not staged ($pi_source). Run scripts/stage-pi-runtime.sh --platform $pi_platform" >&2
+    exit 1
+fi
+"$pi_node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$pi_source" "$pi_platform" >/dev/null
+mkdir -p "$runtime_out/pi"
+"$pi_node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$pi_source" "$pi_platform" --list | while read -r relative; do
+    mkdir -p "$runtime_out/pi/$(dirname "$relative")"
+    install -m 644 "$pi_source/$relative" "$runtime_out/pi/$relative"
+done
+# manifest 自己不在文件清单里，必须单独带上。
+install -m 644 "$pi_source/manifest.json" "$runtime_out/pi/manifest.json"
+chmod 755 "$runtime_out/pi/bin/node"
+bash "$PROJECT_ROOT/scripts/check-node-glibc.sh" "$runtime_out/pi/bin/node"
+
 # 初始基础词表独立随包，便于更新：项目自维护的 quan.txt 为唯一正式来源，
 # mabiao.txt 只作旧机后备；两者都没有时由使用者在设置页导入。
 base_table="$PROJECT_ROOT/assets/fuma/quan.txt"

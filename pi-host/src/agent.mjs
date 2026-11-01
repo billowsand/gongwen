@@ -20,6 +20,12 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import { WorkspaceGuard, WorkspaceEnv } from "./paths.mjs";
 import { createDomainTools, createToolBridge, BridgeError } from "./bridge.mjs";
+import {
+  DeliveryError,
+  readReceipt,
+  writeDocumentReceipt,
+  writeReportReceipt,
+} from "./delivery.mjs";
 import { REPORT_TOOL_NAME, SUBMIT_TOOL_NAME, systemPrompt, userPrompt } from "./prompt.mjs";
 
 const PROVIDER_ID = "gongwen";
@@ -31,6 +37,17 @@ export class AgentError extends Error {
     this.name = "AgentError";
     this.code = code;
   }
+}
+
+/** 为生成保留空间，同时让 32k 等窗口也能在一次长任务中切出可压缩的历史。 */
+export function writingCompaction(model) {
+  const reserveTokens = Math.min(16_384, Math.floor(model.contextWindow / 2));
+  return {
+    enabled: true,
+    reserveTokens,
+    keepRecentTokens: Math.max(1, Math.min(4_096, Math.floor((model.contextWindow - reserveTokens) / 4))),
+    backgroundTokens: 0,
+  };
 }
 
 /** 生产 provider：地址、密钥、模型与窗口全部由 init 显式给出。 */
@@ -110,7 +127,7 @@ function makePausableTimer(ms, onExpire) {
   };
 }
 
-function createSubmitTool({ guard, limits, state, onSubmitted, emit }) {
+function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId }) {
   return defineTool({
     name: SUBMIT_TOOL_NAME,
     description:
@@ -119,7 +136,7 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit }) {
       path: Type.String({ description: "work/ 下的 Markdown 文件路径" }),
       summary: Type.String({ description: "一句话说明本轮改了什么、依据了哪些材料" }),
     }),
-    execute: async (args, _api, _context) => {
+    execute: async (args, api, _context) => {
       if (state.report) {
         throw new AgentError("本轮已经交了侧栏清单；同一轮不能再提交正文。", "submit_duplicate");
       }
@@ -142,12 +159,31 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit }) {
           output: [{ type: "text", text: `本轮已提交 ${relative}（${state.snapshot.bytes} 字节），以第一次提交为准。` }],
         };
       }
-      state.snapshot = { path: relative, content: text, sha256: hash, bytes, summary };
+      // 先把内容复制到运行目录并落回执，再发事件：两个顺序之间崩溃都能用回执交回
+      // 同一份产物，且绝不重读模型可写的 work/。
+      let receipt;
+      try {
+        receipt = writeDocumentReceipt(deliveryDir, {
+          runId,
+          requestId,
+          relative,
+          content: text,
+          sha256: hash,
+          bytes,
+          summary,
+          callId: api?.callId ?? "",
+        });
+      } catch (error) {
+        throw new AgentError(
+          `提交失败：写不出交付回执（${error instanceof DeliveryError ? error.message : error?.message ?? error}）`,
+          "receipt_failed",
+        );
+      }
+      state.snapshot = { path: relative, content: text, sha256: hash, bytes, summary, receipt };
       emit({
         type: "progress",
         message: `已提交 ${relative}，等待程序检查`,
-      });
-      onSubmitted?.(state.snapshot);
+      });      onSubmitted?.(state.snapshot);
       return {
         output: [
           {
@@ -162,7 +198,7 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit }) {
 }
 
 /** 审核 / 找资料的清单：只进侧栏，不产生正文提案。 */
-function createReportTool({ state, emit }) {
+function createReportTool({ state, emit, deliveryDir, runId, requestId }) {
   return defineTool({
     name: REPORT_TOOL_NAME,
     description:
@@ -177,35 +213,59 @@ function createReportTool({ state, emit }) {
         }),
       ),
     }),
-    execute: async (args) => {
+    execute: async (args, api) => {
       if (state.snapshot) {
         throw new AgentError("本轮已经提交了正文；同一轮不能再交清单。", "report_conflict");
       }
-      const items = Array.isArray(args.items)
-        ? args.items.slice(0, 100).map((item) => ({
-            title: String(item.title ?? "").slice(0, 2_000),
-            detail: String(item.detail ?? "").slice(0, 4_000),
-            severity: String(item.severity ?? "").slice(0, 50),
-          }))
-        : [];
-      state.report = { summary: String(args.summary ?? "").slice(0, 2_000), items };
-      emit({ type: "report", summary: state.report.summary, items });
+      let receipt;
+      try {
+        receipt = writeReportReceipt(deliveryDir, {
+          runId,
+          requestId,
+          summary: String(args.summary ?? ""),
+          items: Array.isArray(args.items) ? args.items : [],
+          callId: api?.callId ?? "",
+        });
+      } catch (error) {
+        throw new AgentError(
+          `交清单失败：写不出交付回执（${error instanceof DeliveryError ? error.message : error?.message ?? error}）`,
+          "receipt_failed",
+        );
+      }
+      // 事件与回执用同一份（已按写上限裁过）条目，两侧看到的一致。
+      state.report = {
+        summary: receipt.summary,
+        items: receipt.items,
+        omitted: receipt.omitted ?? 0,
+      };
+      emit({ type: "report", summary: state.report.summary, items: state.report.items });
       return {
-        output: [{ type: "text", text: `已交回侧栏清单（${items.length} 项），正文没有改变。` }],
+        output: [
+          {
+            type: "text",
+            text: `已交回侧栏清单（${receipt.items.length} 项${receipt.omitted ? `，另有 ${receipt.omitted} 项超出上限未带上` : ""}），正文没有改变。`,
+          },
+        ],
         control: { terminate: true },
       };
     },
   });
 }
 
-function createExtension({ guard, limits, state, onSubmitted, emit, bridge }) {
+function createExtension({ guard, limits, state, onSubmitted, emit, bridge, deliveryDir, runId, requestId }) {
   const tools = [
-    ...createDomainTools(bridge),
+    ...createDomainTools(bridge, {
+      readDocument: (path) => {
+        const result = guard.readSubmission(path, { maxFileBytes: limits.maxFileBytes });
+        if (!result.ok) throw new BridgeError(result.error.message);
+        return result.value.text;
+      },
+    }),
     createReadTool(),
     createWriteTool(),
     createEditTool(),
-    createSubmitTool({ guard, limits, state, onSubmitted, emit }),
-    createReportTool({ state, emit }),
+    createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId }),
+    createReportTool({ state, emit, deliveryDir, runId, requestId }),
   ];
   return defineExtension({ name: "gongwen-writing", tools });
 }
@@ -218,8 +278,21 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
   const controller = withCancel(BACKGROUND_CONTEXT);
   onCancel?.(() => controller.cancel(new AgentError("已取消", "cancelled")));
 
+  const deliveryDir = config.workspace.delivery;
+  // 恢复时先看回执：上一次已经落盘了成品，就直接交回同一份，不重跑模型。
+  if (config.recovery?.resume) {
+    const receipt = readReceipt(deliveryDir, config.runId);
+    if (receipt) {
+      if (receipt.requestId !== config.requestId) {
+        throw new AgentError("交付回执的输入标识与本轮不一致，已拒绝恢复。", "receipt_request_mismatch");
+      }
+      emit({ type: "progress", message: "找到上次已落盘的交付回执，直接交回同一份成品。" });
+      return { receipt };
+    }
+  }
+
   const guard = new WorkspaceGuard(config.workspace.root);
-  const state = { snapshot: undefined, report: undefined };
+  const state = { snapshot: undefined, report: undefined, parked: undefined };
   let submitResolve;
   const submitted = new Promise((resolve) => {
     submitResolve = resolve;
@@ -253,6 +326,9 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
         state,
         emit,
         bridge,
+        deliveryDir,
+        runId: config.runId,
+        requestId: config.requestId,
         onSubmitted: (snapshot) => submitResolve(snapshot),
       }),
     );
@@ -271,18 +347,54 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
         settings: {
           stream: { timeoutMs: Math.min(config.limits.timeoutMs, 180_000) },
           retry: { maxRetries: 1 },
-          compaction: { enabled: true, reserveTokens: 8192 },
+          compaction: writingCompaction(selectedModel),
           afterFailedRun: "withdraw",
+          // 不自动无限重启：同一个任务连续被崩溃打断两次就停用，等人工决定。
+          restartLimit: 2,
+        },
+        onReport: (error, info) => {
+          if (info?.type === "task_parked") {
+            state.parked = "restart_limit";
+            emit({
+              type: "progress",
+              message: "任务连续被中断，宿主已停用自动重跑，需要人工处理。",
+            });
+          } else if (info?.type === "task_faulted") {
+            emit({
+              type: "progress",
+              message: `任务失败：${String(error?.message ?? error).slice(0, 300)}`,
+            });
+          }
         },
       },
       controller.context,
     );
 
+    // 继续上次进程留下的 run（未完成的生成与工具调用）。捕获异常时可能已经没有任何
+    // 待跑任务，这不算失败。
+    harness.resume();
+    try {
+      const inspection = await harness.inspect(controller.context);
+      const parked = inspection.tasks.find(
+        (task) => task.state?.kind === "blocked" && task.state.reason === "restart_limit",
+      );
+      if (parked) {
+        state.parked = "restart_limit";
+        throw new AgentError(
+          "这次任务已经连续两次被中断，宿主停用了自动重跑。原件与运行记录都在本机：可以点「从头写」重新开一轮，或在「已中断」卡片上先「接着写」由人工确认一次。",
+          "task_parked",
+        );
+      }
+    } catch (error) {
+      if (error instanceof AgentError) throw error;
+      // inspect 失败不影响后续提交；真正的问题会在 wait 时暴露。
+    }
+
     const root = await harness.root(controller.context, {
       agent: {
         model: { provider: selectedModel.provider, modelId: selectedModel.id },
         thinkingLevel: config.model.reasoning ? (config.model.thinkingLevel ?? "high") : "off",
-        instructions: systemPrompt(config.workspace, config.task),
+        instructions: systemPrompt(config.workspace, config.task, config.recovery),
         cwd: config.workspace.root,
       },
     });
@@ -308,47 +420,70 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     });
 
     emit({ type: "progress", message: "正在读取正文、材料与写作要求…" });
-    const submission = await root.submit(
-      {
-        type: "input",
-        content: userPrompt(config.task),
-        requestId: config.runId,
-      },
-      controller.context,
-    );
-    const settledPromise = submission
-      .wait(controller.context)
-      .then((value) => ({ kind: "settled", value }))
-      .catch((error) => ({ kind: "failed", error }));
-    const submittedPromise = submitted.then((value) => ({ kind: "submitted", value }));
-    const outcome = await Promise.race([settledPromise, submittedPromise]);
-
-    if (outcome.kind === "submitted") {
-      return { snapshot: outcome.value };
+    if (config.recovery?.continuationId) {
+      // 先让崩溃前的 Durable 任务收尾，防止人工补交和原任务同时生成或提交。
+      await root.waitForIdle(controller.context);
+      if (state.snapshot) return { snapshot: state.snapshot };
+      if (state.report) return { report: state.report };
     }
-    if (outcome.kind === "failed") {
-      throw outcome.error;
-    }
-    if (state.snapshot) {
-      return { snapshot: state.snapshot };
-    }
-    if (state.report) {
-      return { report: state.report };
-    }
-    if (outcome.value.status === "unanswered") {
-      throw new AgentError(
-        `模型没有完成本轮：${outcome.value.reason}${outcome.value.detail ? `（${JSON.stringify(outcome.value.detail)}）` : ""}`,
-        "unanswered",
+    const deliveryId = config.recovery?.continuationId
+      ? `${config.runId}:resume:${config.recovery.continuationId}` : config.runId;
+    // 文件交付是宿主契约。模型文字结束或长度截断都不等于交付；有限续跑，仍要求显式工具提交。
+    // 每次补交的 requestId 固定，崩溃恢复时重开同一个 submission，不叠加新一轮额度。
+    for (let attempt = 0; attempt <= 2; attempt += 1) {
+      const submission = await root.submit(
+        {
+          type: "input",
+          content: attempt === 0 ? userPrompt(config.task) :
+            "上一段已经结束或达到输出长度上限，但本轮还没有交付回执。请继续完成剩余工作，不要重写已有成稿。先读取 work/ 中实际文件；检查稿件时用 check_document({path:\"work/文件名.md\"})，不要把全文再放进工具参数。生成/修改任务必须调用 submit_document({path,summary}) 提交你确认的完整成品；仅审核/找资料用 finish_report。不要只用聊天文字说已完成。",
+          requestId: attempt === 0 ? config.runId : `${deliveryId}:delivery:${attempt}`,
+        },
+        controller.context,
       );
+      const settledPromise = submission
+        .wait(controller.context)
+        .then((value) => ({ kind: "settled", value }))
+        .catch((error) => ({ kind: "failed", error }));
+      const submittedPromise = submitted.then((value) => ({ kind: "submitted", value }));
+      const outcome = await Promise.race([settledPromise, submittedPromise]);
+
+      if (outcome.kind === "submitted") {
+        return { snapshot: outcome.value };
+      }
+      if (outcome.kind === "failed") {
+        throw outcome.error;
+      }
+      if (state.snapshot) {
+        return { snapshot: state.snapshot };
+      }
+      if (state.report) {
+        return { report: state.report };
+      }
+      if (outcome.value.status === "unanswered") {
+        throw new AgentError(
+          `模型没有完成本轮：${outcome.value.reason}${outcome.value.detail ? `（${JSON.stringify(outcome.value.detail)}）` : ""}`,
+          "unanswered",
+        );
+      }
+      if (attempt < 2) {
+        emit({ type: "progress", message: `尚未交付成品，正在继续检查与提交（${attempt + 1}/2）…` });
+      }
     }
     throw new AgentError(
-      "模型结束了本轮但没有提交成品（未调用 submit_document 或 finish_report）。",
+      "本轮仍未完成成品交付，已保留工作文件与运行记录。请稍后重试；无需调整最大输出 Token。",
       "not_submitted",
     );
   } catch (error) {
     if (timedOut) throw new AgentError("Pi 智能写作超时，未交付任何提案。", "timeout");
     if (controller.context.abortSignal?.aborted && !state.snapshot && !state.report) {
       throw new AgentError("已停止，未交付任何提案。", "cancelled");
+    }
+    if (state.parked === "restart_limit") {
+      throw new AgentError(
+        error?.message ??
+          "这次任务连续被中断，宿主停用了自动重跑。可以点「从头写」重新开一轮。",
+        "task_parked",
+      );
     }
     if (error instanceof BridgeError) {
       throw new AgentError(`工具调用失败：${error.message}`, "tool_failed");

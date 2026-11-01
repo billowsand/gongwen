@@ -13,10 +13,11 @@ use super::PiWorkspace;
 use super::delivery::{PiSelection, safe_work_path, sha256_hex, verify_submission};
 use super::materials::PiMaterialMeta;
 use super::protocol::{
-    HostEvent, InitLimits, InitMessage, InitModel, InitSelection, InitTask, InitWorkspace,
-    MAX_CANDIDATE_BYTES, MAX_DELIVERY_BYTES, MAX_EVENTS, MAX_HOST_LINE_BYTES, MAX_MESSAGE_CHARS,
-    PROTOCOL_VERSION, PiReportItem, RawQuestion,
+    HOST_VERSION, HostEvent, InitLimits, InitMessage, InitModel, InitRecovery, InitSelection,
+    InitTask, InitWorkspace, MAX_CANDIDATE_BYTES, MAX_DELIVERY_BYTES, MAX_EVENTS,
+    MAX_HOST_LINE_BYTES, MAX_MESSAGE_CHARS, PROTOCOL_VERSION, PiReportItem, RawQuestion,
 };
+use super::recovery::{PiReceipt, PiRunLog, PiRunStatus, read_receipt, read_snapshot};
 use super::runtime::hidden_command;
 use super::tools::PiToolContext;
 use crate::agent::clarify::{Question, Reply};
@@ -69,6 +70,10 @@ pub(crate) struct PiJob {
     pub(crate) base: String,
     pub(crate) tools: Arc<PiToolContext>,
     pub(crate) bridge: Arc<PiBridge>,
+    /// 运行记录：开跑前已写一份，host 的报告与交付状态都回写在这里。
+    pub(crate) record: Arc<PiRunLog>,
+    /// 恢复模式：沿原工作区与 Durable 库，用同一份 requestId 找回原来的提交。
+    pub(crate) resume: bool,
     pub(crate) request_id: String,
     pub(crate) run_id: String,
     pub(crate) timeout: Duration,
@@ -114,17 +119,66 @@ pub(crate) struct PiAnswer {
 }
 
 /// 界面 ↔ 后台进程的受控通道：只允许送回答与读已确认答案，不暴露 stdin 原文。
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct PiBridge {
+    closed: AtomicBool,
     tx: Mutex<Option<mpsc::SyncSender<String>>>,
     answered: AtomicU64,
     confirmed: Mutex<Vec<String>>,
     confirmed_values: Mutex<Vec<String>>,
+    /// 回答先落到运行记录与事实来源，再交给 host；没有这个挂接时只留内存。
+    persist: Mutex<Option<(Arc<PiToolContext>, Arc<PiRunLog>)>>,
+}
+
+impl std::fmt::Debug for PiBridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PiBridge")
+            .field("answered", &self.answered())
+            .finish_non_exhaustive()
+    }
 }
 
 impl PiBridge {
     fn install(&self, tx: mpsc::SyncSender<String>) {
         *self.tx.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(tx);
+    }
+
+    /// 后台进程挂上工具台账与运行记录：回答落盘早于 host 看到回答。
+    fn attach(&self, tools: Arc<PiToolContext>, record: Arc<PiRunLog>) {
+        *self
+            .persist
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some((tools, record));
+    }
+
+    /// 把用户回答登记为事实并立即落盘；失败就不把回答交给模型。
+    fn persist_answers(&self, answers: &[PiAnswer]) -> Result<(), String> {
+        let values: Vec<String> = answers
+            .iter()
+            .filter(|answer| !answer.value.trim().is_empty())
+            .map(|answer| answer.value.chars().take(2_000).collect())
+            .collect();
+        let display: Vec<String> = answers
+            .iter()
+            .filter(|answer| !answer.value.trim().is_empty())
+            .map(|answer| format!("{}：{}", answer.question.trim(), answer.value.trim()))
+            .collect();
+        let guard = self
+            .persist
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if self.closed.load(Ordering::Acquire) {
+            return Err("Pi 进程已经结束，回答没有送到。".into());
+        }
+        if let Some((tools, record)) = guard.as_ref() {
+            let mut sources = tools.fact_sources();
+            sources.extend(values.iter().cloned());
+            record
+                .confirmed_sources(&display, &values, &sources)
+                .map_err(|error| format!("记录已确认回答失败，未把回答交给模型：{error}"))?;
+            tools.confirm_answers(&values);
+        }
+        Ok(())
     }
 
     fn answered(&self) -> u64 {
@@ -141,9 +195,13 @@ impl PiBridge {
     /// 回答一批题。题目 ID 绑定本轮问题，旧轮 / 重复的回答会被 host 忽略；
     /// 这里也拒绝空 ID 列表，避免看似“答了”其实没答。
     pub(crate) fn answer(&self, call_id: &str, answers: &[PiAnswer]) -> Result<(), String> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err("Pi 进程已经结束，回答没有送到。".into());
+        }
         if call_id.trim().is_empty() || answers.is_empty() {
             return Err("没有可提交的回答".into());
         }
+        self.persist_answers(answers)?;
         let mut payload = serde_json::Map::new();
         payload.insert("type".into(), "tool_result".into());
         payload.insert("callId".into(), call_id.into());
@@ -194,6 +252,24 @@ impl PiBridge {
     }
 }
 
+/// 结束后关闭回答能力，并等正在落盘的回答完成；随后才释放运行期所有权锁。
+struct BridgeLifetime<'a>(&'a PiBridge);
+impl Drop for BridgeLifetime<'_> {
+    fn drop(&mut self) {
+        self.0.closed.store(true, Ordering::Release);
+        self.0
+            .persist
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+        self.0
+            .tx
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+    }
+}
+
 /// 成功交付的固定版本。
 #[derive(Debug)]
 pub(crate) struct PiDelivery {
@@ -212,6 +288,10 @@ pub(crate) struct PiDelivery {
     pub(crate) confirmed: Vec<String>,
     pub(crate) workspace_label: String,
     pub(crate) elapsed: Duration,
+    /// 这次结果是从上次运行的回执恢复出来的，没有重新生成正文。
+    pub(crate) recovered: bool,
+    /// 本轮事实来源文件的哈希（`pi/sources.md`）；重载会话后继续改提案时用。
+    pub(crate) sources_sha256: Option<String>,
 }
 
 /// 审核 / 找资料交的清单：只进侧栏，不产生正文提案。
@@ -222,6 +302,8 @@ pub(crate) struct PiReport {
     pub(crate) confirmed: Vec<String>,
     pub(crate) workspace_label: String,
     pub(crate) elapsed: Duration,
+    pub(crate) recovered: bool,
+    pub(crate) sources_sha256: Option<String>,
 }
 
 #[derive(Debug)]
@@ -231,11 +313,10 @@ pub(crate) enum PiOutcome {
 }
 
 struct Submission {
-    path: String,
-    summary: String,
-    content: String,
-    sha256: String,
-    bytes: usize,
+    /// host 落盘的交付回执；没有回执就不算交付。
+    receipt: PiReceipt,
+    /// 回执是重放上次已落盘成品得到的。
+    recovered: bool,
 }
 
 /// 子进程守卫：任何返回路径都 kill + wait，避免孤儿进程与卡住的管道。
@@ -273,13 +354,33 @@ struct ToolDone {
 }
 
 /// 跑一轮 host，直到提交成功、交回报告或失败。
+fn lock_run(run: &std::path::Path) -> Result<std::fs::File, String> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(run.join("rust-owner.lock"))
+        .map_err(|error| format!("打开 Pi 运行所有权锁失败：{error}"))?;
+    lock.try_lock()
+        .map_err(|error| format!("这一轮 Pi 正由另一个窗口处理，请稍后再试：{error}"))?;
+    Ok(lock)
+}
+
 pub(crate) fn run(
     job: PiJob,
     cancel: Arc<AtomicBool>,
     mut on_event: impl FnMut(PiEvent),
 ) -> Result<PiOutcome, String> {
+    // 覆盖 Rust 侧的准备完成后更新、host 退出后落盘窗口；Node 自己另持 SQLite 锁，
+    // 即使 Rust 崩溃而 host 尚存，也不能同时打开 Durable 库。
+    let _run_owner = lock_run(&job.workspace.run)?;
+    let _bridge_lifetime = BridgeLifetime(&job.bridge);
     let started = Instant::now();
     if cancel.load(Ordering::Relaxed) {
+        if !job.resume {
+            job.record
+                .finished(PiRunStatus::Interrupted, "用户在开跑前就停止了这一轮。");
+        }
         return Err("已停止 Pi 智能写作，未交付任何提案。".into());
     }
     if job.model.model_id.trim().is_empty() {
@@ -293,6 +394,8 @@ pub(crate) fn run(
     {
         return Err(error);
     }
+    // 恢复不在这里直读回执：必须让 host 在 SQLite 所有权锁内重放，否则另一个仍活着的
+    // host 可能同时改同一轮的 sources / 运行记录。
     let mut command = hidden_command(&job.runtime.node);
     command
         .arg("--disable-warning=ExperimentalWarning")
@@ -402,6 +505,7 @@ pub(crate) fn run(
             skills: "skills/gongwen-markdown".into(),
             pi_skills: "skills/pi-skills".into(),
             materials: "input/materials".into(),
+            delivery: path_text(&job.workspace.run),
         },
         model: InitModel {
             base_url: job.model.base_url.clone(),
@@ -431,6 +535,11 @@ pub(crate) fn run(
             max_question_batches: MAX_QUESTION_BATCHES,
             max_questions: MAX_QUESTIONS_PER_BATCH,
         },
+        recovery: job.resume.then(|| InitRecovery {
+            mode: "resume",
+            request_id: job.request_id.clone(),
+            continuation_id: uuid::Uuid::new_v4().to_string(),
+        }),
     };
     let mut payload =
         serde_json::to_vec(&init).map_err(|error| format!("组装 Pi init 消息失败：{error}"))?;
@@ -438,6 +547,7 @@ pub(crate) fn run(
     // stdin 也可能被不读输入的 host 堵住；写线程只持管道，主循环仍能超时并回收进程。
     let (control_tx, control_rx) = mpsc::sync_channel(4);
     job.bridge.install(control_tx.clone());
+    job.bridge.attach(job.tools.clone(), job.record.clone());
     std::thread::spawn(move || {
         if stdin.write_all(&payload).is_err() || stdin.flush().is_err() {
             let _ = stdin_errors.send(StdoutMsg::Protocol("Pi host 没有接收初始配置".into()));
@@ -458,6 +568,8 @@ pub(crate) fn run(
     let mut paused = Duration::ZERO;
     let mut submitted: Option<Submission> = None;
     let mut report: Option<(String, Vec<PiReportItem>)> = None;
+    let mut report_recovered = false;
+    let mut delivered_receipt: Option<PiReceipt> = None;
     let mut ready = false;
     let mut events = 0usize;
     let mut cancel_sent: Option<Instant> = None;
@@ -474,13 +586,7 @@ pub(crate) fn run(
         // 人在看题时不计执行超时；回答之后接着按剩余时间算。
         if let Some((_, answered, since)) = &waiting {
             if job.bridge.answered() != *answered {
-                let values = job
-                    .bridge
-                    .confirmed_values
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .clone();
-                job.tools.confirm_answers(&values);
+                // 回答已在 `PiBridge::answer` 里登记为事实并落盘（早于交给 host）。
                 paused += since.elapsed();
                 waiting = None;
             } else if since.elapsed() > Duration::from_secs(30 * 60) {
@@ -489,6 +595,10 @@ pub(crate) fn run(
         }
         if waiting.is_none() && started.elapsed().saturating_sub(paused) > job.timeout {
             let _ = control_tx.try_send("{\"type\":\"cancel\"}\n".into());
+            if ready || !job.resume {
+                job.record
+                    .finished(PiRunStatus::Failed, "Pi 智能写作执行超时。");
+            }
             return Err(format!(
                 "Pi 智能写作超时（{} 秒），未交付任何提案。",
                 job.timeout.as_secs()
@@ -514,7 +624,13 @@ pub(crate) fn run(
                 if ok {
                     let ledger = job.tools.evidence();
                     if let Some(item) = ledger.get(done.evidence_before) {
+                        job.record.evidence(&item.line());
                         on_event(PiEvent::Evidence(item.line()));
+                    }
+                    // 工具实际返回的事实先落盘，再把结果交给 host：崩溃后恢复的闸门
+                    // 仍认这些依据，不会因为“还没到最后交付”就丢掉。
+                    if let Err(error) = job.record.persist_sources(&job.tools.fact_sources()) {
+                        return Err(format!("记录本轮事实来源失败，已停止：{error}"));
                     }
                 }
                 let line = serde_json::json!({
@@ -581,9 +697,16 @@ pub(crate) fn run(
                         protocol
                     ));
                 }
+                let reported = host_version.as_deref().unwrap_or("");
+                if reported != HOST_VERSION {
+                    return Err(format!(
+                        "Pi host 版本不匹配：应用需要 {HOST_VERSION}，host 报告 {reported:?}。请重装或更新随包运行时。"
+                    ));
+                }
+                job.record.ready(reported)?;
                 on_event(PiEvent::Progress(format!(
                     "Pi host 已就绪（host {} / Node {} / 模型 {}）",
-                    host_version.as_deref().unwrap_or("?"),
+                    reported,
                     node_version.as_deref().unwrap_or("?"),
                     model.as_deref().unwrap_or("?")
                 )));
@@ -736,15 +859,28 @@ pub(crate) fn run(
                     }
                 }
             }
-            HostEvent::Report { summary, items, .. } => {
+            HostEvent::Report {
+                summary,
+                items,
+                recovered,
+                ..
+            } => {
                 if !ready {
                     return Err("Pi host 还没有报告就绪就交了清单，已拒绝。".into());
                 }
                 if submitted.is_some() {
                     return Err("Pi host 既提交了正文又交了审核清单，已拒绝。".into());
                 }
-                let items = items
-                    .into_iter()
+                let _ = (summary, items);
+                let Some(receipt) = read_receipt(&job.workspace.run, &job.run_id)? else {
+                    return Err("Pi host 交了清单却没有落交付回执，已拒绝交付。".into());
+                };
+                if receipt.is_document() || receipt.items.len() > 100 {
+                    return Err("Pi 清单回执的内容不对，已拒绝。".into());
+                }
+                let items = receipt
+                    .items
+                    .iter()
                     .take(100)
                     .map(|item| PiReportItem {
                         title: short(&item.title),
@@ -752,7 +888,9 @@ pub(crate) fn run(
                         severity: short(&item.severity),
                     })
                     .collect();
-                report = Some((short(&summary), items));
+                report = Some((short(&receipt.summary), items));
+                report_recovered = recovered;
+                delivered_receipt = Some(receipt);
             }
             HostEvent::Submitted {
                 path,
@@ -760,6 +898,7 @@ pub(crate) fn run(
                 content,
                 sha256,
                 bytes,
+                recovered,
                 ..
             } => {
                 if !ready {
@@ -772,14 +911,21 @@ pub(crate) fn run(
                 if content.len() > MAX_DELIVERY_BYTES {
                     return Err("Pi host 提交的 Markdown 超过上限".into());
                 }
+                if summary.chars().count() > 2_000 {
+                    return Err("Pi host 提交说明太长，已拒绝。".into());
+                }
+                let Some(receipt) = read_receipt(&job.workspace.run, &job.run_id)? else {
+                    return Err("Pi host 提交了正文却没有落交付回执，已拒绝交付。".into());
+                };
+                if !receipt.is_document()
+                    || receipt.path != path
+                    || receipt.bytes != bytes
+                    || receipt.sha256 != sha256.to_ascii_lowercase()
+                {
+                    return Err("Pi 交付回执与提交内容不一致，已拒绝。".into());
+                }
                 on_event(PiEvent::Progress(format!("已提交 {path}，准备交付检查…")));
-                submitted = Some(Submission {
-                    path,
-                    summary: short(&summary),
-                    content,
-                    sha256,
-                    bytes,
-                });
+                submitted = Some(Submission { receipt, recovered });
             }
             HostEvent::Completed {
                 submitted: claimed, ..
@@ -794,28 +940,35 @@ pub(crate) fn run(
                     if report.is_some() {
                         return Err("Pi host 前后矛盾：交清单的同时报告已提交正文".into());
                     }
+                    // 以 host 写的不可变快照与回执为准，不重读模型可写的 work/。
+                    let content = read_snapshot(&job.workspace.run, &submission.receipt)?;
                     verify_submission(
-                        &submission.path,
-                        submission.bytes,
-                        &submission.sha256,
-                        &submission.content,
+                        &submission.receipt.path,
+                        submission.receipt.bytes,
+                        &submission.receipt.sha256,
+                        &content,
                     )?;
                     // 完成事件之后仍须确认进程正常退出，不能接受“先报成功再崩溃”。
                     successful_exit(&mut guard, &cancel)?;
+                    let sources = job.tools.fact_sources();
+                    let sources_sha256 =
+                        job.record.delivered(&submission.receipt, Some(&sources))?;
                     return Ok(PiOutcome::Document(PiDelivery {
                         before: job.before,
                         base: job.base,
                         request: job.task.request,
-                        content: submission.content,
-                        path: submission.path,
-                        summary: submission.summary,
-                        sha256: submission.sha256,
-                        bytes: submission.bytes,
+                        content,
+                        path: submission.receipt.path,
+                        summary: submission.receipt.summary,
+                        sha256: submission.receipt.sha256,
+                        bytes: submission.receipt.bytes,
                         selection: job.task.selection,
-                        fact_sources: job.tools.fact_sources(),
+                        fact_sources: sources,
                         confirmed: job.bridge.confirmed(),
                         workspace_label: job.workspace.label,
                         elapsed: started.elapsed().saturating_sub(paused),
+                        recovered: submission.recovered,
+                        sources_sha256,
                     }));
                 }
                 if submitted.is_some() {
@@ -828,12 +981,18 @@ pub(crate) fn run(
                     );
                 };
                 successful_exit(&mut guard, &cancel)?;
+                let Some(receipt) = delivered_receipt else {
+                    return Err("Pi 清单没有交付回执，未交付任何结果。".into());
+                };
+                let sources_sha256 = job.record.delivered(&receipt, None)?;
                 return Ok(PiOutcome::Report(PiReport {
                     summary,
                     items,
                     confirmed: job.bridge.confirmed(),
                     workspace_label: job.workspace.label,
                     elapsed: started.elapsed().saturating_sub(paused),
+                    recovered: report_recovered,
+                    sources_sha256,
                 }));
             }
             HostEvent::Cancelled { message, .. } => {
@@ -842,15 +1001,27 @@ pub(crate) fn run(
                 } else {
                     short(&message)
                 };
+                if ready || !job.resume {
+                    job.record.finished(PiRunStatus::Interrupted, &message);
+                }
                 return Err(message);
             }
             HostEvent::Error { code, message, .. } => {
                 let code = code.unwrap_or_else(|| "host_error".into());
+                let message = scrub(&short(&message), &job.model.api_key);
+                let parked = code == "task_parked";
+                if ready || !job.resume {
+                    job.record.finished(
+                        if parked {
+                            PiRunStatus::Parked
+                        } else {
+                            PiRunStatus::Failed
+                        },
+                        &message,
+                    );
+                }
                 return Err(host_failure(
-                    format!(
-                        "Pi host 失败（{code}）：{}",
-                        scrub(&short(&message), &job.model.api_key)
-                    ),
+                    format!("Pi host 失败（{code}）：{message}"),
                     &stderr_lines,
                     &job.model.api_key,
                 ));
@@ -993,11 +1164,22 @@ fn answer_text(question: &Question, reply: &Reply) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_run_ownership_lasts_until_the_record_is_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = lock_run(dir.path()).unwrap();
+        assert!(lock_run(dir.path()).is_err());
+        drop(guard);
+        assert!(lock_run(dir.path()).is_ok());
+    }
     use std::path::{Path, PathBuf};
 
     /// 真实 Node 小夹具：只验证协议、进程回收与交付判定；不访问任何模型端点。
     const FIXTURE: &str = r##"
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import readline from "node:readline";
 const rl = readline.createInterface({ input: process.stdin });
 let initRaw;
@@ -1005,10 +1187,21 @@ let handled = false;
 const waiters = new Map();
 const emit = (o) => process.stdout.write(JSON.stringify({ ...base(o), ...o }) + "\n");
 let init;
-function base(o) { return { protocol: 1, requestId: init?.requestId ?? "r", runId: init?.runId ?? "u" }; }
+function base(o) { return { protocol: 2, requestId: init?.requestId ?? "r", runId: init?.runId ?? "u" }; }
 const content = "# 成品\n\n正文。\n";
 const sha256 = createHash("sha256").update(content, "utf8").digest("hex");
+const delivery = () => init.workspace.delivery;
+const writeReceipt = (receipt) => {
+  const dir = delivery();
+  fs.writeFileSync(path.join(dir, "final.md"), content);
+  fs.writeFileSync(path.join(dir, "receipt.json"), JSON.stringify({
+    version: 1, runId: init.runId, requestId: init.requestId,
+    at: "2026-11-01T00:00:00+08:00", ...receipt,
+  }));
+};
 const submit = () => {
+  const receipt = { kind: "document", path: "work/final.md", sha256, bytes: Buffer.byteLength(content), summary: "夹具", callId: "c1" };
+  writeReceipt(receipt);
   emit({ type: "candidate", path: "work/final.md", content, sha256, bytes: Buffer.byteLength(content) });
   emit({ type: "submitted", path: "work/final.md", summary: "夹具", content, sha256, bytes: Buffer.byteLength(content) });
   emit({ type: "completed", submitted: true });
@@ -1019,7 +1212,16 @@ rl.on("line", (line) => {
   if (value.type === "init" && !handled) {
     handled = true;
     init = value;
-    emit({ type: "ready", hostVersion: "test", nodeVersion: process.versions.node, model: init.model.modelId });
+    emit({ type: "ready", hostVersion: "0.2.0", nodeVersion: process.versions.node, model: init.model.modelId });
+    if (init.recovery?.mode === "resume") {
+      const dir = init.workspace.delivery;
+      const receipt = JSON.parse(fs.readFileSync(path.join(dir, "receipt.json"), "utf8"));
+      const text = fs.readFileSync(path.join(dir, "final.md"), "utf8");
+      emit({ type: "submitted", path: receipt.path, summary: receipt.summary, content: text, sha256: receipt.sha256, bytes: receipt.bytes, recovered: true });
+      emit({ type: "completed", submitted: true });
+      setTimeout(() => process.exit(0), 20);
+      return;
+    }
     const mode = init.task.request;
     if (mode === "error") {
       emit({ type: "error", code: "boom", message: "失败且包含密钥 " + init.model.apiKey });
@@ -1049,6 +1251,7 @@ rl.on("line", (line) => {
       return;
     }
     if (mode === "report") {
+      writeReceipt({ kind: "report", summary: "审完", items: [{ title: "称谓", detail: "第二条", severity: "建议" }] });
       emit({ type: "report", summary: "审完", items: [{ title: "称谓", detail: "第二条", severity: "建议" }] });
       emit({ type: "completed", submitted: false });
       setTimeout(() => process.exit(0), 20);
@@ -1063,11 +1266,13 @@ rl.on("line", (line) => {
     if (resolve) { waiters.delete(value.callId); resolve(value); return; }
     if (value.ok && value.callId === "c1" && init.task.request === "tool") { submit(); }
     if (value.ok && value.callId === "q1") {
+      writeReceipt({ kind: "report", summary: "答完了", items: [{ title: "已按回答处理", detail: "", severity: "提示" }] });
       emit({ type: "report", summary: "答完了", items: [{ title: "已按回答处理", detail: "", severity: "提示" }] });
       emit({ type: "completed", submitted: false });
       setTimeout(() => process.exit(0), 20);
     }
     if (!value.ok) {
+      writeReceipt({ kind: "report", summary: "工具被拒：" + value.error, items: [] });
       emit({ type: "report", summary: "工具被拒：" + value.error, items: [] });
       emit({ type: "completed", submitted: false });
       setTimeout(() => process.exit(0), 20);
@@ -1151,10 +1356,12 @@ rl.on("line", (line) => {
             runtime: PiRuntime {
                 node: PathBuf::from("node"),
                 host: fixture(dir),
+                bundled: false,
             },
             workspace: PiWorkspace {
                 root,
                 state: dir.join("session.sqlite"),
+                run: dir.to_path_buf(),
                 label: "test/workspace".into(),
             },
             model: PiModel {
@@ -1178,6 +1385,16 @@ rl.on("line", (line) => {
             base: "# 当前\n".into(),
             tools: Arc::new(tools),
             bridge: Arc::new(PiBridge::default()),
+            record: {
+                let workspace = PiWorkspace {
+                    root: dir.join("workspace"),
+                    state: dir.join("session.sqlite"),
+                    run: dir.to_path_buf(),
+                    label: "test/workspace".into(),
+                };
+                super::super::recovery::test_log(&workspace, "req-1", "run-1")
+            },
+            resume: false,
             request_id: "req-1".into(),
             run_id: "run-1".into(),
             timeout: Duration::from_secs(10),
@@ -1218,6 +1435,70 @@ rl.on("line", (line) => {
         let events = events.lock().unwrap();
         assert!(events.iter().any(|line| line.contains("Candidate")));
         assert!(events.iter().any(|line| line.contains("已提交")));
+    }
+
+    #[test]
+    fn a_resume_with_a_receipt_replays_it_through_the_host_and_verifies_the_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut job = job(temp.path(), "ok");
+        job.resume = true;
+        let content = "# 恢复的成品\n";
+        std::fs::write(temp.path().join("final.md"), content).unwrap();
+        let receipt = serde_json::json!({
+            "version": 1,
+            "runId": "run-1",
+            "requestId": "req-1",
+            "kind": "document",
+            "path": "work/final.md",
+            "sha256": sha256_hex(content),
+            "bytes": content.len(),
+            "summary": "恢复",
+            "callId": "c1",
+            "at": "2026-11-01T00:00:00+08:00",
+        });
+        std::fs::write(
+            temp.path().join("receipt.json"),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+        let outcome = outcome(job, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        let PiOutcome::Document(delivery) = outcome else {
+            panic!("应交付文档");
+        };
+        assert!(delivery.recovered, "host 重放回执时必须标记为恢复");
+        assert_eq!(delivery.content, content);
+        assert_eq!(delivery.sha256, sha256_hex(content));
+    }
+
+    #[test]
+    fn answers_are_persisted_before_the_host_can_see_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let job = job(temp.path(), "ask");
+        let (tx, rx) = mpsc::sync_channel(4);
+        job.bridge.install(tx);
+        job.bridge.attach(job.tools.clone(), job.record.clone());
+        let answers = vec![PiAnswer {
+            id: 1,
+            question: "想强调哪方面".into(),
+            value: "责任".into(),
+        }];
+        job.bridge.answer("q1", &answers).unwrap();
+        // 管道里已有回答，但落盘发生在发送之前。
+        assert!(rx.try_recv().is_ok());
+        let record = super::super::recovery::PiRunRecord::read_from(&job.workspace.run).unwrap();
+        assert_eq!(record.answers, vec!["责任"]);
+        assert!(
+            record
+                .confirmed
+                .iter()
+                .any(|line| line.contains("想强调哪方面：责任"))
+        );
+        let hash = record.sources.expect("回答必须进入事实来源");
+        let sources = super::super::recovery::read_sources(&job.workspace.run, &hash)
+            .unwrap()
+            .unwrap();
+        assert!(sources.contains("责任"));
+        assert!(!sources.contains("想强调哪方面"), "题面不是事实来源");
     }
 
     #[test]
@@ -1421,12 +1702,12 @@ rl.on("line", (line) => {
 import readline from "node:readline";
 const rl = readline.createInterface({{ input: process.stdin }});
 let init;
-const emit = (o) => process.stdout.write(JSON.stringify({{ protocol: 1, requestId: init.requestId, runId: init.runId, ...o }}) + "\n");
+const emit = (o) => process.stdout.write(JSON.stringify({{ protocol: 2, requestId: init.requestId, runId: init.runId, ...o }}) + "\n");
 rl.on("line", (line) => {{
   const value = JSON.parse(line);
   if (value.type === "init") {{
     init = value;
-    emit({{ type: "ready", hostVersion: "test", nodeVersion: process.versions.node, model: init.model.modelId }});
+    emit({{ type: "ready", hostVersion: "0.2.0", nodeVersion: process.versions.node, model: init.model.modelId }});
     emit({{ type: "tool_request", callId: "c1", name: "kb_search", args: {args} }});
   }}
   if (value.type === "tool_result") {{ setTimeout(() => process.exit(0), 10); }}

@@ -3,8 +3,10 @@
 // 这里是 Rust 与 host 之间唯一的约定。协议版本不匹配、行太长、条数太多都直接失败，
 // 不猜、不降级。模型密钥只出现在 init 输入里，绝不进入任何输出或日志。
 
-export const PROTOCOL_VERSION = 1;
-export const HOST_VERSION = "0.1.0";
+import path from "node:path";
+
+export const PROTOCOL_VERSION = 2;
+export const HOST_VERSION = "0.2.0";
 
 /** 单行输出的上限（含换行）。正文最多 8 MiB，JSON 转义后留出余量。 */
 export const MAX_OUTPUT_LINE_BYTES = 16 * 1024 * 1024;
@@ -91,6 +93,13 @@ export function validateInit(value) {
   if (!isAbsolutePath(state)) {
     throw new ProtocolError("workspace.state 必须是绝对路径");
   }
+  const delivery = requireText(workspace.delivery, "workspace.delivery", 4096);
+  if (!isAbsolutePath(delivery)) {
+    throw new ProtocolError("workspace.delivery 必须是绝对路径");
+  }
+  if (isWithinPath(root, delivery)) {
+    throw new ProtocolError("workspace.delivery 必须在模型可写的工作区之外");
+  }
   const model = value.model;
   if (!model || typeof model !== "object") {
     throw new ProtocolError("缺少 model");
@@ -122,13 +131,16 @@ export function validateInit(value) {
   const kind = typeof task.kind === "string" ? sanitizeShort(task.kind, 100) : "";
   const systemDate = typeof task.systemDate === "string" ? sanitizeShort(task.systemDate, 100) : "";
   const limits = value.limits && typeof value.limits === "object" ? value.limits : {};
+  const recovery = validateRecovery(value.recovery);
   return {
     protocol: PROTOCOL_VERSION,
     requestId,
     runId,
+    recovery,
     workspace: {
       root,
       state,
+      delivery,
       current: typeof workspace.current === "string" ? workspace.current : "input/current.md",
       request: typeof workspace.request === "string" ? workspace.request : "input/request.md",
       skills: typeof workspace.skills === "string" ? workspace.skills : "skills/gongwen-markdown",
@@ -155,6 +167,30 @@ export function validateInit(value) {
 }
 
 const MATERIAL_ROLES = new Set(["fact", "style_sample", "structure_sample", "incoming_letter"]);
+
+/** 恢复模式：只认 `resume`，旧 host 遇到新字段会直接拒绝而不是猜。 */
+function validateRecovery(value) {
+  if (value === undefined || value === null) return undefined;
+  if (!value || typeof value !== "object") {
+    throw new ProtocolError("recovery 必须是对象");
+  }
+  if (value.mode !== "resume") {
+    throw new ProtocolError(`不认识的恢复模式：${String(value.mode)}`);
+  }
+  const result = { resume: true };
+  if (typeof value.requestId === "string" && value.requestId !== "") result.requestId = value.requestId;
+  if (value.continuationId !== undefined) {
+    const id = requireText(value.continuationId, "recovery.continuationId", 128);
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new ProtocolError("recovery.continuationId 格式不正确");
+    result.continuationId = id;
+  }
+  return result;
+}
+
+function isWithinPath(root, target) {
+  const relative = path.relative(root, target);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
 
 function optionalText(value, name, max) {
   if (value === undefined || value === null) return undefined;

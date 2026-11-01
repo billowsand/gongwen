@@ -253,8 +253,7 @@ impl AppConfig {
         Ok(config)
     }
 
-    /// 智能写作（Pi）的接入配置：只认 `pi_model`，不回落起草模型。生成参数沿用现有
-    /// 起草设置（温度不参与——host 只发送模型与窗口），输出上限按真实窗口收紧。
+    /// Pi 只认独立模型；上下文自动按该服务与模型解析，不继承小模型的手动窗口和输出上限。
     pub(crate) fn pi_chat(&self) -> Result<LmStudioConfig, ModelRefError> {
         if self.pi_model.is_empty() {
             return Err(ModelRefError(
@@ -267,6 +266,8 @@ impl AppConfig {
         config.base_url = provider.base_url.clone();
         config.api_key = provider.api_key.clone();
         config.model = self.pi_model.model.trim().to_string();
+        config.context_window = 0;
+        config.max_tokens = 32_768;
         Ok(config)
     }
 

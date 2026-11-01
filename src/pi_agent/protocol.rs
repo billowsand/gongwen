@@ -4,7 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use super::materials::PiMaterialMeta;
 
-pub(crate) const PROTOCOL_VERSION: u32 = 1;
+/// 与 `pi-host/src/protocol.mjs` 一一对应。协议升版时必须两边同时改：旧 host 会
+/// 直接拒绝新 init，恢复时也不会拿旧 host 去开原工作区。
+pub(crate) const PROTOCOL_VERSION: u32 = 2;
+/// host 版本；运行记录里存一份，恢复时不一致就拒绝在原工作区接着写。
+pub(crate) const HOST_VERSION: &str = "0.2.0";
 /// 一条协议行的上限。host 侧同样按 16 MiB 卡住。
 pub(crate) const MAX_HOST_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// 整个进程最多处理多少条消息。
@@ -28,6 +32,20 @@ pub(crate) struct InitMessage {
     pub(crate) model: InitModel,
     pub(crate) task: InitTask,
     pub(crate) limits: InitLimits,
+    /// 恢复模式：重新打开同一个 Durable 库，用同一份 requestId 找回原来的提交。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery: Option<InitRecovery>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InitRecovery {
+    /// 固定为 `resume`；将来若有别的模式，旧 host 会拒绝而不是猜。
+    pub(crate) mode: &'static str,
+    /// 原输入的 requestId，便于 host 核对。
+    pub(crate) request_id: String,
+    /// 用户本次点「接着写」的标识；允许新的有界补交，不复用上次已耗尽的请求。
+    pub(crate) continuation_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +58,8 @@ pub(crate) struct InitWorkspace {
     pub(crate) skills: String,
     pub(crate) pi_skills: String,
     pub(crate) materials: String,
+    /// 交付回执与成品快照所在的运行目录（绝对路径，必须在工作区之外）。
+    pub(crate) delivery: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -161,6 +181,9 @@ pub(crate) enum HostEvent {
         #[serde(default)]
         summary: String,
         items: Vec<PiReportItem>,
+        /// 这是从上次已落盘的回执重放的，不是本轮重新生成。
+        #[serde(default)]
+        recovered: bool,
         #[serde(default, rename = "requestId")]
         request_id: Option<String>,
         #[serde(default, rename = "runId")]
@@ -173,6 +196,9 @@ pub(crate) enum HostEvent {
         content: String,
         sha256: String,
         bytes: usize,
+        /// 这是从上次已落盘的回执重放的，不是本轮重新生成。
+        #[serde(default)]
+        recovered: bool,
         #[serde(default, rename = "requestId")]
         request_id: Option<String>,
         #[serde(default, rename = "runId")]

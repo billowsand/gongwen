@@ -2,7 +2,6 @@
 
 use super::skill_job::asking_labels;
 use super::{ProposalSummary, TurnState};
-use crate::agent::skill::POLISH;
 use crate::app::{DraftAction, GongwenApp};
 use crate::draft_page::{AiProposal, DraftPage};
 use crate::theme;
@@ -57,6 +56,8 @@ pub(super) enum CardAction {
     DiscardRun(u64),
     /// 从最近的检查点接着跑（崩溃 / 停止 / 出错后）。
     Resume(u64),
+    /// Pi 轮次：接着写原来的工作区（`false`）或从头写（`true`）。
+    PiResume(u64, bool),
     /// 丢掉检查点，从第一步重来。
     Restart(u64),
     /// 从某个旧检查点重跑。
@@ -111,7 +112,7 @@ impl DraftPage<'_> {
         self.doc.ai_panel.open = open && self.doc.ai_panel.open;
     }
 
-    /// 打开或收起侧栏。带着选区打开时，选区锁进输入区、技能定在润色。
+    /// 打开或收起侧栏。带着选区打开时，锁定选区并选择 Pi 修改技能。
     pub(crate) fn toggle_ai_panel(&mut self, selection: Option<Range<usize>>) {
         let selection = selection
             .filter(|range| !range.is_empty())
@@ -121,29 +122,15 @@ impl DraftPage<'_> {
                     .get(range.clone())
                     .map(|text| (range, text.to_string()))
             });
-        let rag_enabled = self.config.rag.enabled;
         let panel = &mut self.doc.ai_panel;
-        if !panel.composer.primed {
-            // 设置里启用了知识库，用到知识库的技能就默认检索；不然启用了也白启用。
-            panel.composer.use_rag = rag_enabled;
-            panel.composer.primed = true;
-        }
         if panel.open && selection.is_none() {
             panel.open = false;
             return;
         }
         panel.open = true;
-        // 打开时重读一次：用户可能刚改过配置目录里的技能文件。
-        let _ = panel.reload_skills();
         if let Some(selection) = selection {
             panel.composer.selection = Some(selection);
-            if panel
-                .skills
-                .iter()
-                .any(|skill| skill.id == POLISH && skill.enabled)
-            {
-                panel.composer.skill = Some(POLISH.to_string());
-            }
+            panel.composer.pi_skill = Some("gongwen-revise".to_string());
         }
         // 与审校抽屉同在右侧，同时开着中央区太窄。
         self.doc.result_drawer_open = false;
@@ -250,9 +237,10 @@ impl DraftPage<'_> {
                     self.new_ai_session();
                 }
                 let options =
-                    super::appearance::header_button(ui, theme::Icon::Settings, "会话与技能管理");
+                    super::appearance::header_button(ui, theme::Icon::Settings, "会话管理");
                 egui::Popup::menu(&options).show(|ui| {
                     let can_compact = !self.doc.busy
+                        && self.doc.ai_panel.turns.iter().all(|turn| turn.pi_run.is_none() && !turn.title.starts_with("智能写作（Pi"))
                         && self
                             .doc
                             .ai_panel
@@ -264,23 +252,15 @@ impl DraftPage<'_> {
                     if ui
                         .add_enabled(
                             can_compact,
-                            theme::menu_item(theme::Icon::Archive, "压缩会话"),
+                            theme::menu_item(theme::Icon::Archive, "压缩旧会话"),
                         )
                         .on_hover_text(
-                            "最近 3 轮之前的并成一段摘要，后面的追问只带摘要；原始记录仍可翻看。也可以在输入框敲 /compact",
+                            "最近 3 轮之前的并成一段摘要，后面的追问只带摘要；原始记录仍可翻看。只用于旧流程会话；Pi 上下文由其运行时管理",
                         )
                         .on_disabled_hover_text("会话还短，不用压缩")
                         .clicked()
                     {
                         self.start_compact();
-                        ui.close();
-                    }
-                    if ui
-                        .add(theme::menu_item(theme::Icon::WandSparkles, "管理技能…"))
-                        .on_hover_text("AI 管理页「技能」：启用停用、复制改写、新建、导入导出")
-                        .clicked()
-                    {
-                        self.actions.push(DraftAction::OpenSkillSettings);
                         ui.close();
                     }
                     let can_clear = self
@@ -326,7 +306,7 @@ impl DraftPage<'_> {
                     can_fill,
                 ) {
                     self.doc.ai_panel.composer.text = prompt.into();
-                    self.doc.ai_panel.composer.skill = None;
+                    self.doc.ai_panel.composer.pi_skill = None;
                     self.doc.ai_panel.composer.error = None;
                     ui.ctx().memory_mut(|memory| {
                         memory.request_focus(egui::Id::new(("ai_panel_input", self.doc.key)));
@@ -428,6 +408,11 @@ impl DraftPage<'_> {
             }
             Some(CardAction::Discard) => GongwenApp::discard_ai_proposal(self.doc, self.status),
             Some(CardAction::Resume(id)) => self.resume_checkpoint(id),
+            Some(CardAction::PiResume(id, restart)) => {
+                if let Err(error) = self.resume_pi_job(id, restart) {
+                    *self.status = format!("没能恢复 Pi 智能写作：{error}");
+                }
+            }
             Some(CardAction::Restart(id)) => {
                 self.drop_checkpoints(id);
                 if let Some(request) = self
@@ -1619,6 +1604,51 @@ fn ledger_ui(
     });
 }
 
+/// Pi 轮次的「接着写 · 从头写」。接着写会重新打开原工作区与 Durable 库，用同一份
+/// requestId 找回原来的提交；校验工作区路径、快照、host 版本与当前正文基线，不匹配
+/// 就在状态栏说明原因。没有运行记录的旧轮次不画这两个按钮。
+fn pi_recovery_actions(
+    ui: &mut egui::Ui,
+    run: &crate::pi_agent::PiRunRef,
+    turn_id: u64,
+    action: &mut Option<CardAction>,
+) {
+    ui.add_space(6.0);
+    let status = match run.status {
+        crate::pi_agent::PiRunStatus::Parked => "上次任务被宿主停用（连续崩溃），需要人处理",
+        crate::pi_agent::PiRunStatus::Failed => "上次运行失败",
+        crate::pi_agent::PiRunStatus::Interrupted => "上次运行被停止",
+        crate::pi_agent::PiRunStatus::Delivered => "上次已经交出成品",
+        crate::pi_agent::PiRunStatus::Accepted | crate::pi_agent::PiRunStatus::Running => {
+            "上次运行没有收尾"
+        }
+    };
+    ui.label(
+        egui::RichText::new(format!("Pi：{status}，原工作区还在本机"))
+            .small()
+            .color(theme::text_muted()),
+    );
+    ui.horizontal_wrapped(|ui| {
+        if theme::primary_icon_button(ui, theme::Icon::SquareCheck, "接着写")
+            .on_hover_text("重新打开原工作区与 Durable 库，用同一份输入标识找回原来的提交")
+            .clicked()
+        {
+            *action = Some(CardAction::PiResume(turn_id, false));
+        }
+        if ui
+            .add(theme::secondary_icon_button(theme::Icon::Refresh, "从头写"))
+            .on_hover_text("用原要求与材料开一份新工作区，正文以当前正式稿为基线")
+            .clicked()
+        {
+            *action = Some(CardAction::PiResume(turn_id, true));
+        }
+    });
+    ui.weak(
+        "接着写会先核对工作区、快照、host 版本与当前正文；正文改过或换了模型会被拒绝并说明原因。\
+         这篇稿件若还没保存到稿件库，关掉应用后这一轮的运行引用不会随会话保存——先保存再中断，重启后才能接着写。",
+    );
+}
+
 fn rerun_button(
     ui: &mut egui::Ui,
     turn: &super::AiTurn,
@@ -1644,6 +1674,10 @@ fn resume_actions(
     checkpoints: &[crate::manuscript::ai_checkpoints::CheckpointSummary],
     action: &mut Option<CardAction>,
 ) {
+    if let Some(run) = &turn.pi_run {
+        pi_recovery_actions(ui, run, turn.id, action);
+        return;
+    }
     if turn.request.is_none() {
         return;
     }

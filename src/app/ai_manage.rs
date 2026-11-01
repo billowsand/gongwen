@@ -633,7 +633,9 @@ impl GongwenApp {
         setting_row(
             ui,
             "最大输出 Token",
-            Some("每次请求还会按上下文窗口的剩余空间自动收紧，不会因为输入加输出超过窗口被拒"),
+            Some(
+                "仅用于文字起草等旧路径；Pi 自动管理生成预算，不使用此设置。每次请求还会按上下文剩余空间收紧",
+            ),
             |ui| {
                 ui.add(
                     egui::DragValue::new(&mut self.config.lm_studio.max_tokens).range(256..=32768),
@@ -666,9 +668,10 @@ impl GongwenApp {
         });
         ui.label(
             egui::RichText::new(
-                "侧栏「智能写作（Pi 试用）」专用模型，与文字起草分开选。不选就不启动 Pi，\
+                "侧栏发送使用的 Pi 模型，与文字起草分开选。不选就不启动 Pi，\
                  不会偷偷回落到起草模型。地址与密钥仍在「模型服务商管理」里维护；\
-                 窗口与思考深度沿用上方文字起草的设置；每轮执行上限 15 分钟，等用户回答时暂停计时。",
+                 上下文与输出预算自动管理，不沿用上方的窗口和最大输出 Token；思考深度暂沿用上方设置。\
+                 每轮执行上限 15 分钟，等用户回答时暂停计时。",
             )
             .size(theme::font_sizes::SMALL)
             .color(theme::text_muted()),

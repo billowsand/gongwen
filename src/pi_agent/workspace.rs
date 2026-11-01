@@ -1,7 +1,7 @@
 //! 每次 Pi 运行一个持久工作区。
 //!
 //! ```text
-//! <配置目录>/pi/workspaces/doc-<key>/job-<seq>-<时间>/
+//! <配置目录>/pi/workspaces/doc-<key>/run-<时间>-<UUID>/
 //!   workspace/
 //!     input/current.md     本轮正文快照（只读）
 //!     input/request.md     本轮要求 + 技能索引 + 材料索引（只读）
@@ -28,6 +28,8 @@ pub(crate) struct PiWorkspace {
     pub(crate) root: PathBuf,
     /// Durable 的 SQLite 文件，在 `workspace/` 之外。
     pub(crate) state: PathBuf,
+    /// 运行目录（`workspace/` 的上一级）：运行记录、回执、成品快照都在这里。
+    pub(crate) run: PathBuf,
     /// 给人看的相对位置（不含用户主目录）。
     pub(crate) label: String,
 }
@@ -57,7 +59,7 @@ impl PiWorkspace {
     pub(crate) fn prepare(
         base: &Path,
         doc_key: u64,
-        seq: u64,
+        _seq: u64,
         current: &str,
         request: &str,
         materials: &[PiMaterialInput],
@@ -66,14 +68,9 @@ impl PiWorkspace {
         std::fs::create_dir_all(&doc_dir)
             .map_err(|error| format!("建不了工作区子目录（{}）：{error}", doc_dir.display()))?;
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        let mut name = format!("job-{seq}-{stamp}");
-        let mut run_dir = doc_dir.join(&name);
-        let mut attempt = 1u32;
-        while run_dir.exists() {
-            attempt = attempt.saturating_add(1);
-            name = format!("job-{seq}-{stamp}-{attempt}");
-            run_dir = doc_dir.join(&name);
-        }
+        // 目录名带 UUID：两个窗口的 doc_key / seq 可能相同，不能靠重名探测区分。
+        let name = format!("run-{stamp}-{}", short_uuid());
+        let run_dir = doc_dir.join(&name);
         let root = run_dir.join("workspace");
         for sub in ["input", "work", "resources"] {
             std::fs::create_dir_all(root.join(sub)).map_err(|error| {
@@ -104,11 +101,77 @@ impl PiWorkspace {
             Self {
                 root,
                 state: state_dir.join("session.sqlite"),
+                run: run_dir,
                 label,
             },
             metas,
         ))
     }
+
+    /// 恢复时重新打开原工作区：路径由 `recovery::resolve_workspace` 校验过。
+    pub(crate) fn reopen(root: PathBuf, label: String) -> Result<Self, String> {
+        let run = root.parent().ok_or("Pi 工作区没有运行目录")?.to_path_buf();
+        let state = run.join("pi").join("session.sqlite");
+        Ok(Self {
+            root,
+            state,
+            run,
+            label,
+        })
+    }
+
+    /// 工作区里的材料元数据（恢复时按 `index.json` 读回）。
+    pub(crate) fn read_materials(&self) -> Result<Vec<PiMaterialMeta>, String> {
+        let path = self.root.join("input/materials/index.json");
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes = super::recovery::read_bounded(&path, 256 * 1024)?;
+        let metas: Vec<PiMaterialMeta> = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Pi 材料索引读不出来：{error}"))?;
+        Ok(metas
+            .into_iter()
+            .take(super::materials::MAX_MATERIALS)
+            .collect())
+    }
+
+    /// 模型实际读到的要求文件（要求原文 + 技能索引 + 材料索引）。
+    pub(crate) fn read_request(&self) -> Result<String, String> {
+        let bytes = super::recovery::read_bounded(
+            &self.root.join("input/request.md"),
+            super::recovery::MAX_SNAPSHOT_BYTES,
+        )?;
+        String::from_utf8(bytes).map_err(|_| "工作区里的要求文件不是 UTF-8".to_string())
+    }
+
+    /// 按元数据读出材料全文；恢复新一轮工作区时用，读不到就明确失败。
+    pub(crate) fn read_material_texts(&self) -> Result<Vec<PiMaterialInput>, String> {
+        let mut inputs = Vec::new();
+        for meta in self.read_materials()? {
+            let path = self.root.join(&meta.file);
+            let bytes =
+                super::recovery::read_bounded(&path, super::materials::MAX_MATERIAL_BYTES as u64)?;
+            let text = String::from_utf8(bytes)
+                .map_err(|_| format!("材料《{}》不是合法 UTF-8。", meta.title))?;
+            inputs.push(PiMaterialInput {
+                title: meta.title,
+                source: meta.source,
+                role: meta.role,
+                text,
+            });
+        }
+        Ok(inputs)
+    }
+}
+
+/// 目录名里用的短 UUID（只要唯一，不做密码学用途）。
+fn short_uuid() -> String {
+    uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .chars()
+        .take(8)
+        .collect()
 }
 
 fn write_text(path: &Path, text: &str) -> Result<(), String> {

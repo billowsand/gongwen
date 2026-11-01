@@ -206,14 +206,7 @@ pub(crate) fn pi_ask_ui(ui: &mut egui::Ui, panel: &mut AiPanel, running: bool) -
                     turn.notes
                         .push(format!("已确认 {} 个回答。", confirmed.len()));
                 }
-                panel.composer.pi_notes.extend(
-                    answers
-                        .iter()
-                        .filter(|answer| !answer.value.trim().is_empty())
-                        .map(|answer| {
-                            format!("{}：{}", answer.question.trim(), answer.value.trim())
-                        }),
-                );
+                panel.composer.pi_notes.extend(confirmed_values(&answers));
                 if let Some(turn) = panel.running_turn_mut() {
                     turn.state = super::TurnState::Streaming;
                 }
@@ -227,9 +220,29 @@ pub(crate) fn pi_ask_ui(ui: &mut egui::Ui, panel: &mut AiPanel, running: bool) -
     false
 }
 
+/// 后续要求可作为事实来源，因此只携带用户答案；模型题面里的假设不随之升级为事实。
+fn confirmed_values(answers: &[PiAnswer]) -> Vec<String> {
+    answers
+        .iter()
+        .filter(|answer| !answer.value.trim().is_empty())
+        .map(|answer| answer.value.trim().chars().take(2_000).collect())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn follow_up_context_does_not_turn_question_assumptions_into_facts() {
+        let values = confirmed_values(&[PiAnswer {
+            id: 1,
+            question: "是否按2028年12月31日完成".into(),
+            value: "否".into(),
+        }]);
+        assert_eq!(values, vec!["否"]);
+        assert!(!values.join("\n").contains("2028"));
+    }
     use crate::pi_agent::PiQuestion;
 
     fn ask() -> PiAsk {

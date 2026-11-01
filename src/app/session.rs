@@ -37,8 +37,6 @@ pub(crate) enum DraftAction {
     OpenSendPackage(i64),
     /// 查看引用来源稿件，沿用稿件库的只读与标签规则。
     OpenManuscript(i64),
-    /// 打开 AI 管理页的「技能」分区（AI 侧栏右上角「管理技能…」）。
-    OpenSkillSettings,
     /// 到 AI 管理页「风格」。
     OpenStyleSettings,
     /// 把已发布的稿件退回草稿，好继续编辑。
@@ -820,7 +818,7 @@ pub(crate) fn ime_settings_of(ime: &crate::models::ImeConfig) -> crate::ime::Ime
 }
 
 /// 立即写下一篇稿件的 AI 会话（关标签、关窗前）。
-fn save_ai_session(
+pub(super) fn save_ai_session(
     doc: &mut crate::draft_page::DraftSession,
     store: Option<&mut crate::manuscript::ManuscriptStore>,
 ) -> Option<String> {

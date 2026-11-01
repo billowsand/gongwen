@@ -120,6 +120,8 @@ test("the production host path submits through a local OpenAI-compatible endpoin
   fs.mkdirSync(path.join(workspaceRoot, "skills", "gongwen-markdown"), { recursive: true });
   fs.writeFileSync(path.join(workspaceRoot, "input", "current.md"), "# 当前\n");
   fs.writeFileSync(path.join(workspaceRoot, "input", "request.md"), "写一份通知。\n");
+  const deliveryDir = path.join(workspaceRoot, "..", `${path.basename(workspaceRoot)}-run`);
+  fs.mkdirSync(deliveryDir, { recursive: true });
   const { server, requests, baseUrl } = await startStub();
   const key = "sk-stub-secret-9876";
   try {
@@ -139,12 +141,13 @@ test("the production host path submits through a local OpenAI-compatible endpoin
     child.stdin.write(
       `${JSON.stringify({
         type: "init",
-        protocol: 1,
+        protocol: 2,
         requestId: "req-e2e",
         runId: "run-e2e",
         workspace: {
           root: workspaceRoot,
-          state: path.join(workspaceRoot, "session.sqlite"),
+          state: path.join(deliveryDir, "session.sqlite"),
+          delivery: deliveryDir,
           current: "input/current.md",
           request: "input/request.md",
           skills: "skills/gongwen-markdown",

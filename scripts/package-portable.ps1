@@ -203,6 +203,39 @@ foreach ($entry in $runtimeEntries) {
     Copy-Item -LiteralPath $entry.Source -Destination $destination
 }
 
+# 随包 Pi 运行时：必须已由 scripts/stage-pi-runtime.ps1 组装好，manifest 与当前包
+# 平台一致；缺运行时 / 哈希不符 / 不是 npm ci 产物就拒绝出包。
+if ($isWindowsHost -and $Suffix -ne "win-x64") {
+    throw "Portable suffix $Suffix cannot be built on Windows; Linux runtime must be staged on the target architecture"
+}
+if (-not $isWindowsHost -and $Suffix -eq "win-x64") {
+    throw "Portable suffix win-x64 must be built on Windows"
+}
+$piPlatform = $Suffix
+$piDir = [System.IO.Path]::Combine($runtimeRoot, "pi")
+$piFiles = & (Join-Path $PSScriptRoot "verify-pi-runtime.ps1") -RuntimeDir $piDir -Platform $piPlatform -ListFiles
+if (-not $piFiles -or $piFiles.Count -eq 0) {
+    throw "Pi runtime manifest listed no files: $piDir"
+}
+foreach ($relative in $piFiles) {
+    $source = [System.IO.Path]::Combine($piDir, $relative.Replace("/", [System.IO.Path]::DirectorySeparatorChar))
+    $destination = [System.IO.Path]::Combine($OutputDir, "runtime", "pi", $relative.Replace("/", [System.IO.Path]::DirectorySeparatorChar))
+    $destinationDirectory = Split-Path -Parent $destination
+    New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
+    Copy-Item -LiteralPath $source -Destination $destination
+}
+# manifest 自己不在文件清单里（它描述清单），必须单独带上，否则启动时校验不过。
+Copy-Item -LiteralPath ([System.IO.Path]::Combine($piDir, "manifest.json")) -Destination ([System.IO.Path]::Combine($OutputDir, "runtime", "pi", "manifest.json")) -Force
+if (-not $isWindowsHost) {
+    & chmod 755 ([System.IO.Path]::Combine($OutputDir, "runtime", "pi", "bin", "node"))
+    if ($LASTEXITCODE -ne 0) {
+        throw "chmod +x failed for the bundled Node"
+    }
+}
+if (-not (Test-Path -LiteralPath ([System.IO.Path]::Combine($OutputDir, "runtime", "pi", "manifest.json")) -PathType Leaf)) {
+    throw "Pi runtime manifest was not copied into the package"
+}
+
 # 初始基础词表独立随包，便于更新：项目自维护的 quan.txt 为唯一正式来源，
 # mabiao.txt 只作旧机后备；两者都没有时由使用者在设置页导入。
 $baseTableSource = Join-Path $projectRoot "assets/fuma/quan.txt"

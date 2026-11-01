@@ -208,9 +208,19 @@ pub(crate) enum DocJob {
     },
     /// Pi 本轮结束。成功时是一份固定版本或侧栏清单，失败时报原因；
     /// 未提交、超时、取消、崩溃都不会走到成功分支。
-    PiDone(Result<crate::pi_agent::PiOutcome, String>),
+    /// Pi 交付结果。装箱：`PiOutcome` 带着完整正文，不把整个 `DocJob` 撞大。
+    PiDone(Box<Result<crate::pi_agent::PiOutcome, String>>),
     /// Pi 在等用户回答；题目只活在本轮。
     PiQuestions(crate::pi_agent::PiQuestionBatch),
+    /// Pi 后台准备完成：把稳定运行引用交回界面，等界面核对轮次、保存会话后确认。
+    PiPrepared {
+        turn_id: u64,
+        reference: crate::pi_agent::PiRunRef,
+        dev_runtime: bool,
+        bridge: std::sync::Arc<crate::pi_agent::PiBridge>,
+        kind: String,
+        ack: crate::ai_panel::pi_prepare::PiPrepareAck,
+    },
     AiUsage {
         turn_id: u64,
         usage: crate::agent::backend::UsageTotals,
@@ -1571,6 +1581,7 @@ impl GongwenApp {
                 | DocJob::PiTool(_)
                 | DocJob::PiCandidate { .. }
                 | DocJob::PiQuestions(_)
+                | DocJob::PiPrepared { .. }
                 | DocJob::AiWorkspace(_)
                 | DocJob::AiWriteBegin { .. }
                 | DocJob::AiSessionSummary { .. }
@@ -1649,7 +1660,91 @@ impl GongwenApp {
                     .ai_panel
                     .pi_progress(&format!("候选文件已更新：{path}"));
             }
-            DocJob::PiDone(result) => self.apply_pi_done(index, &prefix, result),
+            DocJob::PiPrepared {
+                turn_id,
+                reference,
+                dev_runtime,
+                bridge,
+                kind,
+                ack,
+            } => {
+                let doc = &mut self.docs[index];
+                // 只认仍属于本任务的等待轮次；过期事件直接丢掉 ack，后台有界等待会结束。
+                let valid = doc.ai_panel.turns.iter().any(|turn| {
+                    turn.id == turn_id
+                        && matches!(turn.state, crate::ai_panel::TurnState::Waiting)
+                        && turn.usage_job_seq == Some(seq)
+                });
+                if !valid {
+                    return;
+                }
+                if doc.read_only()
+                    || reference.baseline != crate::pi_agent::sha256_hex(&doc.generated_markdown)
+                    || kind != doc.draft.kind.label()
+                    || doc
+                        .ai_panel
+                        .cancel
+                        .as_ref()
+                        .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed))
+                {
+                    ack.confirm(Err(
+                        "准备期间正文或文种已变化、稿件已锁定或任务已停止，请重新发送。".into(),
+                    ));
+                    return;
+                }
+                let previous_run = if let Some(turn) = doc.ai_panel.turn_mut(turn_id) {
+                    let previous_run = turn.pi_run.replace(reference);
+                    turn.phase = "正在启动 Pi host…".into();
+                    if dev_runtime && !turn.context.iter().any(|line| line.contains("开发运行时"))
+                    {
+                        turn.context.push("开发运行时（未经安装包验证）".into());
+                    }
+                    previous_run
+                } else {
+                    None
+                };
+                // 成功绑定新运行之后才清旧提案；准备失败时旧提案仍可继续审阅。
+                let previous_ask = doc.ai_panel.pi_ask.take();
+                let previous_report = doc.ai_panel.pi_report.take();
+                let previous_sources = doc.ai_panel.pi_sources.take();
+                let previous_proposal = doc.ai_proposal.take();
+                let previous_baseline = doc
+                    .ai_review_baseline
+                    .replace(doc.generated_markdown.clone());
+                // 有库稿件必须先保存运行引用；保存不成功就不启动 host。
+                let save_error = if let Some(manuscript_id) = doc.manuscript_id {
+                    if self.manuscript_store.is_none() {
+                        Some("稿件库没有打开，无法保存 Pi 运行引用；未启动 host。".to_string())
+                    } else if doc.ai_panel.session.loaded_for != Some(manuscript_id) {
+                        Some(
+                            "这篇稿件还没有和稿件库对齐，无法保存 Pi 运行引用；请先保存稿件再试。"
+                                .to_string(),
+                        )
+                    } else {
+                        super::session::save_ai_session(doc, self.manuscript_store.as_mut())
+                    }
+                } else {
+                    None
+                };
+                if let Some(error) = save_error {
+                    doc.ai_panel.pi_ask = previous_ask;
+                    doc.ai_panel.pi_report = previous_report;
+                    doc.ai_panel.pi_sources = previous_sources;
+                    doc.ai_proposal = previous_proposal;
+                    doc.ai_review_baseline = previous_baseline;
+                    // 运行记录虽然已写好，但没有落进会话就不给恢复入口，也不启动 host。
+                    if let Some(turn) = doc.ai_panel.turn_mut(turn_id) {
+                        turn.pi_run = previous_run;
+                    }
+                    self.status = error.clone();
+                    ack.confirm(Err(error));
+                    return;
+                }
+                doc.ai_panel.pi_bridge = Some(bridge);
+                ack.confirm(Ok(()));
+                self.status = "Pi 运行引用已保存，正在启动 host…".into();
+            }
+            DocJob::PiDone(result) => self.apply_pi_done(index, &prefix, *result),
             DocJob::PiQuestions(batch) => {
                 let bridge = self.docs[index].ai_panel.pi_bridge.clone();
                 match bridge {

@@ -44,6 +44,17 @@ if [ ! -f "$STAGING/runtime/fonts/GWFangSong.ttf" ]; then
     exit 1
 fi
 
+# 随包 Pi 运行时：缺 Node / host / manifest 或校验不符就不能出包。
+case "$ARCH" in
+    arm64) pi_platform="linux-arm64" ;;
+    amd64) pi_platform="linux-x64" ;;
+esac
+if [ ! -x "$STAGING/runtime/pi/bin/node" ]; then
+    echo "error: staging Pi runtime missing: $STAGING/runtime/pi/bin/node" >&2
+    exit 1
+fi
+"$STAGING/runtime/pi/bin/node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$STAGING/runtime/pi" "$pi_platform" >/dev/null
+
 PKG_ROOT="$(mktemp -d)"
 trap 'rm -rf "$PKG_ROOT"' EXIT
 

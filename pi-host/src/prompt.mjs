@@ -47,9 +47,18 @@ ${task.selection.text}
 }
 
 /** 组装系统指令。`workspace` 是 init 里的相对路径约定。 */
-export function systemPrompt(workspace, task = {}) {
+export function systemPrompt(workspace, task = {}, recovery = undefined) {
   const skills = workspace.skills || "skills/gongwen-markdown";
   const piSkills = workspace.piSkills || "skills/pi-skills";
+  const resumeBlock = recovery?.resume
+    ? `
+
+## 这是恢复的一轮
+上一轮进程在执行中被中断，本次重新打开了同一个工作区与 Durable 库。
+- 之前没跑完的工具调用（write / edit / 检索 / 提问）可能以“中断”错误返回。不要假设旧的写入一定成功：动手前先 read 一遍当前文件，以磁盘上的内容为准。
+- 已经落盘的交付回执由程序直接交回，不需要你重新提交；如果模型结束前仍有未完成的工作，按当前文件的真实内容继续，不要凭记忆重写。
+- 不要重复已经问过并确认过的信息；已确认的回答已在上下文中。`
+    : "";
   return `你是公文助手里的智能写作助手。你在一份专属文件工作区里围绕当前稿件完成一轮写作，最终必须通过 ${SUBMIT_TOOL_NAME} 提交一份完整 UTF-8 Markdown，或用 ${REPORT_TOOL_NAME} 交一份侧栏清单。
 
 ## 工作区
@@ -70,7 +79,7 @@ ${skillBlock(task)}
 - kb_search / kb_read：本机知识库，返回带证据编号的片段或全文。
 - ms_search / ms_read：稿件库，返回带证据编号的摘要或全文。
 - vocab_search：标准词库里的单位、人员写法（不产生事实证据）。
-- check_document：跑程序的确定性检查，返回硬问题与软问题。
+- check_document：跑程序的确定性检查，返回硬问题与软问题。检查工作稿时优先传 {path:"work/文件名.md"}，host 读取文件全文；不要把整篇稿子重复输出到 text 参数，避免耗尽输出长度。省略参数只检查本轮开始时的正文，不是工作稿。
 - doc_elements：只读当前表单已填的要素，避免重复问已经填过的内容。
 - ask_user：确有必要时问用户，一次最多 3 题、每轮最多 2 批；等回答的时间不算执行超时。
 - ${SUBMIT_TOOL_NAME}：交付完整正文；${REPORT_TOOL_NAME}：交审核 / 资料清单，只进侧栏。
@@ -95,7 +104,7 @@ ${skillBlock(task)}
 - 生成或修改正文：把完整 Markdown 写入 work/ 下的一个文件，调用 ${SUBMIT_TOOL_NAME}({ path, summary })。summary 用一句话说明改了什么、依据了哪些材料。
 - 只审核或只找资料、不产生新正文：调用 ${REPORT_TOOL_NAME}({ summary, items: [{ title, detail, severity }] })。清单只进侧栏，不替换正文。
 - 二者只能选一个。提交内容在调用时固定；提交之后再改文件不会改变已经交出的成品。同一轮重复提交以第一次为准。
-- 不要把正文粘贴在聊天回复里当作交付，也不要声称已经提交而没有调用工具。没有提交就是没有完成。`;
+- 不要把正文粘贴在聊天回复里当作交付，也不要声称已经提交而没有调用工具。没有提交就是没有完成。${resumeBlock}`;
 }
 
 /** 用户消息：本轮要求与本轮上下文。 */

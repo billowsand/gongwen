@@ -83,6 +83,9 @@ pub(crate) struct SavedTurn {
     /// 风格学习学出、还没保存的档案。
     #[serde(default)]
     pub(crate) style: Option<crate::agent::style::StyleProfile>,
+    /// Pi 运行引用：旧会话没有这个字段，读回为 None（不显示假恢复入口）。
+    #[serde(default)]
+    pub(crate) pi_run: Option<crate::pi_agent::PiRunRef>,
 }
 
 /// 挂起的流程。技能本身不存（它在内置资源或配置目录里），只存 id 与文本指纹。
@@ -277,6 +280,7 @@ impl SavedTurn {
             elapsed_ms: turn.elapsed().as_millis() as u64,
             proposal,
             style: turn.style.clone(),
+            pi_run: turn.pi_run.clone(),
         }
     }
 
@@ -376,6 +380,7 @@ impl SavedTurn {
             findings: self.findings,
             field_cards: self.field_cards,
             style: self.style,
+            pi_run: self.pi_run,
             started: Instant::now(),
             elapsed: Some(Duration::from_millis(self.elapsed_ms)),
         };
@@ -449,6 +454,11 @@ fn fingerprint(turn: &AiTurn, has_proposal: bool) -> u64 {
     } else {
         format!("{:?}", turn.state).hash(&mut hasher);
         turn.excluded_hunks.hash(&mut hasher);
+        // Pi 运行状态变化（交付、接受）也要触发一次落盘，否则重启后还会给出恢复入口。
+        turn.pi_run
+            .as_ref()
+            .map(|run| (&run.run_id, run.status))
+            .hash(&mut hasher);
         turn.content.len().hash(&mut hasher);
         turn.notes.len().hash(&mut hasher);
         turn.steps.len().hash(&mut hasher);
@@ -610,6 +620,7 @@ impl AiPanel {
 
     /// 换成一个空白的新会话。调用方先把当前会话写下去。
     pub(crate) fn start_new_session(&mut self) {
+        self.clear_pi_transient();
         let loaded_for = self.session.loaded_for;
         let list = std::mem::take(&mut self.session.list);
         self.turns.clear();
@@ -620,6 +631,16 @@ impl AiPanel {
             list,
             ..Session::fresh()
         };
+    }
+
+    /// 切会话 / 开新会话时清掉只属于当前进程的 Pi 显示引用：题卡、清单卡、
+    /// 回答管道与上一轮事实来源，不能带到另一个会话。运行记录本身随轮次存盘。
+    fn clear_pi_transient(&mut self) {
+        self.pi_ask = None;
+        self.pi_report = None;
+        self.pi_bridge = None;
+        self.pi_sources = None;
+        self.composer.pi_notes.clear();
     }
 
     /// 把库里的一个会话装进侧栏，返回要重新装上的提案（正文没动过时）。
@@ -635,6 +656,7 @@ impl AiPanel {
         } else {
             self.skills.clone()
         };
+        self.clear_pi_transient();
         let mut problems = Vec::new();
         let mut saved: Vec<SavedTurn> = Vec::new();
         for (turn_id, json) in rows {
@@ -1216,11 +1238,56 @@ mod tests {
             elapsed_ms: 1200,
             proposal: None,
             style: None,
+            pi_run: None,
         };
         let (turn, _) = saved.restore(&[], false);
         assert!(matches!(&turn.state, TurnState::Failed(why) if why.contains("不在了")));
         assert!(turn.run.is_none());
         assert_eq!(turn.elapsed, Some(Duration::from_millis(1200)));
+    }
+
+    #[test]
+    fn old_sessions_have_no_pi_run_and_pi_cards_do_not_cross_sessions() {
+        // 旧会话没有 pi_run 字段：读回为 None，界面不显示假恢复入口。
+        let old = r#"{"id":1,"title":"旧轮","prompt":"改","state":"Interrupted"}"#;
+        let saved: SavedTurn = serde_json::from_str(old).unwrap();
+        assert!(saved.pi_run.is_none());
+        let (turn, _) = saved.restore(&[], false);
+        assert!(turn.pi_run.is_none());
+
+        // 切会话 / 开新会话时清掉只属于当前进程的 Pi 题卡、清单与事实来源。
+        let mut panel = AiPanel {
+            pi_ask: Some(crate::ai_panel::pi_ask::PiAsk::new(
+                crate::pi_agent::PiQuestionBatch {
+                    call_id: "c1".into(),
+                    batch: 1,
+                    questions: vec![crate::pi_agent::PiQuestion {
+                        id: 1,
+                        text: "写哪方面".into(),
+                        options: vec!["责任".into()],
+                        custom: false,
+                        skippable: true,
+                    }],
+                },
+                std::sync::Arc::new(crate::pi_agent::PiBridge::default()),
+            )),
+            pi_report: Some(crate::ai_panel::pi_ask::PiReportView {
+                summary: "审完".into(),
+                items: Vec::new(),
+                workspace_label: "pi/workspaces/x".into(),
+            }),
+            pi_sources: Some(crate::ai_panel::pi_job::PiProposalSources {
+                before: "正文".into(),
+                candidate: "候选".into(),
+                sources: vec!["材料".into()],
+            }),
+            ..AiPanel::default()
+        };
+        panel.start_new_session();
+        assert!(panel.pi_ask.is_none());
+        assert!(panel.pi_report.is_none());
+        assert!(panel.pi_sources.is_none());
+        assert!(panel.pi_bridge.is_none());
     }
 
     /// 第 2 期前的会话没有 excluded_hunks 字段，按 0（整篇接受）读回；带排除数的

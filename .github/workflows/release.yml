@@ -62,6 +62,14 @@ jobs:
           Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
           Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force
 
+      - name: Stage bundled Pi runtime
+        shell: pwsh
+        run: ./scripts/stage-pi-runtime.ps1 -Platform win-x64 -Force
+
+      - name: Offline Pi runtime acceptance
+        shell: pwsh
+        run: ./runtime/pi/node.exe scripts/pi-offline-acceptance.mjs --runtime ./runtime/pi
+
       - name: Prepare full staging directory
         shell: pwsh
         run: |
@@ -246,6 +254,14 @@ jobs:
           Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
           Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force
 
+      - name: Stage bundled Pi runtime
+        shell: bash
+        run: bash ./scripts/stage-pi-runtime.sh --platform linux-arm64 --force
+
+      - name: Offline Pi runtime acceptance
+        shell: bash
+        run: ./runtime/pi/bin/node scripts/pi-offline-acceptance.mjs --runtime ./runtime/pi
+
       - name: Prepare full staging directory
         shell: pwsh
         run: |
@@ -289,7 +305,7 @@ jobs:
             base-devel cmake git curl unzip zip pkgconf fakeroot file zstd \
             libx11 libxcursor libxrandr libxi libxinerama \
             libxkbcommon libxkbcommon-x11 libglvnd wayland \
-            fontconfig dbus zlib
+            fontconfig dbus zlib jq iproute2
 
       - uses: actions/checkout@v4
 
@@ -325,6 +341,16 @@ jobs:
           }
           test -f runtime/fonts/GWFangSong.ttf
           test -f runtime/SHA256SUMS.txt
+
+      - name: Stage bundled Pi runtime
+        run: |
+          set -euo pipefail
+          bash ./scripts/stage-pi-runtime.sh --platform linux-x64 --force
+
+      - name: Offline Pi runtime acceptance
+        run: |
+          set -euo pipefail
+          ./runtime/pi/bin/node scripts/pi-offline-acceptance.mjs --runtime ./runtime/pi
 
       - name: Assemble staging directory
         run: |

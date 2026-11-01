@@ -49,6 +49,14 @@ esac
 APP_DIR="/usr/lib/gongwen-assistant"
 test -x "$APP_DIR/gongwen-assistant"
 test -L /usr/bin/gongwen-assistant
+
+# 随包 Pi 运行时：Node / host / manifest 必须在，且 Node 能跑。
+test -x "$APP_DIR/runtime/pi/bin/node"
+test -f "$APP_DIR/runtime/pi/host/main.mjs"
+test -f "$APP_DIR/runtime/pi/manifest.json"
+node_version="$("$APP_DIR/runtime/pi/bin/node" --version)"
+test "$node_version" = "v22.22.3"
+echo "== bundled Node: $node_version"
 test -f "$APP_DIR/runtime/fonts/GWFangSong.ttf"
 test -f "$APP_DIR/runtime/fonts/FZShuSong.ttf"
 test -f "$APP_DIR/runtime/ime/base.txt"

@@ -31,6 +31,7 @@ export const DOMAIN_TOOLS = [
     category: Type.Optional(Type.String({ description: "unit / person，省略为不限" })),
   })],
   ["check_document", "跑程序的确定性检查（事实来源、公文引用、要素、词表）", Type.Object({
+    path: Type.Optional(Type.String({ description: "优先使用：work/ 下待检查的 Markdown 文件路径；host 读取全文，不要重复生成全文参数" })),
     text: Type.Optional(Type.String({ description: "要检查的 Markdown；省略检查本轮正文" })),
   })],
   ["doc_elements", "只读当前表单已填的公文要素（授权类只读）", Type.Object({})],
@@ -119,13 +120,21 @@ function textResult(value) {
 }
 
 /** 把领域工具注册成 Durable 工具；执行时都走同一座桥。 */
-export function createDomainTools(bridge) {
+export function createDomainTools(bridge, { readDocument } = {}) {
   const tools = DOMAIN_TOOLS.map(([name, description, parameters]) =>
     defineTool({
       name,
       description,
       parameters,
-      execute: async (args) => textResult(await bridge.call(name, args ?? {})),
+      execute: async (args) => {
+        let values = args ?? {};
+        if (name === "check_document" && values.path !== undefined) {
+          if (values.text !== undefined) throw new BridgeError("path 与 text 只能选一个");
+          if (!readDocument) throw new BridgeError("当前工具没有文件读取器");
+          values = { text: readDocument(values.path) };
+        }
+        return textResult(await bridge.call(name, values));
+      },
     }),
   );
   tools.push(

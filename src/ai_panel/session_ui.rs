@@ -203,6 +203,24 @@ impl DraftPage<'_> {
                 saved.label,
                 &self.config.vocabulary,
             );
+            // 会话重载后仍能继续改未采纳提案：把这一轮落盘的原始依据读回来。
+            if let Some(turn_id) = self
+                .doc
+                .ai_panel
+                .turns
+                .iter()
+                .rev()
+                .find(|turn| {
+                    matches!(turn.state, crate::ai_panel::TurnState::Proposed(_))
+                        && turn
+                            .pi_run
+                            .as_ref()
+                            .is_some_and(|run| run.sources.is_some())
+                })
+                .map(|turn| turn.id)
+            {
+                self.restore_pi_sources(turn_id);
+            }
         }
         if !problems.is_empty() {
             *self.status = format!("AI 会话有 {} 轮读不出来，已跳过。", problems.len());

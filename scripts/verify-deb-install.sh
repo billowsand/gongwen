@@ -38,9 +38,18 @@ status="$(dpkg-query -W -f='${Status}' gongwen-assistant)"
 echo "== dpkg status: $status"
 test "$status" = "install ok installed"
 
+# 随包 Pi 运行时：Node / host / manifest 必须在，且 Node 能在这个 glibc 基线上跑。
+PI_DIR=/opt/gongwen-assistant/runtime/pi
+test -x "$PI_DIR/bin/node"
+test -f "$PI_DIR/host/main.mjs"
+test -f "$PI_DIR/manifest.json"
+node_version="$("$PI_DIR/bin/node" --version)"
+test "$node_version" = "v22.22.3"
+echo "== bundled Node: $node_version"
+
 # 装进来的 Depends 必须覆盖二进制实际链接的所有库。
 failed=0
-for bin in /opt/gongwen-assistant/gongwen-assistant; do
+for bin in /opt/gongwen-assistant/gongwen-assistant "$PI_DIR/bin/node"; do
     echo "== ldd $bin"
     # 静态链接的 ldd 返回非零并打印 "not a dynamic executable"，没有要找的库，放行。
     out="$(ldd "$bin" 2>&1)" || true

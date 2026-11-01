@@ -1,11 +1,7 @@
 //! 起草页右侧的 AI 侧栏。
 //!
-//! 设计见 `docs/ai-agent-workbench.md` 第十六节。每一轮都按一个技能（SKILL.md）跑流程引擎
-//! （`crate::agent::engine`）：技能默认自动选（上下文过滤 + 触发词，分不出高下时交模型判断），
-//! 也可以在输入框里敲 `/` 从弹出列表里指定；敲 `@` 引用稿件库或知识库里的文章（16.13）。
-//!
-//! 模型输出逐段流进任务流；流程要问用户时挂起，答完接着跑。结果一律是提案，由用户点
-//! 「采用 / 接受」才落入正文（红线 1）；审核类技能交问题清单。
+//! 新请求使用 Pi 文件工作区与标准 SKILL.md；`/` 选择 Pi 技能，`@` 引用文章。
+//! 旧流程仅保留既有会话的展示、恢复及共享服务。结果经确定性闸门和用户接受才进入正文。
 //!
 //! 本文件只放状态与纯逻辑；界面在 `ai_panel/ui.rs`（任务流）与 `ai_panel/composer_ui.rs`
 //! （输入框），`/`、`@` 的识别与过滤在 `ai_panel/mention.rs`。
@@ -29,6 +25,7 @@ mod mention;
 mod paste;
 pub(crate) mod pi_ask;
 pub(crate) mod pi_job;
+pub(crate) mod pi_prepare;
 mod provenance;
 pub(crate) use provenance::source_line as proposal_source;
 pub(crate) mod session;
@@ -41,24 +38,13 @@ pub(crate) use skill_job::{
     GapRevision, SkillResult, SkillRun, finish_research_revision, initial_replies,
 };
 
-/// 自动选技能、输入框还空着时的提示。
-const AUTO_HINT: &str = "说说要做什么…";
-
 /// 输入区的状态。随稿件保存，切换标签页互不影响。
 #[derive(Debug, Default)]
 pub(crate) struct Composer {
-    /// 用户用 `/` 或技能标签指定的技能 id；None 表示自动选。
-    pub(crate) skill: Option<String>,
     pub(crate) text: String,
     /// 打开侧栏时锁定的选区（字节区间）与当时的原文。正文被改动后按原文重新定位。
     pub(crate) selection: Option<(Range<usize>, String)>,
-    /// 润色预设（`AppConfig::ai_prompts` 的 id）。None 表示不用预设。
-    pub(crate) preset: Option<u32>,
-    /// 技能用到知识库时检索。
-    pub(crate) use_rag: bool,
     pub(crate) error: Option<String>,
-    /// 首次打开时按设置给过默认值没有。之后以用户的勾选为准，不再覆盖。
-    pub(crate) primed: bool,
     /// `@` 引用的文章；输入框里对应留着 `@《标题》` 记号，记号删了引用也就没了。
     pub(crate) refs: Vec<Reference>,
     /// 大段粘贴生成的临时材料，标签可单独移除。
@@ -68,8 +54,6 @@ pub(crate) struct Composer {
     /// 有待确认的提案时，修改类技能改提案而不是改正文（16.15 B.7）。默认是；底栏的「改提案」
     /// 标签点掉就回到改正文。
     pub(crate) skip_proposal: bool,
-    /// 写法风格：自动挑 / 指定一份 / 不用（16.15 C.3）。
-    pub(crate) style: crate::agent::style::StyleChoice,
     /// 用户说了「把工作稿提交到正文」（`commit_intent`）：输入框上方出「写入正文？」确认卡。
     pub(crate) commit_prompt: bool,
     /// Pi 入口用哪份标准技能（`assets/pi-skills/`）；None 表示自动。
@@ -214,6 +198,9 @@ pub(crate) struct AiTurn {
     pub(crate) field_cards: Vec<field_card::FieldCardRow>,
     /// 风格学习学出、还没保存的档案。
     pub(crate) style: Option<crate::agent::style::StyleProfile>,
+    /// Pi 这一轮的运行引用：中断 / 停止 / 失败后据此「接着写」或「从头写」。
+    /// 已接受或旧流程轮次为 None；完整记录留在工作区的 `pi/run.json`。
+    pub(crate) pi_run: Option<crate::pi_agent::PiRunRef>,
     pub(crate) started: Instant,
     /// 结束时定格的耗时；运行中为 None，按 `started` 现算。
     pub(crate) elapsed: Option<Duration>,
@@ -336,6 +323,7 @@ impl AiPanel {
             findings: Vec::new(),
             field_cards: Vec::new(),
             style: None,
+            pi_run: None,
             started: Instant::now(),
             elapsed: None,
         });
@@ -602,6 +590,21 @@ impl AiPanel {
             } else {
                 TurnState::Discarded
             };
+            // 接受过的 Pi 轮次不再提供「接着写」：正文已经采纳，重复恢复只会把同一份
+            // 成品当新提案重装。运行记录本身留在工作区，不再参与恢复。
+            if accepted && let Some(run) = turn.pi_run.as_mut() {
+                run.status = crate::pi_agent::PiRunStatus::Accepted;
+                run.updated_at = chrono::Local::now().to_rfc3339();
+                // 运行记录也标成已接受：会话没来得及落盘就重启时，服务器端校验
+                // 也不会再把这一轮当可恢复。
+                if let Ok(root) = crate::pi_agent::resolve_workspace(&run.workspace)
+                    && let Some(dir) = root.parent()
+                    && let Ok(mut record) = crate::pi_agent::PiRunRecord::read_from(dir)
+                {
+                    record.status = crate::pi_agent::PiRunStatus::Accepted;
+                    let _ = record.write_to_dir(dir);
+                }
+            }
         }
     }
 

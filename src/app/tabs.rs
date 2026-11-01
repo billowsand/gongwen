@@ -383,10 +383,6 @@ impl GongwenApp {
                 DraftAction::OpenSendPackage(id) => self.open_send_package(id),
                 DraftAction::OpenManuscript(id) => self.open_in_editor(id),
                 DraftAction::OpenVersionCommit(scope) => self.open_version_commit(scope),
-                DraftAction::OpenSkillSettings => {
-                    self.ai_section = super::AiSection::Skills;
-                    self.open_page(NavPage::AiPrompts);
-                }
                 DraftAction::OpenStyleSettings => {
                     self.ai_section = super::AiSection::Styles;
                     self.open_page(NavPage::AiPrompts);

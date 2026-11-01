@@ -10,8 +10,9 @@ import {
   fauxText,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { AgentError, runAgentJob } from "../src/agent.mjs";
+import { AgentError, runAgentJob, writingCompaction } from "../src/agent.mjs";
 import { PROTOCOL_VERSION, validateInit } from "../src/protocol.mjs";
+import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 
 // 这些测试用 faux provider，只验证真实 Durable harness、工作区限制与提交协议；
 // 生产入口 main.mjs 永远构造 OpenAI 兼容 provider，不走这里。
@@ -24,7 +25,9 @@ function makeWorkspace() {
   fs.writeFileSync(path.join(root, "input", "current.md"), "# 当前正文\n\n原有内容。\n");
   fs.writeFileSync(path.join(root, "input", "request.md"), "把正文改短。\n");
   fs.writeFileSync(path.join(root, "skills", "gongwen-markdown", "SKILL.md"), "# 技能\n");
-  return { root, state: path.join(root, "..", `${path.basename(root)}.sqlite`) };
+  const delivery = path.join(root, "..", `${path.basename(root)}-run`);
+  fs.mkdirSync(delivery, { recursive: true });
+  return { root, state: path.join(root, "..", `${path.basename(root)}.sqlite`), delivery };
 }
 
 function makeConfig(workspace) {
@@ -36,6 +39,7 @@ function makeConfig(workspace) {
     workspace: {
       root: workspace.root,
       state: workspace.state,
+      delivery: workspace.delivery,
       current: "input/current.md",
       request: "input/request.md",
       skills: "skills/gongwen-markdown",
@@ -59,6 +63,93 @@ function fakeBackend() {
   const model = faux.getModel();
   return { faux, models, model };
 }
+
+test("a long 32k task compacts before continuing instead of shrinking output to one token", async () => {
+  const workspace = makeWorkspace();
+  const config = makeConfig(workspace);
+  const faux = fauxProvider({ provider: "faux-32k", models: [{ id: "faux-model", contextWindow: 32_768, maxTokens: 16_384 }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const model = faux.getModel();
+  config.task.request += "\n" + "Background context. ".repeat(700);
+  const content = "# 已写出的稿件\n\n保留正文。\n";
+  fs.writeFileSync(path.join(workspace.root, "work/draft.md"), content);
+  fs.writeFileSync(path.join(workspace.root, "input/long.md"), "Read-only source text. ".repeat(2_000));
+  const reading = fauxAssistantMessage([fauxToolCall("read", { path: "input/long.md" })], { stopReason: "toolUse" });
+  // 持续读取长材料，必须在剩余输出耗尽前切出历史并运行真实 Durable 压缩。
+  let compacted = false;
+  faux.setResponses([
+    reading,
+    (context) => {
+      assert.match(JSON.stringify(context), /context summarization assistant/);
+      compacted = true;
+      return fauxAssistantMessage([fauxText("任务：提交现有 work/draft.md；材料仍在 input/long.md，不编造事实。")]);
+    },
+    (context) => {
+      const output = clampMaxTokensToContext(model, context, model.maxTokens);
+      assert.ok(output >= 4_096, `压缩后必须实际留出输出空间，当前只有 ${output}`);
+      return fauxAssistantMessage([fauxToolCall("submit_document", { path: "work/draft.md", summary: "按已有稿件完成交付" })], { stopReason: "toolUse" });
+    },
+  ]);
+  const result = await runAgentJob({ config, models, model, emit: () => {} });
+  assert.ok(compacted, "必须实际触发 Durable 压缩");
+  assert.equal(result.snapshot.content, content);
+  const policy = writingCompaction(model);
+  assert.equal(policy.reserveTokens, 16_384);
+  assert.ok(policy.keepRecentTokens <= 4_096);
+});
+
+test("a length-truncated turn continues with path-based checking and explicit submission", async () => {
+  const workspace = makeWorkspace();
+  const config = makeConfig(workspace);
+  const { faux, models, model } = fakeBackend();
+  const content = "# 成稿\n\n已经写出的正文。\n";
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall("write", { path: "work/draft.md", content })], { stopReason: "toolUse" }),
+    fauxAssistantMessage([fauxText("检查参数尚未完成")], { stopReason: "length" }),
+    fauxAssistantMessage([fauxToolCall("check_document", { path: "work/draft.md" })], { stopReason: "toolUse" }),
+    fauxAssistantMessage([fauxToolCall("submit_document", { path: "work/draft.md", summary: "完成检查并提交" })], { stopReason: "toolUse" }),
+  ]);
+  let bridge;
+  const events = [];
+  const result = await runAgentJob({ config, models, model, onBridge: value => { bridge = value; }, emit: event => {
+    events.push(event);
+    if (event.type === "tool_request") {
+      assert.equal(event.name, "check_document");
+      assert.deepEqual(event.args, { text: content }, "实际文件内容交给 Rust，而非路径或占位文字");
+      queueMicrotask(() => bridge.handle({ type: "tool_result", callId: event.callId, ok: true, result: { hard: [], soft: [] } }));
+    }
+  }});
+  assert.equal(result.snapshot.content, content);
+  assert.ok(events.some(event => event.type === "progress" && event.message.includes("继续检查与提交")));
+});
+
+test("plain completion is reminded but never silently promoted into a document", async () => {
+  const workspace = makeWorkspace();
+  const config = makeConfig(workspace);
+  const { faux, models, model } = fakeBackend();
+  const events = [];
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall("write", { path: "work/draft.md", content: "# 候选\n" })], { stopReason: "toolUse" }),
+    ...Array.from({ length: 3 }, () => fauxAssistantMessage([fauxText("写好了。")]))
+  ]);
+  await assert.rejects(() => runAgentJob({ config, models, model, emit: event => events.push(event) }), error => error.code === "not_submitted");
+  assert.equal(events.filter(event => event.type === "progress" && event.message.includes("继续检查与提交")).length, 2);
+  assert.equal(fs.existsSync(path.join(workspace.delivery, "receipt.json")), false);
+  assert.equal(fs.readFileSync(path.join(workspace.root, "work/draft.md"), "utf8"), "# 候选\n");
+  const replayEvents = [];
+  // 重开数据库不能重新获得补交额度，也不能把上次留下的候选自动当成成品。
+  config.recovery = { resume: true };
+  await assert.rejects(() => runAgentJob({ config, models, model, emit: event => replayEvents.push(event) }), error => error.code === "not_submitted");
+  assert.equal(fs.existsSync(path.join(workspace.delivery, "receipt.json")), false);
+  // 用户明确点「接着写」可开新的一批有界补交，继续原文件，无需从头生成。
+  config.recovery.continuationId = "manual-resume-1";
+  faux.appendResponses([fauxAssistantMessage([fauxToolCall("submit_document", {
+    path: "work/draft.md", summary: "继续原稿并提交"
+  })], { stopReason: "toolUse" })]);
+  const delivered = await runAgentJob({ config, models, model, emit: () => {} });
+  assert.equal(delivered.snapshot.content, "# 候选\n");
+});
 
 test("a written file submitted through submit_document becomes the delivered snapshot", async () => {
   const workspace = makeWorkspace();
@@ -111,7 +202,7 @@ test("a run that ends without submit_document is not a delivery", async () => {
   const workspace = makeWorkspace();
   const config = makeConfig(workspace);
   const { faux, models, model } = fakeBackend();
-  faux.setResponses([fauxAssistantMessage([fauxText("我写好了，见聊天。")])]);
+  faux.setResponses(Array.from({ length: 3 }, () => fauxAssistantMessage([fauxText("我写好了，见聊天。")])));
   await assert.rejects(
     () => runAgentJob({ config, models, model, emit: () => {} }),
     (error) => error instanceof AgentError && error.code === "not_submitted",
@@ -128,6 +219,8 @@ test("submitting a path outside work/ is refused", async () => {
       [fauxToolCall("submit_document", { path: "input/current.md", summary: "越界" })],
       { stopReason: "toolUse" },
     ),
+    fauxAssistantMessage([fauxText("结束")]),
+    fauxAssistantMessage([fauxText("结束")]),
     fauxAssistantMessage([fauxText("结束")]),
   ]);
   await assert.rejects(
@@ -146,6 +239,8 @@ test("an empty submitted file is refused", async () => {
       [fauxToolCall("submit_document", { path: "work/empty.md", summary: "空文件" })],
       { stopReason: "toolUse" },
     ),
+    fauxAssistantMessage([fauxText("结束")]),
+    fauxAssistantMessage([fauxText("结束")]),
     fauxAssistantMessage([fauxText("结束")]),
   ]);
   await assert.rejects(

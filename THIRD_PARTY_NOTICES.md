@@ -236,3 +236,24 @@ basecamp/omarchy 仓库，只用于测试「跟随 Omarchy」主题的配色换�
 
 - Project: <https://github.com/basecamp/omarchy>
 - License: MIT, Copyright (c) David Heinemeier Hansson
+
+## 随包 Pi 运行时（Node + Pi Durable）
+
+智能写作（Pi）的固定运行时随安装包分发在 `runtime/pi`，不依赖目标机的 Node、npm、
+Python 或全局 Pi：
+
+- **Node.js 22.22.3**（官方二进制，MIT 及第三方组件许可）。原始许可随包保存在
+  `runtime/pi/licenses/LICENSE.node`；官方压缩包只取 `node` / `node.exe` 与 `LICENSE`，
+  不带 npm、头文件与文档。来源：<https://nodejs.org/download/release/v22.22.3/>。
+- **@earendil-works/pi-durable 1.4.0、@earendil-works/pi-ai 1.4.0、
+  @earendil-works/chord 1.4.0**（MIT）。Pi 的宿主代码是本项目自己写的
+  （`pi-host/`），只使用这些包作为 Durable harness / 模型接入库。
+- 其余完整生产依赖（`npm ci --omit=dev --ignore-scripts` 装出的传递依赖）的名称、版本、
+  许可与许可原文，随包保存在 `runtime/pi/licenses/DEPENDENCIES.json` 与
+  `runtime/pi/licenses/deps/`。安装时**不执行**任何第三方 install script；运行资源
+  （WASM / worker / JSON）是否齐全由 `scripts/pi-offline-acceptance.mjs` 实跑验证。
+- 运行时清单 `runtime/pi/manifest.json` 记录平台、Node / Pi / host / 协议版本、lockfile
+  哈希与每个文件的 SHA-256，供打包与启动校验。
+
+组装脚本只从官方地址下载（或使用构建机缓存），先校验固定 SHA-256 再解包；不把 npm 缓存、
+测试工作区、密钥或开发工具打进安装包。项目整体仍按 GPL-3.0-or-later 分发。

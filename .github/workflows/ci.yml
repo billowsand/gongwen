@@ -40,6 +40,22 @@ jobs:
       - name: Test
         run: cargo test --locked --all-targets
 
+      - name: Stage bundled Pi runtime
+        shell: pwsh
+        run: ./scripts/stage-pi-runtime.ps1 -Platform win-x64 -Force
+
+      - name: Pi host tests (bundled Node)
+        shell: pwsh
+        working-directory: pi-host
+        run: |
+          # 测试源码仍在 pi-host/，依赖使用已组装的真实生产树；目标运行时不放测试文件。
+          Copy-Item ../runtime/pi/host/node_modules ./node_modules -Recurse
+          ../runtime/pi/node.exe --test
+
+      - name: Offline Pi runtime acceptance
+        shell: pwsh
+        run: ./runtime/pi/node.exe scripts/pi-offline-acceptance.mjs --runtime ./runtime/pi
+
   linux-arm64-glibc228:
     name: fmt / clippy / test (Linux ARM64 / GLIBC 2.28)
     runs-on: ubuntu-24.04-arm
@@ -187,7 +203,7 @@ jobs:
         run: |
           set -euo pipefail
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl unzip
+          apt-get install -y --no-install-recommends ca-certificates curl unzip jq xz-utils binutils libstdc++6 iproute2
 
       - uses: actions/checkout@v4
 
@@ -214,6 +230,17 @@ jobs:
           # 旧有的 tectonic/、texbundle/ 不随包。
           rm -rf "$staging/runtime/tectonic" "$staging/runtime/texbundle"
           cp README.md LICENSE THIRD_PARTY_NOTICES.md "$staging/"
+
+      - name: Stage bundled Pi runtime
+        run: |
+          set -euo pipefail
+          bash ./scripts/stage-pi-runtime.sh --platform linux-arm64 --force
+          cp -a runtime/pi "$GITHUB_WORKSPACE/dist/staging/runtime/pi"
+
+      - name: Offline Pi runtime acceptance
+        run: |
+          set -euo pipefail
+          ./runtime/pi/bin/node scripts/pi-offline-acceptance.mjs --runtime ./runtime/pi
 
       - name: Package deb
         run: |

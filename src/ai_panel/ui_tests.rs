@@ -23,11 +23,20 @@ fn paper_sidebar_samples() {
         ("welcome", 420.0, false),
         ("narrow", 340.0, false),
         ("conversation", 420.0, true),
+        ("material", 340.0, false),
     ] {
         let size = egui::vec2(width, 850.0);
         let mut harness =
             Harness::new("# 关于做好冬季森林防火工作的通知\n\n请各单位做好隐患排查。\n");
         harness.with_page(|page| page.toggle_ai_panel(None));
+        if name == "material" {
+            harness
+                .doc
+                .ai_panel
+                .composer
+                .materials
+                .push(PastedFile::new(&"这是验收专用材料，不含用户文稿。\n".repeat(150)).unwrap());
+        }
         if conversation {
             harness
                 .doc
@@ -104,6 +113,20 @@ impl Harness {
             store: None,
             _keep,
         }
+    }
+
+    fn configure_pi(&mut self) {
+        self.config.providers.push(crate::models::ProviderConfig {
+            id: "pi-test".into(),
+            name: "测试".into(),
+            enabled: true,
+            base_url: "http://127.0.0.1:9/v1".into(),
+            ..Default::default()
+        });
+        self.config.pi_model = crate::models::ModelRef {
+            provider_id: "pi-test".into(),
+            model: "pi-large-test".into(),
+        };
     }
 
     fn with_page<R>(&mut self, f: impl FnOnce(&mut DraftPage<'_>) -> R) -> R {
@@ -394,13 +417,15 @@ fn workspace_is_shown_on_the_left_and_readonly_until_adopted() {
 fn sending_opens_a_turn_and_stop_releases_the_document() {
     let mut harness = Harness::new("# 标题\n\n一、总体要求\n");
     harness.doc.ai_panel.open = true;
+    harness.configure_pi();
     harness.doc.ai_panel.composer.text = "压缩一下".into();
-    harness.with_page(|page| page.send_ai_panel());
+    harness.with_page(|page| page.send_ai_panel(false));
 
     let panel = &harness.doc.ai_panel;
     assert_eq!(panel.turns.len(), 1);
-    assert_eq!(panel.turns[0].title, "精简扩写");
-    assert_eq!(panel.turns[0].prompt, "压缩一下");
+    assert_eq!(panel.turns[0].title, "智能写作（Pi · 自动）");
+    assert!(panel.turns[0].prompt.starts_with("压缩一下"));
+    assert!(panel.turns[0].request.is_none(), "不创建旧流程请求");
     assert!(panel.running());
     assert!(panel.composer.text.is_empty(), "发出去后输入框清空");
     assert!(harness.doc.busy);
@@ -421,7 +446,7 @@ fn sending_opens_a_turn_and_stop_releases_the_document() {
 #[test]
 fn polish_needs_a_request_or_a_preset() {
     let mut harness = Harness::new("# 标题\n\n正文\n");
-    harness.with_page(|page| page.send_ai_panel());
+    harness.with_page(|page| page.send_ai_panel(false));
     assert!(harness.doc.ai_panel.turns.is_empty());
     assert!(!harness.doc.busy);
     assert!(harness.doc.ai_panel.composer.error.is_some());
@@ -430,35 +455,53 @@ fn polish_needs_a_request_or_a_preset() {
 #[test]
 fn a_stale_selection_is_refused_instead_of_guessed() {
     let mut harness = Harness::new("# 标题\n\n二、乙\n\n二、乙\n");
+    harness.configure_pi();
     let composer = &mut harness.doc.ai_panel.composer;
     composer.text = "改一下".into();
     composer.selection = Some((0..3, "二、乙".into()));
-    harness.with_page(|page| page.send_ai_panel());
+    harness.with_page(|page| page.send_ai_panel(false));
     assert!(harness.doc.ai_panel.turns.is_empty());
     let error = harness.doc.ai_panel.composer.error.clone().unwrap();
     assert!(error.contains("选区"), "{error}");
 }
 
 #[test]
-fn drafting_starts_research_and_only_ever_proposes() {
+fn drafting_uses_pi_and_only_ever_proposes() {
     let mut harness = Harness::new("");
+    harness.configure_pi();
     let composer = &mut harness.doc.ai_panel.composer;
     composer.text = "写一份冬季森林防火的通知".into();
-    composer.use_rag = true;
-    harness.with_page(|page| page.send_ai_panel());
+    harness.with_page(|page| page.send_ai_panel(false));
 
     let panel = &harness.doc.ai_panel;
     assert_eq!(panel.turns.len(), 1);
-    // 空稿只有起草类技能可用；知识库没启用时不检索，也不挂「知识库」chip。
-    assert_eq!(panel.turns[0].title, "研究式起草");
-    assert!(panel.turns[0].context.is_empty());
+    assert_eq!(panel.turns[0].title, "智能写作（Pi · 自动）");
+    assert!(panel.turns[0].request.is_none());
     assert!(panel.running());
     assert!(panel.cancel.is_some());
     assert!(harness.doc.busy);
     // 红线 1：结果只会装成提案，基线记下的是发起时的正文。
-    assert_eq!(harness.doc.ai_review_baseline.as_deref(), Some(""));
+    assert_eq!(
+        harness.doc.ai_review_baseline, None,
+        "准备完成前不清理旧审阅基线"
+    );
     assert!(harness.doc.ai_proposal.is_none());
     assert!(harness.doc.generated_markdown.is_empty());
+}
+
+// 旧模型联机用例仍针对历史流程后端，不能通过新的 Pi 输入区启动。
+fn start_legacy_test_request(harness: &mut Harness) {
+    let composer = &harness.doc.ai_panel.composer;
+    let mut request = panel_request(None, &super::super::mention::plain_request(&composer.text));
+    request.selection = composer.selection.clone();
+    request.refs = composer.refs.clone();
+    request.materials = composer
+        .materials
+        .iter()
+        .map(|file| file.material.clone())
+        .collect();
+    request.use_rag = harness.config.rag.enabled;
+    harness.with_page(|page| page.start_panel_request(request));
 }
 
 fn panel_request(skill: Option<&str>, text: &str) -> crate::ai_panel::TurnRequest {
@@ -1021,7 +1064,7 @@ fn toggling_with_a_selection_locks_it_for_polish() {
     let panel = &harness.doc.ai_panel;
     assert!(panel.open);
     assert!(!harness.doc.result_drawer_open, "与审校抽屉互斥");
-    assert_eq!(panel.composer.skill.as_deref(), Some(POLISH));
+    assert_eq!(panel.composer.pi_skill.as_deref(), Some("gongwen-revise"));
     assert_eq!(panel.composer.selection.as_ref().unwrap().1, "一、");
     // 不带选区再点一下就收起。
     harness.with_page(|page| page.toggle_ai_panel(None));
@@ -1029,111 +1072,145 @@ fn toggling_with_a_selection_locks_it_for_polish() {
 }
 
 #[test]
-fn the_skill_chip_follows_the_document_and_the_input() {
+fn pi_composer_has_one_execution_path_and_no_legacy_controls() {
     let mut harness = Harness::new("");
     harness.with_page(|page| page.toggle_ai_panel(None));
     harness.frame_texts();
     let texts = harness.frame_texts();
-    assert!(
-        has(&texts, "说说要做什么…"),
-        "空稿、没写要求时几个起草类技能都可用：{texts:?}"
-    );
-    assert!(
-        !has(&texts, "不用预设"),
-        "空稿上润色不参与，没有预设下拉框：{texts:?}"
-    );
-
-    harness.doc.ai_panel.composer.text = "起草一份冬季森林防火的通知".into();
-    harness.frame_texts();
+    assert!(has(&texts, "Pi · 自动"), "{texts:?}");
+    assert!(has(&texts, "告诉 Pi 要起草、修改或审核什么…"), "{texts:?}");
+    for obsolete in [
+        "Pi 设置",
+        "Pi 试用",
+        "检索知识库",
+        "不用预设",
+        "风格：",
+        "自动 · 研究式起草",
+    ] {
+        assert!(
+            !has(&texts, obsolete),
+            "不再显示旧控件 {obsolete}: {texts:?}"
+        );
+    }
+    harness.doc.ai_panel.composer.pi_skill = Some("gongwen-review".into());
     let texts = harness.frame_texts();
-    assert!(has(&texts, "自动 · 研究式起草"), "{texts:?}");
-    assert!(has(&texts, "检索知识库"), "研究式起草用知识库：{texts:?}");
-
-    harness.doc.ai_panel.composer.text = "根据下面的会议纪要整理".into();
-    harness.frame_texts();
-    let texts = harness.frame_texts();
-    assert!(has(&texts, "自动 · 材料成文"), "{texts:?}");
-    assert!(!has(&texts, "检索知识库"), "材料成文不检索：{texts:?}");
-    harness.doc.ai_panel.composer.text.clear();
-
-    harness.doc.generated_markdown = "# 标题\n\n一、总体要求\n".into();
-    harness.frame_texts();
-    let texts = harness.frame_texts();
-    assert!(has(&texts, "自动"), "{texts:?}");
-    assert!(
-        has(&texts, "说说要做什么…"),
-        "有稿、没写要求时给通用提示：{texts:?}"
-    );
-
-    harness.doc.ai_panel.composer.text = "压缩第二部分".into();
-    harness.frame_texts();
-    let texts = harness.frame_texts();
-    assert!(has(&texts, "自动 · 精简扩写"), "{texts:?}");
-    assert!(has(&texts, "不用预设"), "润色带预设下拉框：{texts:?}");
-    assert!(has(&texts, "全文"), "{texts:?}");
-
-    harness.doc.ai_panel.composer.skill = Some(RESEARCH_DRAFT.into());
-    harness.frame_texts();
-    let texts = harness.frame_texts();
-    assert!(
-        has(&texts, "研究式起草"),
-        "指定的技能优先于触发词：{texts:?}"
-    );
-    assert!(!has(&texts, "自动 · "), "{texts:?}");
+    assert!(has(&texts, "Pi · 审核"), "{texts:?}");
 }
 
 #[test]
-fn a_slash_prefix_offers_and_pins_skills() {
+fn a_slash_prefix_only_offers_and_pins_pi_skills() {
     let mut harness = Harness::new("# 标题\n\n正文\n");
     harness.doc.ai_panel.open = true;
-    harness.doc.ai_panel.composer.text = "/润".into();
+    harness.doc.ai_panel.composer.text = "/修".into();
     harness.focus_input();
     harness.frame_texts();
     let texts = harness.frame_texts();
-    assert!(has(&texts, "润色"), "列出匹配的技能：{texts:?}");
-    assert!(has(&texts, "↑↓ 选择"), "光标处弹出技能列表：{texts:?}");
-    assert!(!has(&texts, "仿写"), "随输入过滤：{texts:?}");
-
-    // 回车选中高亮项：`/润` 从文字里去掉，技能标签换成润色。
+    assert!(has(&texts, "修改"), "{texts:?}");
+    assert!(!has(&texts, "润色"), "不列旧技能：{texts:?}");
     harness.press(egui::Key::Enter);
-    let composer = &harness.doc.ai_panel.composer;
-    assert_eq!(composer.skill.as_deref(), Some(POLISH));
-    assert!(composer.text.is_empty(), "{:?}", composer.text);
-    let texts = harness.frame_texts();
-    assert!(!has(&texts, "↑↓ 选择"), "选完弹出层关掉：{texts:?}");
-    harness.doc.ai_panel.composer.skill = None;
-
-    harness.doc.ai_panel.composer.text = "/润色 只改错别字".into();
-    harness.with_page(|page| page.send_ai_panel());
-    let turn = &harness.doc.ai_panel.turns[0];
-    assert_eq!(turn.title, "润色");
-    assert!(harness.doc.busy);
-
-    harness.with_page(|page| page.stop_ai_task());
-    harness.doc.generated_markdown.clear();
-    harness.doc.ai_panel.composer.text = "/润色 只改错别字".into();
-    harness.with_page(|page| page.send_ai_panel());
-    let error = harness.doc.ai_panel.composer.error.clone().unwrap();
-    assert!(
-        error.contains("正文还是空的"),
-        "指定了用不了的技能要说明原因：{error}"
+    assert_eq!(
+        harness.doc.ai_panel.composer.pi_skill.as_deref(),
+        Some("gongwen-revise")
     );
+    assert!(harness.doc.ai_panel.composer.text.is_empty());
 }
 
 #[test]
-fn knowledge_search_defaults_to_the_global_switch_only_once() {
-    let mut harness = Harness::new("");
-    harness.config.rag.enabled = true;
-    harness.with_page(|page| page.toggle_ai_panel(None));
+fn unconfigured_pi_never_falls_back_to_the_old_draft_model() {
+    let mut harness = Harness::new("正文");
+    harness.doc.ai_panel.composer.text = "润色一下".into();
+    harness.with_page(|page| page.send_ai_panel(false));
+    assert!(harness.doc.ai_panel.turns.is_empty());
+    assert!(!harness.doc.busy);
     assert!(
-        harness.doc.ai_panel.composer.use_rag,
-        "启用了知识库，起草默认检索"
+        harness
+            .doc
+            .ai_panel
+            .composer
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Pi")
     );
-    // 用户取消勾选后，再开关侧栏也不被改回去。
-    harness.doc.ai_panel.composer.use_rag = false;
-    harness.with_page(|page| page.toggle_ai_panel(None));
-    harness.with_page(|page| page.toggle_ai_panel(None));
-    assert!(!harness.doc.ai_panel.composer.use_rag);
+    assert_eq!(harness.doc.ai_panel.composer.text, "润色一下");
+}
+
+#[test]
+fn keyboard_and_send_button_both_start_pi() {
+    for keyboard in [true, false] {
+        let mut harness = Harness::new("原有正文");
+        harness.configure_pi();
+        harness.doc.ai_panel.open = true;
+        harness.doc.ai_panel.composer.text = "请压缩".into();
+        harness.frame_texts();
+        if keyboard {
+            harness.focus_input();
+            harness.frame_texts();
+            harness.frame_with(vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }]);
+        } else {
+            fn send_center(shape: &egui::epaint::Shape) -> Option<egui::Pos2> {
+                match shape {
+                    egui::epaint::Shape::Circle(circle) if circle.radius == 15.0 => {
+                        Some(circle.center)
+                    }
+                    egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(send_center),
+                    _ => None,
+                }
+            }
+            let output = harness.frame_output_cleared(Vec::new(), egui::vec2(1200.0, 900.0));
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|shape| send_center(&shape.shape))
+                .unwrap();
+            for pressed in [true, false] {
+                harness.frame_with(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+        }
+        let turn = harness
+            .doc
+            .ai_panel
+            .turns
+            .last()
+            .expect("输入区发出 Pi 请求");
+        assert!(turn.title.starts_with("智能写作（Pi"), "{}", turn.title);
+        assert!(turn.request.is_none(), "不能创建旧 flow 请求");
+        assert_eq!(harness.doc.generated_markdown, "原有正文");
+        harness.with_page(|page| page.stop_ai_task());
+    }
+}
+
+#[test]
+fn compact_does_not_start_legacy_history_compression() {
+    let mut harness = Harness::new("正文");
+    harness.doc.ai_panel.composer.text = "/compact".into();
+    harness.with_page(|page| page.send_ai_panel(false));
+    assert!(harness.doc.ai_panel.turns.is_empty());
+    assert!(!harness.doc.busy);
+    assert!(
+        harness
+            .doc
+            .ai_panel
+            .composer
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Pi 由运行时")
+    );
 }
 
 #[test]
@@ -1749,7 +1826,7 @@ fn live_panel_round_trip() {
     harness.doc.ai_panel.composer.text =
         "根据以下要点起草一份通知：各区县做好冬季森林防火；12月1日前完成隐患排查；落实24小时值班。"
             .into();
-    harness.with_page(|page| page.send_ai_panel());
+    start_legacy_test_request(&mut harness);
     assert!(harness.doc.busy);
 
     let started = std::time::Instant::now();
@@ -1827,12 +1904,11 @@ fn live_research_panel_round_trip() {
     config.rag.embedding.api_key = env("GONGWEN_LIVE_EMBED_KEY");
     config.rag.rerank.mode = crate::models::RerankMode::None;
     let composer = &mut harness.doc.ai_panel.composer;
-    composer.use_rag = true;
     // 带上「通知」，免得动笔前因文种卡住；受文对象也写明。
     composer.text = "起草一份通知，部署市直各单位开展人工智能辅助决策系统应用情况调研，\
                      简要介绍美军梅文项目的做法和教训作为参考，要求按时报送调研报告。"
         .into();
-    harness.with_page(|page| page.send_ai_panel());
+    start_legacy_test_request(&mut harness);
     assert!(harness.doc.busy);
 
     let started = std::time::Instant::now();
@@ -1931,7 +2007,7 @@ fn live_model_routing_and_polish() {
     harness.config.lm_studio.timeout_seconds = 300;
     // 不含任何触发词：两个技能都可用，发送后交模型判断。
     harness.doc.ai_panel.composer.text = "这段话太口语了，弄得正式一点".into();
-    harness.with_page(|page| page.send_ai_panel());
+    start_legacy_test_request(&mut harness);
     assert_eq!(harness.doc.ai_panel.turns[0].title, "自动选择技能");
     let started = std::time::Instant::now();
     loop {
@@ -2054,20 +2130,14 @@ fn at_lists_articles_by_group_and_leaves_a_reference_mark() {
     let texts = harness.frame_texts();
     assert!(has(&texts, "《森林防火条例》"), "底栏出文章标签：{texts:?}");
 
+    harness.configure_pi();
     harness.doc.ai_panel.composer.text.push_str("写今年的通知");
-    harness.with_page(|page| page.send_ai_panel());
-    let turn = harness.doc.ai_panel.turns.last().expect("开了一轮");
-    assert_eq!(
-        turn.prompt, "参照《森林防火条例》写今年的通知",
-        "发出去的原话去掉 @"
-    );
-    assert!(turn.context.iter().any(|chip| chip == "《森林防火条例》"));
-    let request = turn.request.as_ref().unwrap();
-    assert_eq!(request.refs.len(), 1);
-    assert!(
-        harness.doc.ai_panel.composer.refs.is_empty(),
-        "发出去后清空"
-    );
+    harness.with_page(|page| page.send_ai_panel(false));
+    let turn = harness.doc.ai_panel.turns.last().expect("开了一轮 Pi");
+    assert!(turn.prompt.starts_with("参照《森林防火条例》写今年的通知"));
+    assert!(turn.context.iter().any(|chip| chip == "材料 1 份"));
+    assert!(turn.request.is_none(), "不用旧流程请求承载引用");
+    assert!(harness.doc.ai_panel.composer.refs.is_empty());
     harness.with_page(|page| page.stop_ai_task());
 }
 
@@ -3294,7 +3364,7 @@ fn saying_commit_to_body_shows_the_confirm_card_instead_of_asking_the_model() {
         .ai_panel
         .finish(TurnState::Proposed(ProposalSummary::default()));
     harness.doc.ai_panel.composer.text = "请把现在的AI工作稿提交到正文".into();
-    harness.with_page(|page| page.send_ai_panel());
+    harness.with_page(|page| page.send_ai_panel(false));
 
     let composer = &harness.doc.ai_panel.composer;
     assert!(composer.commit_prompt, "弹出确认卡");
@@ -3313,7 +3383,7 @@ fn saying_commit_to_body_shows_the_confirm_card_instead_of_asking_the_model() {
 fn saying_commit_to_body_without_a_proposal_explains_why() {
     let mut harness = Harness::new("# 标题\n\n原文。\n");
     harness.doc.ai_panel.composer.text = "/采用".into();
-    harness.with_page(|page| page.send_ai_panel());
+    harness.with_page(|page| page.send_ai_panel(false));
     let composer = &harness.doc.ai_panel.composer;
     assert!(!composer.commit_prompt);
     assert!(

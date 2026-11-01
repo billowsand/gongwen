@@ -56,6 +56,17 @@ if [ ! -f "$STAGING/runtime/fonts/GWFangSong.ttf" ]; then
     exit 1
 fi
 
+# 随包 Pi 运行时：缺 Node / host / manifest 或校验不符就不能出包。
+case "$ARCH" in
+    amd64) pi_platform="linux-x64" ;;
+    arm64) pi_platform="linux-arm64" ;;
+esac
+if [ ! -x "$STAGING/runtime/pi/bin/node" ]; then
+    echo "error: staging Pi runtime missing: $STAGING/runtime/pi/bin/node" >&2
+    exit 1
+fi
+"$STAGING/runtime/pi/bin/node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$STAGING/runtime/pi" "$pi_platform" >/dev/null
+
 # ---------------------------------------------------------------- 依赖列表
 # 1) ldd 里出现的动态库：反查 pacman 包名。
 if ldd "$STAGING/gongwen-assistant" 2>/dev/null | grep -q 'not found'; then
@@ -75,7 +86,7 @@ while read -r lib_path; do
     owner="$(pacman -Qoq "$real_path" 2>/dev/null || true)"
     [ -n "$owner" ] || continue
     add_dep "$owner"
-done < <(ldd "$STAGING/gongwen-assistant" 2>/dev/null \
+done < <(ldd "$STAGING/gongwen-assistant" "$STAGING/runtime/pi/bin/node" 2>/dev/null \
     | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) { print $i; break } }')
 
 # 2) ldd 看不到、但运行时确实要用的：
