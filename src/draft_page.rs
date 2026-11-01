@@ -31,6 +31,7 @@ mod diff_editor;
 mod diff_gaps;
 pub(crate) mod diff_hunks;
 mod editor;
+mod editor_keys;
 mod find;
 mod form;
 mod format_clean;

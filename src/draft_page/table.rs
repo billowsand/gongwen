@@ -99,6 +99,139 @@ pub(crate) fn table_at(text: &str, cursor: usize) -> Option<TableEdit> {
     })
 }
 
+/// 光标所在实际表格源码单元格范围。分隔行、竖线边界、行首/行尾的装饰竖线、
+/// 转义竖线与反引号代码跨度内的竖线都不会被当作单元格边界。
+pub(crate) fn source_cell_at(text: &str, cursor: usize) -> Option<Range<usize>> {
+    table_at(text, cursor)?;
+    let before_line = text.get(..cursor)?.rfind('\n').map_or(0, |index| index + 1);
+    let mut fence: Option<(u8, usize)> = None;
+    for line in text[..before_line].lines() {
+        let trimmed = line.trim_start();
+        let marker = trimmed.as_bytes().first().copied();
+        if !matches!(marker, Some(b'`' | b'~')) {
+            continue;
+        }
+        let run = trimmed
+            .bytes()
+            .take_while(|byte| Some(*byte) == marker)
+            .count();
+        if let Some((active, length)) = fence {
+            if marker == Some(active) && run >= length && trimmed[run..].trim().is_empty() {
+                fence = None;
+            }
+        } else if run >= 3 {
+            fence = Some((marker?, run));
+        }
+    }
+    if fence.is_some() {
+        return None;
+    }
+    // 源码围栏中的示例表格不是真表格，必须与正式解析器的块类型一致。
+    if !crate::export::parse_markdown_located(text)
+        .iter()
+        .any(|located| {
+            matches!(located.block, crate::export::MarkdownBlock::Table { .. })
+                && located.range.contains(&cursor)
+        })
+    {
+        return None;
+    }
+    let ranges = line_ranges(text);
+    let line_index = line_at_byte(&ranges, cursor);
+    let line_range = ranges.get(line_index)?.clone();
+    let line = text.get(line_range.clone())?;
+    if is_table_separator_line(line) {
+        return None;
+    }
+    let delimiters = table_pipe_positions(line);
+    if delimiters.contains(&cursor.saturating_sub(line_range.start)) {
+        return None;
+    }
+    if delimiters.len() < 2 {
+        return None;
+    }
+
+    let first_pipe = *delimiters.first()?;
+    let last_pipe = *delimiters.last()?;
+    let has_opening_pipe = line.get(..first_pipe)?.trim().is_empty();
+    let has_closing_pipe = line.get(last_pipe + 1..)?.trim().is_empty();
+    let mut boundaries = Vec::with_capacity(delimiters.len() + 2);
+    if !has_opening_pipe {
+        boundaries.push(None);
+    }
+    boundaries.extend(delimiters.iter().copied().map(Some));
+    if !has_closing_pipe {
+        boundaries.push(None);
+    }
+    for pair in boundaries.windows(2) {
+        let start = match pair[0] {
+            Some(pipe) => pipe + 1,
+            None => 0,
+        };
+        let end = pair[1].unwrap_or(line.len());
+        let absolute_start = line_range.start + start;
+        let absolute_end = line_range.start + end;
+        if cursor < absolute_start || cursor > absolute_end {
+            continue;
+        }
+        let content = line.get(start..end)?.trim();
+        // MultiMarkdown 的 `^^` 是上一格的纵向合并标记，不是可编辑的独立单元格。
+        if content == "^^" {
+            return None;
+        }
+        return Some(absolute_start..absolute_end);
+    }
+    None
+}
+
+/// 找出 Markdown 表格里的结构竖线：忽略奇数个反斜线转义的竖线，及代码跨度中的竖线。
+fn table_pipe_positions(line: &str) -> Vec<usize> {
+    let bytes = line.as_bytes();
+    let mut positions = Vec::new();
+    let mut index = 0;
+    let mut code_ticks: Option<usize> = None;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'`' => {
+                let mut slashes = 0;
+                let mut before = index;
+                while before > 0 && bytes[before - 1] == b'\\' {
+                    slashes += 1;
+                    before -= 1;
+                }
+                if slashes % 2 == 1 {
+                    index += 1;
+                    continue;
+                }
+                let start = index;
+                while index < bytes.len() && bytes[index] == b'`' {
+                    index += 1;
+                }
+                let run = index - start;
+                match code_ticks {
+                    Some(active) if active == run => code_ticks = None,
+                    None => code_ticks = Some(run),
+                    _ => {}
+                }
+            }
+            b'|' if code_ticks.is_none() => {
+                let mut slashes = 0;
+                let mut before = index;
+                while before > 0 && bytes[before - 1] == b'\\' {
+                    slashes += 1;
+                    before -= 1;
+                }
+                if slashes % 2 == 0 {
+                    positions.push(index);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    positions
+}
+
 /// 把单元格重排成对齐好的 Markdown。列宽取该列最宽的一格，最少三格
 /// （分隔行要放得下 `:-:`）。分隔行写在前 `header_rows` 行（表头）之后。
 pub(crate) fn render_table(
