@@ -60,6 +60,8 @@ struct Row {
 struct BarActions {
     send: bool,
     stop: bool,
+    /// 智能写作（Pi 试用）：独立入口，不改变默认发送行为。
+    pi: bool,
     pick_selection: bool,
     /// 在光标处插入触发符（`+` 菜单里的「引用文章」「选技能」）。
     insert: Option<char>,
@@ -264,6 +266,7 @@ impl DraftPage<'_> {
         // 给阴影留出空间，输入框与侧栏底边之间保持呼吸感。
         ui.add_space(10.0);
 
+        let had_selection = selection_now.is_some();
         if actions.pick_selection
             && let Some(range) = selection_now
         {
@@ -283,6 +286,22 @@ impl DraftPage<'_> {
         }
         if actions.stop {
             self.stop_ai_task();
+            actions.send = false;
+        }
+        if actions.pi && !self.doc.ai_panel.running() {
+            match self.start_pi_job(had_selection) {
+                Ok(()) => {
+                    let composer = &mut self.doc.ai_panel.composer;
+                    composer.text.clear();
+                    composer.error = None;
+                    composer.refs.clear();
+                    composer.materials.clear();
+                    composer.selection = None;
+                }
+                Err(message) => {
+                    self.doc.ai_panel.composer.error = Some(message);
+                }
+            }
             actions.send = false;
         }
         if actions.send && !self.doc.ai_panel.running() {
@@ -354,6 +373,24 @@ impl DraftPage<'_> {
                                     actions.pick_selection = true;
                                 }
                             });
+
+                            let pi = ui
+                                .add_enabled(
+                                    !running,
+                                    egui::Button::image_and_text(
+                                        theme::Icon::WandSparkles.image_sized(12.0),
+                                        egui::RichText::new("智能写作（Pi 试用）").small(),
+                                    )
+                                    .image_tint_follows_text_color(true)
+                                    .corner_radius(egui::CornerRadius::same(255)),
+                                )
+                                .on_hover_text(
+                                    "智能写作（Pi Durable 文件工作区）：用当前输入的要求与正文，在专属工作区里写作并提交一份成品；结果仍是待审提案。本阶段不支持选区、@ 引用与粘贴材料。",
+                                )
+                                .on_disabled_hover_text("当前有任务在跑；先停止或等它结束");
+                            if pi.clicked() {
+                                actions.pi = true;
+                            }
 
                             let skill_button = ui
                                 .add(pill(&chip.label, composer.skill.is_some()))

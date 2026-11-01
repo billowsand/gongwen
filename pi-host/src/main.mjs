@@ -1,0 +1,168 @@
+//! host 入口：读一条 init，跑一轮 Durable，按 JSONL 回报。
+//!
+//! stdout 只写协议；任何依赖或异常的输出都改走 stderr。密钥只在 init 里出现，
+//! 不会进入事件、日志或命令行。
+
+import {
+  HOST_VERSION,
+  PROTOCOL_VERSION,
+  ProtocolError,
+  createEmitter,
+  readJsonLines,
+  validateInit,
+} from "./protocol.mjs";
+import { AgentError, runAgentJob } from "./agent.mjs";
+
+// 先捕获真正的 stdout，再把其他写 stdout 的代码改道 stderr；协议只用 capturedWrite。
+const capturedWrite = process.stdout.write.bind(process.stdout);
+process.stdout.write = (chunk, encoding, callback) => process.stderr.write(chunk, encoding, callback);
+console.log = (...args) => console.error(...args);
+console.info = (...args) => console.error(...args);
+console.debug = (...args) => console.error(...args);
+
+function writeError(message) {
+  try {
+    process.stderr.write(`[pi-host] ${message}\n`);
+  } catch {
+    // stderr 关闭时不再抛。
+  }
+}
+
+async function readInit() {
+  let init;
+  await readJsonLines(process.stdin, {
+    onValue(value) {
+      init = value;
+      return false;
+    },
+  });
+  if (!init) throw new ProtocolError("没有收到 init 消息");
+  return init;
+}
+
+function finish(code) {
+  // 给 stdout 一点时间把最后一条协议行写完，再结束进程；Durable 的计时器与
+  // SQLite 句柄不必逐个拆，Rust 已在收到终止事件后回收子进程。
+  setTimeout(() => process.exit(code), 50);
+}
+
+async function main() {
+  let config;
+  let emit;
+  try {
+    const raw = await readInit();
+    config = validateInit(raw);
+    emit = createEmitter({
+      write: capturedWrite,
+      secrets: [config.model.apiKey],
+    });
+  } catch (error) {
+    // 还没拿到可信配置：只报错误类型，不回显 init 内容（可能含密钥）。
+    const message = error instanceof ProtocolError ? error.message : "init 解析失败";
+    try {
+      capturedWrite(`${JSON.stringify({ type: "error", code: "protocol", message })}\n`);
+    } catch {
+      // 忽略。
+    }
+    writeError(message);
+    setTimeout(() => process.exit(1), 50);
+    return;
+  }
+
+  const base = {
+    protocol: PROTOCOL_VERSION,
+    requestId: config.requestId,
+    runId: config.runId,
+  };
+  const send = (event) => {
+    try {
+      emit({ ...base, ...event });
+    } catch (error) {
+      writeError(`发送协议消息失败：${error.message}`);
+      throw error;
+    }
+  };
+
+  let cancel;
+  let cancelled = false;
+  const requestCancel = (reason) => {
+    if (cancelled) return;
+    cancelled = true;
+    writeError(`收到取消：${reason}`);
+    try {
+      cancel?.();
+    } catch {
+      // 取消只影响本轮。
+    }
+  };
+
+  // init 之后 stdin 只接受 cancel / ping；Rust 进程崩溃导致 EOF 时也停下模型调用。
+  readJsonLines(process.stdin, {
+    onValue(value) {
+      if (value?.type === "cancel") {
+        requestCancel("收到 cancel");
+      } else if (value?.type === "ping") {
+        send({ type: "pong" });
+      }
+      return true;
+    },
+  })
+    .catch(() => {})
+    .finally(() => requestCancel("stdin 已关闭"));
+
+  send({
+    type: "ready",
+    hostVersion: HOST_VERSION,
+    nodeVersion: process.versions.node,
+    model: config.model.modelId,
+  });
+
+  try {
+    const result = await runAgentJob({
+      config,
+      emit: send,
+      onCancel: (fn) => {
+        cancel = fn;
+      },
+    });
+    if (result.snapshot) {
+      send({
+        type: "submitted",
+        path: result.snapshot.path,
+        summary: result.snapshot.summary,
+        content: result.snapshot.content,
+        sha256: result.snapshot.sha256,
+        bytes: result.snapshot.bytes,
+      });
+      send({ type: "completed", submitted: true });
+      finish(0);
+    } else {
+      send({ type: "completed", submitted: false });
+      finish(0);
+    }
+  } catch (error) {
+    const code = error instanceof AgentError ? error.code : "agent_failed";
+    if (code === "cancelled" || cancelled) {
+      send({ type: "cancelled", message: "已停止，未交付任何提案。" });
+      finish(3);
+    } else {
+      send({
+        type: "error",
+        code,
+        message: error?.message || "智能写作失败",
+      });
+      finish(1);
+    }
+  }
+}
+
+process.on("uncaughtException", (error) => {
+  writeError(`未捕获异常：${error?.message || error}`);
+  process.exitCode = 1;
+});
+process.on("unhandledRejection", (error) => {
+  writeError(`未处理的 Promise 拒绝：${error?.message || error}`);
+  process.exitCode = 1;
+});
+
+await main();

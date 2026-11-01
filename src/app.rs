@@ -40,6 +40,7 @@ mod jobs;
 mod knowledge_local;
 mod lexicon_jobs;
 mod manuscript_ui;
+mod pi_jobs;
 mod printing;
 mod proofread_ui;
 mod provider_settings;

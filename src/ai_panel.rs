@@ -27,6 +27,7 @@ pub(crate) mod field_card;
 mod history;
 mod mention;
 mod paste;
+mod pi_job;
 mod provenance;
 pub(crate) use provenance::source_line as proposal_source;
 pub(crate) mod session;
@@ -432,6 +433,14 @@ impl AiPanel {
 
     pub(crate) fn set_phase(&mut self, phase: &str) {
         if let Some(turn) = self.running_turn_mut() {
+            turn.phase = phase.to_string();
+        }
+    }
+
+    /// Pi 主机报来进度：这一轮进入「写作中」，阶段提示显示在卡片上。
+    pub(crate) fn pi_progress(&mut self, phase: &str) {
+        if let Some(turn) = self.running_turn_mut() {
+            turn.state = TurnState::Streaming;
             turn.phase = phase.to_string();
         }
     }

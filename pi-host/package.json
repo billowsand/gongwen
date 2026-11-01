@@ -1,0 +1,20 @@
+{
+  "name": "gongwen-pi-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "公文助手随包的 Pi Durable 写作宿主机（阶段一）",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "src/main.mjs",
+  "dependencies": {
+    "@earendil-works/chord": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0"
+  },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "test": "node --test"
+  }
+}

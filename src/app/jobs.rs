@@ -197,6 +197,18 @@ pub(crate) enum DocJob {
     AiFieldSuggestions(Vec<crate::element_fields::FieldSuggestion>),
     /// 技能流程的一次工具调用，侧栏「过程」里一行。
     AiTool(String),
+    /// Pi 智能写作的进度（读正文、等模型、工具完成……）。
+    PiProgress(String),
+    /// Pi 本轮的一次工具调用，侧栏「过程」里一行。
+    PiTool(String),
+    /// Pi 工作区里最新候选稿；只是预览，不是可接受的提案。
+    PiCandidate {
+        path: String,
+        content: String,
+    },
+    /// Pi 本轮结束。成功时是一份固定版本，失败时报原因；
+    /// 未提交、超时、取消、崩溃都不会走到成功分支。
+    PiDone(Result<crate::pi_agent::PiDelivery, String>),
     AiUsage {
         turn_id: u64,
         usage: crate::agent::backend::UsageTotals,
@@ -1553,6 +1565,9 @@ impl GongwenApp {
                 | DocJob::AiStream { .. }
                 | DocJob::AiNote(_)
                 | DocJob::AiTool(_)
+                | DocJob::PiProgress(_)
+                | DocJob::PiTool(_)
+                | DocJob::PiCandidate { .. }
                 | DocJob::AiWorkspace(_)
                 | DocJob::AiWriteBegin { .. }
                 | DocJob::AiSessionSummary { .. }
@@ -1619,6 +1634,19 @@ impl GongwenApp {
                 done,
             } => self.docs[index].ai_panel.append(&content, &reasoning, done),
             DocJob::AiTool(line) => self.docs[index].ai_panel.step(line),
+            DocJob::PiProgress(message) => {
+                self.docs[index].ai_panel.pi_progress(&message);
+                self.status = format!("{prefix}{message}");
+            }
+            DocJob::PiTool(line) => self.docs[index].ai_panel.step(line),
+            DocJob::PiCandidate { path, content } => {
+                // 候选只是 AI 工作稿的预览；能不能接受由 PiDone 的交付检查决定。
+                self.docs[index].ai_panel.replace_content(content);
+                self.docs[index]
+                    .ai_panel
+                    .pi_progress(&format!("候选文件已更新：{path}"));
+            }
+            DocJob::PiDone(result) => self.apply_pi_done(index, &prefix, result),
             // 用量按原轮次回投，这一支不该走到这里；真走到就忽略，不让任务崩掉。
             DocJob::AiUsage { .. } => {}
             DocJob::AiWorkspace(text) => self.docs[index].ai_panel.replace_content(text),
