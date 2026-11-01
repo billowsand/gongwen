@@ -78,8 +78,11 @@ impl KnowledgeStore {
         let groups: Vec<&str> = if let Some(phrase) = phrase {
             vec![phrase]
         } else {
-            trimmed.split_whitespace().take(32).collect()
+            trimmed.split_whitespace().collect()
         };
+        if groups.len() > 32 {
+            bail!("一次最多检索32组关键词");
+        }
         let mut expressions = Vec::new();
         let mut highlights = Vec::new();
         for group in groups {
@@ -264,6 +267,39 @@ fn excerpt(content: &str, terms: &[String]) -> (String, Vec<Range<usize>>, usize
 mod tests {
     use super::*;
     use crate::knowledge::{KnowledgeImportItem, KnowledgeSource};
+
+    #[test]
+    fn local_fulltext_rebuild_preserves_existing_vectors() {
+        use crate::knowledge::{NewKnowledgeChunk, NewKnowledgeDoc};
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = KnowledgeStore::open(&directory.path().join("vectors.db")).unwrap();
+        let meta = NewKnowledgeDoc {
+            source: KnowledgeSource::Markdown,
+            source_manuscript_id: None,
+            source_path: "旧材料.md".into(),
+            kind: TemplateKind::OfficialLetter,
+            title: "原题名".into(),
+            content_markdown: "原正文".into(),
+            embed_model: "existing-model".into(),
+            content_hash: String::new(),
+        };
+        let chunks = [NewKnowledgeChunk {
+            ord: 0,
+            section: "正文".into(),
+            text: "原正文".into(),
+            tokens: "原 正文".into(),
+            embedding: Some(crate::rag::vector::encode(&[0.25, 0.75])),
+            dims: 2,
+        }];
+        let id = store.replace_document(&meta, &chunks).unwrap();
+        let before = store.all_embeddings(None).unwrap();
+        store.index_local_document(id).unwrap();
+        store.index_local_document(id).unwrap();
+        assert_eq!(store.all_embeddings(None).unwrap(), before);
+        assert_eq!(store.count_chunks().unwrap(), 1);
+        store.replace_chunks(id, &chunks, "existing-model").unwrap();
+        assert_eq!(store.local_search("\"原正文\"", None, 10).unwrap().len(), 1);
+    }
 
     #[test]
     fn local_fulltext_phrase_limit_title_and_reopen() {

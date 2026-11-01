@@ -854,13 +854,27 @@ impl DraftPage<'_> {
         self.smart_paste(ui, editable);
         // 「改为原样粘贴」只在刚粘贴完的一小会儿出现，放在编辑区上方。
         self.recent_paste_strip(ui);
+        // 空列表项与空标题的层级快捷键在 TextEdit 之前处理；边界提示写入状态栏。
+        if let Some(message) =
+            super::list_keys::handle_tab(ui, &mut self.doc.generated_markdown, editable)
+            && !message.is_empty()
+        {
+            *self.status = message.to_string();
+        }
         // 合法表格单元格内的普通 Enter 写入 Markdown 硬换行；先于 TextEdit 消费，
         // 由 replace_with_undo 记录成一个撤销步骤。Shift+Enter 与 IME 提交不接管。
         super::editor_keys::table_enter(ui, &mut self.doc.generated_markdown, editable);
         // TextEdit 本身只会插入普通换行；在焦点确实位于有序列表、且没有选区时，
         // 抢在它之前消费 Enter，完成 Markdown 编辑器惯用的续号/空项退出行为。
+        let editor_focused = ui.ctx().memory(|memory| memory.has_focus(editor_id()));
+        let ime_composing =
+            super::editor_keys::ime_composition_blocks_input(ui.ctx(), editor_focused);
         let ordered_enter = if editable
-            && ui.ctx().memory(|memory| memory.has_focus(editor_id()))
+            && editor_focused
+            && !ime_composing
+            && ui.input(|input| {
+                input.key_pressed(egui::Key::Enter) && input.modifiers == egui::Modifiers::NONE
+            })
             && editor_selection(ui.ctx(), &self.doc.generated_markdown)
                 .is_some_and(|range| range.is_empty())
         {
@@ -872,7 +886,12 @@ impl DraftPage<'_> {
         if let Some((updated, cursor)) = ordered_enter
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
         {
-            self.doc.generated_markdown = updated;
+            crate::draft_page::diff_editor::replace_with_undo(
+                ui.ctx(),
+                &mut self.doc.generated_markdown,
+                updated,
+                cursor,
+            );
             self.doc.pending_source_jump = Some(cursor);
         }
         // 拆开借用：编辑框要可变借文本，布局器要可变借高亮缓存。

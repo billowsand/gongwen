@@ -103,3 +103,54 @@ impl GongwenApp {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::knowledge::LocalSearchHit;
+    use crate::models::TemplateKind;
+
+    fn hit() -> LocalSearchHit {
+        LocalSearchHit {
+            doc_id: 1,
+            title: "测试材料".into(),
+            kind: TemplateKind::OfficialLetter,
+            excerpt: "正文".into(),
+            highlights: std::iter::once(0..6).collect(),
+            source_offset: 0,
+        }
+    }
+
+    #[test]
+    fn local_fulltext_background_results_follow_current_query_and_kind() {
+        let mut app = crate::app::management_samples::fixture();
+        app.knowledge_test_query = "当前查询".into();
+        app.knowledge_busy = true;
+        app.apply_knowledge_job(KnowledgeJob::LocalSearchDone {
+            query: "旧查询".into(),
+            kind: None,
+            result: Ok(vec![hit()]),
+        });
+        assert!(app.knowledge_local_results.is_empty());
+        assert!(!app.knowledge_busy);
+        app.apply_knowledge_job(KnowledgeJob::LocalSearchDone {
+            query: "当前查询".into(),
+            kind: Some(TemplateKind::WhitePaper),
+            result: Ok(vec![hit()]),
+        });
+        assert!(app.knowledge_local_results.is_empty());
+        app.apply_knowledge_job(KnowledgeJob::LocalSearchDone {
+            query: "当前查询".into(),
+            kind: None,
+            result: Ok(vec![hit()]),
+        });
+        assert_eq!(app.knowledge_local_results.len(), 1);
+        app.apply_knowledge_job(KnowledgeJob::LocalSearchDone {
+            query: "当前查询".into(),
+            kind: None,
+            result: Err("读取失败".into()),
+        });
+        assert!(app.knowledge_local_results.is_empty());
+        assert!(app.knowledge_error.as_deref().unwrap().contains("读取失败"));
+    }
+}

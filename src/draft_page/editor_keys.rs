@@ -10,7 +10,7 @@ use std::ops::Range;
 pub(crate) fn table_enter(ui: &egui::Ui, text: &mut String, editable: bool) {
     let ctx = ui.ctx();
     let focused = ctx.memory(|memory| memory.has_focus(editor_id()));
-    let composing = ime_composition_blocks_enter(ctx, focused);
+    let composing = ime_composition_blocks_input(ctx, focused);
     if !editable || !focused || composing {
         return;
     }
@@ -51,7 +51,7 @@ pub(crate) fn table_enter_replacement(
 
 /// egui 0.36 的 IME 组句光标状态不可读；用公开的 Event::Ime 在帧间保存组句状态。
 /// 本帧出现提交事件也屏蔽 Enter，防止提交候选的 Enter 同时插入 `<br>`。
-fn ime_composition_blocks_enter(ctx: &egui::Context, focused: bool) -> bool {
+pub(super) fn ime_composition_blocks_input(ctx: &egui::Context, focused: bool) -> bool {
     let id = egui::Id::new("draft_editor_ime_composing");
     let previous = if focused {
         ctx.data(|data| data.get_temp::<bool>(id).unwrap_or(false))
@@ -70,6 +70,9 @@ fn ime_composition_blocks_enter(ctx: &egui::Context, focused: bool) -> bool {
                 egui::Event::Ime(egui::ImeEvent::Commit(_)) => {
                     ime_event = true;
                     composing = false;
+                }
+                egui::Event::Ime(egui::ImeEvent::DeleteSurrounding { .. }) => {
+                    ime_event = true;
                 }
                 _ => {}
             }
@@ -250,7 +253,7 @@ mod tests {
             ..Default::default()
         };
         crate::test_support::run_ui(&ctx, raw, |_| {
-            assert!(ime_composition_blocks_enter(&ctx, true));
+            assert!(ime_composition_blocks_input(&ctx, true));
         });
         let raw = egui::RawInput {
             events: vec![egui::Event::Key {
@@ -263,17 +266,17 @@ mod tests {
             ..Default::default()
         };
         crate::test_support::run_ui(&ctx, raw, |_| {
-            assert!(ime_composition_blocks_enter(&ctx, true));
+            assert!(ime_composition_blocks_input(&ctx, true));
         });
         let raw = egui::RawInput {
             events: vec![egui::Event::Ime(egui::ImeEvent::Commit("中文".into()))],
             ..Default::default()
         };
         crate::test_support::run_ui(&ctx, raw, |_| {
-            assert!(ime_composition_blocks_enter(&ctx, true));
+            assert!(ime_composition_blocks_input(&ctx, true));
         });
         crate::test_support::run_ui(&ctx, egui::RawInput::default(), |_| {
-            assert!(!ime_composition_blocks_enter(&ctx, true));
+            assert!(!ime_composition_blocks_input(&ctx, true));
         });
     }
 }

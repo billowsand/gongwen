@@ -121,8 +121,8 @@ pub(crate) fn toggle_ordered(line: &str) -> String {
 }
 
 /// 在有序列表项中按回车：非空项按「当前序号+1」续写下一项，光标后方同一连续
-/// 列表组里的已有项序号依次后移，避免与新行重号；空项再次回车则移除占位并
-/// 结束列表。返回修改后的正文和新光标字节位置；非列表行返回 None，
+/// 列表组里的已有项序号依次后移，避免与新行重号；空子项回车提升一级，空顶层
+/// 项回车移除占位并结束列表。返回修改后的正文和新光标字节位置；非列表行返回 None，
 /// 交还给 TextEdit 做普通换行。
 pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String, usize)> {
     if cursor > text.len() || !text.is_char_boundary(cursor) {
@@ -142,6 +142,12 @@ pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String
     }
 
     if content.trim().is_empty() {
+        // 空子项按一次 Enter 提升到父级空项；再按一次才退出顶层列表。
+        if let Some(super::list_keys::Edit::Changed { markdown, cursor }) =
+            super::list_keys::edit_at_cursor(text, cursor, true)
+        {
+            return Some((markdown, cursor));
+        }
         let mut updated = text.to_string();
         updated.replace_range(line_start..line_end, "");
         updated = export::normalize_ordered_list_punctuation(&updated);
@@ -163,13 +169,14 @@ pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String
 
     let indent = &line[..indent_len];
     let indent_columns = export::indent_columns(indent);
-    let marker = format!("\n{indent}{}. ", number + 1);
+    let next_number = number.checked_add(1)?;
+    let marker = format!("\n{indent}{next_number}. ");
     let mut updated = text.to_string();
     updated.insert_str(cursor, &marker);
     // 光标后方同一连续列表组（相同缩进、紧邻的有序列表行，遇空行或非列表行即止）
     // 里已有项的序号依次重排为新行序号 +1、+2……，只重写数字部分，
     // 各行的缩进、分隔符与内容原样保留。缩进更深的行是夹在中间的子项，跳过不编。
-    let mut expected = number + 2;
+    let mut expected = next_number.checked_add(1)?;
     let mut pos = line_end + marker.len();
     while pos < updated.len() && updated.as_bytes()[pos] == b'\n' {
         let item_start = pos + 1;
@@ -198,7 +205,7 @@ pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String
         let replacement = expected.to_string();
         updated.replace_range(number_start..number_start + digits, &replacement);
         pos = item_start + item_len - digits + replacement.len();
-        expected += 1;
+        expected = expected.checked_add(1)?;
     }
     Some((updated, cursor + marker.len()))
 }
@@ -1102,6 +1109,16 @@ mod ordered_list_tests {
         let (updated, cursor) = continue_ordered_list(text, text.len()).unwrap();
         assert_eq!(updated, "正文\n1. 第一项；\n1. 第二项。\n");
         assert_eq!(cursor, updated.len());
+    }
+
+    #[test]
+    fn enter_on_empty_child_promotes_it_before_a_later_enter_exits() {
+        let text = "1. 父项\n  1. \n2. 后项";
+        let cursor = "1. 父项\n  1. ".len();
+        let (promoted, cursor) = continue_ordered_list(text, cursor).unwrap();
+        assert_eq!(promoted, "1. 父项\n2. \n3. 后项");
+        let (exited, _) = continue_ordered_list(&promoted, cursor).unwrap();
+        assert_eq!(exited, "1. 父项。\n\n3. 后项。");
     }
 
     #[test]

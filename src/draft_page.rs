@@ -36,6 +36,7 @@ mod find;
 mod form;
 mod format_clean;
 mod heading_focus;
+mod list_keys;
 mod markdown;
 mod navigator;
 mod page;
