@@ -706,18 +706,31 @@ fn heading_focus_header(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: &mut
 }
 
 fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) {
+    /// 字数栏。
     const COUNT_WIDTH: f32 = 44.0;
-    const REVERT_WIDTH: f32 = 24.0;
-    /// 上移、下移两个图标按钮。
-    const MOVE_WIDTH: f32 = 60.0;
-    // 大字模式：编号栏按字号放宽，行距拉开，字数与下方的提示行都不画。
-    let number_width = if large { LARGE_FONT_SIZE * 4.2 } else { 64.0 };
+    let visible = focus.visible().collect::<Vec<_>>();
+    // 编号栏按这一屏里最长的编号定宽，全组共用：编号是程序生成的，「（十五）」
+    // 这样的长编号在小四号字下比一格常规栏宽还宽，栏宽按实际字宽量，行里才不
+    // 会因为某一条编号长就挤出行外。大字模式按字号放宽。
+    let number_width = number_column_width(ui, focus, &visible, large);
+    // 大字模式：行距拉开，字数与下方的提示行都不画。
     let row_height = if large {
         LARGE_FONT_SIZE * 1.6
     } else {
         ui.spacing().interact_size.y
     };
-    let visible = focus.visible().collect::<Vec<_>>();
+    // 右侧「还原」「上移」「下移」三栏都是图标按钮，按图标按钮的自然宽度（图标
+    // 16 加两侧按钮内边距）占位。栏宽从样式算出来：主题把按钮内边距调大调小，
+    // 栏宽跟着走，行里不会多出或少掉宽度。
+    let icon_width = ui.spacing().button_padding.x * 2.0 + 16.0;
+    // 每条外面那层 Frame 的左右内边距，与下面 frame 的内边距一致。
+    let frame_pad = if large { 10.0 } else { 6.0 };
+    // 除标题框以外的固定栏位：编号栏、字数栏、还原、上移、下移，外加栏与栏之间
+    // 的空隙。大字模式不画字数栏。
+    let fixed_width = number_width
+        + icon_width * 3.0
+        + if large { 0.0 } else { COUNT_WIDTH }
+        + ui.spacing().item_spacing.x * if large { 4.0 } else { 5.0 };
     let focus_row = focus.focus_row.take();
     let mut next_focus = None;
     // (哪一条, 是否上移)；画完这一帧再挪，免得边画边改下标。
@@ -730,6 +743,11 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
             if large {
                 ui.spacing_mut().item_spacing.y = 10.0;
             }
+            // 标题框的宽度整组只算一次，各行共用。以前是每一行现量「还剩多少」：
+            // 行尾控件比预留的宽一点，这一行就溢出，把滚动区的宽度撑大，下一行
+            // 量到的宽度跟着变大，框就一行比一行长。宽度只认整组的总宽，这个
+            // 连锁就断了。
+            let text_width = (ui.available_width() - frame_pad * 2.0 - fixed_width).max(120.0);
             for (position, &index) in visible.iter().enumerate() {
                 let typical = focus.typical_length(focus.items[index].parent);
                 let can_up = focus.can_move(index, true);
@@ -790,14 +808,6 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
                                 ui.label(number);
                             },
                         );
-                        let reserved = if large {
-                            REVERT_WIDTH + MOVE_WIDTH
-                        } else {
-                            COUNT_WIDTH + REVERT_WIDTH + MOVE_WIDTH
-                        };
-                        let width =
-                            (ui.available_width() - reserved - ui.spacing().item_spacing.x * 3.0)
-                                .max(120.0);
                         // 输入框按打开时的先后起名：调整顺序后光标与焦点仍跟着这一条。
                         let id = ui.id().with(("heading_focus_text", item.order));
                         // 先于输入框认下 Alt+↑ / Alt+↓，单行输入框见上下键会自己挪光标。
@@ -814,7 +824,7 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
                                 move_request = Some((index, false));
                             }
                         }
-                        let mut field = theme::field(&mut item.text, "标题文字", width).id(id);
+                        let mut field = theme::field(&mut item.text, "标题文字", text_width).id(id);
                         if let Some(font) = &font {
                             field = field.font(font.clone());
                         }
@@ -841,35 +851,41 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
                         if !large {
                             count_label(ui, item, typical, COUNT_WIDTH);
                         }
+                        // 右侧三栏都按固定宽度占位：没有改动时「还原」栏也留出同样
+                        // 的宽度，有没有按钮的行标题框才会一样长。
                         if item.modified() {
-                            if theme::icon_button(ui, theme::Icon::Undo, "还原这一条").clicked()
-                            {
-                                item.text = item.original.clone();
-                            }
+                            column(ui, icon_width, row_height, |ui| {
+                                if theme::icon_button(ui, theme::Icon::Undo, "还原这一条").clicked()
+                                {
+                                    item.text = item.original.clone();
+                                }
+                            });
                         } else {
-                            ui.add_space(REVERT_WIDTH);
+                            ui.add_space(icon_width);
                         }
                         let blocked = "已到这一组的头尾，或中间隔着附件、附录等区段，不能再挪";
-                        if theme::icon_button_enabled(
-                            ui,
-                            can_up,
-                            theme::Icon::ArrowUp,
-                            "上移（Alt+↑）：连同子标题与正文整节前移",
-                        )
-                        .on_disabled_hover_text(blocked)
-                        .clicked()
-                        {
+                        if column(ui, icon_width, row_height, |ui| {
+                            theme::icon_button_enabled(
+                                ui,
+                                can_up,
+                                theme::Icon::ArrowUp,
+                                "上移（Alt+↑）：连同子标题与正文整节前移",
+                            )
+                            .on_disabled_hover_text(blocked)
+                            .clicked()
+                        }) {
                             move_request = Some((index, true));
                         }
-                        if theme::icon_button_enabled(
-                            ui,
-                            can_down,
-                            theme::Icon::ArrowDown,
-                            "下移（Alt+↓）：连同子标题与正文整节后移",
-                        )
-                        .on_disabled_hover_text(blocked)
-                        .clicked()
-                        {
+                        if column(ui, icon_width, row_height, |ui| {
+                            theme::icon_button_enabled(
+                                ui,
+                                can_down,
+                                theme::Icon::ArrowDown,
+                                "下移（Alt+↓）：连同子标题与正文整节后移",
+                            )
+                            .on_disabled_hover_text(blocked)
+                            .clicked()
+                        }) {
                             move_request = Some((index, false));
                         }
                     });
@@ -887,6 +903,51 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
         focus.focus_row = Some(moved);
         focus.last_row = Some(moved);
     }
+}
+
+/// 编号栏的宽度：这一屏里最长的编号再加一点留白，至少一格常规宽度（大字模式
+/// 按字号放宽）。
+///
+/// 编号是程序生成的，字数不定：「一、」两格，「（十五）」五格。栏宽量出来整组
+/// 共用，标题框才能一次算准，也不会因为某一条编号长就把右边几栏挤出行外。
+fn number_column_width(ui: &egui::Ui, focus: &HeadingFocus, visible: &[usize], large: bool) -> f32 {
+    let body = egui::TextStyle::Body.resolve(ui.style());
+    let widest = visible
+        .iter()
+        .filter_map(|&index| {
+            let item = &focus.items[index];
+            let text = item.number.as_deref().map(str::trim)?;
+            let font = if large {
+                egui::FontId::new(LARGE_FONT_SIZE, theme::official_family(item.family))
+            } else {
+                body.clone()
+            };
+            let galley =
+                ui.painter()
+                    .layout_no_wrap(text.to_owned(), font, egui::Color32::PLACEHOLDER);
+            Some(galley.size().x)
+        })
+        .fold(0.0_f32, f32::max);
+    let base = if large { LARGE_FONT_SIZE * 4.2 } else { 64.0 };
+    (widest + 8.0).max(base)
+}
+
+/// 一行里的一栏：宽度写死，里面的控件在这一栏里居中。
+///
+/// 右侧几栏（还原、上移、下移）用固定宽度排，标题框才能一次算准、每条一样长；
+/// 直接加图标按钮的话，栏宽由按钮内边距和图标尺寸决定，主题改一改行宽就变。
+fn column<R>(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, height),
+        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+        add,
+    )
+    .inner
 }
 
 /// 常规模式右侧的字数：清空标红，与同组中位数相差较大的标黄。
@@ -1208,6 +1269,8 @@ mod tests {
         metrics: crate::metrics::Metrics,
         actions: Vec<crate::app::DraftAction>,
         export_links: crate::draft_page::ExportLinks,
+        /// 画布尺寸：行多时调高，免得后面的行被滚动区裁掉、量不到。
+        screen: egui::Vec2,
     }
 
     impl DialogHarness {
@@ -1215,6 +1278,9 @@ mod tests {
             let ctx = egui::Context::default();
             theme::configure_icons(&ctx);
             theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+            // 与真实启动一致：间距、按钮内边距、滚动条都按应用样式排，
+            // 行宽的变化才测得到。
+            theme::configure_style(&ctx);
             let config = crate::models::AppConfig {
                 last_template: TemplateKind::OfficialLetter,
                 heading_focus_large: large,
@@ -1246,6 +1312,7 @@ mod tests {
                 metrics: crate::metrics::Metrics::default(),
                 actions: Vec::new(),
                 export_links: crate::draft_page::ExportLinks::default(),
+                screen: egui::vec2(1200.0, 800.0),
             }
         }
 
@@ -1253,10 +1320,7 @@ mod tests {
             crate::test_support::run_ui(
                 &self.ctx,
                 egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1200.0, 800.0),
-                    )),
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.screen)),
                     events,
                     ..Default::default()
                 },
@@ -1292,19 +1356,45 @@ mod tests {
         }
     }
 
-    /// 本帧画出来的全部文字，每段附带字号。
-    fn painted(output: &egui::FullOutput) -> Vec<(String, f32)> {
-        fn walk(shape: &egui::Shape, out: &mut Vec<(String, f32)>) {
+    /// 本帧画出来的一段文字：内容、字号、左上角位置与尺寸。
+    struct Painted {
+        text: String,
+        size: f32,
+        pos: egui::Pos2,
+        extent: egui::Vec2,
+    }
+
+    /// 本帧画出来的全部文字。
+    fn painted(output: &egui::FullOutput) -> Vec<Painted> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<Painted>) {
             match shape {
-                egui::Shape::Text(text) => {
-                    let size = text
+                egui::Shape::Text(text) => out.push(Painted {
+                    text: text.galley.text().to_string(),
+                    size: text
                         .galley
                         .job
                         .sections
                         .first()
-                        .map_or(0.0, |section| section.format.font_id.size);
-                    out.push((text.galley.text().to_string(), size));
-                }
+                        .map_or(0.0, |section| section.format.font_id.size),
+                    pos: text.pos,
+                    extent: text.galley.size(),
+                }),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// 本帧画出来的全部方块（底色、边框、按钮底）。
+    fn painted_rects(output: &egui::FullOutput) -> Vec<egui::Rect> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Rect(rect) => out.push(rect.rect),
                 egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, out)),
                 _ => {}
             }
@@ -1375,9 +1465,7 @@ mod tests {
             harness.frame(Vec::new(), true);
             painted(&harness.frame(Vec::new(), false))
         };
-        let has = |texts: &[(String, f32)], needle: &str| {
-            texts.iter().any(|(text, _)| text.contains(needle))
-        };
+        let has = |texts: &[Painted], needle: &str| texts.iter().any(|p| p.text.contains(needle));
 
         let normal = visible(false);
         assert!(has(&normal, "各地要高度重视"), "常规模式显示正文开头");
@@ -1390,8 +1478,184 @@ mod tests {
         assert!(!has(&large, "编号由程序生成"));
         let heading = large
             .iter()
-            .find(|(text, _)| text == "完善制度机制")
+            .find(|p| p.text == "完善制度机制")
             .expect("标题照常画出");
-        assert_eq!(heading.1, LARGE_FONT_SIZE);
+        assert_eq!(heading.size, LARGE_FONT_SIZE);
+    }
+
+    /// 出样张目视检查：tmp/heading-focus.png。
+    #[test]
+    #[ignore = "出标题聚焦对话框样张，手动跑"]
+    fn heading_focus_sample() {
+        let doc = "# 关于“一基两改”存在问题及思考建议\n\n\
+            ## “一基两改”概念的分歧与问题的提出\n\n“一基两改”的提法，原文是“一个基础版进行战略与战役侧的适配改造”。\n\n\
+            ## “一基两改”的实质是基础版的适配改造\n\n正文二。\n\n\
+            ## 适配改造的验收应聚焦兼容性与能力匹配度\n\n适配改造的验收，应当验收兼容性改造部分，而不是基础功能部分。软件和能…\n\n\
+            ## 工程形态应是一个基础平台、一个软件版本、一组能力产品\n\n正文四。\n\n\
+            ## 对当前状态的判断\n\n正文五。\n\n\
+            ## 下步工作的四点建议\n\n正文六。\n\n\
+            ## 结语\n\n“一基两改”的问题，表面是版本之争、界面之争，实质是工程组织方式和建…\n";
+        let mut harness = DialogHarness::new(doc, "正文四", false);
+        harness.screen = egui::vec2(1200.0, 1100.0);
+        let ctx = harness.ctx.clone();
+        ctx.set_pixels_per_point(2.0);
+        let mut canvas = crate::ui_snapshot::Canvas::default();
+        for frame in 0..4 {
+            let screen = harness.screen;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+                    time: Some(frame as f64),
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut page = DraftPage {
+                        doc: &mut harness.doc,
+                        config: &mut harness.config,
+                        store: None,
+                        sender: &harness.sender,
+                        status: &mut harness.status,
+                        version_switch: &mut harness.version_switch,
+                        revert_confirm: &mut harness.revert_confirm,
+                        metrics: &mut harness.metrics,
+                        actions: &mut harness.actions,
+                        export_links: &mut harness.export_links,
+                    };
+                    if frame == 0 {
+                        page.open_heading_focus(ui.ctx());
+                    }
+                    page.heading_focus_modal(ui.ctx());
+                },
+            );
+            let mut output = output;
+            if frame < 3 {
+                canvas.absorb(&mut output.textures_delta);
+            } else {
+                output.textures_delta.clear();
+                canvas.render(
+                    &ctx,
+                    output,
+                    screen,
+                    theme::canvas(),
+                    std::path::Path::new("tmp/heading-focus.png"),
+                );
+            }
+        }
+    }
+
+    /// 回归：加上上移、下移之后，行尾控件比预留的宽，整行溢出把滚动区撑宽，
+    /// 下一行再按撑宽后的宽度排，标题框一行比一行长。现在各行共用一份宽度、
+    /// 右侧栏位宽度固定，每条标题框必须一样长，右侧也顶在同一个位置。
+    #[test]
+    fn every_row_gets_the_same_field_width() {
+        let doc = "# 关于“一基两改”存在问题及思考建议
+
+            ## “一基两改”概念的分歧与问题的提出
+
+正文一。
+
+            ## “一基两改”的实质是基础版的适配改造
+
+正文二。
+
+            ## 适配改造的验收应聚焦兼容性与能力匹配度
+
+正文三。
+
+            ## 工程形态应是一个基础平台、一个软件版本、一组能力产品
+
+正文四。
+
+            ## 对当前状态的判断
+
+正文五。
+
+            ## 下步工作的四点建议
+
+正文六。
+
+            ## 结语
+
+正文七。
+";
+        rows_line_up(doc, "正文三", 7, egui::vec2(1200.0, 1400.0));
+    }
+
+    /// 编号一长到「（三十）」这样的六格，编号栏按实测字宽放宽：各路标题框仍要
+    /// 一样长，整行仍要排在对话框宽度以内。
+    #[test]
+    fn long_numbers_widen_the_number_column_instead_of_the_row() {
+        let mut doc = String::from("# 关于某项工作的通知\n\n## 主要任务\n\n");
+        for number in 1..=30 {
+            doc.push_str(&format!("### 事项{number}\n\n正文{number}。\n\n"));
+        }
+        rows_line_up(&doc, "正文5。", 30, egui::vec2(1200.0, 4600.0));
+    }
+
+    /// 打开对话框量几条标题框：左右沿一致、字数栏对齐、整行排得下。
+    fn rows_line_up(doc: &str, at: &str, rows: usize, screen: egui::Vec2) {
+        let mut harness = DialogHarness::new(doc, at, false);
+        // 行多的稿子要一次全画出来：滚出可视区的行不画，量不到。
+        harness.screen = screen;
+        harness.frame(Vec::new(), true);
+        harness.frame(Vec::new(), false);
+        let output = harness.frame(Vec::new(), false);
+        let texts = painted(&output);
+
+        // 字数栏紧跟在标题框后面，它在栏里居中，栏宽固定，所以取文字中点比对：
+        // 中点数一致就说明标题框一样长。
+        let counts = texts
+            .iter()
+            .filter(|p| p.text.ends_with(" 字"))
+            .map(|p| p.pos.x + p.extent.x / 2.0)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            counts.len(),
+            rows,
+            "每条都该有一个字数：{:?}",
+            texts.iter().map(|p| (&p.text, p.pos.y)).collect::<Vec<_>>()
+        );
+        let count_center = counts[0];
+        for x in &counts {
+            assert!(
+                (x - count_center).abs() < 0.5,
+                "字数栏没对齐（标题框长短不一）：{counts:?}"
+            );
+        }
+
+        // 标题框自己的底色方块就是输入框：每条框的宽度、左沿都必须一样。
+        // 按钮窄、行底色宽，落在这个宽度区间里的方块只有标题框。
+        let fields = painted_rects(&output)
+            .into_iter()
+            .filter(|rect| (200.0..600.0).contains(&rect.width()) && rect.height() < 40.0)
+            .collect::<Vec<_>>();
+        assert_eq!(fields.len(), rows, "每条标题框都要画出来：{fields:?}");
+        for rect in &fields {
+            assert!(
+                (rect.width() - fields[0].width()).abs() < 0.5,
+                "标题框长短不一：{:?}",
+                fields
+                    .iter()
+                    .map(|rect| (rect.width(), rect.left()))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                (rect.left() - fields[0].left()).abs() < 0.5,
+                "标题框左沿没对齐"
+            );
+        }
+
+        // 整行都排得下：对话框仍按常规模式的 640 宽排（卡片两侧各 10 内边距、1 描边）。
+        // 以前每行溢出 12pt，滚动区跟着变宽，卡片和每行的底色都被撑大。
+        let widest = painted_rects(&output)
+            .into_iter()
+            .map(|rect| rect.width())
+            // 全屏遮罩比对话框宽，不算。
+            .filter(|width| *width < 700.0)
+            .fold(0.0, f32::max);
+        assert!(
+            widest <= 640.0 + 20.0 + 2.0,
+            "行比对话框宽，卡片被撑到 {widest}"
+        );
     }
 }
