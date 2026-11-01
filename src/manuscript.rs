@@ -139,6 +139,8 @@ CREATE TABLE IF NOT EXISTS knowledge_docs (
 CREATE INDEX IF NOT EXISTS idx_knowledge_docs_kind   ON knowledge_docs(kind);
 CREATE INDEX IF NOT EXISTS idx_knowledge_docs_source ON knowledge_docs(source, source_manuscript_id)
     WHERE source_manuscript_id IS NOT NULL;
+-- 外部材料按来源路径查重，批量导入时避免对已导入正文反复全表扫描。
+CREATE INDEX IF NOT EXISTS idx_knowledge_docs_path ON knowledge_docs(source, source_path);
 -- 注意：content_hash 的索引不放这里。老库的 knowledge_docs 已经存在（IF NOT
 -- EXISTS 不会补列），此处引用该列会报 no such column，统一交给
 -- ensure_knowledge_schema 在补列之后建。
@@ -177,6 +179,16 @@ CREATE TRIGGER IF NOT EXISTS knowledge_chunks_au AFTER UPDATE ON knowledge_chunk
     INSERT INTO knowledge_chunks_fts(knowledge_chunks_fts, rowid, tokens)
         VALUES('delete', old.id, old.tokens);
     INSERT INTO knowledge_chunks_fts(rowid, tokens) VALUES (new.id, new.tokens);
+END;
+
+-- 独立的整篇文字索引。不依赖向量切块，向量重建也不会替换它。
+CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_local_fts USING fts5(tokens, tokenize='unicode61');
+CREATE TRIGGER IF NOT EXISTS knowledge_docs_local_ad AFTER DELETE ON knowledge_docs BEGIN
+    DELETE FROM knowledge_local_fts WHERE rowid = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS knowledge_docs_local_au AFTER UPDATE OF title, content_markdown ON knowledge_docs
+WHEN old.title != new.title OR old.content_markdown != new.content_markdown BEGIN
+    DELETE FROM knowledge_local_fts WHERE rowid = old.id;
 END;
 "#;
 

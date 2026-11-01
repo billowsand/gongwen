@@ -10,7 +10,7 @@ use crate::draft_page::{DocKey, DraftSession};
 use crate::knowledge;
 use crate::lmstudio;
 use crate::manuscript_io;
-use crate::models::{DraftInput, GeneratedDraft, ModelKind, RerankMode, ReviewNote};
+use crate::models::{DraftInput, GeneratedDraft, ModelKind, RerankMode, ReviewNote, TemplateKind};
 use crate::pdf_viewer;
 use crate::pdf_viewer::PdfKey;
 use crate::preview;
@@ -150,7 +150,22 @@ pub(crate) enum KnowledgeJob {
         failed: Vec<(String, String)>,
     },
     /// 检索测试的结果。
-    SearchDone(Result<rag::RetrievalOutcome, String>),
+    SearchDone {
+        query: String,
+        kind: Option<TemplateKind>,
+        result: Result<rag::RetrievalOutcome, String>,
+    },
+    /// 本地全文检索结果，携带原查询用于丢弃过期响应。
+    LocalSearchDone {
+        query: String,
+        kind: Option<TemplateKind>,
+        result: Result<Vec<crate::knowledge::LocalSearchHit>, String>,
+    },
+    /// 旧文档全文索引补建结束。
+    LocalBackfillDone {
+        ok: usize,
+        failed: Vec<(String, String)>,
+    },
     /// 知识库问答的结果。`question` 是发起时的原始提问，回来时连同答案一起入历史。
     QaDone {
         question: String,
@@ -673,7 +688,7 @@ impl GongwenApp {
                 let next = if ok == 0 {
                     String::new()
                 } else {
-                    "，尚未建立索引，点「建立索引」后才能被检索".to_string()
+                    "，本地全文索引已就绪；语义检索可另建向量索引".to_string()
                 };
                 self.knowledge_index_result = Some(format!(
                     "导入完成：{ok} 篇成功{next}{}。",
@@ -699,17 +714,60 @@ impl GongwenApp {
                     format!("索引完成：{ok} 篇成功{}。", failure_summary(&failed))
                 });
             }
-            KnowledgeJob::SearchDone(Ok(outcome)) => {
+            KnowledgeJob::SearchDone {
+                query,
+                kind,
+                result: Ok(outcome),
+            } if self.knowledge_test_query.trim() == query
+                && self.knowledge_filter_kind == kind =>
+            {
                 self.knowledge_busy = false;
                 self.knowledge_test_results = outcome.chunks;
                 // 降级说明直接摆在检索区，不再只写进服务端日志。
                 self.knowledge_search_warnings = outcome.warnings;
             }
-            KnowledgeJob::SearchDone(Err(error)) => {
+            KnowledgeJob::SearchDone {
+                query,
+                kind,
+                result: Err(error),
+            } if self.knowledge_test_query.trim() == query
+                && self.knowledge_filter_kind == kind =>
+            {
                 self.knowledge_busy = false;
                 self.knowledge_test_results = Vec::new();
                 self.knowledge_search_warnings = Vec::new();
-                self.status = format!("知识库检索失败：{error}");
+                self.knowledge_error = Some(format!("知识库检索失败：{error}"));
+            }
+            KnowledgeJob::SearchDone { .. } => {
+                self.knowledge_busy = false;
+            }
+            KnowledgeJob::LocalSearchDone {
+                query,
+                kind,
+                result,
+            } => {
+                self.knowledge_busy = false;
+                if self.knowledge_test_query.trim() == query && self.knowledge_filter_kind == kind {
+                    match result {
+                        Ok(hits) => self.knowledge_local_results = hits,
+                        Err(error) => {
+                            self.knowledge_local_results.clear();
+                            self.knowledge_error = Some(format!("本地全文检索失败：{error}"));
+                        }
+                    }
+                }
+            }
+            KnowledgeJob::LocalBackfillDone { ok, failed } => {
+                self.knowledge_busy = false;
+                self.knowledge_index_progress = None;
+                self.knowledge_index_result = Some(if failed.is_empty() {
+                    format!("本地全文索引就绪：补建 {ok} 篇旧文档。")
+                } else {
+                    format!(
+                        "本地全文索引补建：{ok} 篇成功{}。",
+                        failure_summary(&failed)
+                    )
+                });
             }
             KnowledgeJob::QaDone { question, result } => {
                 self.knowledge_busy = false;
@@ -870,8 +928,16 @@ impl GongwenApp {
                     content_markdown: content,
                 };
                 match store.import_document(&item) {
-                    Ok(_) => {
-                        ok += 1;
+                    Ok(id) => {
+                        match store.index_local_document(id) {
+                            Ok(true) => ok += 1,
+                            Ok(false) => {
+                                failed.push((name.clone(), "导入完成后文档已被移除".into()))
+                            }
+                            Err(error) => {
+                                failed.push((name.clone(), format!("全文索引失败：{error:#}")))
+                            }
+                        }
                         if auto_enabled
                             && super::task_assistant::can_add_material(
                                 &auto_materials,
@@ -933,56 +999,75 @@ impl GongwenApp {
                 Err(error) => failed.push((format!("稿件 #{id}"), format!("{error:#}"))),
             }
         }
-        let Some(store) = self.knowledge_store.as_mut() else {
-            self.status = "知识库不可用。".into();
+        let Some(db_path) = storage::manuscript_db_path().ok() else {
+            self.status = "知识库路径不可用。".into();
             return;
         };
-        let mut ok = 0usize;
-        let mut auto_materials = Vec::new();
-        for item in &items {
-            match store.import_document(item) {
-                Ok(_) => {
-                    ok += 1;
-                    if auto_enabled
-                        && super::task_assistant::can_add_material(
-                            &auto_materials,
-                            &item.content_markdown,
-                        )
-                    {
-                        auto_materials.push((
-                            item.title.clone(),
-                            item.content_markdown.clone(),
-                            format!(
-                                "manuscript:{}",
-                                item.source_manuscript_id.unwrap_or_default()
-                            ),
-                        ));
-                    }
+        if self.knowledge_busy {
+            return;
+        }
+        self.knowledge_busy = true;
+        self.knowledge_progress_verb = "正在导入并建立全文索引";
+        self.knowledge_index_progress = Some((0, items.len(), String::new()));
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let mut ok = 0usize;
+            let mut auto_materials = Vec::new();
+            let mut store = match knowledge::KnowledgeStore::open(&db_path) {
+                Ok(store) => store,
+                Err(error) => {
+                    failed.push(("知识库".into(), format!("{error:#}")));
+                    let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::ImportFinished {
+                        ok,
+                        failed,
+                        auto_enabled,
+                        auto_materials,
+                    }));
+                    return;
                 }
-                Err(error) => failed.push((item.title.clone(), format!("{error:#}"))),
+            };
+            let total = items.len();
+            for (index, item) in items.iter().enumerate() {
+                let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::IndexProgress {
+                    done: index,
+                    total,
+                    current_title: item.title.clone(),
+                }));
+                match store.import_document(item) {
+                    Ok(id) => match store.index_local_document(id) {
+                        Ok(true) => {
+                            ok += 1;
+                            if auto_enabled
+                                && super::task_assistant::can_add_material(
+                                    &auto_materials,
+                                    &item.content_markdown,
+                                )
+                            {
+                                auto_materials.push((
+                                    item.title.clone(),
+                                    item.content_markdown.clone(),
+                                    format!(
+                                        "manuscript:{}",
+                                        item.source_manuscript_id.unwrap_or_default()
+                                    ),
+                                ));
+                            }
+                        }
+                        Ok(false) => failed.push((item.title.clone(), "文档已被移除".into())),
+                        Err(error) => {
+                            failed.push((item.title.clone(), format!("全文索引失败：{error:#}")))
+                        }
+                    },
+                    Err(error) => failed.push((item.title.clone(), format!("{error:#}"))),
+                }
             }
-        }
-        if auto_enabled {
-            if ok > auto_materials.len() {
-                self.task_ui.extraction_error = Some(format!(
-                    "{} 篇材料超过自动整理上限，已保存在知识库，请分批手工整理。",
-                    ok - auto_materials.len()
-                ));
-            }
-            self.enqueue_task_materials(auto_materials);
-        }
-        self.knowledge_dirty = true;
-        let message = format!(
-            "已把 {ok} 篇稿件加入知识库{}{}。",
-            if ok > 0 {
-                "，到知识库页点「建立索引」后才能被检索"
-            } else {
-                ""
-            },
-            failure_summary(&failed)
-        );
-        self.status = message.clone();
-        self.knowledge_index_result = Some(message);
+            let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::ImportFinished {
+                ok,
+                failed,
+                auto_enabled,
+                auto_materials,
+            }));
+        });
     }
 
     /// 为已导入、尚未索引的文档建立索引。
@@ -1090,6 +1175,9 @@ impl GongwenApp {
             return;
         };
         self.knowledge_busy = true;
+        self.knowledge_local_results.clear();
+        self.knowledge_test_results.clear();
+        self.knowledge_error = None;
         self.knowledge_search_warnings.clear();
         let cfg = self.config.resolved_rag();
         // 重排走「对话大模型」模式时要用到聊天模型的配置。
@@ -1099,7 +1187,11 @@ impl GongwenApp {
         thread::spawn(move || {
             let result = rag::retrieve(&cfg, &chat, &db_path, &query, kind)
                 .map_err(|error| format!("{error:#}"));
-            let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::SearchDone(result)));
+            let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::SearchDone {
+                query,
+                kind,
+                result,
+            }));
         });
     }
 
@@ -1133,7 +1225,6 @@ impl GongwenApp {
             }));
         });
     }
-
     /// 删除知识库文档（单篇或批量），并从勾选里去掉。
     pub(crate) fn knowledge_delete(&mut self, ids: &[i64]) {
         if let Some(store) = self.knowledge_store.as_mut() {
@@ -1144,6 +1235,8 @@ impl GongwenApp {
                         self.knowledge_list.selected.remove(id);
                     }
                     self.knowledge_dirty = true;
+                    self.knowledge_local_results.clear();
+                    self.knowledge_test_results.clear();
                 }
                 Err(error) => self.status = format!("删除失败：{error:#}"),
             }
@@ -1156,8 +1249,11 @@ impl GongwenApp {
         if let Some(store) = self.knowledge_store.as_mut() {
             match store.rename_document(id, title) {
                 Ok(()) => {
-                    self.status = "标题已修改；点「建立索引」让检索也用上新标题。".into();
+                    self.status = "标题已修改；全文索引将自动更新，向量索引可另行重建。".into();
                     self.knowledge_dirty = true;
+                    self.knowledge_local_backfill_started = false;
+                    self.knowledge_local_results.clear();
+                    self.knowledge_test_results.clear();
                 }
                 Err(error) => self.status = format!("改标题失败：{error:#}"),
             }

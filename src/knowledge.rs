@@ -15,6 +15,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod local;
+pub use local::LocalSearchHit;
+
 /// 列表行：知识库文档的轻量展示字段。
 #[derive(Debug, Clone)]
 pub struct KnowledgeDocRow {
@@ -1009,6 +1012,7 @@ mod tests {
             content_markdown: "## 一、背景\n\n正文。".into(),
         };
         let id = s.import_document(&item).unwrap();
+        s.index_local_document(id).unwrap();
         // 导入后在列表里可见，但处于待索引状态。
         let docs = s.list_docs(None).unwrap();
         assert_eq!(docs.len(), 1);
@@ -1040,8 +1044,124 @@ mod tests {
 
         // 重新导入同一文件会把旧索引一并清掉，回到待索引。
         let id2 = s.import_document(&item).unwrap();
+        s.index_local_document(id2).unwrap();
         assert_eq!(s.count_chunks().unwrap(), 0);
         assert_eq!(s.unindexed_doc_ids().unwrap(), vec![id2]);
+    }
+
+    #[test]
+    fn local_fulltext_is_independent_and_highlights_original_text() {
+        let mut s = store();
+        let item = KnowledgeImportItem {
+            source: KnowledgeSource::Markdown,
+            source_manuscript_id: None,
+            source_path: "local-search.md".into(),
+            kind: TemplateKind::OfficialLetter,
+            title: "安全生产检查通知".into(),
+            content_markdown:
+                "开头段落。\n\n关于开展安全生产检查工作的通知。请认真落实。编号 GW-2026。".into(),
+        };
+        let id = s.import_document(&item).unwrap();
+        s.index_local_document(id).unwrap();
+        assert_eq!(
+            s.count_chunks().unwrap(),
+            0,
+            "全文索引不应创建或改动向量切块"
+        );
+        assert!(s.unindexed_doc_ids().unwrap().contains(&id));
+
+        let hits = s.local_search("安全检查", None, 20).unwrap();
+        assert_eq!(hits.len(), 1);
+        let hit = &hits[0];
+        assert!(hit.excerpt.contains("安全生产检查"));
+        assert!(!hit.highlights.is_empty());
+        for range in &hit.highlights {
+            assert!(hit.excerpt.is_char_boundary(range.start));
+            assert!(hit.excerpt.is_char_boundary(range.end));
+            assert!(!hit.excerpt[range.clone()].is_empty());
+        }
+        assert_eq!(s.local_search("生产", None, 20).unwrap().len(), 1);
+        assert_eq!(
+            s.local_search("gw", None, 20).unwrap().len(),
+            1,
+            "英文检索与原文高亮按 ASCII 忽略大小写"
+        );
+        assert!(s.local_search("，。？！", None, 20).unwrap().is_empty());
+        assert_eq!(s.local_search("GW-2026", None, 20).unwrap().len(), 1);
+        assert!(
+            s.local_search("安全 不存在的关键词", None, 20)
+                .unwrap()
+                .is_empty()
+        );
+
+        // 明确引号短语必须在原文中连续出现；FTS 查询语法字符不能注入。
+        assert_eq!(
+            s.local_search("\"安全生产检查\"", None, 20).unwrap().len(),
+            1
+        );
+        assert!(
+            s.local_search("\"安全 检查\"", None, 20)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            s.local_search(" ) OR * NEAR( ", None, 20)
+                .unwrap()
+                .is_empty()
+        );
+
+        s.rename_document(id, "独有新标题").unwrap();
+        assert_eq!(s.unindexed_local_doc_ids().unwrap(), vec![id]);
+        s.index_local_document(id).unwrap();
+        assert_eq!(s.local_search("\"独有新标题\"", None, 20).unwrap().len(), 1);
+        assert!(
+            s.local_search("\"安全生产检查通知\"", None, 20)
+                .unwrap()
+                .is_empty()
+        );
+
+        // 删除文档时其独立全文条目也同步清理；再导入不会误用旧行。
+        s.delete_documents(&[id]).unwrap();
+        assert!(s.local_search("安全检查", None, 20).unwrap().is_empty());
+    }
+
+    /// 可复现的全文索引性能样例：运行时记录 1000 / 10000 篇建索引及冷/热查询耗时。
+    #[test]
+    #[ignore = "性能样例，手工运行并记录输出"]
+    fn local_fulltext_performance_sample_1000_10000_docs() {
+        for count in [1_000, 10_000] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut s = KnowledgeStore::open(&directory.path().join("sample.db")).unwrap();
+            let began = std::time::Instant::now();
+            for n in 0..count {
+                let item = KnowledgeImportItem {
+                    source: KnowledgeSource::Markdown,
+                    source_manuscript_id: None,
+                    source_path: format!("sample-{n}.md"),
+                    kind: TemplateKind::OfficialLetter,
+                    title: format!("第{n}篇安全生产检查通知"),
+                    content_markdown: format!(
+                        "关于开展安全生产检查的通知。{}编号 GW-{n:05}，请认真落实。",
+                        "安全检查工作部署。".repeat(20)
+                    ),
+                };
+                let id = s.import_document(&item).unwrap();
+                s.index_local_document(id).unwrap();
+            }
+            let indexing = began.elapsed();
+            let query = format!("安全生产检查 GW-{:05}", count - 1);
+            drop(s);
+            let mut s = KnowledgeStore::open(&directory.path().join("sample.db")).unwrap();
+            let cold = std::time::Instant::now();
+            assert_eq!(s.local_search(&query, None, 50).unwrap().len(), 1);
+            let cold = cold.elapsed();
+            let warm = std::time::Instant::now();
+            assert_eq!(s.local_search(&query, None, 50).unwrap().len(), 1);
+            eprintln!(
+                "{count} 篇：索引={indexing:?}，冷查={cold:?}，热查={:?}",
+                warm.elapsed()
+            );
+        }
     }
 
     #[test]

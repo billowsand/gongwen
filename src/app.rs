@@ -37,6 +37,7 @@ mod data_safety;
 pub(crate) mod file_dialog;
 mod ime_page;
 mod jobs;
+mod knowledge_local;
 mod lexicon_jobs;
 mod manuscript_ui;
 mod printing;
@@ -332,6 +333,10 @@ pub struct GongwenApp {
     /// 检索测试框。
     pub(crate) knowledge_test_query: String,
     pub(crate) knowledge_test_results: Vec<rag::RetrievedChunk>,
+    /// 本地全文检索命中；与模型检索结果分开保存。
+    pub(crate) knowledge_local_results: Vec<knowledge::LocalSearchHit>,
+    /// 旧库全文补建已由知识库页面启动，避免每帧重复排队。
+    pub(crate) knowledge_local_backfill_started: bool,
     /// 输入区模式：检索 / 问答。
     pub(crate) knowledge_mode: KnowledgeMode,
     /// 问答历史：每轮一个问题 + 答案 + 引用片段 + 降级告警。
@@ -682,6 +687,8 @@ impl GongwenApp {
             knowledge_unindexed: 0,
             knowledge_test_query: String::new(),
             knowledge_test_results: Vec::new(),
+            knowledge_local_results: Vec::new(),
+            knowledge_local_backfill_started: false,
             knowledge_mode: KnowledgeMode::default(),
             knowledge_qa_history: Vec::new(),
             knowledge_qa_pending: None,

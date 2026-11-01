@@ -148,6 +148,8 @@ pub(super) fn fixture() -> GongwenApp {
         knowledge_unindexed: 0,
         knowledge_test_query: String::new(),
         knowledge_test_results: Vec::new(),
+        knowledge_local_results: Vec::new(),
+        knowledge_local_backfill_started: false,
         knowledge_mode: KnowledgeMode::default(),
         knowledge_qa_history: Vec::new(),
         knowledge_qa_pending: None,

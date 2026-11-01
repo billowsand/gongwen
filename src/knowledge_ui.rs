@@ -26,6 +26,7 @@ pub(crate) fn knowledge_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
         );
         return;
     }
+    app.knowledge_backfill_local_index();
     if app.knowledge_dirty {
         app.refresh_knowledge();
     }
@@ -61,6 +62,7 @@ pub(crate) fn knowledge_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
     import_dialog(app, ui);
     delete_confirm(app, ui);
     rename_dialog(app, ui);
+    local_original_window(ui.ctx());
 }
 
 /// 知识库页的子页签。
@@ -120,7 +122,7 @@ fn toolbar(app: &mut GongwenApp, ui: &mut egui::Ui) {
         ui.heading("知识库");
         ui.add_space(8.0);
         ui.weak(format!(
-            "{} 篇 · {} 块",
+            "{} 篇 · {} 个向量切块",
             app.knowledge_docs.len(),
             app.knowledge_chunk_count
         ));
@@ -144,9 +146,9 @@ fn toolbar(app: &mut GongwenApp, ui: &mut egui::Ui) {
             // 右到左布局，先加的靠右：「建立索引」紧挨「导入文档」，顺着操作次序。
             let pending = app.knowledge_unindexed;
             let label = if pending > 0 {
-                format!("建立索引（{pending}）")
+                format!("建立向量索引（{pending}）")
             } else {
-                "建立索引".to_string()
+                "建立向量索引".to_string()
             };
             if ui
                 .add_enabled(
@@ -161,7 +163,7 @@ fn toolbar(app: &mut GongwenApp, ui: &mut egui::Ui) {
             if ui
                 .add_enabled(
                     !busy && !app.knowledge_docs.is_empty(),
-                    theme::icon_text_button(theme::Icon::Refresh, "重建索引"),
+                    theme::icon_text_button(theme::Icon::Refresh, "重建向量索引"),
                 )
                 .on_hover_text("对库内全部文档重新切块、嵌入（更换 embedding 模型后用）")
                 .clicked()
@@ -191,6 +193,9 @@ fn kind_filter_bar(app: &mut GongwenApp, ui: &mut egui::Ui) {
         if let Some(kind) = chosen {
             app.knowledge_filter_kind = kind;
             app.knowledge_dirty = true;
+            app.knowledge_local_results.clear();
+            app.knowledge_test_results.clear();
+            app.knowledge_search_warnings.clear();
         }
     });
 }
@@ -444,10 +449,10 @@ fn doc_table(
                         centered_cell_text(ui, doc.chunk_count.to_string());
                     } else if doc.chunk_count > 0 {
                         centered_cell_text(ui, egui::RichText::new("待重建").color(theme::warn()))
-                            .on_hover_text("标题改过，检索暂用旧索引；点「建立索引」更新");
+                            .on_hover_text("向量索引待重建；本地全文索引会自动更新");
                     } else {
-                        centered_cell_text(ui, egui::RichText::new("未索引").color(theme::warn()))
-                            .on_hover_text("还没建立索引，检索与问答用不到；点「建立索引」");
+                        centered_cell_text(ui, egui::RichText::new("未建向量"))
+                            .on_hover_text("全文索引自动建立；语义检索与问答需另建向量索引");
                     }
                 });
                 row.col(|ui| {
@@ -502,9 +507,7 @@ fn search_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
             ui.label(egui::RichText::new("检索 / 问答").strong())
                 .on_hover_ui(|ui| match app.knowledge_mode {
                     KnowledgeMode::Search => {
-                        ui.label(
-                            "输入检索要求，查看会从知识库调出哪些片段（与起草时的检索一致）。",
-                        );
+                        ui.label("全文检索完全在本机运行，不需要模型服务；「语义检索」仍使用原有 embedding / RAG 服务。");
                     }
                     KnowledgeMode::Qa => {
                         ui.label("向知识库提问，答案基于库内片段生成并标注出处，可连续追问。");
@@ -518,7 +521,7 @@ fn search_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
         let (hint, button_label, icon) = match app.knowledge_mode {
             KnowledgeMode::Search => (
                 "例如：关于开展安全生产检查的通知",
-                "检索",
+                "全文检索",
                 theme::Icon::Reveal,
             ),
             KnowledgeMode::Qa => (
@@ -531,8 +534,13 @@ fn search_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
             let response = ui.add(
                 egui::TextEdit::singleline(&mut app.knowledge_test_query)
                     .hint_text(hint)
-                    .desired_width((ui.available_width() - 90.0).max(120.0)),
+                    .desired_width((ui.available_width() - 250.0).max(100.0)),
             );
+            if response.changed() {
+                app.knowledge_local_results.clear();
+                app.knowledge_test_results.clear();
+                app.knowledge_search_warnings.clear();
+            }
             // 回车也能触发。
             let enter =
                 response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -545,9 +553,16 @@ fn search_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
                 || (enter && !app.knowledge_busy);
             if submit {
                 match app.knowledge_mode {
-                    KnowledgeMode::Search => app.knowledge_test_search(),
+                    KnowledgeMode::Search => app.knowledge_local_search(),
                     KnowledgeMode::Qa => app.knowledge_ask(),
                 }
+            }
+            if app.knowledge_mode == KnowledgeMode::Search
+                && ui
+                    .add_enabled(!app.knowledge_busy, egui::Button::new("语义检索（需模型）"))
+                    .clicked()
+            {
+                app.knowledge_test_search();
             }
         });
         // 文种筛选条同时在约束本次操作，不说明的话容易变成“明明导入了却没结果”。
@@ -560,6 +575,9 @@ fn search_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
                 "当前只在「{}」范围内{verb}，改上方的文种筛选可放开。",
                 kind.label()
             ));
+        }
+        if app.knowledge_mode == KnowledgeMode::Search {
+            ui.weak("导入及打开知识库时自动建立全文索引；空格分隔多个关键词，双引号查连续原文。语义检索需模型。");
         }
         ui.add_space(6.0);
 
@@ -594,9 +612,86 @@ fn search_results(app: &mut GongwenApp, ui: &mut egui::Ui) {
     for warning in &app.knowledge_search_warnings {
         ui.colored_label(theme::warn(), warning);
     }
+    if !app.knowledge_local_results.is_empty() {
+        ui.weak(format!(
+            "本地全文命中 {} 篇",
+            app.knowledge_local_results.len()
+        ));
+        let hits = app.knowledge_local_results.clone();
+        let max_height = (ui.available_height() - 16.0).max(140.0);
+        egui::ScrollArea::vertical()
+            .id_salt("knowledge_local_search_results")
+            .max_height(max_height)
+            .show(ui, |ui| {
+                for hit in &hits {
+                    theme::card().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(&hit.title).strong());
+                            theme::chip(
+                                ui,
+                                hit.kind.label(),
+                                theme::accent(),
+                                theme::surface_sunk(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("复制片段").clicked() {
+                                        ui.ctx().copy_text(hit.excerpt.clone());
+                                    }
+                                    if ui.small_button("查看原文").clicked() {
+                                        match app
+                                            .knowledge_store
+                                            .as_mut()
+                                            .map(|store| store.get_doc_content(hit.doc_id))
+                                        {
+                                            Some(Ok(Some((title, content)))) => {
+                                                let start = hit.source_offset
+                                                    + hit
+                                                        .highlights
+                                                        .first()
+                                                        .map_or(0, |range| range.start);
+                                                let end = hit.source_offset
+                                                    + hit
+                                                        .highlights
+                                                        .first()
+                                                        .map_or(0, |range| range.end);
+                                                ui.ctx().data_mut(|data| {
+                                                    data.insert_temp(
+                                                        egui::Id::new("knowledge_local_original"),
+                                                        LocalOriginal {
+                                                            doc_id: hit.doc_id,
+                                                            title,
+                                                            content: content.into(),
+                                                            selection: start..end,
+                                                            jump: true,
+                                                        },
+                                                    )
+                                                });
+                                            }
+                                            _ => {
+                                                app.knowledge_error = Some(
+                                                    "原文已移除或读取失败，请重新检索。".into(),
+                                                )
+                                            }
+                                        }
+                                    }
+                                    if ui.small_button("版式预览").clicked() {
+                                        app.knowledge_open_preview(hit.doc_id);
+                                    }
+                                },
+                            );
+                        });
+                        highlighted_excerpt(ui, &hit.excerpt, &hit.highlights);
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+        return;
+    }
     if app.knowledge_test_results.is_empty() {
         if !app.knowledge_test_query.trim().is_empty() {
-            ui.weak("未检索到相关片段。可先「导入文档」或在稿件管理「导入到知识库」，再点「建立索引」。");
+            ui.weak("输入关键词后点击「全文检索」或按回车。无匹配时可缩短关键词或放开文种筛选；本地全文检索无需建立向量索引。");
         }
         return;
     }
@@ -614,6 +709,105 @@ fn search_results(app: &mut GongwenApp, ui: &mut egui::Ui) {
                 ui.add_space(4.0);
             }
         });
+}
+
+/// 原文只读查看：定位摘要对应范围，允许选择复制，不回写知识库正文。
+#[derive(Clone)]
+struct LocalOriginal {
+    doc_id: i64,
+    title: String,
+    content: std::sync::Arc<str>,
+    selection: std::ops::Range<usize>,
+    jump: bool,
+}
+
+fn local_original_window(ctx: &egui::Context) {
+    let key = egui::Id::new("knowledge_local_original");
+    let Some(mut original) = ctx.data_mut(|data| data.get_temp::<LocalOriginal>(key)) else {
+        return;
+    };
+    let mut open = true;
+    egui::Window::new(format!("原文 · {}", original.title))
+        .id(key)
+        .open(&mut open)
+        .default_size([760.0, 620.0])
+        .show(ctx, |ui| {
+            if ui.button("回到命中处").clicked() {
+                original.jump = true;
+            }
+            let text_id = key.with(original.doc_id);
+            let valid = original.selection.start <= original.selection.end
+                && original.content.is_char_boundary(original.selection.start)
+                && original.content.is_char_boundary(original.selection.end);
+            let (start, end) = if valid {
+                (original.selection.start, original.selection.end)
+            } else {
+                (0, 0)
+            };
+            let cursor = egui::text::CCursor::new(original.content[..start].chars().count());
+            if original.jump {
+                let mut state = egui::TextEdit::load_state(ctx, text_id).unwrap_or_default();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(
+                        cursor,
+                        egui::text::CCursor::new(original.content[..end].chars().count()),
+                    )));
+                state.store(ctx, text_id);
+            }
+            egui::ScrollArea::vertical()
+                .id_salt(text_id.with("scroll"))
+                .show(ui, |ui| {
+                    // &str 是只读 TextBuffer，仍可选择、复制；不接受键入修改。
+                    let mut text = original.content.as_ref();
+                    let output = egui::TextEdit::multiline(&mut text)
+                        .id(text_id)
+                        .desired_width(f32::INFINITY)
+                        .show(ui);
+                    if original.jump {
+                        let rect = output
+                            .galley
+                            .pos_from_cursor(cursor)
+                            .translate(output.galley_pos.to_vec2());
+                        ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                    }
+                });
+            original.jump = false;
+        });
+    ctx.data_mut(|data| {
+        if open {
+            data.insert_temp(key, original);
+        } else {
+            data.remove::<LocalOriginal>(key);
+        }
+    });
+}
+
+/// 将原文 UTF-8 字节范围分段显示，命中范围加底色。
+fn highlighted_excerpt(ui: &mut egui::Ui, text: &str, ranges: &[std::ops::Range<usize>]) {
+    let mut job = egui::text::LayoutJob::default();
+    let base = egui::TextFormat {
+        font_id: egui::TextStyle::Body.resolve(ui.style()),
+        color: ui.visuals().text_color(),
+        ..Default::default()
+    };
+    let mut cursor = 0;
+    for range in ranges {
+        if range.start < cursor
+            || range.end > text.len()
+            || !text.is_char_boundary(range.start)
+            || !text.is_char_boundary(range.end)
+        {
+            continue;
+        }
+        job.append(&text[cursor..range.start], 0.0, base.clone());
+        let mut format = base.clone();
+        format.background = theme::accent().gamma_multiply(0.35);
+        job.append(&text[range.start..range.end], 0.0, format);
+        cursor = range.end;
+    }
+    job.append(&text[cursor..], 0.0, base);
+    ui.label(job);
 }
 
 /// 问答模式：多轮对话历史（问题 + 答案卡片），等待时展示待生成的问题。
