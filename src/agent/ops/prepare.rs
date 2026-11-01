@@ -138,10 +138,18 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
         // 正文措辞跟着对上（冲突的「替换」建议不记，免得带偏起草）。
         for suggestion in &plan.suggestions {
             if !suggestion.conflict {
+                // display_value 正常由 plan() 填好；旧会话恢复的批次可能为空，按快照现算名称。
+                let value = if suggestion.display_value.is_empty() {
+                    crate::units::identity::display_values(
+                        &ctx.board.draft.profile.vocabulary_snapshot,
+                        &suggestion.value,
+                    )
+                } else {
+                    suggestion.display_value.clone()
+                };
                 ctx.board.notes.push(format!(
-                    "{}：{}（{}；要素建议，待采纳进表单）",
+                    "{}：{value}（{}；要素建议，待采纳进表单）",
                     suggestion.field.label(),
-                    suggestion.display_value,
                     suggestion.source
                 ));
             }

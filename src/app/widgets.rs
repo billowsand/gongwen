@@ -460,6 +460,7 @@ pub(crate) fn single_select(
     id: &str,
     value: &mut String,
     options: &[SelectOption],
+    vocabulary: &[VocabularyEntry],
     manual_fields: &mut BTreeSet<String>,
     allow_free_text: bool,
     width: f32,
@@ -482,7 +483,9 @@ pub(crate) fn single_select(
             .iter()
             .find(|option| option.value == *value)
             .map(|option| option.full.clone())
-            .unwrap_or_else(|| crate::units::identity::label(&[], value))
+            // 词条已从候选池消失（历史稿按快照显示、或词条已删）时也显示名称，
+            // 不能把身份引用原样摆在下拉框上。
+            .unwrap_or_else(|| crate::units::identity::label(vocabulary, value))
     };
     ui.horizontal(|ui| {
         if manual {
@@ -497,13 +500,29 @@ pub(crate) fn single_select(
             } else {
                 width
             };
-            changed = ui
+            // 手填态不能把身份引用原样摆进输入框：能解析的显示规范名称（只显示、
+            // 不回写，回写会丢掉身份），解析不了的留空提示重填。
+            let mut shown = if crate::units::identity::is_ref(value) {
+                crate::units::identity::insert_text(vocabulary, value)
+            } else {
+                value.clone()
+            };
+            let hint = if shown.is_empty() && crate::units::identity::is_ref(value) {
+                "原词条已失效，请重新选择或手填"
+            } else {
+                hint
+            };
+            if ui
                 .add(
-                    egui::TextEdit::singleline(value)
+                    egui::TextEdit::singleline(&mut shown)
                         .hint_text(hint)
                         .desired_width(text_width),
                 )
-                .changed();
+                .changed()
+            {
+                *value = shown;
+                changed = true;
+            }
             if back {
                 back_to_select_button(ui, id, manual_fields);
             }
@@ -629,7 +648,9 @@ pub(crate) fn joint_responsible_editor(
                             .iter()
                             .find(|option| option.value == entry.unit)
                             .map(|option| option.full.clone())
-                            .unwrap_or_else(|| entry.unit.clone())
+                            // 词条已失效或不在候选池（历史稿按快照显示）时，
+                            // 仍要给名称，不能把身份引用原样摆在下拉框上。
+                            .unwrap_or_else(|| display.full_name(&entry.unit))
                     };
                     egui::ComboBox::from_id_salt(&unit_key)
                         .selected_text(selected_text)
@@ -760,6 +781,7 @@ pub(crate) fn multi_select(
     id: &str,
     value: &mut String,
     options: &[SelectOption],
+    vocabulary: &[VocabularyEntry],
     excluded: &[String],
     excluded_reason: &str,
     manual_fields: &mut BTreeSet<String>,
@@ -787,13 +809,31 @@ pub(crate) fn multi_select(
                 } else {
                     width
                 };
-                changed = ui
+                // 手填态不能把身份引用原样摆进输入框：能解析的显示规范名称
+                // （只显示、不回写，回写会丢身份），解析不了的整项留空。
+                let mut shown = split_units(value)
+                    .into_iter()
+                    .map(|part| {
+                        if crate::units::identity::is_ref(&part) {
+                            crate::units::identity::insert_text(vocabulary, &part)
+                        } else {
+                            part
+                        }
+                    })
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("、");
+                if ui
                     .add(
-                        egui::TextEdit::singleline(value)
+                        egui::TextEdit::singleline(&mut shown)
                             .hint_text("多个单位用顿号“、”分隔")
                             .desired_width(text_width),
                     )
-                    .changed();
+                    .changed()
+                {
+                    *value = shown;
+                    changed = true;
+                }
                 if back {
                     back_to_select_button(ui, id, manual_fields);
                 }
@@ -808,13 +848,19 @@ pub(crate) fn multi_select(
                             .iter()
                             .find(|option| option.value == selected[0])
                             .map(|option| option.full.clone())
-                            .unwrap_or_else(|| selected[0].clone()),
+                            // 词条不在候选池（历史稿快照里的、或已从词库删掉）时
+                            // 也显示名称，不能把身份引用原样摆在下拉框上。
+                            .unwrap_or_else(|| {
+                                crate::units::identity::label(vocabulary, &selected[0])
+                            }),
                         n => {
                             let first = options
                                 .iter()
                                 .find(|option| option.value == selected[0])
                                 .map(|option| option.label.clone())
-                                .unwrap_or_else(|| selected[0].clone());
+                                .unwrap_or_else(|| {
+                                    crate::units::identity::label(vocabulary, &selected[0])
+                                });
                             format!("{first} 等 {n} 个")
                         }
                     })
@@ -870,7 +916,7 @@ pub(crate) fn multi_select(
                     for (index, item) in selected.iter().enumerate() {
                         let known = options.iter().find(|option| option.value == *item);
                         // 已选标签显示完整名称，免得只看到“办公室”分不清是哪家的。
-                        let fallback = crate::units::identity::label(&[], item);
+                        let fallback = crate::units::identity::label(vocabulary, item);
                         let display = known
                             .map(|option| option.full.as_str())
                             .unwrap_or(&fallback);
@@ -947,6 +993,7 @@ pub(crate) fn contact_pair(
             "contact_person",
             &mut profile.contact_person,
             &names,
+            vocabulary,
             manual_fields,
             allow_free_text,
             width,

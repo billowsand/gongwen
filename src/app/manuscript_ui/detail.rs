@@ -98,6 +98,10 @@ impl GongwenApp {
         }
         ui.add_space(6.0);
 
+        // 元数据是给人看的：先把要素里的身份引用换成名称。历史稿按自己的
+        // 词库快照显示，不查当前词库临时补名字（见 docs/vocabulary-identity-design.md 6.2）。
+        let readable = crate::units::identity::readable(&detail.snapshot, &self.config.vocabulary);
+
         egui::ScrollArea::vertical()
             .id_salt("manuscript_metadata_scroll")
             .auto_shrink([false; 2])
@@ -109,7 +113,7 @@ impl GongwenApp {
                     .min_col_width(76.0)
                     .spacing([10.0, 6.0])
                     .show(ui, |ui| {
-                        let profile = &detail.snapshot.profile;
+                        let profile = &readable.profile;
                         metadata_grid_row(ui, "标题", &detail.title);
                         metadata_grid_row(ui, "文档类型", detail.kind.label());
                         // 密级按文档类型取：研究报告的在封面元数据里，不在版式要素里。

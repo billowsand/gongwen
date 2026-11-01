@@ -677,6 +677,145 @@ fn reused_business_codes_in_saved_snapshots_do_not_merge_units_or_their_people()
     display.ensure_resolved(&old).unwrap();
 }
 
+/// 「插入」菜单：菜单上显示可读名称，写进正文的只有纯文字。
+/// 提交 cc312be 把人员字段改成 `@person:<uuid>` 后，这里一度把引用直接
+/// 显示到菜单上、又原样插进正文。
+#[test]
+fn insert_menus_show_readable_names_and_write_plain_text() {
+    let entries = fixture();
+    let people = identity::person_insert_items(&entries);
+    // 三个人同名（张宁）：菜单标签必须能区分，正文只写姓名。
+    assert_eq!(people.len(), 3);
+    assert!(people.iter().all(|item| item.text == "张宁"));
+    assert!(people.iter().all(|item| item.label.contains("办公室")));
+    assert_eq!(
+        people
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    let phones = identity::phone_insert_items(&entries);
+    assert_eq!(phones.len(), 3);
+    assert!(
+        phones
+            .iter()
+            .any(|item| item.text == "010-2222" && item.label.ends_with("010-2222"))
+    );
+    for item in people.iter().chain(phones.iter()) {
+        assert!(
+            !item.label.contains('@') && !item.text.contains('@'),
+            "身份引用泄漏：{} / {}",
+            item.label,
+            item.text
+        );
+    }
+    assert_eq!(
+        identity::insert_text(&entries, &key(&entries, "A0101")),
+        "办公室"
+    );
+    assert_eq!(identity::insert_text(&entries, "手填单位"), "手填单位");
+    assert!(
+        identity::insert_text(&entries, "@person:00000000-0000-0000-0000-000000000000").is_empty()
+    );
+}
+
+/// 稿件详情的只读副本：身份引用换成名称，待核对旧值保留原文，原稿不动。
+#[test]
+fn readable_replaces_references_with_names_and_keeps_original_draft() {
+    let entries = fixture();
+    let mut draft = DraftInput::default();
+    apply_field(
+        &mut draft,
+        FieldId::IssuingUnit,
+        &key(&entries, "A01"),
+        &entries,
+    );
+    apply_field(
+        &mut draft,
+        FieldId::ResponsibleUnit,
+        &key(&entries, "A0101"),
+        &entries,
+    );
+    apply_field(
+        &mut draft,
+        FieldId::ContactPerson,
+        &person(&entries, "010-2222"),
+        &entries,
+    );
+    draft.profile.recipient = format!("{}、@unresolved:某某单位", key(&entries, "B0101"));
+    draft.profile.joint_contacts = vec![crate::models::JointContact {
+        unit: key(&entries, "A0101"),
+        name: person(&entries, "010-1111"),
+        phone: "010-1111".into(),
+    }];
+    draft.phone_record.caller_person = person(&entries, "020-3333");
+    draft.phone_record.caller_unit = key(&entries, "B0101");
+    draft.minutes.printing_unit = key(&entries, "A");
+    // 与真实流程一致：每次改要素后都会重抓快照，这里补一次。
+    identity::capture_input(&mut draft, &entries);
+
+    let readable = identity::readable(&draft, &entries);
+    assert_eq!(readable.profile.contact_phone, draft.profile.contact_phone);
+    // 三个人同名，显示时补单位与职务来区分，但都是名称，不是引用。
+    assert!(readable.profile.contact_person.contains("张宁"));
+    assert_eq!(readable.profile.issuing_unit, "教育局");
+    assert!(readable.profile.responsible_unit.contains("办公室"));
+    assert!(
+        readable.profile.recipient.contains("办公室")
+            && readable
+                .profile
+                .recipient
+                .contains("某某单位（同名待核对）")
+    );
+    assert!(readable.profile.joint_contacts[0].name.contains("张宁"));
+    assert!(readable.profile.joint_contacts[0].unit.contains("办公室"));
+    assert!(readable.phone_record.caller_person.contains("张宁"));
+    assert!(readable.phone_record.caller_unit.contains("办公室"));
+    assert_eq!(readable.minutes.printing_unit, "甲市");
+    for value in [
+        &readable.profile.issuing_unit,
+        &readable.profile.responsible_unit,
+        &readable.profile.recipient,
+        &readable.profile.contact_person,
+        &readable.phone_record.caller_unit,
+        &readable.phone_record.caller_person,
+        &readable.minutes.printing_unit,
+    ] {
+        assert!(!value.contains('@'), "未转换的身份引用：{value}");
+    }
+    // 只读副本，原稿仍是引用，写表单的逻辑不受影响。
+    assert!(draft.profile.contact_person.starts_with("@person:"));
+    assert!(draft.profile.responsible_unit.starts_with("@unit:"));
+}
+
+/// 历史稿按自己的词库快照显示：词库改名、调动后详情页与版本对照都不跟着变。
+#[test]
+fn readable_keeps_historical_snapshot_names_after_vocabulary_change() {
+    let mut entries = fixture();
+    let mut draft = DraftInput::default();
+    let selected = person(&entries, "010-1111");
+    apply_field(&mut draft, FieldId::ContactPerson, &selected, &entries);
+    for entry in &mut entries {
+        if entry.category == C::Person {
+            entry.canonical = "李雷".into();
+        }
+    }
+    assert!(
+        identity::readable(&draft, &entries)
+            .profile
+            .contact_person
+            .contains("张宁")
+    );
+    // 没有快照的旧稿才用当前词库兜底。
+    let mut legacy = draft.clone();
+    legacy.profile.vocabulary_snapshot.clear();
+    let readable = identity::readable(&legacy, &entries);
+    assert!(readable.profile.contact_person.contains("李雷"));
+    assert!(!readable.profile.contact_person.contains('@'));
+}
+
 #[test]
 fn ambiguous_legacy_phone_record_unit_requires_reselection() {
     let entries = fixture();

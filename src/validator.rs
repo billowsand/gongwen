@@ -702,7 +702,10 @@ fn validate_metadata(
                 warnings.push(format!("第 {} 行承办单位未填写", index + 1));
             }
             if entry.phone.trim().is_empty() {
-                warnings.push(format!("联系人“{}”缺少联系电话", entry.name.trim()));
+                warnings.push(format!(
+                    "联系人“{}”缺少联系电话",
+                    unit_display.person_name(&entry.name)
+                ));
             }
             if let Some(vocab) =
                 crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, &entry.name)
@@ -711,7 +714,7 @@ fn validate_metadata(
             {
                 warnings.push(format!(
                     "联系人“{}”在标准词库中的电话为“{}”，与当前填写的“{}”不一致",
-                    entry.name.trim(),
+                    unit_display.person_name(&entry.name),
                     vocab.phone.trim(),
                     entry.phone.trim()
                 ));
@@ -728,7 +731,7 @@ fn validate_metadata(
                 {
                     warnings.push(format!(
                         "联系人“{}”属于“{}”，与第 {} 行承办单位“{}”不一致",
-                        entry.name.trim(),
+                        unit_display.person_name(&entry.name),
                         unit_display.full_name(bound),
                         index + 1,
                         unit_display.full_name(responsible)
@@ -740,9 +743,10 @@ fn validate_metadata(
         let contact = profile.contact_person.trim();
         let phone = profile.contact_phone.trim();
         match (contact.is_empty(), phone.is_empty()) {
-            (false, true) => {
-                warnings.push(format!("联系人“{contact}”缺少联系电话，二者必须成对填写"))
-            }
+            (false, true) => warnings.push(format!(
+                "联系人“{}”缺少联系电话，二者必须成对填写",
+                unit_display.person_name(contact)
+            )),
             (true, false) => warnings.push(format!(
                 "填写了联系电话“{phone}”但没有联系人，二者必须成对填写"
             )),
@@ -755,7 +759,8 @@ fn validate_metadata(
             && entry.phone.trim() != phone
         {
             warnings.push(format!(
-                "联系人“{contact}”在标准词库中的电话为“{}”，与当前填写的“{phone}”不一致",
+                "联系人“{}”在标准词库中的电话为“{}”，与当前填写的“{phone}”不一致",
+                unit_display.person_name(contact),
                 entry.phone.trim()
             ));
         }
@@ -771,7 +776,8 @@ fn validate_metadata(
                 && !unit_display.same_unit(bound, responsible)
             {
                 warnings.push(format!(
-                    "联系人“{contact}”属于“{}”，与承办单位“{}”不一致",
+                    "联系人“{}”属于“{}”，与承办单位“{}”不一致",
+                    unit_display.person_name(contact),
                     unit_display.full_name(bound),
                     unit_display.full_name(responsible)
                 ));
@@ -867,7 +873,8 @@ fn validate_metadata(
             for unit in split_units(&profile.copies_to) {
                 if recipients.contains(&unit) {
                     warnings.push(format!(
-                        "“{unit}”同时出现在主送单位和抄送单位中，只能保留其一"
+                        "“{}”同时出现在主送单位和抄送单位中，只能保留其一",
+                        unit_display.full_name(&unit)
                     ));
                 }
             }
@@ -878,10 +885,16 @@ fn validate_metadata(
             };
             for unit in &issuing {
                 if recipients.contains(unit) {
-                    warnings.push(format!("“{unit}”既是发文单位又是主送单位，不能给自己发文"));
+                    warnings.push(format!(
+                        "“{}”既是发文单位又是主送单位，不能给自己发文",
+                        unit_display.full_name(unit)
+                    ));
                 }
                 if split_units(&profile.copies_to).contains(unit) {
-                    warnings.push(format!("“{unit}”既是发文单位又是抄送单位，只能保留其一"));
+                    warnings.push(format!(
+                        "“{}”既是发文单位又是抄送单位，只能保留其一",
+                        unit_display.full_name(unit)
+                    ));
                 }
             }
         }
@@ -1367,6 +1380,70 @@ mod tests {
                 .any(|warning| warning.contains("明确一个主发文单位"))
         );
         assert!(!valid.iter().any(|warning| warning.contains("缺少联系电话")));
+    }
+
+    /// 校验提示是给人看的：单位与联系人一律印名称，不能把身份引用摆出来。
+    /// 提交 cc312be 之后 `@unit:` / `@person:` 一度直接进了提示语。
+    #[test]
+    fn contact_and_unit_warnings_use_vocabulary_names() {
+        let mut vocabulary = vec![
+            VocabularyEntry {
+                code: "01".into(),
+                canonical: "办公室".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                category: VocabularyCategory::Person,
+                unit: "01".into(),
+                code: "07".into(),
+                canonical: "张三".into(),
+                phone: "010-1111".into(),
+                ..Default::default()
+            },
+        ];
+        crate::units::normalize(&mut vocabulary);
+        let unit = vocabulary[0].key();
+        let person = vocabulary
+            .iter()
+            .find(|entry| entry.category == VocabularyCategory::Person)
+            .unwrap()
+            .key();
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            profile: crate::models::TemplateProfile::for_kind(TemplateKind::OfficialLetter),
+            ..Default::default()
+        };
+        input.profile.issuing_unit = unit.clone();
+        input.profile.recipient = "收文单位".into();
+        input.profile.responsible_unit = unit.clone();
+        input.profile.contact_person = person;
+        input.profile.contact_phone.clear();
+
+        let warnings = validate(&input, "# 函\n\n正文。", &vocabulary, &rules());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("联系人“张三”缺少联系电话")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().all(|warning| !warning.contains('@')),
+            "校验提示泄漏身份引用：{warnings:?}"
+        );
+
+        // 同一单位既是发文又是主送：提示里也得是名称。
+        input.profile.recipient = unit;
+        let warnings = validate(&input, "# 函\n\n正文。", &vocabulary, &rules());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("“办公室”既是发文单位又是主送单位")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().all(|warning| !warning.contains('@')),
+            "校验提示泄漏身份引用：{warnings:?}"
+        );
     }
 
     #[test]

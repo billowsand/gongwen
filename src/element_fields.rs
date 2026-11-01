@@ -532,7 +532,11 @@ pub(crate) fn filled_summary(draft: &DraftInput, suggestions: &[FieldSuggestion]
             match suggestions.iter().find(|s| s.field == field && !s.conflict) {
                 Some(suggestion) => {
                     if suggestion.display_value.is_empty() {
-                        suggestion.value.clone()
+                        // 旧会话反序列化后可能没有 display_value：按快照现算名称。
+                        crate::units::identity::display_values(
+                            &draft.profile.vocabulary_snapshot,
+                            &suggestion.value,
+                        )
                     } else {
                         suggestion.display_value.clone()
                     }

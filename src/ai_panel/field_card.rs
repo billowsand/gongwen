@@ -118,6 +118,8 @@ pub(crate) fn missing_in_vocabulary(
     crate::models::split_units(value)
         .into_iter()
         .filter(|name| crate::units::identity::resolve(vocabulary, category, name).is_none())
+        // 提示语里要名称：身份引用原样摆出来用户看不懂。
+        .map(|name| crate::units::identity::label(vocabulary, &name))
         .collect()
 }
 
@@ -235,15 +237,16 @@ pub(crate) fn proposal_reminder(rows: &[FieldCardRow], draft: &DraftInput) -> Op
             .iter()
             .filter(|row| row.suggestion.conflict == conflict)
             .map(|row| {
-                format!(
-                    "{}：{}",
-                    row.suggestion.field.label(),
-                    if row.suggestion.display_value.is_empty() {
-                        &row.suggestion.value
-                    } else {
-                        &row.suggestion.display_value
-                    }
-                )
+                // 旧会话反序列化后可能没有 display_value：按稿件快照现算一次名称。
+                let display_value = if row.suggestion.display_value.is_empty() {
+                    crate::units::identity::display_values(
+                        &draft.profile.vocabulary_snapshot,
+                        &row.suggestion.value,
+                    )
+                } else {
+                    row.suggestion.display_value.clone()
+                };
+                format!("{}：{display_value}", row.suggestion.field.label())
             })
             .collect::<Vec<_>>()
     };

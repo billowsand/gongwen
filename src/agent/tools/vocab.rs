@@ -106,7 +106,8 @@ impl Tool for Units {
     }
     fn description(&self) -> &'static str {
         "查标准词库里的单位：规范名称、对外名称、简称、别名、层级编码、上级单位与职能任务。\
-         分配任务、定牵头或责任单位时用 query 写事项关键词，按职能任务对号"
+         分配任务、定牵头或责任单位时用 query 写事项关键词，按职能任务对号。\
+         返回的 identity 只用于回填表单要素，不得写进正文或回答里"
     }
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
@@ -168,7 +169,8 @@ impl Tool for Persons {
     }
     fn description(&self) -> &'static str {
         "查标准词库里的人员：姓名、职务、所属单位、个人简介。推荐联系人、负责人时用 query 写事项关键词，\
-         按个人简介对号。电话默认不给，技能声明 vocab.persons.phone 才返回"
+         按个人简介对号。电话默认不给，技能声明 vocab.persons.phone 才返回。\
+         返回的 identity / unit_identity 只用于回填表单要素，不得写进正文或回答里"
     }
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[

@@ -218,8 +218,8 @@ impl PiToolContext {
         manuscripts: Arc<dyn PiManuscripts>,
     ) -> Self {
         Self {
+            form_facts: form_facts(&draft, &config.vocabulary),
             config,
-            form_facts: form_facts(&draft),
             draft,
             current,
             request,
@@ -527,19 +527,21 @@ impl PiToolContext {
     }
 
     /// 只读当前表单要素：描述类给值，授权类只列只读值，任何情况下都不写表单。
+    /// 值先换成名称再给模型——身份引用（`@unit:` / `@person:`）进模型会被照抄进正文。
     fn doc_elements(&self) -> Value {
+        let readable = crate::units::identity::readable(&self.draft, &self.config.vocabulary);
         let mut description = Vec::new();
         for field in crate::element_fields::FieldId::ALL {
-            if !field.applies(&self.draft) {
+            if !field.applies(&readable) {
                 continue;
             }
             description.push(json!({
                 "field": field.label(),
-                "value": field.read(&self.draft),
-                "required": field.required(self.draft.kind),
+                "value": field.read(&readable),
+                "required": field.required(readable.kind),
             }));
         }
-        let profile = &self.draft.profile;
+        let profile = &readable.profile;
         let mut authorized = Vec::new();
         for (label, value) in [
             ("密级", profile.security_level.as_str()),
@@ -554,10 +556,10 @@ impl PiToolContext {
         if !self.draft.date.trim().is_empty() {
             authorized.push(json!({"field": "成文日期", "value": self.draft.date}));
         }
-        if !self.draft.minutes.printing_unit.trim().is_empty() {
+        if !readable.minutes.printing_unit.trim().is_empty() {
             authorized.push(json!({
                 "field": "版记印发机关",
-                "value": self.draft.minutes.printing_unit
+                "value": readable.minutes.printing_unit
             }));
         }
         json!({
@@ -573,16 +575,18 @@ impl PiToolContext {
 struct DisabledKnowledge;
 
 /// 表单里用户已填的描述类要素与标题：**不是**授权类，也不包含词库查询结果。
-fn form_facts(draft: &DraftInput) -> Vec<String> {
+/// 事实比对同样要名称而不是身份引用，否则模型写的名称对不上、还可能照抄引用。
+fn form_facts(draft: &DraftInput, vocabulary: &[crate::models::VocabularyEntry]) -> Vec<String> {
+    let readable = crate::units::identity::readable(draft, vocabulary);
     let mut out = Vec::new();
-    if !draft.title_hint.trim().is_empty() {
-        out.push(draft.title_hint.clone());
+    if !readable.title_hint.trim().is_empty() {
+        out.push(readable.title_hint.clone());
     }
     for field in crate::element_fields::FieldId::ALL {
-        if !field.applies(draft) {
+        if !field.applies(&readable) {
             continue;
         }
-        let value = field.read(draft);
+        let value = field.read(&readable);
         if !value.trim().is_empty() {
             out.push(value);
         }

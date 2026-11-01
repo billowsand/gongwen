@@ -986,11 +986,13 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 标准词库的三个下拉：单位、人员、联系方式。选中就把规范名称插到光标处，
-    /// 免得为了抄一个单位全称在词库页和起草页之间来回切。
+    /// 标准词库的三个下拉：单位、人员、联系方式。菜单上显示词条名称，
+    /// 选中后写进正文的也是名称——表单里的身份引用（`@unit:` / `@person:`）
+    /// 只用于关联词条，绝不进正文。
     pub(crate) fn vocabulary_menus(&mut self, ui: &mut egui::Ui) {
         let units = self.unit_pool(false);
-        let contacts = self.contacts();
+        let people = crate::units::identity::person_insert_items(&self.config.vocabulary);
+        let phones = crate::units::identity::phone_insert_items(&self.config.vocabulary);
         let mut snippet: Option<(String, &'static str)> = None;
 
         egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
@@ -1009,7 +1011,13 @@ impl DraftPage<'_> {
                         .add(theme::menu_text_item(option.full.as_str()))
                         .clicked()
                     {
-                        snippet = Some((option.full.clone(), "单位名称"));
+                        snippet = Some((
+                            crate::units::identity::insert_text(
+                                &self.config.vocabulary,
+                                &option.value,
+                            ),
+                            "单位名称",
+                        ));
                         ui.close();
                     }
                 }
@@ -1021,14 +1029,14 @@ impl DraftPage<'_> {
         ))
         .ui(ui, |ui| {
             ui.set_min_width(200.0);
-            if contacts.is_empty() {
+            if people.is_empty() {
                 ui.weak("标准词库里还没有人员。");
                 return;
             }
             theme::popup_scroll(320.0).show(ui, |ui| {
-                for (name, _) in &contacts {
-                    if ui.add(theme::menu_text_item(name.as_str())).clicked() {
-                        snippet = Some((name.clone(), "人员姓名"));
+                for item in &people {
+                    if ui.add(theme::menu_text_item(item.label.as_str())).clicked() {
+                        snippet = Some((item.text.clone(), "人员姓名"));
                         ui.close();
                     }
                 }
@@ -1040,21 +1048,14 @@ impl DraftPage<'_> {
         ))
         .ui(ui, |ui| {
             ui.set_min_width(220.0);
-            let with_phone = contacts
-                .iter()
-                .filter(|(_, phone)| !phone.is_empty())
-                .collect::<Vec<_>>();
-            if with_phone.is_empty() {
+            if phones.is_empty() {
                 ui.weak("词库里的人员都还没填电话。");
                 return;
             }
             theme::popup_scroll(320.0).show(ui, |ui| {
-                for (name, phone) in with_phone {
-                    if ui
-                        .add(theme::menu_text_item(format!("{name} {phone}")))
-                        .clicked()
-                    {
-                        snippet = Some((phone.clone(), "联系电话"));
+                for item in &phones {
+                    if ui.add(theme::menu_text_item(item.label.as_str())).clicked() {
+                        snippet = Some((item.text.clone(), "联系电话"));
                         ui.close();
                     }
                 }

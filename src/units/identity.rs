@@ -806,3 +806,166 @@ pub(crate) fn snapshot_notice(
             .into()
     })
 }
+
+/// 「插入」菜单里的一项：`label` 显示在菜单上，`text` 才是写进正文的文字。
+/// 身份引用只存在表单里，正文永远只放名称（见 docs/vocabulary-identity-design.md 4.3）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InsertItem {
+    pub(crate) label: String,
+    pub(crate) text: String,
+}
+
+/// 「插入 → 人员」候选：菜单显示可消歧的名称，正文插入规范姓名。
+pub(crate) fn person_insert_items(vocabulary: &[Entry]) -> Vec<InsertItem> {
+    vocabulary
+        .iter()
+        .filter(|entry| entry.category == Category::Person)
+        .filter(|entry| !entry.canonical.trim().is_empty())
+        .map(|entry| InsertItem {
+            label: person_label(vocabulary, entry),
+            text: entry.canonical.trim().to_string(),
+        })
+        .collect()
+}
+
+/// 「插入 → 联系方式」候选：菜单显示「姓名 电话」，正文只插入电话。
+pub(crate) fn phone_insert_items(vocabulary: &[Entry]) -> Vec<InsertItem> {
+    vocabulary
+        .iter()
+        .filter(|entry| entry.category == Category::Person)
+        .filter(|entry| !entry.canonical.trim().is_empty())
+        .filter_map(|entry| {
+            let phone = entry.phone.trim();
+            (!phone.is_empty()).then(|| InsertItem {
+                label: format!("{} {phone}", person_label(vocabulary, entry)),
+                text: phone.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// 词条写进正文的纯文字：单位、人员都取规范名称，不带消歧前缀与编号。
+/// 正文是自由文字，纸面消歧只作用于主送、抄送、落款这些要素位。
+pub(crate) fn insert_text(vocabulary: &[Entry], key: &str) -> String {
+    for category in [Category::Unit, Category::Person] {
+        if let Some(entry) = resolve(vocabulary, category, key) {
+            return entry.canonical.trim().to_string();
+        }
+    }
+    if is_ref(key) {
+        String::new()
+    } else {
+        key.trim().to_string()
+    }
+}
+
+/// 只读展示用的一条取值：已绑定词条转成纸面名称，`@unresolved:` 保留原文并
+/// 标出待核对，失效引用给出重选提示，词库外的旧文字原样显示。
+///
+/// 先查稿件快照（历史稿按当时名称显示），快照里没有这条才用当前词库兜底——
+/// 老稿件可能存了引用却没带上完整的快照，详情页不该因此摆出「词条失效」。
+fn text_of(
+    display: &UnitDisplay<'_>,
+    fallback: &UnitDisplay<'_>,
+    category: Category,
+    key: &str,
+) -> String {
+    for candidate in [display, fallback] {
+        if let Some(entry) = resolve(&candidate.vocab, category, key) {
+            return match category {
+                Category::Unit => candidate.full_name(&entry.key()),
+                Category::Person => candidate.person_name(key),
+            };
+        }
+    }
+    label(&display.vocab, key)
+}
+
+fn text_list(
+    display: &UnitDisplay<'_>,
+    fallback: &UnitDisplay<'_>,
+    category: Category,
+    value: &str,
+) -> String {
+    crate::models::split_units(value)
+        .iter()
+        .map(|key| text_of(display, fallback, category, key))
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+/// 一份只读展示用的稿件副本：把要素里的永久身份引用换成纸面文字。
+///
+/// 只给界面展示（稿件详情、版本对照、校验提示、插入菜单）用，**不得写回表单**，
+/// 也不得拿它的结果做身份判断。有稿件快照时按快照显示，词库改名、调动后历史稿
+/// 的显示不变；`vocabulary` 只在稿件没有快照时兜底。
+pub(crate) fn readable(
+    input: &crate::models::DraftInput,
+    vocabulary: &[Entry],
+) -> crate::models::DraftInput {
+    let display = UnitDisplay::new(vocabulary).for_input(input);
+    let fallback = UnitDisplay::new(vocabulary);
+    let mut out = input.clone();
+    out.profile = readable_profile_with(&display, &fallback, &input.profile);
+    let record = &mut out.phone_record;
+    record.institution = text_of(
+        &display,
+        &fallback,
+        Category::Unit,
+        &input.phone_record.institution,
+    );
+    record.caller_unit = text_of(
+        &display,
+        &fallback,
+        Category::Unit,
+        &input.phone_record.caller_unit,
+    );
+    record.caller_person = text_of(
+        &display,
+        &fallback,
+        Category::Person,
+        &input.phone_record.caller_person,
+    );
+    out.minutes.printing_unit = text_of(
+        &display,
+        &fallback,
+        Category::Unit,
+        &input.minutes.printing_unit,
+    );
+    out
+}
+
+/// 只要版式要素的只读副本：配置版本对照、设置页这类没有整篇稿件的地方用。
+/// 与 `readable` 同一套显示规则，`vocabulary` 应是两份版本快照的并集。
+pub(crate) fn readable_profile(profile: &TemplateProfile, vocabulary: &[Entry]) -> TemplateProfile {
+    let display = UnitDisplay::new(vocabulary);
+    readable_profile_with(&display, &display, profile)
+}
+
+fn readable_profile_with(
+    display: &UnitDisplay<'_>,
+    fallback: &UnitDisplay<'_>,
+    profile: &TemplateProfile,
+) -> TemplateProfile {
+    let mut out = profile.clone();
+    for value in [
+        &mut out.issuing_unit,
+        &mut out.joint_issuing_units,
+        &mut out.main_issuing_unit,
+        &mut out.recipient,
+        &mut out.copies_to,
+        &mut out.responsible_unit,
+        &mut out.joint_responsible_units,
+        &mut out.signing_unit,
+    ] {
+        *value = text_list(display, fallback, Category::Unit, value.as_str());
+    }
+    for value in [&mut out.contact_person, &mut out.reporting_leaders] {
+        *value = text_list(display, fallback, Category::Person, value.as_str());
+    }
+    for contact in &mut out.joint_contacts {
+        contact.unit = text_list(display, fallback, Category::Unit, &contact.unit);
+        contact.name = text_list(display, fallback, Category::Person, &contact.name);
+    }
+    out
+}

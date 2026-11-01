@@ -497,6 +497,9 @@ pub fn build_draft_prompt(
         display.abbr(&input.profile.responsible_unit)
     };
     let leaders_display = display.reporting_leaders(&input.profile.reporting_leaders);
+    // 落款与三个导出端同一份显示计划：稿件没有快照时也要出名称，不能给「词条失效」。
+    let signing_display =
+        crate::export::element_display::signing_unit_display(input, &display).join("、");
     // 会议纪要另有列席、请假与纪要名称：名单由程序排，告诉模型只为首段概述会议
     // 范围时取用，不另起名单。
     let minutes_meta = if input.kind == TemplateKind::MeetingMinutes {
@@ -568,10 +571,7 @@ pub fn build_draft_prompt(
         attendees = value_or_infer(&input.attendees, "参加人员"),
         minutes_meta = minutes_meta,
         responsible = value_or_none(&responsible_display),
-        signing = value_or_none(&crate::units::identity::display_values(
-            &input.profile.vocabulary_snapshot,
-            &input.profile.signing_unit
-        )),
+        signing = value_or_none(&signing_display),
         document_number = value_or_none(&if input.kind.has_document_number() {
             format!(
                 "{}〔{}〕{}号",

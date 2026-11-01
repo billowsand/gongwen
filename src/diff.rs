@@ -595,8 +595,32 @@ pub fn draft_changes(a: &DraftInput, b: &DraftInput) -> Vec<FieldChange> {
     field(&mut out, "会议时间", &a.meeting_time, &b.meeting_time);
     field(&mut out, "参会人员", &a.attendees, &b.attendees);
     out.extend(research_changes(&a.research, &b.research));
-    out.extend(profile_changes(&a.profile, &b.profile));
+    // 要素字段存的是身份引用（`@unit:` / `@person:`），对照表是给人看的，
+    // 先按各自稿件的词库快照换成名称再比。
+    let vocabulary = merged_vocabulary(a, b);
+    let readable_a = crate::units::identity::readable(a, &vocabulary);
+    let readable_b = crate::units::identity::readable(b, &vocabulary);
+    out.extend(profile_changes(&readable_a.profile, &readable_b.profile));
     out
+}
+
+/// 两份稿件的词库快照取并集：旧版可能没有快照，另一版的条目可以补上名称。
+/// 同一个词条（同身份）只留旧版那一份，各自的显示仍优先用自己的快照。
+fn merged_vocabulary(a: &DraftInput, b: &DraftInput) -> Vec<VocabularyEntry> {
+    merged_snapshot(
+        &a.profile.vocabulary_snapshot,
+        &b.profile.vocabulary_snapshot,
+    )
+}
+
+fn merged_snapshot(a: &[VocabularyEntry], b: &[VocabularyEntry]) -> Vec<VocabularyEntry> {
+    let mut entries = a.to_vec();
+    for entry in b {
+        if !entries.iter().any(|known| known.key() == entry.key()) {
+            entries.push(entry.clone());
+        }
+    }
+    entries
 }
 
 /// 研究报告封面元数据的字段变化。研究报告的密级、单位、版本号都在这里，
@@ -859,11 +883,18 @@ fn vocab_field_changes(a: &VocabularyEntry, b: &VocabularyEntry) -> Vec<FieldCha
     out
 }
 
-/// 逐文种的版式字段变化。
+/// 逐文种的版式字段变化。版式配置随稿件保存，里面同样存着身份引用，
+/// 对照表要先把引用换成名称（旧版可能没有快照，用两版并集补）。
 fn profile_set_changes(a: &AppConfig, b: &AppConfig) -> Vec<KindChanges> {
     let mut out = Vec::new();
     for kind in TemplateKind::ALL {
-        let changes = profile_changes(&a.profile(kind), &b.profile(kind));
+        let left = a.profile(kind);
+        let right = b.profile(kind);
+        let vocabulary = merged_snapshot(&left.vocabulary_snapshot, &right.vocabulary_snapshot);
+        let changes = profile_changes(
+            &crate::units::identity::readable_profile(&left, &vocabulary),
+            &crate::units::identity::readable_profile(&right, &vocabulary),
+        );
         if !changes.is_empty() {
             out.push(KindChanges { kind, changes });
         }
@@ -1399,6 +1430,68 @@ mod tests {
             changes
                 .iter()
                 .all(|c| c.label != "文种" && c.label != "文号")
+        );
+    }
+
+    /// 版本对照是给人看的：要素里存的是 `@unit:` / `@person:` 引用，
+    /// 对照表必须印名称。提交 cc312be 之后这里一度把 UUID 摆进对照视图。
+    #[test]
+    fn draft_changes_show_vocabulary_names_instead_of_identity_references() {
+        let mut vocabulary = vec![
+            VocabularyEntry {
+                code: "01".into(),
+                canonical: "办公室".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                category: VocabularyCategory::Person,
+                unit: "01".into(),
+                code: "07".into(),
+                canonical: "张三".into(),
+                phone: "010-1111".into(),
+                ..Default::default()
+            },
+        ];
+        crate::units::normalize(&mut vocabulary);
+        let unit = vocabulary[0].key();
+        let person = vocabulary
+            .iter()
+            .find(|entry| entry.category == VocabularyCategory::Person)
+            .unwrap()
+            .key();
+
+        let mut a = DraftInput::default();
+        a.profile.vocabulary_snapshot = vocabulary.clone();
+        a.profile.responsible_unit = unit;
+        a.profile.contact_person = person;
+        a.profile.contact_phone = "010-1111".into();
+        let mut b = a.clone();
+        b.profile.contact_person.clear();
+        b.profile.contact_phone.clear();
+        b.profile.responsible_unit = "新处室".into();
+
+        let changes = draft_changes(&a, &b);
+        let unit_change = changes
+            .iter()
+            .find(|change| change.label == "承办单位")
+            .expect("承办单位应出现在对照里");
+        assert_eq!(
+            (unit_change.before.as_str(), unit_change.after.as_str()),
+            ("办公室", "新处室")
+        );
+        let contact = changes
+            .iter()
+            .find(|change| change.label == "联系人")
+            .expect("联系人应出现在对照里");
+        assert_eq!(
+            (contact.before.as_str(), contact.after.as_str()),
+            ("张三", "")
+        );
+        assert!(
+            changes
+                .iter()
+                .all(|change| !change.before.contains('@') && !change.after.contains('@')),
+            "对照表泄漏了身份引用：{changes:?}"
         );
     }
 
