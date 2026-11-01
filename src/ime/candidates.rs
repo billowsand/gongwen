@@ -46,23 +46,14 @@ const EMPTY_GAP: f32 = 6.0;
 /// 序号与候选词之间的间距。
 const INDEX_GAP: f32 = 3.0;
 
-/// 词表星标边长。
-const SPARKLE_SIZE: f32 = 7.0;
-
-/// 词表星标与前面候选词的间距。
-const SPARKLE_GAP: f32 = 1.5;
-
-/// 星标腰身收进去的程度：控制点离中心的距离相对半径的比例，越小尖越细。
-const SPARKLE_WAIST: f32 = 0.18;
-
-/// 词后右上角小字（简码、逐码提示）与前面候选词 / 星标的间距。
+/// 词后右上角小字（简码、逐码提示）与前面候选词的间距。
 const CORNER_GAP: f32 = 1.0;
 
 /// 展开网格里行与行的间隙。
 const GRID_ROW_GAP: f32 = 6.0;
 
 /// 候选窗的排法与字号，设置页里来。字号按比例放大正文与小字两档，
-/// 星标这些画出来的记号跟着放大，间距不动。
+/// 候选文字的合成加粗跟着放大，间距不动。
 #[derive(Debug, Clone, Copy)]
 struct Look {
     vertical: bool,
@@ -77,13 +68,9 @@ impl Look {
     fn body(self) -> f32 {
         theme::font_sizes::BODY * self.scale
     }
-
-    fn sparkle(self) -> f32 {
-        SPARKLE_SIZE * self.scale
-    }
 }
 
-/// 候选窗中的序号、文字、来源星标与词后小字。
+/// 候选窗中的序号、文字、业务词加粗与词后小字。
 struct Row {
     /// 在整个布局里的位置。
     absolute: usize,
@@ -93,7 +80,7 @@ struct Row {
     numbered: bool,
     text: String,
     /// 来自公文词表、导入表或个人词条（不只在基础表里）。
-    starred: bool,
+    emphasized: bool,
     corner: Option<String>,
     tooltip: String,
 }
@@ -284,7 +271,7 @@ impl Ime {
             number,
             numbered,
             text,
-            starred: slot.sources.iter().any(|source| source != "基础表"),
+            emphasized: slot.sources.iter().any(|source| source != "基础表"),
             corner: slot.hint.as_ref().map(corner_text),
             tooltip: format!(
                 "{} · 来源：{} · 编码 {} · {position}\n右键可置顶、调序、屏蔽",
@@ -657,7 +644,7 @@ fn grid_cell_size(ui: &egui::Ui, ime: &Ime, look: Look) -> egui::Vec2 {
     )
 }
 
-/// 汉字是阅读锚点，辅码单独放在右上角标签里；序号在左上，来源星标在右下。
+/// 汉字是阅读锚点，辅码单独放在右上角标签里；序号在左上，业务词仅加粗汉字。
 fn grid_cell(
     ui: &mut egui::Ui,
     row: &Row,
@@ -727,12 +714,8 @@ fn grid_cell(
             muted,
         );
     }
-    if row.starred {
-        let size = egui::Vec2::splat(look.sparkle() * 0.8);
-        painter.add(sparkle(
-            egui::Rect::from_min_size(inner.right_bottom() - size, size),
-            theme::accent(),
-        ));
+    if row.emphasized {
+        paint_bold_copy(painter, body_pos, &body, text_color, look);
     }
     response
 }
@@ -784,7 +767,7 @@ fn code_strip(ui: &mut egui::Ui, preedit: &Preedit, look: Look) {
 }
 
 /// 一个候选：弱化的小号序号 + 正文字号的候选文本；不只在基础表里的词（公文词表、
-/// 导入表、个人词条）在词后右上角带星标，简码与逐码提示的小字跟在最后。
+/// 导入表、个人词条）仅加粗候选文字，简码与逐码提示的小字跟在最后。
 fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) -> egui::Response {
     let format = |size: f32, color: egui::Color32| egui::TextFormat {
         font_id: ime_font(size),
@@ -817,95 +800,71 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) ->
             },
         ),
     );
-    if row.starred {
-        // 给星标让出位置：一个几乎没宽度的空格，靠前导空白撑开
-        job.append(
-            " ",
-            SPARKLE_GAP + look.sparkle(),
-            format(1.0, egui::Color32::TRANSPARENT),
-        );
-    }
     // 简码 / 逐码小字：序号那档字号、弱化色，顶到行首当上标
     let corner_format = egui::TextFormat {
         valign: egui::Align::TOP,
         ..format(look.small(), theme::text_muted())
     };
-    let corner_width = row.corner.as_ref().map_or(0.0, |corner| {
-        job.append(corner, CORNER_GAP, corner_format.clone());
-        CORNER_GAP
-            + ui.painter()
-                .layout_no_wrap(
-                    corner.clone(),
-                    corner_format.font_id.clone(),
-                    corner_format.color,
-                )
-                .size()
-                .x
+    if let Some(corner) = &row.corner {
+        job.append(corner, CORNER_GAP, corner_format);
+    }
+    let label = job.text.clone();
+    let galley = ui.painter().layout_job(job);
+    let size =
+        (galley.size() + CELL_PADDING * 2.0).max(egui::vec2(0.0, ui.spacing().interact_size.y));
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
     });
-    let button = egui::Button::new(job)
-        .stroke(egui::Stroke::NONE)
-        .corner_radius(4);
-    let response = ui.add(if selected {
-        button.fill(theme::accent_soft())
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let fill = if selected {
+        theme::accent_soft()
+    } else if response.is_pointer_button_down_on() {
+        theme::surface_active()
+    } else if response.hovered() {
+        theme::surface_hover()
     } else {
-        button
-    });
-    if row.starred {
-        // 贴着候选词右上角：右边收进内边距，顶上与字形顶部大致齐平
-        let content = response.rect.shrink2(CELL_PADDING);
-        let min = egui::pos2(
-            content.right() - corner_width - look.sparkle(),
-            content.top() + content.height() * 0.15,
-        );
-        let color = if selected {
-            theme::accent_active()
-        } else {
-            theme::accent()
-        };
-        ui.painter().add(sparkle(
-            egui::Rect::from_min_size(min, egui::Vec2::splat(look.sparkle())),
-            color,
-        ));
+        egui::Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, 4.0, fill);
+    let origin = rect.center() - galley.size() * 0.5;
+    ui.painter().galley(origin, galley.clone(), theme::text());
+    if row.emphasized {
+        // 按实际字形范围裁剪后叠绘，确保只加粗正文且与原字形完全对齐。
+        let start = index.chars().count();
+        let end = start + row.text.chars().count();
+        if let Some(line) = galley.rows.first()
+            && let Some(first) = line.glyphs.get(start)
+            && let Some(last) = line.glyphs.get(end - 1)
+        {
+            let clip = egui::Rect::from_min_max(
+                origin + line.pos.to_vec2() + egui::vec2(first.pos.x, 0.0),
+                origin
+                    + line.pos.to_vec2()
+                    + egui::vec2(last.max_x() + 0.4 * look.scale, line.size.y),
+            );
+            let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(clip));
+            paint_bold_copy(&painter, origin, &galley, theme::text(), look);
+        }
     }
     response
 }
 
-/// 四角星：四个尖在方块各边中点，相邻两尖之间是一条向中心弯的二次曲线。
-/// 星形对中心是「星形域」，从中心扇形三角化就能实心填满（epaint 的多边形填充只认凸形）。
-fn sparkle(rect: egui::Rect, color: egui::Color32) -> egui::Shape {
-    /// 每段曲线切成几截。
-    const STEPS: usize = 4;
-    let c = rect.center();
-    let r = rect.width() / 2.0;
-    let w = r * SPARKLE_WAIST;
-    let tips = [
-        egui::vec2(0.0, -r),
-        egui::vec2(r, 0.0),
-        egui::vec2(0.0, r),
-        egui::vec2(-r, 0.0),
-    ];
-    let controls = [
-        egui::vec2(w, -w),
-        egui::vec2(w, w),
-        egui::vec2(-w, w),
-        egui::vec2(-w, -w),
-    ];
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(c, color);
-    for (i, (&from, &control)) in tips.iter().zip(&controls).enumerate() {
-        let to = tips[(i + 1) % tips.len()];
-        for step in 0..STEPS {
-            let t = step as f32 / STEPS as f32;
-            let u = 1.0 - t;
-            let point = from * (u * u) + control * (2.0 * u * t) + to * (t * t);
-            mesh.colored_vertex(c + point, color);
-        }
-    }
-    let outline = (tips.len() * STEPS) as u32;
-    for i in 0..outline {
-        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % outline);
-    }
-    egui::Shape::mesh(mesh)
+/// 沿用预览的合成粗体方式：原字形向右微移叠绘，不换字体、不改变字宽。
+fn paint_bold_copy(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    galley: &std::sync::Arc<egui::Galley>,
+    color: egui::Color32,
+    look: Look,
+) {
+    painter.galley(
+        pos + egui::vec2(0.4 * look.scale, 0.0),
+        galley.clone(),
+        color,
+    );
 }
 
 #[cfg(test)]
@@ -955,7 +914,7 @@ mod tests {
     fn window_shows_hints_and_empty_code() {
         let mut harness = Harness::new_ui_state(candidate_ui(), ime("abcd"));
         harness.run();
-        // 简码提示跟在词后；个人词条带星标（画出来的，不在文字里）。
+        // 简码提示跟在词后；个人词条仅加粗候选正文。
         harness.get_by_label_contains("‹ab›");
         harness.get_by_label_contains("个人词");
         let mut harness = Harness::new_ui_state(candidate_ui(), ime("zz"));
