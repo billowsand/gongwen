@@ -7,7 +7,7 @@
 //! 「存为用例」时程序按这次的真实返回建议几条期望（[`suggest`]），人勾了才存；模型不写期望。
 
 use crate::agent::api::{self, ApiEndpoint, ApiExample, ApiSecrets, Trial};
-use crate::agent::board::value_to_text;
+use crate::ai_services::text::value_to_text;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -121,7 +121,7 @@ fn place(pointer: &str) -> String {
 }
 
 fn short(text: &str) -> String {
-    crate::agent::tools::short(text, 60)
+    crate::ai_services::text::short(text, 60)
 }
 
 impl Expect {

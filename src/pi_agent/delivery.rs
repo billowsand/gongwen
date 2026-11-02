@@ -179,7 +179,7 @@ pub(crate) fn check_delivery(ctx: &DeliveryCheck<'_>) -> Vec<String> {
         issues.push(format!("公文引用检查未通过：{error}"));
     }
 
-    let text = crate::agent::evidence::strip_citations(content);
+    let text = crate::ai_services::citations::strip_citations(content);
     let text = PENDING.replace_all(&text, "");
     let mut sources = format!("{before}\n{request}");
     for source in (*fact_sources).iter() {

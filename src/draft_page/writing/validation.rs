@@ -24,7 +24,7 @@ pub(super) fn delivery_issues(task: &WritingTask, vocabulary: &[VocabularyEntry]
         .chain(std::iter::once(task.topic.as_str()))
         .collect::<Vec<_>>()
         .join("\n");
-    let text = crate::agent::evidence::strip_citations(&task.final_markdown);
+    let text = crate::ai_services::citations::strip_citations(&task.final_markdown);
     let text = PENDING.replace_all(&text, "");
     for fact in crate::ai_guard::extract_key_facts(&text, vocabulary) {
         let document_title = fact.value.trim_start_matches('《').trim_end_matches('》');

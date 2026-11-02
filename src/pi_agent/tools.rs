@@ -5,8 +5,9 @@
 //! 稿件库、词库与确定性检查。每个真正返回给模型的资料都登记一条证据（编号、来源、
 //! 哈希、片段、角色）；提交时的来源闸门只认这份台账与用户材料，不采信模型自报的引用。
 
-use crate::agent::tools::vocab;
-use crate::agent::tools::{KnowledgeSearch, ManuscriptSource, RagSearch};
+use crate::ai_services::knowledge::{KnowledgeSearch, RagSearch};
+use crate::ai_services::manuscripts::ManuscriptSource;
+use crate::ai_services::vocabulary as vocab;
 use crate::manuscript::ManuscriptFilter;
 use crate::models::{AppConfig, DraftInput, TemplateKind, VocabularyCategory};
 use serde_json::{Map, Value, json};
@@ -79,7 +80,7 @@ impl PiKnowledge for RagSearch {
     }
 }
 
-impl PiManuscripts for crate::agent::tools::SqliteManuscripts {
+impl PiManuscripts for crate::ai_services::manuscripts::SqliteManuscripts {
     fn search(&self, query: &str, limit: usize) -> Result<Vec<PiManuscriptRow>, String> {
         let filter = ManuscriptFilter {
             keyword: query.to_string(),
@@ -203,7 +204,7 @@ impl PiToolContext {
             request,
             material_facts,
             kb,
-            Arc::new(crate::agent::tools::SqliteManuscripts),
+            Arc::new(crate::ai_services::manuscripts::SqliteManuscripts),
         )
     }
 
@@ -311,15 +312,15 @@ impl PiToolContext {
     /// 读一条用户 `@` 引用的全文，作为本轮材料快照。失败明确返回，不静默丢。
     pub(crate) fn read_reference(
         &self,
-        source: crate::agent::board::RefSource,
+        source: crate::ai_services::references::RefSource,
         id: i64,
     ) -> Result<(String, String), String> {
         match source {
-            crate::agent::board::RefSource::Knowledge => self
+            crate::ai_services::references::RefSource::Knowledge => self
                 .kb
                 .read(id)?
                 .ok_or_else(|| format!("知识库里找不到编号为 {id} 的引用文章")),
-            crate::agent::board::RefSource::Manuscript => {
+            crate::ai_services::references::RefSource::Manuscript => {
                 let row = self
                     .manuscripts
                     .read(id, None)?
@@ -487,7 +488,7 @@ impl PiToolContext {
         if let Err(error) = crate::document_reference::ensure_preserved(&self.current, &text) {
             hard.push(format!("公文引用检查未通过：{error}"));
         }
-        let stripped = crate::agent::evidence::strip_citations(&text);
+        let stripped = crate::ai_services::citations::strip_citations(&text);
         let mut sources = vec![self.current.clone(), self.request.clone()];
         sources.extend(self.fact_sources());
         let joined = sources.join("\n");
@@ -773,11 +774,11 @@ mod tests {
     fn missing_references_fail_explicitly() {
         let ctx = context("x");
         assert!(
-            ctx.read_reference(crate::agent::board::RefSource::Knowledge, 99)
+            ctx.read_reference(crate::ai_services::references::RefSource::Knowledge, 99)
                 .is_err()
         );
         assert!(
-            ctx.read_reference(crate::agent::board::RefSource::Manuscript, 99)
+            ctx.read_reference(crate::ai_services::references::RefSource::Manuscript, 99)
                 .is_err()
         );
     }

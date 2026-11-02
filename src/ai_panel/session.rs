@@ -36,7 +36,7 @@ pub(crate) struct SavedTurn {
     #[serde(default)]
     pub(crate) provenance: String,
     #[serde(default)]
-    pub(crate) usage: crate::agent::backend::UsageTotals,
+    pub(crate) usage: crate::ai_services::backend::UsageTotals,
     pub(crate) id: u64,
     pub(crate) title: String,
     pub(crate) prompt: String,
@@ -82,7 +82,7 @@ pub(crate) struct SavedTurn {
     pub(crate) proposal: Option<SavedProposal>,
     /// 风格学习学出、还没保存的档案。
     #[serde(default)]
-    pub(crate) style: Option<crate::agent::style::StyleProfile>,
+    pub(crate) style: Option<crate::ai_services::style::StyleProfile>,
     /// Pi 运行引用：旧会话没有这个字段，读回为 None（不显示假恢复入口）。
     #[serde(default)]
     pub(crate) pi_run: Option<crate::pi_agent::PiRunRef>,
@@ -491,7 +491,7 @@ impl AiPanel {
         }
         self.turns
             .first()
-            .map(|turn| crate::agent::tools::short(turn.prompt.trim(), 24))
+            .map(|turn| crate::ai_services::text::short(turn.prompt.trim(), 24))
             .unwrap_or_else(|| "新会话".into())
     }
 
@@ -902,7 +902,7 @@ mod tests {
             "2026-10-07 14:22",
         );
         panel.turns[0].usage.record(
-            crate::agent::backend::ModelRole::Draft,
+            crate::ai_services::backend::ModelRole::Draft,
             "主模型",
             10,
             "稿",
@@ -997,7 +997,7 @@ mod tests {
         panel.push_turn("起草".into(), "写稿".into(), vec![], None);
         panel.turns[0].provenance = "研究式起草 · 备用模型 · 证据 K1、K3 · 2026-10-07 14:22".into();
         panel.turns[0].usage.record(
-            crate::agent::backend::ModelRole::Draft,
+            crate::ai_services::backend::ModelRole::Draft,
             "备用模型",
             10,
             "稿",
@@ -1023,7 +1023,7 @@ mod tests {
         let turn = &mut panel.turns[0];
         turn.elapsed = Some(Duration::from_secs(12));
         turn.usage.record(
-            crate::agent::backend::ModelRole::Draft,
+            crate::ai_services::backend::ModelRole::Draft,
             "m",
             1,
             "稿",

@@ -9,7 +9,7 @@
 use super::OPENAPI_VERSION;
 use super::schema::{identifier, infer};
 use crate::agent::api::ApiMethod;
-use crate::agent::board::value_to_text;
+use crate::ai_services::text::value_to_text;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 

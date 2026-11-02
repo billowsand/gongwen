@@ -152,6 +152,11 @@ pub fn load() -> Result<(AppConfig, Option<PathBuf>)> {
     if config.migrate_providers() && path.exists() {
         let _ = save(&config);
     }
+    // 智能写作（Pi）的思考深度单独迁移：与提供商迁移互不相干，迁移后立即写回，
+    // 之后改文字起草的思考深度不会影响 Pi。
+    if config.migrate_pi_options() && path.exists() {
+        let _ = save(&config);
+    }
     if crate::units::identity::assign(&mut config.vocabulary) && path.exists() {
         let backup = path.with_extension("json.身份迁移前备份");
         if !backup.exists() {

@@ -75,27 +75,11 @@ pub(crate) struct Board {
 }
 
 /// `@` 引用的一篇文章：稿件库或知识库里的文档。正文由引擎在后台线程读。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Reference {
-    pub(crate) source: RefSource,
-    pub(crate) id: i64,
-    pub(crate) title: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum RefSource {
-    Manuscript,
-    Knowledge,
-}
-
-impl RefSource {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            RefSource::Manuscript => "稿件库",
-            RefSource::Knowledge => "知识库",
-        }
-    }
-}
+///
+/// 类型本身在共享层（`ai_services::references`），黑板只是用它；序列化形态不变。
+pub(crate) use crate::ai_services::references::{RefSource, Reference};
+/// 结构化结果 → 给模型看的文字。实现在共享层，工具与产品共用一份。
+pub(crate) use crate::ai_services::text::{item_line, value_to_text};
 
 /// 审核类技能查出的一条问题。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -305,47 +289,6 @@ impl Board {
 }
 
 /// 结构化结果 → 给模型看的文字：字符串原样；列表逐条编号（对象取标题与正文）；对象按「键：值」。
-pub(crate) fn value_to_text(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::String(text) => text.clone(),
-        Value::Bool(flag) => if *flag { "是" } else { "否" }.into(),
-        Value::Number(number) => number.to_string(),
-        Value::Array(items) => items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| format!("{}. {}", index + 1, item_line(item)))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Value::Object(map) => map
-            .iter()
-            .map(|(key, v)| format!("{key}：{}", value_to_text(v)))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    }
-}
-
-/// 列表里的一项写成一行：对象取标题与说明，其余照 [`value_to_text`]。
-pub(crate) fn item_line(item: &Value) -> String {
-    let Value::Object(map) = item else {
-        return value_to_text(item);
-    };
-    let pick = |keys: &[&str]| {
-        keys.iter()
-            .find_map(|key| map.get(*key).and_then(Value::as_str))
-            .map(str::to_string)
-    };
-    match (
-        pick(&["title", "name", "canonical"]),
-        pick(&["text", "summary", "note"]),
-    ) {
-        (Some(title), Some(text)) => format!("{title}：{text}"),
-        (Some(title), None) => title,
-        (None, Some(text)) => text,
-        (None, None) => value_to_text(item).replace('\n', "；"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,62 +8,20 @@
 //! 来源不明的事实若在材料里「同一处」写着另一个值（同样的上下文、同类事实），就记成冲突候选
 //! （[`Candidate`]），出题时作为程序给的选项（`docs/decision-modules.md` 第八节）。
 
-use super::evidence::{CITATION, strip_citations};
 use crate::ai_guard::{FactKind, FactToken};
+use crate::ai_services::citations::strip_citations;
+use crate::ai_services::text::is_sentence_end;
 use crate::models::VocabularyEntry;
 use regex::Regex;
 use std::ops::Range;
 use std::sync::LazyLock;
 
+/// 句切在共享层（`ai_services::text`），旧调用方仍可从 `agent::gaps` 取。
+pub(crate) use crate::ai_services::text::sentence_spans;
+
 /// 「【待核实】」「【待核实：会议时间】」。冒号全角半角都认，提示可以为空。
 static PLACEHOLDER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"【待核实[：:]?([^】]*)】").expect("占位正则"));
-
-/// 句末标点。
-fn is_sentence_end(ch: char) -> bool {
-    matches!(ch, '。' | '！' | '？' | '；' | '!' | '?')
-}
-
-/// 把正文切成句子（字节区间）。按行、再按句末标点切；句号后紧跟的引用标记 `[K3]`
-/// 归前一句——模型常把标记写在句号后面。首尾空白不计入。
-pub(crate) fn sentence_spans(text: &str) -> Vec<Range<usize>> {
-    let mut spans = Vec::new();
-    let mut line_start = 0usize;
-    for line in text.split('\n') {
-        let mut start = 0usize;
-        let mut iter = line.char_indices().peekable();
-        while let Some((index, ch)) = iter.next() {
-            if !is_sentence_end(ch) {
-                continue;
-            }
-            let mut end = index + ch.len_utf8();
-            if let Some(found) = CITATION.find(&line[end..])
-                && found.start() == 0
-            {
-                end += found.end();
-                while iter.peek().is_some_and(|(next, _)| *next < end) {
-                    iter.next();
-                }
-            }
-            push_trimmed(line, line_start, start..end, &mut spans);
-            start = end;
-        }
-        push_trimmed(line, line_start, start..line.len(), &mut spans);
-        line_start += line.len() + 1;
-    }
-    spans
-}
-
-fn push_trimmed(line: &str, line_start: usize, range: Range<usize>, out: &mut Vec<Range<usize>>) {
-    let raw = &line[range.clone()];
-    let lead = raw.len() - raw.trim_start().len();
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let start = line_start + range.start + lead;
-    out.push(start..start + trimmed.len());
-}
 
 /// 包含 `pos` 的那一句；找不到时退回所在行。
 pub(crate) fn sentence_at(text: &str, pos: usize) -> Range<usize> {

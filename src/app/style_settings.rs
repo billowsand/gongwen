@@ -10,12 +10,13 @@
 
 use super::file_dialog::FileDialogSpec;
 use super::settings::setting_row;
-use crate::agent::backend::LmBackend;
-use crate::agent::board::RefSource;
-use crate::agent::style::{
+use crate::ai_services::backend::LmBackend;
+use crate::ai_services::knowledge::{KnowledgeSearch, RagSearch};
+use crate::ai_services::manuscripts::{ManuscriptSource, SqliteManuscripts};
+use crate::ai_services::references::RefSource;
+use crate::ai_services::style::{
     self, Learned, MAX_SAMPLES, Sample, StyleBook, StyleExample, StyleProfile,
 };
-use crate::agent::tools::{KnowledgeSearch, ManuscriptSource, RagSearch, SqliteManuscripts};
 use crate::app::GongwenApp;
 use crate::models::TemplateKind;
 use crate::theme;

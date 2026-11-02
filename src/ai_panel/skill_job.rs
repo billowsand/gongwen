@@ -10,7 +10,6 @@
 use super::history::{self, HistoryPlan};
 use super::{ReplyDraft, ResearchSnapshot, TurnRequest, TurnState, locate_selection};
 use crate::agent::api::{ApiSecrets, ApiStore};
-use crate::agent::backend::{LmBackend, ModelBackend};
 use crate::agent::board::{Board, Finding};
 use crate::agent::checkpoint::StepPath;
 use crate::agent::clarify::{self, Question, Reply, Target};
@@ -18,7 +17,10 @@ use crate::agent::engine::{self, Event, Outcome, SkillReport, Suspension};
 use crate::agent::gaps::GapStatus;
 use crate::agent::router::{self, Route, RouteContext};
 use crate::agent::skill::{OutputKind, Skill, TextNeed};
-use crate::agent::tools::{Env, Permission, RagSearch, SqliteManuscripts, ToolUse};
+use crate::agent::tools::{Env, Permission, ToolUse};
+use crate::ai_services::backend::{LmBackend, ModelBackend};
+use crate::ai_services::knowledge::RagSearch;
+use crate::ai_services::manuscripts::SqliteManuscripts;
 use crate::app::{DocJob, GongwenApp, WorkerResult};
 use crate::draft_page::DraftPage;
 use crate::models::GeneratedDraft;
@@ -51,7 +53,7 @@ pub(crate) enum SkillResult {
         skill_id: String,
         findings: Vec<Finding>,
         /// 风格学习学出的档案（待用户点「保存为风格」）。
-        style: Option<Box<crate::agent::style::StyleProfile>>,
+        style: Option<Box<crate::ai_services::style::StyleProfile>>,
     },
 }
 
@@ -622,7 +624,7 @@ impl DraftPage<'_> {
     /// 这一轮用哪份写法风格（16.15 C.3）：用户指定的，或按文种与场合自动挑；分不出的交给后台
     /// 让辅助模型挑。
     fn style_pick(&self, request: &TurnRequest, board: &Board) -> StylePick {
-        use crate::agent::style::{Ranked, StyleChoice, rank};
+        use crate::ai_services::style::{Ranked, StyleChoice, rank};
         let styles = &self.doc.ai_panel.styles;
         match &request.style {
             StyleChoice::Off => StylePick::None,
@@ -1137,15 +1139,15 @@ impl DraftPage<'_> {
                 &mut emit,
             );
             // 还没定的几处接着出题，顺带要建议写法。
-            use crate::agent::backend::ModelBackend as _;
+            use crate::ai_services::backend::ModelBackend as _;
             let mut remaining =
                 clarify::gap_questions(&revised.ledger, BATCH_QUESTIONS, &config.vocabulary);
             let today = crate::prompt::TimeContext::now().today;
             if let Some(text) =
                 clarify::suggestion_prompt(&remaining, &revised.ledger, &revised.raw, &today)
                 && let Ok(reply) = model.complete(
-                    crate::agent::backend::ModelRole::Assist,
-                    crate::agent::tools::ASSIST_SYSTEM,
+                    crate::ai_services::backend::ModelRole::Assist,
+                    crate::ai_services::backend::ASSIST_SYSTEM,
                     &text,
                     &mut |_| {},
                 )
@@ -1263,12 +1265,12 @@ pub(crate) fn finish_research_revision(
 
 /// 让辅助模型把较早的轮次并进会话摘要。
 fn compact_session(
-    model: &dyn crate::agent::backend::ModelBackend,
+    model: &dyn crate::ai_services::backend::ModelBackend,
     compaction: &history::Compaction,
 ) -> anyhow::Result<String> {
     let completion = model.complete(
-        crate::agent::backend::ModelRole::Assist,
-        crate::agent::tools::ASSIST_SYSTEM,
+        crate::ai_services::backend::ModelRole::Assist,
+        crate::ai_services::backend::ASSIST_SYSTEM,
         &history::compact_prompt(compaction),
         &mut |_| {},
     )?;
@@ -1294,8 +1296,8 @@ pub(crate) fn with_history(system: &str, history: &str) -> String {
 pub(crate) enum StylePick {
     None,
     /// 档案与来由（「指定」「自动选」）。
-    Fixed(Box<crate::agent::style::StyleProfile>, &'static str),
-    Ask(Vec<crate::agent::style::StyleProfile>),
+    Fixed(Box<crate::ai_services::style::StyleProfile>, &'static str),
+    Ask(Vec<crate::ai_services::style::StyleProfile>),
 }
 
 /// 写稿的技能定下风格：排进黑板（`board.style`），返回用了哪份。审核类技能不用风格。
@@ -1303,7 +1305,7 @@ pub(super) fn apply_style(
     style: StylePick,
     skill: &Skill,
     board: &mut Board,
-    model: &dyn crate::agent::backend::ModelBackend,
+    model: &dyn crate::ai_services::backend::ModelBackend,
     emit: &mut dyn FnMut(Event),
 ) -> Option<String> {
     if skill.output == OutputKind::Report || !board.style.is_empty() {
@@ -1313,7 +1315,7 @@ pub(super) fn apply_style(
         StylePick::None => return None,
         StylePick::Fixed(profile, reason) => (*profile, reason),
         StylePick::Ask(list) => {
-            match crate::agent::style::choose_by_model(model, &list, &board.request) {
+            match crate::ai_services::style::choose_by_model(model, &list, &board.request) {
                 Ok(Some(index)) => (list[index].clone(), "模型从几份里挑的"),
                 Ok(None) => return None,
                 Err(error) => {
@@ -1326,8 +1328,11 @@ pub(super) fn apply_style(
         }
     };
     // 风格占起草模型上下文的十分之一以内，放不下先砍范例。
-    let budget = model.window(crate::agent::backend::ModelRole::Draft).tokens / 10;
-    board.style = crate::agent::style::render(&profile, budget);
+    let budget = model
+        .window(crate::ai_services::backend::ModelRole::Draft)
+        .tokens
+        / 10;
+    board.style = crate::ai_services::style::render(&profile, budget);
     emit(Event::Tool(ToolUse::new(
         "style",
         Permission::Read,
@@ -1391,7 +1396,7 @@ fn resolve_skill(
                 Some(last) if !last.trim().is_empty() => format!(
                     "{}\n\n（本会话上一轮：{}）",
                     board.request,
-                    crate::agent::tools::short(last, 300)
+                    crate::ai_services::text::short(last, 300)
                 ),
                 _ => board.request.clone(),
             };

@@ -6,10 +6,10 @@
 //! 本文件只放状态与纯逻辑；界面在 `ai_panel/ui.rs`（任务流）与 `ai_panel/composer_ui.rs`
 //! （输入框），`/`、`@` 的识别与过滤在 `ai_panel/mention.rs`。
 
-use crate::agent::board::Reference;
 use crate::agent::clarify::{Question, Reply};
 use crate::agent::gaps::Ledger;
 use crate::agent::skill::Skill;
+use crate::ai_services::references::Reference;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -90,7 +90,7 @@ pub(crate) struct TurnRequest {
     pub(crate) on_proposal: bool,
     /// 写法风格的选择。
     #[serde(default)]
-    pub(crate) style: crate::agent::style::StyleChoice,
+    pub(crate) style: crate::ai_services::style::StyleChoice,
 }
 
 /// 结果卡上的摘要，在提案到达时算一次，不必每帧重算。
@@ -148,7 +148,7 @@ pub(crate) struct AiTurn {
     /// 用量回投所属的后台任务；停止后仍可记录，不能串到新任务或另一会话。
     pub(crate) usage_job_seq: Option<u64>,
     pub(crate) provenance: String,
-    pub(crate) usage: crate::agent::backend::UsageTotals,
+    pub(crate) usage: crate::ai_services::backend::UsageTotals,
     pub(crate) id: u64,
     /// 卡片抬头：「润色 · 精简篇幅」。
     pub(crate) title: String,
@@ -197,7 +197,7 @@ pub(crate) struct AiTurn {
     /// 用户点采纳才写表单（红线 2）。随会话存盘。
     pub(crate) field_cards: Vec<field_card::FieldCardRow>,
     /// 风格学习学出、还没保存的档案。
-    pub(crate) style: Option<crate::agent::style::StyleProfile>,
+    pub(crate) style: Option<crate::ai_services::style::StyleProfile>,
     /// Pi 这一轮的运行引用：中断 / 停止 / 失败后据此「接着写」或「从头写」。
     /// 已接受或旧流程轮次为 None；完整记录留在工作区的 `pi/run.json`。
     pub(crate) pi_run: Option<crate::pi_agent::PiRunRef>,
@@ -244,7 +244,7 @@ pub(crate) struct AiPanel {
     /// 技能列表的缓存，技能标签与 `/` 弹出列表每帧要用；打开侧栏和每次发送时重读。
     pub(crate) skills: Vec<Skill>,
     /// 风格档案的缓存（底栏「风格」标签用），与技能列表一起重读。
-    pub(crate) styles: Vec<crate::agent::style::StyleProfile>,
+    pub(crate) styles: Vec<crate::ai_services::style::StyleProfile>,
     next_id: u64,
     /// 当前会话：随稿件存进稿件库（16.15 B）。
     pub(crate) session: session::Session,
@@ -269,7 +269,7 @@ impl AiPanel {
         &mut self,
         id: u64,
         seq: u64,
-        usage: crate::agent::backend::UsageTotals,
+        usage: crate::ai_services::backend::UsageTotals,
     ) -> bool {
         let Some(turn) = self
             .turn_mut(id)
@@ -536,7 +536,7 @@ impl AiPanel {
     pub(crate) fn reload_skills(&mut self) -> Vec<String> {
         let (skills, mut notes) = crate::agent::skill::load_all();
         self.skills = skills;
-        match crate::agent::style::StyleBook::load() {
+        match crate::ai_services::style::StyleBook::load() {
             Ok(book) => self.styles = book.styles,
             Err(error) => notes.push(format!("风格档案读不出来：{error:#}")),
         }
@@ -836,9 +836,9 @@ mod tests {
         panel.finish(TurnState::Stopped);
         panel.push_turn("起草".into(), "另写".into(), vec![], None);
         panel.turns[1].usage_job_seq = Some(5);
-        let mut usage = crate::agent::backend::UsageTotals::default();
+        let mut usage = crate::ai_services::backend::UsageTotals::default();
         usage.record(
-            crate::agent::backend::ModelRole::Draft,
+            crate::ai_services::backend::ModelRole::Draft,
             "m",
             10,
             "半稿",

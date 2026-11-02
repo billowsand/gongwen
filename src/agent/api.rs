@@ -11,14 +11,16 @@
 //! - 方法不限于 GET / POST，但只有标了只查询（`readonly`）的接口给 AI 调；会改数据的接口
 //!   只在调试台由人发。
 
-use crate::agent::board::value_to_text;
+use crate::ai_services::text::value_to_text;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::PathBuf;
 use std::sync::LazyLock;
+
+/// JSON 配置文件读写的实现在共享层（`ai_services::persistence`），这里单向 re-export。
+pub(crate) use crate::ai_services::persistence::{read_json, write_json};
 
 /// 模板占位：`{region}`、`{secret:token}`。
 pub(crate) static PLACEHOLDER: LazyLock<Regex> =
@@ -333,32 +335,6 @@ pub(crate) struct ApiSecrets {
     pub(crate) secrets: BTreeMap<String, String>,
 }
 
-fn store_path(name: &str) -> anyhow::Result<PathBuf> {
-    Ok(crate::storage::config_dir()?.join(name))
-}
-
-pub(crate) fn read_json<T: serde::de::DeserializeOwned + Default>(name: &str) -> anyhow::Result<T> {
-    let path = store_path(name)?;
-    match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("{} 解析失败：{e}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(error) => Err(anyhow::anyhow!("读取 {} 失败：{error}", path.display())),
-    }
-}
-
-pub(crate) fn write_json<T: Serialize>(name: &str, value: &T) -> anyhow::Result<()> {
-    let path = store_path(name)?;
-    // 原子写 + 仅本人可读写：这里落的是接口密钥与配置，不能写到一半，
-    // 也不能让同机的其他用户读到。
-    let text = serde_json::to_string_pretty(value)?;
-    crate::storage::atomic_write(&path, |file| {
-        use std::io::Write as _;
-        file.write_all(text.as_bytes())?;
-        Ok(())
-    })
-}
-
 impl ApiStore {
     /// 读 `apis/` 下的 OpenAPI 并编译；只有旧版 `apis.json` 时先迁移。
     pub(crate) fn load() -> anyhow::Result<Self> {
@@ -530,7 +506,7 @@ impl ApiTestLog {
             summary.push_str(&format!(
                 "；「{}」{}",
                 failed.name,
-                crate::agent::tools::short(&failed.reason, 60)
+                crate::ai_services::text::short(&failed.reason, 60)
             ));
         }
         self.suites.insert(
@@ -1118,7 +1094,7 @@ fn check_status(raw: &RawResponse) -> Result<(), String> {
         Err(format!(
             "接口返回 {}：{}",
             raw.status,
-            crate::agent::tools::short(raw.body.trim(), 200)
+            crate::ai_services::text::short(raw.body.trim(), 200)
         ))
     }
 }
@@ -1272,7 +1248,7 @@ pub(crate) fn check_success(endpoint: &ApiEndpoint, body: &str) -> Result<(), St
     .iter()
     .find_map(|key| root.pointer(key).map(value_to_text))
     .filter(|text| !text.trim().is_empty())
-    .map(|text| format!("：{}", crate::agent::tools::short(text.trim(), 120)))
+    .map(|text| format!("：{}", crate::ai_services::text::short(text.trim(), 120)))
     .unwrap_or_default();
     Err(format!(
         "接口报告查询失败（{pointer} 是 {actual}，成功应为 {}）{reason}",
@@ -1490,7 +1466,7 @@ impl Trial {
 
     pub(crate) fn summary(&self) -> String {
         match &self.error {
-            Some(error) => crate::agent::tools::short(error, 80),
+            Some(error) => crate::ai_services::text::short(error, 80),
             None if self.total > self.items.len() => {
                 format!("取到 {} 条（共 {} 条）", self.items.len(), self.total)
             }

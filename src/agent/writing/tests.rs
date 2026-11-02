@@ -443,15 +443,15 @@ fn resume_skips_successful_blocks_and_resets_the_call_budget() {
 #[test]
 fn truncated_output_is_not_counted_as_a_successful_block() {
     struct Truncated;
-    impl crate::agent::backend::ModelBackend for Truncated {
+    impl crate::ai_services::backend::ModelBackend for Truncated {
         fn complete(
             &self,
-            _: crate::agent::backend::ModelRole,
+            _: crate::ai_services::backend::ModelRole,
             _: &str,
             _: &str,
             _: &mut dyn FnMut(crate::lmstudio::StreamDelta<'_>),
-        ) -> anyhow::Result<crate::agent::backend::Completion> {
-            Ok(crate::agent::backend::Completion {
+        ) -> anyhow::Result<crate::ai_services::backend::Completion> {
+            Ok(crate::ai_services::backend::Completion {
                 content: "观点：未完成\n原句：原文".into(),
                 truncated: true,
             })
@@ -507,7 +507,7 @@ fn tiny_or_corrupted_block_sizes_still_make_utf8_progress() {
 
 #[test]
 fn long_section_merge_uses_bounded_groups_and_can_resume_between_groups() {
-    use crate::agent::backend::{Completion, ModelBackend, ModelRole};
+    use crate::ai_services::backend::{Completion, ModelBackend, ModelRole};
     use crate::lmstudio::context::{Window, WindowSource, estimate_tokens};
     struct Small(ScriptedModel);
     impl ModelBackend for Small {
@@ -520,7 +520,7 @@ fn long_section_merge_uses_bounded_groups_and_can_resume_between_groups() {
         ) -> anyhow::Result<Completion> {
             assert!(
                 estimate_tokens(system) + estimate_tokens(prompt)
-                    < crate::agent::budget::input_budget(8192),
+                    < crate::ai_services::budget::input_budget(8192),
                 "归并请求必须适配小窗口"
             );
             self.0.complete(role, system, prompt, delta)
@@ -652,7 +652,7 @@ fn a_manually_skipped_block_counts_as_covered_and_can_be_undone() {
 
 #[test]
 fn cancelling_stops_immediately_instead_of_retrying_the_rest() {
-    use crate::agent::backend::{Completion, ModelBackend, ModelRole};
+    use crate::ai_services::backend::{Completion, ModelBackend, ModelRole};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct Cancelling {
@@ -1346,7 +1346,7 @@ fn many_topic_cards_are_organized_within_the_model_window() {
 /// 分阶段写作每一步都走关思考的补全；普通补全一调就报错。
 #[test]
 fn every_staged_writing_call_turns_thinking_off() {
-    use crate::agent::backend::{Completion, ModelBackend, ModelRole};
+    use crate::ai_services::backend::{Completion, ModelBackend, ModelRole};
     struct NoThinking(ScriptedModel);
     impl ModelBackend for NoThinking {
         fn complete(

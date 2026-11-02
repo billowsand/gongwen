@@ -10,7 +10,7 @@
 //! （规格 §2.4）、代字带出、承办条目同步都在这里处理。
 
 use crate::agent::clarify::{Action, Choice, Question, Reply, Target};
-use crate::agent::{elements, tools::vocab};
+use crate::agent::elements;
 use crate::models::{
     DraftInput, JointIssuanceMode, JointResponsibleEntry, TemplateKind, TemplateProfile,
     VocabularyCategory, VocabularyEntry, join_units, joint_responsible_entries, split_units,
@@ -585,7 +585,7 @@ fn parse_extraction(reply: &str) -> Vec<(FieldId, Option<Vec<String>>)> {
     out
 }
 
-/// 一条摘要对上词库里的哪些词条（规范名）。名称对词库用 `vocab::matches`
+/// 一条摘要对上词库里的哪些词条（规范名）。名称对词库用 `ai_services::vocabulary::matches`
 /// 同一套规则：规范名、对外名、简称、别名。
 fn resolve<'a>(
     vocabulary: &'a [VocabularyEntry],
@@ -601,7 +601,7 @@ fn resolve<'a>(
         .filter(|entry| {
             entry.category == field.category()
                 && !entry.canonical.trim().is_empty()
-                && vocab::matches(entry, excerpt)
+                && crate::ai_services::vocabulary::matches(entry, excerpt)
         })
         .collect();
     // 名称整个对上的优先：「市数据局」不要因为词库里还有「市数据局办公室」就算对上多个。
@@ -2054,7 +2054,7 @@ mod tests {
 #[cfg(test)]
 mod live_tests {
     use super::*;
-    use crate::agent::backend::{LmBackend, ModelBackend, ModelRole};
+    use crate::ai_services::backend::{LmBackend, ModelBackend, ModelRole};
 
     /// 一个样本期望模型走到哪一步。
     enum Expect {

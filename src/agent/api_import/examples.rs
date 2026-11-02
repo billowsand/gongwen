@@ -11,7 +11,7 @@
 use super::model::ModelExample;
 use super::scan::{BlockRole, JsonBlock, balanced_end};
 use crate::agent::api::{ApiEndpoint, ApiExample, InputKind};
-use crate::agent::backend::{ModelBackend, ModelRole};
+use crate::ai_services::backend::{ModelBackend, ModelRole};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;

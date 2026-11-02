@@ -24,8 +24,10 @@ use std::thread;
 /// 所有 AI 产物（单次起草、润色、研究式起草）都走这一条，不另起一套。
 pub(crate) fn prepare_model_markdown(input: &DraftInput, raw: &str) -> String {
     let cleaned = prompt::sanitize_model_markdown(raw);
-    let cleaned =
-        crate::agent::evidence::delivery_markdown(&cleaned, &input.research.bibliography_content);
+    let cleaned = crate::ai_services::citations::delivery_markdown(
+        &cleaned,
+        &input.research.bibliography_content,
+    );
     let normalized = prompt::normalize_generated_markdown(input, &cleaned);
     export::finalize_markdown(input, &normalized)
 }

@@ -3,7 +3,7 @@
 //!
 //! 位置一律按**字符**计（与 egui 文本框的光标一致），不按字节。
 
-use crate::agent::board::Reference;
+use crate::ai_services::references::Reference;
 use crate::models::TemplateKind;
 use pinyin::ToPinyin;
 use regex::Regex;
@@ -273,7 +273,7 @@ impl PopupState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::board::RefSource;
+    use crate::ai_services::references::RefSource;
 
     fn at(text: &str) -> Option<Trigger> {
         detect(text, text.chars().count())

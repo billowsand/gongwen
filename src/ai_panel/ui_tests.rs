@@ -2065,8 +2065,8 @@ fn escape_closes_the_popup_until_the_trigger_is_typed_again() {
 
 #[test]
 fn at_lists_articles_by_group_and_leaves_a_reference_mark() {
-    use crate::agent::board::{RefSource, Reference};
     use crate::ai_panel::mention::CatalogItem;
+    use crate::ai_services::references::{RefSource, Reference};
     use crate::models::TemplateKind;
     let mut harness = Harness::new("");
     harness.doc.ai_panel.open = true;
@@ -2144,8 +2144,8 @@ fn at_lists_articles_by_group_and_leaves_a_reference_mark() {
 /// 长列表与同名稿件都不能复用控件 ID；展开后输入框仍可编辑。
 #[test]
 fn article_popup_has_no_widget_id_clashes_with_long_or_duplicate_titles() {
-    use crate::agent::board::{RefSource, Reference};
     use crate::ai_panel::mention::CatalogItem;
+    use crate::ai_services::references::{RefSource, Reference};
     let mut harness = Harness::new("");
     theme::configure_style(&harness.ctx);
     harness.doc.ai_panel.open = true;
@@ -2218,7 +2218,7 @@ fn article_popup_has_no_widget_id_clashes_with_long_or_duplicate_titles() {
 
 #[test]
 fn deleting_the_mark_drops_the_reference_and_the_chip_unlinks() {
-    use crate::agent::board::{RefSource, Reference};
+    use crate::ai_services::references::{RefSource, Reference};
     let mut harness = Harness::new("");
     harness.doc.ai_panel.open = true;
     let reference = Reference {
@@ -2243,8 +2243,8 @@ fn deleting_the_mark_drops_the_reference_and_the_chip_unlinks() {
 #[test]
 #[ignore = "出样张，手动跑"]
 fn composer_samples() {
-    use crate::agent::board::{RefSource, Reference};
     use crate::ai_panel::mention::CatalogItem;
+    use crate::ai_services::references::{RefSource, Reference};
     use crate::models::TemplateKind;
     let size = egui::vec2(480.0, 720.0);
     // 同一上下文连续出样张时，字体纹理只在第一次上传，必须跨样张保留。
@@ -2563,9 +2563,9 @@ fn the_session_comes_back_after_reopening_the_manuscript() {
 /// 风格（16.15 C.3）：写稿的技能排进风格并留一行过程；审核类不用；分不出时交模型挑。
 #[test]
 fn writing_skills_carry_the_chosen_style() {
-    use crate::agent::style::{StyleExample, StyleProfile};
     use crate::agent::testkit::ScriptedModel;
     use crate::ai_panel::skill_job::{StylePick, apply_style};
+    use crate::ai_services::style::{StyleExample, StyleProfile};
     let profile = |name: &str| StyleProfile {
         name: name.into(),
         description: "总体基调：庄重。".into(),
@@ -2640,7 +2640,7 @@ fn writing_skills_carry_the_chosen_style() {
 #[test]
 #[ignore = "出样张，手动跑"]
 fn session_samples() {
-    use crate::agent::style::StyleProfile;
+    use crate::ai_services::style::StyleProfile;
     let size = egui::vec2(480.0, 900.0);
     let mut harness = Harness::new("# 关于做好冬季森林防火工作的通知\n\n一、总体要求\n");
     harness.with_page(|page| page.toggle_ai_panel(None));

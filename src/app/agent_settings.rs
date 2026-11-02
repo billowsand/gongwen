@@ -254,8 +254,8 @@ fn run_tool_in_background(
     std::thread::spawn(move || {
         let skill = console_skill();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let model = crate::agent::backend::LmBackend::new(&config, cancel);
-        let kb = crate::agent::tools::RagSearch {
+        let model = crate::ai_services::backend::LmBackend::new(&config, cancel);
+        let kb = crate::ai_services::knowledge::RagSearch {
             enabled: config.rag.enabled,
             rag: config.resolved_rag(),
             chat: config.draft_chat().unwrap_or_default(),
@@ -298,7 +298,7 @@ fn run_tool_in_background(
                         "《{}》{} —— {}",
                         doc.title,
                         doc.section,
-                        crate::agent::tools::short(&doc.text, 60)
+                        crate::ai_services::text::short(&doc.text, 60)
                     )
                 })
                 .collect(),

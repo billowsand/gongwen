@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::agent::api::ApiInput;
-use crate::agent::board::value_to_text;
+use crate::ai_services::text::value_to_text;
 use crate::modal::{self, Dismiss};
 
 pub(super) fn try_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize, config: &AppConfig) {

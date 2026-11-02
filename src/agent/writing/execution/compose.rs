@@ -30,7 +30,7 @@ pub(super) fn card_catalog(task: &WritingTask) -> String {
 /// 已分配过且提纲、素材都没变的章节保持原样（含用户手动增删的结果）。
 pub(super) fn assign_cards(
     task: &mut WritingTask,
-    model: &dyn crate::agent::backend::ModelBackend,
+    model: &dyn crate::ai_services::backend::ModelBackend,
     save: &mut dyn FnMut(&WritingTask) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     task.ready_for(Stage::Collect)?;
@@ -67,7 +67,7 @@ pub(super) fn assign_cards(
         );
         let budget = tokens_to_bytes(extract::extract_tokens(
             model
-                .window(crate::agent::backend::ModelRole::Assist)
+                .window(crate::ai_services::backend::ModelRole::Assist)
                 .tokens,
             &fixed,
         ));
@@ -97,7 +97,7 @@ pub(super) fn assign_cards(
             let answer = complete(
                 task,
                 model,
-                crate::agent::backend::ModelRole::Assist,
+                crate::ai_services::backend::ModelRole::Assist,
                 system,
                 &prompt,
             )?;
@@ -194,7 +194,7 @@ fn parse_assignment(raw: &str, sections: usize, cards: usize) -> Vec<Vec<usize>>
 /// 第五步：需要写的章节（未锁定、非人工稿、输入变了或还没写）。篇幅不大时整篇一次写成。
 pub(super) fn write_all(
     task: &mut WritingTask,
-    model: &dyn crate::agent::backend::ModelBackend,
+    model: &dyn crate::ai_services::backend::ModelBackend,
     save: &mut dyn FnMut(&WritingTask) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     task.ready_for(Stage::Write)?;
@@ -227,7 +227,7 @@ pub(super) fn write_all(
 fn write_at_once(
     task: &mut WritingTask,
     targets: &[usize],
-    model: &dyn crate::agent::backend::ModelBackend,
+    model: &dyn crate::ai_services::backend::ModelBackend,
     save: &mut dyn FnMut(&WritingTask) -> anyhow::Result<()>,
 ) -> anyhow::Result<Vec<usize>> {
     let mut outline = String::new();
@@ -282,12 +282,14 @@ fn write_at_once(
         task.kind, task.topic, task.target_chars, total, task.style_md, task.framework_md, outline
     );
     // 输入装不下或预计输出超过余量，就整篇交回逐节写。
-    let window = model.window(crate::agent::backend::ModelRole::Draft).tokens;
+    let window = model
+        .window(crate::ai_services::backend::ModelRole::Draft)
+        .tokens;
     let input = crate::lmstudio::context::estimate_tokens(&system)
         + crate::lmstudio::context::estimate_tokens(&prompt)
         + crate::lmstudio::context::estimate_tokens(crate::prompt::kind_rules(task.kind));
     let output = total.saturating_mul(3) / 2;
-    if input + output >= window || output >= crate::agent::budget::output_reserve(window) {
+    if input + output >= window || output >= crate::ai_services::budget::output_reserve(window) {
         return Ok(targets.to_vec());
     }
     task.status = format!("整篇一次成文：{} 节，约 {} 字", targets.len(), total);
@@ -298,7 +300,7 @@ fn write_at_once(
     let answer = complete(
         task,
         model,
-        crate::agent::backend::ModelRole::Draft,
+        crate::ai_services::backend::ModelRole::Draft,
         &system,
         &prompt,
     )?;

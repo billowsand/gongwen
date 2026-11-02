@@ -670,7 +670,8 @@ impl GongwenApp {
             egui::RichText::new(
                 "侧栏发送使用的 Pi 模型，与文字起草分开选。不选就不启动 Pi，\
                  不会偷偷回落到起草模型。地址与密钥仍在「模型服务商管理」里维护；\
-                 上下文与输出预算自动管理，不沿用上方的窗口和最大输出 Token；思考深度暂沿用上方设置。\
+                 上下文与输出预算自动管理，不沿用上方的窗口和最大输出 Token；思考深度\
+                 在下方单独设置，与文字起草互不影响。\
                  每轮执行上限 15 分钟，等用户回答时暂停计时。",
             )
             .size(theme::font_sizes::SMALL)
@@ -694,6 +695,31 @@ impl GongwenApp {
                     &mut show_all,
                 );
                 self.store_picker_state("pi", filter, show_all);
+            },
+        );
+        setting_row(
+            ui,
+            "思考深度",
+            Some(
+                "只对支持深度参数的模型生效；默认「沿用服务端」，即不发送深度参数。\
+                 与上方文字起草的思考深度互不影响。",
+            ),
+            |ui| {
+                let options = self
+                    .config
+                    .pi_options
+                    .get_or_insert_with(crate::models::PiOptions::default);
+                egui::ComboBox::from_id_salt("pi_reasoning_effort")
+                    .selected_text(options.reasoning_effort.label())
+                    .show_ui(ui, |ui| {
+                        for effort in crate::models::ReasoningEffort::ALL {
+                            ui.selectable_value(
+                                &mut options.reasoning_effort,
+                                effort,
+                                effort.label(),
+                            );
+                        }
+                    });
             },
         );
 

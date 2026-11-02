@@ -7,14 +7,11 @@ use super::{
 use crate::agent::backend::ModelRole;
 use crate::agent::clarify::{Action, Choice, Question, Target};
 use crate::agent::engine::Event;
+use crate::ai_services::backend::ASSIST_SYSTEM;
 use crate::lmstudio::StreamDelta;
 use serde_json::{Map, Value, json};
 
 pub(super) const TOOLS: [&dyn Tool; 4] = [&Generate, &AskChoice, &Note, &AddFinding];
-
-/// 辅助步骤（列问题、核对、出题）的系统提示。
-pub(crate) const ASSIST_SYSTEM: &str =
-    "你是公文写作的辅助判断程序。严格按要求的格式输出，不解释、不寒暄、不加 Markdown。";
 
 struct Generate;
 

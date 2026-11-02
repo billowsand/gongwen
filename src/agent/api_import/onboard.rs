@@ -19,7 +19,7 @@ use super::auth::{self, AuthPlace, AuthSpec};
 use super::redact::secret_name;
 use super::{Access, Draft, Material, refine_with_reply};
 use crate::agent::api::{self, ApiEndpoint, ApiSecrets, Trial};
-use crate::agent::backend::ModelBackend;
+use crate::ai_services::backend::ModelBackend;
 pub(crate) use diagnose::Verdict;
 use diagnose::verdict;
 use serde_json::{Map, Value};

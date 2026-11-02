@@ -23,10 +23,14 @@ mod store;
 pub(crate) mod vocab;
 mod workspace;
 
-pub(crate) use interact::ASSIST_SYSTEM;
+pub(crate) use crate::ai_services::backend::ASSIST_SYSTEM;
+/// 知识库与稿件库的窄接口与共享实现都在 `ai_services`，这里只做单向 re-export。
+pub(crate) use crate::ai_services::knowledge::KnowledgeSearch;
 #[cfg(test)]
-pub(crate) use store::ManuscriptDoc;
-pub(crate) use store::{ManuscriptSource, SqliteManuscripts};
+pub(crate) use crate::ai_services::knowledge::RagSearch;
+#[cfg(test)]
+pub(crate) use crate::ai_services::manuscripts::ManuscriptDoc;
+pub(crate) use crate::ai_services::manuscripts::{ManuscriptSource, SqliteManuscripts};
 
 use super::api::{ApiSecrets, ApiStore};
 use super::backend::ModelBackend;
@@ -35,8 +39,7 @@ use super::clarify::Question;
 use super::engine::Event;
 use super::evidence::EvidenceDoc;
 use super::skill::Skill;
-use crate::models::{AppConfig, LmStudioConfig, RagConfig, TemplateKind, VocabularyEntry};
-use crate::rag::RetrievedChunk;
+use crate::models::{AppConfig, TemplateKind, VocabularyEntry};
 use serde_json::{Map, Value, json};
 
 /// 工具的权限级别。
@@ -95,60 +98,6 @@ impl ToolUse {
 
     pub(crate) fn line(&self) -> String {
         format!("{} {}", self.permission.icon(), self.summary)
-    }
-}
-
-/// 知识库（只读）。测试时换成假知识库。
-pub(crate) trait KnowledgeSearch {
-    /// 知识库没启用时不检索，可检索的缺口直接记为「知识库无答案」。
-    fn enabled(&self) -> bool;
-    /// 返回 (片段, 降级说明)。
-    fn search(&self, query: &str) -> anyhow::Result<(Vec<RetrievedChunk>, Vec<String>)>;
-    /// 一篇文档的 (标题, 全文)。
-    fn read(&self, _doc_id: i64) -> anyhow::Result<Option<(String, String)>> {
-        Ok(None)
-    }
-    /// 文档列表：(id, 标题, 文种)。
-    fn list(
-        &self,
-        _kind: Option<TemplateKind>,
-    ) -> anyhow::Result<Vec<(i64, String, TemplateKind)>> {
-        Ok(Vec::new())
-    }
-}
-
-/// 本机知识库，检索与知识库页的检索、问答走同一个 `rag::retrieve`。
-pub(crate) struct RagSearch {
-    pub(crate) enabled: bool,
-    pub(crate) rag: RagConfig,
-    pub(crate) chat: LmStudioConfig,
-    pub(crate) kind_filter: Option<TemplateKind>,
-}
-
-impl KnowledgeSearch for RagSearch {
-    fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    fn search(&self, query: &str) -> anyhow::Result<(Vec<RetrievedChunk>, Vec<String>)> {
-        let db_path = crate::storage::manuscript_db_path()?;
-        let outcome =
-            crate::rag::retrieve(&self.rag, &self.chat, &db_path, query, self.kind_filter)?;
-        Ok((outcome.chunks, outcome.warnings))
-    }
-
-    fn read(&self, doc_id: i64) -> anyhow::Result<Option<(String, String)>> {
-        let db_path = crate::storage::manuscript_db_path()?;
-        crate::knowledge::KnowledgeStore::open(&db_path)?.get_doc_content(doc_id)
-    }
-
-    fn list(&self, kind: Option<TemplateKind>) -> anyhow::Result<Vec<(i64, String, TemplateKind)>> {
-        let db_path = crate::storage::manuscript_db_path()?;
-        Ok(crate::knowledge::KnowledgeStore::open(&db_path)?
-            .list_docs(kind)?
-            .into_iter()
-            .map(|row| (row.id, row.title, row.kind))
-            .collect())
     }
 }
 
@@ -604,13 +553,8 @@ pub(crate) fn kind_arg(args: &Map<String, Value>, name: &str) -> Option<Template
     })
 }
 
-/// 截断成给人看的短文字。
-pub(crate) fn short(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    text.chars().take(max).collect::<String>() + "…"
-}
+/// 截断成给人看的短文字。实现在共享层（`ai_services::text`），产品与旧工具共用一份。
+pub(crate) use crate::ai_services::text::short;
 
 #[cfg(test)]
 pub(crate) mod testing;

@@ -22,7 +22,7 @@ use crate::agent::api_import::{
     self, Access, Analysis, Draft, Material, merge_secrets, refine_with_reply, rename_secret_refs,
     secret_refs,
 };
-use crate::agent::backend::{LmBackend, ModelBackend};
+use crate::ai_services::backend::{LmBackend, ModelBackend};
 use crate::models::AppConfig;
 use crate::theme;
 use eframe::egui;

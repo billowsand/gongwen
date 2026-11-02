@@ -10,7 +10,7 @@ use super::*;
 /// 一次提炼投送多少原文（估算 token）：窗口的一半，且不超过扣掉固定提示词与输出余量后的输入预算。
 /// 60k 窗口约投 30k token，32k 窗口约 16k。
 pub(super) fn extract_tokens(window: usize, fixed: &str) -> usize {
-    let input = crate::agent::budget::input_budget(window)
+    let input = crate::ai_services::budget::input_budget(window)
         .saturating_sub(crate::lmstudio::context::estimate_tokens(fixed) + 1024);
     (window / 2).min(input).max(512)
 }
@@ -33,7 +33,7 @@ const SYSTEM: &str = "你是公文材料提炼助手。通读给出的全部材�
 /// 把未完成的内容块按预算拼成若干批，逐批提炼。返回失败的块数；取消、超预算等全局错误立即返回。
 pub(super) fn extract_content(
     task: &mut WritingTask,
-    model: &dyn crate::agent::backend::ModelBackend,
+    model: &dyn crate::ai_services::backend::ModelBackend,
     save: &mut dyn FnMut(&WritingTask) -> anyhow::Result<()>,
 ) -> anyhow::Result<usize> {
     let query = task.topic_query();
@@ -89,7 +89,7 @@ pub(super) fn retry_segment(
     source_id: &str,
     start: usize,
     end: usize,
-    model: &dyn crate::agent::backend::ModelBackend,
+    model: &dyn crate::ai_services::backend::ModelBackend,
     save: &mut dyn FnMut(&WritingTask) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let source = task
@@ -137,7 +137,7 @@ fn pack(segments: &[Segment], budget: usize) -> Vec<Vec<Segment>> {
 
 fn extract_batch(
     task: &mut WritingTask,
-    model: &dyn crate::agent::backend::ModelBackend,
+    model: &dyn crate::ai_services::backend::ModelBackend,
     batch: &[Segment],
     query: &str,
 ) -> anyhow::Result<()> {
@@ -179,7 +179,7 @@ fn extract_batch(
         let response = complete(
             task,
             model,
-            crate::agent::backend::ModelRole::Assist,
+            crate::ai_services::backend::ModelRole::Assist,
             SYSTEM,
             &format!("{prompt}{retry}"),
         )?;

@@ -25,7 +25,7 @@ mod scan;
 mod sections;
 
 use crate::agent::api::{ApiEndpoint, ApiInput, ApiMethod, ApiSecrets, ApiSuccess, InputKind};
-use crate::agent::backend::{ModelBackend, ModelRole};
+use crate::ai_services::backend::{ModelBackend, ModelRole};
 use auth::AuthSpec;
 use model::ModelEndpoint;
 use redact::Secrets;

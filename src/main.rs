@@ -14,6 +14,7 @@
 mod agent;
 mod ai_guard;
 mod ai_panel;
+mod ai_services;
 mod app;
 mod crash_log;
 mod data_backup;

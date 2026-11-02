@@ -1,11 +1,12 @@
 //! 工具测试用的假环境：假知识库、假稿件库、按配置回话的假模型。
 
-use super::store::ManuscriptDoc;
 use super::*;
 use crate::agent::backend::Completion;
 use crate::agent::backend::ModelRole;
+use crate::ai_services::manuscripts::ManuscriptDoc;
 use crate::lmstudio::StreamDelta;
 use crate::models::{ManuscriptStatus, VocabularyCategory};
+use crate::rag::RetrievedChunk;
 use std::cell::RefCell;
 
 pub(crate) struct FakeKb {

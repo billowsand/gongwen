@@ -36,7 +36,7 @@ use crate::agent::api::{
 use crate::agent::api_import::{auth, examples, infer};
 use crate::agent::apidef::ai_cases::{self, Attempt};
 use crate::agent::apidef::cases::{self, ExpectKind};
-use crate::agent::backend::LmBackend;
+use crate::ai_services::backend::LmBackend;
 use crate::models::AppConfig;
 use crate::theme;
 use eframe::egui;

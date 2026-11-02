@@ -9,9 +9,9 @@
 use super::cases;
 use super::tooling::{self, ApiTools, Resolved};
 use crate::agent::api::{self, ApiAiCase, ApiEndpoint, ApiSecrets, ApiStore, InputKind, Trial};
-use crate::agent::backend::{ModelBackend, ModelRole};
-use crate::agent::board::value_to_text;
-use crate::agent::toolcall::{Protocol, Turn};
+use crate::ai_services::backend::{ModelBackend, ModelRole};
+use crate::ai_services::text::value_to_text;
+use crate::ai_services::toolcall::{Protocol, Turn};
 use serde_json::{Map, Value, json};
 
 /// 一次 AI 试调最多几轮模型回复（两级访问时：搜、调、改参数再调）。
@@ -173,7 +173,7 @@ pub(crate) fn judge(
     apis: &ApiStore,
 ) -> Result<(), String> {
     let Some(api) = &attempt.api else {
-        let said = crate::agent::tools::short(&attempt.reply, 60);
+        let said = crate::ai_services::text::short(&attempt.reply, 60);
         return Err(if said.is_empty() {
             "没调接口".into()
         } else {

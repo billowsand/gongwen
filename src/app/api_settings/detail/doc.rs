@@ -148,7 +148,10 @@ pub(super) fn doc_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
                             .expect_args
                             .iter()
                             .map(|(name, value)| {
-                                format!("{name} = {}", crate::agent::board::value_to_text(value))
+                                format!(
+                                    "{name} = {}",
+                                    crate::ai_services::text::value_to_text(value)
+                                )
                             })
                             .collect();
                         theme::caption(
@@ -362,7 +365,7 @@ pub(super) fn item_card(ui: &mut egui::Ui, number: usize, item: &MappedItem) {
             });
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(crate::agent::tools::short(&item.text, 400))
+                    egui::RichText::new(crate::ai_services::text::short(&item.text, 400))
                         .color(theme::text_soft()),
                 )
                 .wrap(),

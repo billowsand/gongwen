@@ -14,8 +14,8 @@
 
 use super::mention;
 use super::pi_prepare::PiPrepareAck;
-use crate::agent::board::Reference;
 use crate::ai_panel::paste;
+use crate::ai_services::references::Reference;
 use crate::app::{DocJob, WorkerResult};
 use crate::draft_page::DraftPage;
 use crate::models::{LmStudioConfig, ReasoningEffort};
@@ -936,6 +936,9 @@ impl PiRunLog {
 }
 
 /// 应用现有 OpenAI 兼容模型设置映射成 host 的显式参数。
+///
+/// 思考深度取自 `AppConfig::pi_chat`（Pi 自己的 `pi_options`，不沿用文字起草）；
+/// 窗口与输出预算仍由程序自动解析。
 fn pi_model(chat: &LmStudioConfig) -> Result<PiModel, String> {
     let base_url = chat.base_url.trim().trim_end_matches('/').to_string();
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {

@@ -115,7 +115,7 @@ pub(crate) fn verdict(trial: &Trial, endpoint: &ApiEndpoint) -> Verdict {
 }
 
 fn short(text: &str) -> String {
-    crate::agent::tools::short(text, 120)
+    crate::ai_services::text::short(text, 120)
 }
 
 #[cfg(test)]

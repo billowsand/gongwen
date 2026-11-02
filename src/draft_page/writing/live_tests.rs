@@ -51,7 +51,7 @@ impl Run {
     ) -> anyhow::Result<()> {
         let mut last = Ok(());
         for attempt in 0..=resumes {
-            let backend = crate::agent::backend::LmBackend::new(
+            let backend = crate::ai_services::backend::LmBackend::new(
                 &self.config,
                 Arc::new(AtomicBool::new(false)),
             );

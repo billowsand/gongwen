@@ -8,10 +8,10 @@ mod pages;
 mod tests;
 mod validation;
 
-use crate::agent::backend::LmBackend;
 use crate::agent::writing::{
     self, Action, Coverage, SourceRole, SourceSnapshot, Stage, WritingTask,
 };
+use crate::ai_services::backend::LmBackend;
 use crate::draft_page::DraftPage;
 use crate::models::{AppConfig, TemplateKind};
 use eframe::egui;

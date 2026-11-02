@@ -223,7 +223,7 @@ pub(crate) enum DocJob {
     },
     AiUsage {
         turn_id: u64,
-        usage: crate::agent::backend::UsageTotals,
+        usage: crate::ai_services::backend::UsageTotals,
     },
     /// 技能流程的工作稿整体换新（补全之后）。
     AiWorkspace(String),
@@ -1801,7 +1801,7 @@ impl GongwenApp {
                 self.status = format!("{prefix}已按你的回答修订，新的提案在侧栏里。");
             }
             DocJob::StyleUsed(id) => {
-                if let Ok(mut book) = crate::agent::style::StyleBook::load() {
+                if let Ok(mut book) = crate::ai_services::style::StyleBook::load() {
                     book.record_use(&id);
                     let _ = book.save();
                 }

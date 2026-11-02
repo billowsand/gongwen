@@ -2001,7 +2001,7 @@ mod tests {
     #[test]
     #[ignore = "需要真实模型：设置 GONGWEN_LIVE_LLM_URL / MODEL / KEY 后运行"]
     fn live_draft_output_samples() {
-        use crate::agent::backend::{LmBackend, ModelBackend, ModelRole};
+        use crate::ai_services::backend::{LmBackend, ModelBackend, ModelRole};
         let env = |key: &str| std::env::var(key).unwrap_or_default();
         if env("GONGWEN_LIVE_LLM_URL").is_empty() {
             eprintln!(

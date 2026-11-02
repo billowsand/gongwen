@@ -12,7 +12,7 @@ use crate::agent::api::{
     ApiDestination, ApiEndpoint, ApiExample, ApiHeader, ApiInput, ApiMapping, ApiMethod,
     ApiSuccess, BodyKind, DEFAULT_TIMEOUT, InputKind, OpOrigin, percent_encode,
 };
-use crate::agent::board::value_to_text;
+use crate::ai_services::text::value_to_text;
 use regex::Regex;
 use serde_json::{Map, Value};
 use std::sync::LazyLock;

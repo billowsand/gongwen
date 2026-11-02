@@ -29,6 +29,11 @@ pub struct AppConfig {
     /// 不偷偷回落到起草模型。地址与密钥仍只存在 providers 里。
     #[serde(default)]
     pub pi_model: ModelRef,
+    /// 智能写作（Pi）自己的生成参数（目前只有思考深度）。旧配置没有该字段时为空，
+    /// 由 `migrate_pi_options` 一次性按原来实际用的深度补上，之后与文字起草的设置互不影响。
+    /// 窗口与输出预算由程序自动管理，不放用户旋钮。
+    #[serde(default)]
+    pub pi_options: Option<PiOptions>,
     pub output_dir: String,
     pub vocabulary: Vec<VocabularyEntry>,
     /// 首次建库引导的完成状态；旧配置会根据是否已有词条在启动时自动迁移。
@@ -126,6 +131,7 @@ impl Default for AppConfig {
             draft_model: ModelRef::default(),
             draft_backup_model: ModelRef::default(),
             pi_model: ModelRef::default(),
+            pi_options: None,
             output_dir: String::new(),
             vocabulary: vec![],
             vocabulary_setup: VocabularySetupStatus::Pending,
@@ -268,7 +274,33 @@ impl AppConfig {
         config.model = self.pi_model.model.trim().to_string();
         config.context_window = 0;
         config.max_tokens = 32_768;
+        // 思考深度只认 Pi 自己的设置，不再隐式继承文字起草。
+        // host 自行适配参数格式；保留这里的网关格式供知识库回退调用使用。
+        config.reasoning_effort = self.pi_options().reasoning_effort;
         Ok(config)
+    }
+
+    /// Pi 的生成参数：旧配置还没迁移时按 Pi 默认值解析（不回写，迁移在启动时做）。
+    pub(crate) fn pi_options(&self) -> PiOptions {
+        self.pi_options.clone().unwrap_or_default()
+    }
+
+    /// 旧配置迁移：把 Pi 原来隐式继承的思考深度固化成 Pi 自己的设置，只做一次。
+    ///
+    /// 旧版 Pi 直接沿用文字起草的 `reasoning_effort`；这里把它复制成 `pi_options`，之后
+    /// 改起草设置不再影响 Pi。旧配置没有 Pi 模型（本来也启动不了 Pi）时用 Pi 默认值。
+    /// 与提供商迁移无关，单独由 `storage::load_config` 接入。
+    pub(crate) fn migrate_pi_options(&mut self) -> bool {
+        if self.pi_options.is_some() {
+            return false;
+        }
+        let reasoning_effort = if self.pi_model.is_empty() {
+            PiOptions::default().reasoning_effort
+        } else {
+            self.lm_studio.reasoning_effort
+        };
+        self.pi_options = Some(PiOptions { reasoning_effort });
+        true
     }
 
     /// 文字复核与智能体辅助步骤的接入配置：配了复核模型（且复核已启用）用它，
@@ -725,4 +757,23 @@ pub(crate) fn auto_save_default() -> bool {
 /// 旧配置文件没有源码导航开关；升级后默认显示目录与缩略图。
 pub(crate) fn source_navigation_default() -> bool {
     true
+}
+
+/// 智能写作（Pi）的生成参数。
+///
+/// 只放思考深度这一项：上下文窗口与输出上限由程序按服务与模型自动管理，不给用户旋钮。
+/// 与 `LmStudioConfig` 里的起草参数彻底分开——改文字起草的思考深度不影响 Pi。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PiOptions {
+    /// 思考深度。默认「沿用服务端」：不发深度参数，兼容不认该参数的服务。
+    pub reasoning_effort: ReasoningEffort,
+}
+
+impl Default for PiOptions {
+    fn default() -> Self {
+        Self {
+            reasoning_effort: ReasoningEffort::Default,
+        }
+    }
 }

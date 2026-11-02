@@ -10,7 +10,7 @@
 
 use super::AiPanel;
 use super::mention::{self, CatalogItem, PopupKey, Trigger, TriggerKind};
-use crate::agent::board::{RefSource, Reference};
+use crate::ai_services::references::{RefSource, Reference};
 use crate::draft_page::DraftPage;
 use crate::pi_agent::MaterialRole;
 use crate::theme;

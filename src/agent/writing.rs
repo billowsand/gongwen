@@ -377,7 +377,7 @@ pub(crate) struct WritingTask {
     #[serde(default)]
     pub calls_used: usize,
     #[serde(default)]
-    pub usage: crate::agent::backend::UsageTotals,
+    pub usage: crate::ai_services::backend::UsageTotals,
     #[serde(skip)]
     usage_prefix: usize,
     #[serde(default)]

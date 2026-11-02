@@ -9,8 +9,8 @@ use super::super::redact::Secrets;
 use super::super::{mentioned, path_key, write_word};
 use super::{Answer, Ask, Desk, Event, MAX_TRIALS, Question, Run, State, Verdict, host_of};
 use crate::agent::api::{ApiEndpoint, ApiHeader, ApiInput, ApiMethod, ApiSecrets, InputKind};
-use crate::agent::backend::{ModelBackend, ModelRole};
-use crate::agent::toolcall::{Protocol, ToolSpec, Turn};
+use crate::ai_services::backend::{ModelBackend, ModelRole};
+use crate::ai_services::toolcall::{Protocol, ToolSpec, Turn};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use std::sync::LazyLock;
@@ -131,7 +131,7 @@ fn conclude(run: &mut Run<'_>, index: usize, summary: &str, desk: &mut dyn Desk)
         desk.emit(Event::Step(format!(
             "模型对「{}」的结论：{}",
             item.draft.endpoint.name,
-            crate::agent::tools::short(summary, 120)
+            crate::ai_services::text::short(summary, 120)
         )));
     }
     if !item.dirty && item.state == State::Working {
@@ -140,7 +140,7 @@ fn conclude(run: &mut Run<'_>, index: usize, summary: &str, desk: &mut dyn Desk)
                 .as_ref()
                 .map_or("模型没改好".into(), Verdict::label)
         } else {
-            crate::agent::tools::short(summary, 200)
+            crate::ai_services::text::short(summary, 200)
         });
     }
 }

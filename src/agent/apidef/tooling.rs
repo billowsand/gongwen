@@ -12,8 +12,8 @@
 
 use crate::agent::api::{ApiEndpoint, ApiStore, InputKind};
 use crate::agent::argcheck;
-use crate::agent::board::value_to_text;
-use crate::agent::toolcall::{ToolCall, ToolSpec, wire_name};
+use crate::ai_services::text::value_to_text;
+use crate::ai_services::toolcall::{ToolCall, ToolSpec, wire_name};
 use serde_json::{Map, Value, json};
 
 /// 一次能用的接口超过这么多，就改成两级访问。
@@ -183,7 +183,7 @@ pub(crate) fn tool_spec(endpoint: &ApiEndpoint) -> ToolSpec {
         description.push_str(&format!(
             "\n用法示例「{}」：{}",
             example.name,
-            crate::agent::tools::short(&args, 400)
+            crate::ai_services::text::short(&args, 400)
         ));
     }
     let schema = parameters_schema(endpoint);
@@ -550,7 +550,7 @@ pub(crate) fn search(ids: &[String], apis: &ApiStore, query: &str) -> String {
                 "- 接口 id：{}；{}：{}；参数：{}",
                 endpoint.id,
                 endpoint.name,
-                crate::agent::tools::short(endpoint.description.trim(), 120),
+                crate::ai_services::text::short(endpoint.description.trim(), 120),
                 signatures(endpoint)
             )
         })

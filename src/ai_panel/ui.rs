@@ -211,7 +211,7 @@ impl DraftPage<'_> {
             let title = self.doc.ai_panel.session_title();
             if !self.doc.ai_panel.turns.is_empty() {
                 ui.label(
-                    egui::RichText::new(crate::agent::tools::short(&title, 14))
+                    egui::RichText::new(crate::ai_services::text::short(&title, 14))
                         .small()
                         .color(theme::text_muted()),
                 )
@@ -502,7 +502,7 @@ impl DraftPage<'_> {
         else {
             return;
         };
-        let saved = crate::agent::style::StyleBook::load().and_then(|mut book| {
+        let saved = crate::ai_services::style::StyleBook::load().and_then(|mut book| {
             book.upsert(profile.clone());
             book.save()
         });
@@ -973,7 +973,7 @@ fn gap_context(
         .unwrap_or(0);
     Some(GapContext {
         section: crate::agent::gaps::section_of(text, pos),
-        sentence: crate::agent::evidence::strip_citations(&gap.sentence)
+        sentence: crate::ai_services::citations::strip_citations(&gap.sentence)
             .trim()
             .to_string(),
         literal: gap.literal.clone(),

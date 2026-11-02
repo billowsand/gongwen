@@ -10,7 +10,7 @@ use crate::agent::api_import::Material;
 use crate::agent::api_import::onboard::{
     Answer, Answers, Ask, Desk, Event, Item, Question, Report, Run,
 };
-use crate::agent::backend::{LmBackend, ModelBackend};
+use crate::ai_services::backend::{LmBackend, ModelBackend};
 use crate::models::AppConfig;
 use crate::theme;
 use eframe::egui;

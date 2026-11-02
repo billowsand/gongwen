@@ -7,7 +7,7 @@
 use super::try_tab::{code_view, pretty, status_line};
 use super::*;
 use crate::agent::apidef::tooling;
-use crate::agent::board::value_to_text;
+use crate::ai_services::text::value_to_text;
 
 /// 起草模型的名字，记进测试记录（换模型可以对比）。
 fn model_name(config: &AppConfig) -> String {
@@ -213,7 +213,7 @@ fn cases_bar(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) -> Option<usi
                 Some(Err(_)) => "✗ ",
                 None => "",
             };
-            let label = crate::agent::tools::short(&case.question, 16);
+            let label = crate::ai_services::text::short(&case.question, 16);
             let mut response =
                 ui.selectable_label(page.detail.ai.case == Some(at), format!("{mark}{label}"));
             let mut hover = case.question.clone();

@@ -7,7 +7,7 @@
 //! 仍在会话里可翻看，只是不再整段带进提示词。
 
 use super::{AiPanel, AiTurn, TurnState};
-use crate::agent::tools::short;
+use crate::ai_services::text::short;
 use crate::lmstudio::context::estimate_tokens;
 
 /// 压缩时最近几轮保留原样。

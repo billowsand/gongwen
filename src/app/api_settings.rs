@@ -1163,7 +1163,7 @@ pub(super) fn trial_ui(ui: &mut egui::Ui, trial: &Trial, salt: &str) {
         ui.label(format!(
             "【{}】{}",
             item.title,
-            crate::agent::tools::short(&item.text, 120)
+            crate::ai_services::text::short(&item.text, 120)
         ));
         theme::caption(ui, &format!("出处：{} · 编号：{}", item.source, item.id));
     }

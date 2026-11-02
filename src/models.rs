@@ -21,6 +21,7 @@ pub(crate) use ai::builtin_ai_prompts;
 pub(crate) use config::AUTO_SAVE_INTERVAL_MAX_SECS;
 pub(crate) use config::AUTO_SAVE_INTERVAL_MIN_SECS;
 pub(crate) use config::AppConfig;
+pub(crate) use config::PiOptions;
 pub(crate) use config::UI_SCALE_MAX;
 pub(crate) use config::UI_SCALE_MIN;
 pub(crate) use config::UI_SCALE_PRESETS;
@@ -355,6 +356,100 @@ mod tests {
         let assist = config.assist_chat().unwrap();
         assert_eq!(assist.model, "qwen3-4b");
         assert_eq!(assist.context_window, 0);
+    }
+
+    /// 旧配置没有 `pi_options`：把 Pi 当时实际继承的思考深度复制一次，之后不再随起草变。
+    #[test]
+    fn legacy_pi_config_copies_the_thinking_depth_it_actually_used() {
+        // 自造旧配置：只有 Pi 模型与起草侧的思考深度，没有 pi_options。
+        let mut config: AppConfig = serde_json::from_str(
+            r#"{
+                "providers": [{"id": "p1", "name": "内网", "base_url": "http://127.0.0.1:9000/v1"}],
+                "pi_model": {"provider_id": "p1", "model": "deepseek-v4-flash"},
+                "lm_studio": {"reasoning_effort": "high"}
+            }"#,
+        )
+        .unwrap();
+        assert!(config.pi_options.is_none(), "旧配置没有这一项");
+        assert!(config.migrate_pi_options());
+        assert_eq!(
+            config.pi_options(),
+            PiOptions {
+                reasoning_effort: ReasoningEffort::High
+            }
+        );
+        assert_eq!(
+            config.pi_chat().unwrap().reasoning_effort,
+            ReasoningEffort::High
+        );
+        // 一次迁移：再跑不改；起草侧后来改成低也不影响 Pi。
+        assert!(!config.migrate_pi_options());
+        config.lm_studio.reasoning_effort = ReasoningEffort::Low;
+        assert_eq!(config.pi_options().reasoning_effort, ReasoningEffort::High);
+        assert_eq!(
+            config.pi_chat().unwrap().reasoning_effort,
+            ReasoningEffort::High
+        );
+    }
+
+    /// 旧配置没有 Pi 模型：用 Pi 自己的默认深度，不从起草那边借。
+    #[test]
+    fn pi_without_a_model_starts_from_its_own_default() {
+        let mut config: AppConfig =
+            serde_json::from_str(r#"{"lm_studio": {"reasoning_effort": "max"}}"#).unwrap();
+        assert!(config.migrate_pi_options());
+        assert_eq!(
+            config.pi_options().reasoning_effort,
+            PiOptions::default().reasoning_effort
+        );
+        assert_eq!(
+            config.pi_options().reasoning_effort,
+            ReasoningEffort::Default
+        );
+    }
+
+    /// 迁移写回后是持久的；起草与 Pi 的深度各走各的，窗口与输出仍自动管理。
+    #[test]
+    fn pi_thinking_depth_persists_and_stays_independent() {
+        let mut config = AppConfig::default();
+        config.providers = vec![ProviderConfig {
+            id: "p1".into(),
+            name: "内网".into(),
+            base_url: "http://127.0.0.1:9000/v1".into(),
+            ..Default::default()
+        }];
+        config.draft_model = ModelRef {
+            provider_id: "p1".into(),
+            model: "起草".into(),
+        };
+        config.pi_model = ModelRef {
+            provider_id: "p1".into(),
+            model: "pi".into(),
+        };
+        config.pi_options = Some(PiOptions {
+            reasoning_effort: ReasoningEffort::Medium,
+        });
+        config.lm_studio.reasoning_effort = ReasoningEffort::High;
+        config.lm_studio.reasoning_format = ReasoningFormat::ReasoningObject;
+        assert_eq!(
+            config.draft_chat().unwrap().reasoning_effort,
+            ReasoningEffort::High
+        );
+        let pi = config.pi_chat().unwrap();
+        assert_eq!(pi.reasoning_effort, ReasoningEffort::Medium);
+        assert_eq!(
+            pi.reasoning_format,
+            ReasoningFormat::ReasoningObject,
+            "知识库走 Rust 回退调用时仍保留原网关协议，Pi host 不读取此字段"
+        );
+        assert_eq!(pi.context_window, 0, "窗口仍自动按服务与模型解析");
+        assert_eq!(pi.max_tokens, 32_768, "输出预算仍由程序管");
+
+        let round: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(round.pi_options, config.pi_options);
+        assert!(!round.clone().migrate_pi_options(), "已有设置不再迁移");
+        assert_eq!(round.pi_options().reasoning_effort, ReasoningEffort::Medium);
     }
 
     /// 迁移后的解析：起草 / 复核 / embedding 都拿到提供商的地址密钥。
