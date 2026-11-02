@@ -599,6 +599,8 @@ fn inset_paragraph(
 ) {
     let right_aligned = job.halign == Align::Max;
     let width = job.wrap.max_width;
+    // 合成粗体按字形下标逐行画（见 `layout::glyph_ranges`），先把字符下标换算过去。
+    let bold_ranges = super::layout::glyph_ranges(&job.text, bold_ranges);
     let base = layout(ui, job.clone());
     let height = base.size().y;
     let spans = row_spans(&base);
@@ -609,7 +611,7 @@ fn inset_paragraph(
                 let origin = egui::pos2(rect.left() + left, rect.top());
                 push_galley_tints(metrics, &base, origin);
                 paint_justified_rows(painter, metrics, origin, &job, &base, rows.clone());
-                for chars in bold_ranges {
+                for chars in &bold_ranges {
                     paint_synthetic_bold_rows(painter, origin, &base, &rows, chars.clone());
                 }
             }
@@ -619,7 +621,7 @@ fn inset_paragraph(
                 push_galley_tints(metrics, &base, origin);
                 marks::paint_galley_marks(painter, metrics, origin, &base);
                 painter.galley(origin, base.clone(), theme::paper::ink());
-                for chars in bold_ranges {
+                for chars in &bold_ranges {
                     paint_synthetic_bold_galley(painter, origin, &base, chars.clone());
                 }
             }

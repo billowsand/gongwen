@@ -160,6 +160,8 @@ pub(crate) fn cover_sheet(
                 &style,
                 &mut bold_ranges,
             );
+            // 题名按标题断行规则拼成多行（`\n`），合成粗体按字形下标画，先换算。
+            let bold_ranges = crate::preview::layout::glyph_ranges(&job.text, &bold_ranges);
             let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
             let origin = at(center_x, l::TITLE_TOP);
             painter.galley(origin, galley.clone(), ink);

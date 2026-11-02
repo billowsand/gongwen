@@ -7,8 +7,8 @@
 //! 框内用灰色小字写出公式源码，不 panic、不阻塞预览。
 
 use super::layout::{
-    SUPERSCRIPT_RATIO, append_run, indent, is_no_line_end, is_no_line_start, job, layout,
-    paint_synthetic_bold_galley, place, row_tint_offset, text_format, tint_rect,
+    SUPERSCRIPT_RATIO, append_run, glyph_ranges, indent, is_no_line_end, is_no_line_start, job,
+    layout, paint_synthetic_bold_galley, place, row_tint_offset, text_format, tint_rect,
 };
 use super::marks;
 use super::math_render;
@@ -778,6 +778,8 @@ fn draw_line(
         }
     }
     // 断行已经算好，不限宽排版就不会再被改切（kinsoku_wrap 对无穷宽原样返回）。
+    // 合成粗体按字形下标逐行画，先把字符下标（原子文本里可能带换行）换算过去。
+    let bold_ranges = glyph_ranges(&job.text, &bold_ranges);
     let galley = layout(ui, job);
 
     // 行高 = max(正文行距, 各公式图高)；基线先让文本在行里垂直居中，
@@ -869,8 +871,9 @@ fn paint_math(painter: &egui::Painter, metrics: &Metrics, rect: egui::Rect, math
 
 // ── 整块排好的文字（表格单元格、封面题名） ───────────────────────────────────
 
-/// galley 里的一个行内公式：第 `slot` 个字符是它的全角空格占位，前面用 `pad`
+/// galley 里的一个行内公式：第 `slot` 个字形是它的全角空格占位，前面用 `pad`
 /// 补足盒宽（同 [`draw_line`] 的做法），画的时候按该字的位置贴图。
+/// 换行不产生字形，因此这个下标不受手写换行与 `layout()` 插入的避头尾换行影响。
 pub(crate) struct MathSlot {
     slot: usize,
     pad: f32,
@@ -911,7 +914,7 @@ pub(crate) fn append_with_math(
                     atom.mark = chunk.kind;
                     let pad = std::mem::take(&mut gap) + atom.size.x - em;
                     maths.push(MathSlot {
-                        slot: job.text.chars().count(),
+                        slot: job.text.chars().filter(|ch| *ch != '\n').count(),
                         pad,
                         atom,
                     });
@@ -941,7 +944,7 @@ fn paint_slot(
 ) {
     let mut first = 0usize;
     for row in &galley.rows {
-        let count = row.char_count_including_newline().0;
+        let count = row.glyphs.len();
         if slot < first + count
             && let Some(glyph) = row.glyphs.get(slot - first)
         {
@@ -971,7 +974,7 @@ pub(crate) fn paint_slots(
     }
 }
 
-/// 两端对齐的逐行 galley 改变了公式占位符的横坐标，全局字符序号仍按原 galley 逐行换算。
+/// 两端对齐的逐行 galley 改变了公式占位符的横坐标，全局字形序号仍按原 galley 逐行换算。
 pub(crate) fn paint_justified_slots(
     painter: &egui::Painter,
     metrics: &Metrics,
@@ -982,7 +985,7 @@ pub(crate) fn paint_justified_slots(
 ) {
     let mut first = 0usize;
     for (placed, galley) in base.rows.iter().zip(rows) {
-        let count = placed.char_count_including_newline().0;
+        let count = placed.glyphs.len();
         let at = origin + placed.pos.to_vec2();
         for math in maths
             .iter()
@@ -1063,6 +1066,35 @@ mod tests {
             baseline: 0.75,
             mark: RedlineKind::Same,
         })
+    }
+
+    /// 公式占位与逐行绘制共用字形下标，手写换行不占位，自动折行新增的换行也不影响。
+    #[test]
+    fn math_slots_use_glyph_indexes_across_manual_breaks() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let font = metrics.font(theme::FONT_HEITI, 16.0);
+        let style = FlowStyle::block((font.clone(), font), 16.0, 28.0, 300.0);
+        let mut slots = Vec::new();
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
+            let mut job = job(f32::INFINITY);
+            slots = append_with_math(
+                ui,
+                &metrics,
+                &mut job,
+                "甲\n乙$x$丙\n$y$",
+                &style,
+                &mut Vec::new(),
+            );
+            assert_eq!(job.text, "甲\n乙\u{3000}丙\n\u{3000}");
+        });
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].slot, 2, "第一个公式前面只有「甲乙」两个字形");
+        assert_eq!(
+            slots[1].slot, 4,
+            "第二个公式前面是「甲乙」、第一个占位与「丙」"
+        );
     }
 
     #[test]

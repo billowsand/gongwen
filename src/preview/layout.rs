@@ -369,6 +369,33 @@ pub(crate) fn single_line(text: &str, format: TextFormat) -> LayoutJob {
     job
 }
 
+/// 把字符下标区间换成字形下标区间。
+///
+/// `append_run` 等给的是 `job.text.chars()` 的字符下标，而画合成粗体时逐行累计的是
+/// `glyphs.len()`：换行符不产生字形，却占字符下标。表格格内的 `<br>` 会留下真换行，
+/// 不换算就直接按字符下标去索引字形，第二行起必然越界（就是 0.10.1 预览闪退那个崩）。
+pub(crate) fn glyph_ranges(text: &str, ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    // 每个字符边界对应的字形下标；一次扫描供所有粗体区间共用。
+    let mut boundaries = Vec::with_capacity(text.chars().count() + 1);
+    let mut glyphs = 0usize;
+    boundaries.push(0);
+    for ch in text.chars() {
+        if ch != '\n' {
+            glyphs += 1;
+        }
+        boundaries.push(glyphs);
+    }
+    ranges
+        .iter()
+        .map(|chars| {
+            // 区间越界（不该发生）时贴到文本末尾，宁可少画也不要 panic。
+            let start = boundaries.get(chars.start).copied().unwrap_or(glyphs);
+            let end = boundaries.get(chars.end).copied().unwrap_or(glyphs);
+            start..end
+        })
+        .collect()
+}
+
 /// 排版一段文字：先按中文避头尾（禁则）算好断点，再交给 egui 逐行排。
 ///
 /// epaint 自带的断行只认它内置的那串「不能出现在行首」的字符
@@ -377,8 +404,10 @@ pub(crate) fn single_line(text: &str, format: TextFormat) -> LayoutJob {
 /// 根本不判，于是断行会把标点甩到下一行行首。中文公文的禁则比那串字符宽得多，
 /// 这里先按自然宽度量一遍，用完整的避头尾规则重算断点，插成硬换行后再交给 epaint。
 ///
-/// 换行符不产生字形，因此返回的 galley 逐行累积的 `glyphs.len()` 仍等于原文本的
-/// 字符下标——`justified_rows` 与各处点击命中都依赖这个不变量切片。
+/// 这里插入的换行符不产生字形，所以逐行累积的 `glyphs.len()` 仍等于原文本里去掉
+/// 换行后的字符下标——`justified_rows` 与各处点击命中都依赖这个不变量切片。**原文
+/// 自带的换行**（表格格内的 `<br>`）是另一回事：它不产生字形却占字符下标，
+/// [`row_byte_ranges`] 专门把它算进行边界。
 pub(crate) fn layout(ui: &egui::Ui, job: LayoutJob) -> Arc<egui::Galley> {
     let job = kinsoku_wrap(ui, job);
     ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
@@ -593,12 +622,14 @@ pub(crate) fn draw_justified_with_bold_ranges(
 ) {
     let width = job.wrap.max_width;
     let base = layout(ui, job.clone());
+    // 合成粗体按字形下标逐行画，这里先把字符下标（含 `\n`）换算过去。
+    let synthetic_bold = glyph_ranges(&job.text, synthetic_bold);
     if !width.is_finite() || base.rows.len() < 2 {
         // 单行段落本来就是末行，不参与对齐。
         let galley = base.clone();
         let rect = ui.add(egui::Label::new(base)).rect;
         marks::paint_galley_marks(ui.painter(), metrics, rect.left_top(), &galley);
-        for chars in synthetic_bold {
+        for chars in &synthetic_bold {
             paint_synthetic_bold_galley(ui.painter(), rect.left_top(), &galley, chars.clone());
         }
         return;
@@ -614,11 +645,16 @@ pub(crate) fn draw_justified_with_bold_ranges(
         &base,
         rows.clone(),
     );
-    for chars in synthetic_bold {
+    for chars in &synthetic_bold {
         paint_synthetic_bold_rows(ui.painter(), rect.left_top(), &base, &rows, chars.clone());
     }
 }
 
+/// 用同一份原字形微移重绘，给没有专用粗体字面的字体做合成粗体。
+///
+/// `chars` 是**字形下标**区间（见 [`glyph_ranges`]）：这里逐行累计的是
+/// `glyphs.len()`，两者必须同一套下标。表格格内含 `<br>` 时文本里有真换行，
+/// 直接拿字符下标来索引就会越界（0.10.1 预览闪退就是这个）。
 pub(crate) fn paint_synthetic_bold_galley(
     painter: &egui::Painter,
     origin: egui::Pos2,
@@ -630,9 +666,14 @@ pub(crate) fn paint_synthetic_bold_galley(
         let row_end = row_start + row.glyphs.len();
         let start = chars.start.max(row_start);
         let end = chars.end.min(row_end);
-        if start < end {
-            let left = row.pos.x + row.glyphs[start - row_start].pos.x;
-            let right = row.pos.x + row.glyphs[end - row_start - 1].max_x();
+        if start < end
+            && let (Some(first), Some(last)) = (
+                row.glyphs.get(start - row_start),
+                row.glyphs.get(end - row_start - 1),
+            )
+        {
+            let left = row.pos.x + first.pos.x;
+            let right = row.pos.x + last.max_x();
             let clip = egui::Rect::from_min_max(
                 origin + egui::vec2(left, row.pos.y),
                 origin + egui::vec2(right + 0.4, row.pos.y + row.size.y),
@@ -648,6 +689,9 @@ pub(crate) fn paint_synthetic_bold_galley(
 }
 
 /// egui 没有静态字体的合成粗体：用同一份原字形微移重绘，不改变字宽和断行。
+///
+/// `chars` 同样是字形下标区间（见 [`glyph_ranges`]）；`rows` 是
+/// [`justified_rows`] 逐行切出来的 galley，每行正好是 `base` 对应行的字。
 pub(crate) fn paint_synthetic_bold_rows(
     painter: &egui::Painter,
     origin: egui::Pos2,
@@ -660,10 +704,15 @@ pub(crate) fn paint_synthetic_bold_rows(
         let row_end = row_start + placed.glyphs.len();
         let start = chars.start.max(row_start);
         let end = chars.end.min(row_end);
-        if start < end {
-            let row = &galley.rows[0];
-            let left = row.pos.x + row.glyphs[start - row_start].pos.x;
-            let right = row.pos.x + row.glyphs[end - row_start - 1].max_x();
+        if start < end
+            && let Some(row) = galley.rows.first()
+            && let (Some(first), Some(last)) = (
+                row.glyphs.get(start - row_start),
+                row.glyphs.get(end - row_start - 1),
+            )
+        {
+            let left = row.pos.x + first.pos.x;
+            let right = row.pos.x + last.max_x();
             let at = origin + placed.pos.to_vec2();
             let clip = egui::Rect::from_min_max(
                 at + egui::vec2(left, 0.0),
@@ -712,42 +761,72 @@ pub(crate) fn paint_justified_rows(
 /// 按 `base` 已经排好的断行位置，把整段拆成逐行的两端对齐 galley。
 ///
 /// 返回的行数与 `base.rows` 一一对应，第 i 行画在 `base.rows[i].pos` 处即可。
-/// 末行不撑开：公文和 Word 一样，段落最后一行保持自然宽度。
+/// 表格格里的手写换行（`<br>`）不结束段落，与 Word 的软回车、Typst 的 `\` 一样
+/// 只有整段的最后一行不撑开。
 pub(crate) fn justified_rows(
     ui: &egui::Ui,
     job: &LayoutJob,
     base: &egui::Galley,
 ) -> Vec<Arc<egui::Galley>> {
     let width = job.wrap.max_width;
-    let char_offsets = job
-        .text
-        .char_indices()
-        .map(|(offset, _)| offset)
-        .collect::<Vec<_>>();
+    let ranges = row_byte_ranges(job, base);
     let row_count = base.rows.len();
     let mut galleys = Vec::with_capacity(row_count);
-    let mut char_start = 0usize;
     for (index, row) in base.rows.iter().enumerate() {
-        let char_end = char_start + row.glyphs.len();
-        let byte_start = char_offsets
-            .get(char_start)
-            .copied()
-            .unwrap_or(job.text.len());
-        let byte_end = char_offsets
-            .get(char_end)
-            .copied()
-            .unwrap_or(job.text.len())
-            // 兜底：epaint 承诺一个字符一个字形，万一出现多字形簇也不能让切片反转。
-            .max(byte_start);
         let extra = if index + 1 == row_count || !width.is_finite() {
             0.0
         } else {
             row_extra_spacing(row, width)
         };
-        galleys.push(layout(ui, row_job(job, byte_start..byte_end, extra)));
-        char_start = char_end;
+        galleys.push(layout(ui, row_job(job, ranges[index].clone(), extra)));
     }
     galleys
+}
+
+/// 按 `base` 的行切 `job.text`，返回每行在任务文本里的字节区间。
+///
+/// 不能直接按字形数取字节：换行符不产生字形，却占字符下标。`layout()` 自己插的
+/// 避头尾换行在 `job.text` 里没有（切行时用的是原任务），但表格格内的 `<br>` 是在
+/// 的——按字形数切，第二行起就整体前移一个换行，切出以 `\n` 开头的片段（egui 会
+/// 把它排成一个空行，两端对齐与合成粗体随之错位/越界）。所以逐行数**可见字**，
+/// 行尾真正的换行吞进本行边界、不带进下一行。
+fn row_byte_ranges(job: &LayoutJob, base: &egui::Galley) -> Vec<Range<usize>> {
+    let text = job.text.as_str();
+    let chars = text.char_indices().collect::<Vec<_>>();
+    let byte_at = |index: usize| chars.get(index).map_or(text.len(), |(byte, _)| *byte);
+    let mut ranges = Vec::with_capacity(base.rows.len());
+    let mut cursor = 0usize;
+    for row in &base.rows {
+        if row.glyphs.is_empty() {
+            // 空行（连续两个换行，或文末的空段）：本行没有可见字。
+            ranges.push(byte_at(cursor)..byte_at(cursor));
+            if matches!(chars.get(cursor), Some((_, '\n'))) {
+                cursor += 1;
+            }
+            continue;
+        }
+        // 行首不该是换行；真出现了说明字形数和字符数已经对不上，跳过它兜底。
+        while matches!(chars.get(cursor), Some((_, '\n'))) {
+            cursor += 1;
+        }
+        let start = cursor;
+        let mut glyphs = row.glyphs.len();
+        while glyphs > 0 {
+            let Some((_, ch)) = chars.get(cursor) else {
+                break;
+            };
+            cursor += 1;
+            if *ch != '\n' {
+                glyphs -= 1;
+            }
+        }
+        ranges.push(byte_at(start)..byte_at(cursor));
+        // 行尾的换行是行边界：吞掉，但不算进这一行的可见字。
+        if matches!(chars.get(cursor), Some((_, '\n'))) {
+            cursor += 1;
+        }
+    }
+    ranges
 }
 
 /// 这一行要补多少字距才能撑满 `width`。行末空白不算进已用宽度，
@@ -1068,6 +1147,8 @@ pub(crate) fn aligned_block(
     };
     let bold_ranges = append_inline_with_bold_ranges(&mut job, metrics, text, &metrics.body_font());
     let bold_ranges = metrics.paragraph_bold(job.text.chars().count(), bold_ranges);
+    // 合成粗体按字形下标画（见 `glyph_ranges`）。
+    let bold_ranges = glyph_ranges(&job.text, &bold_ranges);
     // halign 让每行相对 galley 原点对齐，所以原点要放在版心中线或右沿上，
     // 道理同 `line_block_runs` 的居中分支。
     let galley = layout(ui, job);
@@ -1194,6 +1275,8 @@ pub(crate) fn clickable_justified_job(
 ) {
     let base = layout(ui, job.clone());
     let rows = justified_rows(ui, &job, &base);
+    // 合成粗体按字形下标逐行画，这里先把字符下标（含 `\n`）换算过去。
+    let synthetic_bold_chars = glyph_ranges(&job.text, synthetic_bold_chars);
     let height = base.size().y;
     let (block_rect, _) =
         ui.allocate_exact_size(egui::vec2(metrics.content, height), egui::Sense::hover());
@@ -1353,7 +1436,7 @@ pub(crate) fn clickable_justified_job(
     if let Some((row_index, index, origin, tint_top, height)) = caret_at {
         paint_caret(ui, &rows[row_index], index, origin, tint_top, height);
     }
-    for chars in synthetic_bold_chars {
+    for chars in &synthetic_bold_chars {
         paint_synthetic_bold_rows(
             ui.painter(),
             block_rect.left_top(),
@@ -1697,6 +1780,9 @@ pub(crate) fn measure_table(
                     }
                 }
             }
+            // 合成粗体按字形下标逐行画（见 `glyph_ranges`）：格内 `<br>` 的换行占
+            // 字符下标却不产生字形，不换算就会在第二行起按字符下标索引字形而越界。
+            let synthetic_bold_chars = glyph_ranges(&cell_job.text, &synthetic_bold_chars);
             let base = layout(ui, cell_job.clone());
             let justified = if align == ColumnAlignment::Left && !group && base.rows.len() > 1 {
                 justified_rows(ui, &cell_job, &base)
@@ -2463,6 +2549,133 @@ mod tests {
         assert_eq!(cell.galley.text(), "张某\n电话：12345678");
         assert_eq!(cell.galley.rows.len(), 2);
         assert!(table.row_heights[1] > table.row_heights[0]);
+    }
+
+    /// 合成粗体的区间是字形下标：换行不产生字形，字符下标要按它收缩。
+    #[test]
+    fn synthetic_bold_ranges_are_glyph_indexes() {
+        let text = "甲乙\n丙丁戊";
+        // 字形流是「甲乙丙丁戊」，字符下标 5 的「戊」是字形 4。
+        let bold = 5..6;
+        assert_eq!(glyph_ranges(text, &[bold]), vec![4..5]);
+        // 跨换行的粗体区间两头都按字形数收缩。
+        let across = 0..6;
+        assert_eq!(glyph_ranges(text, &[across]), vec![0..5]);
+        // 区间越界时贴到末尾，宁可少画也不 panic。
+        let beyond = 9..12;
+        assert_eq!(glyph_ranges(text, &[beyond]), vec![5..5]);
+    }
+
+    /// 连续、开头与末尾的手写换行都对应空行；切行时只吞换行本身，不错位、不丢字。
+    #[test]
+    fn manual_break_row_ranges_include_empty_lines() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
+            let mut task = job(f32::INFINITY);
+            task.append(
+                "\n甲\n\n乙\n",
+                0.0,
+                text_format(metrics.body_font(), metrics.line),
+            );
+            let base = layout(ui, task.clone());
+            assert_eq!(base.rows.len(), 5, "首行、中间空行与末尾空行都应保留");
+            let ranges = row_byte_ranges(&task, &base);
+            let slices = ranges
+                .iter()
+                .map(|range| &task.text[range.clone()])
+                .collect::<Vec<_>>();
+            assert_eq!(slices, vec!["", "甲", "", "乙", ""]);
+        });
+    }
+
+    /// 回归：左对齐格里有手写换行（`<br>`）且第二行有粗体时，预览一排就闪退
+    /// （`paint_synthetic_bold_rows` 拿含换行的字符下标索引长度 0 的字形数组）。
+    /// 修好后逐行切片要正好拼回整段，换行后面的字一个都不能少。
+    #[test]
+    fn left_cell_with_manual_breaks_and_bold_paints_without_panicking() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let rows = vec![
+            vec!["说明".to_string()],
+            vec![
+                "这是一段足够长的说明文字要在窄格里折成好几行才行<br>第二行联系人：**张三**"
+                    .to_string(),
+            ],
+        ];
+        let aligns = [export::ColumnAlign::Left];
+        let mut measured = None;
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
+            let table = measure_table(ui, &metrics, &rows, &aligns, &[], 1, false, 260.0)
+                .expect("表格应排出");
+            let all = (0..table.row_heights.len()).collect::<Vec<_>>();
+            // 修复前这里在第二行越界 panic。
+            table.paint_rows(ui.painter(), &metrics, egui::pos2(0.0, 0.0), &all);
+            measured = Some(table);
+        });
+        let table = measured.expect("表格应排出");
+        let cell = table
+            .cells
+            .iter()
+            .find(|cell| cell.row == 1)
+            .expect("正文格");
+        assert!(cell.justified.len() > 2, "第一行应在窄格里折成多行");
+        assert_eq!(cell.justified.len(), cell.galley.rows.len());
+        assert_eq!(
+            cell.justified.last().expect("末行").text(),
+            "第二行联系人：张三"
+        );
+        for (index, galley) in cell.justified.iter().enumerate() {
+            assert_eq!(galley.rows.len(), 1, "第 {index} 行只应排成一行");
+            assert!(!galley.text().contains('\n'), "第 {index} 行不该带换行");
+        }
+        // 换行不产生字形，逐行切片拼起来应正好是整段去掉换行后的字。
+        let joined = cell
+            .justified
+            .iter()
+            .map(|galley| galley.text())
+            .collect::<String>();
+        let expected = cell
+            .galley
+            .text()
+            .chars()
+            .filter(|ch| *ch != '\n')
+            .collect::<String>();
+        assert_eq!(joined, expected);
+    }
+
+    /// 居中格不生成两端对齐行，但也走同一条字组粗体路径：手写换行之后的粗体
+    /// 应按字形下标落在自己的字上，而不是错位或整个丢掉。
+    #[test]
+    fn centered_cell_keeps_bold_after_a_manual_break() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let rows = vec![
+            vec!["说明".to_string()],
+            vec!["开头<br>一二三四五**六**".to_string()],
+        ];
+        let aligns = [export::ColumnAlign::Center];
+        let mut measured = None;
+        let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
+            let table = measure_table(ui, &metrics, &rows, &aligns, &[], 1, false, 300.0)
+                .expect("表格应排出");
+            let all = (0..table.row_heights.len()).collect::<Vec<_>>();
+            table.paint_rows(ui.painter(), &metrics, egui::pos2(0.0, 0.0), &all);
+            measured = Some(table);
+        });
+        let table = measured.expect("表格应排出");
+        let cell = table
+            .cells
+            .iter()
+            .find(|cell| cell.row == 1)
+            .expect("正文格");
+        assert_eq!(cell.galley.text(), "开头\n一二三四五六");
+        assert!(cell.justified.is_empty(), "居中格不做两端对齐");
+        // 「六」在字形流里是第 7 个（前两字 + 换行后的「一二三四五」）。
+        assert_eq!(cell.synthetic_bold_chars, vec![7..8]);
     }
 
     #[test]
