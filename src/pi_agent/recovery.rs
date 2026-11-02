@@ -41,7 +41,8 @@ pub(crate) const MAX_EVIDENCE_LINES: usize = 200;
 const MAX_EVIDENCE_CHARS: usize = 500;
 
 /// 一轮运行的状态。`Running` 是开跑时写的，进程死掉后读回来仍是它，界面据此
-/// 判断「可以接着写」；`Delivered` 表示成品已交出，`Accepted` 表示用户已接受。
+/// 判断「可以接着写」；`Delivered` 表示成品已交出，`Accepted` 表示成品已写进正文
+/// （旧提案被接受与 Pi 直接写入都用它，语义都是「这一轮的成品已经进正文了」）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PiRunStatus {
@@ -55,7 +56,7 @@ pub(crate) enum PiRunStatus {
 }
 
 impl PiRunStatus {
-    /// 还能不能从这份运行记录恢复。交付过的还可以接着改（下一轮），接受过的不再恢复。
+    /// 还能不能从这份运行记录恢复。交付过的还可以接着改（下一轮），已写进正文的不再恢复。
     pub(crate) fn recoverable(self) -> bool {
         !matches!(self, Self::Accepted)
     }
@@ -483,7 +484,60 @@ pub(crate) fn check_workspace_files(
             ));
         }
     }
+    // 手选技能必须仍在原快照里；不因为全局目录后来改了名 / 停用了就换别的技能。
+    if let Some(skill) = &record.skill {
+        if !crate::pi_agent::pi_skills::valid_name(skill) {
+            return Err("运行记录里的技能名不合法，不能接着写。".into());
+        }
+        if !workspace
+            .root
+            .join("skills/pi-skills")
+            .join(skill)
+            .join("SKILL.md")
+            .is_file()
+        {
+            return Err(format!(
+                "这一轮用的技能「{skill}」已经不在工作区快照里，不能接着写；可以点「从头写」重新开始。"
+            ));
+        }
+    }
     Ok(())
+}
+
+/// 交付前再确认「修改前基线」确实在盘上。
+///
+/// 直接写入正文时，撤销记录靠这份快照：读不到或与 `before` 不一致，就不能保证
+/// 「先保留基线、再替换正文」，宁可拒绝交付也不形成无撤销记录的替换。
+/// 比的是完整文本，不是哈希指针——指针相同不代表文件还在。
+pub(crate) fn check_baseline_snapshot(workspace: &PiWorkspace, before: &str) -> Result<(), String> {
+    let path = workspace.root.join("input/current.md");
+    let bytes = read_bounded(&path, MAX_SNAPSHOT_BYTES)
+        .map_err(|error| format!("本轮修改前基线快照不在了，不能直接写入正文：{error}"))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| "工作区里的正文快照不是 UTF-8，不能直接写入正文".to_string())?;
+    if text != before {
+        return Err("工作区里的修改前基线快照与本轮正文不一致，不能直接写入正文".into());
+    }
+    Ok(())
+}
+
+/// 成品已经写进正文：把运行记录标成 `Accepted`，这一轮不再出现在「接着写」里，
+/// 重启后重放回执也不会再自动覆盖一次。旧记录里的 `Accepted` 就是这个含义，直接沿用。
+pub(crate) fn consume_run(run: &PiRunRef) -> Result<(), String> {
+    if run.is_empty() {
+        return Err("这一轮没有可标记的 Pi 运行记录".into());
+    }
+    let root = resolve_workspace(&run.workspace)?;
+    let Some(dir) = root.parent() else {
+        return Err("Pi 运行目录定位失败".into());
+    };
+    let mut record = PiRunRecord::read_from(dir)?;
+    if record.run_id != run.run_id {
+        return Err("运行记录与这一轮的运行标识对不上，未标记".into());
+    }
+    record.status = PiRunStatus::Accepted;
+    record.updated_at = chrono::Local::now().to_rfc3339();
+    record.write_to_dir(dir)
 }
 
 /// 把工作区相对引用解析成真实目录，并确认它仍在配置目录的 Pi 工作区里。
@@ -862,10 +916,18 @@ mod tests {
 
     #[test]
     fn a_style_sample_cannot_be_promoted_by_changing_the_material_index() {
+        let config = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(config.path().to_path_buf()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::storage::set_test_config_dir(None);
+            }
+        }
+        let _reset = Reset;
         let dir = tempfile::tempdir().unwrap();
         let (workspace, metas) = PiWorkspace::prepare(
             dir.path(),
-            1,
             1,
             "正文",
             "要求",
@@ -875,6 +937,8 @@ mod tests {
                 role: super::super::materials::MaterialRole::StyleSample,
                 text: "2026年已有的样稿事实".into(),
             }],
+            &crate::pi_agent::pi_skills::load_catalog(),
+            None,
         )
         .unwrap();
         let mut saved = record(&workspace);

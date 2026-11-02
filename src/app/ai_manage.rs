@@ -113,8 +113,8 @@ impl AiSection {
                  换服务商不用各处改，在这里重选一次即可。"
             }
             AiSection::Skills => {
-                "AI 侧栏按技能做事：流程、提示词和能用的工具都写在 SKILL.md 里。内置技能可以复制一份改，\
-                 也可以新建自己的；保存时校验，写坏了不影响使用。"
+                "Pi 标准技能：标准 SKILL.md（YAML frontmatter + 自然语言步骤）与随包辅助文件。\
+                 可以编辑、新建、复制内置、启停、恢复内置、导入导出；旧流程技能不再供 Pi 执行。"
             }
             AiSection::DataApis => {
                 "让技能查内网系统（统计、政策库、业务系统、算法服务）的数据。只做查询，不发任何会改变\
@@ -306,7 +306,7 @@ impl GongwenApp {
         ui.separator();
         ui.add_space(4.0);
         if self.ai_section == AiSection::Skills {
-            ui.weak("技能文件在工作区单独校验与保存；切换文件会保留未保存的修改。");
+            ui.weak("Pi 技能文件在「技能」分区单独校验与保存；切换文件会保留未保存的修改。");
             return;
         }
         ui.horizontal(|ui| {

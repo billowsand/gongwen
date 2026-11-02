@@ -119,7 +119,17 @@ impl DraftPage<'_> {
         if request.trim().is_empty() {
             return Err("请先写下这轮要做什么，再发送给 Pi。".into());
         }
-        let skill = pi_skills::resolve(composer.pi_skill.as_deref())?.map(str::to_string);
+        let selected = composer.pi_skill.clone();
+        self.doc.ai_panel.ensure_pi_skills();
+        let catalog = self
+            .doc
+            .ai_panel
+            .pi_skills
+            .as_ref()
+            .expect("刚刷新过 Pi 技能目录");
+        let skill = catalog.resolve(selected.as_deref())?;
+        let skill_label = skill.as_deref().map(|name| catalog.label_for(name));
+        let composer = &self.doc.ai_panel.composer;
         let chat = self.config.pi_chat().map_err(|error| error.to_string())?;
         let model = pi_model(&chat)?;
         let model_provider = self.config.pi_model.provider_id.clone();
@@ -185,7 +195,10 @@ impl DraftPage<'_> {
             ));
         }
         let title = match &skill {
-            Some(skill) => format!("智能写作（Pi · {}）", pi_skills::label(skill)),
+            Some(_) => format!(
+                "智能写作（Pi · {}）",
+                skill_label.as_deref().unwrap_or("技能")
+            ),
             None => "智能写作（Pi · 自动）".to_string(),
         };
         let context = vec![
@@ -569,8 +582,16 @@ fn prepare_start(
         return Err("已停止 Pi 智能写作，未启动 host。".into());
     }
     let workspaces = base_dir()?;
-    let (workspace, metas) =
-        PiWorkspace::prepare(&workspaces, key, seq, &before, &prompt, &materials)?;
+    let catalog = pi_skills::load_catalog();
+    let (workspace, metas) = PiWorkspace::prepare(
+        &workspaces,
+        key,
+        &before,
+        &prompt,
+        &materials,
+        &catalog,
+        skill.as_deref(),
+    )?;
     // 先写候选稿（会往 request.md 追加说明），再取实际输入文件的哈希；顺序反了
     // 记录里的 input_request 就对应旧内容，恢复必然被拒。
     let input_request = finalize_input(&workspace, &base, &before)?;
@@ -680,8 +701,16 @@ fn prepare_resume(
             .ok()
             .flatten();
         let workspaces = base_dir()?;
-        let (workspace, metas) =
-            PiWorkspace::prepare(&workspaces, key, seq, &before, &record.request, &inputs)?;
+        let catalog = pi_skills::load_catalog();
+        let (workspace, metas) = PiWorkspace::prepare(
+            &workspaces,
+            key,
+            &before,
+            &record.request,
+            &inputs,
+            &catalog,
+            record.skill.as_deref(),
+        )?;
         let input_request = finalize_input(&workspace, &base, &before)?;
         let material_facts: Vec<String> = inputs
             .iter()
@@ -1056,9 +1085,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
         let _reset = ConfigReset;
-        let (workspace, metas) =
-            PiWorkspace::prepare(&base_dir().unwrap(), 1, 1, "旧正文", "保留的原要求", &[])
-                .unwrap();
+        let (workspace, metas) = PiWorkspace::prepare(
+            &base_dir().unwrap(),
+            1,
+            "旧正文",
+            "保留的原要求",
+            &[],
+            &pi_skills::load_catalog(),
+            None,
+        )
+        .unwrap();
         let record = PiRunRecord::start(
             "old-run".into(),
             "old-request".into(),
@@ -1190,9 +1226,26 @@ mod tests {
 
     #[test]
     fn candidate_note_is_written_before_the_request_hash_is_taken() {
+        let config = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(config.path().to_path_buf()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::storage::set_test_config_dir(None);
+            }
+        }
+        let _reset = Reset;
         let dir = tempfile::tempdir().unwrap();
-        let (workspace, _) =
-            PiWorkspace::prepare(dir.path(), 1, 1, "正式正文", "用户要求：改短", &[]).unwrap();
+        let (workspace, _) = PiWorkspace::prepare(
+            dir.path(),
+            1,
+            "正式正文",
+            "用户要求：改短",
+            &[],
+            &pi_skills::load_catalog(),
+            None,
+        )
+        .unwrap();
         // 旧顺序（先 read_request 再 write_candidate）会记下旧内容；新顺序必须对上实际文件。
         let before_candidate = workspace.read_request().unwrap();
         let hash = finalize_input(&workspace, "未采纳的候选稿", "正式正文").unwrap();

@@ -1,18 +1,25 @@
 //! 技能文件的管理：启用 / 停用、保存（带校验）、复制内置、新建、删除、导入导出。
 //!
+//! 4C 起 Pi 标准技能改用 `pi_agent::pi_skills`，旧流程技能管理页不再有入口；
+//! 生产代码仅保留旧引擎的停用清单读取；旧管理写接口只编译为旧格式回归测试。
+//!
 //! 用户技能都在 `配置目录/skills/<id>/SKILL.md`；停用的 id 记在 `配置目录/skills/disabled.json`
 //! （内置技能没有文件可改，停用只能记在这里）。`package` 子模块完整保留辅助文件与子目录，
 //! 导入导出以整个技能包为单位；应用的数据接口配置与密钥不加入技能包。
 
+#[cfg(test)]
 use super::skill::{self, Skill};
 use std::path::PathBuf;
 
+#[cfg(test)]
 pub(crate) mod package;
+#[cfg(test)]
 pub(crate) use package::{export, import, remove};
 
 const DISABLED_FILE: &str = "disabled.json";
 
 /// 新建技能的模板。
+#[cfg(test)]
 const TEMPLATE: &str = "---
 name: 新技能
 description: 一句话写清这个技能做什么、什么时候用
@@ -42,6 +49,7 @@ fn skills_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// 技能 id 只能用英文字母、数字、下划线和短横线（它是文件夹名）。
+#[cfg(test)]
 pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
@@ -50,6 +58,7 @@ pub(crate) fn valid_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+#[cfg(test)]
 fn check_id(id: &str) -> anyhow::Result<()> {
     if valid_id(id) {
         Ok(())
@@ -58,6 +67,7 @@ fn check_id(id: &str) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn user_file(id: &str) -> anyhow::Result<PathBuf> {
     check_id(id)?;
     Ok(skills_dir()?.join(id).join("SKILL.md"))
@@ -72,6 +82,7 @@ pub(crate) fn disabled_ids() -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 pub(crate) fn set_enabled(id: &str, enabled: bool) -> anyhow::Result<()> {
     let mut ids = disabled_ids();
     ids.retain(|existing| existing != id);
@@ -86,6 +97,7 @@ pub(crate) fn set_enabled(id: &str, enabled: bool) -> anyhow::Result<()> {
 }
 
 /// 编辑器里显示的原文：有用户文件就是用户文件，否则是内置原文。
+#[cfg(test)]
 pub(crate) fn source_text(id: &str) -> anyhow::Result<String> {
     let file = user_file(id)?;
     if file.exists() {
@@ -96,12 +108,14 @@ pub(crate) fn source_text(id: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("找不到技能「{id}」的文件"))
 }
 
+#[cfg(test)]
 pub(crate) fn has_user_file(id: &str) -> bool {
     user_file(id).is_ok_and(|file| file.exists())
 }
 
 /// 按引擎认识的算子与工具校验一份技能原文（覆盖内置的按合并后的结果校验）。
 /// 解析失败返回 Err，校验问题放在 Ok 里。
+#[cfg(test)]
 pub(crate) fn check_text(id: &str, text: &str) -> Result<Vec<String>, String> {
     let parsed = skill::parse(id, text, "编辑器")?;
     let merged = match skill::builtin_skills().into_iter().find(|s| s.id == id) {
@@ -111,12 +125,14 @@ pub(crate) fn check_text(id: &str, text: &str) -> Result<Vec<String>, String> {
     Ok(problems_of(&merged))
 }
 
+#[cfg(test)]
 pub(crate) fn problems_of(skill: &Skill) -> Vec<String> {
     skill::validate(skill, &super::ops::names(), &super::tools::ids())
 }
 
 /// 保存用户技能。解析不过拒绝保存；校验问题照样保存，返回给界面提示（加载时会停用或
 /// 退回内置）。
+#[cfg(test)]
 pub(crate) fn save(id: &str, text: &str) -> Result<Vec<String>, String> {
     let problems = check_text(id, text)?;
     let file = package::destination(id, "SKILL.md").map_err(|e| e.to_string())?;
@@ -128,6 +144,7 @@ pub(crate) fn save(id: &str, text: &str) -> Result<Vec<String>, String> {
 }
 
 /// 新建一个技能（写入模板），返回原文。id 已存在就报错。
+#[cfg(test)]
 pub(crate) fn create(id: &str) -> anyhow::Result<String> {
     check_id(id)?;
     if has_user_file(id) || skill::builtin_text(id).is_some() {

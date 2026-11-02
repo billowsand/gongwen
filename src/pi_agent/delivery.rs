@@ -6,6 +6,11 @@
 //! 找到；公文引用不能被删改；交付正文里不能留下内部工作区路径。
 //!
 //! 样稿、结构范文、模型自己的摘要与旧候选稿都不是新的事实来源。
+//!
+//! 结果分两类（[`DeliveryReport`]）：技术 / 权限保护是**阻止项**，成品不能写进正文；
+//! 事实来源这类疑点是**提示项**，只展示给用户核对，不再要求人工确认才能写入
+//! （`docs/pi-implementation/pi-direct-write-task.md` 结果契约 2）。分类由字段承载，
+//! 界面与状态机都不解析中文原因串来判断类别。
 
 use crate::models::VocabularyEntry;
 use sha2::{Digest, Sha256};
@@ -117,8 +122,39 @@ pub(crate) struct DeliveryCheck<'a> {
     pub(crate) vocabulary: &'a [VocabularyEntry],
 }
 
-/// 交付前的来源检查。返回硬问题；非空就不装提案。
-pub(crate) fn check_delivery(ctx: &DeliveryCheck<'_>) -> Vec<String> {
+/// 一次交付检查的结果。
+///
+/// `blockers` 是技术 / 权限保护（空稿、工作区路径泄漏、选区越界造成的选区外改动、
+/// 公文引用被删改、与本轮基准完全相同）：非空就不写入正文。
+/// `advisories` 是仍然值得检查、值得展示的疑点（关键事实在本轮依据里找不到）：
+/// 照常写入，只作为提示挂在结果卡与审校抽屉上。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct DeliveryReport {
+    pub(crate) blockers: Vec<String>,
+    pub(crate) advisories: Vec<String>,
+}
+
+impl DeliveryReport {
+    /// 阻止原因（给人看）：多条用中文分号连接。
+    pub(crate) fn blocking_reason(&self) -> Option<String> {
+        (!self.blockers.is_empty()).then(|| self.blockers.join("；"))
+    }
+
+    /// 合并另一遍检查（如规整之后的稿件再查一次）的结果。
+    pub(crate) fn absorb(&mut self, other: DeliveryReport) {
+        self.blockers.extend(other.blockers);
+        self.advisories.extend(other.advisories);
+        self.blockers.sort();
+        self.blockers.dedup();
+        self.blockers.truncate(20);
+        self.advisories.sort();
+        self.advisories.dedup();
+        self.advisories.truncate(20);
+    }
+}
+
+/// 交付前的来源检查。阻止项非空就不能写入正文；提示项只展示。
+pub(crate) fn check_delivery(ctx: &DeliveryCheck<'_>) -> DeliveryReport {
     let DeliveryCheck {
         before,
         base,
@@ -129,6 +165,7 @@ pub(crate) fn check_delivery(ctx: &DeliveryCheck<'_>) -> Vec<String> {
         vocabulary,
     } = ctx;
     let mut issues = Vec::new();
+    let mut advisories = Vec::new();
     if content.trim().is_empty() {
         issues.push("提交稿为空".to_string());
     }
@@ -197,24 +234,33 @@ pub(crate) fn check_delivery(ctx: &DeliveryCheck<'_>) -> Vec<String> {
                 .any(|line| line.trim().trim_start_matches('#').trim() == title)
                 || request.lines().any(|line| line.trim() == title));
         if !known_title {
-            issues.push(format!(
-                "{}「{}」未在本轮正文、用户要求、事实材料或工具证据中找到，请补充依据或修订",
+            // 事实疑点只提示：用户要求「直接写入并保留撤销记录」之后，来源核对不再
+            // 是人工确认的前置条件，但仍要摆到人眼前。
+            advisories.push(format!(
+                "{}「{}」未在本轮正文、用户要求、事实材料或工具证据中找到依据",
                 fact.kind.label(),
                 fact.value
             ));
         }
     }
-    issues.sort();
-    issues.dedup();
-    issues.truncate(20);
-    issues
+    let mut report = DeliveryReport {
+        blockers: issues,
+        advisories,
+    };
+    report.blockers.sort();
+    report.blockers.dedup();
+    report.blockers.truncate(20);
+    report.advisories.sort();
+    report.advisories.dedup();
+    report.advisories.truncate(20);
+    report
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn check(before: &str, request: &str, content: &str) -> Vec<String> {
+    fn check(before: &str, request: &str, content: &str) -> DeliveryReport {
         check_delivery(&DeliveryCheck {
             before,
             base: before,
@@ -224,6 +270,11 @@ mod tests {
             fact_sources: &[],
             vocabulary: &[],
         })
+    }
+
+    /// 没有任何阻止项，也没有事实提示。
+    fn clean(report: &DeliveryReport) -> bool {
+        report.blockers.is_empty() && report.advisories.is_empty()
     }
 
     #[test]
@@ -256,25 +307,39 @@ mod tests {
         }
     }
 
+    /// 新数字、日期不再阻止写入，只作事实提示（`pi-direct-write-task.md` 结果契约 2）。
     #[test]
-    fn new_numbers_dates_and_units_are_rejected() {
-        let issues = check(
+    fn new_numbers_and_dates_are_advised_but_do_not_block_the_write() {
+        let report = check(
             "# 通知\n\n请各单位报送材料。\n",
             "把报送时间改到十月。",
             "# 通知\n\n请各单位于2026年10月8日报送材料，共12项。\n",
         );
-        assert!(issues.iter().any(|issue| issue.contains("2026年10月8日")));
-        assert!(issues.iter().any(|issue| issue.contains("12项")));
+        assert!(
+            report.blockers.is_empty(),
+            "事实疑点不能阻止写入：{report:?}"
+        );
+        assert!(
+            report
+                .advisories
+                .iter()
+                .any(|item| item.contains("2026年10月8日")),
+            "{report:?}"
+        );
+        assert!(
+            report.advisories.iter().any(|item| item.contains("12项")),
+            "{report:?}"
+        );
     }
 
     #[test]
     fn facts_already_in_the_request_are_allowed() {
-        let issues = check(
+        let report = check(
             "# 通知\n\n请各单位报送材料。\n",
             "报送时间改成2026年10月8日，共12项。",
             "# 通知\n\n请各单位于2026年10月8日报送材料，共12项。\n",
         );
-        assert!(issues.is_empty(), "{issues:?}");
+        assert!(clean(&report), "{report:?}");
     }
 
     #[test]
@@ -291,7 +356,7 @@ mod tests {
             fact_sources: &evidence,
             vocabulary: &[],
         });
-        assert!(issues.is_empty(), "{issues:?}");
+        assert!(clean(&issues), "{issues:?}");
         // 样稿不是事实材料：同样的日期放进样稿角色就不会出现在 fact_sources 里。
         let style_only = vec!["去年定于2026年10月8日检查。".to_string()];
         let issues = check_delivery(&DeliveryCheck {
@@ -304,7 +369,7 @@ mod tests {
             vocabulary: &[],
         });
         assert!(
-            issues.is_empty(),
+            clean(&issues),
             "样稿文本一旦被误列进 fact_sources 就会放行；角色过滤在 materials 层完成"
         );
     }
@@ -312,14 +377,24 @@ mod tests {
     #[test]
     fn workspace_paths_do_not_leak_into_the_delivery() {
         let issues = check("", "写一份通知。", "# 通知\n\n见 work/final.md。\n");
-        assert!(issues.iter().any(|issue| issue.contains("工作区路径")));
+        assert!(
+            issues
+                .blockers
+                .iter()
+                .any(|issue| issue.contains("工作区路径"))
+        );
     }
 
     #[test]
     fn an_unchanged_document_is_not_a_delivery() {
         let doc = "# 通知\n\n正文。\n";
         let issues = check(doc, "润色", doc);
-        assert!(issues.iter().any(|issue| issue.contains("完全相同")));
+        assert!(
+            issues
+                .blockers
+                .iter()
+                .any(|issue| issue.contains("完全相同"))
+        );
     }
 
     #[test]
@@ -327,7 +402,12 @@ mod tests {
         let before = "# 通知\n\n根据《国务院关于进一步加强安全生产工作的通知》（国发〔2026〕3号），现通知如下。\n";
         let after = "# 通知\n\n现通知如下。\n";
         let issues = check(before, "精简", after);
-        assert!(issues.iter().any(|issue| issue.contains("公文引用")));
+        assert!(
+            issues
+                .blockers
+                .iter()
+                .any(|issue| issue.contains("公文引用"))
+        );
     }
 
     #[test]
@@ -346,7 +426,7 @@ mod tests {
             fact_sources: &[],
             vocabulary: &[],
         });
-        assert!(issues.is_empty(), "{issues:?}");
+        assert!(clean(&issues), "{issues:?}");
         let outside = before.replace("第三段原样。", "第三段被顺手改了。");
         let issues = check_delivery(&DeliveryCheck {
             before,
@@ -358,7 +438,10 @@ mod tests {
             vocabulary: &[],
         });
         assert!(
-            issues.iter().any(|issue| issue.contains("选区以外")),
+            issues
+                .blockers
+                .iter()
+                .any(|issue| issue.contains("选区以外")),
             "{issues:?}"
         );
         assert!(PiSelection { start: 1, end: 2 }.validate("中文").is_err());
@@ -386,10 +469,10 @@ mod tests {
             vocabulary: &vocabulary,
         });
         assert!(
-            issues.iter().any(|issue| issue.contains("张三")),
+            issues.advisories.iter().any(|issue| issue.contains("张三")),
             "只查到词库人员不足以授权事项事实：{issues:?}"
         );
-        // 用户本轮明确说「由张三负责」就可以：确认后的人仍然要过事实闸门。
+        // 用户本轮明确说「由张三负责」就可以：确认后的人仍然要过事实检查。
         let issues = check_delivery(&DeliveryCheck {
             before,
             base: before,
@@ -399,17 +482,20 @@ mod tests {
             fact_sources: &[],
             vocabulary: &vocabulary,
         });
-        assert!(issues.is_empty(), "{issues:?}");
+        assert!(clean(&issues), "{issues:?}");
     }
 
     #[test]
-    fn fabricated_citations_are_rejected() {
+    fn fabricated_citations_are_flagged_as_advisories() {
         let before = "# 通知\n\n请各单位报送材料。\n";
         let content = "# 通知\n\n根据《国务院关于进一步加强安全生产工作的通知》（国发〔2026〕9号），请各单位报送材料。\n";
         let issues = check(before, "补充依据", content);
         assert!(
-            issues.iter().any(|issue| issue.contains("国发〔2026〕9号")),
-            "模型自报的引用不能当依据：{issues:?}"
+            issues
+                .advisories
+                .iter()
+                .any(|issue| issue.contains("国发〔2026〕9号")),
+            "模型自报的引用不能当依据，但要提示出来：{issues:?}"
         );
     }
 
@@ -428,7 +514,10 @@ mod tests {
             vocabulary: &[],
         });
         assert!(
-            issues.iter().any(|issue| issue.contains("2026年10月8日")),
+            issues
+                .advisories
+                .iter()
+                .any(|issue| issue.contains("2026年10月8日")),
             "旧候选里的日期不能自动成为新事实来源：{issues:?}"
         );
     }

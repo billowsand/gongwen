@@ -1,16 +1,41 @@
 //! Pi 智能写作结果交付与异步任务隔离测试。
+//!
+//! 产品契约（2026-11-02 用户确认，`docs/pi-implementation/pi-direct-write-task.md`）：Pi 明确
+//! 提交的有效 Markdown 由界面线程**直接写进当前可编辑正文**，普通流程不再弹人工校订窗、
+//! 不勾事实、不接受提案。事实来源、数字日期这类疑点照旧检查并展示，但只作提示；
+//! 路径 / 哈希 / 体积 / 选区 / 只读 / 基线这些技术性与权限保护照旧拦下。
+//! 报告型产物仍然只进侧栏。
 
 use super::GongwenApp;
 use crate::ai_panel::TurnState;
 use crate::models::ReviewNote;
-use crate::pi_agent::{DeliveryCheck, PiOutcome};
+use crate::pi_agent::{DeliveryCheck, DeliveryReport, PiDelivery, PiOutcome};
+
+/// 一份 Pi 交付的结构化检查结果。原稿与规整后的稿件各跑一遍，取并集。
+fn delivery_check(
+    config: &crate::models::AppConfig,
+    delivery: &PiDelivery,
+    content: &str,
+) -> DeliveryReport {
+    crate::pi_agent::check_delivery(&DeliveryCheck {
+        before: &delivery.before,
+        base: &delivery.base,
+        request: &delivery.request,
+        content,
+        selection: delivery.selection,
+        fact_sources: &delivery.fact_sources,
+        vocabulary: &config.vocabulary,
+    })
+}
 
 impl GongwenApp {
-    /// Pi 本轮结束：成功才安装提案或侧栏清单，失败只留原因，绝不动正文。
+    /// Pi 本轮结束：正文交付直接写入当前正文（可用卡片或 Ctrl+Z 撤销），
+    /// 侧栏清单只进侧栏，失败只留原因，绝不动正文。
     pub(super) fn apply_pi_done(
         &mut self,
         index: usize,
         prefix: &str,
+        ctx: Option<&eframe::egui::Context>,
         result: Result<PiOutcome, String>,
     ) {
         let doc = &mut self.docs[index];
@@ -85,81 +110,37 @@ impl GongwenApp {
                     self.status = format!("{prefix}Pi 智能写作交付检查未通过：{error}");
                     return;
                 }
-                let issues = crate::pi_agent::check_delivery(&DeliveryCheck {
-                    before: &delivery.before,
-                    base: &delivery.base,
-                    request: &delivery.request,
-                    content: &delivery.content,
-                    selection: delivery.selection,
-                    fact_sources: &delivery.fact_sources,
-                    vocabulary: &self.config.vocabulary,
-                });
-                if !issues.is_empty() {
-                    let reason = issues.join("；");
+                // 交付检查分两类：技术 / 权限保护挡住写入，事实来源这类疑点只作提示。
+                let mut report = delivery_check(&self.config, &delivery, &delivery.content);
+                if let Some(reason) = report.blocking_reason() {
                     doc.ai_review_baseline = None;
                     doc.ai_panel.finish(TurnState::Failed(reason.clone()));
                     self.status =
-                        format!("{prefix}Pi 智能写作交付检查未通过，未生成提案：{reason}");
+                        format!("{prefix}Pi 智能写作交付检查未通过，未写入正文：{reason}");
                     return;
                 }
-                // 交付仍走 reviewed_draft（清理、文种规整、validator、版式估算）与本地复扫；
-                // 硬闸门通过后才装提案，用户接受时还会再过一遍 accept_ai_proposal。
-                let mut result = crate::draft_page::reviewed_draft(
+                // 规整（清理、文种、validator、版式估算）之后才真正写进正文：对规整后的
+                // 稿件再过一遍同样的检查，选区与公文引用都要按实际写入的文本成立。
+                let result = crate::draft_page::reviewed_draft(
                     &doc.draft,
                     &self.config,
                     &delivery.content,
                     false,
                 );
-                // 清理和文种规整也可能改变选区外文字，须对实际安装的稿件再过闸门。
-                let issues = crate::pi_agent::check_delivery(&DeliveryCheck {
-                    before: &delivery.before,
-                    base: &delivery.base,
-                    request: &delivery.request,
-                    content: &result.markdown,
-                    selection: delivery.selection,
-                    fact_sources: &delivery.fact_sources,
-                    vocabulary: &self.config.vocabulary,
-                });
-                if !issues.is_empty() {
-                    let reason = issues.join("；");
+                report.absorb(delivery_check(&self.config, &delivery, &result.markdown));
+                if let Some(reason) = report.blocking_reason() {
                     doc.ai_review_baseline = None;
                     doc.ai_panel.finish(TurnState::Failed(reason.clone()));
                     self.status = format!("{prefix}Pi 文稿规整后未通过检查：{reason}");
                     return;
                 }
-                let mut notes = crate::proofread::Lexicon::resolved(&self.config.proofread)
-                    .check(&result.markdown);
-                notes.extend(crate::proofread_rules::check_with_config(
-                    &doc.draft,
-                    &result.markdown,
-                    &self.config.proofread,
-                ));
-                result
-                    .warnings
-                    .extend(notes.into_iter().map(ReviewNote::from));
+                let advisories = report.advisories.clone();
                 let provenance = format!(
                     "Pi Durable 智能写作；{}；提交文件 {}；工作区保留在本机配置目录",
                     delivery.workspace_label, delivery.path
                 );
                 let elapsed = delivery.elapsed;
-                let mut sources = delivery.fact_sources.clone();
-                sources.push(delivery.request.clone());
-                sources.sort();
-                sources.dedup();
-                let proposal_sources = crate::ai_panel::pi_job::PiProposalSources {
-                    before: delivery.before.clone(),
-                    candidate: result.markdown.clone(),
-                    sources,
-                };
-                let summary = GongwenApp::install_ai_proposal(
-                    doc,
-                    delivery.before,
-                    result,
-                    "Pi 智能写作".into(),
-                    &self.config.vocabulary,
-                );
-                doc.ai_panel.pi_sources = Some(proposal_sources);
-                if let Some(turn) = doc.ai_panel.running_turn_mut() {
+                let Some(turn_id) = doc.ai_panel.running_turn_mut().map(|turn| {
                     turn.provenance = provenance;
                     turn.elapsed = Some(elapsed);
                     if let Some(run) = turn.pi_run.as_mut() {
@@ -172,22 +153,87 @@ impl GongwenApp {
                             "这是从上次运行已经落盘的成品回执恢复的，没有重新生成正文。".into(),
                         );
                     }
-                    for note in delivery.confirmed {
+                    for note in &delivery.confirmed {
                         turn.notes.push(format!("已确认：{note}"));
                     }
                     if !delivery.summary.trim().is_empty() {
                         turn.notes
                             .push(format!("提交说明：{}", delivery.summary.trim()));
                     }
+                    turn.id
+                }) else {
+                    doc.ai_review_baseline = None;
+                    self.status =
+                        format!("{prefix}Pi 交回了成品，但这一轮已经不在了，未写入正文。");
+                    return;
+                };
+                // 运行期间正文改过、稿件被发布 / 归档：正文与 AI 成品都不丢，
+                // 成品留在轮次里等用户显式取回，或按当前正文重做。
+                let conflict = doc.generated_markdown != delivery.before;
+                let run_id = doc
+                    .ai_panel
+                    .turns
+                    .iter()
+                    .find(|turn| turn.id == turn_id)
+                    .and_then(|turn| turn.pi_run.as_ref())
+                    .map(|run| run.run_id.clone())
+                    .unwrap_or_default();
+                let pending = crate::ai_panel::pi_write::PiPendingDelivery {
+                    run_id,
+                    markdown: result.markdown.clone(),
+                    advisories: advisories.clone(),
+                };
+                if let Some(turn) = doc.ai_panel.turn_mut(turn_id) {
+                    turn.pi_pending = Some(pending.clone());
                 }
                 doc.ai_review_baseline = None;
-                doc.ai_panel.finish(TurnState::Proposed(summary));
-                if let Some(proposal) = doc.ai_proposal.as_mut() {
-                    proposal.open = true;
+                if doc.read_only() {
+                    let reason =
+                        "这篇稿件已发布或归档，只读，未写入正文；成品留在这一轮里。".to_string();
+                    doc.ai_panel
+                        .park_pi_delivery(turn_id, pending, false, reason.clone());
+                    self.status = format!("{prefix}{reason}");
+                    return;
                 }
-                self.status = format!(
-                    "{prefix}Pi 智能写作已交出一份提案；接受前正文不变，请先核对关键事实变化。"
-                );
+                if conflict {
+                    let reason = "运行期间正文改过，未自动覆盖：AI 成品留在这一轮里，\
+                                  可点「取回 AI 成品」（写入后可撤销），或按当前正文重做。"
+                        .to_string();
+                    doc.ai_panel
+                        .park_pi_delivery(turn_id, pending, true, reason.clone());
+                    self.status = format!("{prefix}{reason}");
+                    return;
+                }
+                match crate::ai_panel::pi_write::commit(
+                    doc,
+                    self.manuscript_store.as_mut(),
+                    ctx,
+                    turn_id,
+                    result.markdown,
+                    advisories.clone(),
+                ) {
+                    Ok(()) => {
+                        // 校对与预览按新正文重算；事实提示挂在 warnings 与卡片上，不挡写入。
+                        self.draft_page_at(index).revalidate();
+                        let doc = &mut self.docs[index];
+                        for advisory in &advisories {
+                            doc.warnings
+                                .push(ReviewNote::from(format!("事实提示：{advisory}")));
+                        }
+                        self.status = if advisories.is_empty() {
+                            format!("{prefix}Pi 已把成品直接写进正文，可撤销。")
+                        } else {
+                            format!(
+                                "{prefix}Pi 已把成品直接写进正文（可撤销）；{} 条事实提示待核对。",
+                                advisories.len()
+                            )
+                        };
+                    }
+                    Err(reason) => {
+                        // `commit` 已把卡片退回「成品已保留」；正文没有被改。
+                        self.status = format!("{prefix}Pi 成品没有写进正文：{reason}");
+                    }
+                }
             }
         }
     }
@@ -236,8 +282,7 @@ mod pi_job_tests {
         }
     }
 
-    /// 停止或新任务之后，迟到的 Pi 结果不能覆盖当前稿件；当前结果只装提案，
-    /// 不直接写 `generated_markdown`。
+    /// 停止或新任务之后，迟到的 Pi 结果不能覆盖当前稿件；当前结果直接写进正文。
     #[test]
     fn a_late_pi_delivery_cannot_replace_a_newer_job() {
         let mut app = management_samples::fixture();
@@ -273,48 +318,50 @@ mod pi_job_tests {
                 "# 通知\n\n改后的正文。\n",
             ))))),
         );
-        let proposal = app.docs[0]
-            .ai_proposal
-            .as_ref()
-            .expect("当前结果应装成提案");
-        assert_eq!(proposal.before, before);
-        assert_eq!(proposal.result.markdown, "# 通知\n\n改后的正文。\n");
-        assert_eq!(app.docs[0].generated_markdown, before);
+        assert!(app.docs[0].ai_proposal.is_none(), "不再装提案");
+        assert_eq!(app.docs[0].generated_markdown, "# 通知\n\n改后的正文。\n");
         assert!(!app.docs[0].busy);
-        assert!(matches!(
-            app.docs[0].ai_panel.turns.last().map(|turn| &turn.state),
-            Some(TurnState::Proposed(_))
-        ));
-        let doc = &app.docs[0];
-        let sources = doc.ai_panel.pi_sources.as_ref().unwrap();
-        assert!(
-            sources
-                .for_document(doc)
-                .iter()
-                .any(|text| text == "改一下正文。")
-        );
-        assert!(
-            !sources
-                .for_document(doc)
-                .iter()
-                .any(|text| text.contains("改后的正文")),
-            "候选稿不能自行变成事实依据"
-        );
-        app.docs[0].generated_markdown.push_str("用户新改动");
-        let doc = &app.docs[0];
-        assert!(
-            doc.ai_panel
-                .pi_sources
-                .as_ref()
-                .unwrap()
-                .for_document(doc)
-                .is_empty()
-        );
+        let turn = app.docs[0].ai_panel.turns.last().unwrap();
+        assert_eq!(turn.state, TurnState::Accepted);
+        let write = turn.pi_write.as_ref().expect("要留下撤销记录");
+        assert_eq!(write.before, before);
+        assert_eq!(write.after, "# 通知\n\n改后的正文。\n");
     }
 
-    /// 来源检查不过时只有失败卡片，没有提案。
+    /// 技术 / 权限问题仍然拦下：正文不动，只有失败卡片。
     #[test]
-    fn a_failed_pi_delivery_installs_no_proposal() {
+    fn a_technical_blocker_keeps_the_document_untouched() {
+        let mut app = management_samples::fixture();
+        let before = "# 通知\n\n原文。\n";
+        app.docs[0].generated_markdown = before.into();
+        app.docs[0].job_seq = 3;
+        app.docs[0].busy = true;
+        app.docs[0].ai_panel.push_turn(
+            "智能写作（Pi 试用）".into(),
+            "改一下正文。".into(),
+            Vec::new(),
+            None,
+        );
+        let key = app.docs[0].key;
+        app.apply_doc_job(
+            key,
+            3,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Document(delivery(
+                before,
+                "# 通知\n\n见 work/终稿.md。\n",
+            ))))),
+        );
+        assert!(app.docs[0].ai_proposal.is_none());
+        assert_eq!(app.docs[0].generated_markdown, before);
+        assert!(matches!(
+            app.docs[0].ai_panel.turns.last().map(|turn| &turn.state),
+            Some(TurnState::Failed(_))
+        ));
+    }
+
+    /// 事实疑点（新日期 / 数字）不再拦写入：成品照常进正文，提示摆在卡片与审校里。
+    #[test]
+    fn fact_doubts_are_shown_but_do_not_block_the_write() {
         let mut app = management_samples::fixture();
         let before = "# 通知\n\n原文。\n";
         app.docs[0].generated_markdown = before.into();
@@ -335,12 +382,292 @@ mod pi_job_tests {
                 "# 通知\n\n新增2026年10月8日，共12项。\n",
             ))))),
         );
-        assert!(app.docs[0].ai_proposal.is_none());
+        assert_eq!(
+            app.docs[0].generated_markdown, "# 通知\n\n新增2026年10月8日，共12项。\n",
+            "事实疑点不能阻止写入"
+        );
+        let turn = app.docs[0].ai_panel.turns.last().unwrap();
+        assert_eq!(turn.state, TurnState::Accepted);
+        assert!(
+            turn.notes.iter().any(|note| note.contains("2026年10月8日")),
+            "提示要摆在卡片上：{:?}",
+            turn.notes
+        );
+        assert!(
+            app.docs[0]
+                .warnings
+                .iter()
+                .any(|note| note.message.contains("事实提示")),
+            "审校里也要看得到"
+        );
+    }
+
+    /// 运行期间改过正文：不自动覆盖，成品留在轮次里；显式取回后仍可撤销。
+    #[test]
+    fn edits_during_the_run_are_kept_until_the_user_takes_the_draft_back() {
+        let mut app = management_samples::fixture();
+        let before = "# 通知\n\n原文。\n";
+        app.docs[0].generated_markdown = before.into();
+        app.docs[0].job_seq = 3;
+        app.docs[0].busy = true;
+        app.docs[0].ai_panel.push_turn(
+            "智能写作（Pi 试用）".into(),
+            "改一下正文。".into(),
+            Vec::new(),
+            None,
+        );
+        let key = app.docs[0].key;
+        // 跑着的时候用户自己加了一句。
+        let edited = "# 通知\n\n原文。用户加的一句。\n";
+        app.docs[0].generated_markdown = edited.into();
+        app.apply_doc_job(
+            key,
+            3,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Document(delivery(
+                before,
+                "# 通知\n\n改后的正文。\n",
+            ))))),
+        );
+        assert_eq!(app.docs[0].generated_markdown, edited, "不能盖掉用户的改动");
+        let turn = app.docs[0].ai_panel.turns.last().unwrap();
+        assert_eq!(turn.state, TurnState::Conflict);
+        assert_eq!(
+            turn.pi_pending.as_ref().map(|p| p.markdown.as_str()),
+            Some("# 通知\n\n改后的正文。\n"),
+            "AI 成品也要留着"
+        );
+        let turn_id = turn.id;
+        // 显式取回：写进正文，撤销能退回用户当时的版本。
+        assert!(take_back(&mut app, turn_id), "取回要成功");
+        assert_eq!(app.docs[0].generated_markdown, "# 通知\n\n改后的正文。\n");
+        let turn = app.docs[0].ai_panel.turns.last().unwrap();
+        assert_eq!(turn.state, TurnState::Accepted);
+        assert_eq!(
+            turn.pi_write.as_ref().map(|w| w.before.as_str()),
+            Some(edited),
+            "撤销要退回用户改过的那一版"
+        );
+    }
+
+    /// 同一轮回执只能应用一次：已写过就不再重复盖正文。
+    #[test]
+    fn the_same_run_cannot_be_written_twice() {
+        let mut app = management_samples::fixture();
+        let before = "# 通知\n\n原文。\n";
+        app.docs[0].generated_markdown = before.into();
+        app.docs[0].job_seq = 3;
+        app.docs[0].busy = true;
+        let turn = waiting_turn(&mut app, 3);
+        app.docs[0].ai_panel.turn_mut(turn).unwrap().pi_run = Some(run_ref(before));
+        let key = app.docs[0].key;
+        app.apply_doc_job(
+            key,
+            3,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Document(delivery(
+                before,
+                "# 通知\n\n改后的正文。\n",
+            ))))),
+        );
+        assert_eq!(app.docs[0].generated_markdown, "# 通知\n\n改后的正文。\n");
+        // 同一份运行标识再交一次（例如重启后重放回执）：正文不再变。
+        app.docs[0].job_seq = 4;
+        app.docs[0].busy = true;
+        let again = app.docs[0].ai_panel.push_turn(
+            "智能写作（Pi · 恢复）".into(),
+            "接着改。".into(),
+            Vec::new(),
+            None,
+        );
+        let mut reference = run_ref("# 通知\n\n改后的正文。\n");
+        reference.run_id = "run-1".into();
+        app.docs[0].ai_panel.turn_mut(again).unwrap().pi_run = Some(reference);
+        app.apply_doc_job(
+            app.docs[0].key,
+            4,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Document(delivery(
+                "# 通知\n\n改后的正文。\n",
+                "# 通知\n\n另一版。\n",
+            ))))),
+        );
+        assert_eq!(
+            app.docs[0].generated_markdown, "# 通知\n\n改后的正文。\n",
+            "同一轮不能重复应用"
+        );
+    }
+
+    /// 有库稿件存不下撤销记录就不写正文：成品留在轮次里，可以稍后重试。
+    #[test]
+    fn a_library_document_keeps_the_draft_when_the_undo_record_cannot_be_saved() {
+        let mut app = management_samples::fixture();
+        let before = "# 通知\n\n原文。\n";
+        app.docs[0].generated_markdown = before.into();
+        app.docs[0].manuscript_id = Some(7);
+        app.docs[0].ai_panel.session.loaded_for = None;
+        app.docs[0].job_seq = 3;
+        app.docs[0].busy = true;
+        app.docs[0].ai_panel.push_turn(
+            "智能写作（Pi 试用）".into(),
+            "改一下正文。".into(),
+            Vec::new(),
+            None,
+        );
+        let key = app.docs[0].key;
+        app.apply_doc_job(
+            key,
+            3,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Document(delivery(
+                before,
+                "# 通知\n\n改后的正文。\n",
+            ))))),
+        );
+        assert_eq!(app.docs[0].generated_markdown, before, "没落盘就不换正文");
+        let turn = app.docs[0].ai_panel.turns.last().unwrap();
+        assert!(matches!(turn.state, TurnState::Failed(_)));
+        assert!(turn.pi_pending.is_some(), "成品要留着");
+        assert!(turn.pi_write.is_none());
+    }
+
+    /// 卡片撤销：整次退回原文；写入后又手工改过就拒绝，不冲掉新编辑。
+    #[test]
+    fn a_write_can_be_undone_by_the_card_but_not_over_later_edits() {
+        let mut app = management_samples::fixture();
+        let before = "# 通知\n\n原文。\n";
+        let after = "# 通知\n\n改后的正文。\n";
+        app.docs[0].generated_markdown = before.into();
+        app.docs[0].job_seq = 3;
+        app.docs[0].busy = true;
+        let turn_id = waiting_turn(&mut app, 3);
+        app.apply_doc_job(
+            app.docs[0].key,
+            3,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Document(delivery(before, after))))),
+        );
+        assert_eq!(app.docs[0].generated_markdown, after);
+        assert!(
+            crate::ai_panel::pi_write::undo(&mut app.docs[0], None, None, turn_id).is_ok(),
+            "卡片撤销要能整次退回"
+        );
         assert_eq!(app.docs[0].generated_markdown, before);
-        assert!(matches!(
-            app.docs[0].ai_panel.turns.last().map(|turn| &turn.state),
-            Some(TurnState::Failed(_))
-        ));
+        let turn = app.docs[0]
+            .ai_panel
+            .turns
+            .iter()
+            .find(|turn| turn.id == turn_id)
+            .unwrap();
+        assert_eq!(turn.state, TurnState::Accepted, "卡片留着，标成已撤销");
+        assert!(turn.pi_write.as_ref().is_some_and(|write| write.undone));
+        // 再撤一次：没有可撤的了。
+        assert!(crate::ai_panel::pi_write::undo(&mut app.docs[0], None, None, turn_id).is_err());
+        assert_eq!(app.docs[0].generated_markdown, before);
+
+        // 写入后用户又在正文里加了一句：卡片撤销不得整篇盖回去。
+        app.docs[0].generated_markdown = before.into();
+        app.docs[0].job_seq = 4;
+        app.docs[0].busy = true;
+        let second = waiting_turn(&mut app, 4);
+        app.apply_doc_job(
+            app.docs[0].key,
+            4,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Document(delivery(before, after))))),
+        );
+        let edited = format!("{after}用户后来加的一句。\n");
+        app.docs[0].generated_markdown = edited.clone();
+        let error = crate::ai_panel::pi_write::undo(&mut app.docs[0], None, None, second)
+            .expect_err("写入后改过就要拒绝");
+        assert!(error.contains("Ctrl+Z"), "{error}");
+        assert_eq!(app.docs[0].generated_markdown, edited);
+    }
+
+    /// 已入库稿件：撤销记录随会话落盘，重启后仍能找到修改前的原文。
+    #[test]
+    fn a_written_library_draft_keeps_its_before_text_across_restart() {
+        let mut app = management_samples::fixture();
+        let id = app
+            .manuscript_store
+            .as_mut()
+            .unwrap()
+            .create(
+                &crate::manuscript::NewManuscript {
+                    content_markdown: "".into(),
+                    status: crate::models::ManuscriptStatus::Draft,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let before = "# 通知\n\n原文。\n";
+        let after = "# 通知\n\n改后的正文。\n";
+        app.docs[0].generated_markdown = before.into();
+        app.docs[0].manuscript_id = Some(id);
+        app.docs[0].ai_panel.session.loaded_for = Some(id);
+        app.docs[0].job_seq = 3;
+        app.docs[0].busy = true;
+        let turn_id = waiting_turn(&mut app, 3);
+        app.apply_doc_job(
+            app.docs[0].key,
+            3,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Document(delivery(before, after))))),
+        );
+        assert_eq!(app.docs[0].generated_markdown, after);
+        assert_eq!(
+            app.docs[0]
+                .ai_panel
+                .turns
+                .iter()
+                .find(|turn| turn.id == turn_id)
+                .and_then(|turn| turn.pi_write.as_ref())
+                .map(|write| write.before.as_str()),
+            Some(before)
+        );
+        // 库里的会话已经带上撤销记录，换一个面板读回也一样。
+        let store = app.manuscript_store.as_mut().unwrap();
+        let records = store.list_ai_sessions(id).unwrap();
+        assert_eq!(records.len(), 1, "写入要把会话写进库");
+        let rows = store.load_ai_session_turns(&records[0].id).unwrap();
+        let mut panel = crate::ai_panel::AiPanel::default();
+        let (_proposal, problems) = panel.load_session(id, &records[0], rows, after);
+        assert!(problems.is_empty(), "{problems:?}");
+        let restored = panel.turns.last().unwrap();
+        assert_eq!(restored.state, TurnState::Accepted);
+        assert_eq!(
+            restored
+                .pi_write
+                .as_ref()
+                .map(|write| write.before.as_str()),
+            Some(before)
+        );
+    }
+
+    /// 正文写入不碰表单：标题与授权要素全部保持原样。
+    #[test]
+    fn a_pi_write_only_touches_the_markdown() {
+        let mut app = management_samples::fixture();
+        let before = "# 通知\n\n原文。\n";
+        app.docs[0].generated_markdown = before.into();
+        app.docs[0].draft.title_hint = "原题名".into();
+        app.docs[0].draft.profile.document_number = "12".into();
+        let draft = app.docs[0].draft.clone();
+        app.docs[0].job_seq = 3;
+        app.docs[0].busy = true;
+        app.docs[0].ai_panel.push_turn(
+            "智能写作（Pi 试用）".into(),
+            "改一下正文。".into(),
+            Vec::new(),
+            None,
+        );
+        app.apply_doc_job(
+            app.docs[0].key,
+            3,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Document(delivery(
+                before,
+                "# 另一个题名\n\n改后的正文。\n",
+            ))))),
+        );
+        assert_eq!(app.docs[0].draft.title_hint, draft.title_hint);
+        assert_eq!(
+            app.docs[0].draft.profile.document_number,
+            draft.profile.document_number
+        );
     }
 
     /// `finish_report` 只进侧栏：既没有提案，也不改正文。
@@ -451,6 +778,32 @@ mod pi_job_tests {
         }
     }
 
+    /// 测试用：走与侧栏「取回 AI 成品」同一条提交路径（不依赖绘制）。
+    fn take_back(app: &mut GongwenApp, turn_id: u64) -> bool {
+        let index = app.active_doc;
+        let Some(pending) = app.docs[index]
+            .ai_panel
+            .turns
+            .iter()
+            .find(|turn| turn.id == turn_id)
+            .and_then(|turn| turn.pi_pending.clone())
+        else {
+            return false;
+        };
+        let committed = crate::ai_panel::pi_write::commit(
+            &mut app.docs[index],
+            app.manuscript_store.as_mut(),
+            None,
+            turn_id,
+            pending.markdown,
+            pending.advisories.clone(),
+        );
+        if committed.is_ok() {
+            app.draft_page_at(index).revalidate();
+        }
+        committed.is_ok()
+    }
+
     fn waiting_turn(app: &mut GongwenApp, seq: u64) -> u64 {
         let turn = app.docs[0].ai_panel.push_turn(
             "智能写作（Pi）".into(),
@@ -462,6 +815,100 @@ mod pi_job_tests {
         item.state = TurnState::Waiting;
         item.usage_job_seq = Some(seq);
         turn
+    }
+
+    #[test]
+    fn a_real_session_save_failure_preserves_a_retryable_delivery() {
+        let mut app = management_samples::fixture();
+        let before = "# 通知\n\n原文。\n";
+        app.docs[0].generated_markdown = before.into();
+        // 内存库中不存在此稿件，触发实际外键写入失败，而非缺少 store 的前置拒绝。
+        app.docs[0].manuscript_id = Some(99999);
+        app.docs[0].ai_panel.adopt_session(99999);
+        app.docs[0].job_seq = 1;
+        app.docs[0].busy = true;
+        let turn_id = waiting_turn(&mut app, 1);
+        let key = app.docs[0].key;
+        app.apply_doc_job(
+            key,
+            1,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Document(delivery(
+                before,
+                "# 通知\n\n成品。\n",
+            ))))),
+        );
+        assert_eq!(app.docs[0].generated_markdown, before);
+        let turn = app.docs[0].ai_panel.turn_mut(turn_id).unwrap();
+        assert!(matches!(turn.state, TurnState::Failed(_)));
+        assert!(turn.pi_write.is_none());
+        assert_eq!(
+            turn.pi_pending.as_ref().unwrap().markdown,
+            "# 通知\n\n成品。\n"
+        );
+        app.docs[0].manuscript_id = None;
+        assert!(
+            take_back(&mut app, turn_id),
+            "保存问题解决后应能取回同一份成品"
+        );
+    }
+
+    #[test]
+    fn taking_back_a_delivery_never_writes_a_read_only_document() {
+        for status in [
+            crate::models::ManuscriptStatus::Published,
+            crate::models::ManuscriptStatus::Archived,
+        ] {
+            let mut app = management_samples::fixture();
+            app.docs[0].generated_markdown = "原文".into();
+            app.docs[0].manuscript_id = Some(1);
+            app.docs[0].record_status = status;
+            let turn_id = waiting_turn(&mut app, 1);
+            app.docs[0].ai_panel.park_pi_delivery(
+                turn_id,
+                crate::ai_panel::pi_write::PiPendingDelivery {
+                    run_id: String::new(),
+                    markdown: "成品".into(),
+                    advisories: Vec::new(),
+                },
+                false,
+                "只读".into(),
+            );
+            assert!(!take_back(&mut app, turn_id));
+            assert_eq!(app.docs[0].generated_markdown, "原文");
+            assert!(
+                app.docs[0]
+                    .ai_panel
+                    .turn_mut(turn_id)
+                    .unwrap()
+                    .pi_pending
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn a_manual_list_punctuation_edit_is_a_conflict_too() {
+        let mut app = management_samples::fixture();
+        let before = "# 通知\n\n1. 原文。\n";
+        let edited = "# 通知\n\n1、原文。\n";
+        app.docs[0].generated_markdown = edited.into();
+        app.docs[0].job_seq = 1;
+        app.docs[0].busy = true;
+        waiting_turn(&mut app, 1);
+        let key = app.docs[0].key;
+        app.apply_doc_job(
+            key,
+            1,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Document(delivery(
+                before,
+                "# 通知\n\n改后的正文。\n",
+            ))))),
+        );
+        assert_eq!(app.docs[0].generated_markdown, edited);
+        assert!(matches!(
+            app.docs[0].ai_panel.turns.last().unwrap().state,
+            TurnState::Conflict
+        ));
     }
 
     /// 准备完成事件绑定运行引用，但不提前清 busy；host 还没开始跑。

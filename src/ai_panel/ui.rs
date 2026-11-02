@@ -85,6 +85,14 @@ pub(super) enum CardAction {
     AdoptAllFields(u64),
     /// 撤销一条已采纳的要素建议（表单从那时起到现在没动过才允许）。
     UndoField(u64, usize),
+    /// Pi 成品已写进正文：整次撤销这次写入。
+    UndoPiWrite(u64),
+    /// 取回被保留的 Pi 成品（正文冲突 / 保存失败 / 只读时）。
+    ApplyPiPending(u64),
+    /// 丢弃保留的 Pi 成品，正文不变。
+    DiscardPiPending(u64),
+    /// 看这次 Pi 写入前后的差异（只读，不影响正文）。
+    PiDiff(u64),
 }
 
 impl DraftPage<'_> {
@@ -379,6 +387,7 @@ impl DraftPage<'_> {
                             ui,
                             turn,
                             &doc.draft,
+                            &doc.generated_markdown,
                             doc.ai_proposal.as_mut(),
                             checkpoints
                                 .get(&turn.id)
@@ -461,6 +470,13 @@ impl DraftPage<'_> {
             }
             Some(CardAction::AdoptAllFields(turn_id)) => self.adopt_all_field_suggestions(turn_id),
             Some(CardAction::UndoField(turn_id, row)) => self.undo_field_suggestion(turn_id, row),
+            Some(CardAction::UndoPiWrite(turn_id)) => self.undo_pi_write(ui.ctx(), turn_id),
+            Some(CardAction::ApplyPiPending(turn_id)) => self.apply_pi_pending(ui.ctx(), turn_id),
+            Some(CardAction::DiscardPiPending(turn_id)) => self.discard_pi_pending(turn_id),
+            Some(CardAction::PiDiff(turn_id)) => {
+                self.doc.ai_panel.workspace_view = Some(turn_id);
+                self.doc.ai_panel.workspace_compare = true;
+            }
             Some(CardAction::Answer(id)) => {
                 let state = self
                     .doc
@@ -489,6 +505,66 @@ impl DraftPage<'_> {
                 }
             }
             None => {}
+        }
+    }
+
+    /// 撤销一次 Pi 成品写入：正文回到写入前那一份。写入后用户又改过就不允许整篇盖回去。
+    fn undo_pi_write(&mut self, ctx: &egui::Context, turn_id: u64) {
+        let result = crate::ai_panel::pi_write::undo(
+            self.doc,
+            self.store.as_deref_mut(),
+            Some(ctx),
+            turn_id,
+        );
+        match result {
+            Ok(()) => {
+                self.revalidate();
+                *self.status = "已撤销本次 Pi 写入，正文恢复为写入前的版本。".into();
+            }
+            Err(reason) => *self.status = reason,
+        }
+    }
+
+    /// 取回被保留的 Pi 成品：显式覆盖当前正文，同样留下可撤销的写入记录。
+    fn apply_pi_pending(&mut self, ctx: &egui::Context, turn_id: u64) {
+        let Some(pending) = self
+            .doc
+            .ai_panel
+            .turns
+            .iter()
+            .find(|turn| turn.id == turn_id)
+            .and_then(|turn| turn.pi_pending.clone())
+        else {
+            *self.status = "这一轮没有保留的 AI 成品。".into();
+            return;
+        };
+        match crate::ai_panel::pi_write::commit(
+            self.doc,
+            self.store.as_deref_mut(),
+            Some(ctx),
+            turn_id,
+            pending.markdown,
+            pending.advisories.clone(),
+        ) {
+            Ok(()) => {
+                self.revalidate();
+                for advisory in &pending.advisories {
+                    self.doc
+                        .warnings
+                        .push(crate::models::ReviewNote::from(format!(
+                            "事实提示：{advisory}"
+                        )));
+                }
+                *self.status = "已取回 AI 成品并写进正文；卡片上还能撤销。".into();
+            }
+            Err(reason) => *self.status = reason,
+        }
+    }
+
+    /// 丢弃保留的 Pi 成品：正文不动。
+    fn discard_pi_pending(&mut self, turn_id: u64) {
+        if self.doc.ai_panel.discard_pi_pending(turn_id) {
+            *self.status = "已丢弃这一轮的 AI 成品，正文未改变。".into();
         }
     }
 
@@ -577,10 +653,19 @@ fn turn_card(
     ui: &mut egui::Ui,
     turn: &mut super::AiTurn,
     draft: &crate::models::DraftInput,
+    document: &str,
     proposal: Option<&mut AiProposal>,
     checkpoints: &[crate::manuscript::ai_checkpoints::CheckpointSummary],
     action: &mut Option<CardAction>,
 ) {
+    // Ctrl+Z / Ctrl+Y 走编辑器自己的历史，也同步卡片显示；运行消费记录始终保留。
+    if let Some(write) = turn.pi_write.as_mut() {
+        if document == write.before {
+            write.undone = true;
+        } else if document == write.after {
+            write.undone = false;
+        }
+    }
     let seconds = turn.elapsed().as_secs_f32();
     let chars = turn.content.chars().count();
     // 耗时先从右往左占位，状态与阶段提示在剩下的宽度里从左排。阶段提示（如「第 2 轮 · 查
@@ -652,12 +737,33 @@ fn turn_card(
                         theme::chip(ui, "问题清单", theme::accent(), theme::accent_soft());
                     }
                     TurnState::Accepted => {
-                        let text = if turn.excluded_hunks > 0 {
-                            format!("已写入正文（排除 {} 处）", turn.excluded_hunks)
+                        if let Some(write) = &turn.pi_write {
+                            if write.undone {
+                                theme::chip(
+                                    ui,
+                                    "已撤销本次写入",
+                                    theme::text_soft(),
+                                    theme::surface_sunk(),
+                                );
+                            } else {
+                                theme::chip(
+                                    ui,
+                                    "已写入正文",
+                                    theme::success(),
+                                    theme::success_soft(),
+                                );
+                            }
                         } else {
-                            "已写入正文".to_string()
-                        };
-                        theme::chip(ui, &text, theme::success(), theme::success_soft());
+                            let text = if turn.excluded_hunks > 0 {
+                                format!("已写入正文（排除 {} 处）", turn.excluded_hunks)
+                            } else {
+                                "已写入正文".to_string()
+                            };
+                            theme::chip(ui, &text, theme::success(), theme::success_soft());
+                        }
+                    }
+                    TurnState::Conflict => {
+                        theme::chip(ui, "与正文改动冲突", theme::warn(), theme::warn_soft());
                     }
                     TurnState::Discarded => {
                         theme::chip(ui, "已放弃", theme::text_soft(), theme::surface_sunk());
@@ -842,6 +948,16 @@ fn turn_card(
             }
             rerun_button(ui, turn, "重新做一遍", action);
         }
+        // Pi 成品已写进正文：只给可选的撤销与差异，不再出现「接受提案」。
+        TurnState::Accepted if turn.pi_write.is_some() => {
+            pi_write_actions(ui, turn, document, action);
+        }
+        TurnState::Conflict => {
+            ui.add_space(6.0);
+            ui.weak("这一轮没有改动正文：AI 成品留在这里，可显式取回或丢弃。");
+            pi_pending_actions(ui, turn, action);
+            rerun_button(ui, turn, "按当前正文重做", action);
+        }
         TurnState::Stopped => {
             ui.add_space(6.0);
             ui.weak(format!("已停止，生成了 {chars} 字；半截输出不能采用。"));
@@ -851,6 +967,8 @@ fn turn_card(
         TurnState::Failed(error) => {
             ui.add_space(6.0);
             ui.colored_label(theme::danger(), error);
+            // 交付检查过了但没能写进正文（如会话存不下）：成品还在这里，可以再取一次。
+            pi_pending_actions(ui, turn, action);
             resume_actions(ui, turn, checkpoints, action);
             rerun_button(ui, turn, "重试", action);
         }
@@ -882,6 +1000,82 @@ fn turn_card(
                 .color(theme::text_muted()),
         );
     }
+}
+
+/// Pi 成品已写进正文：可选的撤销与差异。
+///
+/// 写入之后用户又改过正文时不给撤销（整篇盖回去会冲掉这些编辑），并说明可以用
+/// 编辑器自己的 Ctrl+Z 逐次撤回。
+fn pi_write_actions(
+    ui: &mut egui::Ui,
+    turn: &super::AiTurn,
+    document: &str,
+    action: &mut Option<CardAction>,
+) {
+    let Some(write) = turn.pi_write.as_ref() else {
+        return;
+    };
+    ui.add_space(6.0);
+    if write.undone {
+        ui.weak("本次写入已撤销，正文已恢复为写入前的版本。");
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            let blocked = write.blocked_reason(document);
+            let button = ui.add_enabled(
+                blocked.is_none(),
+                theme::secondary_icon_button(theme::Icon::Undo, "撤销本次写入"),
+            );
+            let button = match blocked {
+                Some(reason) => button.on_disabled_hover_text(reason),
+                None => {
+                    button.on_hover_text("把正文整篇退回这次 Pi 写入之前；编辑器里按 Ctrl+Z 也可以")
+                }
+            };
+            if button.clicked() {
+                *action = Some(CardAction::UndoPiWrite(turn.id));
+            }
+            if ui
+                .add(theme::secondary_icon_button(
+                    theme::Icon::Compare,
+                    "查看差异",
+                ))
+                .clicked()
+            {
+                *action = Some(CardAction::PiDiff(turn.id));
+            }
+        });
+    }
+}
+
+/// 交付检查过了、但没能写进正文时保留的成品：取回（同样可撤销）或丢弃。
+fn pi_pending_actions(ui: &mut egui::Ui, turn: &super::AiTurn, action: &mut Option<CardAction>) {
+    if turn.pi_pending.is_none() {
+        return;
+    }
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        if theme::primary_icon_button(ui, theme::Icon::SquareCheck, "取回 AI 成品")
+            .on_hover_text("写进当前正文，并留下可撤销的记录；当前正文会先被保存为撤销版本")
+            .clicked()
+        {
+            *action = Some(CardAction::ApplyPiPending(turn.id));
+        }
+        if ui
+            .add(theme::secondary_icon_button(theme::Icon::Trash, "丢弃成品"))
+            .clicked()
+        {
+            *action = Some(CardAction::DiscardPiPending(turn.id));
+        }
+        if ui
+            .add(theme::secondary_icon_button(
+                theme::Icon::Compare,
+                "查看成品",
+            ))
+            .clicked()
+        {
+            *action = Some(CardAction::Workspace(turn.id));
+        }
+    });
 }
 
 /// 阶段提示：一行放不下就截断，悬停看全文。

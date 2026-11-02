@@ -498,7 +498,9 @@ impl GongwenApp {
                         }
                     }
                 }
-                WorkerResult::Doc { key, seq, job } => self.apply_doc_job(key, seq, job),
+                WorkerResult::Doc { key, seq, job } => {
+                    self.apply_doc_job_with(Some(ctx), key, seq, job)
+                }
                 WorkerResult::Redline {
                     key,
                     base,
@@ -1557,9 +1559,24 @@ impl GongwenApp {
         }
     }
 
+    /// 后台任务回投（测试用：不带 `egui::Context`，Pi 成品直接换文本、不碰编辑器撤销栈）。
+    #[cfg(test)]
+    pub(crate) fn apply_doc_job(&mut self, key: DocKey, seq: u64, job: DocJob) {
+        self.apply_doc_job_with(None, key, seq, job);
+    }
+
     /// 后台任务回投。稿件可能已经关闭，或者同一篇又发起了新任务——
     /// 两种情况下这份结果都已作废，直接丢掉，绝不能落到别的稿件上。
-    pub(crate) fn apply_doc_job(&mut self, key: DocKey, seq: u64, job: DocJob) {
+    ///
+    /// 额外带上这一帧的 `egui::Context`：Pi 成品直接写入正文时，只有活动标签
+    /// 才能动共用 `editor_id` 的撤销栈，需要它才能把一次写入记成可撤销的一步。
+    pub(crate) fn apply_doc_job_with(
+        &mut self,
+        ctx: Option<&egui::Context>,
+        key: DocKey,
+        seq: u64,
+        job: DocJob,
+    ) {
         let Some(index) = self.docs.iter().position(|doc| doc.key == key) else {
             return;
         };
@@ -1744,7 +1761,7 @@ impl GongwenApp {
                 ack.confirm(Ok(()));
                 self.status = "Pi 运行引用已保存，正在启动 host…".into();
             }
-            DocJob::PiDone(result) => self.apply_pi_done(index, &prefix, *result),
+            DocJob::PiDone(result) => self.apply_pi_done(index, &prefix, ctx, *result),
             DocJob::PiQuestions(batch) => {
                 let bridge = self.docs[index].ai_panel.pi_bridge.clone();
                 match bridge {

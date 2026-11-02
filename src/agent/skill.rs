@@ -722,6 +722,7 @@ pub(crate) fn builtin_research_draft() -> Skill {
 }
 
 /// 内置技能的原文（技能页「复制为我的技能」、编辑器显示用）。
+#[cfg(test)]
 pub(crate) fn builtin_text(id: &str) -> Option<&'static str> {
     BUILTIN
         .iter()

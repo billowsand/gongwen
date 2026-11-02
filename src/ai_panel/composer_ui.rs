@@ -69,6 +69,7 @@ impl DraftPage<'_> {
     pub(super) fn ai_composer_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
         self.commit_prompt_ui(ui);
+        self.doc.ai_panel.ensure_pi_skills();
         let ctx = ui.ctx().clone();
         let running = self.doc.ai_panel.running();
         let selection_now = crate::draft_page::editor_selection(&ctx, &self.doc.generated_markdown)
@@ -283,6 +284,7 @@ impl DraftPage<'_> {
         actions: &mut BarActions,
     ) {
         let has_proposal = self.doc.ai_proposal.is_some();
+        let catalog = self.doc.ai_panel.pi_skills.clone().unwrap_or_default();
         let AiPanel { composer, .. } = &mut self.doc.ai_panel;
         ui.horizontal_top(|ui| {
             let spacing = ui.spacing().item_spacing.x;
@@ -346,18 +348,36 @@ impl DraftPage<'_> {
                                 ui.weak("事实材料可作为依据；样稿与范文只参考写法。知识库由 Pi 按需检索。");
                             });
 
-                            let label = composer.pi_skill.as_deref()
-                                .map_or("Pi · 自动".to_string(), |name| format!("Pi · {}", crate::pi_agent::pi_skills::label(name)));
+                            let label = composer.pi_skill.as_deref().map_or_else(
+                                || "Pi · 自动".to_string(),
+                                |name| {
+                                    let suffix = catalog.get(name).map_or(
+                                        "（不存在）",
+                                        |entry| {
+                                            if entry.loadable() {
+                                                ""
+                                            } else {
+                                                "（不可用）"
+                                            }
+                                        },
+                                    );
+                                    format!("Pi · {}{suffix}", catalog.label_for(name))
+                                },
+                            );
                             let skill = ui.add(pill(&label, composer.pi_skill.is_some()))
                                 .on_hover_text("发送只使用 Pi；自动按任务选择技能，知识库由 Pi 按需检索");
                             egui::Popup::menu(&skill).show(|ui| {
                                 if ui.add(theme::menu_selectable_item(composer.pi_skill.is_none(), "自动")).clicked() {
                                     composer.pi_skill = None;
                                 }
-                                for name in crate::pi_agent::pi_skills::names() {
-                                    if ui.add(theme::menu_selectable_item(composer.pi_skill.as_deref() == Some(name), crate::pi_agent::pi_skills::label(name))).clicked() {
-                                        composer.pi_skill = Some(name.to_string());
+                                for entry in catalog.enabled() {
+                                    if ui.add(theme::menu_selectable_item(composer.pi_skill.as_deref() == Some(entry.name.as_str()), &entry.label)).on_hover_text(&entry.description).clicked() {
+                                        composer.pi_skill = Some(entry.name.clone());
                                     }
+                                }
+                                let enabled = catalog.enabled();
+                                if enabled.is_empty() {
+                                    ui.weak("没有启用的 Pi 技能，先到「AI 管理 → 技能」里启用。");
                                 }
                             });
 
@@ -467,7 +487,13 @@ impl DraftPage<'_> {
     fn popup_rows(&self, trigger: &Trigger) -> Vec<Row> {
         let composer = &self.doc.ai_panel.composer;
         match trigger.kind {
-            TriggerKind::Skill => pi_skill_rows(&trigger.query),
+            TriggerKind::Skill => self
+                .doc
+                .ai_panel
+                .pi_skills
+                .as_ref()
+                .map(|catalog| pi_skill_rows(&trigger.query, catalog))
+                .unwrap_or_default(),
             TriggerKind::Article => {
                 let catalog = composer.popup.catalog.as_deref().unwrap_or_default();
                 let order =
@@ -1030,20 +1056,20 @@ fn popup_row(ui: &mut egui::Ui, row: &Row, highlighted: bool) -> egui::Response 
 }
 
 /// 只列出 Pi 标准技能，不读取旧流程技能目录。
-fn pi_skill_rows(query: &str) -> Vec<Row> {
-    let skills = crate::pi_agent::pi_skills::SKILLS;
-    mention::rank(query, skills, |(name, _)| {
-        (crate::pi_agent::pi_skills::label(name), name)
+fn pi_skill_rows(query: &str, catalog: &crate::pi_agent::pi_skills::Catalog) -> Vec<Row> {
+    let skills = catalog.enabled();
+    mention::rank(query, &skills, |entry| {
+        (entry.label.as_str(), entry.name.as_str())
     })
     .into_iter()
     .map(|index| {
-        let (name, content) = skills[index];
+        let entry = skills[index];
         Row {
-            title: crate::pi_agent::pi_skills::label(name).to_string(),
-            detail: crate::pi_agent::pi_skills::describe(content).to_string(),
+            title: entry.label.clone(),
+            detail: entry.description.clone(),
             group: None,
             dim: false,
-            pick: Pick::Skill(name.to_string()),
+            pick: Pick::Skill(entry.name.clone()),
         }
     })
     .collect()

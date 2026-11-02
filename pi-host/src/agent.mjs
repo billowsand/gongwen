@@ -26,7 +26,7 @@ import {
   writeDocumentReceipt,
   writeReportReceipt,
 } from "./delivery.mjs";
-import { REPORT_TOOL_NAME, SUBMIT_TOOL_NAME, systemPrompt, userPrompt } from "./prompt.mjs";
+import { REPORT_TOOL_NAME, SUBMIT_TOOL_NAME, loadSkillIndex, systemPrompt, userPrompt } from "./prompt.mjs";
 
 const PROVIDER_ID = "gongwen";
 const CANDIDATE_INTERVAL_MS = 400;
@@ -394,7 +394,12 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       agent: {
         model: { provider: selectedModel.provider, modelId: selectedModel.id },
         thinkingLevel: config.model.reasoning ? (config.model.thinkingLevel ?? "high") : "off",
-        instructions: systemPrompt(config.workspace, config.task, config.recovery),
+        instructions: systemPrompt(
+          config.workspace,
+          config.task,
+          config.recovery,
+          loadSkillIndex(config.workspace),
+        ),
         cwd: config.workspace.root,
       },
     });

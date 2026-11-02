@@ -2,25 +2,100 @@
 //!
 //! 领域规范来自随包的 `skills/gongwen-markdown/`；本文件只负责“怎么干活、什么不能干、
 //! 怎么交付”，不复制整套语法文档，避免长期分叉。技能是指导，权限与交付关卡在程序里。
+//! 技能清单不再写死五份：每轮从工作区的 `input/skills.json` 读取本轮快照，读不到才退回
+//! 扫描 `skills/pi-skills/`（兼容没有索引的旧工作区）。
+
+import fs from "node:fs";
+import path from "node:path";
+import { sanitizeShort } from "./protocol.mjs";
 
 export const SUBMIT_TOOL_NAME = "submit_document";
 export const REPORT_TOOL_NAME = "finish_report";
 
-/** 五个标准技能的路径与简介（没有目录列表工具，这里直接给出索引）。 */
-export const SKILL_INDEX = [
-  ["gongwen-draft", "按材料起草一份完整公文"],
-  ["gongwen-revise", "按用户要求修改现稿，保护无关内容"],
-  ["gongwen-review", "审核正文并列出问题，需要改稿时再交修订稿"],
-  ["gongwen-imitate", "学习样稿的写法，不搬用其事实"],
-  ["gongwen-research", "检索资料、分节论证、整合研究报告"],
-];
+const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const MAX_SKILL_INDEX_BYTES = 512 * 1024;
+const MAX_SKILL_DESCRIPTION = 500;
 
-function skillBlock(task) {
-  if (task.skill) {
-    return `本轮指定技能：${task.skill}。开始前必须先读 skills/pi-skills/${task.skill}/SKILL.md，按它的步骤做。`;
+/**
+ * 本轮技能索引。优先读 Rust 写好的 `input/skills.json`；旧工作区没有索引时，
+ * 只从该工作区自己的 `skills/pi-skills/` 目录扫描，不读取全局配置。
+ */
+export function loadSkillIndex(workspace) {
+  const root = typeof workspace?.root === "string" ? workspace.root : "";
+  if (!root) return [];
+  const indexFile = path.join(root, "input", "skills.json");
+  try {
+    const stat = fs.statSync(indexFile);
+    if (!stat.isFile() || stat.size > MAX_SKILL_INDEX_BYTES) throw new Error("index too large");
+    const parsed = JSON.parse(fs.readFileSync(indexFile, "utf8"));
+    return normalizeSkillIndex(parsed?.skills);
+  } catch (error) {
+    if (error?.code === "ENOENT") return scanSkillDirectory(workspace);
+    throw new Error(`读取本轮技能索引失败：${error.message}`);
   }
-  return `本轮没有指定技能，从下面挑一个最接近的，开始前先读它的 SKILL.md：
-${SKILL_INDEX.map(([name, description]) => `- ${name}：${description}（skills/pi-skills/${name}/SKILL.md）`).join("\n")}`;
+}
+
+function normalizeSkillIndex(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const name = typeof item?.name === "string" ? item.name : "";
+    if (!SKILL_NAME.test(name)) return [];
+    return [
+      {
+        name,
+        displayName: sanitizeShort(item?.displayName ?? name, 80),
+        description: sanitizeShort(item?.description ?? "", MAX_SKILL_DESCRIPTION),
+      },
+    ];
+  });
+}
+
+function scanSkillDirectory(workspace) {
+  const root = typeof workspace?.root === "string" ? workspace.root : "";
+  const relative = typeof workspace?.piSkills === "string" ? workspace.piSkills : "skills/pi-skills";
+  if (!root) return [];
+  const dir = path.resolve(root, relative);
+  const within = path.relative(root, dir);
+  if (within.startsWith("..") || path.isAbsolute(within)) return [];
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.isDirectory() && SKILL_NAME.test(entry.name))
+    .map((entry) => ({
+      name: entry.name,
+      displayName: entry.name,
+      description: sanitizeShort(frontmatterDescription(dir, entry.name), MAX_SKILL_DESCRIPTION),
+    }));
+}
+
+function frontmatterDescription(dir, name) {
+  try {
+    const file = path.join(dir, name, "SKILL.md");
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size > 64 * 1024) return "";
+    const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(fs.readFileSync(file, "utf8"));
+    if (!match) return "";
+    const line = match[1].split(/\r?\n/).find((text) => /^description\s*:/.test(text));
+    return line ? line.replace(/^description\s*:\s*/, "").replace(/^["']|["']$/g, "").trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+function skillBlock(task, piSkills, skillIndex) {
+  const index = Array.isArray(skillIndex) ? skillIndex : [];
+  if (task.skill) {
+    return `本轮指定技能：${task.skill}。开始前必须先读 ${piSkills}/${task.skill}/SKILL.md，按它的步骤做。`;
+  }
+  if (index.length === 0) {
+    return "本轮技能索引为空。不要假设还有别的技能，按用户要求、当前正文与材料工作。";
+  }
+  return `本轮没有指定技能。先看 input/skills.json 的本轮技能索引，从下面挑一个最接近的，开始前先读它的 SKILL.md：
+${index.map((skill) => `- ${skill.name}（${skill.displayName}）：${skill.description}（${piSkills}/${skill.name}/SKILL.md）`).join("\n")}`;
 }
 
 function materialBlock(task) {
@@ -43,13 +118,14 @@ function selectionBlock(task) {
 <<<选区
 ${task.selection.text}
 选区>>>
-选区以外的正文必须逐字保持原样；程序会确定性比较，改了就拒绝提案。`;
+选区以外的正文必须逐字保持原样；程序会确定性比较，改了就拒绝写入成品。`;
 }
 
-/** 组装系统指令。`workspace` 是 init 里的相对路径约定。 */
-export function systemPrompt(workspace, task = {}, recovery = undefined) {
+/** 组装系统指令。`workspace` 是 init 里的相对路径约定，`skillIndex` 是本轮快照索引。 */
+export function systemPrompt(workspace, task = {}, recovery = undefined, skillIndex = []) {
   const skills = workspace.skills || "skills/gongwen-markdown";
   const piSkills = workspace.piSkills || "skills/pi-skills";
+  const index = Array.isArray(skillIndex) ? skillIndex : [];
   const resumeBlock = recovery?.resume
     ? `
 
@@ -67,11 +143,11 @@ export function systemPrompt(workspace, task = {}, recovery = undefined) {
 - input/request.md：用户本轮的要求、技能索引与材料索引，只读，是事实来源。
 - input/materials/：材料全文与 index.json，只读。角色由用户决定，样稿不能当事实。
 - ${skills}/：公文 Markdown 语法、文种规则、模板与写作风格，只读。开始写之前先读 SKILL.md，再按需要读 references/ 下的文件。
-- ${piSkills}/：五份标准写作技能（gongwen-draft / revise / review / imitate / research），只读。它们是自然语言步骤，不是流程脚本。
+- ${piSkills}/：本轮技能快照（${index.length} 份），索引与文件哈希在 input/skills.json，只读。它们是自然语言步骤，不是流程脚本。
 - work/：你的工作文件，可读写。可以拆提纲、摘录、分节稿、核对记录、多个方案，自行决定怎么合并。
 - 不要读写工作区以外的任何路径。文件工具只允许读 input、skills、work，只允许写 work。
 
-${skillBlock(task)}
+${skillBlock(task, piSkills, index)}
 
 ## 可用工具
 
@@ -86,9 +162,9 @@ ${skillBlock(task)}
 
 ## 三条红线（必须遵守）
 
-1. 正式稿只能由用户在应用里合并。你不能修改正式正文，也不能把“已经写入正文”当作结果；你只能写 work/ 下的文件，并调用 ${SUBMIT_TOOL_NAME} 交出成品。
+1. 你写的是工作稿，不是正式稿。提交成功后由程序直接写进编辑正文，并保留修改前的版本与撤销；用户随时可以整次撤销。
 2. 公文要素分两级。密级与保密期限、文号（年份与数字）、份号、签发人、成文日期、版记印发机关与印发日期属于授权类：你只读不写、不编造、不给建议、不出题。标题、主送、抄送、附件说明、发文单位、落款单位、呈报领导、承办单位、联系人、联系电话属于描述类：需要时只能取自 input/ 里的材料或 doc_elements 已填的值，不能凭空补。
-3. 确定性闸门既是你的自查工具也是关卡。程序会在提交后强制检查要素、公文引用、关键事实和词表；不要为了通过而放宽或绕过规则。检查不过时按提示修订后重新提交。
+3. 确定性闸门既是你的自查工具也是关卡。程序在提交后会强制检查：技术问题（空稿、选区外被改、公文引用被删改、哈希不符）会拒绝交付；事实来源疑点（数字、日期、单位在本轮依据里找不到）只作为提示显示给用户，不会阻止写入。不要为了「解锁交付」反复重交 —— 先把稿子写对，有依据就按依据写，没依据就写成「【待核实：…】」或干脆不写。
 
 ## 写作要求
 
@@ -101,9 +177,10 @@ ${skillBlock(task)}
 
 ## 交付
 
-- 生成或修改正文：把完整 Markdown 写入 work/ 下的一个文件，调用 ${SUBMIT_TOOL_NAME}({ path, summary })。summary 用一句话说明改了什么、依据了哪些材料。
+- 生成或修改正文：把完整 Markdown 写入 work/ 下的一个文件，调用 ${SUBMIT_TOOL_NAME}({ path, summary })。summary 用一句话说明改了什么、依据了哪些材料。提交成功后程序会把成品直接写进编辑正文（保留修改前的版本，用户可撤销）；不要假设用户会再手动接受一次。
 - 只审核或只找资料、不产生新正文：调用 ${REPORT_TOOL_NAME}({ summary, items: [{ title, detail, severity }] })。清单只进侧栏，不替换正文。
 - 二者只能选一个。提交内容在调用时固定；提交之后再改文件不会改变已经交出的成品。同一轮重复提交以第一次为准。
+- 提交前用 check_document 自查一遍：技术问题（选区外被改、公文引用被删改、留了工作区路径）会被拒绝，必须先改；事实疑点只会在界面上提示，不必再为它重交。
 - 不要把正文粘贴在聊天回复里当作交付，也不要声称已经提交而没有调用工具。没有提交就是没有完成。${resumeBlock}`;
 }
 

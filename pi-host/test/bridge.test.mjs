@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import {
   DOMAIN_TOOLS,
@@ -6,7 +9,13 @@ import {
   createDomainTools,
   createToolBridge,
 } from "../src/bridge.mjs";
-import { REPORT_TOOL_NAME, SUBMIT_TOOL_NAME, systemPrompt, userPrompt } from "../src/prompt.mjs";
+import {
+  REPORT_TOOL_NAME,
+  SUBMIT_TOOL_NAME,
+  loadSkillIndex,
+  systemPrompt,
+  userPrompt,
+} from "../src/prompt.mjs";
 import { validateInit, PROTOCOL_VERSION } from "../src/protocol.mjs";
 
 function bridgeWith(events) {
@@ -184,6 +193,75 @@ test("prompt states material roles, selection protection and the two delivery pa
   assert.match(user, /incoming_letter/);
   assert.match(user, /style_sample/);
   assert.match(user, /选区以外的正文必须逐字保持原样/);
+});
+
+test("auto skill prompt follows the round index instead of a hardcoded five", () => {
+  const workspace = { skills: "skills/gongwen-markdown", piSkills: "skills/pi-skills" };
+  const index = [
+    { name: "custom-a", displayName: "自定义甲", description: "只做甲事" },
+    { name: "custom-b", displayName: "自定义乙", description: "只做乙事" },
+  ];
+  const text = systemPrompt(workspace, { materials: [] }, undefined, index);
+  assert.match(text, /custom-a/);
+  assert.match(text, /自定义甲/);
+  assert.match(text, /只做甲事/);
+  assert.doesNotMatch(text, /gongwen-imitate/, "不能再写死五份技能");
+  assert.match(text, /本轮技能快照（2 份）/);
+  const empty = systemPrompt(workspace, { materials: [] }, undefined, []);
+  assert.doesNotMatch(empty, /gongwen-draft/);
+  assert.match(empty, /技能索引为空/);
+  const selected = systemPrompt(workspace, { skill: "custom-a" }, undefined, index);
+  assert.match(selected, /skills\/pi-skills\/custom-a\/SKILL.md/);
+});
+
+test("skill index is read from the workspace, not from a global directory", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gongwen-pi-skills-"));
+  try {
+    fs.mkdirSync(path.join(root, "input"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "input", "skills.json"),
+      JSON.stringify({
+        protocol: 1,
+        skills: [
+          { name: "mine", displayName: "我的", description: "索引里的说明" },
+          { name: "../escape", displayName: "越界", description: "应该丢掉" },
+        ],
+      }),
+    );
+    const index = loadSkillIndex({ root, piSkills: "skills/pi-skills" });
+    assert.deepEqual(index.map((skill) => skill.name), ["mine"]);
+    assert.equal(index[0].description, "索引里的说明");
+    // 旧工作区没有 skills.json：只扫描自己的技能目录。
+    fs.rmSync(path.join(root, "input", "skills.json"));
+    const dir = path.join(root, "skills", "pi-skills", "legacy-skill");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "SKILL.md"),
+      "---\nname: legacy-skill\ndescription: 旧工作区的技能\n---\n正文\n",
+    );
+    const fallback = loadSkillIndex({ root, piSkills: "skills/pi-skills" });
+    assert.deepEqual(fallback.map((skill) => skill.name), ["legacy-skill"]);
+    assert.equal(fallback[0].description, "旧工作区的技能");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a larger valid skill index is never silently truncated", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gongwen-pi-many-skills-"));
+  try {
+    fs.mkdirSync(path.join(root, "input"), { recursive: true });
+    const skills = Array.from({ length: 65 }, (_, i) => ({ name: `skill-${i}`, description: `说明 ${i}` }));
+    const file = path.join(root, "input", "skills.json");
+    fs.writeFileSync(file, JSON.stringify({ protocol: 1, skills }));
+    const index = loadSkillIndex({ root });
+    assert.equal(index.length, 65);
+    assert.match(systemPrompt({ root }, {}, undefined, index), /skill-64/);
+    fs.writeFileSync(file, "损坏索引");
+    assert.throws(() => loadSkillIndex({ root }), /读取本轮技能索引失败/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("init carries skill, selection and material roles without trusting user paths", () => {

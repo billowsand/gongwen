@@ -7,7 +7,7 @@
 //!     input/request.md     本轮要求 + 技能索引 + 材料索引（只读）
 //!     input/materials/     材料快照与 index.json（只读）
 //!     skills/gongwen-markdown/  随包语法资料（只读）
-//!     skills/pi-skills/    5 份标准写作技能（只读）
+//!     skills/pi-skills/    本轮启用的标准写作技能完整快照（只读）
 //!     work/                模型的工作文件
 //!     resources/           预留只读资源
 //!   pi/session.sqlite      Durable 数据库，位于模型可读写区域之外
@@ -21,6 +21,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::materials::{self, PiMaterialInput, PiMaterialMeta};
+use super::skills::{Catalog, SkillSnapshot};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PiWorkspace {
@@ -59,10 +60,11 @@ impl PiWorkspace {
     pub(crate) fn prepare(
         base: &Path,
         doc_key: u64,
-        _seq: u64,
         current: &str,
         request: &str,
         materials: &[PiMaterialInput],
+        catalog: &Catalog,
+        selected: Option<&str>,
     ) -> Result<(Self, Vec<PiMaterialMeta>), String> {
         let doc_dir = base.join(format!("doc-{doc_key}"));
         std::fs::create_dir_all(&doc_dir)
@@ -78,10 +80,12 @@ impl PiWorkspace {
             })?;
         }
         write_text(&root.join("input").join("current.md"), current)?;
+        // 先按同一份内存快照落盘技能与索引，再用同一份快照写要求文件。
+        let skills = SkillSnapshot::build(catalog, selected)?;
+        skills.write_to(&root)?;
         let mut request_file = vec![request.trim().to_string()];
         request_file.push(String::new());
-        request_file.push("## 技能".into());
-        request_file.push(super::skills::index_text());
+        request_file.push(skills.request_block());
         request_file.push(String::new());
         request_file.push("## 材料".into());
         let metas = materials::write_all(&root, materials)?;
@@ -92,7 +96,6 @@ impl PiWorkspace {
         )?;
         crate::skill_pack::write_directory(&root.join("skills"))
             .map_err(|error| format!("写不出随包技能：{error:#}"))?;
-        super::skills::install(&root.join("skills"))?;
         let state_dir = run_dir.join("pi");
         std::fs::create_dir_all(&state_dir)
             .map_err(|error| format!("建不了 Pi 状态目录（{}）：{error}", state_dir.display()))?;
@@ -188,9 +191,19 @@ mod tests {
 
     #[test]
     fn candidate_is_delivered_separately_from_the_formal_snapshot() {
+        let config = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(config.path().to_path_buf()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::storage::set_test_config_dir(None);
+            }
+        }
+        let _reset = Reset;
         let dir = tempfile::tempdir().unwrap();
+        let catalog = super::super::skills::load_catalog();
         let (workspace, _) =
-            PiWorkspace::prepare(dir.path(), 1, 1, "正式正文", "继续改", &[]).unwrap();
+            PiWorkspace::prepare(dir.path(), 1, "正式正文", "继续改", &[], &catalog, None).unwrap();
         workspace.write_candidate("尚未采纳的修改").unwrap();
         assert_eq!(
             std::fs::read_to_string(workspace.root.join("input/current.md")).unwrap(),
@@ -202,5 +215,91 @@ mod tests {
         );
         let request = std::fs::read_to_string(workspace.root.join("input/request.md")).unwrap();
         assert!(request.contains("不是事实来源"));
+    }
+
+    #[test]
+    fn a_new_task_freezes_the_enabled_skill_catalog_into_its_workspace() {
+        let config = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(config.path().to_path_buf()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::storage::set_test_config_dir(None);
+            }
+        }
+        let _reset = Reset;
+        use super::super::skills::store as skills;
+        skills::create("custom-skill", Some("自定义技能")).unwrap();
+        skills::save_text("custom-skill", "references/依据.md", "辅助依据").unwrap();
+        skills::set_enabled("gongwen-draft", false).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = super::super::skills::load_catalog();
+        let (workspace, metas) = PiWorkspace::prepare(
+            dir.path(),
+            1,
+            "正式正文",
+            "按自定义技能写",
+            &[],
+            &catalog,
+            Some("custom-skill"),
+        )
+        .unwrap();
+        let request = workspace.read_request().unwrap();
+        assert!(request.contains("custom-skill"), "{request}");
+        assert!(request.contains("自定义技能"), "{request}");
+        assert!(
+            !request.contains("gongwen-draft"),
+            "停用技能不进本轮：{request}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                workspace
+                    .root
+                    .join("skills/pi-skills/custom-skill/references/依据.md")
+            )
+            .unwrap(),
+            "辅助依据"
+        );
+        let index = std::fs::read_to_string(workspace.root.join("input/skills.json")).unwrap();
+        assert!(index.contains("custom-skill"), "{index}");
+        assert!(index.contains("sha256"), "{index}");
+        assert!(!index.contains("gongwen-draft"), "{index}");
+        // 全局技能改动不会改已经准备好的工作区。
+        skills::save_text(
+            "custom-skill",
+            "SKILL.md",
+            "---\nname: custom-skill\ndescription: 新版本\n---\n新版正文",
+        )
+        .unwrap();
+        skills::set_enabled("custom-skill", false).unwrap();
+        let frozen = std::fs::read_to_string(
+            workspace
+                .root
+                .join("skills/pi-skills/custom-skill/SKILL.md"),
+        )
+        .unwrap();
+        assert!(frozen.contains("一句话写清"), "{frozen}");
+        std::fs::write(&workspace.state, b"sqlite").unwrap();
+        let record = super::super::PiRunRecord::start(
+            "run-frozen".into(),
+            "request-frozen".into(),
+            &workspace,
+            "正式正文",
+            "正式正文",
+            "正式正文",
+            &workspace.read_request().unwrap(),
+            None,
+            "按自定义技能写",
+            "通知",
+            "2026-11-02",
+            Some("custom-skill"),
+            None,
+            metas,
+            "测试服务商",
+            "测试模型",
+        );
+        record.write(&workspace).unwrap();
+        // 恢复只认原快照，即使全局技能已经停用。
+        super::super::recovery::check_workspace_files(&workspace, &record).unwrap();
     }
 }

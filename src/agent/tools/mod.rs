@@ -312,18 +312,6 @@ pub(crate) fn find(id: &str) -> Option<&'static dyn Tool> {
     all().into_iter().find(|tool| tool.id() == base)
 }
 
-/// 「⌕ kb.search（只读）：检索本机知识库……」——技能标签的悬浮说明里列出技能能用的工具。
-pub(crate) fn describe(id: &str) -> Option<String> {
-    let tool = find(id)?;
-    let permission = tool.permission();
-    Some(format!(
-        "{} {id}（{}）：{}",
-        permission.icon(),
-        permission.label(),
-        tool.description()
-    ))
-}
-
 pub(crate) fn ids() -> Vec<&'static str> {
     all().into_iter().map(|tool| tool.id()).collect()
 }

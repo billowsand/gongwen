@@ -1,96 +1,19 @@
-//! 技能包的完整目录读写；所有相对路径在访问磁盘之前统一校验。
+//! 旧流程技能包的完整目录读写；所有相对路径在访问磁盘之前统一校验。
+//!
+//! 包的通用安全读写（路径、链接、体积、ZIP 条目）在
+//! [`crate::ai_services::skill_package`]；这里只保留旧格式自己的入口校验、安装位置
+//! 与导入分组规则。4C 起 Pi 标准技能复用同一套原语，但不复用旧流程语义。
+//! 旧流程管理页已无入口，这些接口保留到 4F 退役。
 
 use super::{check_id, check_text, skills_dir, source_text, user_file};
+use crate::ai_services::skill_package::{
+    self, Limits, MAX_FILE, MAX_FILES, MAX_PACKAGE, Package, destination_with, no_link,
+    relative_path,
+};
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-const MAX_FILE: u64 = 16 * 1024 * 1024;
-const MAX_PACKAGE: usize = 64 * 1024 * 1024;
-const MAX_FILES: usize = 512;
-/// 一个压缩包按条目声明大小累加的上限。
-///
-/// 实际读到的字节已由 [`Package::insert`] 按单文件 16 MB、整包 64 MB 卡住；
-/// 这里按声明大小提前拒绝，明显过大的包不必解压到一半才报错。
-const MAX_ARCHIVE_TOTAL: u64 = 128 * 1024 * 1024;
-/// 一个压缩包里的条目数上限（目录条目也算，`insert` 的 512 个文件上限管不到它们）。
-const MAX_ARCHIVE_ENTRIES: usize = 4096;
-
 include!(concat!(env!("OUT_DIR"), "/builtin_skill_files.rs"));
-
-#[derive(Clone, Default)]
-pub(crate) struct Package {
-    pub(crate) files: BTreeMap<String, Vec<u8>>,
-}
-
-/// 同时适用于 ZIP、Windows 与 Unix，拒绝磁盘前缀、父目录和特殊文件名。
-pub(crate) fn relative_path(name: &str) -> anyhow::Result<String> {
-    let name = name.replace('\\', "/");
-    anyhow::ensure!(
-        !name.is_empty()
-            && name.split('/').all(|part| {
-                !part.is_empty()
-                    && part != "."
-                    && part != ".."
-                    && !part.ends_with(['.', ' '])
-                    && !part
-                        .chars()
-                        .any(|c| c.is_control() || ":*?\"<>|".contains(c))
-                    && !matches!(
-                        part.split('.')
-                            .next()
-                            .unwrap_or_default()
-                            .to_uppercase()
-                            .as_str(),
-                        "CON"
-                            | "PRN"
-                            | "AUX"
-                            | "NUL"
-                            | "COM1"
-                            | "COM2"
-                            | "COM3"
-                            | "COM4"
-                            | "COM5"
-                            | "COM6"
-                            | "COM7"
-                            | "COM8"
-                            | "COM9"
-                            | "LPT1"
-                            | "LPT2"
-                            | "LPT3"
-                            | "LPT4"
-                            | "LPT5"
-                            | "LPT6"
-                            | "LPT7"
-                            | "LPT8"
-                            | "LPT9"
-                    )
-            }),
-        "无效的技能文件路径：{name}"
-    );
-    Ok(name)
-}
-
-fn no_link(path: &Path) -> anyhow::Result<()> {
-    if path.exists() || path.symlink_metadata().is_ok() {
-        let metadata = path.symlink_metadata()?;
-        anyhow::ensure!(
-            !metadata.file_type().is_symlink(),
-            "不支持符号链接：{}",
-            path.display()
-        );
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            anyhow::ensure!(
-                metadata.file_attributes() & 0x400 == 0,
-                "不支持目录联接：{}",
-                path.display()
-            );
-        }
-    }
-    Ok(())
-}
 
 pub(crate) fn folder(id: &str) -> anyhow::Result<PathBuf> {
     check_id(id)?;
@@ -103,100 +26,27 @@ pub(crate) fn folder(id: &str) -> anyhow::Result<PathBuf> {
 }
 
 pub(super) fn destination(id: &str, name: &str) -> anyhow::Result<PathBuf> {
-    let name = relative_path(name)?;
-    let mut path = folder(id)?;
-    let parts = name.split('/').collect::<Vec<_>>();
-    for (index, part) in parts.iter().enumerate() {
-        path.push(part);
-        no_link(&path)?;
-        if path.exists() {
-            anyhow::ensure!(
-                if index + 1 == parts.len() {
-                    path.is_file()
-                } else {
-                    path.is_dir()
-                },
-                "文件与目录冲突：{}",
-                path.display()
-            );
-        }
-    }
-    Ok(path)
+    destination_with(&folder(id)?, name, Limits::LEGACY)
 }
 
-impl Package {
-    fn insert(&mut self, name: String, bytes: Vec<u8>) -> anyhow::Result<()> {
-        let name = relative_path(&name)?;
-        anyhow::ensure!(bytes.len() as u64 <= MAX_FILE, "文件超过 16 MB：{name}");
-        anyhow::ensure!(self.files.len() < MAX_FILES, "技能包文件数量超过 512");
-        anyhow::ensure!(
-            self.files.values().map(Vec::len).sum::<usize>() + bytes.len() <= MAX_PACKAGE,
-            "技能包超过 64 MB"
-        );
-        anyhow::ensure!(
-            !self.files.keys().any(|key| key.eq_ignore_ascii_case(&name)),
-            "技能包有重复路径：{name}"
-        );
-        let lower = name.to_lowercase();
-        anyhow::ensure!(
-            !self.files.keys().any(|key| {
-                let key = key.to_lowercase();
-                lower.starts_with(&format!("{key}/")) || key.starts_with(&format!("{lower}/"))
-            }),
-            "技能包的文件与目录冲突：{name}"
-        );
-        self.files.insert(name, bytes);
-        Ok(())
+fn install(package: &Package, id: &str) -> anyhow::Result<Vec<String>> {
+    check_id(id)?;
+    let entry = package
+        .files
+        .get("SKILL.md")
+        .ok_or_else(|| anyhow::anyhow!("缺少 SKILL.md"))?;
+    let problems = check_text(id, std::str::from_utf8(entry)?).map_err(anyhow::Error::msg)?;
+    // 全包先检查路径与目标，解析失败时不写入任何辅助文件。
+    let destinations = package
+        .files
+        .keys()
+        .map(|name| destination(id, name))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    for ((_, bytes), path) in package.files.iter().zip(destinations) {
+        std::fs::create_dir_all(path.parent().expect("技能目录"))?;
+        std::fs::write(path, bytes)?;
     }
-
-    fn read_dir(root: &Path) -> anyhow::Result<Self> {
-        fn walk(root: &Path, dir: &Path, package: &mut Package) -> anyhow::Result<()> {
-            no_link(dir)?;
-            for entry in std::fs::read_dir(dir)? {
-                let path = entry?.path();
-                no_link(&path)?;
-                if path.is_dir() {
-                    walk(root, &path, package)?;
-                } else if path.is_file() {
-                    anyhow::ensure!(
-                        path.metadata()?.len() <= MAX_FILE,
-                        "文件超过 16 MB：{}",
-                        path.display()
-                    );
-                    let name = path
-                        .strip_prefix(root)?
-                        .to_str()
-                        .ok_or_else(|| anyhow::anyhow!("文件名不是 UTF-8"))?
-                        .replace('\\', "/");
-                    package.insert(name, std::fs::read(&path)?)?;
-                }
-            }
-            Ok(())
-        }
-        let mut package = Self::default();
-        walk(root, root, &mut package)?;
-        Ok(package)
-    }
-
-    fn install(&self, id: &str) -> anyhow::Result<Vec<String>> {
-        check_id(id)?;
-        let entry = self
-            .files
-            .get("SKILL.md")
-            .ok_or_else(|| anyhow::anyhow!("缺少 SKILL.md"))?;
-        let problems = check_text(id, std::str::from_utf8(entry)?).map_err(anyhow::Error::msg)?;
-        // 全包先检查路径与目标，解析失败时不写入任何辅助文件。
-        let destinations = self
-            .files
-            .keys()
-            .map(|name| destination(id, name))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        for ((_, bytes), path) in self.files.iter().zip(destinations) {
-            std::fs::create_dir_all(path.parent().expect("技能目录"))?;
-            std::fs::write(path, bytes)?;
-        }
-        Ok(problems)
-    }
+    Ok(problems)
 }
 
 pub(crate) fn load(id: &str) -> anyhow::Result<Package> {
@@ -216,11 +66,6 @@ pub(crate) fn load(id: &str) -> anyhow::Result<Package> {
         }
         Ok(package)
     }
-}
-
-pub(crate) fn copy_for_editing(id: &str) -> anyhow::Result<()> {
-    load(id)?.install(id)?;
-    Ok(())
 }
 
 pub(crate) fn save_file(id: &str, name: &str, text: &str) -> anyhow::Result<Vec<String>> {
@@ -250,8 +95,11 @@ pub(crate) fn save_file(id: &str, name: &str, text: &str) -> anyhow::Result<Vec<
     } else {
         Vec::new()
     };
-    std::fs::create_dir_all(path.parent().expect("技能目录"))?;
-    std::fs::write(path, text)?;
+    crate::storage::atomic_write(&path, |file| {
+        use std::io::Write;
+        file.write_all(text.as_bytes())?;
+        Ok(())
+    })?;
     Ok(problems)
 }
 
@@ -262,29 +110,13 @@ pub(crate) fn export(id: &str, target: &Path) -> anyhow::Result<PathBuf> {
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("skill") || e.eq_ignore_ascii_case("zip"))
     {
-        let mut zip = zip::ZipWriter::new(std::fs::File::create(target)?);
-        for (name, bytes) in package.files {
-            zip.start_file(
-                format!("{id}/{name}"),
-                zip::write::SimpleFileOptions::default(),
-            )?;
-            zip.write_all(&bytes)?;
-        }
-        zip.finish()?;
+        package.write_zip(target, id)?;
         Ok(target.to_path_buf())
     } else {
         let root = target.join(id);
         no_link(target)?;
         no_link(&root)?;
-        for (name, bytes) in package.files {
-            let mut path = root.clone();
-            for part in name.split('/') {
-                path.push(part);
-                no_link(&path)?;
-            }
-            std::fs::create_dir_all(path.parent().expect("技能目录"))?;
-            std::fs::write(path, bytes)?;
-        }
+        package.write_dir(&root)?;
         Ok(root.join("SKILL.md"))
     }
 }
@@ -292,32 +124,7 @@ pub(crate) fn export(id: &str, target: &Path) -> anyhow::Result<PathBuf> {
 pub(crate) fn import(path: &Path) -> anyhow::Result<(Vec<String>, Vec<String>)> {
     let mut packages = BTreeMap::new();
     if path.is_file() {
-        let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
-        anyhow::ensure!(
-            archive.len() <= MAX_ARCHIVE_ENTRIES,
-            "技能包里的条目超过 {MAX_ARCHIVE_ENTRIES} 个"
-        );
-        let mut total: u64 = 0;
-        let mut files = Package::default();
-        for index in 0..archive.len() {
-            let mut entry = archive.by_index(index)?;
-            anyhow::ensure!(!entry.is_symlink(), "技能包含符号链接");
-            if entry.is_dir() {
-                continue;
-            }
-            let name = relative_path(entry.name())?;
-            anyhow::ensure!(entry.size() <= MAX_FILE, "文件超过 16 MB：{name}");
-            // 按声明大小累加，提前拒绝明显过大的包；实际字节由 `insert` 再卡。
-            total = total.saturating_add(entry.size());
-            anyhow::ensure!(
-                total <= MAX_ARCHIVE_TOTAL,
-                "技能包解压后超过 {} MB",
-                MAX_ARCHIVE_TOTAL / 1024 / 1024
-            );
-            let mut bytes = Vec::new();
-            entry.by_ref().take(MAX_FILE + 1).read_to_end(&mut bytes)?;
-            files.insert(name, bytes)?;
-        }
+        let files = Package::read_zip(path)?;
         // 支持外层封装目录和一个 ZIP 中多个技能，辅助文件按入口所在目录归属。
         if files.files.contains_key("SKILL.md") {
             let id = path
@@ -378,7 +185,7 @@ pub(crate) fn import(path: &Path) -> anyhow::Result<(Vec<String>, Vec<String>)> 
     let mut ids = Vec::new();
     let mut notes = Vec::new();
     for (id, package) in packages {
-        match package.install(&id) {
+        match install(&package, &id) {
             Ok(problems) => {
                 if !problems.is_empty() {
                     notes.push(format!("「{id}」有问题：{}", problems.join("；")));
@@ -395,9 +202,7 @@ pub(crate) fn remove(id: &str) -> anyhow::Result<()> {
     let root = folder(id)?;
     if root.exists() {
         // folder 验证 id 与目录联接；解析后的目标必须仍位于配置的技能目录内。
-        let base = skills_dir()?.canonicalize()?;
-        anyhow::ensure!(root.canonicalize()?.starts_with(base), "技能目录越界");
-        std::fs::remove_dir_all(root)?;
+        skill_package::remove_dir_within(&skills_dir()?, &root)?;
     }
     Ok(())
 }

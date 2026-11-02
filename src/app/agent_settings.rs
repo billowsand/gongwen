@@ -7,8 +7,8 @@
 //! 工具调用可能要等网络，放在后台线程里跑，界面每帧取一次结果。
 
 use super::api_settings::ApisPage;
+use super::pi_skill_manager::PiSkillsPage;
 use super::settings::setting_row;
-use super::skill_manager::SkillsPage;
 use crate::agent::api::{ApiSecrets, ApiStore};
 use crate::agent::board::Board;
 use crate::agent::skill::{self, Skill};
@@ -23,7 +23,7 @@ use std::time::Duration;
 /// 三个分区的状态。纯当次会话，不进配置。
 #[derive(Default)]
 pub(crate) struct AgentSettings {
-    pub(super) skills: SkillsPage,
+    pub(super) skills: PiSkillsPage,
     pub(super) apis: ApisPage,
     console: ConsolePage,
 }

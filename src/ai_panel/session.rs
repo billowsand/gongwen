@@ -86,6 +86,12 @@ pub(crate) struct SavedTurn {
     /// Pi 运行引用：旧会话没有这个字段，读回为 None（不显示假恢复入口）。
     #[serde(default)]
     pub(crate) pi_run: Option<crate::pi_agent::PiRunRef>,
+    /// Pi 成品直接写入正文的撤销记录；旧会话没有，读回为 None（不给撤销按钮）。
+    #[serde(default)]
+    pub(crate) pi_write: Option<super::pi_write::PiWrite>,
+    /// 交付检查过了但没能写进正文的成品（冲突 / 保存失败 / 只读）。
+    #[serde(default)]
+    pub(crate) pi_pending: Option<super::pi_write::PiPendingDelivery>,
 }
 
 /// 挂起的流程。技能本身不存（它在内置资源或配置目录里），只存 id 与文本指纹。
@@ -281,6 +287,8 @@ impl SavedTurn {
             proposal,
             style: turn.style.clone(),
             pi_run: turn.pi_run.clone(),
+            pi_write: turn.pi_write.clone(),
+            pi_pending: turn.pi_pending.clone(),
         }
     }
 
@@ -381,6 +389,9 @@ impl SavedTurn {
             field_cards: self.field_cards,
             style: self.style,
             pi_run: self.pi_run,
+            pi_write: self.pi_write,
+            pi_pending: self.pi_pending,
+            pi_diff: Default::default(),
             started: Instant::now(),
             elapsed: Some(Duration::from_millis(self.elapsed_ms)),
         };
@@ -454,10 +465,19 @@ fn fingerprint(turn: &AiTurn, has_proposal: bool) -> u64 {
     } else {
         format!("{:?}", turn.state).hash(&mut hasher);
         turn.excluded_hunks.hash(&mut hasher);
-        // Pi 运行状态变化（交付、接受）也要触发一次落盘，否则重启后还会给出恢复入口。
+        // Pi 运行状态变化（交付、写入、撤销）也要触发一次落盘，否则重启后还会给出恢复入口，
+        // 或丢掉撤销记录。
         turn.pi_run
             .as_ref()
             .map(|run| (&run.run_id, run.status))
+            .hash(&mut hasher);
+        turn.pi_write
+            .as_ref()
+            .map(|write| (&write.run_id, write.undone, write.after.len()))
+            .hash(&mut hasher);
+        turn.pi_pending
+            .as_ref()
+            .map(|pending| (&pending.run_id, pending.markdown.len()))
             .hash(&mut hasher);
         turn.content.len().hash(&mut hasher);
         turn.notes.len().hash(&mut hasher);
@@ -742,6 +762,42 @@ mod tests {
         assert_eq!(panel.session.model_session_id(), id);
         panel.adopt_session(42);
         assert_eq!(panel.session.model_session_id(), id);
+    }
+
+    #[test]
+    fn a_written_pi_turn_keeps_its_baseline_and_consumed_state_after_reload() {
+        let (mut store, manuscript_id) = store();
+        let mut panel = AiPanel::default();
+        panel.adopt_session(manuscript_id);
+        let turn_id = panel.push_turn("Pi".into(), "写作".into(), Vec::new(), None);
+        panel.mark_pi_written(
+            turn_id,
+            crate::ai_panel::pi_write::PiWrite {
+                run_id: "persisted-run".into(),
+                before: "修改前。\n".into(),
+                after: "成品。\n".into(),
+                applied_at: "2026-11-02T10:00:00+08:00".into(),
+                advisories: vec!["日期待核对".into()],
+                undone: true,
+            },
+        );
+        assert!(
+            panel
+                .save_session(Some(manuscript_id), Some(&mut store), None, true)
+                .is_none()
+        );
+        let mut restored = AiPanel::default();
+        let records = store.list_ai_sessions(manuscript_id).unwrap();
+        let rows = store.load_ai_session_turns(&records[0].id).unwrap();
+        let (_, problems) = restored.load_session(manuscript_id, &records[0], rows, "修改前。\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        let write = restored.turns.last().unwrap().pi_write.as_ref().unwrap();
+        assert_eq!(write.before, "修改前。\n");
+        assert!(write.undone);
+        assert!(
+            restored.pi_run_already_written("persisted-run"),
+            "撤销过的运行也不可重放"
+        );
     }
 
     use super::*;
@@ -1239,6 +1295,8 @@ mod tests {
             proposal: None,
             style: None,
             pi_run: None,
+            pi_write: None,
+            pi_pending: None,
         };
         let (turn, _) = saved.restore(&[], false);
         assert!(matches!(&turn.state, TurnState::Failed(why) if why.contains("不在了")));
@@ -1248,12 +1306,15 @@ mod tests {
 
     #[test]
     fn old_sessions_have_no_pi_run_and_pi_cards_do_not_cross_sessions() {
-        // 旧会话没有 pi_run 字段：读回为 None，界面不显示假恢复入口。
+        // 旧会话没有 pi_run / pi_write 字段：读回为 None，界面不显示假恢复入口与假撤销。
         let old = r#"{"id":1,"title":"旧轮","prompt":"改","state":"Interrupted"}"#;
         let saved: SavedTurn = serde_json::from_str(old).unwrap();
         assert!(saved.pi_run.is_none());
+        assert!(saved.pi_write.is_none());
+        assert!(saved.pi_pending.is_none());
         let (turn, _) = saved.restore(&[], false);
         assert!(turn.pi_run.is_none());
+        assert!(turn.pi_write.is_none());
 
         // 切会话 / 开新会话时清掉只属于当前进程的 Pi 题卡、清单与事实来源。
         let mut panel = AiPanel {

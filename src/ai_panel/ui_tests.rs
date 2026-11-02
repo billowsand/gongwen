@@ -3864,4 +3864,77 @@ mod field_card_cases {
         assert!(text.contains("与表单不一致"), "{text}");
         assert!(!text.contains("正文是按它们写的"), "{text}");
     }
+
+    /// Pi 成品直接写入后：卡片是「已写入正文」+ 撤销 / 差异，不再出现「接受提案」。
+    #[test]
+    fn a_written_pi_turn_shows_undo_instead_of_accept() {
+        let mut harness = Harness::new("# 通知\n\n改后。\n");
+        harness.doc.ai_panel.open = true;
+        let id = harness.doc.ai_panel.push_turn(
+            "智能写作（Pi · 自动）".into(),
+            "改一下正文".into(),
+            vec![],
+            None,
+        );
+        harness.doc.ai_panel.mark_pi_written(
+            id,
+            crate::ai_panel::pi_write::PiWrite {
+                run_id: "run-1".into(),
+                before: "# 通知\n\n原文。\n".into(),
+                after: "# 通知\n\n改后。\n".into(),
+                applied_at: "2026-11-02T10:00:00+08:00".into(),
+                advisories: Vec::new(),
+                undone: false,
+            },
+        );
+        let texts = harness.frame_texts();
+        assert!(has(&texts, "已写入正文"), "{texts:?}");
+        assert!(has(&texts, "撤销本次写入"), "{texts:?}");
+        assert!(has(&texts, "查看差异"), "{texts:?}");
+        assert!(!has(&texts, "接受提案"), "{texts:?}");
+        // 正文又改过：按钮还在，但不能整篇盖回去（禁用，悬停说明原因）；
+        // 即便此时说成「已写入」，也仍然是已写入的回执，不出现接受入口。
+        harness
+            .doc
+            .generated_markdown
+            .push_str("用户又改了一句。\n");
+        let texts = harness.frame_texts();
+        assert!(has(&texts, "撤销本次写入"), "{texts:?}");
+        assert!(!has(&texts, "接受提案"), "{texts:?}");
+        harness.doc.generated_markdown = "# 通知\n\n原文。\n".into();
+        let texts = harness.frame_texts();
+        assert!(
+            has(&texts, "已撤销本次写入"),
+            "编辑器 Ctrl+Z 后卡片也应同步：{texts:?}"
+        );
+    }
+
+    /// 与正文冲突时：卡片说清楚，给出取回 / 丢弃，正文不动。
+    #[test]
+    fn a_conflicted_pi_turn_offers_to_take_the_draft_back() {
+        let mut harness = Harness::new("# 通知\n\n用户自己写的。\n");
+        harness.doc.ai_panel.open = true;
+        let id = harness.doc.ai_panel.push_turn(
+            "智能写作（Pi · 自动）".into(),
+            "改一下正文".into(),
+            vec![],
+            None,
+        );
+        harness.doc.ai_panel.park_pi_delivery(
+            id,
+            crate::ai_panel::pi_write::PiPendingDelivery {
+                run_id: "run-1".into(),
+                markdown: "# 通知\n\nAI 写的。\n".into(),
+                advisories: vec!["日期「2026年10月8日」未在本轮依据中找到".into()],
+            },
+            true,
+            "运行期间正文改过，未自动覆盖。".into(),
+        );
+        let texts = harness.frame_texts();
+        assert!(has(&texts, "与正文改动冲突"), "{texts:?}");
+        assert!(has(&texts, "取回 AI 成品"), "{texts:?}");
+        assert!(has(&texts, "丢弃成品"), "{texts:?}");
+        assert!(has(&texts, "2026年10月8日"), "提示要看得见：{texts:?}");
+        assert_eq!(harness.doc.generated_markdown, "# 通知\n\n用户自己写的。\n");
+    }
 }

@@ -32,7 +32,17 @@ pub(crate) fn digest(index: usize, turn: &AiTurn) -> Option<String> {
             } else {
                 String::new()
             };
-            format!("交了提案，你已接受写进正文{excluded}。开头：{}", head())
+            if turn.pi_write.is_some() {
+                format!("Pi 成品已直接写入正文{excluded}。开头：{}", head())
+            } else {
+                format!("交了提案，你已接受写进正文{excluded}。开头：{}", head())
+            }
+        }
+        TurnState::Conflict => {
+            format!(
+                "交了成品，但正文已改过 / 未能写入，成品留在这一轮。开头：{}",
+                head()
+            )
         }
         TurnState::Discarded => format!("交了提案，你放弃了。开头：{}", head()),
         TurnState::Superseded | TurnState::Expired => {

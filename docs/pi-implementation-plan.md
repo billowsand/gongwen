@@ -2,7 +2,7 @@
 
 2026-11-01 开始。用户授权：由本机 Pi agent 实现，主代理编写分期提示词、验收、修正。第一阶段代码验收后，用户另行授权提交该阶段并继续第二阶段；不推送或发布。
 
-产品契约见 `pi-writing-product-design.md`：小模型分阶段写作保留，大模型以 Pi + 标准技能 + 文件工作区自主写作；最终单个 Markdown 经现有提案审阅进入正文。离线安装部署是硬性要求。
+产品契约见 `pi-writing-product-design.md`：小模型分阶段写作保留，大模型以 Pi + 标准技能 + 文件工作区自主写作；最终单个 Markdown 直接进入正文并保留撤销，事实疑点只提示（2026-11-02 用户修订）。离线安装部署是硬性要求。
 
 ## 阶段与提示词
 
@@ -11,7 +11,7 @@
 | 1. 文件交付闭环 | `pi-implementation/phase-1.md` | 本地 host 修改工作文件、显式提交成品，Rust 后台桥接并复用现有提案界面；协议/安全/交付测试 | 代码验收通过；真实 host 通过；GUI 待验 |
 | 2. 技能与领域工具 | `pi-implementation/phase-2.md` | 独立模型配置、标准技能、材料/知识库/词库/检查工具；选区保护、提问与追问；无旧 flow 解释器 | Pi 已实现，主审修正与自动回归通过；GUI 入口与真实 host 已验，业务场景待验 |
 | 3. 恢复与离线分发 | `pi-implementation/phase-3.md` | 任务与文件恢复、成品去重、多窗口；固定 Node 和完整运行依赖，断网安装启动 | 实现、主审回归、Windows 装箱及开发安装包生成通过；干净机安装/升级、GUI 恢复及 Linux 真机待验 |
-| 4. 收缩旧框架 | `pi-implementation/phase-4a.md`、`phase-4b.md` | 解耦小模型/API/风格等共享服务，迁移默认入口，旧通用编排退出 | A 入口收敛完成；B 共享服务与 Pi 思考配置独立已实现并主审修正；C 技能管理及 F 旧编排退役未开始 |
+| 4. 收缩旧框架 | `pi-implementation/phase-4a.md`、`phase-4b.md`、`phase-4c.md` | 解耦小模型/API/风格等共享服务，迁移默认入口，旧通用编排退出 | A 入口收敛完成；B 已提交 f0c00a5；C 标准技能管理已主审验收；F 旧编排退役未开始 |
 
 后续阶段每次执行前根据真实代码补全提示词和基线，不预设尚未确定的文件/API。
 
@@ -73,3 +73,38 @@
 最终 2732 项 Rust 测试通过、85 忽略，fmt/clippy/diff 检查通过，代码验收完成；未重打安装包。
 实施与剩余耦合见 `phase-4b-report.md`，最终主审结论以 `phase-4b-review.md` 为准；本阶段尚未提交。
 用户随后授权提交 4B 本地检查点；历史报告中的未提交指验收时状态，不推送或发布。
+
+## 第四阶段 C 与交付流程修订
+
+4B 已提交为 `f0c00a5`，提交钩子 release 构建通过，未推送。4C 从该提交的干净工作区开始，
+基线快照见 `tmp/pi-implementation/phase-4c-baseline/`。继续由本机 Pi 固定
+`opencode-go/deepseek-v4.1-flash` 实现，主代理写 TASK、主审与修正；实际 RPC 已核对模型。
+具体契约见 `pi-implementation/phase-4c.md`：Pi 标准技能目录、管理页、侧栏选择与运行快照接通，
+保留旧 DSL 数据而不再用旧 UI 管理当前 Pi 技能。本阶段不自动提交或发布。
+
+用户已明确确认后续 Pi 成品直接写入正文，保留修改前版本和撤销，事实疑点只提示，
+不再要求人工确认事实/接受提案。该选择修订本文开头旧的提案交付约定；4C worker 不混改交付，
+技能管理完成后按独立契约实施并同步架构说明。讨论和实施草案分别见
+`pi-implementation/pi-direct-write-discussion.md` 与 `pi-implementation/pi-direct-write-task.md`。
+
+4C 已完成主审与修正，最终 Rust 2756 passed / 84 ignored、host 49 passed / 1 skipped，fmt/clippy 通过。
+具体 findings 与验证边界见 `pi-implementation/phase-4c-review.md`。本地未提交，作为下一项直接写入任务的 dirty 基线保存。
+
+直接写入任务 TASK 和基线已准备。启动同一 Pi runner 被自动审批拒绝，理由是此前明确外发授权仅覆盖 4B，
+需要用户明确允许将本任务源码、提示和自造测试数据发送至 opencode.ai / DeepSeek V4.1 Flash。
+runner 未执行，未绕过拒绝，直接写入功能尚未实施；产品方案本身已经用户确认，无需再问产品选择。
+
+用户随后明确回复“好的，我授权pi启动，以后不要再为这种事情来问我了”。已据此授权本次启动，并持续允许同一
+opencode.ai / DeepSeek V4.1 Flash 目的地处理项目开发所需源码、提示和自造测试数据；不包括真实稿件、用户配置或密钥。
+后续同范围启动沿用授权，不重复询问。
+
+## Pi 直接写入与撤销
+
+按用户明确确认的方案实施。Pi 已实际启动，固定模型核对无误；完成主体代码后连接中断，
+自动重试结束并停止，未生成原报告。主代理接手实际审查和修正，执行交接补记见
+`pi-implementation/pi-direct-write-report.md`，最终验收以 `pi-implementation/pi-direct-write-review.md` 为准。
+最终 Rust 全量 2774 passed / 84 ignored、host 49 passed / 1 skipped，fmt 与严格 clippy 全部通过，代码验收完成。
+代码仍未提交或打包，不提前做 4D/4E/4F。
+
+用户随后授权提交 4C 与 Pi 直接写入/撤销的本地检查点，验收记录中的“未提交”指当时状态；
+最终提交以 Git 历史为准。不推送、不发布，不重打安装包；提交后等待既有钩子 release 构建。

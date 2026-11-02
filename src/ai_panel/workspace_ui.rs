@@ -45,7 +45,14 @@ impl DraftPage<'_> {
                     TurnState::Stopped => "已停止 · 内容未完成",
                     TurnState::Failed(_) => "生成失败 · 内容未完成",
                     TurnState::Interrupted => "已中断 · 内容未完成",
+                    TurnState::Accepted
+                        if turn.pi_write.as_ref().is_some_and(|write| write.undone) =>
+                    {
+                        "已撤销写入"
+                    }
+                    TurnState::Accepted if turn.pi_write.is_some() => "已写入正文",
                     TurnState::Accepted => "已采纳",
+                    TurnState::Conflict => "与正文冲突 · 成品已保留",
                     TurnState::Discarded => "已放弃",
                     TurnState::Superseded | TurnState::Expired => "历史工作稿",
                     TurnState::Reported { .. } => "工作稿",
@@ -94,7 +101,57 @@ impl DraftPage<'_> {
             Some(CardAction::Stop) => self.stop_ai_task(),
             _ => {}
         }
-        ui.weak("AI 工作稿只读；采纳后进入正文。保存与导出使用正文。");
+        // Pi 直接写入的成品：差异只读，正文已经是成品，没有可采纳的东西。
+        let pi_write = self
+            .doc
+            .ai_panel
+            .turns
+            .iter()
+            .find(|turn| turn.id == id)
+            .and_then(|turn| turn.pi_write.clone());
+        if self.doc.ai_panel.workspace_compare
+            && let Some(write) = pi_write
+        {
+            let old =
+                ContentSnapshot::new(self.doc.draft.clone(), write.before.clone(), String::new());
+            let new =
+                ContentSnapshot::new(self.doc.draft.clone(), write.after.clone(), String::new());
+            let report = manuscript_diff(&old, &new);
+            let position = self
+                .doc
+                .ai_panel
+                .turns
+                .iter()
+                .position(|turn| turn.id == id)
+                .expect("当前会话的工作稿");
+            let view = &mut self.doc.ai_panel.turns[position].pi_diff.0;
+            manuscript_diff_ui(
+                ui,
+                &report,
+                view,
+                &DiffViewConfig {
+                    old_label: "写入前",
+                    new_label: "Pi 成品",
+                    exclude: None,
+                },
+            );
+            ui.weak("差异只读：成品已经写进正文，撤销在结果卡上。");
+            return true;
+        }
+        ui.weak(
+            if self
+                .doc
+                .ai_panel
+                .turns
+                .iter()
+                .find(|turn| turn.id == id)
+                .is_some_and(|turn| turn.pi_write.is_some() || turn.pi_pending.is_some())
+            {
+                "AI 成品只读；保存与导出使用正文。"
+            } else {
+                "AI 工作稿只读；采纳后进入正文。保存与导出使用正文。"
+            },
+        );
         if self.doc.ai_panel.workspace_compare
             && matches!(state, TurnState::Proposed(_))
             && let Some(proposal) = self.doc.ai_proposal.as_mut()

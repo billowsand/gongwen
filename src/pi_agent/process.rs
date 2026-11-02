@@ -950,6 +950,8 @@ pub(crate) fn run(
                     )?;
                     // 完成事件之后仍须确认进程正常退出，不能接受“先报成功再崩溃”。
                     successful_exit(&mut guard, &cancel)?;
+                    // 成品要直接写进正文：修改前基线必须确实在盘上，撤销才有准确的原稿。
+                    super::recovery::check_baseline_snapshot(&job.workspace, &job.before)?;
                     let sources = job.tools.fact_sources();
                     let sources_sha256 =
                         job.record.delivered(&submission.receipt, Some(&sources))?;

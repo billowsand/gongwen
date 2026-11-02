@@ -840,6 +840,7 @@ impl DraftPage<'_> {
 
     /// Markdown 源码编辑框，带语法高亮。
     pub(crate) fn markdown_editor(&mut self, ui: &mut egui::Ui) {
+        crate::ai_panel::pi_write::bind_editor(ui.ctx(), self.doc.key);
         let source_mode = self.doc.preview_mode == PreviewMode::Source;
         let source_scroll_request = source_mode
             .then(|| self.doc.source_minimap.requested_offset.take())

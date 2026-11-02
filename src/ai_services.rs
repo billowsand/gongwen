@@ -22,6 +22,7 @@ pub(crate) mod knowledge;
 pub(crate) mod manuscripts;
 pub(crate) mod persistence;
 pub(crate) mod references;
+pub(crate) mod skill_package;
 pub(crate) mod style;
 pub(crate) mod text;
 pub(crate) mod toolcall;

@@ -55,6 +55,7 @@ mod version_diff;
 mod versions;
 pub(crate) mod writing;
 
+pub(crate) use diff_editor::replace_with_undo;
 pub(crate) use editor::{PreviewAnchor, editor_id};
 pub(crate) use find::{
     DraftDiffState, FileAction, LoadedVersion, MarkdownFindState, blank_line_padding,

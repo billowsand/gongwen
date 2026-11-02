@@ -26,6 +26,7 @@ mod paste;
 pub(crate) mod pi_ask;
 pub(crate) mod pi_job;
 pub(crate) mod pi_prepare;
+pub(crate) mod pi_write;
 mod provenance;
 pub(crate) use provenance::source_line as proposal_source;
 pub(crate) mod session;
@@ -65,7 +66,6 @@ pub(crate) struct Composer {
     /// Pi 追问时保留的已确认回答（只来自用户点选 / 填写，不是模型总结）。
     pub(crate) pi_notes: Vec<String>,
 }
-
 /// 一轮请求的原始参数，「重新生成」照它再发一次。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TurnRequest {
@@ -124,7 +124,12 @@ pub(crate) enum TurnState {
     Reported {
         fixes: usize,
     },
+    /// 成品已经写进正文（旧提案接受与 Pi 直接写入都用它）；`pi_write` 有值时
+    /// 卡片上还能整次撤销。
     Accepted,
+    /// Pi 交了成品，但运行期间正文被改过 / 稿件已只读 / 落盘失败：
+    /// 正文不动，成品留在这一轮里等用户显式取回或按当前正文重做。
+    Conflict,
     Discarded,
     /// 被同一篇稿件的新任务取代。
     Superseded,
@@ -201,6 +206,12 @@ pub(crate) struct AiTurn {
     /// Pi 这一轮的运行引用：中断 / 停止 / 失败后据此「接着写」或「从头写」。
     /// 已接受或旧流程轮次为 None；完整记录留在工作区的 `pi/run.json`。
     pub(crate) pi_run: Option<crate::pi_agent::PiRunRef>,
+    /// Pi 成品直接写入正文的撤销记录（前后文本、运行标识、提示）。
+    pub(crate) pi_write: Option<pi_write::PiWrite>,
+    /// 交付检查通过、但没能写进正文的成品（冲突 / 保存失败 / 只读）。
+    pub(crate) pi_pending: Option<pi_write::PiPendingDelivery>,
+    /// Pi 写入前后的可选差异视图状态（不随会话存盘，读回重新开）。
+    pub(crate) pi_diff: pi_write::PiDiffView,
     pub(crate) started: Instant,
     /// 结束时定格的耗时；运行中为 None，按 `started` 现算。
     pub(crate) elapsed: Option<Duration>,
@@ -258,12 +269,26 @@ pub(crate) struct AiPanel {
     pub(crate) pi_cancel: bool,
     /// 本轮 Pi 的回答通道；题卡靠它把答案送回后台进程。
     pub(crate) pi_bridge: Option<Arc<crate::pi_agent::PiBridge>>,
+    /// Pi 标准技能目录的缓存。每帧只查一次 revision，不重复读盘；管理页保存 /
+    /// 启停 / 导入后 revision 变化，下一次画侧栏或发送时重读。
+    pub(crate) pi_skills: Option<crate::pi_agent::pi_skills::Catalog>,
+    pub(crate) pi_skills_revision: Option<u64>,
     /// 当前在左侧查看的工作稿轮次；None 表示查看正式正文。
     pub(crate) workspace_view: Option<u64>,
     pub(crate) workspace_compare: bool,
 }
 
 impl AiPanel {
+    /// 按需刷新 Pi 技能目录。只比较一个原子计数，不每帧遍历技能包。
+    pub(crate) fn ensure_pi_skills(&mut self) -> &crate::pi_agent::pi_skills::Catalog {
+        let revision = crate::pi_agent::pi_skills::revision();
+        if self.pi_skills.is_none() || self.pi_skills_revision != Some(revision) {
+            self.pi_skills = Some(crate::pi_agent::pi_skills::load_catalog());
+            self.pi_skills_revision = Some(revision);
+        }
+        self.pi_skills.as_ref().expect("刚放进目录，必然存在")
+    }
+
     /// 用量是只读记录，允许停止后的原任务补回；任务产物仍走原有的过期检查。
     pub(crate) fn record_usage(
         &mut self,
@@ -324,6 +349,9 @@ impl AiPanel {
             field_cards: Vec::new(),
             style: None,
             pi_run: None,
+            pi_write: None,
+            pi_pending: None,
+            pi_diff: Default::default(),
             started: Instant::now(),
             elapsed: None,
         });
@@ -608,9 +636,84 @@ impl AiPanel {
         }
     }
 
+    /// 用户丢弃保留的成品：卡片转「已放弃」，正文不变。
+    pub(crate) fn discard_pi_pending(&mut self, turn_id: u64) -> bool {
+        let Some(turn) = self.turn_mut(turn_id) else {
+            return false;
+        };
+        turn.pi_pending = None;
+        turn.notes.push("已丢弃保留的 AI 成品，正文未改变。".into());
+        turn.settle(TurnState::Discarded);
+        true
+    }
+
     /// 清空任务流。跑着的那一轮保留，否则回来的增量没处落。
     pub(crate) fn clear_history(&mut self) {
         self.turns.retain(|turn| turn.state.running());
+    }
+
+    /// 这一轮 Pi 的成品是不是已经写过。同一份交付回执（恢复重放、重启后重试）
+    /// 只能自动应用一次；撤销过的也不能被盖回来。
+    pub(crate) fn pi_run_already_written(&self, run_id: &str) -> bool {
+        self.turns.iter().any(|turn| {
+            turn.pi_write
+                .as_ref()
+                .is_some_and(|w| w.matches_run(run_id))
+        })
+    }
+
+    /// 成品已写进正文：卡片转「已写入」，并记住精确的前后文本供撤销。
+    pub(crate) fn mark_pi_written(&mut self, turn_id: u64, write: pi_write::PiWrite) -> bool {
+        let Some(turn) = self.turn_mut(turn_id) else {
+            return false;
+        };
+        for advisory in &write.advisories {
+            let line = format!("提示：{advisory}");
+            if !turn.notes.contains(&line) {
+                turn.notes.push(line);
+            }
+        }
+        turn.content = write.after.clone();
+        turn.is_workspace = true;
+        turn.stream_suffix.clear();
+        turn.pi_pending = None;
+        turn.pi_write = Some(write);
+        if let Some(run) = turn.pi_run.as_mut() {
+            run.status = crate::pi_agent::PiRunStatus::Accepted;
+        }
+        turn.settle(TurnState::Accepted);
+        true
+    }
+
+    /// 交付检查过了但没写进正文：正文不动，成品留在这一轮里等用户显式取回。
+    pub(crate) fn park_pi_delivery(
+        &mut self,
+        turn_id: u64,
+        pending: pi_write::PiPendingDelivery,
+        conflict: bool,
+        reason: String,
+    ) -> bool {
+        let Some(turn) = self.turn_mut(turn_id) else {
+            return false;
+        };
+        turn.content = pending.markdown.clone();
+        turn.is_workspace = true;
+        turn.stream_suffix.clear();
+        turn.pi_pending = Some(pending);
+        let notes = &mut turn.notes;
+        for advisory in &turn.pi_pending.as_ref().expect("刚放进去").advisories {
+            let line = format!("提示：{advisory}");
+            if !notes.contains(&line) {
+                notes.push(line);
+            }
+        }
+        if conflict {
+            turn.settle(TurnState::Conflict);
+        } else {
+            turn.notes.push(reason.clone());
+            turn.settle(TurnState::Failed(reason));
+        }
+        true
     }
 }
 

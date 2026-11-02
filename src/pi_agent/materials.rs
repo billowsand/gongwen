@@ -255,8 +255,14 @@ mod tests {
                 vocabulary: &[],
             });
         assert!(
-            issues.iter().any(|issue| issue.contains("2025年10月9日"))
-                && issues.iter().any(|issue| issue.contains("市应急管理局")),
+            issues
+                .advisories
+                .iter()
+                .any(|item| item.contains("2025年10月9日"))
+                && issues
+                    .advisories
+                    .iter()
+                    .any(|item| item.contains("市应急管理局")),
             "样稿的日期与单位不能当事实：{issues:?}"
         );
     }
