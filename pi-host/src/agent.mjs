@@ -3,7 +3,13 @@
 //! 生产路径只注册一个 OpenAI 兼容 provider，模型参数全部来自 init 消息；这里不读
 //! `~/.pi`、不刷新模型目录、不登录、不下载技能。测试可以注入 faux provider，但只走
 //! 同一套 Durable harness、工作区与 submit_document 工具。
+//!
+//! 常规与分阶段共用同一个 Durable Harness 与同一份交付权限：分阶段只是宿主按预算
+//! 把长任务拆成几步短任务，中间成果经 `record_progress` 由宿主核验登记，最终仍必须
+//! `submit_document` / `finish_report`。这里没有第二个推理循环，也没有通用流程 DSL。
 
+import fs from "node:fs";
+import path from "node:path";
 import { createHash } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
 import { createModels, createProvider } from "@earendil-works/pi-ai/models";
@@ -17,7 +23,7 @@ import {
   watchEvents,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
+import { createEditTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import { WorkspaceGuard, WorkspaceEnv } from "./paths.mjs";
 import { createDomainTools, createToolBridge, BridgeError } from "./bridge.mjs";
 import {
@@ -27,9 +33,23 @@ import {
   writeReportReceipt,
 } from "./delivery.mjs";
 import { REPORT_TOOL_NAME, SUBMIT_TOOL_NAME, loadSkillIndex, systemPrompt, userPrompt } from "./prompt.mjs";
+import { budgetLabel, decideStrategy, readBudgetChars, taskEstimate } from "./budget.mjs";
+import {
+  RECORD_TOOL_NAME,
+  buildPlan,
+  expandSections,
+  expectedUnits,
+  missingUses,
+  phasePrompt,
+  planSummary,
+} from "./phases.mjs";
+import { ProgressError, ProgressRegistry, identityOf } from "./progress.mjs";
+import { createBoundedReadTool } from "./read.mjs";
 
 const PROVIDER_ID = "gongwen";
 const CANDIDATE_INTERVAL_MS = 400;
+/** 免密服务在 SDK 要求鉴权时使用的非秘密占位值，只发往用户配置的模型地址。 */
+const LOCAL_PLACEHOLDER_KEY = "lm-studio-local";
 
 export class AgentError extends Error {
   constructor(message, code = "agent_failed") {
@@ -40,12 +60,15 @@ export class AgentError extends Error {
 }
 
 /** 为生成保留空间，同时让 32k 等窗口也能在一次长任务中切出可压缩的历史。 */
-export function writingCompaction(model) {
-  const reserveTokens = Math.min(16_384, Math.floor(model.contextWindow / 2));
+export function writingCompaction(model, outputReserve = undefined, workBudget = model.contextWindow) {
+  const budget = Math.min(model.contextWindow, workBudget);
+  const reserveTokens = Number.isInteger(outputReserve) && outputReserve > 0
+    ? Math.min(16_384, outputReserve)
+    : Math.min(16_384, Math.floor(budget / 2));
   return {
     enabled: true,
-    reserveTokens,
-    keepRecentTokens: Math.max(1, Math.min(4_096, Math.floor((model.contextWindow - reserveTokens) / 4))),
+    reserveTokens: model.contextWindow - budget + reserveTokens,
+    keepRecentTokens: Math.max(1, Math.min(4_096, Math.floor((budget - reserveTokens) / 4))),
     backgroundTokens: 0,
   };
 }
@@ -78,10 +101,11 @@ export function buildModels(config) {
     auth: {
       apiKey: {
         name: "公文助手模型",
+        // 本机免密模型不需要用户填假密钥：SDK 要求鉴权时只在本地 provider 里给占位值。
         resolve: async () =>
           config.model.apiKey
             ? { auth: { apiKey: config.model.apiKey }, source: "应用设置" }
-            : { auth: {}, source: "无密钥（本机模型）" },
+            : { auth: { apiKey: LOCAL_PLACEHOLDER_KEY }, source: "本机模型（免密占位）" },
       },
     },
     models: [model],
@@ -127,7 +151,7 @@ function makePausableTimer(ms, onExpire) {
   };
 }
 
-function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId }) {
+function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId, phase }) {
   return defineTool({
     name: SUBMIT_TOOL_NAME,
     description:
@@ -140,11 +164,61 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir
       if (state.report) {
         throw new AgentError("本轮已经交了侧栏清单；同一轮不能再提交正文。", "submit_duplicate");
       }
+      if (["gongwen-extract", "gongwen-policy-check"].includes(phase?.task?.skill)) {
+        throw new AgentError("本技能只交侧栏清单，不提交正文文件。请调用 finish_report({summary,items})，不要调用 submit_document。", "report_required");
+      }
+      if (phase?.phased && phase.id !== "deliver") {
+        throw new AgentError(
+          `现在还在分阶段写作的「${phase.title ?? phase.id}」这一步，不能提交半稿。请先写完 work/ 里的阶段成果并调用 ${RECORD_TOOL_NAME} 登记，最后一步再提交。`,
+          "phase_premature_submit",
+        );
+      }
+      if (phase?.phased && phase.id === "deliver" && !phase.report && !phase.registry?.has("final")) {
+        throw new AgentError(
+          "合稿成果还没有登记：请先完成完整候选稿并登记 final，再提交。不能把半稿当成品。",
+          "phase_incomplete",
+        );
+      }
       const read = guard.readSubmission(args.path, { maxFileBytes: limits.maxFileBytes });
       if (!read.ok) {
         throw new AgentError(`提交失败：${read.error.message}`, "submit_invalid");
       }
       const { relative, text } = read.value;
+      if (!phase?.task?.selection) {
+        const research = phase?.task?.skill === "gongwen-research" || phase?.task?.kind === "研究报告";
+        const prose = text.replace(/```[^\n]*\n[\s\S]*?```/g, "").replace(/`[^`\n]+`/g, "");
+        const repair = phase.phased ? ` 修改文件后先用 record_progress 重新登记 phase=review, unit=final, path=${relative}, uses=${JSON.stringify(phase.registry.get("final")?.uses ?? [])}，再提交。` : "修改文件后重新提交。";
+        const issues = [];
+        if (phase?.task?.kind !== "会议纪要" && !/^#\s+[^#\s]/u.test(prose.trimStart())) issues.push("第一行必须是唯一的 # 具体题名，再写摘要/正文标记");
+        const numbered = prose.split("\n").filter((line) => /^#{2,6}\s+(?:[一二三四五六七八九十百零]+[、.．]|[（(][一二三四五六七八九十百零\d]+[）)]|第[一二三四五六七八九十百零\d]+(?:[章节条]|部分)|\d+(?:\.\d+)+|\d+[、.．\s])/u.test(line)).slice(0, 12);
+        if (numbered.length) issues.push(`标题不要手写编号（包括第几部分），删除编号并保留 # 层级和标题文字：${numbered.join("；")}`);
+        const invalid = research && prose.match(/\[\^[^\]\r\n]+\](?![:：]\s*[(（])/u);
+        if (invalid) {
+          issues.push(`脚注语法不受应用支持：${invalid[0]}。请改为行内 [^s1]:(来源与原文摘录)，不要裸标记或文末定义；也可直接用资料题名说明出处`);
+        }
+        if (research) {
+          let appendix = false;
+          let chapters = 0;
+          for (const line of prose.split("\n")) {
+            const marker = line.match(/^\s*<!--\s*\[([^\]]+)\]\s*-->\s*$/u)?.[1];
+            if (marker && ["目录", "摘要", "正文", "附录", "附件", "版本变更记录", "参考文献"].includes(marker)) {
+              appendix = marker === "附录" || marker === "附件";
+              chapters = 0;
+            } else if (appendix && /^##\s+[^#]/u.test(line)) {
+              chapters += 1;
+              if (chapters > 1) { issues.push("一个附录标记下有多份附录：每份附录前各写 <!-- [附录] -->；版本变更记录前写 <!-- [版本变更记录] -->"); break; }
+            }
+          }
+        }
+        if (issues.length) throw new AgentError(`Markdown 技术格式检查未通过：${issues.join("；")}。${repair}`, "submit_invalid");
+      }
+      if (phase?.phased) {
+        validatePhaseDelivery(phase, guard);
+        const final = phase.registry.get("final");
+        if (!final || final.path !== relative || final.sha256 !== sha256(text)) {
+          throw new AgentError("提交文件与已登记合稿不一致，请回到合稿阶段核验后再交付。", "phase_incomplete");
+        }
+      }
       const bytes = Buffer.byteLength(text, "utf8");
       if (bytes > limits.maxFileBytes) {
         throw new AgentError(`提交文件超过上限（${bytes} 字节）`, "submit_too_large");
@@ -183,7 +257,8 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir
       emit({
         type: "progress",
         message: `已提交 ${relative}，等待程序检查`,
-      });      onSubmitted?.(state.snapshot);
+      });
+      onSubmitted?.(state.snapshot);
       return {
         output: [
           {
@@ -198,7 +273,7 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir
 }
 
 /** 审核 / 找资料的清单：只进侧栏，不产生正文提案。 */
-function createReportTool({ state, emit, deliveryDir, runId, requestId }) {
+function createReportTool({ state, emit, deliveryDir, runId, requestId, phase }) {
   return defineTool({
     name: REPORT_TOOL_NAME,
     description:
@@ -217,6 +292,13 @@ function createReportTool({ state, emit, deliveryDir, runId, requestId }) {
       if (state.snapshot) {
         throw new AgentError("本轮已经提交了正文；同一轮不能再交清单。", "report_conflict");
       }
+      if (phase?.phased && phase.id !== "deliver") {
+        throw new AgentError(
+          `现在还在分阶段写作的「${phase.title ?? phase.id}」这一步，不能提前交清单。请先完成材料提炼并登记，最后一步再交清单。`,
+          "phase_premature_submit",
+        );
+      }
+      if (phase?.phased) validatePhaseDelivery(phase, phase.guard);
       let receipt;
       try {
         receipt = writeReportReceipt(deliveryDir, {
@@ -252,22 +334,145 @@ function createReportTool({ state, emit, deliveryDir, runId, requestId }) {
   });
 }
 
-function createExtension({ guard, limits, state, onSubmitted, emit, bridge, deliveryDir, runId, requestId }) {
+/**
+ * 中间成果登记。模型只能提交「阶段 + 单元 + 路径 + 可回查引文」，由宿主核验文件、
+ * 哈希、原文定位与依赖后写入运行目录；它不能写正文，也不能代替最终提交。
+ */
+function createRecordTool({ guard, limits, phase, registry, emit }) {
+  return defineTool({
+    name: RECORD_TOOL_NAME,
+    description:
+      "分阶段写作的中间成果登记。写完本步的 work/ 文件后调用；宿主会核对文件、哈希、原文引文与依赖，登记成功才算这一步完成。常规策略下不需要它。",
+    parameters: Type.Object({
+      phase: Type.String({ description: "当前阶段：distill / outline / sections / review" }),
+      unit: Type.String({ description: "提示里给出的单元编号，逐字照抄" }),
+      path: Type.String({ description: "work/ 下保存本步成果的文件" }),
+      summary: Type.String({ description: "一句话说明这一步做了什么" }),
+      sources: Type.Optional(
+        Type.Array(
+          Type.Object({
+            path: Type.String({ description: "input/ 下的原文件路径" }),
+            quote: Type.String({ description: "原文里连续的一句，必须能回查" }),
+          }),
+        ),
+      ),
+      uses: Type.Optional(Type.Array(Type.String(), { description: "依赖的已登记单元编号" })),
+      sections: Type.Optional(Type.Array(Type.String(), { description: "提纲阶段的章节标题" })),
+    }),
+    execute: async (args) => {
+      if (!phase?.phased) {
+        throw new AgentError("本轮是常规策略，不需要分阶段登记；请直接写完整成品并提交。", "progress_unused");
+      }
+      const accepted = phase.spec ?? (phase.id === "deliver" && !phase.report
+        ? phase.plan.phases.find((item) => item.id === "review") : undefined);
+      const spec = (accepted?.units ?? []).find((unit) => unit.id === args?.unit);
+      if (!spec) {
+        throw new AgentError(
+          `这一步没有单元「${String(args?.unit ?? "")}」。请按提示里列出的单元编号逐字登记。`,
+          "progress_invalid_unit",
+        );
+      }
+      const result = registry.record(
+        {
+          spec: { ...spec, attempt: phase.attempt ?? 1 },
+          phase: args?.phase,
+          unit: args?.unit,
+          file: args?.path,
+          summary: args?.summary,
+          sources: args?.sources,
+          uses: args?.uses,
+          sections: args?.sections,
+        },
+        {
+          guard,
+          workspace: phase.workspace,
+          task: phase.task,
+          maxFileBytes: limits.maxFileBytes,
+        },
+      );
+      const status = registry.status(phase.id, accepted.allUnits ?? accepted.units);
+      if (phase.id === "distill") {
+        emit({ type: "progress", message: `正在提炼第 ${status.done}/${status.total} 份材料…` });
+      } else {
+        emit({ type: "progress", message: `已登记${spec.title ? ` ${spec.title}` : ""}，宿主核对通过` });
+      }
+      return {
+        output: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: result.status,
+              unit: spec.id,
+              path: result.record.path,
+              sha256: result.record.sha256,
+              phase_done: status.done,
+              phase_total: status.total,
+              remaining: status.missing.map((item) => item.id),
+              note: "宿主已核对；本步单元完成后立即结束本轮，等待宿主发下一步，不要自行写下一阶段或提交半稿。",
+            }),
+          },
+        ],
+        control: registry.status(phase.id, accepted.units).ok ? { terminate: true } : undefined,
+      };
+    },
+  });
+}
+
+function createExtension({
+  guard,
+  limits,
+  state,
+  onSubmitted,
+  emit,
+  bridge,
+  deliveryDir,
+  runId,
+  requestId,
+  phase,
+  registry,
+  readChars,
+}) {
   const tools = [
     ...createDomainTools(bridge, {
+      readChars,
+      onAnswer: (answer) => {
+        if (Buffer.byteLength(JSON.stringify(answer), "utf8") > 32_000) throw new AgentError("确认信息超过大小上限", "answer_too_large");
+        registry.answers = [...registry.answers, answer].slice(-6);
+        registry.persist();
+      },
+      onResult: (name, result) => registry.cacheEvidence(name, result, guard),
       readDocument: (path) => {
         const result = guard.readSubmission(path, { maxFileBytes: limits.maxFileBytes });
         if (!result.ok) throw new BridgeError(result.error.message);
         return result.value.text;
       },
     }),
-    createReadTool(),
+    createBoundedReadTool({ guard, maxFileBytes: limits.maxFileBytes, maxChars: readChars }),
     createWriteTool(),
     createEditTool(),
-    createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId }),
-    createReportTool({ state, emit, deliveryDir, runId, requestId }),
+    createRecordTool({ guard, limits, phase, registry, emit }),
+    createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId, phase }),
+    createReportTool({ state, emit, deliveryDir, runId, requestId, phase }),
   ];
   return defineExtension({ name: "gongwen-writing", tools });
+}
+
+function readCurrentBytes(config) {
+  try {
+    const file = path.resolve(config.workspace.root, config.workspace.current);
+    const stat = fs.statSync(file);
+    return stat.isFile() ? stat.size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function toAgentError(error) {
+  if (error instanceof AgentError) return error;
+  if (error instanceof ProgressError) {
+    return new AgentError(`阶段成果登记失败：${error.message}`, error.code);
+  }
+  return error;
 }
 
 /**
@@ -291,7 +496,87 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     }
   }
 
+  config.currentBytes = readCurrentBytes(config);
+  const estimate = taskEstimate(config);
+  let decision = decideStrategy(config, estimate);
   const guard = new WorkspaceGuard(config.workspace.root);
+  emit({
+    type: "strategy",
+    mode: decision.mode,
+    reasons: decision.reasons,
+    window: decision.window,
+    workBudget: decision.workBudget,
+    materialsBudget: decision.materialsBudget,
+    verified: decision.verified,
+    estimate,
+  });
+  if (decision.mode === "insufficient") {
+    throw new AgentError(
+      `本次预算放不下最小写作指令与一次有效输出（窗口 ${decision.window} token）。请换用窗口更大的模型，或把材料拆成几轮。`,
+      "budget_insufficient",
+    );
+  }
+
+  let plan = buildPlan({ config, decision, guard });
+  if (decision.mode === "phased" && plan.phases.length === 0) {
+    // 局部修改 / 小任务：分阶段没有可拆的步骤，退回常规，并在事件里说明。
+    decision = { ...decision, mode: "regular", reasons: [...decision.reasons, "没有可拆的阶段，按常规一轮完成"] };
+  }
+  if (decision.mode === "phased") {
+    emit({
+      type: "progress",
+      message: `策略：分阶段（${decision.reasons.join("；")}；${budgetLabel(decision)}；步骤 ${planSummary(plan)}）`,
+    });
+  } else {
+    emit({
+      type: "progress",
+      message: `策略：常规（${decision.reasons.join("；")}；${budgetLabel(decision)}）`,
+    });
+  }
+
+  const identity = identityOf({ guard, workspace: config.workspace, task: config.task });
+  let registry;
+  try {
+    registry = ProgressRegistry.load({
+      deliveryDir,
+      runId: config.runId,
+      requestId: config.requestId,
+      identity,
+    });
+    registry.refresh({ guard, workspace: config.workspace, task: config.task });
+  } catch (error) {
+    throw toAgentError(error);
+  }
+  if (decision.mode !== "phased" && (registry.records.length > 0 || registry.cursor?.phased)) {
+    decision = { ...decision, mode: "phased", reasons: [...decision.reasons, "沿用已保存的分阶段进度"] };
+    plan = buildPlan({ config, decision, guard });
+    emit({ type: "strategy", ...decision });
+  }
+  const phase = {
+    phased: decision.mode === "phased",
+    id: "deliver",
+    report: estimate.report,
+    title: "交付",
+    spec: undefined,
+    attempt: 1,
+    registry,
+    workspace: config.workspace,
+    task: config.task,
+    guard,
+    plan,
+  };
+  // Harness 一恢复就可能重放工具，必须先还原当时阶段的权限和单元。
+  if (phase.phased && registry.cursor) {
+    if (registry.get("outline") && plan.phases.some((item) => item.dynamic === "sections")) expandSections(plan, registry);
+    const saved = plan.phases.find((item) => item.id === registry.cursor.phaseId);
+    if (!saved) throw new AgentError("保存的阶段与当前计划不一致，已拒绝恢复。", "progress_identity_mismatch");
+    const unit = registry.cursor.unit ? saved.units?.find((item) => item.id === registry.cursor.unit) : undefined;
+    if (registry.cursor.unit && !unit) throw new AgentError("保存的材料块与当前计划不一致。", "progress_identity_mismatch");
+    phase.id = saved.id;
+    phase.title = saved.title;
+    phase.spec = unit ? { ...saved, units: [unit], allUnits: saved.units } : saved;
+  }
+
   const state = { snapshot: undefined, report: undefined, parked: undefined };
   let submitResolve;
   const submitted = new Promise((resolve) => {
@@ -311,6 +596,13 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     pause: () => timer.pause(),
     resume: () => timer.resume(),
   });
+  const hardToolCap = decision.toolBudget + (decision.mode === "phased" ? 16 : 0);
+  let toolCap = decision.mode === "phased" ? Math.min(24, hardToolCap) : hardToolCap;
+  bridge.setLimit(toolCap);
+  const grantTools = (count) => {
+    toolCap = Math.min(hardToolCap, toolCap + Math.max(0, count));
+    bridge.setLimit(toolCap);
+  };
   onBridge?.(bridge);
   const candidateScan = makeCandidateScanner({ guard, state, emit, limits: config.limits });
 
@@ -318,8 +610,8 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     const built = models && model ? { models, model } : buildModels(config);
     const selectedModels = built.models;
     const selectedModel = built.model;
-    const registry = createRegistry();
-    registry.install(
+    const registryTools = createRegistry();
+    registryTools.install(
       createExtension({
         guard,
         limits: config.limits,
@@ -329,6 +621,9 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
         deliveryDir,
         runId: config.runId,
         requestId: config.requestId,
+        phase,
+        registry,
+        readChars: readBudgetChars(decision),
         onSubmitted: (snapshot) => submitResolve(snapshot),
       }),
     );
@@ -337,7 +632,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       storage,
       {
         models: selectedModels,
-        registry,
+        registry: registryTools,
         env: ({ cwd }) =>
           new WorkspaceEnv({
             root: config.workspace.root,
@@ -347,7 +642,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
         settings: {
           stream: { timeoutMs: Math.min(config.limits.timeoutMs, 180_000) },
           retry: { maxRetries: 1 },
-          compaction: writingCompaction(selectedModel),
+          compaction: writingCompaction(selectedModel, undefined, decision.workBudget),
           afterFailedRun: "withdraw",
           // 不自动无限重启：同一个任务连续被崩溃打断两次就停用，等人工决定。
           restartLimit: 2,
@@ -399,6 +694,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
           config.task,
           config.recovery,
           loadSkillIndex(config.workspace),
+          decision.mode === "phased",
         ),
         cwd: config.workspace.root,
       },
@@ -425,7 +721,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     });
 
     emit({ type: "progress", message: "正在读取正文、材料与写作要求…" });
-    if (config.recovery?.continuationId) {
+    if (config.recovery?.resume || config.recovery?.continuationId) {
       // 先让崩溃前的 Durable 任务收尾，防止人工补交和原任务同时生成或提交。
       await root.waitForIdle(controller.context);
       if (state.snapshot) return { snapshot: state.snapshot };
@@ -433,51 +729,205 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     }
     const deliveryId = config.recovery?.continuationId
       ? `${config.runId}:resume:${config.recovery.continuationId}` : config.runId;
-    // 文件交付是宿主契约。模型文字结束或长度截断都不等于交付；有限续跑，仍要求显式工具提交。
-    // 每次补交的 requestId 固定，崩溃恢复时重开同一个 submission，不叠加新一轮额度。
-    for (let attempt = 0; attempt <= 2; attempt += 1) {
-      const submission = await root.submit(
+
+    const submitPrompt = (attempt, requestPrefix, firstContent = undefined) =>
+      root.submit(
         {
           type: "input",
-          content: attempt === 0 ? userPrompt(config.task) :
+          content: attempt === 0 && firstContent
+            ? firstContent
+            : attempt === 0 ? userPrompt(config.task) :
             "上一段已经结束或达到输出长度上限，但本轮还没有交付回执。请继续完成剩余工作，不要重写已有成稿。先读取 work/ 中实际文件；检查稿件时用 check_document({path:\"work/文件名.md\"})，不要把全文再放进工具参数。生成/修改任务必须调用 submit_document({path,summary}) 提交你确认的完整成品；仅审核/找资料用 finish_report。不要只用聊天文字说已完成。",
-          requestId: attempt === 0 ? config.runId : `${deliveryId}:delivery:${attempt}`,
+          requestId: attempt === 0 ? `${requestPrefix}:first` : `${requestPrefix}:delivery:${attempt}`,
         },
         controller.context,
       );
-      const settledPromise = submission
-        .wait(controller.context)
-        .then((value) => ({ kind: "settled", value }))
-        .catch((error) => ({ kind: "failed", error }));
-      const submittedPromise = submitted.then((value) => ({ kind: "submitted", value }));
-      const outcome = await Promise.race([settledPromise, submittedPromise]);
 
-      if (outcome.kind === "submitted") {
-        return { snapshot: outcome.value };
+    /** 最终交付：仍有 3 次有界补交，每次都要显式工具提交。 */
+    const runDelivery = async (attempts, requestPrefix, firstContent = undefined) => {
+      for (let attempt = 0; attempt <= attempts; attempt += 1) {
+        if (phase.phased) {
+          registry.cursor = { phased: true, phaseId: "deliver" };
+          registry.persist();
+        }
+        const submission = await submitPrompt(attempt, requestPrefix, firstContent);
+        const settledPromise = submission
+          .wait(controller.context)
+          .then((value) => ({ kind: "settled", value }))
+          .catch((error) => ({ kind: "failed", error }));
+        const submittedPromise = submitted.then((value) => ({ kind: "submitted", value }));
+        const outcome = await Promise.race([settledPromise, submittedPromise]);
+
+        if (outcome.kind === "submitted") return { snapshot: outcome.value };
+        if (outcome.kind === "failed") throw outcome.error;
+        if (state.snapshot) return { snapshot: state.snapshot };
+        if (state.report) return { report: state.report };
+        if (outcome.value.status === "unanswered") {
+          throw new AgentError(
+            `模型没有完成本轮：${outcome.value.reason}${outcome.value.detail ? `（${JSON.stringify(outcome.value.detail)}）` : ""}`,
+            "unanswered",
+          );
+        }
+        if (attempt < attempts) {
+          emit({ type: "progress", message: `尚未交付成品，正在继续检查与提交（${attempt + 1}/${attempts}）…` });
+        }
       }
-      if (outcome.kind === "failed") {
-        throw outcome.error;
-      }
-      if (state.snapshot) {
-        return { snapshot: state.snapshot };
-      }
-      if (state.report) {
-        return { report: state.report };
-      }
-      if (outcome.value.status === "unanswered") {
-        throw new AgentError(
-          `模型没有完成本轮：${outcome.value.reason}${outcome.value.detail ? `（${JSON.stringify(outcome.value.detail)}）` : ""}`,
-          "unanswered",
+      throw new AgentError(
+        "本轮仍未完成成品交付，已保留工作文件与运行记录。请稍后重试；无需调整最大输出 Token。",
+        "not_submitted",
+      );
+    };
+
+    /** 跑一个中间阶段；最多两次纠错，仍无有效登记就停，不冒充完成。 */
+    const runPhase = async (spec) => {
+      phase.id = spec.id;
+      phase.title = spec.title;
+      phase.spec = spec;
+      phase.attempt = 1;
+      registry.refresh({ guard, workspace: config.workspace, task: config.task });
+      // 失效后重跑不能重用 Durable 已完成的旧 submission。
+      const revision = sha256(JSON.stringify(registry.records.map((record) => [record.unit, record.sha256, Boolean(record.invalid)]))).slice(0, 16);
+      grantTools(spec.kindHint === "distill" ? Math.min(18, 6 + spec.units.length * 2) : 8);
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        phase.attempt = attempt;
+        const check = phaseStatus(spec, registry);
+        if (check.ok) {
+          registry.markPhase(spec.id, attempt);
+          emit({ type: "progress", message: `${spec.title}已完成（${check.done}/${check.total}）` });
+          return;
+        }
+        emit({
+          type: "progress",
+          message: attempt === 1
+            ? `正在${spec.title}…`
+            : `${spec.title}还缺 ${check.missing.length} 项，正在补齐（${attempt}/2）…`,
+        });
+        registry.cursor = {
+          phased: true,
+          phaseId: spec.id,
+          unit: spec.units?.length === 1 ? spec.units[0].id : undefined,
+        };
+        registry.persist();
+        // 每个短步骤从明确任务和已验证文件重新开始，避免旧步骤指令干扰小模型。
+        await root.waitForIdle(controller.context);
+        await root.reset("当前工作成果保存在 work/，接下来只执行宿主发来的新步骤。用户确认信息和必要文件由下一条任务提供。", controller.context);
+        const submission = await root.submit(
+          {
+            type: "input",
+            content: phasePrompt({
+              config,
+              decision,
+              phase: spec,
+              registry,
+              plan,
+              attempt,
+              missing: check.missing.map((item) => item.id),
+            }),
+            requestId: `${deliveryId}:phase:${spec.id}:${spec.units?.[0]?.id ?? "all"}:${revision}:${attempt}`,
+          },
+          controller.context,
         );
+        const settledPromise = submission
+          .wait(controller.context)
+          .then((value) => ({ kind: "settled", value }))
+          .catch((error) => ({ kind: "failed", error }));
+        const submittedPromise = submitted.then((value) => ({ kind: "submitted", value }));
+        const outcome = await Promise.race([settledPromise, submittedPromise]);
+        if (outcome.kind === "submitted") {
+          throw new AgentError("分阶段写作中提前提交了成品，已拒绝。", "phase_premature_submit");
+        }
+        if (outcome.kind === "failed") throw outcome.error;
+        if (state.report) {
+          throw new AgentError("分阶段写作中提前交了清单，已拒绝。", "phase_premature_submit");
+        }
+        if (outcome.value.status === "unanswered") {
+          throw new AgentError(
+            `模型没有完成「${spec.title}」：${outcome.value.reason}`,
+            "unanswered",
+          );
+        }
+        registry.refresh({ guard, workspace: config.workspace, task: config.task });
+        const after = phaseStatus(spec, registry);
+        if (after.ok) {
+          registry.markPhase(spec.id, attempt);
+          emit({ type: "progress", message: `${spec.title}已完成（${after.done}/${after.total}）` });
+          return;
+        }
       }
-      if (attempt < 2) {
-        emit({ type: "progress", message: `尚未交付成品，正在继续检查与提交（${attempt + 1}/2）…` });
+      throw new AgentError(
+        `「${spec.title}」没有登记有效成果，已暂停，不冒充完成。已登记的文件与运行记录都在本机。`,
+        "phase_incomplete",
+      );
+    };
+
+    const runPhases = async (startIndex = 0) => {
+      for (let index = startIndex; index < plan.phases.length; index += 1) {
+        const spec = plan.phases[index];
+        if (spec.final) break;
+        if (spec.dynamic === "sections") {
+          // 提纲阶段完成后才知道有几节；这里按登记展开成逐节短任务。
+          expandSections(plan, registry);
+          index -= 1;
+          continue;
+        }
+        if (spec.id === "distill") {
+          for (const unit of spec.units) {
+            await runPhase({ ...spec, units: [unit], allUnits: spec.units });
+          }
+        } else {
+          await runPhase(spec);
+        }
       }
+    };
+
+    if (decision.mode === "phased") {
+      await runPhases(0);
+      phase.id = "deliver";
+      phase.title = "交付";
+      phase.spec = undefined;
+      grantTools(8);
+      ensureReportCoverage(plan, registry, estimate);
+      return await runDelivery(2, `${deliveryId}:deliver`, phasePrompt({
+        config, decision, phase: plan.phases[plan.phases.length - 1], registry, plan,
+      }));
     }
-    throw new AgentError(
-      "本轮仍未完成成品交付，已保留工作文件与运行记录。请稍后重试；无需调整最大输出 Token。",
-      "not_submitted",
-    );
+
+    // 常规策略：先按现有的一次性交付跑；没交出成品时有一次有界转换到分阶段。
+    try {
+      return await runDelivery(2, deliveryId);
+    } catch (error) {
+      const agentError = toAgentError(error);
+      const convertible =
+        agentError instanceof AgentError &&
+        ["not_submitted", "unanswered"].includes(agentError.code) &&
+        decision.preference === "auto" &&
+        !estimate.selection &&
+        // 只有材料能拆块时才值得转：没有材料的空转不是窗口不足，也不该靠阶段
+        // 把同一件事再问一遍（否则「无成果」会被阶段循环掩盖）。
+        estimate.materialTokens > 0 &&
+        !state.snapshot &&
+        !state.report;
+      if (!convertible) throw agentError;
+      const phased = { ...decision, mode: "phased", reasons: [...decision.reasons, "常规一轮没有交出成品，转为分阶段继续"] };
+      plan = buildPlan({ config, decision: phased, guard });
+      if (plan.phases.length === 0) throw agentError;
+      decision = phased;
+      phase.phased = true;
+      phase.plan = plan;
+      emit({
+        type: "progress",
+        message: `常规一轮没有交出成品，转为分阶段继续（${planSummary(plan)}）；已登记成果为 0，不重复任何已验证单元。`,
+      });
+      grantTools(24);
+      await runPhases(0);
+      phase.id = "deliver";
+      phase.spec = undefined;
+      grantTools(8);
+      ensureReportCoverage(plan, registry, estimate);
+      return await runDelivery(1, `${deliveryId}:converted`, phasePrompt({
+        config, decision, phase: plan.phases[plan.phases.length - 1], registry, plan,
+      }));
+    }
   } catch (error) {
     if (timedOut) throw new AgentError("Pi 智能写作超时，未交付任何提案。", "timeout");
     if (controller.context.abortSignal?.aborted && !state.snapshot && !state.report) {
@@ -493,7 +943,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     if (error instanceof BridgeError) {
       throw new AgentError(`工具调用失败：${error.message}`, "tool_failed");
     }
-    throw error;
+    throw toAgentError(error);
   } finally {
     timer.clear();
     bridge.abortAll(new AgentError("本轮已结束", "cancelled"));
@@ -517,6 +967,44 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       }
     }
   }
+}
+
+/** 最终交付前重新核对阶段文件及依赖，登记之后改稿或改交另一份半稿都不能绕过。 */
+function validatePhaseDelivery(phase, guard) {
+  phase.registry.refresh({ guard, workspace: phase.workspace, task: phase.task });
+  for (const spec of phase.plan.phases) {
+    if (spec.final || spec.dynamic) continue;
+    if (!phaseStatus(spec, phase.registry).ok) {
+      throw new AgentError(`阶段成果已经失效或不完整：${spec.title}，请恢复后重新核验。`, "phase_incomplete");
+    }
+  }
+}
+
+/** 报告 / 提炼任务：材料提炼必须覆盖全部材料块，不能只写「都读完了」。 */
+function ensureReportCoverage(plan, registry, estimate) {
+  if (!estimate.report) return;
+  const distill = plan.phases.find((item) => item.id === "distill");
+  if (!distill) return;
+  const check = phaseStatus(distill, registry);
+  if (!check.ok) {
+    throw new AgentError("材料提炼还没有覆盖全部材料块，不能提前交清单。", "phase_incomplete");
+  }
+}
+
+/** 阶段是否完成：单元齐全，且依赖引用完整（提纲引用全部材料、合稿引用全部章节）。 */
+function phaseStatus(spec, registry) {
+  const expected = expectedUnits(spec, registry);
+  const status = registry.status(spec.id, expected);
+  const missingUsesNow = missingUses(spec, registry);
+  if (missingUsesNow.length > 0) {
+    const seen = new Set(status.missing.map((item) => item.id));
+    for (const id of missingUsesNow) {
+      if (!seen.has(id)) status.missing.push({ id });
+    }
+    status.ok = false;
+    status.total = Math.max(status.total, status.done + status.missing.length);
+  }
+  return status;
 }
 
 /** 候选稿刷新：只在 work/ 里读，按内容哈希去重，按时间节流。 */

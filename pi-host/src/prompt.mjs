@@ -122,10 +122,21 @@ ${task.selection.text}
 }
 
 /** 组装系统指令。`workspace` 是 init 里的相对路径约定，`skillIndex` 是本轮快照索引。 */
-export function systemPrompt(workspace, task = {}, recovery = undefined, skillIndex = []) {
+export function systemPrompt(workspace, task = {}, recovery = undefined, skillIndex = [], phased = false) {
   const skills = workspace.skills || "skills/gongwen-markdown";
   const piSkills = workspace.piSkills || "skills/pi-skills";
   const index = Array.isArray(skillIndex) ? skillIndex : [];
+  const phasedBlock = phased
+    ? `
+
+## 本轮是分阶段写作
+宿主已经按本次实际窗口、工作预算与任务规模把长任务拆成几步短任务。
+- 每一步只做宿主在用户消息里指定的那一小步；中间阶段**不要**调用 submit_document / finish_report。
+- 每步写完 work/ 里的成果后，必须调用 record_progress 登记：宿主会核对文件、哈希、原文引文和依赖，登记通过才算这一步完成。模型说「已完成」不算。
+- 只登记提示里列出的单元编号；不要跳步、不要把多步合成一次、不要声称已经读完全部材料。没登记的单元就是没做。
+- 读到长文件用 read 的 offset / limit 分页，按返回里的「未读」范围继续。
+- 只有最后一步（用户消息明确说「最后一步：交付」）才能提交成品。`
+    : "";
   const resumeBlock = recovery?.resume
     ? `
 
@@ -160,6 +171,7 @@ ${skillBlock(task, piSkills, index)}
 - doc_elements：只读当前表单已填的要素，避免重复问已经填过的内容。
 - style_list / style_read：当前文种已启用的写法风格档案，只读。档案与范例是写法样稿，只学结构与表达，不是事实来源。
 - ask_user：确有必要时问用户，一次最多 3 题、每轮最多 2 批；等回答的时间不算执行超时。
+- record_progress：只在分阶段写作时使用，登记中间成果；不能代替最终交付。
 - ${SUBMIT_TOOL_NAME}：交付完整正文；${REPORT_TOOL_NAME}：交审核 / 资料清单，只进侧栏。
 
 ## 三条红线（必须遵守）
@@ -183,7 +195,7 @@ ${skillBlock(task, piSkills, index)}
 - 只审核或只找资料、不产生新正文：调用 ${REPORT_TOOL_NAME}({ summary, items: [{ title, detail, severity }] })。清单只进侧栏，不替换正文。
 - 二者只能选一个。提交内容在调用时固定；提交之后再改文件不会改变已经交出的成品。同一轮重复提交以第一次为准。
 - 提交前用 check_document 自查一遍：技术问题（选区外被改、公文引用被删改、留了工作区路径）会被拒绝，必须先改；事实疑点只会在界面上提示，不必再为它重交。
-- 不要把正文粘贴在聊天回复里当作交付，也不要声称已经提交而没有调用工具。没有提交就是没有完成。${resumeBlock}`;
+- 不要把正文粘贴在聊天回复里当作交付，也不要声称已经提交而没有调用工具。没有提交就是没有完成。${phasedBlock}${resumeBlock}`;
 }
 
 /** 用户消息：本轮要求与本轮上下文。 */

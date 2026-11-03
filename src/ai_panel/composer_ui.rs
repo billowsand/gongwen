@@ -60,9 +60,12 @@ struct BarActions {
     pick_selection: bool,
     /// 在光标处插入触发符（`+` 菜单里的「引用文章」「选技能」）。
     insert: Option<char>,
-    /// 去掉一个引用。
-    unlink: Option<String>,
+    /// 去掉一个引用：按「来源 + 编号」定位，只删这一篇。
+    unlink: Option<(RefSource, i64)>,
     remove_material: Option<usize>,
+    /// 改某篇粘贴材料 / `@` 引用的用途。
+    material_role: Option<(usize, MaterialRole)>,
+    ref_role: Option<((String, i64), MaterialRole)>,
 }
 
 impl DraftPage<'_> {
@@ -93,6 +96,8 @@ impl DraftPage<'_> {
                         match super::paste::PastedFile::new(&material) {
                             Ok(file) => {
                                 composer.materials.push(file);
+                                // 逐篇用途跟着材料一起进，旧会话没有这项时回退到默认值。
+                                composer.pi_material_roles.push(composer.pi_material_role);
                                 composer.error = None;
                                 return false;
                             }
@@ -255,13 +260,45 @@ impl DraftPage<'_> {
             let text = self.doc.generated_markdown[range.clone()].to_string();
             self.doc.ai_panel.composer.selection = Some((range, text));
         }
-        if let Some(title) = actions.unlink {
+        if let Some(key) = actions.unlink {
+            // 按「来源 + 编号」删：同名不同来源的两篇各算各的，不会因标题相同把两篇一起删掉。
             let composer = &mut self.doc.ai_panel.composer;
-            composer.text = mention::unlink(&composer.text, &title);
-            composer.refs.retain(|reference| reference.title != title);
+            if let Some(index) = composer
+                .refs
+                .iter()
+                .position(|reference| (reference.source, reference.id) == key)
+            {
+                let reference = composer.refs.remove(index);
+                composer.text = mention::unlink(&composer.text, &reference);
+                composer.pi_ref_roles.retain(|(saved, _)| {
+                    saved != &(reference.source.label().to_string(), reference.id)
+                });
+            }
         }
         if let Some(index) = actions.remove_material {
             self.doc.ai_panel.composer.materials.remove(index);
+            if index < self.doc.ai_panel.composer.pi_material_roles.len() {
+                self.doc.ai_panel.composer.pi_material_roles.remove(index);
+            }
+        }
+        if let Some((index, role)) = actions.material_role {
+            let composer = &mut self.doc.ai_panel.composer;
+            while composer.pi_material_roles.len() <= index {
+                composer.pi_material_roles.push(composer.pi_material_role);
+            }
+            composer.pi_material_roles[index] = role;
+        }
+        if let Some((key, role)) = actions.ref_role {
+            let composer = &mut self.doc.ai_panel.composer;
+            if let Some((_, saved)) = composer
+                .pi_ref_roles
+                .iter_mut()
+                .find(|(saved, _)| *saved == key)
+            {
+                *saved = role;
+            } else {
+                composer.pi_ref_roles.push((key, role));
+            }
         }
         if let Some(symbol) = actions.insert {
             insert_trigger(&ctx, input_id, &mut self.doc.ai_panel.composer.text, symbol);
@@ -332,19 +369,27 @@ impl DraftPage<'_> {
                                     actions.pick_selection = true;
                                 }
                                 ui.separator();
-                                ui.label("粘贴材料用途");
+                                ui.label("新粘贴材料用途");
                                 for role in MaterialRole::ALL {
                                     if ui.add(theme::menu_selectable_item(composer.pi_material_role == role, role.label())).clicked() {
                                         composer.pi_material_role = role;
                                     }
                                 }
                                 ui.separator();
-                                ui.label("@ 引用用途");
+                                ui.label("新 @ 引用用途");
                                 for role in MaterialRole::ALL {
                                     if ui.add(theme::menu_selectable_item(composer.pi_ref_role == role, role.label())).clicked() {
                                         composer.pi_ref_role = role;
                                     }
                                 }
+                                ui.separator();
+                                ui.label("写作策略");
+                                for preference in crate::pi_agent::PiStrategyPreference::ALL {
+                                    if ui.add(theme::menu_selectable_item(composer.pi_strategy == preference, preference.label())).clicked() {
+                                        composer.pi_strategy = preference;
+                                    }
+                                }
+                                ui.weak("自动按实际窗口与任务规模选常规或分阶段；倾向分阶段只对长任务生效。");
                                 ui.weak("事实材料可作为依据；样稿与范文只参考写法。知识库由 Pi 按需检索。");
                             });
 
@@ -438,8 +483,19 @@ impl DraftPage<'_> {
                                     ))
                                     .clicked()
                                 {
-                                    actions.unlink = Some(reference.title.clone());
+                                    actions.unlink = Some((reference.source, reference.id));
                                 }
+                                let role = composer.ref_role(reference.source, reference.id);
+                                let key = (reference.source.label().to_string(), reference.id);
+                                egui::Popup::menu(&ui.add(pill(role.label(), role != crate::pi_agent::MaterialRole::Fact)))
+                                    .show(|ui| {
+                                        for role in MaterialRole::ALL {
+                                            if ui.add(theme::menu_selectable_item(role == composer.ref_role(reference.source, reference.id), role.label())).clicked() {
+                                                actions.ref_role = Some((key.clone(), role));
+                                            }
+                                        }
+                                        ui.weak("按来源与编号单独记，同名不同来源不会串用。");
+                                    });
                             }
                             for (index, material) in composer.materials.iter().enumerate() {
                                 if ui
@@ -456,8 +512,17 @@ impl DraftPage<'_> {
                                 {
                                     actions.remove_material = Some(index);
                                 }
+                                let role = composer.material_role(index);
+                                egui::Popup::menu(&ui.add(pill(role.label(), role != crate::pi_agent::MaterialRole::Fact)))
+                                    .show(|ui| {
+                                        for candidate in MaterialRole::ALL {
+                                            if ui.add(theme::menu_selectable_item(candidate == composer.material_role(index), candidate.label())).clicked() {
+                                                actions.material_role = Some((index, candidate));
+                                            }
+                                        }
+                                    });
                             }
-                            });
+                        });
                         });
                 },
             );
@@ -587,7 +652,17 @@ impl DraftPage<'_> {
                 composer.pi_skill = Some(id);
                 String::new()
             }
-            Pick::Article(reference) => {
+            Pick::Article(mut reference) => {
+                // 同名不同来源：显示名必须唯一，否则记号分不清是哪一篇；同名同源再选一次
+                // 沿用已有的显示名（不发散成第二个名字）。
+                reference.title = match composer
+                    .refs
+                    .iter()
+                    .find(|r| r.source == reference.source && r.id == reference.id)
+                {
+                    Some(existing) => existing.title.clone(),
+                    None => mention::unique_title(&reference, &composer.refs),
+                };
                 let mark = mention::mark(&reference.title);
                 if !composer.refs.contains(&reference) {
                     composer.refs.push(reference);
@@ -626,6 +701,8 @@ impl DraftPage<'_> {
                 composer.error = None;
                 composer.refs.clear();
                 composer.materials.clear();
+                composer.pi_material_roles.clear();
+                composer.pi_ref_roles.clear();
                 composer.selection = None;
             }
             Err(message) => self.doc.ai_panel.composer.error = Some(message),
@@ -747,7 +824,12 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 按一轮请求发起技能任务。发不出去时把原因写进输入区，返回 false。
+    /// 旧流程（小模型分阶段）的任务入口：**仅供已有自动测试**，生产代码不再调用。
+    ///
+    /// 统一写作第五阶段开始，侧栏新任务一律走 Pi（`start_pi_job`），旧卡片的「重新生成 /
+    /// 重试 / 从头重来」也改成了「复制为新 Pi 任务」（`copy_turn_to_pi`）。这里留着是因为
+    /// 旧模型联机用例仍以旧后端为基准；旧入口整体退役时随 `ai_panel/skill_job.rs` 一并删。
+    #[cfg(test)]
     pub(super) fn start_panel_request(&mut self, request: super::TurnRequest) -> bool {
         match self.start_skill(request, None) {
             Ok(()) => true,

@@ -77,6 +77,53 @@ fs.writeFileSync(
 
 const expected = "# 关于开展防火检查的通知\n\n各单位应于十月开展一次防火检查。\n";
 
+// 分阶段离线验收用：一段带哈希的材料，让 host 走进分阶段调度。
+const phasedExpected = "# 关于开展防火检查的通知\n\n各单位应于十月开展一次防火检查。\n";
+const phasedMaterial = "各单位应于十月开展一次防火检查。\n";
+const phasedMaterialSha = createHash("sha256").update(phasedMaterial, "utf8").digest("hex");
+let phased = false;
+let phasedCallIndex = 0;
+const phasedPlan = [
+  ["write", { path: "work/notes/01.md", content: "检查要求：十月开展一次防火检查。" }],
+  ["record_progress", {
+    phase: "distill",
+    unit: "distill:input/materials/01.md#1",
+    path: "work/notes/01.md",
+    summary: "十月的防火检查要求",
+    sources: [{ path: "input/materials/01.md", quote: "各单位应于十月开展一次防火检查" }],
+  }],
+  null,
+  ["write", { path: "work/outline.md", content: "# 检查安排\n\n写清十月开展一次防火检查。\n" }],
+  ["record_progress", {
+    phase: "outline",
+    unit: "outline",
+    path: "work/outline.md",
+    summary: "一节提纲",
+    uses: ["distill:input/materials/01.md#1"],
+    sections: ["检查安排"],
+  }],
+  null,
+  ["write", { path: "work/sections/01.md", content: "各单位应于十月开展一次防火检查。\n" }],
+  ["record_progress", {
+    phase: "sections",
+    unit: "section:1",
+    path: "work/sections/01.md",
+    summary: "第一节",
+    uses: ["outline", "distill:input/materials/01.md#1"],
+  }],
+  null,
+  ["write", { path: "work/final.md", content: phasedExpected }],
+  ["record_progress", {
+    phase: "review",
+    unit: "final",
+    path: "work/final.md",
+    summary: "合稿完成",
+    uses: ["outline", "section:1"],
+  }],
+  null,
+  ["submit_document", { path: "work/final.md", summary: "按材料写完通知" }],
+].filter(Boolean);
+
 // 本地假 OpenAI：按步骤返回 read / read / write / submit_document。
 let modelCalls = 0;
 const requests = [];
@@ -98,10 +145,28 @@ const server = http.createServer((req, res) => {
     const toolCalls = messages.flatMap((message) =>
       (message.tool_calls ?? []).map((call) => call.function?.name),
     );
-    const step = toolCalls.length;
+    const step = phased ? phasedCallIndex++ : toolCalls.length;
     let name;
     let callArgs;
-    if (step === 0) {
+    if (phased) {
+      const action = phasedPlan[step];
+      if (action === undefined) {
+        // 交付后模型只需结束，不应再发起工具调用。
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        const text = { id: "chatcmpl-stub", object: "chat.completion.chunk", created: 0, model: "stub", choices: [{ index: 0, delta: { role: "assistant", content: "已提交。" }, finish_reason: "stop" }] };
+        res.write(`data: ${JSON.stringify(text)}\n\ndata: [DONE]\n\n`);
+        res.end();
+        return;
+      }
+      if (action === null) {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        const text = { id: "chatcmpl-stub", object: "chat.completion.chunk", created: 0, model: "stub", choices: [{ index: 0, delta: { role: "assistant", content: "这一步完成。" }, finish_reason: "stop" }] };
+        res.write(`data: ${JSON.stringify(text)}\n\ndata: [DONE]\n\n`);
+        res.end();
+        return;
+      }
+      [name, callArgs] = action;
+    } else if (step === 0) {
       name = "read";
       callArgs = { path: "skills/pi-skills/gongwen-draft/SKILL.md" };
     } else if (step === 1) {
@@ -141,16 +206,18 @@ await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const { port } = server.address();
 const baseUrl = `http://127.0.0.1:${port}/v1`;
 
-function initMessage(recovery) {
+function initMessage(recovery, options = {}) {
+  const rootDir = options.workspaceRoot ?? workspaceRoot;
+  const run = options.runDir ?? runDir;
   return {
     type: "init",
     protocol: manifest.host.protocol,
-    requestId: "offline-1",
-    runId: "offline-run-1",
+    requestId: options.requestId ?? "offline-1",
+    runId: options.runId ?? "offline-run-1",
     workspace: {
-      root: workspaceRoot,
-      state: path.join(runDir, "session.sqlite"),
-      delivery: runDir,
+      root: rootDir,
+      state: path.join(run, "session.sqlite"),
+      delivery: run,
       current: "input/current.md",
       request: "input/request.md",
       skills: "skills/gongwen-markdown",
@@ -161,13 +228,20 @@ function initMessage(recovery) {
       baseUrl,
       apiKey: "sk-offline-not-real",
       modelId: "offline-stub",
-      contextWindow: 8192,
+      contextWindow: options.contextWindow ?? 32768,
       maxTokens: 1024,
       reasoning: false,
     },
-    task: { request: "按材料写一份简短通知。", kind: "通知", systemDate: "2026-11-01", skill: "gongwen-draft" },
+    strategy: options.strategy ?? { preference: "auto", capability: {} },
+    task: {
+      request: options.request ?? "按材料写一份简短通知。",
+      kind: "通知",
+      systemDate: "2026-11-01",
+      skill: "gongwen-draft",
+      ...(options.materials ? { materials: options.materials } : {}),
+    },
     limits: { maxFileBytes: 8388608, maxCandidateBytes: 2097152, timeoutSeconds: 120, maxQuestionBatches: 2, maxQuestions: 3 },
-    ...(recovery ? { recovery: { mode: "resume", requestId: "offline-1" } } : {}),
+    ...(recovery ? { recovery: { mode: "resume", requestId: options.requestId ?? "offline-1" } } : {}),
   };
 }
 
@@ -304,13 +378,13 @@ function nonLoopbackConnections(pid) {
   return found;
 }
 
-function assertDelivery(result, label) {
+function assertDelivery(result, label, want = expected) {
   if (result.code !== 0) throw new Error(`${label}退出码 ${result.code}\nstderr:\n${result.err}`);
   const submitted = result.lines.find((line) => line.type === "submitted");
   const completed = result.lines.find((line) => line.type === "completed");
   if (!submitted) throw new Error(`${label}没有 submitted 事件\n${JSON.stringify(result.lines)}`);
   if (!completed || completed.submitted !== true) throw new Error(`${label}没有 completed(submitted)`);
-  if (submitted.content !== expected) throw new Error(`${label}交付内容不符：${submitted.content}`);
+  if (submitted.content !== want) throw new Error(`${label}交付内容不符：${submitted.content}`);
   return { submitted, completed };
 }
 
@@ -334,9 +408,73 @@ try {
   const reopened = fs.statSync(path.join(runDir, "session.sqlite"));
   if (reopened.size === 0) throw new Error("重开后 Durable 数据库为空");
 
+  // 分阶段新流程：同一份 host、同一套交付权限，按材料提炼→提纲→分节→合稿→交付走一遍。
+  phased = true;
+  phasedCallIndex = 0;
+  const phasedRoot = path.join(work, "phased-workspace");
+  const phasedRun = path.join(work, "phased-run");
+  for (const sub of ["input/materials", "work", "skills/gongwen-markdown", "skills/pi-skills/gongwen-draft"]) {
+    fs.mkdirSync(path.join(phasedRoot, sub), { recursive: true });
+  }
+  fs.mkdirSync(phasedRun, { recursive: true });
+  fs.mkdirSync(path.join(phasedRun, "tmp"), { recursive: true });
+  fs.writeFileSync(path.join(phasedRoot, "input", "current.md"), "# 当前正文\n\n原有内容。\n");
+  fs.writeFileSync(path.join(phasedRoot, "input", "request.md"), "按材料写一份简短通知。\n");
+  fs.writeFileSync(path.join(phasedRoot, "input", "materials", "01.md"), phasedMaterial);
+  fs.writeFileSync(
+    path.join(phasedRoot, "input", "materials", "index.json"),
+    JSON.stringify([
+      {
+        file: "input/materials/01.md",
+        title: "防火检查要求",
+        source: "离线验收夹具",
+        role: "fact",
+        sha256: phasedMaterialSha,
+        bytes: Buffer.byteLength(phasedMaterial, "utf8"),
+      },
+    ]),
+  );
+  fs.writeFileSync(path.join(phasedRoot, "skills", "gongwen-markdown", "SKILL.md"), "# 公文语法\n用一级标题写题名。\n");
+  fs.writeFileSync(
+    path.join(phasedRoot, "skills", "pi-skills", "gongwen-draft", "SKILL.md"),
+    "# 起草\n按宿主每一步的说明做，中间用 record_progress 登记。\n",
+  );
+  const beforePhased = modelCalls;
+  const phasedResult = await runHost(
+    initMessage(false, {
+      workspaceRoot: phasedRoot,
+      runDir: phasedRun,
+      requestId: "offline-phased-1",
+      runId: "offline-phased-run-1",
+      contextWindow: 32768,
+      request: "按材料写一份简短通知，说明十月开展一次防火检查。\n" + "背景说明。".repeat(300),
+      strategy: { preference: "phased", capability: {} },
+      materials: [
+        {
+          file: "input/materials/01.md",
+          title: "防火检查要求",
+          source: "离线验收夹具",
+          role: "fact",
+          sha256: phasedMaterialSha,
+          bytes: Buffer.byteLength(phasedMaterial, "utf8"),
+        },
+      ],
+    }),
+  );
+  assertDelivery(phasedResult, "分阶段运行", phasedExpected);
+  const phasedEvents = phasedResult.lines.map((line) => line.type);
+  if (!phasedEvents.includes("strategy")) throw new Error("分阶段运行没有 strategy 事件");
+  const progress = JSON.parse(fs.readFileSync(path.join(phasedRun, "progress.json"), "utf8"));
+  const units = progress.records.map((record) => record.unit).sort();
+  const wantUnits = ["distill:input/materials/01.md#1", "final", "outline", "section:1"].sort();
+  if (JSON.stringify(units) !== JSON.stringify(wantUnits)) {
+    throw new Error(`分阶段登记不完整：${JSON.stringify(units)}`);
+  }
+  if (modelCalls <= beforePhased) throw new Error("分阶段运行没有真实调用模型");
+
   ok = true;
   process.stdout.write(
-    `PASS 无公网验收：Node ${manifest.node.version} · host ${manifest.host.version} · ${manifest.files.length} 文件 · 模型调用 ${callsBefore} 次 · 回执重放 0 次新调用\n` +
+    `PASS 无公网验收：Node ${manifest.node.version} · host ${manifest.host.version} · ${manifest.files.length} 文件 · 常规模型调用 ${callsBefore} 次 · 回执重放 0 次新调用 · 分阶段模型调用 ${modelCalls - beforePhased} 次\n` +
       "说明：工作区里的技能是验收专用简化夹具；真实技能包由应用内嵌资源与 cargo test skill_pack 覆盖，本脚本不冒充真实技能验收。\n",
   );
 } catch (error) {

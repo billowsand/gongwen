@@ -81,7 +81,7 @@ function initMessage(workspace, extra = {}) {
       baseUrl: "http://127.0.0.1:9/v1",
       apiKey: "sk-test-not-real",
       modelId: "stub-model",
-      contextWindow: 8192,
+      contextWindow: 32768,
       maxTokens: 1024,
       reasoning: false,
     },

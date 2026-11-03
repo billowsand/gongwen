@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { WorkspaceEnv, WorkspaceGuard, resolveInside } from "../src/paths.mjs";
+import { WorkspaceEnv, WorkspaceGuard, resolveInside, atomicWrite } from "../src/paths.mjs";
 
 function workspace() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gongwen-pi-ws-"));
@@ -14,6 +14,29 @@ function workspace() {
   fs.writeFileSync(path.join(root, "work", "final.md"), "# 候选\n");
   return root;
 }
+
+test("atomicWrite 在 Windows 短暂占用时有限重试且保留原子替换", { skip: process.platform !== "win32" }, () => {
+  const root = workspace();
+  const target = path.join(root, "work", "state.json");
+  fs.writeFileSync(target, "old");
+  const original = fs.renameSync;
+  let attempts = 0;
+  fs.renameSync = (...args) => {
+    attempts += 1;
+    if (attempts === 1) {
+      assert.equal(fs.readFileSync(target, "utf8"), "old");
+      throw Object.assign(new Error("暂时占用"), { code: "EPERM" });
+    }
+    return original(...args);
+  };
+  try {
+    atomicWrite(target, "new");
+    assert.equal(fs.readFileSync(target, "utf8"), "new");
+    assert.equal(attempts, 2);
+  } finally {
+    fs.renameSync = original;
+  }
+});
 
 test("guard accepts paths inside the workspace and rejects escapes", () => {
   const root = workspace();

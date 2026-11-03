@@ -61,7 +61,7 @@ export class BridgeError extends Error {
  * 正在等 `tool_result`，收到匹配的回复再发下一个。排队中的请求不占 Rust 的槽位，
  * 但计入工具次数 / 提问批次预算。
  */
-export function createToolBridge({ emit, pause, resume }) {
+export function createToolBridge({ emit, pause, resume, maxCalls = MAX_TOOL_CALLS }) {
   /** callId → waiter；包含已发出和排队中的请求。 */
   const pending = new Map();
   /** 还没发出的 waiter，FIFO。 */
@@ -71,6 +71,8 @@ export function createToolBridge({ emit, pause, resume }) {
   let nextCall = 1;
   let calls = 0;
   let batches = 0;
+  /** 本轮的绝对工具额度；分阶段时按阶段增量上调，但总上限仍由宿主封顶。 */
+  let callLimit = Number.isInteger(maxCalls) && maxCalls > 0 ? maxCalls : MAX_TOOL_CALLS;
   /** 取消 / 进程结束后不再发协议、也不再接纳新请求。 */
   let closed = false;
   /** `pump` 防重入：`emit` 里同步回来的回复不能把调度栈搅乱。 */
@@ -137,8 +139,8 @@ export function createToolBridge({ emit, pause, resume }) {
   const call = (name, args) => {
     if (closed) return Promise.reject(new BridgeError("本轮已取消，不能再调用工具"));
     calls += 1;
-    if (calls > MAX_TOOL_CALLS) {
-      return Promise.reject(new BridgeError(`工具调用次数超过上限（${MAX_TOOL_CALLS}）`));
+    if (calls > callLimit) {
+      return Promise.reject(new BridgeError(`工具调用次数超过上限（${callLimit}）`));
     }
     if (pending.size >= MAX_PENDING_REQUESTS) {
       return Promise.reject(new BridgeError(`等待中的工具请求过多（${MAX_PENDING_REQUESTS}）`));
@@ -192,7 +194,19 @@ export function createToolBridge({ emit, pause, resume }) {
     for (const waiter of waiters) settle(waiter, false, reason);
   };
 
-  return { call, ask, handle, abortAll, pending: () => pending.size };
+  return {
+    call,
+    ask,
+    handle,
+    abortAll,
+    pending: () => pending.size,
+    used: () => calls,
+    limit: () => callLimit,
+    /** 上调 / 下调本轮的绝对工具额度。分阶段只按阶段需要加，不无限放宽。 */
+    setLimit(value) {
+      if (Number.isInteger(value) && value > 0) callLimit = Math.min(MAX_TOOL_CALLS + 24, value);
+    },
+  };
 }
 
 function textResult(value) {
@@ -200,7 +214,7 @@ function textResult(value) {
 }
 
 /** 把领域工具注册成 Durable 工具；执行时都走同一座桥。 */
-export function createDomainTools(bridge, { readDocument } = {}) {
+export function createDomainTools(bridge, { readDocument, readChars, onAnswer, onResult } = {}) {
   const tools = DOMAIN_TOOLS.map(([name, description, parameters]) =>
     defineTool({
       name,
@@ -208,12 +222,17 @@ export function createDomainTools(bridge, { readDocument } = {}) {
       parameters,
       execute: async (args) => {
         let values = args ?? {};
+        if ((name === "kb_read" || name === "ms_read") && Number.isInteger(readChars)) {
+          values = { ...values, limit_chars: readChars };
+        }
         if (name === "check_document" && values.path !== undefined) {
           if (values.text !== undefined) throw new BridgeError("path 与 text 只能选一个");
           if (!readDocument) throw new BridgeError("当前工具没有文件读取器");
           values = { text: readDocument(values.path) };
         }
-        return textResult(await bridge.call(name, values));
+        const result = await bridge.call(name, values);
+        onResult?.(name, result);
+        return textResult(result);
       },
     }),
   );
@@ -234,6 +253,7 @@ export function createDomainTools(bridge, { readDocument } = {}) {
       }),
       execute: async (args) => {
         const result = await bridge.ask(args?.questions ?? []);
+        onAnswer?.(result);
         return textResult(result);
       },
     }),

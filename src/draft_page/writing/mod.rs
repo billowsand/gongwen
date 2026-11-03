@@ -24,6 +24,12 @@ use std::time::{Duration, Instant};
 
 use materials::{MaterialPicker, SourceViewer};
 
+/// 旧「分阶段写作」执行入口的退役开关（统一写作第五阶段）。
+///
+/// 打开时：面板只能查看、导出和「复制为新的 Pi 任务」，老的六阶段流程不再启动。
+/// 实现先保留到主代理真机验收后删除；临时回退把它改成 `false` 即可。
+const LEGACY_WRITING_RETIRED: bool = true;
+
 /// 会丢掉成果或替换人工修改的操作，先弹框确认再做。
 enum Confirm {
     RemoveSource(String),
@@ -82,6 +88,13 @@ struct CoverageCache {
 }
 
 impl WritingPanel {
+    pub(crate) fn has_history(&self) -> bool {
+        self.load_failed
+            || !self.task.topic.trim().is_empty()
+            || !self.task.sources.is_empty()
+            || !self.task.sections.is_empty()
+            || !self.task.final_markdown.is_empty()
+    }
     pub(crate) fn new(kind: TemplateKind) -> Self {
         Self {
             open: false,
@@ -679,7 +692,8 @@ impl DraftPage<'_> {
             if ui.button("← 返回正文").clicked() {
                 self.doc.writing.open = false;
             }
-            ui.strong("分阶段写作");
+            ui.strong("旧分阶段写作（历史）");
+            ui.weak("第五阶段起新任务统一走右侧「智能写作」；这里只查看、导出与迁移旧任务。");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.doc.writing.open {
                     if ui.button("公文要素").clicked() {
@@ -704,7 +718,12 @@ impl DraftPage<'_> {
     }
 
     pub(crate) fn writing_ui(&mut self, ui: &mut egui::Ui) {
+        if LEGACY_WRITING_RETIRED {
+            self.writing_history_ui(ui);
+            return;
+        }
         let mut action = None;
+        let mut migrate = false;
         let editable = !self.doc.read_only() && !self.doc.writing.running;
         // 文种在外部表单里改了：立刻按新文种收窄失效、更新默认写法，不必等用户点运行。
         if !self.doc.writing.running
@@ -789,12 +808,25 @@ impl DraftPage<'_> {
                     } else {
                         if let Some(resume) = &self.doc.writing.task.resume_action
                             && ui
-                                .add_enabled(editable, egui::Button::new("接着跑"))
+                                .add_enabled(false, egui::Button::new("接着跑"))
+                                .on_disabled_hover_text(
+                                    "旧流程已停止运行；请用右侧「智能写作」，或把这一份复制为新的 Pi 任务",
+                                )
                                 .clicked()
                         {
                             action = Some(resume.clone());
                         }
-                        self.writing_primary_action(ui, editable, &mut action);
+                        // 旧流程不再从这里运行：新任务一律走右侧 Pi（统一写作第五阶段）。
+                        self.writing_primary_action(ui, false, &mut action);
+                        if ui
+                            .button("复制为新的 Pi 任务")
+                            .on_hover_text(
+                                "把主题、素材（按原用途）与归纳的写法 / 结构搬进右侧「智能写作」，检查后发送；旧任务历史仍保留",
+                            )
+                            .clicked()
+                        {
+                            migrate = true;
+                        }
                     }
                     if let Some((estimate, basis)) = self.doc.writing.estimated_calls() {
                         ui.weak(estimate).on_hover_text(basis);
@@ -863,12 +895,136 @@ impl DraftPage<'_> {
             });
         self.writing_material_modal(ui.ctx());
         self.writing_confirm_modal(ui.ctx(), &mut action);
+        if migrate {
+            self.copy_writing_task_to_pi();
+            return;
+        }
         if let Some(action) = action {
             self.start_writing(action, ui.ctx());
         }
     }
 
+    /// 旧流程已停止：新任务一律走右侧「智能写作」（Pi）。
+    ///
+    /// 入口按钮已经置灰，但阶段页里的修改操作（重新提炼、整篇重写……）仍会走到这里，
+    /// 所以这里再拦一遭：旧的六阶段流程不再启动、不再接着跑，只保留查看、导出与迁移。
+    ///
+    /// 实现（`writing::run` 与它下面的一整套）在统一写作第五阶段退役，但暂时保留到主代理
+    /// 真机验收后再删：`LEGACY_WRITING_RETIRED` 改成 `false` 可临时回退，不影响历史数据。
     fn start_writing(&mut self, action: Action, ctx: &egui::Context) {
+        if LEGACY_WRITING_RETIRED {
+            self.doc.writing.task.error = Some(
+                "旧的分阶段写作已停止运行：新任务请用右侧「智能写作」，或点「复制为新的 Pi 任务」把这一份搬过去。"
+                    .into(),
+            );
+            return;
+        }
+        self.start_writing_legacy(action, ctx);
+    }
+
+    /// 历史面板只读显示，复制/导出不改任务；所有模型操作交给新 Pi 入口。
+    fn writing_history_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("旧分阶段写作历史");
+        ui.label("原任务只读保留，可查看、复制或导出。新任务统一使用右侧智能写作。");
+        if ui
+            .add_enabled(
+                !self.doc.read_only() && !self.doc.busy,
+                egui::Button::new("复制为新的 Pi 任务"),
+            )
+            .clicked()
+        {
+            self.copy_writing_task_to_pi();
+            return;
+        }
+        if let Some(error) = &self.doc.writing.save_error {
+            ui.label(error);
+        }
+        let task = &self.doc.writing.task;
+        ui.label(format!("主题：{}", task.topic));
+        egui::ScrollArea::vertical()
+            .id_salt("legacy-writing-history")
+            .show(ui, |ui| {
+                if !task.topic_cards.is_empty() {
+                    egui::CollapsingHeader::new("提炼素材").show(ui, |ui| {
+                        let text = task
+                            .topic_cards
+                            .iter()
+                            .map(|card| {
+                                format!(
+                                    "## {}\n\n> {}\n\n来源：{}（{}–{}）",
+                                    card.point, card.quote, card.source_id, card.start, card.end
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        history_artifact(ui, self.actions, "全部摘记", "legacy-notes.md", &text);
+                    });
+                }
+                for (index, source) in task.sources.iter().enumerate() {
+                    history_artifact(
+                        ui,
+                        self.actions,
+                        &format!("材料 {} · {}", index + 1, source.title),
+                        &format!("legacy-source-{}.md", index + 1),
+                        &source.text,
+                    );
+                }
+                history_artifact(
+                    ui,
+                    self.actions,
+                    "归纳的写法",
+                    "legacy-style.md",
+                    &task.style_md,
+                );
+                history_artifact(
+                    ui,
+                    self.actions,
+                    "归纳的结构",
+                    "legacy-framework.md",
+                    &task.framework_md,
+                );
+                for (index, section) in task.sections.iter().enumerate() {
+                    let text = format!(
+                        "## {}\n\n{}\n\n{}",
+                        section.title, section.points, section.markdown
+                    );
+                    history_artifact(
+                        ui,
+                        self.actions,
+                        &format!("章节 {} · {}", index + 1, section.title),
+                        &format!("legacy-section-{}.md", index + 1),
+                        &text,
+                    );
+                    for (version, previous) in section.revision_history.iter().enumerate() {
+                        history_artifact(
+                            ui,
+                            self.actions,
+                            &format!("章节 {} 历史 {}", index + 1, version + 1),
+                            &format!("legacy-section-{}-{}.md", index + 1, version + 1),
+                            previous,
+                        );
+                    }
+                }
+                history_artifact(
+                    ui,
+                    self.actions,
+                    "统稿成果",
+                    "legacy-final.md",
+                    &task.final_markdown,
+                );
+                for (index, previous) in task.final_history.iter().enumerate() {
+                    history_artifact(
+                        ui,
+                        self.actions,
+                        &format!("统稿历史 {}", index + 1),
+                        &format!("legacy-final-{}.md", index + 1),
+                        previous,
+                    );
+                }
+            });
+    }
+
+    fn start_writing_legacy(&mut self, action: Action, ctx: &egui::Context) {
         if self.doc.busy || self.doc.ai_panel.running() || self.doc.read_only() {
             self.doc.writing.task.error = Some("请先完成其他任务，且仅在草稿中运行写作".into());
             return;
@@ -896,4 +1052,35 @@ impl DraftPage<'_> {
             Err(error) => self.doc.writing.task.error = Some(format!("{error:#}")),
         }
     }
+}
+
+fn history_artifact(
+    ui: &mut egui::Ui,
+    actions: &mut Vec<crate::app::DraftAction>,
+    title: &str,
+    name: &str,
+    text: &str,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    egui::CollapsingHeader::new(title)
+        .id_salt(name)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("复制 Markdown").clicked() {
+                    ui.ctx().copy_text(text.to_string());
+                }
+                if ui.button("导出 Markdown…").clicked() {
+                    actions.push(crate::app::DraftAction::ExportWritingArtifact {
+                        name: name.to_string(),
+                        text: text.to_string(),
+                    });
+                }
+            });
+            ui.label(text.chars().take(2_000).collect::<String>());
+            if text.chars().count() > 2_000 {
+                ui.weak("预览仅显示前2000字，复制或导出可取得全文。");
+            }
+        });
 }

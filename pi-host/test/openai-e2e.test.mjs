@@ -141,7 +141,7 @@ test("the production host path submits through a local OpenAI-compatible endpoin
     child.stdin.write(
       `${JSON.stringify({
         type: "init",
-        protocol: 2,
+        protocol: 3,
         requestId: "req-e2e",
         runId: "run-e2e",
         workspace: {
@@ -156,7 +156,7 @@ test("the production host path submits through a local OpenAI-compatible endpoin
           baseUrl,
           apiKey: key,
           modelId: "stub-model",
-          contextWindow: 8192,
+          contextWindow: 32768,
           maxTokens: 1024,
           reasoning: false,
         },

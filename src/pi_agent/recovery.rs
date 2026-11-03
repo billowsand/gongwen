@@ -17,6 +17,7 @@
 use super::delivery::sha256_hex;
 use super::materials::PiMaterialMeta;
 use super::protocol::{HOST_VERSION, PROTOCOL_VERSION};
+use super::strategy::PiStrategyPreference;
 use super::workspace::PiWorkspace;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -95,11 +96,18 @@ pub(crate) struct PiRunRecord {
     #[serde(default)]
     pub(crate) candidate: Option<String>,
     pub(crate) request: String,
+    /// 用户原始要求，与模型侧追加的技能、选区说明分开；复制成新任务时使用。
+    #[serde(default)]
+    pub(crate) user_request: Option<String>,
     pub(crate) request_sha256: String,
     pub(crate) kind: String,
     pub(crate) system_date: String,
     #[serde(default)]
     pub(crate) skill: Option<String>,
+    /// 统一写作入口的策略倾向（自动 / 倾向分阶段）。恢复时**按记录值**走，不看输入框
+    /// 当前选的是什么；旧记录没有这一项，按自动（与旧行为一致）。
+    #[serde(default)]
+    pub(crate) strategy: PiStrategyPreference,
     #[serde(default)]
     pub(crate) selection: Option<PiRunSelection>,
     #[serde(default)]
@@ -277,10 +285,12 @@ impl PiRunRecord {
             input_request: sha256_hex(input_request),
             candidate: candidate.map(sha256_hex),
             request: request.to_string(),
+            user_request: None,
             request_sha256: sha256_hex(request),
             kind: kind.to_string(),
             system_date: system_date.to_string(),
             skill: skill.map(str::to_string),
+            strategy: PiStrategyPreference::Auto,
             selection,
             materials,
             model_provider: model_provider.to_string(),
@@ -300,6 +310,13 @@ impl PiRunRecord {
     /// 原子写。记录里有正文要求与材料标题，写入前确认没超过整份上限。
     pub(crate) fn write(&self, workspace: &PiWorkspace) -> Result<(), String> {
         self.write_to_dir(&workspace.run)
+    }
+
+    /// 记下这一轮用户选的策略倾向。开跑前写记录时调它，恢复时照着记录走，
+    /// 不会因为输入框后来换了选择而在中途把常规任务变成分阶段。
+    pub(crate) fn with_strategy(mut self, strategy: PiStrategyPreference) -> Self {
+        self.strategy = strategy;
+        self
     }
 
     /// 按运行目录写（接受提案时只拿得到目录）。
@@ -1038,6 +1055,45 @@ mod tests {
         read.check_resume(&workspace.label, "run-1", "正式正文")
             .unwrap();
         check_workspace_files(&workspace, &read).unwrap();
+    }
+
+    #[test]
+    fn the_strategy_preference_survives_serialization_and_restart() {
+        use crate::pi_agent::PiStrategyPreference;
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = workspace(dir.path());
+        let record = record(&workspace).with_strategy(PiStrategyPreference::Phased);
+        record.write(&workspace).unwrap();
+        // 相当于重启后重读运行记录：用户后来把输入框改回「自动」也不影响这一轮。
+        let read = PiRunRecord::read_from(&workspace.run).unwrap();
+        assert_eq!(read.strategy, PiStrategyPreference::Phased);
+        assert_eq!(
+            serde_json::to_value(&read).unwrap()["strategy"],
+            serde_json::json!("phased"),
+            "存的是 snake_case 字符串，不是调试输出"
+        );
+    }
+
+    #[test]
+    fn old_records_without_a_strategy_are_read_as_auto() {
+        use crate::pi_agent::PiStrategyPreference;
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = workspace(dir.path());
+        let record = record(&workspace);
+        let mut value = serde_json::to_value(&record).unwrap();
+        value.as_object_mut().unwrap().remove("strategy");
+        std::fs::write(
+            workspace.run.join("run.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let read = PiRunRecord::read_from(&workspace.run).unwrap();
+        assert_eq!(read.strategy, PiStrategyPreference::Auto);
+        assert_eq!(
+            record.strategy,
+            PiStrategyPreference::Auto,
+            "新记录默认自动"
+        );
     }
 
     #[test]

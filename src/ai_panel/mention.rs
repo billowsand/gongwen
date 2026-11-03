@@ -160,9 +160,36 @@ pub(crate) struct CatalogItem {
     pub(crate) date: String,
 }
 
-/// 引用在输入框里留的记号。
+/// 引用在输入框里的记号。
 pub(crate) fn mark(title: &str) -> String {
     format!("@《{title}》")
+}
+
+/// 引用在输入框里的唯一显示名。
+///
+/// 稿件库与知识库里可能有两篇同名的文章，而记号 `@《标题》` 只带标题：同名时从第二篇
+/// 起在显示名后补来源，再撞就补编号。**显示名只是输入框里的记号与标签**：发送时正文由
+/// `read_reference(来源, 编号)` 真读，真题名不受影响；旧会话里已经同名的引用不改写。
+pub(crate) fn unique_title(reference: &Reference, existing: &[Reference]) -> String {
+    let clashes = |candidate: &str| {
+        existing.iter().any(|other| {
+            other.title == candidate
+                && !(other.source == reference.source && other.id == reference.id)
+        })
+    };
+    if !clashes(&reference.title) {
+        return reference.title.clone();
+    }
+    let with_source = format!("{}（{}）", reference.title, reference.source.label());
+    if !clashes(&with_source) {
+        return with_source;
+    }
+    format!(
+        "{}（{} {}）",
+        reference.title,
+        reference.source.label(),
+        reference.id
+    )
 }
 
 /// 输入框里的记号还在的引用（用户可能直接把记号删了），按出现先后、去重。
@@ -199,7 +226,11 @@ pub(crate) fn routing_text(text: &str, refs: &[Reference]) -> String {
 }
 
 /// 去掉一个引用：记号换回不带 `@` 的书名，句子还通顺。
-pub(crate) fn unlink(text: &str, title: &str) -> String {
+///
+/// 只去掉**这一篇**的记号（按它自己的显示名匹配）：同名不同来源的两篇各有一条显示名，
+/// 不会因为标题相同就把两篇一起删掉。
+pub(crate) fn unlink(text: &str, reference: &Reference) -> String {
+    let title = &reference.title;
     text.replacen(&mark(title), &format!("《{title}》"), 1)
 }
 
@@ -390,8 +421,52 @@ mod tests {
             "发送时记号已换成书名，照样去掉"
         );
         assert_eq!(routing_text("看@《别的》", &[]), "看");
-        assert_eq!(unlink(text, "甲通知"), "依据@《乙办法》，参照《甲通知》写");
+        assert_eq!(unlink(text, &a), "依据@《乙办法》，参照《甲通知》写");
     }
+    #[test]
+    fn same_titled_references_get_distinct_marks_and_unlink_one_at_a_time() {
+        let manuscript = Reference {
+            source: RefSource::Manuscript,
+            id: 7,
+            title: "防火通知".into(),
+        };
+        let knowledge = Reference {
+            source: RefSource::Knowledge,
+            id: 7,
+            title: "防火通知".into(),
+        };
+        // 第一篇还能用光标题；第二篇同名，补上来源才能分清。
+        assert_eq!(unique_title(&manuscript, &[]), "防火通知");
+        let second = Reference {
+            title: unique_title(&knowledge, std::slice::from_ref(&manuscript)),
+            ..knowledge.clone()
+        };
+        assert_eq!(second.title, "防火通知（知识库）");
+        // 同名同来源的第三篇再撞就补编号。
+        let third = Reference {
+            source: RefSource::Knowledge,
+            id: 8,
+            ..knowledge.clone()
+        };
+        assert_eq!(
+            unique_title(&third, &[manuscript.clone(), second.clone()]),
+            "防火通知（知识库 8）"
+        );
+        // 同一篇再选一次：沿用已有的显示名，不变成第二个名字。
+        assert_eq!(
+            unique_title(&second, &[manuscript.clone(), second.clone()]),
+            second.title
+        );
+
+        let mut refs = vec![manuscript.clone(), second.clone()];
+        let text = format!("{} 与 {}", mark(&refs[0].title), mark(&refs[1].title));
+        assert_eq!(live_refs(&text, &refs), refs, "两条记号各指向自己那一篇");
+        // 删掉第二篇：第一篇的记号与引用还在，不会两篇一起没。
+        let after = unlink(&text, &second);
+        refs.retain(|r| !(r.source == second.source && r.id == second.id));
+        assert_eq!(live_refs(&after, &refs), vec![manuscript]);
+    }
+
     #[test]
     fn keyboard_moves_wraps_picks_and_dismisses() {
         let mut popup = PopupState::default();

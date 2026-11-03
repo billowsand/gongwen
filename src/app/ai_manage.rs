@@ -542,9 +542,12 @@ impl GongwenApp {
             provider_ref_chip(ui, &self.config, &mref);
         });
         ui.label(
-            egui::RichText::new("分阶段写作与普通技能使用这里的模型；Pi 在下方单独选择。")
-                .size(theme::font_sizes::SMALL)
-                .color(theme::text_muted()),
+            egui::RichText::new(
+                "这里的模型用于复核、要素抽取、风格学习、数据接口与工具等辅助调用；\
+                 侧栏的新任务一律走下方「智能写作（Pi）」，不用这里的模型。",
+            )
+            .size(theme::font_sizes::SMALL)
+            .color(theme::text_muted()),
         );
         setting_row(ui, "模型", None, |ui| {
             let (mut filter, mut show_all) = self.picker_state("draft");
@@ -634,7 +637,8 @@ impl GongwenApp {
             ui,
             "最大输出 Token",
             Some(
-                "仅用于文字起草等旧路径；Pi 自动管理生成预算，不使用此设置。每次请求还会按上下文剩余空间收紧",
+                "用于上述辅助调用与数据接口；Pi（智能写作）自动管理生成预算，不使用此设置。\
+                 每次请求还会按上下文剩余空间收紧",
             ),
             |ui| {
                 ui.add(
@@ -668,10 +672,10 @@ impl GongwenApp {
         });
         ui.label(
             egui::RichText::new(
-                "侧栏发送使用的 Pi 模型，与文字起草分开选。不选就不启动 Pi，\
+                "侧栏智能写作使用的模型，与上方的辅助调用模型分开选。不选就不启动 Pi，\
                  不会偷偷回落到起草模型。地址与密钥仍在「模型服务商管理」里维护；\
                  上下文与输出预算自动管理，不沿用上方的窗口和最大输出 Token；思考深度\
-                 在下方单独设置，与文字起草互不影响。\
+                 在下方单独设置，与上方互不影响。\
                  每轮执行上限 15 分钟，等用户回答时暂停计时。",
             )
             .size(theme::font_sizes::SMALL)
@@ -702,7 +706,7 @@ impl GongwenApp {
             "思考深度",
             Some(
                 "只对支持深度参数的模型生效；默认「沿用服务端」，即不发送深度参数。\
-                 与上方文字起草的思考深度互不影响。",
+                 与上方辅助调用的思考深度互不影响。",
             ),
             |ui| {
                 let options = self

@@ -13,9 +13,10 @@ use super::PiWorkspace;
 use super::delivery::{PiSelection, safe_work_path, sha256_hex, verify_submission};
 use super::materials::PiMaterialMeta;
 use super::protocol::{
-    HOST_VERSION, HostEvent, InitLimits, InitMessage, InitModel, InitRecovery, InitSelection,
-    InitTask, InitWorkspace, MAX_CANDIDATE_BYTES, MAX_DELIVERY_BYTES, MAX_EVENTS,
-    MAX_HOST_LINE_BYTES, MAX_MESSAGE_CHARS, PROTOCOL_VERSION, PiReportItem, RawQuestion,
+    HOST_VERSION, HostEvent, InitCapability, InitLimits, InitMessage, InitModel, InitRecovery,
+    InitSelection, InitStrategy, InitTask, InitWorkspace, MAX_CANDIDATE_BYTES, MAX_DELIVERY_BYTES,
+    MAX_EVENTS, MAX_HOST_LINE_BYTES, MAX_MESSAGE_CHARS, PROTOCOL_VERSION, PiReportItem,
+    RawQuestion,
 };
 use super::recovery::{PiReceipt, PiRunLog, PiRunStatus, read_receipt, read_snapshot};
 use super::runtime::hidden_command;
@@ -55,6 +56,8 @@ pub(crate) struct PiTask {
     pub(crate) system_date: String,
     /// 用户选择的 Pi 技能（内置八份或用户副本之一）；None 表示自动。
     pub(crate) skill: Option<String>,
+    /// 统一写作入口的策略倾向；实际策略由 host 按窗口与任务规模决定。
+    pub(crate) strategy: super::strategy::PiStrategyPreference,
     pub(crate) selection: Option<PiSelection>,
     pub(crate) materials: Vec<PiMaterialMeta>,
 }
@@ -83,6 +86,8 @@ pub(crate) struct PiJob {
 pub(crate) enum PiEvent {
     Progress(String),
     Tool(String),
+    /// host 算出的策略决定：模式、原因、实际窗口与工作预算。
+    Strategy(PiStrategyInfo),
     Candidate {
         path: String,
         content: String,
@@ -91,6 +96,45 @@ pub(crate) enum PiEvent {
     Questions(PiQuestionBatch),
     /// 工具返回的证据已登记（侧栏「过程」里一行）。
     Evidence(String),
+}
+
+/// host 算出的策略决定。原因只给人看；界面不解析字符串判断类别。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PiStrategyInfo {
+    pub(crate) mode: String,
+    pub(crate) reasons: Vec<String>,
+    pub(crate) window: u64,
+    pub(crate) work_budget: u64,
+    pub(crate) materials_budget: u64,
+    pub(crate) verified: bool,
+}
+
+impl PiStrategyInfo {
+    /// 「分阶段 · 262k 窗口 / 96k 工作预算 · 材料超过本次可用预算…」
+    pub(crate) fn line(&self) -> String {
+        let mode = if self.mode == "phased" {
+            "分阶段"
+        } else {
+            "常规"
+        };
+        let reasons = if self.reasons.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", self.reasons.join("；"))
+        };
+        let verified = if self.verified {
+            "已验证"
+        } else {
+            "未验证"
+        };
+        format!(
+            "策略：{mode} · {} 窗口 / {} 工作预算（{}）· 材料预算 {}{reasons}",
+            crate::lmstudio::context::tokens_label(self.window as usize),
+            crate::lmstudio::context::tokens_label(self.work_budget as usize),
+            verified,
+            crate::lmstudio::context::tokens_label(self.materials_budget as usize),
+        )
+    }
 }
 
 /// 一道已经过 `clarify::agent_questions` 校验的题。
@@ -516,6 +560,15 @@ pub(crate) fn run(
             reasoning: job.model.reasoning,
             thinking_level: job.model.thinking_level.clone(),
         },
+        strategy: InitStrategy {
+            preference: job.task.strategy.as_str(),
+            // 尚无写回运行记录的实测工作预算：明确按「未验证」交给 host 保守规划，
+            // 不按模型名称或参数量猜。任务规模与窗口由 host 现算。
+            capability: InitCapability {
+                verified_work_budget: None,
+                needs_short_steps: false,
+            },
+        },
         task: InitTask {
             request: job.task.request.clone(),
             kind: job.task.kind.clone(),
@@ -717,6 +770,29 @@ pub(crate) fn run(
                     &short(&message),
                     &job.model.api_key,
                 )));
+            }
+            HostEvent::Strategy {
+                mode,
+                reasons,
+                window,
+                work_budget,
+                materials_budget,
+                verified,
+                ..
+            } => {
+                let info = PiStrategyInfo {
+                    mode: short(&mode),
+                    reasons: reasons
+                        .into_iter()
+                        .take(8)
+                        .map(|reason| short(&reason))
+                        .collect(),
+                    window,
+                    work_budget,
+                    materials_budget,
+                    verified,
+                };
+                on_event(PiEvent::Strategy(info));
             }
             HostEvent::Tool { name, message, .. } => {
                 let line = match message.filter(|text| !text.trim().is_empty()) {
@@ -1189,7 +1265,7 @@ let handled = false;
 const waiters = new Map();
 const emit = (o) => process.stdout.write(JSON.stringify({ ...base(o), ...o }) + "\n");
 let init;
-function base(o) { return { protocol: 2, requestId: init?.requestId ?? "r", runId: init?.runId ?? "u" }; }
+function base(o) { return { protocol: 3, requestId: init?.requestId ?? "r", runId: init?.runId ?? "u" }; }
 const content = "# 成品\n\n正文。\n";
 const sha256 = createHash("sha256").update(content, "utf8").digest("hex");
 const delivery = () => init.workspace.delivery;
@@ -1214,7 +1290,7 @@ rl.on("line", (line) => {
   if (value.type === "init" && !handled) {
     handled = true;
     init = value;
-    emit({ type: "ready", hostVersion: "0.2.0", nodeVersion: process.versions.node, model: init.model.modelId });
+    emit({ type: "ready", hostVersion: "0.3.0", nodeVersion: process.versions.node, model: init.model.modelId });
     if (init.recovery?.mode === "resume") {
       const dir = init.workspace.delivery;
       const receipt = JSON.parse(fs.readFileSync(path.join(dir, "receipt.json"), "utf8"));
@@ -1380,6 +1456,7 @@ rl.on("line", (line) => {
                 kind: "通知".into(),
                 system_date: "2026-11-01".into(),
                 skill: None,
+                strategy: super::super::strategy::PiStrategyPreference::Auto,
                 selection: None,
                 materials: Vec::new(),
             },
@@ -1704,12 +1781,12 @@ rl.on("line", (line) => {
 import readline from "node:readline";
 const rl = readline.createInterface({{ input: process.stdin }});
 let init;
-const emit = (o) => process.stdout.write(JSON.stringify({{ protocol: 2, requestId: init.requestId, runId: init.runId, ...o }}) + "\n");
+const emit = (o) => process.stdout.write(JSON.stringify({{ protocol: 3, requestId: init.requestId, runId: init.runId, ...o }}) + "\n");
 rl.on("line", (line) => {{
   const value = JSON.parse(line);
   if (value.type === "init") {{
     init = value;
-    emit({{ type: "ready", hostVersion: "0.2.0", nodeVersion: process.versions.node, model: init.model.modelId }});
+    emit({{ type: "ready", hostVersion: "0.3.0", nodeVersion: process.versions.node, model: init.model.modelId }});
     emit({{ type: "tool_request", callId: "c1", name: "kb_search", args: {args} }});
   }}
   if (value.type === "tool_result") {{ setTimeout(() => process.exit(0), 10); }}

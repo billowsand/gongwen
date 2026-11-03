@@ -31,7 +31,7 @@
 
 | 技能 | 目录 | 参考文件（按需读） |
 | --- | --- | --- |
-| 起草 `gongwen-draft` | `assets/pi-skills/gongwen-draft/` | `material-drafting.md` |
+| 起草 `gongwen-draft` | `assets/pi-skills/gongwen-draft/` | `material-drafting.md`、`phased-writing.md`（公共分阶段参考：每步只做一件事、登记硬规则、小模型易错项） |
 | 修改 `gongwen-revise` | `assets/pi-skills/gongwen-revise/` | `condense.md`、`polish.md`、`tone.md`、`normalize.md` |
 | 审核 `gongwen-review` | `assets/pi-skills/gongwen-review/` | `fact-check.md` |
 | 仿写 `gongwen-imitate` | `assets/pi-skills/gongwen-imitate/` | `style-analysis.md` |

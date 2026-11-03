@@ -204,7 +204,16 @@ export function atomicWrite(target, content) {
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
-    fs.renameSync(temp, target);
+    // Windows 的杀毒/索引器可能短暂持有目标文件，不删除旧件，只有限重试原子替换。
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        fs.renameSync(temp, target);
+        break;
+      } catch (error) {
+        if (process.platform !== "win32" || !["EPERM", "EACCES", "EBUSY"].includes(error?.code) || attempt >= 4) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (attempt + 1));
+      }
+    }
   } catch (error) {
     if (fd !== undefined) {
       try {

@@ -290,138 +290,75 @@ fn harness(stage: Stage) -> egui_kittest::Harness<'static, Bench> {
 }
 
 #[test]
-fn removing_a_processed_material_asks_first_and_cancel_keeps_it() {
+fn history_materials_cannot_be_removed_from_the_read_only_view() {
     use egui_kittest::kittest::Queryable;
-    let mut harness = harness(Stage::Prepare);
-    harness.get_by_label("移除").click();
-    harness.run();
-    assert_eq!(harness.state().doc.writing.task.sources.len(), 1);
-    harness.get_by_label("移除材料");
-    harness.get_by_label("取消").click();
-    harness.run();
-    assert!(harness.state().doc.writing.confirm.is_none());
-    assert_eq!(harness.state().doc.writing.task.sources.len(), 1);
-
-    harness.get_by_label("移除").click();
-    harness.run();
-    harness.get_all_by_label("移除").last().unwrap().click();
-    harness.run();
-    let task = &harness.state().doc.writing.task;
-    assert!(task.sources.is_empty());
-    assert!(task.chunks.is_empty() && task.topic_cards.is_empty());
-}
-
-#[test]
-fn a_topic_edit_waits_for_apply_and_keeps_finished_extraction() {
-    use egui_kittest::kittest::Queryable;
-    let mut harness = harness(Stage::Prepare);
-    let original = harness.state().doc.writing.task.topic.clone();
-    harness.state_mut().doc.writing.topic_draft = Some("另拟主题".into());
-    harness.run();
-    assert_eq!(harness.state().doc.writing.task.topic, original);
-    harness.get_by_label("放弃修改").click();
-    harness.run();
+    let mut h = harness(Stage::Prepare);
+    let before = serde_json::to_value(&h.state().doc.writing.task).unwrap();
+    h.run();
+    assert!(h.query_by_label_contains("移除").is_none());
     assert_eq!(
-        harness.state().doc.writing.topic_draft.as_deref(),
-        Some(original.as_str()),
-        "放弃后草稿回到原主题"
+        serde_json::to_value(&h.state().doc.writing.task).unwrap(),
+        before
     );
-    assert_eq!(harness.state().doc.writing.task.topic, original);
-    assert!(harness.query_by_label("应用新主题").is_none());
+}
 
-    harness.state_mut().doc.writing.topic_draft = Some("另拟主题".into());
-    harness.run();
-    let chunks = harness.state().doc.writing.task.chunks.len();
-    harness.get_by_label("应用新主题").click();
-    harness.run();
-    let task = &harness.state().doc.writing.task;
-    assert_eq!(task.topic, "另拟主题");
-    assert!(!task.outline_confirmed);
+#[test]
+fn history_does_not_apply_pending_topic_edits() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness(Stage::Prepare);
+    let topic = h.state().doc.writing.task.topic.clone();
+    let chunks = h.state().doc.writing.task.chunks.len();
+    h.state_mut().doc.writing.topic_draft = Some("不应应用的新主题".into());
+    h.run();
+    assert!(h.query_by_label("应用新主题").is_none());
+    assert_eq!(h.state().doc.writing.task.topic, topic);
+    assert_eq!(h.state().doc.writing.task.chunks.len(), chunks);
+}
+
+#[test]
+fn history_does_not_offer_repolishing_an_old_manual_final() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness(Stage::Review);
+    h.state_mut().doc.writing.task.final_manual = true;
+    h.run();
+    assert!(h.query_by_label("重新统稿").is_none());
+    assert!(h.state().doc.writing.task.final_manual);
+    assert!(!h.state().doc.writing.running);
+}
+
+#[test]
+fn history_does_not_reclassify_a_failed_block_as_completed() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness(Stage::Extract);
+    h.state_mut().doc.writing.task.chunks[0].status = ChunkStatus::Failed;
+    h.run();
+    assert!(h.query_by_label("人工确认无相关内容").is_none());
     assert_eq!(
-        task.chunks.len(),
-        chunks,
-        "已完成的提炼保留，改回原主题可恢复"
+        h.state().doc.writing.task.chunks[0].status,
+        ChunkStatus::Failed
     );
+    assert!(!h.state().doc.writing.running);
 }
 
 #[test]
-fn repolishing_over_a_hand_edited_final_asks_first() {
+fn history_does_not_apply_old_advisory_suggestions() {
     use egui_kittest::kittest::Queryable;
-    let mut harness = harness(Stage::Review);
-    harness.state_mut().doc.writing.task.final_manual = true;
-    harness.run();
-    harness.get_by_label("重新统稿").click();
-    harness.run();
-    assert!(matches!(
-        harness.state().doc.writing.confirm,
-        Some(Confirm::Repolish)
-    ));
-    assert!(!harness.state().doc.writing.running, "确认前不得启动模型");
-    harness.get_by_label("取消").click();
-    harness.run();
-    assert!(harness.state().doc.writing.confirm.is_none());
-    assert!(harness.state().doc.writing.task.final_manual);
+    let mut h = harness(Stage::Review);
+    h.state_mut().doc.writing.task.sections[0].advisory_suggestion = Some("仅历史建议".into());
+    let original = h.state().doc.writing.task.sections[0].markdown.clone();
+    h.run();
+    assert!(h.query_by_label("采纳到本节").is_none());
+    assert_eq!(h.state().doc.writing.task.sections[0].markdown, original);
 }
 
 #[test]
-fn a_failed_block_can_be_confirmed_manually_as_no_relevant_content() {
-    use egui_kittest::kittest::Queryable;
-    let mut harness = harness(Stage::Extract);
-    {
-        let task = &mut harness.state_mut().doc.writing.task;
-        let query = task.topic_query();
-        let chunk = task
-            .chunks
-            .iter_mut()
-            .find(|chunk| chunk.section_id.is_none() && chunk.query == query)
-            .unwrap();
-        chunk.status = ChunkStatus::Failed;
-        chunk.error = Some("模拟失败：格式不合规".into());
-    }
-    harness.run();
-    harness.get_by_label("人工确认无相关内容").click();
-    harness.run();
-    let task = &harness.state().doc.writing.task;
-    assert_eq!(task.coverage().failed, 0);
-    assert_eq!(task.coverage().skipped, 1);
-    assert!(
-        task.chunks
-            .iter()
-            .any(|chunk| chunk.status == ChunkStatus::SkippedByUser),
-        "人工处置记为独立状态"
-    );
-}
-
-#[test]
-fn an_advisory_suggestion_can_be_adopted_into_a_manual_section() {
-    use egui_kittest::kittest::Queryable;
-    let mut harness = harness(Stage::Review);
-    harness.state_mut().doc.writing.task.sections[0].advisory_suggestion =
-        Some("建议修改后的正文。".into());
-    harness.run();
-    harness.get_by_label("采纳到本节").click();
-    harness.run();
-    let section = &harness.state().doc.writing.task.sections[0];
-    assert_eq!(section.markdown, "建议修改后的正文。");
-    assert!(section.manually_edited);
-}
-
-#[test]
-fn changing_the_document_kind_updates_the_task_without_running() {
-    let mut harness = harness(Stage::Prepare);
-    harness.state_mut().doc.draft.kind = TemplateKind::OfficialLetter;
-    harness.run();
-    let writing = &harness.state().doc.writing;
-    assert_eq!(writing.task.kind, TemplateKind::OfficialLetter);
-    assert!(
-        writing
-            .task
-            .stale_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("文种")),
-        "切换文种后不点运行也能看到提示"
-    );
-    assert!(!writing.running, "切换文种不得启动模型");
+fn changing_current_document_kind_does_not_rewrite_the_historical_task() {
+    let mut h = harness(Stage::Prepare);
+    let original = h.state().doc.writing.task.kind;
+    h.state_mut().doc.draft.kind = TemplateKind::OfficialLetter;
+    h.run();
+    assert_eq!(h.state().doc.writing.task.kind, original);
+    assert!(!h.state().doc.writing.running);
 }
 
 #[test]
@@ -488,30 +425,15 @@ fn progress_updates_follow_the_task_unless_the_user_switched_the_stage() {
 }
 
 #[test]
-fn marking_a_card_conflict_updates_the_verification_counts() {
+fn history_does_not_change_the_verification_of_saved_cards() {
     use egui_kittest::kittest::Queryable;
-    let mut harness = harness(Stage::Write);
-    harness.run();
-    assert!(
-        harness
-            .query_by_label("已核对 0 · 存在冲突 0 · 依据不足 0 · 待核对 1")
-            .is_some(),
-        "初始统计按当前节素材计算"
-    );
-    harness.get_by_label("存在冲突").click();
-    harness.run();
-    assert!(
-        harness
-            .query_by_label("已核对 0 · 存在冲突 1 · 依据不足 0 · 待核对 0")
-            .is_some()
-    );
-    harness.get_by_label("存在冲突").click();
-    harness.run();
-    assert!(
-        harness
-            .query_by_label("已核对 0 · 存在冲突 0 · 依据不足 0 · 待核对 1")
-            .is_some(),
-        "再点一次撤回为待核对"
+    let mut h = harness(Stage::Write);
+    let before = serde_json::to_value(&h.state().doc.writing.task.topic_cards).unwrap();
+    h.run();
+    assert!(h.query_by_label("存在冲突").is_none());
+    assert_eq!(
+        serde_json::to_value(&h.state().doc.writing.task.topic_cards).unwrap(),
+        before
     );
 }
 
@@ -558,179 +480,98 @@ fn coverage_benchmark_one_megabyte_and_eight_sections() {
 }
 
 #[test]
-fn completed_stages_show_a_check_and_incomplete_stages_warn() {
+fn history_is_read_only_at_every_old_stage() {
     use egui_kittest::kittest::Queryable;
-    let mut complete = harness(Stage::Extract);
-    complete.run();
-    assert!(
-        complete.query_by_label_contains("2 提炼素材 √").is_some(),
-        "完成的阶段带勾"
-    );
-    let mut pending = harness(Stage::Outline);
-    pending.state_mut().doc.writing.task.outline_confirmed = false;
-    pending.run();
-    assert!(
-        pending.query_by_label_contains("3 确认提纲 ⚠").is_some(),
-        "待人工确认的阶段带提示"
+    for stage in Stage::ALL {
+        let mut h = harness(stage);
+        h.run();
+        assert!(h.query_by_label("旧分阶段写作历史").is_some());
+        assert!(h.query_by_label("复制为新的 Pi 任务").is_some());
+        assert!(h.query_by_label("接着跑").is_none());
+        assert!(h.state().actions.is_empty());
+    }
+}
+
+#[test]
+fn history_original_materials_remain_visible_and_exportable() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness(Stage::Prepare);
+    let source = h.state().doc.writing.task.sources[0].text.clone();
+    h.run();
+    h.get_by_label("材料 1 · 基层报表梳理清单").click();
+    h.run();
+    assert!(h.query_by_label_contains(&source).is_some());
+    h.get_by_label("导出 Markdown…").click();
+    h.run();
+    assert!(h.state().actions.iter().any(|action| matches!(action, crate::app::DraftAction::ExportWritingArtifact {text,..} if *text == source)));
+}
+
+#[test]
+fn history_does_not_reorder_the_old_outline() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness(Stage::Outline);
+    let before = serde_json::to_value(&h.state().doc.writing.task.sections).unwrap();
+    h.run();
+    assert!(h.query_by_label("↓ 下移").is_none());
+    assert_eq!(
+        serde_json::to_value(&h.state().doc.writing.task.sections).unwrap(),
+        before
     );
 }
 
 #[test]
-fn the_material_list_shows_parse_status_and_extraction_progress() {
+fn history_cannot_start_an_old_rewrite_even_with_a_saved_request() {
     use egui_kittest::kittest::Queryable;
-    let mut harness = harness(Stage::Prepare);
-    harness.run();
-    assert!(
-        harness
-            .query_by_label_contains("已解析 · 提炼 1/1 块")
-            .is_some(),
-        "每份材料显示解析状态与提炼进度"
-    );
-}
-
-#[test]
-fn the_outline_can_move_sections_down_and_flags_bad_length_split() {
-    use egui_kittest::kittest::Queryable;
-    let mut harness = harness(Stage::Outline);
-    harness.run();
-    let first = harness.state().doc.writing.task.sections[0].title.clone();
-    let second = harness.state().doc.writing.task.sections[1].title.clone();
-    harness.get_all_by_label("↓ 下移").next().unwrap().click();
-    harness.run();
-    let sections = &harness.state().doc.writing.task.sections;
-    assert_eq!(sections[0].title, second);
-    assert_eq!(sections[1].title, first);
-    assert!(
-        harness.query_by_label_contains("偏差超过 15%").is_some(),
-        "各节字数合计与目标篇幅相差过大时提示"
-    );
-}
-
-#[test]
-fn section_tabs_show_state_marks_and_rewrite_needs_a_request() {
-    use egui_kittest::kittest::Queryable;
-    let mut harness = harness(Stage::Write);
-    harness.run();
-    assert!(
-        harness
-            .query_by_label_contains("√ 一、精简规范检查考核")
-            .is_some(),
-        "完成章节页签带勾"
-    );
-    assert!(
-        harness.query_by_label_contains("当前 ").is_some(),
-        "正文下方显示当前字数与目标字数"
-    );
-    // 修改要求为空时重写按钮禁用：点击不产生任何动作。
-    harness.get_by_label("按要求重写本节").click();
-    harness.run();
-    assert!(harness.state().actions.is_empty());
-    // 给本节单独写要求后可以重写；没有稿件身份时先把动作转成保存。
-    harness
-        .state_mut()
+    let mut h = harness(Stage::Write);
+    h.state_mut()
         .doc
         .writing
         .rewrite_drafts
-        .insert("first".into(), "压缩到两句话".into());
-    harness.run();
-    harness.get_by_label("按要求重写本节").click();
-    harness.run();
-    assert!(
-        harness
-            .state()
-            .actions
-            .iter()
-            .any(|action| matches!(action, crate::app::DraftAction::SaveToLibrary))
-    );
+        .insert("first".into(), "重写要求".into());
+    h.run();
+    assert!(h.query_by_label("按要求重写本节").is_none());
+    assert!(h.state().actions.is_empty());
+    assert!(!h.state().doc.writing.running);
 }
 
 #[test]
-fn review_uses_per_section_comparison_and_can_keep_the_draft() {
+fn history_final_can_be_exported_without_applying_it_to_the_document() {
     use egui_kittest::kittest::Queryable;
-    let mut harness = harness(Stage::Review);
-    harness.state_mut().doc.writing.task.sections[0].review_suggestion =
-        Some("统稿建议正文。".into());
-    harness.run();
-    assert!(
-        harness.query_by_label("原稿").is_some(),
-        "默认视图是逐节原稿 / 统稿建议对照"
-    );
-    assert!(harness.query_by_label("全文用：统稿建议").is_some());
-    harness.get_all_by_label("保留原稿").next().unwrap().click();
-    harness.run();
-    let task = &harness.state().doc.writing.task;
-    assert!(
-        task.sections[0].review_suggestion.is_some(),
-        "保留原稿不丢建议，可以改回"
-    );
-    assert!(!task.final_markdown.contains("统稿建议正文。"));
-    assert!(harness.query_by_label("全文用：原稿").is_some());
+    let mut h = harness(Stage::Review);
+    h.state_mut().doc.writing.task.final_markdown = "旧统稿全文。".into();
+    let current = h.state().doc.generated_markdown.clone();
+    h.run();
+    h.get_by_label("统稿成果").click();
+    h.run();
+    h.get_by_label("导出 Markdown…").click();
+    h.run();
+    assert!(h.query_by_label("采纳建议").is_none());
+    assert!(h.state().actions.iter().any(|action| matches!(action, crate::app::DraftAction::ExportWritingArtifact {text,..} if text == "旧统稿全文。")));
+    assert_eq!(h.state().doc.generated_markdown, current);
+}
 
-    harness.get_all_by_label("采纳建议").next().unwrap().click();
-    harness.run();
-    assert!(
-        harness
-            .state()
-            .doc
-            .writing
-            .task
-            .final_markdown
-            .contains("统稿建议正文。")
-    );
-
-    // 统稿人工改过：逐节选择不动它，提示并给出重拼入口（人工稿先进统稿历史）。
-    harness.state_mut().doc.writing.task.final_markdown = "人工统稿。".into();
-    harness.state_mut().doc.writing.task.final_manual = true;
-    harness.run();
-    harness.get_by_label("按逐节选择重新拼全文").click();
-    harness.run();
-    let task = &harness.state().doc.writing.task;
-    assert!(!task.final_manual);
-    assert!(task.final_markdown.contains("统稿建议正文。"));
+#[test]
+fn history_keeps_the_original_fact_excerpts_available() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness(Stage::Extract);
+    h.run();
+    assert!(h.query_by_label("提炼素材").is_some());
+    let before = serde_json::to_value(&h.state().doc.writing.task.topic_cards).unwrap();
+    h.get_by_label("提炼素材").click();
+    h.run();
+    assert!(h.query_by_label("全部摘记").is_some());
     assert_eq!(
-        task.final_history.last().map(String::as_str),
-        Some("人工统稿。")
+        serde_json::to_value(&h.state().doc.writing.task.topic_cards).unwrap(),
+        before
     );
 }
 
 #[test]
-fn the_evidence_column_shows_stage_specific_status() {
-    use egui_kittest::kittest::Queryable;
-    let mut harness = harness(Stage::Outline);
-    harness.run();
-    assert!(
-        harness
-            .query_by_label_contains("确认提纲后分给各节")
-            .is_some(),
-        "提纲页右栏显示各节素材分配情况"
-    );
-    // 夹具里各节素材是旧版逐节备料留下的，读回时视为已分配。
-    assert!(harness.query_all_by_label_contains("· 素材 1 条").count() >= 1);
-}
-
-#[test]
-fn the_footer_shows_call_estimate_and_long_task_progress() {
-    use egui_kittest::kittest::Queryable;
-    let mut harness = harness(Stage::Prepare);
-    harness.run();
-    assert!(
-        harness
-            .query_by_label_contains("开始提炼前：预计约")
-            .is_some(),
-        "开始提炼前显示预计模型调用次数"
-    );
-    harness.state_mut().doc.writing.running = true;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    harness.state_mut().doc.writing.task.started_at_unix = Some(now - 65);
-    harness.run_steps(2);
-    assert!(
-        harness.query_by_label_contains("总进度").is_some(),
-        "长任务显示总进度条"
-    );
-    assert!(harness.query_by_label_contains("已用 1:").is_some());
+fn a_new_task_does_not_offer_an_empty_legacy_history_entry() {
+    let mut panel = WritingPanel::new(TemplateKind::PlainDocument);
+    assert!(!panel.has_history());
+    panel.task = fixture();
+    assert!(panel.has_history());
 }
 
 #[test]

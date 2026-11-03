@@ -15,6 +15,7 @@ mod protocol;
 pub(crate) mod recovery;
 mod runtime;
 pub(crate) mod skills;
+mod strategy;
 mod tools;
 mod workspace;
 
@@ -36,5 +37,6 @@ pub(crate) use recovery::{
 };
 pub(crate) use runtime::PiRuntime;
 pub(crate) use skills as pi_skills;
+pub(crate) use strategy::PiStrategyPreference;
 pub(crate) use tools::PiToolContext;
 pub(crate) use workspace::{PiWorkspace, base_dir};

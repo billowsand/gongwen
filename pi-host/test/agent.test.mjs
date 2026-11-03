@@ -121,19 +121,19 @@ test("a long 32k task compacts before continuing instead of shrinking output to 
   const reading = fauxAssistantMessage([fauxToolCall("read", { path: "input/long.md" })], { stopReason: "toolUse" });
   // 持续读取长材料，必须在剩余输出耗尽前切出历史并运行真实 Durable 压缩。
   let compacted = false;
-  faux.setResponses([
-    reading,
-    (context) => {
-      assert.match(JSON.stringify(context), /context summarization assistant/);
+  // 有界读取不再一次塞入整份长文，连续读取直到真实阈值触发，而非假定第二次就是压缩。
+  faux.setResponses(Array.from({ length: 40 }, () => (context) => {
+    if (/context summarization assistant/.test(JSON.stringify(context))) {
       compacted = true;
       return fauxAssistantMessage([fauxText("任务：提交现有 work/draft.md；材料仍在 input/long.md，不编造事实。")]);
-    },
-    (context) => {
+    }
+    if (compacted) {
       const output = clampMaxTokensToContext(model, context, model.maxTokens);
       assert.ok(output >= 4_096, `压缩后必须实际留出输出空间，当前只有 ${output}`);
       return fauxAssistantMessage([fauxToolCall("submit_document", { path: "work/draft.md", summary: "按已有稿件完成交付" })], { stopReason: "toolUse" });
-    },
-  ]);
+    }
+    return reading;
+  }));
   const result = await runAgentJob({ config, models, model, emit: () => {} });
   assert.ok(compacted, "必须实际触发 Durable 压缩");
   assert.equal(result.snapshot.content, content);

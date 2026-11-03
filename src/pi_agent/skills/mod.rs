@@ -41,6 +41,7 @@ macro_rules! skill_file {
 pub(crate) const FILES: &[(&str, &str, &str)] = &[
     skill_file!("gongwen-draft", "SKILL.md"),
     skill_file!("gongwen-draft", "references/material-drafting.md"),
+    skill_file!("gongwen-draft", "references/phased-writing.md"),
     skill_file!("gongwen-revise", "SKILL.md"),
     skill_file!("gongwen-revise", "references/condense.md"),
     skill_file!("gongwen-revise", "references/normalize.md"),

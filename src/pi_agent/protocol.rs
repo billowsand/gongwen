@@ -6,9 +6,9 @@ use super::materials::PiMaterialMeta;
 
 /// 与 `pi-host/src/protocol.mjs` 一一对应。协议升版时必须两边同时改：旧 host 会
 /// 直接拒绝新 init，恢复时也不会拿旧 host 去开原工作区。
-pub(crate) const PROTOCOL_VERSION: u32 = 2;
+pub(crate) const PROTOCOL_VERSION: u32 = 3;
 /// host 版本；运行记录里存一份，恢复时不一致就拒绝在原工作区接着写。
-pub(crate) const HOST_VERSION: &str = "0.2.0";
+pub(crate) const HOST_VERSION: &str = "0.3.0";
 /// 一条协议行的上限。host 侧同样按 16 MiB 卡住。
 pub(crate) const MAX_HOST_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// 整个进程最多处理多少条消息。
@@ -30,6 +30,8 @@ pub(crate) struct InitMessage {
     pub(crate) run_id: String,
     pub(crate) workspace: InitWorkspace,
     pub(crate) model: InitModel,
+    /// 统一写作入口的策略倾向与已验证能力。旧 host 会忽略，新 host 缺省按自动。
+    pub(crate) strategy: InitStrategy,
     pub(crate) task: InitTask,
     pub(crate) limits: InitLimits,
     /// 恢复模式：重新打开同一个 Durable 库，用同一份 requestId 找回原来的提交。
@@ -60,6 +62,24 @@ pub(crate) struct InitWorkspace {
     pub(crate) materials: String,
     /// 交付回执与成品快照所在的运行目录（绝对路径，必须在工作区之外）。
     pub(crate) delivery: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InitStrategy {
+    /// `auto` / `phased`；host 按实际窗口、工作预算与任务规模决定最终策略。
+    pub(crate) preference: &'static str,
+    pub(crate) capability: InitCapability,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InitCapability {
+    /// 经验证的模型工作预算（token）；`None` 表示未验证，host 按保守默认规划。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) verified_work_budget: Option<u32>,
+    /// 实测更适合短步骤的模型标记；未知能力不按模型名称猜。
+    pub(crate) needs_short_steps: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,6 +148,24 @@ pub(crate) enum HostEvent {
     },
     Progress {
         message: String,
+        #[serde(default, rename = "requestId")]
+        request_id: Option<String>,
+        #[serde(default, rename = "runId")]
+        run_id: Option<String>,
+    },
+    /// host 算出的策略决定：实际窗口与工作预算是两个字段，原因给人看。
+    Strategy {
+        mode: String,
+        #[serde(default)]
+        reasons: Vec<String>,
+        #[serde(default)]
+        window: u64,
+        #[serde(default, rename = "workBudget")]
+        work_budget: u64,
+        #[serde(default, rename = "materialsBudget")]
+        materials_budget: u64,
+        #[serde(default)]
+        verified: bool,
         #[serde(default, rename = "requestId")]
         request_id: Option<String>,
         #[serde(default, rename = "runId")]
@@ -266,6 +304,9 @@ impl HostEvent {
             | Self::Progress {
                 request_id, run_id, ..
             }
+            | Self::Strategy {
+                request_id, run_id, ..
+            }
             | Self::Tool {
                 request_id, run_id, ..
             }
@@ -302,5 +343,56 @@ impl HostEvent {
     pub(crate) fn matches(&self, request_id: &str, run_id: &str) -> bool {
         let (request, run) = self.ids();
         request == Some(request_id) && run == Some(run_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_strategy_event_keeps_the_two_window_fields_apart() {
+        let event: HostEvent = serde_json::from_str(
+            r#"{"type":"strategy","mode":"phased","reasons":["材料超过预算"],
+                "window":262144,"workBudget":98304,"materialsBudget":61440,"verified":false,
+                "requestId":"req-1","runId":"run-1"}"#,
+        )
+        .unwrap();
+        assert!(event.matches("req-1", "run-1"));
+        match event {
+            HostEvent::Strategy {
+                mode,
+                reasons,
+                window,
+                work_budget,
+                materials_budget,
+                verified,
+                ..
+            } => {
+                assert_eq!(mode, "phased");
+                assert_eq!(reasons, vec!["材料超过预算"]);
+                assert_eq!(window, 262_144);
+                assert_ne!(window, work_budget, "实际窗口与工作预算必须是两个字段");
+                assert_eq!(work_budget, 98_304);
+                assert_eq!(materials_budget, 61_440);
+                assert!(!verified);
+            }
+            other => panic!("解析成了别的类型：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn strategy_init_is_serialized_with_camel_case_fields_and_no_unverified_budget() {
+        let init = InitStrategy {
+            preference: "phased",
+            capability: InitCapability {
+                verified_work_budget: None,
+                needs_short_steps: false,
+            },
+        };
+        let value = serde_json::to_value(&init).unwrap();
+        assert_eq!(value["preference"], "phased");
+        assert_eq!(value["capability"]["needsShortSteps"], false);
+        assert!(value["capability"].get("verifiedWorkBudget").is_none());
     }
 }

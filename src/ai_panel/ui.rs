@@ -48,23 +48,27 @@ fn conversation_edge_fades(ui: &egui::Ui, rect: egui::Rect, top: bool, bottom: b
 }
 
 /// 卡片上的按钮动作，画完一轮后统一执行，避免一边借着轮次一边改状态。
+///
+/// 旧流程（小模型分阶段那一套）只保留历史：可以看、可以导出、可以显式复制成 Pi 任务，
+/// 但**不从这里新建或重跑**——所以这里没有「重新生成 / 重试 / 从头重来」（统一写作第五
+/// 阶段，见 `docs/pi-unified-writing-design.md`）。已经在跑的旧运行仍可「接着跑 / 从这里
+/// 重跑 / 丢弃检查点」，与答完它挂起的题接着跑是同一回事。
 pub(super) enum CardAction {
     Stop,
     Accept,
     Discard,
-    /// 丢弃这一轮的检查点（不再能接着跑）。
+    /// 丢弃这一轮留下的旧检查点。
     DiscardRun(u64),
-    /// 从最近的检查点接着跑（崩溃 / 停止 / 出错后）。
+    /// 旧流程：从最近的检查点把已经在跑的旧运行接着做完（不新建运行）。
     Resume(u64),
+    /// 旧流程：从某个旧检查点把该运行重跑一遍（不新建运行）。
+    RerunFrom(u64, i64),
     /// Pi 轮次：接着写原来的工作区（`false`）或从头写（`true`）。
     PiResume(u64, bool),
-    /// 丢掉检查点，从第一步重来。
-    Restart(u64),
-    /// 从某个旧检查点重跑。
-    RerunFrom(u64, i64),
+    /// 把旧流程轮次的要求、材料与引用显式复制成一份新的 Pi 任务。
+    CopyToPi(u64),
     Review,
     Workspace(u64),
-    Rerun(u64),
     /// 交上这一轮选择题的回答。
     Answer(u64),
     /// 按当前框内清单（大纲、检索问题……）与修改要求再优化一轮，不往下跑。
@@ -215,7 +219,7 @@ impl DraftPage<'_> {
                     .image_sized(16.0)
                     .tint(theme::accent()),
             );
-            ui.label(egui::RichText::new("AI 助手").strong());
+            ui.label(egui::RichText::new("智能写作").strong());
             let title = self.doc.ai_panel.session_title();
             if !self.doc.ai_panel.turns.is_empty() {
                 ui.label(
@@ -378,7 +382,14 @@ impl DraftPage<'_> {
                     });
                     ui.add_space(8.0);
                 }
+                // 旧「分阶段写作」的主题与素材在写作任务里，这一轮的 `request` 是空的。
+                let writing_topic = doc.writing.task.topic.trim().to_string();
+                let staged_turn = doc.writing.proposal_turn;
                 for turn in &mut doc.ai_panel.turns {
+                    // 刚跑完时由 `proposal_turn` 指认；重开会话后按主题与卡片抬头对上。
+                    let staged = turn.request.is_none()
+                        && (staged_turn == Some(turn.id)
+                            || (!writing_topic.is_empty() && writing_topic == turn.prompt.trim()));
                     request_bubble(ui, turn);
                     ui.add_space(6.0);
                     egui::Frame::NONE.inner_margin(10).show(ui, |ui| {
@@ -393,6 +404,7 @@ impl DraftPage<'_> {
                                 .get(&turn.id)
                                 .map(Vec::as_slice)
                                 .unwrap_or_default(),
+                            staged,
                             &mut action,
                         );
                     });
@@ -422,17 +434,9 @@ impl DraftPage<'_> {
                     *self.status = format!("没能恢复 Pi 智能写作：{error}");
                 }
             }
-            Some(CardAction::Restart(id)) => {
-                self.drop_checkpoints(id);
-                if let Some(request) = self
-                    .doc
-                    .ai_panel
-                    .turns
-                    .iter()
-                    .find(|turn| turn.id == id)
-                    .and_then(|turn| turn.request.clone())
-                {
-                    self.start_panel_request(request);
+            Some(CardAction::CopyToPi(id)) => {
+                if let Err(error) = self.copy_turn_to_pi(id) {
+                    *self.status = format!("没能复制旧任务：{error}");
                 }
             }
             Some(CardAction::DiscardRun(id)) => self.drop_checkpoints(id),
@@ -492,18 +496,6 @@ impl DraftPage<'_> {
                 }
             }
             Some(CardAction::ReviseList(id)) => self.revise_list(id),
-            Some(CardAction::Rerun(id)) => {
-                let request = self
-                    .doc
-                    .ai_panel
-                    .turns
-                    .iter()
-                    .find(|turn| turn.id == id)
-                    .and_then(|turn| turn.request.clone());
-                if let Some(request) = request {
-                    self.start_panel_request(request);
-                }
-            }
             None => {}
         }
     }
@@ -649,6 +641,9 @@ fn request_bubble(ui: &mut egui::Ui, turn: &super::AiTurn) {
     });
 }
 
+/// 一轮的卡片。参数多是因为绘制要知道正文、提案、检查点与迁移入口；与 `PiRunRecord::start`
+/// 一样就这一个绘制入口，不改结构。
+#[allow(clippy::too_many_arguments)]
 fn turn_card(
     ui: &mut egui::Ui,
     turn: &mut super::AiTurn,
@@ -656,6 +651,7 @@ fn turn_card(
     document: &str,
     proposal: Option<&mut AiProposal>,
     checkpoints: &[crate::manuscript::ai_checkpoints::CheckpointSummary],
+    staged: bool,
     action: &mut Option<CardAction>,
 ) {
     // Ctrl+Z / Ctrl+Y 走编辑器自己的历史，也同步卡片显示；运行消费记录始终保留。
@@ -946,7 +942,6 @@ fn turn_card(
                     }
                 });
             }
-            rerun_button(ui, turn, "重新做一遍", action);
         }
         // Pi 成品已写进正文：只给可选的撤销与差异，不再出现「接受提案」。
         TurnState::Accepted if turn.pi_write.is_some() => {
@@ -956,13 +951,11 @@ fn turn_card(
             ui.add_space(6.0);
             ui.weak("这一轮没有改动正文：AI 成品留在这里，可显式取回或丢弃。");
             pi_pending_actions(ui, turn, action);
-            rerun_button(ui, turn, "按当前正文重做", action);
         }
         TurnState::Stopped => {
             ui.add_space(6.0);
             ui.weak(format!("已停止，生成了 {chars} 字；半截输出不能采用。"));
             resume_actions(ui, turn, checkpoints, action);
-            rerun_button(ui, turn, "重新生成", action);
         }
         TurnState::Failed(error) => {
             ui.add_space(6.0);
@@ -970,20 +963,42 @@ fn turn_card(
             // 交付检查过了但没能写进正文（如会话存不下）：成品还在这里，可以再取一次。
             pi_pending_actions(ui, turn, action);
             resume_actions(ui, turn, checkpoints, action);
-            rerun_button(ui, turn, "重试", action);
         }
         TurnState::Interrupted => {
             ui.add_space(6.0);
             ui.weak("程序关闭时这一轮还没跑完。");
             resume_actions(ui, turn, checkpoints, action);
-            rerun_button(ui, turn, "重新生成", action);
         }
         TurnState::Expired => {
             ui.add_space(6.0);
             ui.weak("提案交出之后正文改过了，这份提案不能再接受。");
-            rerun_button(ui, turn, "重新生成", action);
         }
         _ => {}
+    }
+    // 旧流程轮次只保留历史：可以看、可以导出，但不在这里新建第二条写作路线。
+    // 显式「复制为新 Pi 任务」把要求、材料与引用搬进统一入口，旧选区不迁到新正文。
+    // 旧「分阶段写作」任务的成果挂在这一轮上（没有 `request`，写作任务里），`staged` 时也能迁。
+    // Pi 轮次则「复制回输入区」：材料用途与策略取自当时那份工作区快照，改完再发。
+    let copy_label = match turn.pi_run.as_ref() {
+        Some(run) => (!run.is_empty()).then_some("复制回输入区"),
+        None => (turn.request.is_some() || staged).then_some("复制为新 Pi 任务"),
+    };
+    if let Some(label) = copy_label.filter(|_| !turn.state.running()) {
+        ui.add_space(4.0);
+        if ui
+            .add(theme::secondary_icon_button(
+                theme::Icon::WandSparkles,
+                label,
+            ))
+            .on_hover_text(if label == "复制回输入区" {
+                "把这一轮的要求、材料（按当时逐篇用途）与策略搬回输入区，改完再发就是新的一轮；原运行记录保留。"
+            } else {
+                "旧流程只保留历史兼容。复制这一轮的要求、材料与引用到统一 Pi 入口，检查后再发送；旧选区不迁移。"
+            })
+            .clicked()
+        {
+            *action = Some(CardAction::CopyToPi(turn.id));
+        }
     }
     // 要素建议卡不挡流程：什么状态下都画（起草跑着也能先采纳）。
     if !turn.field_cards.is_empty() {
@@ -1843,25 +1858,11 @@ fn pi_recovery_actions(
     );
 }
 
-fn rerun_button(
-    ui: &mut egui::Ui,
-    turn: &super::AiTurn,
-    label: &str,
-    action: &mut Option<CardAction>,
-) {
-    if turn.request.is_some()
-        && ui
-            .add(theme::secondary_icon_button(theme::Icon::Refresh, label))
-            .clicked()
-    {
-        *action = Some(CardAction::Rerun(turn.id));
-    }
-}
-
-/// 中断 / 停止 / 出错后的「接着跑 · 从头重来 · 丢弃」（内核加固第 4 期）。
+/// 中断 / 停止 / 出错后：Pi 轮次给「接着写 / 从头写」，旧流程轮次把**已经在跑的**旧运行
+/// 接着做完，或清掉检查点。
 ///
-/// 有检查点才给「接着跑」，并注明停在哪一步、什么时候存的；找不到检查点就只留原来的
-/// 「重新生成」，不假装能续。三个按钮只在侧栏发起的轮次上出现。
+/// 旧流程（小模型分阶段）不再从这里新建运行：卡片上没有「重新生成 / 重试 / 从头重来」，
+/// 要重做就用下方的「复制为新 Pi 任务」（统一写作第五阶段）。
 fn resume_actions(
     ui: &mut egui::Ui,
     turn: &super::AiTurn,
@@ -1877,26 +1878,16 @@ fn resume_actions(
     }
     ui.add_space(6.0);
     if turn.resumable.is_none() {
-        ui.weak("这一轮没有留下检查点，只能重新生成。");
+        ui.weak("这一轮没有留下检查点；旧流程不再新建运行，要接着做请复制为新的 Pi 任务。");
         return;
     }
     let label = turn.resumable.as_deref().unwrap_or_default();
     ui.horizontal_wrapped(|ui| {
         if theme::primary_icon_button(ui, theme::Icon::SquareCheck, "接着跑")
-            .on_hover_text(format!("从最近一步接着跑（{label}）"))
+            .on_hover_text(format!("把这一轮旧运行从最近一步接着做完（{label}）"))
             .clicked()
         {
             *action = Some(CardAction::Resume(turn.id));
-        }
-        if ui
-            .add(theme::secondary_icon_button(
-                theme::Icon::Refresh,
-                "从头重来",
-            ))
-            .on_hover_text("丢掉检查点，从第一步重新跑一遍")
-            .clicked()
-        {
-            *action = Some(CardAction::Restart(turn.id));
         }
         if ui
             .add(theme::secondary_icon_button(theme::Icon::Eraser, "丢弃"))

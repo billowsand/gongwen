@@ -29,7 +29,7 @@ const HOST_DIR = path.join(REPO, "pi-host");
 const SKILLS_DIR = path.join(REPO, "assets", "pi-skills");
 const MARKDOWN_SKILL = path.join(REPO, "skills", "gongwen-markdown");
 const TMP_ROOT = path.join(REPO, "tmp");
-const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 const MAX_EVENT_BYTES = 32 * 1024 * 1024;
 const MAX_TOOL_ERROR = 2_000;
 const DEFAULT_TIMEOUT_SECONDS = 600;
@@ -185,6 +185,12 @@ export function validateCases(fixtures) {
     const delivery = item.expect?.delivery;
     if (delivery !== "document" && delivery !== "report") {
       problems.push(`${name} 的 delivery 必须是 document 或 report`);
+    }
+    if (item.strategy !== undefined && item.strategy !== "phased" && item.strategy !== "auto") {
+      problems.push(`${name} 的 strategy 只能是 phased 或 auto`);
+    }
+    if (item.strategy === "phased" && (item.materials ?? []).length === 0) {
+      problems.push(`${name} 要求分阶段但没有材料，会退成常规而测不到阶段`);
     }
     if (item.current) {
       const file = path.join(fixtures.dir, item.current);
@@ -532,7 +538,8 @@ export function createFixtureBridge({ caseDef, fixtures, bridge, workspace, base
     const haystack = `${doc.title ?? ""}\n${doc.section ?? ""}\n${doc.text ?? doc.markdown ?? ""}\n${idList(doc.keywords).join(" ")}`;
     const terms = query.split(/[\s，。、；：！？（）()《》]+/).filter((term) => term.length >= 2);
     if (terms.length === 0) return haystack.includes(query);
-    return terms.some((term) => haystack.includes(term));
+    return terms.some((term) => haystack.includes(term))
+      || idList(doc.keywords).some((keyword) => query.includes(keyword));
   };
 
   const handleImpl = (name, args) => {
@@ -878,6 +885,8 @@ function hostInit({ caseDef, requestId, runId, prepared, model, timeoutSeconds }
       reasoning: model.reasoning,
       thinkingLevel: model.thinkingLevel,
     },
+    // 评测用例可以明确要求分阶段；不传就是自动路由，与实际入口一致。
+    strategy: { preference: caseDef.strategy === "phased" ? "phased" : "auto", capability: {} },
     task: {
       request: caseDef.request,
       kind: caseDef.kind ?? "",
@@ -1036,6 +1045,15 @@ export async function runCase({
   const reportEvent = events.find((event) => event.type === "report");
   const receipt = readReceiptIfAny(prepared.run);
   const receiptContent = receipt && receipt.kind === "document" ? readIfPresent(path.join(prepared.run, "final.md")) : "";
+  const progressText = readIfPresent(path.join(prepared.run, "progress.json"));
+  let progress;
+  if (progressText) {
+    try {
+      progress = JSON.parse(progressText);
+    } catch {
+      progress = { unreadable: true };
+    }
+  }
   const submitted = submittedEvent
     ? {
         path: submittedEvent.path,
@@ -1062,6 +1080,7 @@ export async function runCase({
     report,
     receipt,
     receiptContent,
+    progress,
     base: prepared.base,
     selection: prepared.selection,
     toolCalls,
@@ -1119,13 +1138,24 @@ function check(list, name, ok, detail) {
 /**
  * 分开记录技术交付与业务判据。`manual` 不转成分数；关键词命中只算「指定事实在不在」。
  */
+/**
+ * 数字 / 日期判据的等价形式：只去掉紧邻数字的空白（「10 月 8 日」=「10月8日」）。
+ * 不改动交付原文，也不参与字数上限：字数判据始终用原文计数，不能借归一化放宽。
+ */
+export function compactNumbers(text) {
+  return String(text ?? "").replace(/(?<=\d)\s+|\s+(?=\d)/gu, "");
+}
+
 export function judgeCase(caseDef, result) {
   const technical = [];
   const business = [];
   const expect = caseDef.expect ?? {};
   const wantsDocument = expect.delivery === "document";
   const delivered = deliveredText(result);
+  // 事实关键词比对用数字空格等价形式；字数与选区检查仍用原文。
+  const matchable = compactNumbers(delivered);
   let factScope = delivered;
+  let factMatchable = matchable;
 
   check(technical, "进程正常退出", result.exitCode === 0 && !result.timedOut, result.timedOut ? "超时" : `exitCode=${result.exitCode}`);
   check(technical, "收到 completed 事件", result.events.some((event) => event.type === "completed"), result.events.map((event) => event.type).join(","));
@@ -1175,6 +1205,7 @@ export function judgeCase(caseDef, result) {
       check(technical, "选区外逐字未变", prefixOk && suffixOk, prefixOk ? (suffixOk ? undefined : "选区后文字被改") : "选区前文字被改");
       const inside = content.length >= selection.start + tail ? content.slice(selection.start, content.length - tail) : "";
       factScope = inside;
+      factMatchable = compactNumbers(inside);
       if (expect.maxSelectionChars !== undefined) {
         check(
           business,
@@ -1187,16 +1218,18 @@ export function judgeCase(caseDef, result) {
   }
 
   for (const phrase of expect.required ?? []) {
-    check(business, `保留事实「${phrase}」`, factScope.includes(phrase), factScope.includes(phrase) ? undefined : "交付内容的任务范围里没有");
+    const ok = factMatchable.includes(compactNumbers(phrase));
+    check(business, `保留事实「${phrase}」`, ok, ok ? undefined : "交付内容的任务范围里没有");
   }
   for (const phrase of expect.forbidden ?? []) {
-    check(business, `不得出现「${phrase}」`, !delivered.includes(phrase), delivered.includes(phrase) ? "交付内容里出现了" : undefined);
+    const ok = !matchable.includes(compactNumbers(phrase));
+    check(business, `不得出现「${phrase}」`, ok, ok ? undefined : "交付内容里出现了");
   }
   for (const phrase of expect.requiredSummary ?? []) {
     check(business, `交付说明含「${phrase}」`, (result.submitted?.summary ?? "").includes(phrase), "独立检查交付说明，不允许用正文代替表单建议");
   }
   for (const group of expect.requirePhrasesAny ?? []) {
-    const hit = group.find((phrase) => factScope.includes(phrase));
+    const hit = group.find((phrase) => factMatchable.includes(compactNumbers(phrase)));
     check(business, `说明了「${group[0]}」类结论`, Boolean(hit), hit ? `命中「${hit}」` : "一个说法都没有");
   }
   if (expect.minChars !== undefined) {
@@ -1212,13 +1245,28 @@ export function judgeCase(caseDef, result) {
     check(business, `调用了 ${expect.requiredToolsAny.join(" / ")}`, Boolean(hit), hit ? undefined : [...names].join(","));
   }
 
+  if (caseDef.strategy === "phased") {
+    const records = Array.isArray(result.progress?.records) ? result.progress.records : [];
+    // 旧版本留痕且标失效是正常更正；只认可每个单元最后登记的有效版本。
+    const latest = [...new Map(records.map((record) => [record.unit, record])).values()];
+    const current = latest.filter((record) => !record.invalid);
+    const units = new Set(current.map((record) => record.unit));
+    const phaseNames = new Set(current.map((record) => record.phase));
+    check(technical, "确实走了分阶段调度", result.events.some((event) => event.type === "strategy" && event.mode === "phased"), result.events.find((event) => event.type === "strategy")?.mode);
+    check(technical, "登记了材料提炼成果", [...units].some((unit) => String(unit).startsWith("distill:") || String(unit).startsWith("study:")), [...units].join(","));
+    check(technical, "登记了提纲与章节成果", units.has("outline") && [...units].some((unit) => String(unit).startsWith("section:")), [...units].join(","));
+    check(technical, "最终提交前登记了完整候选稿", units.has("final"), phaseNames.has("review") ? undefined : "没有 review 阶段登记");
+    const unresolved = latest.filter((record) => record.invalid || (record.uses ?? []).some((unit) => !units.has(unit)));
+    check(technical, "当前成果与依赖均有有效登记", unresolved.length === 0, unresolved.map((record) => record.unit).join(","));
+  }
+
   const required = expect.required ?? [];
   const forbidden = expect.forbidden ?? [];
   const keywordCoverage = {
-    note: "只表示指定事实 / 禁项是否命中，不是写作质量总分",
-    requiredHit: required.filter((phrase) => delivered.includes(phrase)).length,
+    note: "只表示指定事实 / 禁项是否命中（数字空格等价），不是写作质量总分",
+    requiredHit: required.filter((phrase) => matchable.includes(compactNumbers(phrase))).length,
     requiredTotal: required.length,
-    forbiddenHit: forbidden.filter((phrase) => delivered.includes(phrase)).length,
+    forbiddenHit: forbidden.filter((phrase) => matchable.includes(compactNumbers(phrase))).length,
     forbiddenTotal: forbidden.length,
   };
 
@@ -1429,6 +1477,49 @@ export function selftest() {
     }),
   );
   expect(!forbiddenInReportOnly.businessPassed, "缺「未找到原文」时业务判据不应通过");
+
+  // 数字 / 日期空格等价：原文写「10 月 8 日」也认作「10月8日」；字数判据仍按原文计数。
+  const spacedNumbers = judgeCase(
+    syntheticCase(),
+    syntheticResult({
+      submitted: {
+        ...syntheticResult().submitted,
+        content: "# 通知\n\n2026 年 12 月 1 日 前完成。\n",
+      },
+    }),
+  );
+  expect(spacedNumbers.businessPassed, "数字空格等价的日期应保留事实");
+  const spacedButShort = judgeCase(
+    syntheticCase({ minChars: 60 }),
+    syntheticResult({
+      submitted: {
+        ...syntheticResult().submitted,
+        content: "# 通知\n\n2026 年 12 月 1 日 前完成。\n",
+      },
+    }),
+  );
+  expect(!spacedButShort.businessPassed, "字数判据不能被数字空格归一化放宽");
+
+  const phasedMissing = judgeCase(
+    { ...syntheticCase(), strategy: "phased" },
+    syntheticResult(),
+  );
+  expect(!phasedMissing.technicalPassed, "要求分阶段却没有登记成果时技术判据不应通过");
+  const phasedOk = judgeCase(
+    { ...syntheticCase(), strategy: "phased" },
+    syntheticResult({
+      events: [{ type: "strategy", mode: "phased" }, { type: "submitted" }, { type: "completed", submitted: true }],
+      progress: {
+        records: [
+          { unit: "distill:input/materials/01.md#1", phase: "distill" },
+          { unit: "outline", phase: "outline" },
+          { unit: "section:1", phase: "sections" },
+          { unit: "final", phase: "review" },
+        ],
+      },
+    }),
+  );
+  expect(phasedOk.technicalPassed, `完整分阶段登记应通过技术判据：${JSON.stringify(phasedOk.technical)}`);
 
   const args = parseArgs(["--case", "a", "--case", "b", "--timeout", "30", "--out", "tmp/x"]);
   expect(args.cases.length === 2 && args.timeoutSeconds === 30 && args.out === "tmp/x", "CLI 参数解析不对");

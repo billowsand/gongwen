@@ -5,8 +5,8 @@
 
 import path from "node:path";
 
-export const PROTOCOL_VERSION = 2;
-export const HOST_VERSION = "0.2.0";
+export const PROTOCOL_VERSION = 3;
+export const HOST_VERSION = "0.3.0";
 
 /** 单行输出的上限（含换行）。正文最多 8 MiB，JSON 转义后留出余量。 */
 export const MAX_OUTPUT_LINE_BYTES = 16 * 1024 * 1024;
@@ -148,6 +148,7 @@ export function validateInit(value) {
       materials: typeof workspace.materials === "string" ? workspace.materials : "input/materials",
     },
     model: { baseUrl, apiKey, modelId, contextWindow, maxTokens, reasoning, thinkingLevel },
+    strategy: validateStrategy(value.strategy),
     task: {
       request,
       kind,
@@ -167,6 +168,27 @@ export function validateInit(value) {
 }
 
 const MATERIAL_ROLES = new Set(["fact", "style_sample", "structure_sample", "incoming_letter"]);
+
+/**
+ * 分阶段倾向与有限能力元数据。旧 host 不认识这个字段会忽略，新 host 缺省按 `auto`。
+ * 能力只收已验证的值；没有就不猜，按保守工作预算处理。
+ */
+function validateStrategy(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const preference = source.preference === "phased" ? "phased" : "auto";
+  const capability = source.capability && typeof source.capability === "object" ? source.capability : {};
+  const verifiedWorkBudget =
+    Number.isInteger(capability.verifiedWorkBudget) && capability.verifiedWorkBudget > 0
+      ? capability.verifiedWorkBudget
+      : undefined;
+  return {
+    preference,
+    capability: {
+      ...(verifiedWorkBudget === undefined ? {} : { verifiedWorkBudget }),
+      needsShortSteps: capability.needsShortSteps === true,
+    },
+  };
+}
 
 /** 恢复模式：只认 `resume`，旧 host 遇到新字段会直接拒绝而不是猜。 */
 function validateRecovery(value) {

@@ -21,8 +21,8 @@ use crate::draft_page::DraftPage;
 use crate::models::{LmStudioConfig, ReasoningEffort};
 use crate::pi_agent::{
     MaterialRole, PiBridge, PiEvent, PiJob, PiMaterialInput, PiModel, PiOutcome, PiRunLog,
-    PiRunRecord, PiRunRef, PiRunSelection, PiRuntime, PiSelection, PiTask, PiToolContext,
-    PiWorkspace, base_dir, pi_skills, read_sources, resolve_workspace, run,
+    PiRunRecord, PiRunRef, PiRunSelection, PiRuntime, PiSelection, PiStrategyPreference, PiTask,
+    PiToolContext, PiWorkspace, base_dir, pi_skills, read_sources, resolve_workspace, run,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -68,13 +68,15 @@ struct PiPrepare {
     before: String,
     base: String,
     prompt: String,
+    raw_request: Option<String>,
     kind: String,
     system_date: String,
     skill: Option<String>,
+    strategy: PiStrategyPreference,
     selection: Option<PiSelection>,
     materials: Vec<PiMaterialInput>,
     refs: Vec<Reference>,
-    ref_role: MaterialRole,
+    ref_roles: Vec<MaterialRole>,
     previous_sources: Vec<String>,
     model: PiModel,
     model_provider: String,
@@ -160,20 +162,27 @@ impl DraftPage<'_> {
             }
             None => None,
         };
-        // 材料角色由用户选：事实材料 / 写法样稿 / 结构范文 / 来函。样稿不会进事实来源。
-        let material_role = composer.pi_material_role;
-        let ref_role = composer.pi_ref_role;
+        // 材料角色逐篇取自用户选择：事实材料 / 写法样稿 / 结构范文 / 来函。样稿不会进事实来源。
+        let strategy = composer.pi_strategy;
         let materials: Vec<PiMaterialInput> = composer
             .materials
             .iter()
-            .map(|pasted: &paste::PastedFile| PiMaterialInput {
-                title: pasted.material.name.clone(),
-                source: "粘贴材料".into(),
-                role: material_role,
-                text: pasted.material.text.clone(),
-            })
+            .enumerate()
+            .map(
+                |(index, pasted): (usize, &paste::PastedFile)| PiMaterialInput {
+                    title: pasted.material.name.clone(),
+                    source: "粘贴材料".into(),
+                    role: composer.material_role(index),
+                    text: pasted.material.text.clone(),
+                },
+            )
             .collect();
         let refs = mention::live_refs(&composer.text, &composer.refs);
+        // 逐篇引用用途按「来源 + 编号」算，同名不同来源不串用。
+        let ref_roles: Vec<MaterialRole> = refs
+            .iter()
+            .map(|reference| composer.ref_role(reference.source, reference.id))
+            .collect();
         let mut prompt = request.clone();
         if let Some(skill) = &skill {
             prompt.push_str(&format!(
@@ -215,7 +224,7 @@ impl DraftPage<'_> {
 
         // 界面线程到此为止：只创建等待中的轮次，准备交给后台。
         let (key, seq) = self.begin_job();
-        let turn_id = self.begin_pi_turn(&title, &prompt, &context, seq);
+        let turn_id = self.begin_pi_turn(&title, &request, &context, seq);
         self.open_pi_panel(&title, seq);
         *self.status = "正在准备 Pi 工作区…".into();
         let prepare = PiPrepare {
@@ -229,19 +238,275 @@ impl DraftPage<'_> {
             before,
             base,
             prompt,
+            raw_request: Some(request),
             kind: kind.label().to_string(),
             system_date: time.today,
             skill,
+            strategy,
             selection,
             materials,
             refs,
-            ref_role,
+            ref_roles,
             previous_sources,
             model,
             model_provider,
             model_id,
         };
         spawn_prepare(prepare, self.panel_cancel(), self.sender.clone());
+        Ok(())
+    }
+
+    /// 把一份 Pi 轮次原样搬回输入区：材料逐篇用途取自那一轮工作区的材料索引（模型实际
+    /// 读到的那份快照），策略倾向取自运行记录，要求用卡片上显示的原话。改完再发就是新的
+    /// 一轮，原工作区与记录都不动。
+    fn copy_pi_run_into_composer(
+        &mut self,
+        reference: &PiRunRef,
+        prompt: &str,
+    ) -> Result<(), String> {
+        if reference.is_empty() || reference.run_id.trim().is_empty() {
+            return Err("这一轮没有可读的 Pi 工作区，复制不出当时的材料。".into());
+        }
+        let root = resolve_workspace(&reference.workspace)?;
+        let workspace = PiWorkspace::reopen(root, reference.workspace.clone())?;
+        let record = PiRunRecord::read_from(&workspace.run)?;
+        if record.run_id != reference.run_id
+            || record.request_id != reference.request_id
+            || record.workspace != reference.workspace
+        {
+            return Err("运行记录与这一轮的引用不一致，不能复制。".into());
+        }
+        record.check_request()?;
+        record.check_materials(&workspace)?;
+        let inputs = workspace.read_material_texts()?;
+        let mut pasted = Vec::new();
+        let mut roles = Vec::new();
+        for material in inputs {
+            pasted.push(
+                super::paste::PastedFile::new(&material.text)
+                    .map_err(|error| format!("临时材料创建失败（{error}）"))?,
+            );
+            // 当时逐篇选的用途原样跟着走，不降成事实材料。
+            roles.push(material.role);
+        }
+        let count = pasted.len();
+        let composer = &mut self.doc.ai_panel.composer;
+        composer.text = record.user_request.clone().unwrap_or_else(|| {
+            // 旧选区轮次没有单独保存原始要求时不猜边界，避免把旧选区当成新要求。
+            if record.selection.is_some() {
+                String::new()
+            } else {
+                prompt.to_string()
+            }
+        });
+        composer.pi_skill = record.skill.clone();
+        // 那一轮的 `@` 引用在发送时已经变成带用途的材料，这里不再当成引用搬一遍。
+        composer.refs.clear();
+        composer.materials = pasted;
+        composer.pi_material_roles = roles;
+        composer.pi_ref_roles.clear();
+        composer.pi_notes = record.confirmed.clone();
+        // 策略倾向按运行记录，不看输入框现在的选择。
+        composer.pi_strategy = record.strategy;
+        composer.selection = None;
+        composer.error = None;
+        self.doc.ai_panel.open = true;
+        *self.status = format!(
+            "已把这一轮 Pi 的要求、{count} 份材料（按当时用途）与策略复制到输入区；检查后点发送就是新的一轮，原运行记录保留。"
+        );
+        Ok(())
+    }
+
+    /// 从旧「分阶段写作」面板显式迁移到统一 Pi 入口：搬主题、素材（按原用途）、
+    /// 归纳出的写法与结构，按分阶段倾向开新任务。旧面板随后收起，旧流程不再运行。
+    pub(crate) fn copy_writing_task_to_pi(&mut self) -> bool {
+        if self.doc.read_only() {
+            *self.status = "这篇稿件已发布或归档，只读。".into();
+            return false;
+        }
+        if self.doc.busy || self.doc.ai_panel.running() || self.doc.writing.running {
+            *self.status = "这篇稿件还有任务在跑，稍等一下再迁移旧任务。".into();
+            return false;
+        }
+        let (text, pasted, roles) = match self.writing_task_materials(String::new()) {
+            Ok(parts) => parts,
+            Err(error) => {
+                *self.status = error;
+                return false;
+            }
+        };
+        if text.trim().is_empty() && pasted.is_empty() {
+            *self.status = "旧分阶段写作还没有主题和素材，没什么可迁移的。".into();
+            return false;
+        }
+        let count = pasted.len();
+        let composer = &mut self.doc.ai_panel.composer;
+        composer.text = text;
+        // 旧面板没有 `@` 引用，已有的引用也不能跟着串进来。
+        composer.refs.clear();
+        composer.materials = pasted;
+        composer.pi_material_roles = roles;
+        composer.pi_ref_roles.clear();
+        composer.pi_notes.clear();
+        composer.pi_strategy = PiStrategyPreference::Phased;
+        composer.pi_skill = Some("gongwen-draft".into());
+        composer.selection = None;
+        composer.error = None;
+        self.doc.ai_panel.open = true;
+        self.doc.writing.open = false;
+        *self.status = format!(
+            "已把旧分阶段写作的主题与 {count} 份素材（按原用途）复制到右侧智能写作；检查后点发送，旧任务历史仍保留。"
+        );
+        true
+    }
+
+    /// 旧「分阶段写作」任务的素材与归纳结果，按原来的内容 / 风格 / 结构用途打包。
+    fn writing_task_materials(
+        &self,
+        fallback_text: String,
+    ) -> Result<(String, Vec<super::paste::PastedFile>, Vec<MaterialRole>), String> {
+        let task = &self.doc.writing.task;
+        let text = if task.topic.trim().is_empty() {
+            fallback_text
+        } else {
+            task.topic.clone()
+        };
+        let mut pasted = Vec::new();
+        let mut roles = Vec::new();
+        for source in &task.sources {
+            pasted.push(
+                super::paste::PastedFile::new(&source.text)
+                    .map_err(|error| format!("临时材料创建失败（{error}）"))?,
+            );
+            // 内容 / 风格 / 结构三种素材按原用途搬：不编造、也不降成普通事实材料。
+            roles.push(match source.role {
+                crate::agent::writing::SourceRole::Content => MaterialRole::Fact,
+                crate::agent::writing::SourceRole::Style => MaterialRole::StyleSample,
+                crate::agent::writing::SourceRole::Framework => MaterialRole::StructureSample,
+            });
+        }
+        for (title, body, role) in [
+            (
+                "旧任务归纳的写法",
+                task.style_md.trim(),
+                MaterialRole::StyleSample,
+            ),
+            (
+                "旧任务归纳的结构",
+                task.framework_md.trim(),
+                MaterialRole::StructureSample,
+            ),
+        ] {
+            if body.is_empty() {
+                continue;
+            }
+            pasted.push(
+                super::paste::PastedFile::new(&format!("# {title}\n\n{body}"))
+                    .map_err(|error| format!("临时材料创建失败（{error}）"))?,
+            );
+            roles.push(role);
+        }
+        Ok((text, pasted, roles))
+    }
+
+    /// 把旧流程轮次显式复制成一份新的 Pi 任务：只搬要求、材料、引用与已确认信息，
+    /// 旧选区不迁到当前正文（旧检查点也不能当成 Pi 检查点），要写什么由用户再看一遍。
+    ///
+    /// 两条旧历史都能搬：
+    /// - 旧侧栏流程轮次（有 `request`）：材料与引用按事实材料，不继承输入框里残留的用途；
+    /// - 旧「分阶段写作」任务（无 `request`，成果挂在这一轮）：素材按原来的内容 / 风格 /
+    ///   结构用途搬过来，归纳出来的写法与结构也跟着搬，不丢用户历史任务，也不重新跑旧流程。
+    pub(crate) fn copy_turn_to_pi(&mut self, turn_id: u64) -> Result<(), String> {
+        if self.doc.read_only() {
+            return Err("这篇稿件已发布或归档，只读。".into());
+        }
+        if self.doc.busy || self.doc.ai_panel.running() {
+            return Err("这篇稿件还有任务在跑，稍等一下再复制旧任务。".into());
+        }
+        let (pi_run, prompt, request, staged) = {
+            let Some(turn) = self
+                .doc
+                .ai_panel
+                .turns
+                .iter()
+                .find(|turn| turn.id == turn_id)
+            else {
+                return Err("这一轮已经不在了。".into());
+            };
+            // 旧分阶段写作的成果也挂在这一轮里，要求不在 `request` 上，在写作任务里。
+            // 刚跑完时由 `proposal_turn` 指认；重开会话后按主题与卡片抬头对上。
+            let topic = self.doc.writing.task.topic.trim();
+            let staged = turn.request.is_none()
+                && (self.doc.writing.proposal_turn == Some(turn_id)
+                    || (!topic.is_empty() && topic == turn.prompt.trim()));
+            (
+                turn.pi_run.clone(),
+                turn.prompt.clone(),
+                turn.request.clone(),
+                staged,
+            )
+        };
+        if let Some(reference) = pi_run {
+            // Pi 轮次：按那一轮工作区里的材料用途与运行记录里的策略原样搬回输入区。
+            return self.copy_pi_run_into_composer(&reference, &prompt);
+        }
+        let mut pasted = Vec::new();
+        let mut roles = Vec::new();
+        let text;
+        let mut refs = Vec::new();
+        let mut notes = Vec::new();
+        let mut migrated_staged = false;
+        if let Some(request) = request {
+            text = request.text.clone();
+            refs = request.refs.clone();
+            notes = request.notes.clone();
+            for material in &request.materials {
+                pasted.push(
+                    super::paste::PastedFile::new(&material.text)
+                        .map_err(|error| format!("临时材料创建失败（{error}）"))?,
+                );
+                // 旧会话没有逐篇用途：一律按事实材料，不继承输入框里残留的角色。
+                roles.push(MaterialRole::Fact);
+            }
+        } else if staged {
+            let (task_text, task_pasted, task_roles) = self.writing_task_materials(prompt)?;
+            text = task_text;
+            pasted = task_pasted;
+            roles = task_roles;
+            migrated_staged = true;
+        } else {
+            return Err("这一轮没有可复制的原始要求。".into());
+        }
+        if text.trim().is_empty() && pasted.is_empty() {
+            return Err("这一轮没有可复制的主题与材料，不用迁移。".into());
+        }
+        let count = pasted.len();
+        let composer = &mut self.doc.ai_panel.composer;
+        composer.text = text;
+        composer.refs = refs;
+        composer.pi_skill = None;
+        composer.materials = pasted;
+        composer.pi_material_roles = roles;
+        // 引用用途按「来源 + 编号」存：旧任务没记过用途，不能留着输入框里上一篇的角色。
+        composer.pi_ref_roles.clear();
+        composer.pi_notes = notes;
+        // 旧分阶段写作本来就是一步一步跑的，搬过来继续按分阶段；旧侧栏流程不动用户的选择。
+        if migrated_staged {
+            composer.pi_strategy = PiStrategyPreference::Phased;
+        }
+        // 旧选区、旧提案与旧检查点都不迁移：新正文基线可能已经变了。
+        composer.selection = None;
+        composer.error = None;
+        self.doc.ai_panel.open = true;
+        *self.status = if migrated_staged {
+            format!(
+                "已把旧分阶段写作的主题、{count} 份素材（按原用途）与归纳结果复制到统一 Pi 入口；检查后点发送，旧任务历史仍保留。"
+            )
+        } else {
+            format!(
+                "已把旧任务的要求、{count} 份材料与引用复制到统一 Pi 入口；检查后点发送，旧任务历史仍保留。"
+            )
+        };
         Ok(())
     }
 
@@ -312,13 +577,17 @@ impl DraftPage<'_> {
             before,
             base,
             prompt: String::new(),
+            raw_request: None,
             kind: kind.label().to_string(),
             system_date: time.today,
             skill: None,
+            // 恢复时不用这里的值：策略倾向按运行记录（`PiRunRecord.strategy`）走，
+            // 免得重启后输入框里的选择把常规任务改成阶段性。
+            strategy: self.doc.ai_panel.composer.pi_strategy,
             selection: None,
             materials: Vec::new(),
             refs: Vec::new(),
-            ref_role: MaterialRole::Fact,
+            ref_roles: Vec::new(),
             previous_sources: Vec::new(),
             model,
             model_provider: self.config.pi_model.provider_id.clone(),
@@ -459,6 +728,11 @@ fn spawn_prepare_with(
         let workspace_label = launch.workspace.label.clone();
         let result = run_launch(launch, cancel, |event| match event {
             PiEvent::Progress(message) => send(DocJob::PiProgress(message)),
+            PiEvent::Strategy(info) => {
+                let line = info.line();
+                send(DocJob::PiTool(line.clone()));
+                send(DocJob::PiProgress(line));
+            }
             PiEvent::Tool(line) => send(DocJob::PiTool(line)),
             PiEvent::Evidence(line) => send(DocJob::PiTool(line)),
             PiEvent::Candidate { path, content } => send(DocJob::PiCandidate { path, content }),
@@ -502,19 +776,39 @@ fn prepare_pi(prepare: PiPrepare, cancel: &AtomicBool) -> Result<PiLaunch, Strin
 }
 
 fn prepare_pi_with_runtime(
-    prepare: PiPrepare,
+    mut prepare: PiPrepare,
     cancel: &AtomicBool,
     locate: impl FnOnce() -> Result<PiRuntime, String>,
 ) -> Result<PiLaunch, String> {
     if cancel.load(Ordering::Relaxed) {
         return Err("已停止 Pi 智能写作，未启动 host。".into());
     }
+    // 窗口探测放在后台准备线程里：LM Studio 的实际加载窗口只有原生
+    // `/api/v0/models` 给，标准 `/v1/models` 只有 ID。短超时、只问已配置的地址，
+    // 不阻塞界面，也不盲探无关主机。
+    refine_model_window(&mut prepare);
     let runtime = locate()?;
     if prepare.reference.is_some() {
         prepare_resume(prepare, runtime, cancel)
     } else {
         prepare_start(prepare, runtime, cancel)
     }
+}
+
+/// 在后台把 `peek_window` 的估计换成服务实际报告的加载窗口。
+fn refine_model_window(prepare: &mut PiPrepare) {
+    let Ok(chat) = prepare.config.pi_chat() else {
+        return;
+    };
+    let mut probe = chat;
+    probe.timeout_seconds = probe.timeout_seconds.clamp(1, 3);
+    let window = crate::lmstudio::context::window(&probe);
+    let tokens = window.tokens.min(u32::MAX as usize).max(1) as u32;
+    prepare.model.context_window = tokens;
+    prepare.model.max_tokens = prepare
+        .model
+        .max_tokens
+        .min(tokens.saturating_sub(1_024).max(1));
 }
 
 fn prepare_start(
@@ -530,13 +824,15 @@ fn prepare_start(
         before,
         base,
         prompt,
+        raw_request,
         kind,
         system_date,
         skill,
+        strategy,
         selection,
         mut materials,
         refs,
-        ref_role,
+        ref_roles,
         previous_sources,
         model,
         model_provider,
@@ -564,7 +860,7 @@ fn prepare_start(
             text: previous_sources.join("\n\n---\n\n"),
         });
     }
-    for reference in &refs {
+    for (index, reference) in refs.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             return Err("已停止 Pi 智能写作，未启动 host。".into());
         }
@@ -574,7 +870,7 @@ fn prepare_start(
         materials.push(PiMaterialInput {
             title,
             source: reference.source.label().to_string(),
-            role: ref_role,
+            role: ref_roles.get(index).copied().unwrap_or(MaterialRole::Fact),
             text,
         });
     }
@@ -597,7 +893,7 @@ fn prepare_start(
     let input_request = finalize_input(&workspace, &base, &before)?;
     let run_id = uuid::Uuid::new_v4().to_string();
     let request_id = format!("gongwen-{key}-{seq}");
-    let record = PiRunRecord::start(
+    let mut record = PiRunRecord::start(
         run_id.clone(),
         request_id.clone(),
         &workspace,
@@ -618,7 +914,9 @@ fn prepare_start(
         metas.clone(),
         &model_provider,
         &model_id,
-    );
+    )
+    .with_strategy(strategy);
+    record.user_request = raw_request;
     let log = Arc::new(PiRunLog::open(&workspace, record)?);
     let tools = Arc::new(PiToolContext::new(
         config,
@@ -640,6 +938,7 @@ fn prepare_start(
             kind,
             system_date,
             skill,
+            strategy,
             selection,
             materials: metas,
         },
@@ -670,6 +969,7 @@ fn prepare_resume(
         kind,
         system_date,
         restart,
+        strategy: _,
         model,
         model_provider,
         model_id,
@@ -686,6 +986,9 @@ fn prepare_resume(
         return Err("运行记录与当前轮次引用不一致，不能恢复或重写。".into());
     }
     record.check_request()?;
+    // 策略倾向用**运行记录里的**：输入框现在选的是什么与这一轮无关，恢复中途换策略会把
+    // 常规任务变成分阶段（或反之）。旧记录没有这一项，读回来就是自动。
+    let strategy = record.strategy;
     // 旧材料只做路径 / 哈希 / 体积校验：两种恢复都要求材料没被换过。
     record.check_materials(&old_workspace)?;
     // 文种换了就不能沿用旧规则写、再用新文种清洗。
@@ -720,7 +1023,7 @@ fn prepare_resume(
             .collect();
         let run_id = uuid::Uuid::new_v4().to_string();
         let request_id = format!("gongwen-{key}-{seq}");
-        let new_record = PiRunRecord::start(
+        let mut new_record = PiRunRecord::start(
             run_id.clone(),
             request_id.clone(),
             &workspace,
@@ -741,7 +1044,9 @@ fn prepare_resume(
             metas.clone(),
             &model_provider,
             &model_id,
-        );
+        )
+        .with_strategy(record.strategy);
+        new_record.user_request = record.user_request.clone();
         let log = Arc::new(PiRunLog::open(&workspace, new_record)?);
         let tools = Arc::new(PiToolContext::new(
             config,
@@ -761,6 +1066,7 @@ fn prepare_resume(
                 kind,
                 system_date,
                 skill: record.skill,
+                strategy,
                 selection,
                 materials: metas,
             },
@@ -842,6 +1148,7 @@ fn prepare_resume(
             kind: record.kind,
             system_date: record.system_date,
             skill: record.skill,
+            strategy,
             selection,
             materials,
         },
@@ -1033,13 +1340,15 @@ mod tests {
             before: "当前正文".into(),
             base: "当前正文".into(),
             prompt: "用户要求".into(),
+            raw_request: Some("用户要求".into()),
             kind: "研究报告".into(),
             system_date: "2026-11-02".into(),
             skill: None,
+            strategy: PiStrategyPreference::Auto,
             selection: None,
             materials: vec![],
             refs: vec![],
-            ref_role: MaterialRole::Fact,
+            ref_roles: vec![],
             previous_sources: vec![],
             model: pi_model(&chat()).unwrap(),
             model_provider: "当前服务商".into(),
@@ -1112,12 +1421,15 @@ mod tests {
             metas,
             "原服务商",
             "原模型",
-        );
+        )
+        .with_strategy(PiStrategyPreference::Phased);
         record.write(&workspace).unwrap();
         let mut prepare = preparation();
         prepare.reference = Some(PiRunRef::from_record(&record));
         prepare.restart = true;
         prepare.prompt.clear();
+        // 重启后输入框可能已经回到「自动」：恢复/重开必须按运行记录里的「倾向分阶段」走。
+        assert_eq!(prepare.strategy, PiStrategyPreference::Auto);
         let launch = prepare_pi_with_runtime(prepare, &AtomicBool::new(false), || {
             Ok(PiRuntime {
                 node: dir.path().join("unused-node"),
@@ -1132,9 +1444,79 @@ mod tests {
         assert_eq!(launch.task.kind, "研究报告");
         assert_eq!(launch.task.system_date, "2026-11-02");
         assert_eq!(launch.before, "当前正文");
+        assert_eq!(
+            launch.task.strategy,
+            PiStrategyPreference::Phased,
+            "重开也用运行记录里的策略倾向，不看输入框当前选择"
+        );
         let saved = launch.record.snapshot();
         assert_eq!(saved.model, "当前模型");
         assert_eq!(saved.baseline, crate::pi_agent::sha256_hex("当前正文"));
+        assert_eq!(saved.strategy, PiStrategyPreference::Phased);
+    }
+
+    #[test]
+    fn resuming_keeps_the_recorded_strategy_instead_of_the_composer() {
+        struct ConfigReset;
+        impl Drop for ConfigReset {
+            fn drop(&mut self) {
+                crate::storage::set_test_config_dir(None);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        let _reset = ConfigReset;
+        let (workspace, metas) = PiWorkspace::prepare(
+            &base_dir().unwrap(),
+            1,
+            "当前正文",
+            "保留的原要求",
+            &[],
+            &pi_skills::load_catalog(),
+            None,
+        )
+        .unwrap();
+        // 恢复会校验 Durable 库还在。
+        std::fs::write(&workspace.state, b"sqlite").unwrap();
+        let record = PiRunRecord::start(
+            "old-run".into(),
+            "old-request".into(),
+            &workspace,
+            "当前正文",
+            "当前正文",
+            "当前正文",
+            &workspace.read_request().unwrap(),
+            None,
+            "保留的原要求",
+            "研究报告",
+            "2026-11-02",
+            None,
+            None,
+            metas,
+            "当前服务商",
+            "当前模型",
+        )
+        .with_strategy(PiStrategyPreference::Phased);
+        record.write(&workspace).unwrap();
+        let mut prepare = preparation();
+        prepare.reference = Some(PiRunRef::from_record(&record));
+        // 重启后输入框回到了「自动」：恢复不能因此把阶段任务变成常规任务。
+        prepare.strategy = PiStrategyPreference::Auto;
+        let launch = prepare_pi_with_runtime(prepare, &AtomicBool::new(false), || {
+            Ok(PiRuntime {
+                node: dir.path().join("unused-node"),
+                host: dir.path().join("unused-host"),
+                bundled: false,
+            })
+        })
+        .unwrap();
+        assert!(launch.resume);
+        assert_eq!(launch.task.strategy, PiStrategyPreference::Phased);
+        assert_eq!(
+            launch.record.snapshot().strategy,
+            PiStrategyPreference::Phased,
+            "恢复不会把记录里的倾向改写"
+        );
     }
 
     #[test]

@@ -196,6 +196,97 @@ pub fn native_model_kinds(
     Some(kinds)
 }
 
+/// LM Studio 原生接口报告的实际已加载窗口（`loaded_context_length`）。
+///
+/// 标准 `/v1/models` 只有模型 ID；只有 `/api/v0/models` 给出实际加载值。**只对本机
+/// （loopback）已配置的模型地址探测**：远端服务不是 LM Studio，既不该收这条非标准
+/// 路径，也不该把鉴权头带出去。短超时、问不到就返回 None，不影响后续回退。
+pub fn probe_native_window(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    timeout_seconds: u64,
+) -> Option<usize> {
+    let root = native_probe_root(base_url)?;
+    let client = crate::net::client(base_url, timeout_seconds.max(1)).ok()?;
+    let mut request = client.get(format!("{root}/api/v0/models"));
+    if !api_key.trim().is_empty() {
+        request = request.bearer_auth(api_key.trim());
+    }
+    let response = request.send().ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    parse_native_loaded_window(&crate::net::read_body(response).ok()?, model)
+}
+
+/// 原生探测的根地址：只有本机地址才返回 `Some`，远端一律 `None`。
+///
+/// `http://127.0.0.1:12345/v1` → `http://127.0.0.1:12345`；
+/// `https://api.example.com/v1` → `None`（不请求，也不带密钥）。
+fn native_probe_root(base_url: &str) -> Option<String> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let (scheme, rest) = trimmed.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host = authority_host(authority);
+    if !is_loopback_host(&host) {
+        return None;
+    }
+    // 原生接口挂在主机根路径上，不在 /v1 下。
+    Some(
+        trimmed
+            .trim_end_matches("/v1")
+            .trim_end_matches('/')
+            .to_string(),
+    )
+}
+
+/// 取出 authority 里的主机名：去掉 `user:pass@` 与端口，IPv6 去方括号。
+fn authority_host(authority: &str) -> String {
+    let after_user = authority.rsplit('@').next().unwrap_or(authority);
+    if let Some(rest) = after_user.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or_default().to_string();
+    }
+    after_user.split(':').next().unwrap_or_default().to_string()
+}
+
+/// 本机回环地址：`localhost`、`127.0.0.0/8`、`::1`。
+fn is_loopback_host(host: &str) -> bool {
+    let host = host
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+/// 从原生接口返回里取指定模型的实际加载窗口；纯函数，便于用固件测试。
+///
+/// 只采信 `loaded_context_length`（实际加载值）。`max_context_length` 是模型的能力
+/// 上限，不是这次加载的窗口，拿它当窗口会按过大的上下文规划请求。
+fn parse_native_loaded_window(body: &str, model: &str) -> Option<usize> {
+    #[derive(Deserialize)]
+    struct NativeModels {
+        data: Vec<NativeWindow>,
+    }
+    #[derive(Deserialize)]
+    struct NativeWindow {
+        id: String,
+        loaded_context_length: Option<u64>,
+    }
+    let data = serde_json::from_str::<NativeModels>(body).ok()?.data;
+    data.into_iter()
+        .find(|item| item.id == model)?
+        .loaded_context_length
+        .map(|tokens| tokens as usize)
+        .filter(|tokens| *tokens >= 1024)
+}
+
 pub fn generate(config: &LmStudioConfig, system: &str, user: &str) -> Result<String> {
     generate_with(config, system, user, config.temperature, config.max_tokens)
 }
@@ -626,5 +717,60 @@ mod session_tests {
         let restored: LmStudioConfig = serde_json::from_value(value).unwrap();
         assert!(!restored.session_id.is_empty());
         assert_ne!(restored.session_id, draft.session_id);
+    }
+
+    #[test]
+    fn native_loaded_window_is_read_from_the_native_models_endpoint() {
+        let body = r#"{"data":[
+            {"id":"other","loaded_context_length":1024},
+            {"id":"qwen-test","max_context_length":262144,"loaded_context_length":65536}
+        ]}"#;
+        assert_eq!(parse_native_loaded_window(body, "qwen-test"), Some(65_536));
+        assert_eq!(parse_native_loaded_window(body, "missing"), None);
+        assert_eq!(parse_native_loaded_window("not json", "qwen-test"), None);
+    }
+
+    #[test]
+    fn a_missing_loaded_window_never_falls_back_to_the_capability_limit() {
+        // `max_context_length` 是模型能力上限，不是这次加载的窗口：不当窗口用。
+        let only_max = r#"{"data":[{"id":"m","max_context_length":32768}]}"#;
+        assert_eq!(parse_native_loaded_window(only_max, "m"), None);
+        let empty = r#"{"data":[{"id":"m","loaded_context_length":null}]}"#;
+        assert_eq!(parse_native_loaded_window(empty, "m"), None);
+        let too_small = r#"{"data":[{"id":"m","loaded_context_length":512}]}"#;
+        assert_eq!(parse_native_loaded_window(too_small, "m"), None);
+    }
+
+    #[test]
+    fn the_native_endpoint_is_only_probed_on_this_machine() {
+        assert_eq!(
+            native_probe_root("http://127.0.0.1:12345/v1").as_deref(),
+            Some("http://127.0.0.1:12345")
+        );
+        assert_eq!(
+            native_probe_root("http://localhost:1234/v1/").as_deref(),
+            Some("http://localhost:1234")
+        );
+        assert_eq!(
+            native_probe_root("http://[::1]:1234/v1").as_deref(),
+            Some("http://[::1]:1234")
+        );
+        // 远端、内网其它机器、非 http 一律不探测：不请求非标准路径，也不带密钥出去。
+        for remote in [
+            "https://api.deepseek.com/v1",
+            "https://api.example.com/v1",
+            "http://192.168.1.20:1234/v1",
+            "http://10.0.0.5/v1",
+            "http://127.remote.example/v1",
+            "ftp://127.0.0.1/v1",
+            "127.0.0.1:12345/v1",
+        ] {
+            assert_eq!(native_probe_root(remote), None, "{remote}");
+            assert_eq!(
+                probe_native_window(remote, "secret-key", "m", 1),
+                None,
+                "{remote}"
+            );
+        }
     }
 }

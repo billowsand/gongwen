@@ -3135,7 +3135,7 @@ fn interrupted_cards_offer_resume_only_when_a_checkpoint_exists() {
     harness.with_page(|page| page.sync_ai_session());
     let session = harness.doc.ai_panel.session.id.clone();
 
-    // 没有检查点：只有「重新生成」，不假装能续。
+    // 没有检查点：不再给「重新生成」（旧流程不新建运行），只说明去复制为 Pi 任务。
     harness
         .doc
         .ai_panel
@@ -3145,10 +3145,14 @@ fn interrupted_cards_offer_resume_only_when_a_checkpoint_exists() {
     harness.with_page(|page| page.refresh_resumable());
     let texts = harness.frame_texts();
     assert!(has(&texts, "程序关闭时这一轮还没跑完"), "{texts:?}");
-    assert!(has(&texts, "重新生成"), "{texts:?}");
     assert!(!has(&texts, "接着跑"), "没有检查点就不给接着跑：{texts:?}");
+    assert!(!has(&texts, "重新生成"), "旧流程不再新建运行：{texts:?}");
+    assert!(
+        has(&texts, "复制为新 Pi 任务"),
+        "旧历史只留复制为 Pi 的入口：{texts:?}"
+    );
 
-    // 落一份检查点：卡片出「接着跑 / 从头重来 / 丢弃」，并注明停在哪一步。
+    // 落一份检查点：卡片出「接着跑 / 丢弃」，并注明停在哪一步（旧流程不再新建运行）。
     harness.with_page(|page| page.save_ai_session(true));
     {
         let store = harness.store.as_mut().unwrap();
@@ -3172,14 +3176,17 @@ fn interrupted_cards_offer_resume_only_when_a_checkpoint_exists() {
     harness.with_page(|page| page.refresh_resumable());
     let texts = harness.frame_texts();
     assert!(has(&texts, "接着跑"), "{texts:?}");
-    assert!(has(&texts, "从头重来"), "{texts:?}");
     assert!(has(&texts, "丢弃"), "{texts:?}");
+    assert!(
+        !has(&texts, "从头重来"),
+        "旧流程不再新建运行，就没有「从头重来」：{texts:?}"
+    );
     assert!(
         has(&texts, "可接着跑：已完成 算子 clarify"),
         "注明停在哪一步：{texts:?}"
     );
 
-    // 丢弃：检查点删掉，卡片回到只有「重新生成」。
+    // 丢弃：检查点删掉，卡片不再给接着跑（也不会冒出「重新生成」）。
     harness.with_page(|page| page.drop_checkpoints(id));
     assert!(
         harness
@@ -3193,7 +3200,7 @@ fn interrupted_cards_offer_resume_only_when_a_checkpoint_exists() {
     );
     let texts = harness.frame_texts();
     assert!(!has(&texts, "接着跑"), "{texts:?}");
-    assert!(has(&texts, "重新生成"), "{texts:?}");
+    assert!(!has(&texts, "重新生成"), "{texts:?}");
 }
 
 /// Stopped 与 Failed 也一样：找到检查点就能接着跑（提示词第 3 节的出入 3）。
@@ -3940,4 +3947,137 @@ mod field_card_cases {
         assert!(has(&texts, "2026年10月8日"), "提示要看得见：{texts:?}");
         assert_eq!(harness.doc.generated_markdown, "# 通知\n\n用户自己写的。\n");
     }
+}
+
+#[test]
+fn an_old_turn_is_copied_into_the_unified_pi_entry_without_its_selection() {
+    use crate::pi_agent::MaterialRole;
+    let mut harness = Harness::new("# 标题\n\n正文\n");
+    harness.doc.ai_panel.composer.selection = Some((0..1, "#".into()));
+    // 输入框里残留着上一篇材料的用途：复制旧任务时不能把它带进去。
+    harness.doc.ai_panel.composer.pi_ref_roles =
+        vec![(("稿件库".into(), 7), MaterialRole::StyleSample)];
+    harness.doc.ai_panel.composer.pi_material_roles = vec![MaterialRole::StructureSample];
+    let id = harness
+        .doc
+        .ai_panel
+        .push_turn("旧流程 · 润色".into(), "旧要求".into(), vec![], None);
+    let mut old = request();
+    old.text = "旧要求".into();
+    old.materials = vec![crate::ai_panel::paste::Material {
+        name: "旧材料.txt".into(),
+        text: "材料正文".into(),
+    }];
+    harness.doc.ai_panel.turn_mut(id).unwrap().request = Some(old);
+    harness.doc.ai_panel.turn_mut(id).unwrap().state = TurnState::Stopped;
+    harness.with_page(|page| page.copy_turn_to_pi(id)).unwrap();
+    let composer = &harness.doc.ai_panel.composer;
+    assert_eq!(composer.text, "旧要求");
+    assert_eq!(composer.materials.len(), 1);
+    assert_eq!(composer.materials[0].material.text, "材料正文");
+    assert!(composer.selection.is_none(), "旧选区不能迁到新正文");
+    assert_eq!(
+        composer.pi_material_roles,
+        vec![MaterialRole::Fact],
+        "旧会话没记过逐篇用途，一律按事实材料，不继承残留角色"
+    );
+    assert!(
+        composer.pi_ref_roles.is_empty(),
+        "旧任务的引用按事实材料，不能沿用输入框里上一篇的用途"
+    );
+    assert!(harness.doc.ai_panel.open);
+}
+
+/// 新 Pi 轮次的「复制回输入区」不能把当时的逐篇用途与策略弄丢：角色取自那一轮工作区的
+/// 材料索引（模型实际读到的快照），策略取自运行记录，不依赖输入框当前值。
+#[test]
+fn copying_a_pi_turn_keeps_the_material_roles_and_strategy_of_that_run() {
+    use crate::pi_agent::{
+        MaterialRole, PiMaterialInput, PiRunRecord, PiRunRef, PiStrategyPreference, PiWorkspace,
+        base_dir, pi_skills,
+    };
+    let mut harness = Harness::new("正文\n");
+    let (workspace, metas) = PiWorkspace::prepare(
+        &base_dir().unwrap(),
+        9,
+        "正文\n",
+        "按样稿写一篇通知",
+        &[
+            PiMaterialInput {
+                title: "事实材料".into(),
+                source: "粘贴材料".into(),
+                role: MaterialRole::Fact,
+                text: "各单位于3月1日前报送。".into(),
+            },
+            PiMaterialInput {
+                title: "写法样稿".into(),
+                source: "粘贴材料".into(),
+                role: MaterialRole::StyleSample,
+                text: "请各单位高度重视。".into(),
+            },
+        ],
+        &pi_skills::load_catalog(),
+        None,
+    )
+    .unwrap();
+    let request_file = workspace.read_request().unwrap();
+    let mut record = PiRunRecord::start(
+        "pi-run-1".into(),
+        "pi-req-1".into(),
+        &workspace,
+        "正文\n",
+        "正文\n",
+        "正文\n",
+        &request_file,
+        None,
+        "按样稿写一篇通知",
+        "通知",
+        "2026-11-03",
+        None,
+        None,
+        metas,
+        "本机服务商",
+        "本机模型",
+    )
+    .with_strategy(PiStrategyPreference::Phased);
+    record.user_request = Some("用户原始要求".into());
+    record.skill = Some("gongwen-imitate".into());
+    record.write(&workspace).unwrap();
+    harness.doc.ai_panel.open = true;
+    // 输入框里残留着别的用途与别的策略。
+    harness.doc.ai_panel.composer.pi_material_role = MaterialRole::StructureSample;
+    harness.doc.ai_panel.composer.pi_strategy = PiStrategyPreference::Auto;
+    let id = harness.doc.ai_panel.push_turn(
+        "智能写作".into(),
+        "用户原始要求\n\n【只改选区】旧选区不应复制".into(),
+        vec![],
+        None,
+    );
+    {
+        let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+        turn.pi_run = Some(PiRunRef::from_record(&record));
+        turn.state = TurnState::Stopped;
+    }
+    harness.with_page(|page| page.copy_turn_to_pi(id)).unwrap();
+    let composer = &harness.doc.ai_panel.composer;
+    assert_eq!(composer.text, "用户原始要求");
+    assert_eq!(composer.pi_skill.as_deref(), Some("gongwen-imitate"));
+    assert_eq!(composer.materials.len(), 2);
+    assert_eq!(
+        composer.pi_material_roles,
+        vec![MaterialRole::Fact, MaterialRole::StyleSample],
+        "逐篇用途按那一轮的材料快照走"
+    );
+    assert_eq!(
+        composer.pi_strategy,
+        PiStrategyPreference::Phased,
+        "策略按运行记录，不看输入框当前选择"
+    );
+    assert!(composer.pi_ref_roles.is_empty());
+    assert!(composer.selection.is_none());
+    std::fs::write(workspace.root.join("input/materials/01.md"), "被替换的材料").unwrap();
+    assert!(
+        harness.with_page(|page| page.copy_turn_to_pi(id)).is_err(),
+        "材料哈希不符时不能把改过的文件当作原快照复制"
+    );
 }

@@ -228,6 +228,41 @@
           "有没有声称已经把风格保存进风格库"
         ]
       }
+    },
+    {
+      "name": "phased-multi-source",
+      "skill": "gongwen-draft",
+      "kind": "通知",
+      "systemDate": "2026-11-20",
+      "current": null,
+      "strategy": "phased",
+      "request": "根据附后的两份材料起草通知，把检查时间、整改时限和责任单位写清楚。",
+      "materials": [
+        {
+          "file": "cases/phased-multi-source/materials/01-notice.md",
+          "title": "冬季防火检查安排（夹具）",
+          "source": "夹具材料",
+          "role": "fact"
+        },
+        {
+          "file": "cases/phased-multi-source/materials/02-requirement.md",
+          "title": "整改台账报送要求（夹具）",
+          "source": "夹具材料",
+          "role": "fact"
+        }
+      ],
+      "answers": {},
+      "expect": {
+        "delivery": "document",
+        "required": ["2026年12月1日", "2026年12月15日", "各县（区）人民政府", "市应急管理局"],
+        "forbidden": [],
+        "minChars": 120,
+        "manual": [
+          "是否真的分批读了材料，摘记里的引文能否在原文定位",
+          "提纲、分节、合稿是否一致，最终只交一份完整成品",
+          "有没有为了分阶段重复写主送、手写章节编号或编造材料里没有的事实"
+        ]
+      }
     }
   ]
 }

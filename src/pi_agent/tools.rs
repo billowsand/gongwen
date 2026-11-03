@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 
 /// 一次工具调用最多返回多少资料。
 const MAX_SEARCH_RESULTS: usize = 10;
-/// 读全文的字符上限。
-const MAX_READ_CHARS: usize = 200_000;
+/// 读全文的字符上限；超限时按 offset 分页继续，不静默截断。
+const MAX_READ_CHARS: usize = 24_000;
 /// 一条证据交给模型的片段上限。
 const MAX_SNIPPET_CHARS: usize = 600;
 /// 一次最多列几份风格档案。
@@ -541,12 +541,31 @@ impl PiToolContext {
 
     fn kb_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
         let doc_id = int_arg(args, "doc_id")?;
-        let Some((title, text)) = self.kb.read(doc_id)? else {
+        let Some((title, full)) = self.kb.read(doc_id)? else {
             return Err(format!("知识库没有编号为 {doc_id} 的文档"));
         };
-        let text = limit_chars(&text, MAX_READ_CHARS);
-        let id = self.record("kb_read", &title, "知识库", "全文", &text, true);
-        Ok(json!({"evidence": id, "doc_id": doc_id, "title": title, "text": text}))
+        let offset = optional_offset_arg(args);
+        let page = read_page(&full, offset, read_limit_arg(args))?;
+        let id = self.record(
+            "kb_read",
+            &title,
+            "知识库",
+            &page.location,
+            &page.text,
+            true,
+        );
+        Ok(json!({
+            "evidence": id,
+            "doc_id": doc_id,
+            "title": title,
+            "text": page.text,
+            "offset": page.offset,
+            "total_chars": page.total_chars,
+            "next_offset": page.next_offset,
+            "unread_chars": page.unread_chars,
+            "truncated": page.next_offset.is_some(),
+            "note": READ_PAGE_NOTE,
+        }))
     }
 
     fn ms_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
@@ -580,15 +599,24 @@ impl PiToolContext {
         let Some(row) = self.manuscripts.read(id, version)? else {
             return Err(format!("稿件库没有编号为 {id} 的稿件"));
         };
-        let text = limit_chars(&row.markdown, MAX_READ_CHARS);
-        if text.trim().is_empty() {
+        let full = row.markdown;
+        if full.trim().is_empty() {
             return Err(format!("稿件《{}》没有正文", row.title));
         }
+        let offset = optional_offset_arg(args);
+        let page = read_page(&full, offset, read_limit_arg(args))?;
         let label = match row.version {
             Some(version) => format!("《{}》v{version}", row.title),
             None => format!("《{}》", row.title),
         };
-        let evidence = self.record("ms_read", &label, "稿件库", "全文", &text, true);
+        let evidence = self.record(
+            "ms_read",
+            &label,
+            "稿件库",
+            &page.location,
+            &page.text,
+            true,
+        );
         Ok(json!({
             "evidence": evidence,
             "id": row.id,
@@ -596,7 +624,13 @@ impl PiToolContext {
             "title": row.title,
             "kind": row.kind.label(),
             "status": row.status,
-            "markdown": text,
+            "markdown": page.text,
+            "offset": page.offset,
+            "total_chars": page.total_chars,
+            "next_offset": page.next_offset,
+            "unread_chars": page.unread_chars,
+            "truncated": page.next_offset.is_some(),
+            "note": READ_PAGE_NOTE,
         }))
     }
 
@@ -858,13 +892,56 @@ fn style_excerpt(text: &str, max: usize) -> String {
     out
 }
 
-fn limit_chars(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
+/// 读一页原文：offset 是字符偏移，返回本页、总量与下一段偏移。
+struct ReadPage {
+    text: String,
+    offset: usize,
+    total_chars: usize,
+    next_offset: Option<usize>,
+    unread_chars: usize,
+    location: String,
+}
+
+const READ_PAGE_NOTE: &str = "这是分页读到的一部分；next_offset 非空时还有未读内容，用同一个工具带 offset=next_offset 继续读，不要把本页当全文。";
+
+fn optional_offset_arg(args: &Map<String, Value>) -> usize {
+    args.get("offset")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(0)
+}
+
+/// 本次读多少字：host 会把隐藏参数 `limit_chars` 换成本轮的工具结果预算
+/// （`readBudgetChars`）。模型看不到这个字段，也不能靠它要得比上限多：
+/// 一律 clamp 到 `1..=MAX_READ_CHARS`；没有这个参数时按固定上限（旧行为）。
+fn read_limit_arg(args: &Map<String, Value>) -> usize {
+    args.get("limit_chars")
+        .and_then(Value::as_u64)
+        .map(|value| (value as usize).clamp(1, MAX_READ_CHARS))
+        .unwrap_or(MAX_READ_CHARS)
+}
+
+fn read_page(full: &str, offset: usize, max: usize) -> Result<ReadPage, String> {
+    let total_chars = full.chars().count();
+    if total_chars == 0 {
+        return Err("文档没有内容".into());
     }
-    let mut out: String = text.chars().take(max).collect();
-    out.push_str("\n\n【资料过长，只读到上限，其余内容请按标题分段查询】");
-    out
+    if offset >= total_chars {
+        return Err(format!(
+            "offset {offset} 超过文档长度（共 {total_chars} 字）；从 0 开始读"
+        ));
+    }
+    let text: String = full.chars().skip(offset).take(max).collect();
+    let end = offset + text.chars().count();
+    let next_offset = (end < total_chars).then_some(end);
+    Ok(ReadPage {
+        text,
+        offset,
+        total_chars,
+        next_offset,
+        unread_chars: total_chars - end,
+        location: format!("第 {offset}–{end} 字（共 {total_chars} 字）"),
+    })
 }
 
 fn sha256_hex(text: &str) -> String {
@@ -875,6 +952,81 @@ fn sha256_hex(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_documents_page_with_an_explicit_unread_remainder() {
+        let text = "零一二三四五六七八九十";
+        let page = read_page(text, 0, 4).unwrap();
+        assert_eq!(page.text, "零一二三");
+        assert_eq!(page.total_chars, 11);
+        assert_eq!(page.next_offset, Some(4));
+        assert_eq!(page.unread_chars, 7);
+        assert!(page.location.contains("第 0–4 字"));
+        let last = read_page(text, page.next_offset.unwrap(), 100).unwrap();
+        assert_eq!(last.text, "四五六七八九十");
+        assert_eq!(last.next_offset, None);
+        assert_eq!(last.unread_chars, 0);
+        assert!(read_page(text, 11, 4).is_err(), "越过末尾要明确失败");
+    }
+
+    fn args_of(value: Value) -> Map<String, Value> {
+        value.as_object().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn the_read_budget_cannot_exceed_the_hard_limit() {
+        let hard = super::MAX_READ_CHARS;
+        assert_eq!(super::read_limit_arg(&Map::new()), hard, "缺省仍是 24k");
+        assert_eq!(
+            super::read_limit_arg(&args_of(json!({"limit_chars": 3200}))),
+            3200
+        );
+        assert_eq!(
+            super::read_limit_arg(&args_of(json!({"limit_chars": 10_000_000}))),
+            hard,
+            "预算给得再大也不能突破上限"
+        );
+        assert_eq!(
+            super::read_limit_arg(&args_of(json!({"limit_chars": 0}))),
+            1,
+            "0 也要能读一个字，不能返回空页"
+        );
+    }
+
+    #[test]
+    fn a_small_limit_pages_and_still_reports_the_unread_remainder() {
+        let ctx = context("x");
+        let first = ctx
+            .call("ms_read", &json!({"id": 3, "limit_chars": 4, "offset": 0}))
+            .unwrap();
+        let text = first["markdown"].as_str().unwrap();
+        assert_eq!(text.chars().count(), 4);
+        assert_eq!(first["truncated"], true);
+        assert_eq!(first["next_offset"], 4);
+        let total = first["total_chars"].as_u64().unwrap() as usize;
+        assert_eq!(first["unread_chars"], (total - 4) as u64);
+        let second = ctx
+            .call("ms_read", &json!({"id": 3, "limit_chars": 4, "offset": 4}))
+            .unwrap();
+        assert_eq!(second["offset"], 4);
+        assert_ne!(second["markdown"], first["markdown"], "分页不能重复同一段");
+    }
+
+    #[test]
+    fn kb_and_ms_read_accept_an_offset_and_report_what_is_unread() {
+        let ctx = context("x");
+        let first = ctx
+            .call("kb_read", &json!({"doc_id": 7, "offset": 0}))
+            .unwrap();
+        assert_eq!(first["truncated"], false);
+        assert!(first["next_offset"].is_null());
+        let second = ctx.call("ms_read", &json!({"id": 3, "offset": 0})).unwrap();
+        assert!(second["markdown"].as_str().unwrap().contains("去年10月9日"));
+        assert!(
+            ctx.call("ms_read", &json!({"id": 3, "offset": 99999}))
+                .is_err()
+        );
+    }
 
     struct FakeKb {
         text: String,

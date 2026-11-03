@@ -356,31 +356,22 @@ impl DraftPage<'_> {
         }
         toolbar_separator(ui);
 
-        // 写作向导属于当前稿件的起草操作，不占正文区的常驻空间。
-        // 固定骨架与如实记录的文种不按章节拼接，入口直接灰掉并说明原因。
-        let kind_fits = crate::agent::writing::supports(self.doc.draft.kind);
-        if ui
+        // 旧「分阶段写作」只保留历史：可以打开看成果、导出，并整份迁移为新的 Pi 任务；
+        // 新任务统一从右侧「智能写作」（Pi）发起，这里不再引导第二条写作路线。
+        if self.doc.writing.has_history() && ui
             .add_enabled(
-                editable && kind_fits,
-                theme::icon_text_button(theme::Icon::FilePlus, "分阶段写作…"),
+                true,
+                theme::icon_text_button(theme::Icon::FilePlus, "旧分阶段写作（历史）…"),
             )
             .on_hover_text(
-                "按提炼素材、确认提纲、分配素材、成文与统稿审阅逐步完成；已有任务继续上次进度",
+                "查看、导出之前的分阶段写作任务，或把主题与素材（按原用途）复制为新的 Pi 任务；新任务请用右侧「智能写作」",
             )
-            .on_disabled_hover_text(if kind_fits {
-                "当前稿件只读，不能分阶段写作"
-            } else {
-                "会议议程、会议纪要有固定骨架，电话记录单如实记录来电，不适合分节写作"
-            })
             .clicked()
         {
             self.doc.writing.open = true;
             self.doc.form_collapsed = true;
             self.doc.ai_panel.open = false;
             self.doc.result_drawer_open = false;
-            if !saved {
-                self.actions.push(DraftAction::SaveToLibrary);
-            }
         }
         toolbar_separator(ui);
 
@@ -425,12 +416,13 @@ impl DraftPage<'_> {
         }
         toolbar_separator(ui);
 
-        // 三、AI：打开或收起右侧 AI 侧栏。生成中也能点开，看进度、点停止。
-        if theme::primary_icon_button_enabled(ui, editable, theme::Icon::Sparkles, "AI 助手")
+        // 三、AI：统一从右侧「智能写作」侧栏发起新任务（Pi 执行内核）。
+        // 旧流程只保留历史兼容，这里不再引导第二条写作路线。
+        if theme::primary_icon_button_enabled(ui, editable, theme::Icon::Sparkles, "智能写作")
             .on_hover_text(if self.doc.ai_panel.open {
-                "收起 AI 侧栏；选中正文再点，则把选区交给 AI 润色"
+                "收起智能写作侧栏；选中正文再点，则把选区交给 Pi"
             } else {
-                "在右侧打开 AI 侧栏：起草、润色，边生成边显示；选中正文再点只改选区"
+                "打开右侧智能写作侧栏：新任务统一走 Pi，按窗口与任务规模自动选常规或分阶段；旧流程历史仍可查看与复制"
             })
             .clicked()
         {

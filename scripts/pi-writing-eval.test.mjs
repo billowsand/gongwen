@@ -9,6 +9,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  PROTOCOL_VERSION as EVAL_PROTOCOL_VERSION,
+  compactNumbers,
   deliveredText,
   createFixtureBridge,
   judgeCase,
@@ -22,6 +24,7 @@ import {
   selftest,
   validateCases,
 } from "./pi-writing-eval.mjs";
+import { PROTOCOL_VERSION as HOST_PROTOCOL_VERSION } from "../pi-host/src/protocol.mjs";
 
 const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 
@@ -82,9 +85,83 @@ test("fixtures validate and every case declares its own criteria", () => {
     "extract-only",
     "research-sources",
     "style-apply",
+    "phased-multi-source",
   ]) {
     assert.ok(names.includes(required), required);
   }
+  const phased = fixtures.cases.find((item) => item.name === "phased-multi-source");
+  assert.equal(phased.strategy, "phased");
+  assert.ok(phased.materials.length >= 2);
+});
+
+test("评测脚本与随包 host 的协议版本一致", () => {
+  assert.equal(EVAL_PROTOCOL_VERSION, HOST_PROTOCOL_VERSION);
+  const runtime = JSON.parse(fs.readFileSync(path.join("packaging", "pi-runtime.json"), "utf8"));
+  assert.equal(runtime.host.protocol, HOST_PROTOCOL_VERSION);
+});
+
+test("数字空格等价但字数判据不放宽", () => {
+  assert.equal(compactNumbers("2026 年 12 月 1 日，3 个检查组"), "2026年12月1日，3个检查组");
+  const spaced = judgeCase(
+    documentCase({ minChars: 8 }),
+    goodResult({
+      submitted: {
+        ...goodResult().submitted,
+        content: "# 通知\n\n2026 年 12 月 1 日 前完成。\n",
+      },
+    }),
+  );
+  assert.ok(spaced.business.some((check) => check.name.includes("2026年12月1日") && check.ok), "空格日期应算命中");
+  const short = judgeCase(
+    documentCase({ minChars: 60 }),
+    goodResult({
+      submitted: {
+        ...goodResult().submitted,
+        content: "# 通知\n\n2026 年 12 月 1 日 前完成。\n",
+      },
+    }),
+  );
+  assert.ok(short.business.some((check) => check.name.includes("不少于") && !check.ok), "字数仍按原文计");
+});
+
+test("分阶段用例必须有宿主核验的成果登记，不能只看提交", () => {
+  const phasedCase = { ...documentCase(), strategy: "phased" };
+  const withoutProgress = judgeCase(phasedCase, goodResult({ events: [{ type: "strategy", mode: "phased" }, ...goodResult().events] }));
+  assert.equal(withoutProgress.technicalPassed, false);
+  const withProgress = judgeCase(
+    phasedCase,
+    goodResult({
+      events: [{ type: "strategy", mode: "phased" }, ...goodResult().events],
+      progress: {
+        records: [
+          { unit: "distill:input/materials/01.md#1", phase: "distill" },
+          { unit: "outline", phase: "outline" },
+          { unit: "section:1", phase: "sections" },
+          { unit: "final", phase: "review" },
+        ],
+      },
+    }),
+  );
+  assert.equal(withProgress.technicalPassed, true);
+});
+
+test("分阶段更正可保留失效旧版本，但不能使用失效当前版本或缺失依赖", () => {
+  const phasedCase = { ...documentCase(), strategy: "phased" };
+  const records = [
+    { unit: "distill:1", phase: "distill" },
+    { unit: "outline", phase: "outline", uses: ["distill:1"] },
+    { unit: "section:1", phase: "sections", uses: ["outline"] },
+    { unit: "final", phase: "review", invalid: true },
+    { unit: "final", phase: "review", uses: ["outline", "section:1"] },
+  ];
+  const judge = (items) => judgeCase(phasedCase, goodResult({
+    events: [{ type: "strategy", mode: "phased" }, ...goodResult().events],
+    progress: { records: items },
+  }));
+  assert.equal(judge(records).technicalPassed, true);
+  assert.equal(judge(records.slice(0, -1)).technicalPassed, false);
+  assert.equal(judge([...records, { unit: "section:1", phase: "sections", invalid: true }]).technicalPassed, false);
+  assert.equal(judge([...records, { unit: "final", phase: "review", uses: ["missing"] }]).technicalPassed, false);
 });
 
 test("evaluation workspaces carry the same material index as production, including empty materials", () => {
@@ -152,6 +229,15 @@ test("fact checks exclude samples and only admit actually returned sources or an
   assert.notEqual(first,second,"再次检索不能重复分配证据编号");
   box.recordAnswers([{value:"2027年4月1日"}]);
   assert.ok(box.corpusText().includes("2027年4月1日"));
+});
+
+test("declared fixture keywords match longer natural queries without returning unrelated documents", () => {
+  const box = createFixtureBridge({
+    caseDef: { materials: [], answers: {} }, fixtures: {}, workspace: process.cwd(), base: "", request: "研究",
+    materialTexts: [], bridge: { knowledge: [{ docId: 1, title: "信息化建设情况", text: "86个监控点", keywords: ["森林防火", "信息化"] }] },
+  });
+  assert.equal(box.handle("kb_search", {query:"森林防火信息化研究 我市"}).result.results.length, 1);
+  assert.equal(box.handle("kb_search", {query:"完全无关的海洋渔业规定"}).result.results.length, 0);
 });
 
 test("unchanged outside text cannot satisfy facts required inside the selected passage", () => {

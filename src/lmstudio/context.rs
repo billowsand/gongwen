@@ -24,6 +24,8 @@ pub enum WindowSource {
     /// 服务端报过超长，记下了它说的上限。
     Observed,
     Service,
+    /// LM Studio 原生接口报告的实际已加载窗口（`loaded_context_length`）。
+    NativeLoaded,
     ModelTable,
     Default,
 }
@@ -34,6 +36,7 @@ impl WindowSource {
             WindowSource::Manual => "手动设置",
             WindowSource::Observed => "服务端报超长时给出",
             WindowSource::Service => "来自服务",
+            WindowSource::NativeLoaded => "LM Studio 已加载窗口",
             WindowSource::ModelTable => "按模型名估计",
             WindowSource::Default => "默认值",
         }
@@ -85,6 +88,9 @@ fn key(base_url: &str, model: &str) -> String {
 /// 服务自报的窗口：键是「地址|模型」；值为 None 表示问过、服务没说。
 static SERVICE: LazyLock<Mutex<HashMap<String, Option<usize>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// LM Studio `/api/v0/models` 报告的实际加载窗口；None 表示问过、不是 LM Studio 或没给。
+static NATIVE: LazyLock<Mutex<HashMap<String, Option<usize>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 /// 服务端报超长时给出的上限，本进程内一直按它算。
 static OBSERVED: LazyLock<Mutex<HashMap<String, usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -102,6 +108,14 @@ pub(super) fn record_observed(config: &LmStudioConfig, tokens: usize) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(key(&config.base_url, &config.model), tokens);
+}
+
+/// 记下 LM Studio 原生接口报告的实际加载窗口（`None` 表示问过但没有）。
+pub(super) fn record_native(base_url: &str, model: &str, tokens: Option<usize>) {
+    NATIVE.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        key(base_url, model),
+        tokens.filter(|tokens| *tokens >= 1024),
+    );
 }
 
 /// 不联网，按已知的信息定窗口。界面线程用它。
@@ -123,8 +137,35 @@ pub fn peek_window(config: &LmStudioConfig) -> Window {
         };
     }
     if config.context_window > 0 {
+        let manual = config.context_window as usize;
+        // 服务端报告的实际部署窗口比手动设置小时，以服务端为准：设大了请求只会
+        // 一次次被拒。手动值只在它更小（用户明确保守）时优先。
+        let service = SERVICE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .copied()
+            .flatten();
+        let native = NATIVE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .copied()
+            .flatten();
+        if let Some(tokens) = service.filter(|tokens| *tokens < manual) {
+            return Window {
+                tokens,
+                source: WindowSource::Service,
+            };
+        }
+        if let Some(tokens) = native.filter(|tokens| *tokens < manual) {
+            return Window {
+                tokens,
+                source: WindowSource::NativeLoaded,
+            };
+        }
         return Window {
-            tokens: config.context_window as usize,
+            tokens: manual,
             source: WindowSource::Manual,
         };
     }
@@ -132,6 +173,12 @@ pub fn peek_window(config: &LmStudioConfig) -> Window {
         return Window {
             tokens: *tokens,
             source: WindowSource::Service,
+        };
+    }
+    if let Some(Some(tokens)) = NATIVE.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Window {
+            tokens: *tokens,
+            source: WindowSource::NativeLoaded,
         };
     }
     from_model_name(&config.model).unwrap_or(Window {
@@ -158,8 +205,13 @@ fn from_model_name(model: &str) -> Option<Window> {
 
 /// 自动模式下还没问过服务时，先问一次 `/v1/models`（每个「地址 + 模型」本进程只问一次），
 /// 再按 [`peek_window`] 定。问不到不算错。在后台线程里调。
+///
+/// LM Studio 的 OpenRai 兼容 `/v1/models` 只有模型 ID，实际加载窗口只在原生
+/// `/api/v0/models` 的 `loaded_context_length` 里；标准接口没给窗口时再用同一个
+/// 配置地址问一次原生接口（短超时、每轮只问一次）。**只问本机地址**，远端既不
+/// 请求这条非标准路径，也不把密钥带出去。
 pub fn window(config: &LmStudioConfig) -> Window {
-    if config.context_window == 0 && !config.model.trim().is_empty() {
+    if !config.model.trim().is_empty() {
         let key = key(&config.base_url, &config.model);
         let asked = SERVICE
             .lock()
@@ -179,11 +231,97 @@ pub fn window(config: &LmStudioConfig) -> Window {
             SERVICE
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .entry(key)
+                .entry(key.clone())
                 .or_insert(None);
         }
+        // 本机重新加载同一模型可能改变窗口，每次后台准备都刷新。标准接口报告上限或
+        // 用户手动设大时，也不能跳过实际加载窗口。远端在探测函数内直接拒绝，不发请求。
+        let tokens = super::probe_native_window(
+            &config.base_url,
+            &config.api_key,
+            &config.model,
+            config.timeout_seconds.min(3),
+        );
+        record_native(&config.base_url, &config.model, tokens);
     }
     peek_window(config)
+}
+
+#[cfg(test)]
+mod native_window_tests {
+    use super::*;
+
+    fn config(base_url: &str, model: &str, manual: u32) -> LmStudioConfig {
+        LmStudioConfig {
+            base_url: base_url.into(),
+            model: model.into(),
+            context_window: manual,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    #[ignore = "显式提供本机 LM Studio 地址与已加载模型后执行"]
+    fn live_lmstudio_window_uses_the_loaded_capacity() {
+        let address = std::env::var("GONGWEN_LIVE_LMSTUDIO_URL").expect("设置本机地址");
+        let model = std::env::var("GONGWEN_LIVE_LMSTUDIO_MODEL").expect("设置已加载模型");
+        let mut config = config(&address, &model, 0);
+        let loaded = crate::lmstudio::probe_native_window(&address, "", &model, 3)
+            .expect("原生接口应报告实际窗口");
+        let resolved = window(&config);
+        assert_eq!(resolved.source, WindowSource::NativeLoaded);
+        assert_eq!(resolved.tokens, loaded);
+        config.context_window = loaded.saturating_mul(2).min(u32::MAX as usize) as u32;
+        assert_eq!(
+            window(&config).tokens,
+            loaded,
+            "手动设大也必须以实际加载容量为准"
+        );
+        println!("LM Studio 实际已加载窗口：{} token", loaded);
+    }
+
+    #[test]
+    fn a_native_loaded_window_constrains_an_oversized_manual_value() {
+        let config = config("http://127.0.0.1:12345/v1", "qwen-local", 262_144);
+        record_native(&config.base_url, &config.model, Some(65_536));
+        let window = peek_window(&config);
+        assert_eq!(window.tokens, 65_536);
+        assert_eq!(window.source, WindowSource::NativeLoaded);
+        assert!(window.label().contains("LM Studio 已加载窗口"));
+    }
+
+    #[test]
+    fn a_smaller_manual_value_stays_authoritative() {
+        let key_config = config("http://127.0.0.1:12346/v1", "qwen-local", 32_768);
+        record_native(&key_config.base_url, &key_config.model, Some(262_144));
+        let window = peek_window(&key_config);
+        assert_eq!(window.tokens, 32_768);
+        assert_eq!(window.source, WindowSource::Manual);
+    }
+
+    #[test]
+    fn unknown_native_window_falls_back_without_guessing() {
+        let config = config("http://127.0.0.1:12347/v1", "custom-model", 0);
+        record_service(&config.base_url, &[(config.model.clone(), None)]);
+        record_native(&config.base_url, &config.model, None);
+        let window = peek_window(&config);
+        assert_eq!(window.tokens, DEFAULT_WINDOW);
+        assert_eq!(window.source, WindowSource::Default);
+    }
+
+    #[test]
+    fn a_remote_service_window_is_never_taken_from_the_native_endpoint() {
+        // 远端不探测原生接口：没有 NativeLoaded 记录，就按服务自报 / 模型名表 / 默认值走。
+        let config = config("https://api.example.com/v1", "qwen3-4b", 0);
+        assert_eq!(
+            super::super::probe_native_window(&config.base_url, &config.api_key, &config.model, 1),
+            None
+        );
+        assert_eq!(peek_window(&config).source, WindowSource::ModelTable);
+        // 只有本机地址的那份记录才算数，键不同不会串用。
+        record_native("http://127.0.0.1:12345/v1", "qwen3-4b", Some(65_536));
+        assert_eq!(peek_window(&config).source, WindowSource::ModelTable);
+    }
 }
 
 /// 保守估 token：汉字与全角标点 1 字 1 个，其余 4 个字符 1 个，再加 10%。
@@ -426,15 +564,20 @@ mod tests {
         record_service(&config.base_url, &[(config.model.clone(), Some(65_536))]);
         assert_eq!(peek_window(&config).tokens, 65_536);
         assert_eq!(peek_window(&config).source, WindowSource::Service);
+        // 手动值大于服务实际部署窗口时，以服务为准：设大了请求只会一次次被拒。
         config.context_window = 262_144;
-        assert_eq!(peek_window(&config).tokens, 262_144);
-        assert_eq!(peek_window(&config).source, WindowSource::Manual);
-        record_observed(&config, 32_768);
+        assert_eq!(peek_window(&config).tokens, 65_536);
+        assert_eq!(peek_window(&config).source, WindowSource::Service);
+        // 手动值更小时它仍是更保守的选择，不能被服务窗口放大。
+        config.context_window = 32_768;
         assert_eq!(peek_window(&config).tokens, 32_768);
+        assert_eq!(peek_window(&config).source, WindowSource::Manual);
+        record_observed(&config, 16_384);
+        assert_eq!(peek_window(&config).tokens, 16_384);
         assert_eq!(peek_window(&config).source, WindowSource::Observed);
         let error = local_overflow(peek_window(&config), 192_844).with_model(&config.model);
         assert!(error.message.contains(&config.model));
-        assert_eq!(error.limit, Some(32_768));
+        assert_eq!(error.limit, Some(16_384));
     }
 
     #[test]

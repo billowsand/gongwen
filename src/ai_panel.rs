@@ -59,12 +59,42 @@ pub(crate) struct Composer {
     pub(crate) commit_prompt: bool,
     /// Pi 入口用哪份标准技能（`assets/pi-skills/`）；None 表示自动。
     pub(crate) pi_skill: Option<String>,
-    /// Pi 本轮材料的用途：事实材料 / 写法样稿 / 结构范文 / 来函。
+    /// 统一写作入口的策略倾向：自动 / 倾向分阶段。
+    pub(crate) pi_strategy: crate::pi_agent::PiStrategyPreference,
+    /// 新粘贴材料的默认用途（旧字段保留，作为没单独设置过的材料的回退值）。
     pub(crate) pi_material_role: crate::pi_agent::MaterialRole,
-    /// `@` 引用的用途。默认事实材料，可改成样稿让模型只学写法。
+    /// 逐篇粘贴材料的用途，与 `materials` 同下标；旧会话没有这项就用默认值。
+    pub(crate) pi_material_roles: Vec<crate::pi_agent::MaterialRole>,
+    /// `@` 引用的默认用途。默认事实材料，可改成样稿让模型只学写法。
     pub(crate) pi_ref_role: crate::pi_agent::MaterialRole,
+    /// 逐篇 `@` 引用的用途，按「来源 + 编号」存，避免同名不同来源串用。
+    pub(crate) pi_ref_roles: Vec<((String, i64), crate::pi_agent::MaterialRole)>,
     /// Pi 追问时保留的已确认回答（只来自用户点选 / 填写，不是模型总结）。
     pub(crate) pi_notes: Vec<String>,
+}
+
+impl Composer {
+    /// 第 `index` 份粘贴材料的用途；旧会话没有逐篇设置时回退到默认值。
+    pub(crate) fn material_role(&self, index: usize) -> crate::pi_agent::MaterialRole {
+        self.pi_material_roles
+            .get(index)
+            .copied()
+            .unwrap_or(self.pi_material_role)
+    }
+
+    /// 某篇 `@` 引用的用途。键是来源 + 编号，不复用标题：同名不同库的两篇各算各的。
+    pub(crate) fn ref_role(
+        &self,
+        source: crate::ai_services::references::RefSource,
+        id: i64,
+    ) -> crate::pi_agent::MaterialRole {
+        let key = (source.label().to_string(), id);
+        self.pi_ref_roles
+            .iter()
+            .find(|(saved, _)| *saved == key)
+            .map(|(_, role)| *role)
+            .unwrap_or(self.pi_ref_role)
+    }
 }
 /// 一轮请求的原始参数，「重新生成」照它再发一次。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -803,6 +833,58 @@ pub(crate) fn polish_instruction(preset: &str, custom: &str, selected: Option<&s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn material_roles_are_per_item_and_old_sessions_fall_back_to_the_default() {
+        use crate::ai_services::references::RefSource;
+        use crate::pi_agent::MaterialRole;
+        let mut composer = Composer::default();
+        assert_eq!(
+            composer.material_role(0),
+            MaterialRole::Fact,
+            "旧会话默认事实材料"
+        );
+        composer.pi_material_roles = vec![MaterialRole::Fact, MaterialRole::StyleSample];
+        assert_eq!(composer.material_role(0), MaterialRole::Fact);
+        assert_eq!(composer.material_role(1), MaterialRole::StyleSample);
+        assert_eq!(
+            composer.material_role(9),
+            composer.pi_material_role,
+            "没单独设过的回退默认值"
+        );
+
+        // 两篇标题一样、来源不同：按「来源 + 编号」记，不能串用。
+        composer.pi_ref_roles = vec![
+            (("稿件库".into(), 7), MaterialRole::StyleSample),
+            (("知识库".into(), 7), MaterialRole::Fact),
+        ];
+        assert_eq!(
+            composer.ref_role(RefSource::Manuscript, 7),
+            MaterialRole::StyleSample
+        );
+        assert_eq!(
+            composer.ref_role(RefSource::Knowledge, 7),
+            MaterialRole::Fact
+        );
+        assert_eq!(
+            composer.ref_role(RefSource::Knowledge, 8),
+            composer.pi_ref_role
+        );
+    }
+
+    #[test]
+    fn strategy_defaults_to_auto_and_keeps_the_old_default_role() {
+        let composer = Composer::default();
+        assert_eq!(
+            composer.pi_strategy,
+            crate::pi_agent::PiStrategyPreference::Auto
+        );
+        assert_eq!(
+            composer.pi_material_role,
+            crate::pi_agent::MaterialRole::Fact
+        );
+        assert_eq!(composer.pi_ref_role, crate::pi_agent::MaterialRole::Fact);
+    }
 
     fn panel_with_turn() -> AiPanel {
         let mut panel = AiPanel::default();
