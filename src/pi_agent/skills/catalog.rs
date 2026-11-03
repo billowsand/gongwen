@@ -1,4 +1,4 @@
-//! 有效 Pi 技能目录：内置五份 + 用户目录覆盖 + 停用清单。
+//! 有效 Pi 技能目录：内置八份 + 用户目录覆盖 + 停用清单。
 
 use super::parser;
 use super::store;
@@ -117,7 +117,7 @@ pub(crate) fn load() -> Catalog {
         Err(error) => catalog.notes.push(error),
     }
 
-    for (name, _) in super::BUILTINS {
+    for name in super::BUILTINS {
         let mut entry = match user_entries.remove(*name) {
             Some(entry) => entry,
             None => builtin_entry(name, &disabled),
@@ -267,16 +267,19 @@ mod tests {
     fn builtins_are_listed_with_chinese_labels_and_catalog_can_be_empty() {
         let _dir = ConfigDir::new();
         let catalog = load();
-        assert_eq!(catalog.enabled().len(), 5);
+        assert_eq!(catalog.enabled().len(), 8);
         assert_eq!(catalog.label_for("gongwen-draft"), "起草");
         assert_eq!(catalog.label_for("gongwen-research"), "研究报告");
+        assert_eq!(catalog.label_for("gongwen-reply"), "复函");
+        assert_eq!(catalog.label_for("gongwen-extract"), "要点提炼");
+        assert_eq!(catalog.label_for("gongwen-policy-check"), "政策依据核对");
         for name in ["gongwen-draft", "gongwen-revise", "gongwen-review"] {
             store::set_enabled(name, false).unwrap();
         }
         let catalog = load();
-        assert_eq!(catalog.enabled().len(), 2);
+        assert_eq!(catalog.enabled().len(), 5);
         store::set_enabled("gongwen-review", true).unwrap();
-        assert_eq!(load().enabled().len(), 3);
+        assert_eq!(load().enabled().len(), 6);
         assert_eq!(
             load().resolve(Some("gongwen-review")),
             Ok(Some("gongwen-review".into()))

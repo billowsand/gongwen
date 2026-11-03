@@ -1106,7 +1106,10 @@ fn a_slash_prefix_only_offers_and_pins_pi_skills() {
     harness.frame_texts();
     let texts = harness.frame_texts();
     assert!(has(&texts, "修改"), "{texts:?}");
-    assert!(!has(&texts, "润色"), "不列旧技能：{texts:?}");
+    assert!(
+        !texts.iter().any(|text| text == "润色"),
+        "不列旧技能入口：{texts:?}"
+    );
     harness.press(egui::Key::Enter);
     assert_eq!(
         harness.doc.ai_panel.composer.pi_skill.as_deref(),

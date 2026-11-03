@@ -64,6 +64,49 @@ function fakeBackend() {
   return { faux, models, model };
 }
 
+test("同轮批量工具经真实 Durable harness 顺序往返后完成正文与回执交付", { timeout: 15_000 }, async () => {
+  const workspace = makeWorkspace();
+  const config = makeConfig(workspace);
+  const { faux, models, model } = fakeBackend();
+  const content = "# 批量工具测试\n\n已使用两项资料。\n";
+  faux.setResponses([
+    fauxAssistantMessage([
+      fauxToolCall("kb_search", { query: "自造知识资料" }, { id: "kb-batch" }),
+      fauxToolCall("ms_search", { query: "自造稿件资料" }, { id: "ms-batch" }),
+    ], { stopReason: "toolUse" }),
+    context => {
+      const messages = JSON.stringify(context);
+      assert.ok(messages.includes("knowledge-marker"));
+      assert.ok(messages.includes("manuscript-marker"));
+      return fauxAssistantMessage([fauxToolCall("write", { path: "work/batch.md", content })], { stopReason: "toolUse" });
+    },
+    fauxAssistantMessage([fauxToolCall("submit_document", { path: "work/batch.md", summary: "两项资料已返回" })], { stopReason: "toolUse" }),
+  ]);
+  let bridge;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let maxPending = 0;
+  const names = [];
+  const result = await runAgentJob({ config, models, model, onBridge: value => { bridge = value; }, emit: event => {
+    if (event.type !== "tool_request") return;
+    names.push(event.name);
+    maxInFlight = Math.max(maxInFlight, ++inFlight);
+    // 模拟 Rust 单槽：结果返回前不接受下一条，特意延迟以暴露同批并发。
+    setTimeout(() => {
+      maxPending = Math.max(maxPending, bridge.pending());
+      inFlight -= 1;
+      bridge.handle({ type: "tool_result", callId: event.callId, ok: true,
+        result: { marker: event.name === "kb_search" ? "knowledge-marker" : "manuscript-marker" } });
+    }, 30);
+  } });
+  assert.equal(maxInFlight, 1, "不能同时向 Rust 发出两条工具请求");
+  assert.equal(maxPending, 2, "真实 SDK 应已同轮发起两项调用，第二项实际在桥内排队");
+  assert.deepEqual(names, ["kb_search", "ms_search"]);
+  assert.equal(result.snapshot.content, content);
+  assert.equal(fs.readFileSync(path.join(workspace.delivery, "final.md"), "utf8"), content);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(workspace.delivery, "receipt.json"), "utf8")).kind, "document");
+});
+
 test("a long 32k task compacts before continuing instead of shrinking output to one token", async () => {
   const workspace = makeWorkspace();
   const config = makeConfig(workspace);

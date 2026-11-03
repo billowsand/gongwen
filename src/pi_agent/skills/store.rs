@@ -1,6 +1,6 @@
 //! Pi 标准技能的配置目录存储：`<配置目录>/pi/skills/<name>/`。
 //!
-//! - 内置五份是只读默认；用户目录里的同名技能覆盖默认，删掉用户副本即恢复内置。
+//! - 内置八份是只读默认（含 references）；用户目录里的同名技能覆盖默认，删掉用户副本即恢复内置。
 //! - 停用状态单独写在 `<配置目录>/pi/skills-disabled.json`，不改写旧 `skills/` 目录。
 //! - 新建、复制、导入都用同目录暂存目录加 rename 落盘；保存 SKILL.md 走
 //!   `storage::atomic_write`。解析失败不写文件，已有包和编辑缓冲不会被清掉。
@@ -95,13 +95,26 @@ pub(crate) fn known_name(name: &str) -> bool {
     super::builtin_text(name).is_some() || has_user_copy(name)
 }
 
+/// 内置技能的完整包：SKILL.md 与它按需读取的 references 一起编进二进制。
+/// 新建工作区、复制为用户副本、导出都走这一份，不在源码目录之外另找文件。
 pub(crate) fn builtin_package(name: &str) -> Result<Package, String> {
-    let text =
-        super::builtin_text(name).ok_or_else(|| format!("没有名为「{name}」的内置 Pi 技能"))?;
+    if !super::BUILTINS.contains(&name) {
+        return Err(format!("没有名为「{name}」的内置 Pi 技能"));
+    }
     let mut package = Package::default();
-    package
-        .insert_with("SKILL.md".into(), text.as_bytes().to_vec(), LIMITS)
-        .map_err(|error| format!("{error:#}"))?;
+    let mut count = 0usize;
+    for (skill, relative, text) in super::FILES {
+        if *skill != name {
+            continue;
+        }
+        package
+            .insert_with((*relative).to_string(), text.as_bytes().to_vec(), LIMITS)
+            .map_err(|error| format!("{error:#}"))?;
+        count += 1;
+    }
+    if count == 0 {
+        return Err(format!("内置技能「{name}」没有任何文件"));
+    }
     Ok(package)
 }
 
@@ -634,6 +647,45 @@ mod tests {
         assert_eq!(skill_text("original").unwrap(), source);
         assert!(copy_to("original", "duplicate", None).is_err());
         assert!(copy_to("original", "gongwen-draft", None).is_err());
+    }
+
+    #[test]
+    fn builtin_packages_carry_their_references_into_copies_and_exports() {
+        let config = ConfigDir::new();
+        let builtin = load_package("gongwen-revise").unwrap();
+        for relative in [
+            "SKILL.md",
+            "references/condense.md",
+            "references/normalize.md",
+            "references/polish.md",
+            "references/tone.md",
+        ] {
+            assert!(builtin.files.contains_key(relative), "缺 {relative}");
+        }
+        // 复制为用户副本：参考文件一起复制。
+        copy_builtin("gongwen-revise").unwrap();
+        assert_eq!(load_package("gongwen-revise").unwrap().files, builtin.files);
+        // 导出 ZIP：参考文件在包里。
+        let zip = config.dir.path().join("revise.zip");
+        export("gongwen-revise", &zip).unwrap();
+        let archive = Package::read_zip_with(
+            &zip,
+            Limits {
+                max_depth: 16,
+                ..LIMITS
+            },
+        )
+        .unwrap();
+        assert!(
+            archive
+                .files
+                .contains_key("gongwen-revise/references/condense.md"),
+            "{:?}",
+            archive.files.keys().collect::<Vec<_>>()
+        );
+        // 恢复内置：包还在，不因为删掉用户副本就少文件。
+        restore_builtin("gongwen-revise").unwrap();
+        assert_eq!(load_package("gongwen-revise").unwrap().files, builtin.files);
     }
 
     #[test]

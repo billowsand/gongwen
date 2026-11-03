@@ -53,7 +53,7 @@ pub(crate) struct PiTask {
     pub(crate) request: String,
     pub(crate) kind: String,
     pub(crate) system_date: String,
-    /// 用户选择的 Pi 技能（5 份标准技能之一）；None 表示自动。
+    /// 用户选择的 Pi 技能（内置八份或用户副本之一）；None 表示自动。
     pub(crate) skill: Option<String>,
     pub(crate) selection: Option<PiSelection>,
     pub(crate) materials: Vec<PiMaterialMeta>,

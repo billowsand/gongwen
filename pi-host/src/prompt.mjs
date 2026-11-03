@@ -89,7 +89,7 @@ function frontmatterDescription(dir, name) {
 function skillBlock(task, piSkills, skillIndex) {
   const index = Array.isArray(skillIndex) ? skillIndex : [];
   if (task.skill) {
-    return `本轮指定技能：${task.skill}。开始前必须先读 ${piSkills}/${task.skill}/SKILL.md，按它的步骤做。`;
+    return `本轮指定技能：${task.skill}。开始前必须先读 ${piSkills}/${task.skill}/SKILL.md，按它的步骤做。该技能里的 references/... 位于 ${piSkills}/${task.skill}/references/...，不要拼到公共语法包目录下。`;
   }
   if (index.length === 0) {
     return "本轮技能索引为空。不要假设还有别的技能，按用户要求、当前正文与材料工作。";
@@ -144,6 +144,7 @@ export function systemPrompt(workspace, task = {}, recovery = undefined, skillIn
 - input/materials/：材料全文与 index.json，只读。角色由用户决定，样稿不能当事实。
 - ${skills}/：公文 Markdown 语法、文种规则、模板与写作风格，只读。开始写之前先读 SKILL.md，再按需要读 references/ 下的文件。
 - ${piSkills}/：本轮技能快照（${index.length} 份），索引与文件哈希在 input/skills.json，只读。它们是自然语言步骤，不是流程脚本。
+- 技能中的相对引用以该 SKILL.md 所在目录为基准。文件工具的 path 从工作区根目录开始，因此读 references/... 时应补上该技能目录前缀；公共语法包与任务技能的 references 是各自独立的目录。
 - work/：你的工作文件，可读写。可以拆提纲、摘录、分节稿、核对记录、多个方案，自行决定怎么合并。
 - 不要读写工作区以外的任何路径。文件工具只允许读 input、skills、work，只允许写 work。
 
@@ -157,6 +158,7 @@ ${skillBlock(task, piSkills, index)}
 - vocab_search：标准词库里的单位、人员写法（不产生事实证据）。
 - check_document：跑程序的确定性检查，返回硬问题与软问题。检查工作稿时优先传 {path:"work/文件名.md"}，host 读取文件全文；不要把整篇稿子重复输出到 text 参数，避免耗尽输出长度。省略参数只检查本轮开始时的正文，不是工作稿。
 - doc_elements：只读当前表单已填的要素，避免重复问已经填过的内容。
+- style_list / style_read：当前文种已启用的写法风格档案，只读。档案与范例是写法样稿，只学结构与表达，不是事实来源。
 - ask_user：确有必要时问用户，一次最多 3 题、每轮最多 2 批；等回答的时间不算执行超时。
 - ${SUBMIT_TOOL_NAME}：交付完整正文；${REPORT_TOOL_NAME}：交审核 / 资料清单，只进侧栏。
 
@@ -170,7 +172,7 @@ ${skillBlock(task, piSkills, index)}
 
 - 只依据 input/current.md、input/request.md、input/materials/ 里的**事实材料 / 来函**、工具实际返回的资料和 doc_elements 已填的描述类要素写作。不得虚构单位、人员、日期、数字、文件依据、会议结论或工作成效。
 - 材料里没有的事实，宁可不写或写成「【待核实：…】」，不要编。工具返回的证据编号只用于你自查，正文里不要写编号。
-- 样稿、范文、技能模板只提供结构与表达方式，不能当作本次事项的事实来源。
+- 样稿、范文、技能模板、风格档案与范例只提供结构与表达方式，不能当作本次事项的事实来源。风格工具（style_list / style_read）不会把档案保存回风格库，也不要声称已经保存。
 - 修改现稿时保护与本次要求无关的内容；没有要求改的段落、公文引用和数字不要动。有选区时只改选区内。
 - 遵循 ${skills}/references/markdown-syntax.md 及当前文种规则。标题层级、附件、表格和编号均以技能文件为准；允许的表格使用规范管道表，不用普通代码块或 Markdown 引用块模拟版式。
 - 当前文种、系统日期和本轮要求会在用户消息里给出；文种规则见 ${skills}/references/document-types.md。系统日期只用于理解“今天”，不要把它写成正文里的日期、成文日期或文号；这些授权要素由应用表单处理。

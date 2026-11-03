@@ -145,6 +145,8 @@ test("domain tools include every Rust-backed read-only tool plus doc_elements", 
     "vocab_search",
     "check_document",
     "doc_elements",
+    "style_list",
+    "style_read",
   ]) {
     assert.ok(names.includes(name), name);
   }
@@ -152,6 +154,10 @@ test("domain tools include every Rust-backed read-only tool plus doc_elements", 
   const tools = createDomainTools(createToolBridge({ emit: (event) => events.push(event) }));
   assert.equal(tools.length, names.length + 1, "领域工具 + ask_user");
   assert.ok(!names.includes("bash"), "不向模型提供 shell");
+  // 风格工具只是读档案，没有写、没有保存、没有第二个模型。
+  const styleTools = tools.filter((tool) => ["style_list", "style_read"].includes(tool.name));
+  assert.equal(styleTools.length, 2);
+  assert.ok(!names.some((name) => /style_(write|save|learn)/.test(name)));
 });
 
 test("prompt states material roles, selection protection and the two delivery paths", () => {
@@ -165,6 +171,10 @@ test("prompt states material roles, selection protection and the two delivery pa
   assert.match(text, new RegExp(REPORT_TOOL_NAME));
   assert.match(text, /样稿.*不能当作.*事实来源/s);
   assert.match(text, /doc_elements/);
+  assert.match(text, /style_list \/ style_read/);
+  assert.match(text, /不会把档案保存回风格库/);
+  assert.match(text, /references\/\.\.\. 位于 skills\/pi-skills\/gongwen-revise\/references\/\.\.\./);
+  assert.match(text, /相对引用以该 SKILL\.md 所在目录为基准/);
   assert.doesNotMatch(text, /禁用表格/, "表格写法以技能文件为准");
   const user = userPrompt({
     kind: "通知",

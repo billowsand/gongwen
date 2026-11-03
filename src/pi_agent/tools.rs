@@ -7,6 +7,7 @@
 
 use crate::ai_services::knowledge::{KnowledgeSearch, RagSearch};
 use crate::ai_services::manuscripts::ManuscriptSource;
+use crate::ai_services::style::{self, StyleBook};
 use crate::ai_services::vocabulary as vocab;
 use crate::manuscript::ManuscriptFilter;
 use crate::models::{AppConfig, DraftInput, TemplateKind, VocabularyCategory};
@@ -21,6 +22,14 @@ const MAX_SEARCH_RESULTS: usize = 10;
 const MAX_READ_CHARS: usize = 200_000;
 /// 一条证据交给模型的片段上限。
 const MAX_SNIPPET_CHARS: usize = 600;
+/// 一次最多列几份风格档案。
+const MAX_STYLE_ROWS: usize = 20;
+/// 读一份风格时交给模型的 token 预算与字符上限。
+const MAX_STYLE_TOKENS: usize = 1_200;
+const MAX_STYLE_CHARS: usize = 8_000;
+/// 风格结果固定带的一句说明：写法不是事实。
+const STYLE_NOTE: &str = "风格档案与范例是写法样稿（style_sample），只给结构与表达；不是本次事项的事实来源，\
+其中的单位、人员、日期、数字与结论不得写进正文；这个结果不登记为事实证据。";
 
 /// 知识库检索结果的窄接口（生产用现有 RAG，测试可换假库）。
 pub(crate) trait PiKnowledge: Send + Sync {
@@ -35,6 +44,126 @@ pub(crate) struct PiChunk {
     pub(crate) title: String,
     pub(crate) section: String,
     pub(crate) text: String,
+}
+
+/// 一份可用风格档案的摘要（列表用）。
+#[derive(Debug, Clone)]
+pub(crate) struct PiStyleRow {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) note: String,
+    pub(crate) kinds: Vec<String>,
+    pub(crate) occasions: Vec<String>,
+    pub(crate) examples: usize,
+    pub(crate) description_chars: usize,
+}
+
+/// 按 id 读一份风格的结果。找不到 / 停用 / 不适用都明确返回，不偷偷换成别的。
+#[derive(Debug, Clone)]
+pub(crate) enum PiStyleLookup {
+    Found {
+        id: String,
+        name: String,
+        text: String,
+    },
+    Unavailable {
+        reason: &'static str,
+        message: String,
+    },
+}
+
+/// 风格列表：最多 `MAX_STYLE_ROWS` 份，多出来的明确标记，不默默截断。
+#[derive(Debug, Clone)]
+pub(crate) struct PiStyleList {
+    pub(crate) rows: Vec<PiStyleRow>,
+    pub(crate) truncated: bool,
+}
+
+/// 风格档案的窄接口（生产用 `ai_services::style`，测试注入假数据；不写库、不加使用次数）。
+pub(crate) trait PiStyles: Send + Sync {
+    fn list(&self, kind: TemplateKind) -> Result<PiStyleList, String>;
+    fn read(&self, id: &str, kind: TemplateKind) -> Result<PiStyleLookup, String>;
+}
+
+/// 只读资料来源；生产与测试共用明确的注入边界。
+pub(crate) struct PiSources {
+    pub(crate) knowledge: Arc<dyn PiKnowledge>,
+    pub(crate) manuscripts: Arc<dyn PiManuscripts>,
+    pub(crate) styles: Arc<dyn PiStyles>,
+}
+
+/// 生产实现：只读 `styles.json`，不调辅助模型、不保存、不记使用次数。
+struct StyleArchives;
+
+impl PiStyles for StyleArchives {
+    fn list(&self, kind: TemplateKind) -> Result<PiStyleList, String> {
+        let book = StyleBook::load().map_err(|error| format!("读不到风格档案：{error:#}"))?;
+        let applicable = book
+            .styles
+            .iter()
+            .filter(|profile| style_applies(profile, kind))
+            .collect::<Vec<_>>();
+        let truncated = applicable.len() > MAX_STYLE_ROWS;
+        let rows = applicable
+            .into_iter()
+            .take(MAX_STYLE_ROWS)
+            .map(|profile| PiStyleRow {
+                id: profile.id.clone(),
+                name: profile.name.clone(),
+                note: profile.note.clone(),
+                kinds: profile
+                    .kinds
+                    .iter()
+                    .map(|kind| kind.label().to_string())
+                    .collect(),
+                occasions: profile.occasions.clone(),
+                examples: profile.examples.len(),
+                description_chars: profile.description.chars().count(),
+            })
+            .collect();
+        Ok(PiStyleList { rows, truncated })
+    }
+
+    fn read(&self, id: &str, kind: TemplateKind) -> Result<PiStyleLookup, String> {
+        let book = StyleBook::load().map_err(|error| format!("读不到风格档案：{error:#}"))?;
+        let Some(profile) = book.get(id) else {
+            return Ok(PiStyleLookup::Unavailable {
+                reason: "unknown",
+                message: format!(
+                    "没有编号为「{id}」的风格档案。用 style_list 看当前文种可用的档案，不要自己换另一份。"
+                ),
+            });
+        };
+        if !profile.enabled {
+            return Ok(PiStyleLookup::Unavailable {
+                reason: "disabled",
+                message: format!(
+                    "风格「{}」已停用，不能使用。需要时请用户到「AI 管理 → 风格」里启用。",
+                    profile.name
+                ),
+            });
+        }
+        if !style_applies(profile, kind) {
+            return Ok(PiStyleLookup::Unavailable {
+                reason: "not_applicable",
+                message: format!(
+                    "风格「{}」不适用于当前文种（{}）。用 style_list 看当前文种的档案。",
+                    profile.name,
+                    kind.label()
+                ),
+            });
+        }
+        let text = style_excerpt(&style::render(profile, MAX_STYLE_TOKENS), MAX_STYLE_CHARS);
+        Ok(PiStyleLookup::Found {
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            text,
+        })
+    }
+}
+
+fn style_applies(profile: &crate::ai_services::style::StyleProfile, kind: TemplateKind) -> bool {
+    profile.enabled && (profile.kinds.is_empty() || profile.kinds.contains(&kind))
 }
 
 /// 稿件库的窄接口。
@@ -167,6 +296,7 @@ pub(crate) struct PiToolContext {
     form_facts: Vec<String>,
     kb: Arc<dyn PiKnowledge>,
     manuscripts: Arc<dyn PiManuscripts>,
+    styles: Arc<dyn PiStyles>,
     evidence: Arc<Mutex<Vec<PiEvidence>>>,
     seq: Arc<AtomicUsize>,
 }
@@ -208,7 +338,7 @@ impl PiToolContext {
         )
     }
 
-    /// 测试替身入口。
+    /// 测试替身入口。风格工具默认读本机档案；需要隔离时用 `with_all_sources` 注入。
     pub(crate) fn with_sources(
         config: Arc<AppConfig>,
         draft: DraftInput,
@@ -218,6 +348,29 @@ impl PiToolContext {
         kb: Arc<dyn PiKnowledge>,
         manuscripts: Arc<dyn PiManuscripts>,
     ) -> Self {
+        Self::with_all_sources(
+            config,
+            draft,
+            current,
+            request,
+            material_facts,
+            PiSources {
+                knowledge: kb,
+                manuscripts,
+                styles: Arc::new(StyleArchives),
+            },
+        )
+    }
+
+    /// 全部资料源的注入入口（风格显式给，测试不读真实风格库）。
+    pub(crate) fn with_all_sources(
+        config: Arc<AppConfig>,
+        draft: DraftInput,
+        current: String,
+        request: String,
+        material_facts: Vec<String>,
+        sources: PiSources,
+    ) -> Self {
         Self {
             form_facts: form_facts(&draft, &config.vocabulary),
             config,
@@ -225,8 +378,9 @@ impl PiToolContext {
             current,
             request,
             material_facts,
-            kb,
-            manuscripts,
+            kb: sources.knowledge,
+            manuscripts: sources.manuscripts,
+            styles: sources.styles,
             evidence: Arc::new(Mutex::new(Vec::new())),
             seq: Arc::new(AtomicUsize::new(0)),
         }
@@ -271,6 +425,8 @@ impl PiToolContext {
                 | "vocab_search"
                 | "check_document"
                 | "doc_elements"
+                | "style_list"
+                | "style_read"
         )
     }
 
@@ -346,6 +502,8 @@ impl PiToolContext {
             "vocab_search" => self.vocab_search(args),
             "check_document" => self.check_document(args),
             "doc_elements" => Ok(self.doc_elements()),
+            "style_list" => self.style_list(),
+            "style_read" => self.style_read(args),
             other => Err(format!("未知工具：{other}")),
         }
     }
@@ -523,8 +681,58 @@ impl PiToolContext {
         Ok(json!({
             "hard": hard,
             "soft": soft,
-            "note": "硬问题必须修订后才能提交；软问题程序会附在提案上供人核对",
+            "note": "检查结果用于自查；技术与权限问题会阻止写入，事实来源疑点只提示；成品由程序直接写入并保留撤销。",
         }))
+    }
+
+    /// 当前文种可用的风格档案。只读；档案例子与写法都不是本次事项的事实。
+    fn style_list(&self) -> Result<Value, String> {
+        let list = self.styles.list(self.draft.kind)?;
+        let truncated = list.truncated || list.rows.len() > MAX_STYLE_ROWS;
+        let results = list
+            .rows
+            .iter()
+            .take(MAX_STYLE_ROWS)
+            .map(|row| {
+                json!({
+                    "id": style_excerpt(&row.id, 500),
+                    "name": style_excerpt(&row.name, 100),
+                    "note": style_excerpt(&row.note, 500),
+                    "kinds": row.kinds.iter().take(20).map(|value| style_excerpt(value, 100)).collect::<Vec<_>>(),
+                    "occasions": row.occasions.iter().take(10).map(|value| style_excerpt(value, 100)).collect::<Vec<_>>(),
+                    "examples": row.examples,
+                    "description_chars": row.description_chars,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "kind": self.draft.kind.label(),
+            "results": results,
+            "count": results.len(),
+            "truncated": truncated,
+            "note": STYLE_NOTE,
+        }))
+    }
+
+    /// 按 id 读一份风格。未知 / 停用 / 不适用明确告知，不静默换成另一份。
+    fn style_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        let id = required_str(args, "id")?;
+        match self.styles.read(&id, self.draft.kind)? {
+            PiStyleLookup::Found { id, name, text } => Ok(json!({
+                "id": style_excerpt(&id, 500),
+                "name": style_excerpt(&name, 100),
+                "available": true,
+                "text": style_excerpt(&text, MAX_STYLE_CHARS),
+                "note": STYLE_NOTE,
+            })),
+            PiStyleLookup::Unavailable { reason, message } => Ok(json!({
+                "id": id,
+                "available": false,
+                "reason": reason,
+                "message": style_excerpt(&message, 1_000),
+                "note": "没有换成别的风格；用 style_list 看当前文种可用的档案。",
+            })),
+        }
     }
 
     /// 只读当前表单要素：描述类给值，授权类只列只读值，任何情况下都不写表单。
@@ -639,6 +847,17 @@ fn usize_arg(args: &Map<String, Value>, name: &str, max: usize) -> usize {
         .unwrap_or(max.min(5))
 }
 
+/// 风格返回值的总字符上限包括省略号，不能再附加超出限额的提示。
+fn style_excerpt(text: &str, max: usize) -> String {
+    let mut chars = text.chars();
+    let mut out: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() && max > 0 {
+        out.pop();
+        out.push('…');
+    }
+    out
+}
+
 fn limit_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -722,6 +941,147 @@ mod tests {
             }),
             Arc::new(FakeManuscripts),
         )
+    }
+
+    /// 假风格库：只验证工具行为，不读真实 `styles.json`。
+    struct FakeStyles;
+
+    impl PiStyles for FakeStyles {
+        fn list(&self, kind: TemplateKind) -> Result<PiStyleList, String> {
+            let all = vec![
+                PiStyleRow {
+                    id: "literal-style".into(),
+                    name: "公函写法".into(),
+                    note: "商洽有礼".into(),
+                    kinds: vec![kind.label().into()],
+                    occasions: vec!["商洽".into()],
+                    examples: 2,
+                    description_chars: 30,
+                },
+                PiStyleRow {
+                    id: "notice-style".into(),
+                    name: "通知写法".into(),
+                    note: "部署明确".into(),
+                    kinds: vec!["通知".into()],
+                    occasions: vec![],
+                    examples: 1,
+                    description_chars: 20,
+                },
+                PiStyleRow {
+                    id: "disabled-style".into(),
+                    name: "旧写法".into(),
+                    note: String::new(),
+                    kinds: vec![],
+                    occasions: vec![],
+                    examples: 0,
+                    description_chars: 0,
+                },
+            ];
+            let cutoff = 12usize;
+            Ok(PiStyleList {
+                truncated: all.len() > cutoff,
+                rows: all,
+            })
+        }
+
+        fn read(&self, id: &str, kind: TemplateKind) -> Result<PiStyleLookup, String> {
+            Ok(match id {
+                "oversized" => PiStyleLookup::Found {
+                    id: id.into(),
+                    name: "名".repeat(10_000),
+                    text: "例".repeat(100_000),
+                },
+                "literal-style" => PiStyleLookup::Found {
+                    id: id.into(),
+                    name: "公函写法".into(),
+                    text: "【写法风格：公函写法】商洽有礼，用「请予支持为荷」。".into(),
+                },
+                "disabled-style" => PiStyleLookup::Unavailable {
+                    reason: "disabled",
+                    message: "风格「旧写法」已停用，不能使用。".into(),
+                },
+                "notice-style" => PiStyleLookup::Unavailable {
+                    reason: "not_applicable",
+                    message: format!("风格「通知写法」不适用于当前文种（{}）。", kind.label()),
+                },
+                other => PiStyleLookup::Unavailable {
+                    reason: "unknown",
+                    message: format!("没有编号为「{other}」的风格档案。"),
+                },
+            })
+        }
+    }
+
+    fn style_context() -> PiToolContext {
+        PiToolContext::with_all_sources(
+            Arc::new(AppConfig::default()),
+            DraftInput::default(),
+            "# 当前\n".into(),
+            "按风格改。".into(),
+            vec![],
+            PiSources {
+                knowledge: Arc::new(FakeKb { text: "x".into() }),
+                manuscripts: Arc::new(FakeManuscripts),
+                styles: Arc::new(FakeStyles),
+            },
+        )
+    }
+
+    #[test]
+    fn style_tools_are_read_only_and_never_become_fact_sources() {
+        let ctx = style_context();
+        let list = ctx.call("style_list", &json!({})).unwrap();
+        assert_eq!(list["kind"], "公函");
+        assert_eq!(list["count"], 3);
+        assert_eq!(list["truncated"], false);
+        assert_eq!(list["results"][0]["id"], "literal-style");
+        assert!(list["note"].as_str().unwrap().contains("style_sample"));
+        assert!(list["note"].as_str().unwrap().contains("不得写进正文"));
+        let read = ctx
+            .call("style_read", &json!({"id": "literal-style"}))
+            .unwrap();
+        assert_eq!(read["available"], true);
+        assert!(read["text"].as_str().unwrap().contains("请予支持为荷"));
+        assert!(
+            read["note"]
+                .as_str()
+                .unwrap()
+                .contains("不是本次事项的事实来源")
+        );
+        // 风格结果是写法样稿：不登记证据，也不进事实来源。
+        assert!(ctx.evidence().is_empty());
+        assert!(ctx.fact_sources().is_empty());
+    }
+
+    #[test]
+    fn unknown_disabled_or_inapplicable_styles_are_reported_not_substituted() {
+        let ctx = style_context();
+        for (id, reason) in [
+            ("missing", "unknown"),
+            ("disabled-style", "disabled"),
+            ("notice-style", "not_applicable"),
+        ] {
+            let value = ctx.call("style_read", &json!({"id": id})).unwrap();
+            assert_eq!(value["available"], false, "{value}");
+            assert_eq!(value["reason"], reason, "{value}");
+            assert!(value.get("text").is_none(), "不能给出替代风格：{value}");
+            assert!(
+                value["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&"风格".to_string())
+            );
+        }
+        assert!(ctx.call("style_read", &json!({})).is_err());
+    }
+
+    #[test]
+    fn style_read_bounds_all_profile_text_at_the_tool_boundary() {
+        let value = style_context()
+            .call("style_read", &json!({"id": "oversized"}))
+            .unwrap();
+        assert!(value["name"].as_str().unwrap().chars().count() <= 100);
+        assert!(value["text"].as_str().unwrap().chars().count() <= MAX_STYLE_CHARS);
     }
 
     #[test]

@@ -317,6 +317,57 @@ mod tests {
     }
 
     #[test]
+    fn builtin_skill_references_reach_the_workspace_snapshot() {
+        let _config = ConfigDir::new();
+        let snapshot = SkillSnapshot::build(
+            &crate::pi_agent::pi_skills::load_catalog(),
+            Some("gongwen-revise"),
+        )
+        .unwrap();
+        let entry = snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.name == "gongwen-revise")
+            .unwrap();
+        assert!(
+            entry
+                .files
+                .iter()
+                .any(|file| file.path == "references/condense.md"),
+            "{:?}",
+            entry
+                .files
+                .iter()
+                .map(|file| &file.path)
+                .collect::<Vec<_>>()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        snapshot.write_to(dir.path()).unwrap();
+        let text = std::fs::read_to_string(
+            dir.path()
+                .join(SKILLS_DIR)
+                .join("gongwen-revise/references/condense.md"),
+        )
+        .unwrap();
+        assert!(text.contains("责任单位"), "{text}");
+        // 索引里的文件哈希与实际写的文件一致。
+        let index = std::fs::read_to_string(dir.path().join(INDEX_FILE)).unwrap();
+        let parsed: SkillIndex = serde_json::from_str(&index).unwrap();
+        let revise = parsed
+            .skills
+            .iter()
+            .find(|skill| skill.name == "gongwen-revise")
+            .unwrap();
+        let condense = revise
+            .files
+            .iter()
+            .find(|file| file.path == "references/condense.md")
+            .unwrap();
+        assert_eq!(condense.sha256, hash_bytes(text.as_bytes()));
+        assert_eq!(condense.bytes, text.len() as u64);
+    }
+
+    #[test]
     fn selected_disabled_or_missing_skill_fails_instead_of_falling_back_to_auto() {
         let _config = ConfigDir::new();
         store::set_enabled("gongwen-revise", false).unwrap();
@@ -327,7 +378,7 @@ mod tests {
         assert!(error.contains("删除"), "{error}");
         SkillSnapshot::build(&catalog, None)
             .unwrap_or_else(|error| panic!("自动快照失败：{error}"));
-        for (name, _) in crate::pi_agent::pi_skills::BUILTINS {
+        for name in crate::pi_agent::pi_skills::BUILTINS {
             store::set_enabled(name, false).unwrap();
         }
         let error =

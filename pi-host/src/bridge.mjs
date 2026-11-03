@@ -8,6 +8,11 @@ import { defineTool } from "@earendil-works/pi-durable";
 export const MAX_TOOL_CALLS = 60;
 export const MAX_QUESTION_BATCHES = 2;
 export const MAX_QUESTIONS = 3;
+/**
+ * 同时挂着的请求上限：Rust 侧一次只接一个 `tool_request`，其余在桥里排队。
+ * 排队也计入预算，所以这里只是把 `Map` 的规模封死，正常永远到不了。
+ */
+export const MAX_PENDING_REQUESTS = MAX_TOOL_CALLS + MAX_QUESTION_BATCHES;
 
 /** 领域工具的名字与 schema。Rust 还会再校验一遍。 */
 export const DOMAIN_TOOLS = [
@@ -35,6 +40,10 @@ export const DOMAIN_TOOLS = [
     text: Type.Optional(Type.String({ description: "要检查的 Markdown；省略检查本轮正文" })),
   })],
   ["doc_elements", "只读当前表单已填的公文要素（授权类只读）", Type.Object({})],
+  ["style_list", "列出当前文种已启用的写法风格档案（只读；档案与范例是写法样稿，不是事实来源）", Type.Object({})],
+  ["style_read", "按 id 读一份写法风格档案（只读；只学写法，不搬用其中单位、人员、日期、数字与结论）", Type.Object({
+    id: Type.String({ description: "style_list 返回的档案 id" }),
+  })],
 ];
 
 export class BridgeError extends Error {
@@ -46,43 +55,99 @@ export class BridgeError extends Error {
 
 /**
  * 建立工具桥。`emit` 只写协议；`pause/resume` 用于把等用户回答的时间从执行超时里扣除。
+ *
+ * 模型可以在同一轮里批量发起工具调用，而 Rust 侧只有 `pending_tool` 一个槽位：
+ * 桥把 `call` / `ask` 放进同一条有界 FIFO，任何时候最多只有一个请求已经发出、
+ * 正在等 `tool_result`，收到匹配的回复再发下一个。排队中的请求不占 Rust 的槽位，
+ * 但计入工具次数 / 提问批次预算。
  */
 export function createToolBridge({ emit, pause, resume }) {
+  /** callId → waiter；包含已发出和排队中的请求。 */
   const pending = new Map();
+  /** 还没发出的 waiter，FIFO。 */
+  const queue = [];
+  /** 已发出、正在等回复的 waiter。 */
+  let active = null;
   let nextCall = 1;
   let calls = 0;
   let batches = 0;
+  /** 取消 / 进程结束后不再发协议、也不再接纳新请求。 */
+  let closed = false;
+  /** `pump` 防重入：`emit` 里同步回来的回复不能把调度栈搅乱。 */
+  let pumping = false;
 
-  const settle = (callId, fn) => {
-    const waiter = pending.get(callId);
-    if (!waiter) return false;
-    pending.delete(callId);
-    fn(waiter);
+  /** 结束一个 waiter：只生效一次，必要时恰好恢复一次计时。 */
+  const settle = (waiter, ok, value) => {
+    if (waiter.settled) return false;
+    waiter.settled = true;
+    pending.delete(waiter.callId);
+    if (active === waiter) active = null;
+    if (waiter.paused) {
+      waiter.paused = false;
+      try {
+        resume?.();
+      } catch {
+        // 计时器出问题也不能把队列卡住。
+      }
+    }
+    if (ok) waiter.resolve(value);
+    else waiter.reject(value);
     return true;
   };
 
-  const request = (type, payload) => {
+  /** 队列空着且没有在途请求时，发出队首那一个。 */
+  const pump = () => {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (!closed && active === null && queue.length > 0) {
+        const waiter = queue.shift();
+        if (waiter.settled || pending.get(waiter.callId) !== waiter) continue;
+        active = waiter;
+        try {
+          // 只有真正发出提问时才暂停计时；排队期间照常算工具执行时间。
+          if (waiter.type === "questions") {
+            pause?.();
+            waiter.paused = true;
+          }
+          emit({ type: waiter.type, callId: waiter.callId, ...waiter.payload });
+        } catch (error) {
+          // 写给 Rust 失败只拒绝这一条，后面的继续排队；`settle` 会恢复计时。
+          settle(waiter, false, error);
+          continue;
+        }
+        // `emit` 里若同步回来了回复，waiter 已结束、active 已清空，循环接着发下一个。
+      }
+    } finally {
+      pumping = false;
+    }
+  };
+
+  /** 入队并尝试立即发出；所有请求共用这一条 FIFO。 */
+  const enqueue = (type, payload) => {
     const callId = `c${nextCall++}`;
     return new Promise((resolve, reject) => {
-      pending.set(callId, { resolve, reject, type });
-      try {
-        emit({ type, callId, ...payload });
-      } catch (error) {
-        pending.delete(callId);
-        reject(error);
-      }
+      const waiter = { callId, type, payload, resolve, reject, settled: false, paused: false };
+      pending.set(callId, waiter);
+      queue.push(waiter);
+      pump();
     });
   };
 
   const call = (name, args) => {
+    if (closed) return Promise.reject(new BridgeError("本轮已取消，不能再调用工具"));
     calls += 1;
     if (calls > MAX_TOOL_CALLS) {
       return Promise.reject(new BridgeError(`工具调用次数超过上限（${MAX_TOOL_CALLS}）`));
     }
-    return request("tool_request", { name, args });
+    if (pending.size >= MAX_PENDING_REQUESTS) {
+      return Promise.reject(new BridgeError(`等待中的工具请求过多（${MAX_PENDING_REQUESTS}）`));
+    }
+    return enqueue("tool_request", { name, args });
   };
 
   const ask = (questions) => {
+    if (closed) return Promise.reject(new BridgeError("本轮已取消，不能再提问"));
     if (!Array.isArray(questions) || questions.length === 0) {
       return Promise.reject(new BridgeError("至少写一道题"));
     }
@@ -93,23 +158,38 @@ export function createToolBridge({ emit, pause, resume }) {
     if (batches > MAX_QUESTION_BATCHES) {
       return Promise.reject(new BridgeError(`本轮提问批次已用完（最多 ${MAX_QUESTION_BATCHES} 批）`));
     }
-    pause?.();
-    return request("questions", { batch: batches, questions }).finally(() => resume?.());
+    if (pending.size >= MAX_PENDING_REQUESTS) {
+      return Promise.reject(new BridgeError(`等待中的工具请求过多（${MAX_PENDING_REQUESTS}）`));
+    }
+    return enqueue("questions", { batch: batches, questions });
   };
 
-  /** 处理一条来自 stdin 的 `tool_result`；错 ID / 迟到回复返回 false，直接丢弃。 */
+  /**
+   * 处理一条来自 stdin 的 `tool_result`。只认当前已发出请求的 callId：
+   * 未知 ID、还没发出的排队 ID、重复与迟到回复一律返回 false，不推进队列。
+   */
   const handle = (value) => {
     if (!value || value.type !== "tool_result") return false;
-    return settle(value.callId, (waiter) => {
-      if (value.ok) waiter.resolve(value.result ?? {});
-      else waiter.reject(new BridgeError(value.error || "工具调用失败"));
-    });
+    const waiter = active;
+    if (!waiter || waiter.settled) return false;
+    if (value.callId !== waiter.callId) return false;
+    const ok = value.ok === true;
+    const outcome = ok ? (value.result ?? {}) : new BridgeError(value.error || "工具调用失败");
+    if (!settle(waiter, ok, outcome)) return false;
+    pump();
+    return true;
   };
 
-  /** 取消 / 进程结束时清掉所有等待者，不把取消当成功。 */
+  /**
+   * 取消 / 进程结束时清空在途与排队请求，不把取消当成功；
+   * 之后不再发出任何请求，晚到的回复没有等待者。可重复调用。
+   */
   const abortAll = (error) => {
-    for (const [, waiter] of pending) waiter.reject(error);
-    pending.clear();
+    closed = true;
+    const waiters = [...pending.values()];
+    queue.length = 0;
+    const reason = error instanceof Error ? error : new BridgeError("本轮已取消");
+    for (const waiter of waiters) settle(waiter, false, reason);
   };
 
   return { call, ask, handle, abortAll, pending: () => pending.size };

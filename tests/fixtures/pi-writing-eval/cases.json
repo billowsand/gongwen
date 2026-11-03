@@ -1,0 +1,233 @@
+{
+  "version": 1,
+  "fixtures": "资料源是自造夹具；Pi host 与模型是真实执行。",
+  "cases": [
+    {
+      "name": "draft-from-material",
+      "skill": "gongwen-draft",
+      "kind": "通知",
+      "systemDate": "2026-11-20",
+      "current": null,
+      "request": "根据附后的会议纪要起草一份通知，主送各县（区）人民政府，把会议确定的三项要求写清楚。",
+      "materials": [
+        {
+          "file": "cases/draft-from-material/materials/01-meeting.md",
+          "title": "冬季防火专题会议纪要（夹具）",
+          "source": "夹具材料",
+          "role": "fact"
+        }
+      ],
+      "answers": {},
+      "elements": {
+        "title": "关于做好冬季森林防火工作的通知",
+        "description": [],
+        "authorized": []
+      },
+      "expect": {
+        "delivery": "document",
+        "required": ["2026年12月1日", "3个督查组", "市应急管理局", "2026年12月15日"],
+        "forbidden": [],
+        "minChars": 150,
+        "manual": [
+          "三项要求在正文里是否都落成了可执行的分条，而不是照抄纪要",
+          "标题、主送、结语是否符合通知的文种规则",
+          "有没有编造材料里没有的单位、数字或成效"
+        ]
+      }
+    },
+    {
+      "name": "condense-selection",
+      "skill": "gongwen-revise",
+      "kind": "通知",
+      "systemDate": "2026-11-20",
+      "current": "cases/condense-selection/current.md",
+      "selectionText": "请各县（区）人民政府在2026年12月1日前完成一次林区输配电设施隐患排查，市应急管理局负责汇总整改情况，并于2026年12月15日前将整改台账报市应急管理局。",
+      "request": "把选区压缩到80字以内，保留全部任务、责任单位和时限，选区外一个字都不要动。",
+      "materials": [],
+      "answers": {},
+      "expect": {
+        "delivery": "document",
+        "required": ["2026年12月1日", "2026年12月15日", "各县（区）人民政府", "排查"],
+        "requirePhrasesAny": [["市应急管理局负责汇总", "市应急管理局汇总"]],
+        "forbidden": [],
+        "unchangedOutsideSelection": true,
+        "maxSelectionChars": 80,
+        "manual": [
+          "压缩后任务、责任单位、两个时限是否都在",
+          "有没有把表述压成看不懂的短句",
+          "选区外是否逐字未变"
+        ]
+      }
+    },
+    {
+      "name": "reply-unknown-stance",
+      "skill": "gongwen-reply",
+      "kind": "公函",
+      "systemDate": "2026-11-20",
+      "current": null,
+      "request": "根据来函起草复函。第一项：政务信息系统已在全市10个县（区）部署完成，完成时间为2026年9月底。第二项的答复意见我还没定，先不要替我写。",
+      "materials": [
+        {
+          "file": "cases/reply-unknown-stance/materials/01-incoming.md",
+          "title": "关于商请提供政务信息系统部署情况的函（夹具）",
+          "source": "夹具来函",
+          "role": "incoming_letter"
+        }
+      ],
+      "answers": {},
+      "elements": {
+        "title": "",
+        "description": [],
+        "authorized": []
+      },
+      "expect": {
+        "delivery": "document",
+        "required": ["2026年9月底", "10个县（区）", "特此函复"],
+        "requiredSummary": ["主送建议：市数据局"],
+        "forbidden": ["市财政局：", "市数据局：", "原则同意", "暂缓"],
+        "requirePhrasesAny": [["待核实", "答复意见"]],
+        "manual": [
+          "交付说明的主送建议是不是来函落款「市数据局」，正文不写主送抬头，表单未自动写值",
+          "第二项有没有替用户表态（同意 / 暂缓 / 正在研究）",
+          "两项是否按来函顺序逐项答复"
+        ]
+      }
+    },
+    {
+      "name": "material-conflict",
+      "skill": "gongwen-draft",
+      "kind": "通知",
+      "systemDate": "2026-11-20",
+      "current": null,
+      "request": "根据附后的两份报送材料起草通知，完成时限按材料写。",
+      "materials": [
+        {
+          "file": "cases/material-conflict/materials/01-report.md",
+          "title": "市安委办报送材料（夹具）",
+          "source": "夹具材料",
+          "role": "fact"
+        },
+        {
+          "file": "cases/material-conflict/materials/02-report.md",
+          "title": "市应急管理局报送材料（夹具）",
+          "source": "夹具材料",
+          "role": "fact"
+        }
+      ],
+      "answers": {},
+      "expect": {
+        "delivery": "document",
+        "required": ["2026年12月10日", "2026年12月20日"],
+        "forbidden": ["分两阶段", "予以通报"],
+        "requirePhrasesAny": [["待核实", "矛盾", "不一致"]],
+        "manual": [
+          "两个时限是否都保留下来，而不是悄悄二选一",
+          "冲突处是否写清了「哪两处、有什么不同」",
+          "除了时限冲突以外有没有新增臆测事实"
+        ]
+      }
+    },
+    {
+      "name": "policy-source-missing",
+      "skill": "gongwen-policy-check",
+      "kind": "意见",
+      "systemDate": "2026-11-20",
+      "current": "cases/policy-source-missing/current.md",
+      "request": "核对文中引用的政策依据，逐条给结论。",
+      "materials": [],
+      "answers": {},
+      "expect": {
+        "delivery": "report",
+        "reportOnly": true,
+        "requirePhrasesAny": [["未找到原文", "未找到", "没有找到原文", "未检索到原文"]],
+        "forbidden": ["已核实", "经核对无误"],
+        "manual": [
+          "有没有在找不到原文时编出原文内容",
+          "名称、文号、引文三项是否分开给结论",
+          "有没有顺手重写一份正文"
+        ]
+      }
+    },
+    {
+      "name": "extract-only",
+      "skill": "gongwen-extract",
+      "kind": "通报",
+      "systemDate": "2026-11-20",
+      "current": "cases/extract-only/current.md",
+      "request": "提炼三条要点，只出清单，不要改稿。",
+      "materials": [],
+      "answers": {},
+      "expect": {
+        "delivery": "report",
+        "reportOnly": true,
+        "required": ["2026年9月底", "10个县（区）", "3个县（区）", "2026年12月1日"],
+        "forbidden": [],
+        "manual": [
+          "三条是否按原文顺序，每条一句话",
+          "有没有额外评论、评价或改写原文",
+          "正文是否完全没有变化"
+        ]
+      }
+    },
+    {
+      "name": "research-sources",
+      "skill": "gongwen-research",
+      "kind": "研究报告",
+      "systemDate": "2026-11-20",
+      "current": null,
+      "request": "写一篇关于我市森林防火信息化建设的研究报告，关键判断都要有出处；本次没有文献库，不要编参考文献。",
+      "materials": [],
+      "answers": {
+        "篇幅": "3000字左右"
+      },
+      "expect": {
+        "delivery": "document",
+        "required": ["86个", "2026年6月", "15分钟"],
+        "forbidden": ["[@", "doi:", "（来源：K", "（来源：E", "【K", "【E", "部分基层单位的预算安排难以满足", "当前基层防火队伍中"],
+        "inlineFootnotesOnly": true,
+        "requirePhrasesAny": [["资料不足", "待核实", "尚不能判断", "资料边界", "待调查", "研究局限性", "未作详细记载"]],
+        "minChars": 300,
+        "requiredToolsAny": ["kb_search", "kb_read"],
+        "manual": [
+          "关键数据是否都能在知识库结果里找到",
+          "有没有编造文献、作者、年份或链接",
+          "对策建议是否与前文问题对应，而不是空话"
+        ]
+      }
+    },
+    {
+      "name": "style-apply",
+      "skill": "gongwen-draft",
+      "kind": "通知",
+      "systemDate": "2026-11-20",
+      "current": null,
+      "request": "先按风格档案 fixture-style 的写法，再根据事实材料起草通知：市应急管理局于2026年11月20日成立5个检查组，对林区输配电设施开展检查，检查结果于2026年12月10日前报市应急管理局。",
+      "materials": [
+        {
+          "file": "cases/style-apply/materials/01-facts.md",
+          "title": "事故情况报告（夹具事实材料）",
+          "source": "夹具材料",
+          "role": "fact"
+        },
+        {
+          "file": "cases/style-apply/materials/02-sample.md",
+          "title": "水务设施安全检查通知（夹具样稿）",
+          "source": "夹具样稿",
+          "role": "style_sample"
+        }
+      ],
+      "answers": {},
+      "expect": {
+        "delivery": "document",
+        "required": ["市应急管理局", "2026年11月20日", "5个检查组", "2026年12月10日"],
+        "forbidden": ["市水务局", "2025年3月15日", "12个监测点", "王建国"],
+        "requiredToolsAny": ["style_read"],
+        "manual": [
+          "写法是否落在结构与句式上，而不是照抄样稿句子",
+          "样稿 / 风格档案里的单位、日期、数字有没有搬进正文",
+          "有没有声称已经把风格保存进风格库"
+        ]
+      }
+    }
+  ]
+}

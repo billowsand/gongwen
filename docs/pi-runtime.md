@@ -98,7 +98,7 @@ runtime\pi\node.exe scripts\pi-offline-acceptance.mjs --runtime .\runtime\pi
   回执绑定与哈希、`final.md` 快照、Durable `session.sqlite` 已落盘；
 - 再用 `recovery: { mode: "resume" }` 启动一次：必须交回同一份成品，且**不再调用模型**。
 
-注意：验收脚本工作区里的技能是**简化夹具**（只验证文件工具与交付链），真实 5 份技能由
+注意：验收脚本工作区里的技能是**简化夹具**（只验证文件工具与交付链），真实 8 份标准技能由
 应用内嵌资源（`cargo test --locked skill_pack`）与界面集成验收覆盖，本脚本不冒充真实技能验收。
 
 本机已对 Windows x64 组装运行时实测通过（4 次模型调用、回执重放 0 次新调用）。Linux ARM64 /
@@ -199,8 +199,35 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 
 AI 管理 → 技能管理实际提供给 Pi 的标准 SKILL.md，不再编辑旧 flow 流程。
 用户技能位于配置目录 `pi/skills/<name>/`，停用清单为 `pi/skills-disabled.json`。
-五份内置技能是只读默认，复制为同名用户副本后可修改，也可恢复内置；旧 `skills/`
+内置技能是只读默认，复制为同名用户副本后可修改，也可恢复内置；旧 `skills/`
 数据保留，不自动转换或执行。公共 `gongwen-markdown` 语法包由程序提供，不能被用户技能覆盖。
+
+### 内置技能与参考文件（4D）
+
+八份内置技能：起草 `gongwen-draft`、修改 `gongwen-revise`、审核 `gongwen-review`、
+仿写 `gongwen-imitate`、研究报告 `gongwen-research`、复函 `gongwen-reply`、
+要点提炼 `gongwen-extract`、政策依据核对 `gongwen-policy-check`。
+润色 / 精简 / 语气 / 规范化是修改技能按任务选择的 `references/`，材料成文归起草，
+事实核对归审核；旧 15 份技能的映射、取舍与未覆盖能力见 `docs/pi-skill-migration.md`。
+
+`assets/pi-skills/` 下的每个文件都通过 `FILES` 表 `include_str!` 编进二进制：
+新建工作区、复制为用户副本、导出技能包都带上完整 references，不依赖源码目录或
+安装目录里另有一份。磁盘资源与注册表由测试核对；公共语法包仍只读且不可覆盖。
+
+技能按需读 `skills/gongwen-markdown/` 的语法与文种规则、材料角色、选区与已填要素；
+只有会让整篇方向写错的事才 `ask_user`，授权要素不建议、不出题，也没有「先确认清单
+才能生成」或「事实勾选才能进正文」的闸门。交付分流：只审核 / 提炼 / 风格分析用
+`finish_report`；生成或修改正文才用 `submit_document` 交完整 Markdown。
+
+### 只读风格工具（4D）
+
+Pi 增加两个只读领域工具：`style_list`（按当前文种列出启用且有适用范围限定的风格档案）
+与 `style_read`（按 id 取回写法描述与范例）。它们直接复用
+`ai_services::style::{StyleBook, render}`，不调第二个模型、不写风格库、不记使用次数、
+不执行 shell；列表最多 20 份、返回文本有 token 与字符上限。未知 / 停用 / 不适用的
+档案给结构化错误（`available:false` + `reason`），不悄悄换成另一份。风格内容与范例
+按 `style_sample` 对待：只提供写法，不登记为事实来源，单位、人员、日期、数字不得
+搬进正文。AI 自动学风格并保存进风格库仍未实现，模型不得声称已经保存。
 
 导入/导出保留完整的 references、assets、scripts 等文件；脚本不会因此执行。
 同名导入报冲突，不覆盖现有包。标准 frontmatter 用 YAML 解析，步骤写在 Markdown 正文中；

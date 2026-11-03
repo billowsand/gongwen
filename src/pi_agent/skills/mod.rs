@@ -23,28 +23,56 @@ pub(crate) use snapshot::SkillSnapshot;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// 内置五份技能：目录名同时是 frontmatter 的 name。
-pub(crate) const BUILTINS: &[(&str, &str)] = &[
-    (
-        "gongwen-draft",
-        include_str!("../../../assets/pi-skills/gongwen-draft/SKILL.md"),
-    ),
-    (
-        "gongwen-revise",
-        include_str!("../../../assets/pi-skills/gongwen-revise/SKILL.md"),
-    ),
-    (
-        "gongwen-review",
-        include_str!("../../../assets/pi-skills/gongwen-review/SKILL.md"),
-    ),
-    (
-        "gongwen-imitate",
-        include_str!("../../../assets/pi-skills/gongwen-imitate/SKILL.md"),
-    ),
-    (
+macro_rules! skill_file {
+    ($skill:literal, $path:literal) => {
+        (
+            $skill,
+            $path,
+            include_str!(concat!("../../../assets/pi-skills/", $skill, "/", $path)),
+        )
+    };
+}
+
+/// 内置技能的全部文件：（技能名，包内相对路径，内容）。
+///
+/// 整包编进二进制：新建工作区、复制为用户副本、导出技能包都从这里取，
+/// 不依赖安装目录里恰好带着 `assets/pi-skills/`。新增文件必须登记在这里，
+/// `every_builtin_file_on_disk_is_embedded` 会核对两边一致。
+pub(crate) const FILES: &[(&str, &str, &str)] = &[
+    skill_file!("gongwen-draft", "SKILL.md"),
+    skill_file!("gongwen-draft", "references/material-drafting.md"),
+    skill_file!("gongwen-revise", "SKILL.md"),
+    skill_file!("gongwen-revise", "references/condense.md"),
+    skill_file!("gongwen-revise", "references/normalize.md"),
+    skill_file!("gongwen-revise", "references/polish.md"),
+    skill_file!("gongwen-revise", "references/tone.md"),
+    skill_file!("gongwen-review", "SKILL.md"),
+    skill_file!("gongwen-review", "references/fact-check.md"),
+    skill_file!("gongwen-imitate", "SKILL.md"),
+    skill_file!("gongwen-imitate", "references/style-analysis.md"),
+    skill_file!("gongwen-research", "SKILL.md"),
+    skill_file!(
         "gongwen-research",
-        include_str!("../../../assets/pi-skills/gongwen-research/SKILL.md"),
+        "references/argumentation-and-sources.md"
     ),
+    skill_file!("gongwen-reply", "SKILL.md"),
+    skill_file!("gongwen-reply", "references/incoming-letter.md"),
+    skill_file!("gongwen-extract", "SKILL.md"),
+    skill_file!("gongwen-extract", "references/extraction-checklist.md"),
+    skill_file!("gongwen-policy-check", "SKILL.md"),
+    skill_file!("gongwen-policy-check", "references/citation-check.md"),
+];
+
+/// 内置技能目录名，同时是 frontmatter 的 name。顺序就是管理页里的固定顺序。
+pub(crate) const BUILTINS: &[&str] = &[
+    "gongwen-draft",
+    "gongwen-revise",
+    "gongwen-review",
+    "gongwen-imitate",
+    "gongwen-research",
+    "gongwen-reply",
+    "gongwen-extract",
+    "gongwen-policy-check",
 ];
 
 /// 内置技能的中文显示名。用户副本没有写 metadata 显示名时沿用。
@@ -55,15 +83,23 @@ pub(crate) fn builtin_label(name: &str) -> Option<&'static str> {
         "gongwen-review" => Some("审核"),
         "gongwen-imitate" => Some("仿写"),
         "gongwen-research" => Some("研究报告"),
+        "gongwen-reply" => Some("复函"),
+        "gongwen-extract" => Some("要点提炼"),
+        "gongwen-policy-check" => Some("政策依据核对"),
         _ => None,
     }
 }
 
-pub(crate) fn builtin_text(name: &str) -> Option<&'static str> {
-    BUILTINS
+/// 内置技能包里的一个文件；没有登记就返回 `None`。
+pub(crate) fn builtin_file(name: &str, relative: &str) -> Option<&'static str> {
+    FILES
         .iter()
-        .find(|(builtin, _)| *builtin == name)
-        .map(|(_, text)| *text)
+        .find(|(skill, path, _)| *skill == name && *path == relative)
+        .map(|(_, _, text)| *text)
+}
+
+pub(crate) fn builtin_text(name: &str) -> Option<&'static str> {
+    builtin_file(name, "SKILL.md")
 }
 
 /// 目录变化计数：管理页保存 / 启停 / 导入后加一，侧栏据此刷新缓存，不每帧读盘。
@@ -85,11 +121,31 @@ pub(crate) fn load_catalog() -> Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    fn source_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("pi-skills")
+    }
+
+    fn files_under(dir: &std::path::Path, base: &std::path::Path, out: &mut BTreeSet<String>) {
+        for entry in std::fs::read_dir(dir).expect("技能目录可读") {
+            let path = entry.expect("目录项").path();
+            if path.is_dir() {
+                files_under(&path, base, out);
+            } else {
+                let relative = path.strip_prefix(base).expect("在技能目录内");
+                out.insert(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
 
     #[test]
-    fn five_builtin_skills_are_valid_standard_skills() {
-        assert_eq!(BUILTINS.len(), 5);
-        for (name, text) in BUILTINS {
+    fn eight_builtin_skills_are_valid_standard_skills() {
+        assert_eq!(BUILTINS.len(), 8);
+        for name in BUILTINS {
+            let text = builtin_text(name).unwrap_or_else(|| panic!("{name} 缺 SKILL.md"));
             let parsed = parser::parse(name, text).unwrap_or_else(|error| panic!("{error}"));
             assert_eq!(parsed.name, *name);
             assert!(!parsed.description.is_empty());
@@ -98,6 +154,60 @@ mod tests {
             assert!(text.contains("submit_document") || text.contains("finish_report"));
             assert!(builtin_label(name).is_some());
         }
+    }
+
+    #[test]
+    fn every_builtin_file_on_disk_is_embedded() {
+        let dir = source_dir();
+        let mut on_disk = BTreeSet::new();
+        files_under(&dir, &dir, &mut on_disk);
+        let embedded = FILES
+            .iter()
+            .map(|(skill, path, _)| format!("{skill}/{path}"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(on_disk, embedded, "assets/pi-skills/ 与 FILES 登记不一致");
+    }
+
+    #[test]
+    fn every_builtin_skill_has_its_skill_md_and_registered_references() {
+        for name in BUILTINS {
+            assert!(builtin_text(name).is_some(), "{name} 缺 SKILL.md");
+            assert!(
+                FILES
+                    .iter()
+                    .any(|(skill, path, _)| skill == name && *path != "SKILL.md"),
+                "{name} 没有任何参考文件"
+            );
+        }
+        // SKILL.md 里点名的 references/... 必须真的在包里，否则模型会读空气。
+        for name in BUILTINS {
+            let text = builtin_text(name).unwrap();
+            for relative in referenced_files(text) {
+                assert!(
+                    builtin_file(name, &relative).is_some(),
+                    "{name}/SKILL.md 引用了不存在的 {relative}"
+                );
+            }
+        }
+    }
+
+    /// 从正文里扫出 `references/xxx.md` 形式的相对引用（只认代码标记里的，
+    /// `skills/gongwen-markdown/references/...` 这类跨包路径不算本包文件）。
+    fn referenced_files(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = text;
+        while let Some(index) = rest.find("`references/") {
+            rest = &rest[index + 1..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')))
+                .unwrap_or(rest.len());
+            let candidate = &rest[..end];
+            if candidate.ends_with(".md") && !out.iter().any(|seen| seen == candidate) {
+                out.push(candidate.to_string());
+            }
+            rest = &rest[end..];
+        }
+        out
     }
 
     #[test]
