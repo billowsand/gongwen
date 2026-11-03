@@ -14,7 +14,7 @@ export const PROGRESS_VERSION = 1;
 export const MAX_RECORDS = 400;
 const MAX_SOURCES = 8;
 const MAX_USES = MAX_RECORDS;
-const MAX_QUOTE_CHARS = 2_000;
+export const MAX_QUOTE_CHARS = 2_000;
 const MAX_SUMMARY_CHARS = 2_000;
 const MAX_UNIT_CHARS = 200;
 const MAX_SECTIONS = 12;
@@ -290,20 +290,35 @@ export class ProgressRegistry {
     const normalizedSources = [];
     for (const source of Array.isArray(sources) ? sources.slice(0, MAX_SOURCES) : []) {
       const sourcePath = typeof source?.path === "string" ? source.path : "";
-      const quote = clamp(source?.quote, MAX_QUOTE_CHARS);
+      let quote = typeof source?.quote === "string" ? source.quote : "";
       if (!sourcePath.startsWith("input/")) {
         throw new ProgressError("依据只能引用本轮 input/ 下的原文件，不能引用你自己的工作稿");
       }
-      if (quote.trim().length < 2) throw new ProgressError("每条依据都要带上可回查的原文摘录");
       const opened = guard.read(sourcePath, guard.root, maxFileBytes);
       if (!opened.ok) throw new ProgressError(`依据文件读不到：${sourcePath}`);
       let sourceText;
       try {
-        sourceText = fs.readFileSync(opened.value, "utf8");
+        sourceText = readTextFile(opened.value, maxFileBytes, true);
       } catch (error) {
         throw new ProgressError(`依据文件读不出来：${error.message}`);
       }
-      const start = sourceText.indexOf(quote, spec.kind === "distill" ? spec.start ?? 0 : 0);
+      let start;
+      if (source?.fromLine !== undefined || source?.toLine !== undefined) {
+        if (quote !== "") throw new ProgressError("依据定位只能选行号或 quote，不要同时填写");
+        const from = source.fromLine;
+        const to = source.toLine ?? from;
+        const lines = sourceText.split("\n");
+        if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from || to > lines.length) {
+          throw new ProgressError(`依据行号越界：使用原文件 1–${lines.length} 行内的 fromLine/toLine`);
+        }
+        start = lines.slice(0, from - 1).reduce((offset, line) => offset + line.length + 1, 0);
+        // 提取原文后仍核对材料角色、块范围、哈希和精确位置。
+        quote = lines.slice(from - 1, to).join("\n");
+      } else {
+        start = sourceText.indexOf(quote, spec.kind === "distill" ? spec.start ?? 0 : 0);
+      }
+      if (quote.trim().length < 2) throw new ProgressError("每条依据都要带上有效原文行号或可回查的原文摘录");
+      if (quote.length > MAX_QUOTE_CHARS) throw new ProgressError(`原文摘录超过 ${MAX_QUOTE_CHARS} 字符，请缩小行号范围或用短 quote`);
       if (start < 0) {
         throw new ProgressError(`摘录在原文里找不到：${sourcePath}（${quote.slice(0, 40)}…）`);
       }

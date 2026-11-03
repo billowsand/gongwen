@@ -91,7 +91,7 @@ function backend(contextWindow = 32768) {
 
 const DISTILL = "distill:input/materials/01.md#1";
 
-function phasedResponses() {
+function phasedResponses({ lineSources = false } = {}) {
   const done = fauxAssistantMessage([fauxText("这一步完成。")]);
   return [
     // 材料提炼：写摘记并登记带原文引文的成果。
@@ -105,7 +105,7 @@ function phasedResponses() {
         unit: DISTILL,
         path: "work/notes/01.md",
         summary: "检查时间与责任单位",
-        sources: [{ path: "input/materials/01.md", quote: "我局定于10月8日检查" }],
+        sources: [{ path: "input/materials/01.md", ...(lineSources ? { fromLine: 1, toLine: 1 } : { quote: "我局定于10月8日检查" }) }],
       }),
     ], { stopReason: "toolUse" }),
     done,
@@ -186,6 +186,53 @@ test("完整分阶段闭环：提炼→提纲→逐节→合稿→显式提交",
     assert.ok(record.path.startsWith("work/"));
   }
   assert.equal(progress.records.find((record) => record.unit === DISTILL).sources[0].role, "fact");
+});
+
+test("行号登记通过真实Harness完成交付，保存的引文仍是逐字原文", { timeout: 30_000 }, async () => {
+  const space = workspace();
+  const config = init(space, { preference: "phased" });
+  const { faux, models, model } = backend();
+  faux.setResponses(phasedResponses({ lineSources: true }));
+  const result = await runAgentJob({ config, models, model, emit: () => {} });
+  assert.ok(result.snapshot);
+  const progress = JSON.parse(fs.readFileSync(path.join(space.run, "progress.json"), "utf8"));
+  const source = progress.records.find(record => record.unit === DISTILL).sources[0];
+  assert.equal(source.quote, MATERIAL.split("\n")[0]);
+  assert.equal(source.start, 0);
+  assert.equal(source.end, source.quote.length);
+  assert.equal(source.sha256, identityOf({ guard: new WorkspaceGuard(space.root), workspace: config.workspace, task: config.task }).materials[0].sha256);
+});
+
+test("原文行号支持CRLF和Unicode，越界/混填/跨块/样稿不能冒充事实", () => {
+  const original = "题名🧾。\r\n2031年3月16日开始办理。\r\n责任单位：办公室。";
+  const space = workspace({ materials: [original] });
+  const config = init(space, { preference: "phased" });
+  const guard = new WorkspaceGuard(space.root);
+  const context = { guard, workspace: config.workspace, task: config.task, maxFileBytes: config.limits.maxFileBytes };
+  const registry = ProgressRegistry.load({ deliveryDir: space.run, runId: config.runId, requestId: config.requestId, identity: identityOf(context) });
+  const spec = buildPlan({ config, decision: decideStrategy(config), guard }).phases[0].units[0];
+  fs.writeFileSync(path.join(space.root, "work/notes.md"), "日期摘记");
+  const record = (source, override = spec) => registry.record({ spec: override, phase: "distill", unit: spec.id, file: "work/notes.md", sources: [{ path: spec.file, ...source }] }, context);
+  const found = record({ fromLine: 2, toLine: 2 }).record.sources[0];
+  assert.equal(found.quote, "2031年3月16日开始办理。\r");
+  assert.equal(original.slice(found.start, found.end), found.quote);
+  for (const bad of [{ fromLine: 0 }, { fromLine: 99 }, { fromLine: 1.5 }, { toLine: 2 }, { fromLine: 2, toLine: 1 }]) {
+    assert.throws(() => record(bad), /行号越界/);
+  }
+  assert.throws(() => record({ fromLine: 2, quote: "2031年3月16日" }), /不要同时/);
+  assert.throws(() => record({ fromLine: 2 }, { ...spec, end: 5 }), /本块范围/);
+  assert.throws(() => record({ path: "work/notes.md", fromLine: 1 }), /只能引用/);
+  config.task.materials[0].role = "style_sample";
+  assert.throws(() => record({ fromLine: 2 }), /不能登记为事实/);
+});
+
+test("带行号读取仍按工具结果预算分页", async () => {
+  const space = workspace({ materials: ["日期2031年3月16日。\n责任单位：办公室。\n".repeat(20)] });
+  const tool = createBoundedReadTool({ guard: new WorkspaceGuard(space.root), maxChars: 80 });
+  const read = await tool.execute({ path: "input/materials/01.md", offset: 2, limit: 40, numbered: true });
+  assert.match(read.output[0].text, /2 \| 责任单位：办公室/);
+  assert.ok(read.details.range.toLine < 40);
+  assert.ok(read.details.unreadFromLine);
 });
 
 test("相同窗口按任务规模路由：长材料分阶段，小任务常规", () => {

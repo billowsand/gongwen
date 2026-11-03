@@ -20,6 +20,7 @@ pub(crate) mod store;
 pub(crate) use catalog::{Catalog, Entry};
 pub(crate) use parser::valid_name;
 pub(crate) use snapshot::SkillSnapshot;
+pub(crate) use snapshot::content_digest;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

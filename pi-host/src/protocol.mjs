@@ -6,7 +6,7 @@
 import path from "node:path";
 
 export const PROTOCOL_VERSION = 3;
-export const HOST_VERSION = "0.3.0";
+export const HOST_VERSION = "0.3.2";
 
 /** 单行输出的上限（含换行）。正文最多 8 MiB，JSON 转义后留出余量。 */
 export const MAX_OUTPUT_LINE_BYTES = 16 * 1024 * 1024;
@@ -186,6 +186,7 @@ function validateStrategy(value) {
     capability: {
       ...(verifiedWorkBudget === undefined ? {} : { verifiedWorkBudget }),
       needsShortSteps: capability.needsShortSteps === true,
+      reason: typeof capability.reason === "string" ? capability.reason.slice(0, 500) : "",
     },
   };
 }

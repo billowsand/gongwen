@@ -5,6 +5,20 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PiCapabilitySnapshot {
+    #[serde(default)]
+    pub(crate) verified_work_budget: Option<u32>,
+    /// 未知值在协议边界按 false 传递；证据档案仍保留三态。
+    #[serde(default)]
+    pub(crate) needs_short_steps: bool,
+    #[serde(default)]
+    pub(crate) identity_key: String,
+    #[serde(default)]
+    pub(crate) reason: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PiStrategyPreference {

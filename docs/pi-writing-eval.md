@@ -24,9 +24,36 @@ Pi 实现者此前只跑离线单测与本机 HTTP 桩，桩结果不是模型�
 因此本评测回答的是「在这些自造任务上，模型 + 真实 host + 标准技能能否按判据交付」，
 不回答「内网知识库联机效果」或「真实公文写作质量总分」。
 
+另有 Rust 针对性用例 `pi_agent::tools::tests::pi_tool_context_uses_real_temporary_sqlite_knowledge_chain`：
+它只写自造记录到临时 SQLite，实际经过 `KnowledgeStore`、生产 `rag::retrieve`、只读 `SqliteManuscripts` 与 `PiToolContext`，
+核验 FTS 命中、稿件检索/读取、分页、证据登记和 embedding 失败降级告警。当前 loopback embedding 端点故意不可用，
+所以它证明的是**真实 SQLite/FTS 链 + 模拟 embedding 服务失败**，不证明真实 embedding 或 rerank 可用。
+现有 Node 桥接评测仍是 JS 模拟资料，两种结果分开报告，不得合并称作真实知识库/向量链验收。
+
+生产能力校准的真实模型入口是 Rust ignored 测试 `live_qwen_synthetic_sqlite_paired_calibration`；
+它用四次同题对照跑真实 PiJob、Pi host 和临时 SQLite/FTS 知识库 / 稿件库。模型必须从 `kb_search`、`kb_read`、
+`ms_search`、`ms_read` 取证后在正文保留仅库内的日期与办理地点。它不访问真实用户库；loopback embedding 仍是故意不可用，
+所以真实模型评测同时覆盖真实 FTS 和模拟向量服务故障。机器判据不替代人工质量评审。
+
+在用户已经启动并授权的 LM Studio 与开发 Pi runtime 上，可显式这样运行（API key 可不设；运行结果保存在仓库 `tmp/`）：
+
+```powershell
+$env:TEMP = 'D:\gongwen\tmp'; $env:TMP = 'D:\gongwen\tmp'
+$env:GONGWEN_PI_RUNTIME_DIR = 'D:\path\to\runtime\pi'
+$env:GONGWEN_PI_NODE = 'D:\path\to\runtime\pi\node.exe'
+$env:GONGWEN_PI_LIVE_CALIBRATION = '1'
+$env:GONGWEN_PI_CALIBRATION_URL = 'http://127.0.0.1:12345/v1'
+$env:GONGWEN_PI_CALIBRATION_MODEL = '当前已加载模型 ID'
+$env:GONGWEN_PI_CALIBRATION_THINKING = 'high'
+cargo test --locked pi_agent::capability::tests::live_qwen_synthetic_sqlite_paired_calibration -- --ignored --nocapture
+```
+
+测试要求 Rust 已能定位验证过的 Pi runtime；不联网安装依赖、不读取应用配置或真实凭据。结果档案与含四份合成成品的
+单独证据文件写到 `tmp/pi-implementation/phase-6ab-live-evidence/`，文件摘要相互校验。
+
 ## 二、案例
 
-`tests/fixtures/pi-writing-eval/cases.json` 共 8 个：
+`tests/fixtures/pi-writing-eval/cases.json` 共 9 个：
 
 | 名称 | 场景 | 关键业务判据 |
 | --- | --- | --- |

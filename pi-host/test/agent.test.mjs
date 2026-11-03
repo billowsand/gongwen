@@ -10,12 +10,58 @@ import {
   fauxText,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { AgentError, runAgentJob, writingCompaction } from "../src/agent.mjs";
+import { AgentError, findHandNumberedHeadings, runAgentJob, writingCompaction } from "../src/agent.mjs";
 import { PROTOCOL_VERSION, validateInit } from "../src/protocol.mjs";
 import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 
 // 这些测试用 faux provider，只验证真实 Durable harness、工作区限制与提交协议；
 // 生产入口 main.mjs 永远构造 OpenAI 兼容 provider，不走这里。
+
+test("标题编号检查放过年份标题，但仍拦显式编号", () => {
+  assert.deepEqual(findHandNumberedHeadings([
+    "## 2027 年度系统运维经费保障意见",
+    "## 1. 事项",
+    "## 一、工作安排",
+    "## （二）保障措施",
+    "## 附录 A：资料清单",
+    "## Appendix B.2: Results",
+  ].join("\n")), ["## 1. 事项", "## 一、工作安排", "## （二）保障措施", "## 附录 A：资料清单", "## Appendix B.2: Results"]);
+});
+
+test("分阶段登记对同一单元连续失败三次后由宿主终止Harness并保留工作文件", { timeout: 15_000 }, async () => {
+  const workspace = makeWorkspace();
+  fs.mkdirSync(path.join(workspace.root, "input", "materials"), { recursive: true });
+  fs.writeFileSync(path.join(workspace.root, "input", "materials", "00.md"), "用于校验引文的原始材料内容。\n");
+  const config = makeConfig(workspace);
+  config.strategy = { preference: "phased", capability: {} };
+  config.task.materials = [{ file: "input/materials/00.md", title: "测试材料", role: "fact", sha256: "", bytes: 20 }];
+  const { faux, models, model } = fakeBackend();
+  const invalid = fauxToolCall("record_progress", {
+    phase: "distill", unit: "distill:input/materials/00.md#1", path: "work/distill.md",
+    summary: "提炼材料", sources: [{ path: "input/materials/00.md", quote: "材料里不存在的引文" }],
+  });
+  let invalidAttempts = 0;
+  let correctionContext = "";
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall("write", { path: "work/distill.md", content: "已摘录材料要点。\n" })], { stopReason: "toolUse" }),
+    ...Array.from({ length: 3 }, () => context => {
+      invalidAttempts += 1;
+      correctionContext = JSON.stringify(context);
+      return fauxAssistantMessage([invalid], { stopReason: "toolUse" });
+    }),
+    fauxAssistantMessage([fauxText("继续尝试")]),
+  ]);
+  const started = Date.now();
+  await assert.rejects(
+    () => runAgentJob({ config, models, model, emit: () => {} }),
+    error => error.code === "progress_retry_limit" && /work\//.test(error.message),
+  );
+  assert.ok(Date.now() - started < 10_000, "应立即终止，不等到任务总超时");
+  assert.equal(invalidAttempts, 3, "真实Harness只应允许当前单元三次无效登记尝试");
+  assert.match(correctionContext, /数字、日期和其中的空格也必须原样复制/);
+  assert.match(correctionContext, /用于校验引文的原始材料内容/);
+  assert.equal(fs.readFileSync(path.join(workspace.root, "work", "distill.md"), "utf8"), "已摘录材料要点。\n");
+});
 
 function makeWorkspace() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gongwen-pi-agent-"));

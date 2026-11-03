@@ -805,6 +805,8 @@ fn refine_model_window(prepare: &mut PiPrepare) {
     let window = crate::lmstudio::context::window(&probe);
     let tokens = window.tokens.min(u32::MAX as usize).max(1) as u32;
     prepare.model.context_window = tokens;
+    prepare.model.window_source =
+        crate::pi_agent::capability::CapabilityWindowSource::from_window(window.source);
     prepare.model.max_tokens = prepare
         .model
         .max_tokens
@@ -891,6 +893,7 @@ fn prepare_start(
     // 先写候选稿（会往 request.md 追加说明），再取实际输入文件的哈希；顺序反了
     // 记录里的 input_request 就对应旧内容，恢复必然被拒。
     let input_request = finalize_input(&workspace, &base, &before)?;
+    let capability = matched_capability(&model, &skill_snapshot_digest(&workspace)?);
     let run_id = uuid::Uuid::new_v4().to_string();
     let request_id = format!("gongwen-{key}-{seq}");
     let mut record = PiRunRecord::start(
@@ -915,7 +918,8 @@ fn prepare_start(
         &model_provider,
         &model_id,
     )
-    .with_strategy(strategy);
+    .with_strategy(strategy)
+    .with_capability(capability.clone());
     record.user_request = raw_request;
     let log = Arc::new(PiRunLog::open(&workspace, record)?);
     let tools = Arc::new(PiToolContext::new(
@@ -939,6 +943,7 @@ fn prepare_start(
             system_date,
             skill,
             strategy,
+            capability,
             selection,
             materials: metas,
         },
@@ -1015,6 +1020,7 @@ fn prepare_resume(
             record.skill.as_deref(),
         )?;
         let input_request = finalize_input(&workspace, &base, &before)?;
+        let capability = matched_capability(&model, &skill_snapshot_digest(&workspace)?);
         let material_facts: Vec<String> = inputs
             .iter()
             .filter(|material| material.role.is_fact_source())
@@ -1045,7 +1051,8 @@ fn prepare_resume(
             &model_provider,
             &model_id,
         )
-        .with_strategy(record.strategy);
+        .with_strategy(record.strategy)
+        .with_capability(capability.clone());
         new_record.user_request = record.user_request.clone();
         let log = Arc::new(PiRunLog::open(&workspace, new_record)?);
         let tools = Arc::new(PiToolContext::new(
@@ -1067,6 +1074,7 @@ fn prepare_resume(
                 system_date,
                 skill: record.skill,
                 strategy,
+                capability,
                 selection,
                 materials: metas,
             },
@@ -1149,6 +1157,7 @@ fn prepare_resume(
             system_date: record.system_date,
             skill: record.skill,
             strategy,
+            capability: record.capability.clone(),
             selection,
             materials,
         },
@@ -1275,7 +1284,7 @@ impl PiRunLog {
 ///
 /// 思考深度取自 `AppConfig::pi_chat`（Pi 自己的 `pi_options`，不沿用文字起草）；
 /// 窗口与输出预算仍由程序自动解析。
-fn pi_model(chat: &LmStudioConfig) -> Result<PiModel, String> {
+pub(crate) fn pi_model(chat: &LmStudioConfig) -> Result<PiModel, String> {
     let base_url = chat.base_url.trim().trim_end_matches('/').to_string();
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
         return Err(format!(
@@ -1287,9 +1296,8 @@ fn pi_model(chat: &LmStudioConfig) -> Result<PiModel, String> {
     if model_id.is_empty() {
         return Err("还没有选择智能写作模型：请到「AI 管理 → 模型服务」选择。".into());
     }
-    let context_window = crate::lmstudio::context::peek_window(chat)
-        .tokens
-        .min(u32::MAX as usize) as u32;
+    let window = crate::lmstudio::context::peek_window(chat);
+    let context_window = window.tokens.min(u32::MAX as usize) as u32;
     // 配置冲突时限制输出，不能虚构比服务端实际值更大的上下文窗口。
     let max_tokens = chat
         .max_tokens
@@ -1307,10 +1315,106 @@ fn pi_model(chat: &LmStudioConfig) -> Result<PiModel, String> {
         api_key: chat.api_key.clone(),
         model_id,
         context_window,
+        window_source: crate::pi_agent::capability::CapabilityWindowSource::from_window(
+            window.source,
+        ),
         max_tokens,
         reasoning,
         thinking_level,
     })
+}
+
+/// 仅选取与本次窗口数值及来源、服务、思考设置及技能快照完全相同的证据档案。
+fn matched_capability(
+    model: &PiModel,
+    skill_digest: &str,
+) -> crate::pi_agent::PiCapabilitySnapshot {
+    use crate::pi_agent::capability::{CapabilityIdentity, load};
+    let thinking = if model.reasoning {
+        model.thinking_level.as_deref().unwrap_or("enabled")
+    } else {
+        "default"
+    };
+    let source_note = format!("{}；", model.window_source.description());
+    let identity = match CapabilityIdentity::new(
+        &model.base_url,
+        &model.model_id,
+        model.context_window,
+        model.window_source,
+        thinking,
+        skill_digest,
+    ) {
+        Ok(identity) => identity,
+        Err(error) => {
+            return crate::pi_agent::PiCapabilitySnapshot {
+                reason: format!("{source_note}能力档案身份无效：{error}；本轮按保守预算运行"),
+                ..Default::default()
+            };
+        }
+    };
+    let path = match crate::storage::config_dir() {
+        Ok(dir) => dir.join("pi").join("capability.json"),
+        Err(error) => {
+            return crate::pi_agent::PiCapabilitySnapshot {
+                reason: format!("{source_note}无法读取能力档案目录：{error:#}；本轮按保守预算运行"),
+                ..Default::default()
+            };
+        }
+    };
+    let entries = match load(&path) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return crate::pi_agent::PiCapabilitySnapshot {
+                reason: format!("{source_note}{error}；本轮按保守预算运行"),
+                ..Default::default()
+            };
+        }
+    };
+    let Some(profile) = entries
+        .iter()
+        .rev()
+        .find(|profile| profile.matches(&identity))
+    else {
+        return crate::pi_agent::PiCapabilitySnapshot {
+            identity_key: identity.key(),
+            reason: format!(
+                "{source_note}模型服务、窗口、思考设置或技能版本没有匹配的校准证据；按保守预算运行"
+            ),
+            ..Default::default()
+        };
+    };
+    let evidence_dir = match crate::storage::config_dir() {
+        Ok(dir) => dir.join("pi").join("calibration-evidence"),
+        Err(_) => {
+            return crate::pi_agent::PiCapabilitySnapshot {
+                identity_key: identity.key(),
+                reason: format!("{source_note}校准证据目录不可用；按保守预算运行"),
+                ..Default::default()
+            };
+        }
+    };
+    if !crate::pi_agent::capability::verify_evidence(&evidence_dir, &profile.evidence_digest) {
+        return crate::pi_agent::PiCapabilitySnapshot {
+            identity_key: identity.key(),
+            reason: format!("{source_note}校准证据缺失或校验失败；按保守预算运行"),
+            ..Default::default()
+        };
+    }
+    let (verified_work_budget, needs_short_steps) = profile.init_values();
+    crate::pi_agent::PiCapabilitySnapshot {
+        verified_work_budget,
+        needs_short_steps,
+        identity_key: identity.key(),
+        reason: format!(
+            "{}；{}",
+            identity.window_source.description(),
+            profile.conclusion.recommendation
+        ),
+    }
+}
+
+fn skill_snapshot_digest(workspace: &PiWorkspace) -> Result<String, String> {
+    crate::pi_agent::pi_skills::content_digest(&workspace.root)
 }
 
 #[cfg(test)]
@@ -1422,7 +1526,13 @@ mod tests {
             "原服务商",
             "原模型",
         )
-        .with_strategy(PiStrategyPreference::Phased);
+        .with_strategy(PiStrategyPreference::Phased)
+        .with_capability(crate::pi_agent::PiCapabilitySnapshot {
+            verified_work_budget: Some(12_000),
+            needs_short_steps: true,
+            identity_key: "identity-at-start".into(),
+            reason: "当时的校准摘要".into(),
+        });
         record.write(&workspace).unwrap();
         let mut prepare = preparation();
         prepare.reference = Some(PiRunRef::from_record(&record));
@@ -1496,7 +1606,13 @@ mod tests {
             "当前服务商",
             "当前模型",
         )
-        .with_strategy(PiStrategyPreference::Phased);
+        .with_strategy(PiStrategyPreference::Phased)
+        .with_capability(crate::pi_agent::PiCapabilitySnapshot {
+            verified_work_budget: Some(12_000),
+            needs_short_steps: true,
+            identity_key: "identity-at-start".into(),
+            reason: "当时的校准摘要".into(),
+        });
         record.write(&workspace).unwrap();
         let mut prepare = preparation();
         prepare.reference = Some(PiRunRef::from_record(&record));
@@ -1512,6 +1628,8 @@ mod tests {
         .unwrap();
         assert!(launch.resume);
         assert_eq!(launch.task.strategy, PiStrategyPreference::Phased);
+        assert_eq!(launch.task.capability.verified_work_budget, Some(12_000));
+        assert_eq!(launch.task.capability.reason, "当时的校准摘要");
         assert_eq!(
             launch.record.snapshot().strategy,
             PiStrategyPreference::Phased,

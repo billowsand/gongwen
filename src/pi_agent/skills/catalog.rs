@@ -82,6 +82,18 @@ impl Catalog {
     }
 }
 
+/// 合成校准用固定内置目录，不访问用户配置或停用清单。
+pub(crate) fn builtins() -> Catalog {
+    let disabled = std::collections::BTreeSet::new();
+    Catalog {
+        entries: super::BUILTINS
+            .iter()
+            .map(|name| builtin_entry(name, &disabled))
+            .collect(),
+        ..Default::default()
+    }
+}
+
 /// 读配置目录，生成一份有效目录。单个技能坏了只记错误，不让整页打不开。
 pub(crate) fn load() -> Catalog {
     let mut catalog = Catalog {

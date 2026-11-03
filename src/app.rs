@@ -158,6 +158,21 @@ pub struct GongwenApp {
     pub(crate) provider_status: std::collections::HashMap<String, ProviderProbe>,
     /// 提供商卡片哪些处于展开编辑态。
     pub(crate) provider_edit: std::collections::HashSet<String>,
+    /// Pi 合成能力校准后台结果；每个任务独立隔离，不挂到稿件轮次。
+    pi_calibration_rx: Option<
+        std::sync::mpsc::Receiver<
+            Result<
+                (
+                    crate::pi_agent::capability::CapabilityProfile,
+                    crate::pi_agent::capability::CalibrationEvidence,
+                ),
+                String,
+            >,
+        >,
+    >,
+    pi_calibration_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pi_calibration_note: String,
+    pi_calibration_view_key: String,
     /// 各模型选择器弹层的筛选词（键是选择器的 salt）。
     pub(crate) model_filter: BTreeMap<String, String>,
     /// 各模型选择器是否展开了「其他类型的模型」（键是选择器的 salt）。
@@ -578,6 +593,10 @@ impl GongwenApp {
             export_links: ExportLinks::default(),
             provider_status: std::collections::HashMap::new(),
             provider_edit: std::collections::HashSet::new(),
+            pi_calibration_rx: None,
+            pi_calibration_cancel: None,
+            pi_calibration_note: String::new(),
+            pi_calibration_view_key: String::new(),
             model_filter: BTreeMap::new(),
             model_picker_show_all: std::collections::HashSet::new(),
             vocabulary_import_conflicts: None,

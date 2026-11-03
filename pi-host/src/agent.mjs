@@ -33,6 +33,12 @@ import {
   writeReportReceipt,
 } from "./delivery.mjs";
 import { REPORT_TOOL_NAME, SUBMIT_TOOL_NAME, loadSkillIndex, systemPrompt, userPrompt } from "./prompt.mjs";
+
+/** 只拦标题中的显式编号；普通年份（如“2027 年度……”）不是编号。 */
+export function findHandNumberedHeadings(prose) {
+  const numberedHeading = /^#{2,6}\s+(?:附录\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?|[Aa][Pp][Pp][Ee][Nn][Dd][Ii][Xx]\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?|[一二三四五六七八九十百零]+[、.．]|[（(][一二三四五六七八九十百零\d]+[）)]|第[一二三四五六七八九十百零\d]+(?:[章节条]|部分)|\d+(?:\.\d+)+|\d+[、.．]|\d{1,3}\s+)/u;
+  return prose.split("\n").filter((line) => numberedHeading.test(line)).slice(0, 12);
+}
 import { budgetLabel, decideStrategy, readBudgetChars, taskEstimate } from "./budget.mjs";
 import {
   RECORD_TOOL_NAME,
@@ -190,7 +196,7 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir
         const repair = phase.phased ? ` 修改文件后先用 record_progress 重新登记 phase=review, unit=final, path=${relative}, uses=${JSON.stringify(phase.registry.get("final")?.uses ?? [])}，再提交。` : "修改文件后重新提交。";
         const issues = [];
         if (phase?.task?.kind !== "会议纪要" && !/^#\s+[^#\s]/u.test(prose.trimStart())) issues.push("第一行必须是唯一的 # 具体题名，再写摘要/正文标记");
-        const numbered = prose.split("\n").filter((line) => /^#{2,6}\s+(?:[一二三四五六七八九十百零]+[、.．]|[（(][一二三四五六七八九十百零\d]+[）)]|第[一二三四五六七八九十百零\d]+(?:[章节条]|部分)|\d+(?:\.\d+)+|\d+[、.．\s])/u.test(line)).slice(0, 12);
+        const numbered = findHandNumberedHeadings(prose);
         if (numbered.length) issues.push(`标题不要手写编号（包括第几部分），删除编号并保留 # 层级和标题文字：${numbered.join("；")}`);
         const invalid = research && prose.match(/\[\^[^\]\r\n]+\](?![:：]\s*[(（])/u);
         if (invalid) {
@@ -338,7 +344,24 @@ function createReportTool({ state, emit, deliveryDir, runId, requestId, phase })
  * 中间成果登记。模型只能提交「阶段 + 单元 + 路径 + 可回查引文」，由宿主核验文件、
  * 哈希、原文定位与依赖后写入运行目录；它不能写正文，也不能代替最终提交。
  */
-function createRecordTool({ guard, limits, phase, registry, emit }) {
+function createRecordTool({ guard, limits, phase, registry, emit, onFatal }) {
+  const invalidByUnit = new Map();
+  let invalidTotal = 0;
+  const rejectRegistration = (error, unit) => {
+    invalidTotal += 1;
+    const key = typeof unit === "string" ? unit.slice(0, 100) : "<missing>";
+    const unitCount = (invalidByUnit.get(key) ?? 0) + 1;
+    invalidByUnit.set(key, unitCount);
+    if (unitCount >= 3 || invalidTotal >= 8) {
+      const fatal = new AgentError(
+        `阶段成果登记对当前单元累计失败 ${unitCount} 次（全阶段 ${invalidTotal} 次），已停止本单元以避免重复消耗；work/ 文件已保留，可修正引文后继续。最后错误：${error?.message ?? error}`,
+        "progress_retry_limit",
+      );
+      onFatal?.(fatal);
+      throw fatal;
+    }
+    throw error;
+  };
   return defineTool({
     name: RECORD_TOOL_NAME,
     description:
@@ -352,7 +375,9 @@ function createRecordTool({ guard, limits, phase, registry, emit }) {
         Type.Array(
           Type.Object({
             path: Type.String({ description: "input/ 下的原文件路径" }),
-            quote: Type.String({ description: "原文里连续的一句，必须能回查" }),
+            fromLine: Type.Optional(Type.Integer({ minimum: 1, description: "推荐：read(numbered:true)显示的原文行号，1开始；宿主提取原文，不再填写quote" })),
+            toLine: Type.Optional(Type.Integer({ minimum: 1, description: "结束行号，含该行；不填则只取fromLine这一行" })),
+            quote: Type.Optional(Type.String({ description: "兼容方式：原文里连续的一句，必须逐字一致；不要与行号同时填写" })),
           }),
         ),
       ),
@@ -367,12 +392,14 @@ function createRecordTool({ guard, limits, phase, registry, emit }) {
         ? phase.plan.phases.find((item) => item.id === "review") : undefined);
       const spec = (accepted?.units ?? []).find((unit) => unit.id === args?.unit);
       if (!spec) {
-        throw new AgentError(
+        return rejectRegistration(new AgentError(
           `这一步没有单元「${String(args?.unit ?? "")}」。请按提示里列出的单元编号逐字登记。`,
           "progress_invalid_unit",
-        );
+        ), args?.unit);
       }
-      const result = registry.record(
+      let result;
+      try {
+        result = registry.record(
         {
           spec: { ...spec, attempt: phase.attempt ?? 1 },
           phase: args?.phase,
@@ -389,7 +416,28 @@ function createRecordTool({ guard, limits, phase, registry, emit }) {
           task: phase.task,
           maxFileBytes: limits.maxFileBytes,
         },
-      );
+        );
+      } catch (error) {
+        const failure = toAgentError(error);
+        let hint = "当前正文阶段不要重复填写 sources；沿用已登记材料即可。若本步是样稿研究，仍须按提示提供一条原文摘录。";
+        if (spec.kind === "distill" && spec.file) {
+          const opened = guard.read(spec.file, phase.workspace.root, limits.maxFileBytes);
+          if (opened.ok) {
+            try {
+              const raw = fs.readFileSync(opened.value, "utf8");
+              const start = Math.max(0, spec.start ?? 0);
+              const end = Math.min(raw.length, spec.end ?? raw.length);
+              const excerpt = raw.slice(start, Math.min(end, start + 220));
+              if (excerpt) {
+                hint = `请从本单元允许范围逐字复制一小段作 quote；数字、日期和其中的空格也必须原样复制，不要改写。原文片段：${JSON.stringify(excerpt)}`;
+              }
+            } catch {
+              // 只提供提示；原来的登记校验仍是唯一裁判。
+            }
+          }
+        }
+        return rejectRegistration(new AgentError(`${failure.message}。${hint}`, failure.code), args?.unit);
+      }
       const status = registry.status(phase.id, accepted.allUnits ?? accepted.units);
       if (phase.id === "distill") {
         emit({ type: "progress", message: `正在提炼第 ${status.done}/${status.total} 份材料…` });
@@ -431,6 +479,7 @@ function createExtension({
   phase,
   registry,
   readChars,
+  onFatal,
 }) {
   const tools = [
     ...createDomainTools(bridge, {
@@ -450,7 +499,7 @@ function createExtension({
     createBoundedReadTool({ guard, maxFileBytes: limits.maxFileBytes, maxChars: readChars }),
     createWriteTool(),
     createEditTool(),
-    createRecordTool({ guard, limits, phase, registry, emit }),
+    createRecordTool({ guard, limits, phase, registry, emit, onFatal }),
     createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId, phase }),
     createReportTool({ state, emit, deliveryDir, runId, requestId, phase }),
   ];
@@ -577,7 +626,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     phase.spec = unit ? { ...saved, units: [unit], allUnits: saved.units } : saved;
   }
 
-  const state = { snapshot: undefined, report: undefined, parked: undefined };
+  const state = { snapshot: undefined, report: undefined, parked: undefined, terminalToolError: undefined };
   let submitResolve;
   const submitted = new Promise((resolve) => {
     submitResolve = resolve;
@@ -624,6 +673,10 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
         phase,
         registry,
         readChars: readBudgetChars(decision),
+        onFatal: (error) => {
+          state.terminalToolError = error;
+          controller.cancel(error);
+        },
         onSubmitted: (snapshot) => submitResolve(snapshot),
       }),
     );
@@ -929,6 +982,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       }));
     }
   } catch (error) {
+    if (state.terminalToolError) throw state.terminalToolError;
     if (timedOut) throw new AgentError("Pi 智能写作超时，未交付任何提案。", "timeout");
     if (controller.context.abortSignal?.aborted && !state.snapshot && !state.report) {
       throw new AgentError("已停止，未交付任何提案。", "cancelled");

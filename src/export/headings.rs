@@ -23,7 +23,7 @@ pub(crate) fn clean_heading_number(text: &str) -> String {
         r"^\(\d+\)\s*[、.．]?\s*",
         r"^\d+(?:\.\d+)+[.．]?\s*",
         r"^\d+[.．、]\s+",
-        r"^\d+\s+",
+        r"^\d{1,3}\s+",
     ];
     static REGEXES: OnceLock<Vec<Regex>> = OnceLock::new();
     let mut cleaned = text.to_string();
@@ -212,6 +212,18 @@ impl HeadingCounters {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heading_number_cleanup_preserves_year_titles_and_clears_short_manual_prefixes() {
+        assert_eq!(
+            clean_heading_number("2027 年度系统运维经费保障意见"),
+            "2027 年度系统运维经费保障意见"
+        );
+        assert_eq!(clean_heading_number("2027年重点工作"), "2027年重点工作");
+        assert_eq!(clean_heading_number("1 事项"), "事项");
+        assert_eq!(clean_heading_number("1. 事项"), "事项");
+        assert_eq!(clean_heading_number("一、事项"), "事项");
+    }
 
     #[test]
     fn renders_every_heading_numbering_style() {

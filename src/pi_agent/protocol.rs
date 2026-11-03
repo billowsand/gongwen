@@ -8,7 +8,7 @@ use super::materials::PiMaterialMeta;
 /// 直接拒绝新 init，恢复时也不会拿旧 host 去开原工作区。
 pub(crate) const PROTOCOL_VERSION: u32 = 3;
 /// host 版本；运行记录里存一份，恢复时不一致就拒绝在原工作区接着写。
-pub(crate) const HOST_VERSION: &str = "0.3.0";
+pub(crate) const HOST_VERSION: &str = "0.3.2";
 /// 一条协议行的上限。host 侧同样按 16 MiB 卡住。
 pub(crate) const MAX_HOST_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// 整个进程最多处理多少条消息。
@@ -80,6 +80,9 @@ pub(crate) struct InitCapability {
     pub(crate) verified_work_budget: Option<u32>,
     /// 实测更适合短步骤的模型标记；未知能力不按模型名称猜。
     pub(crate) needs_short_steps: bool,
+    /// 档案匹配/回退说明，供策略事件与侧栏运行记录回看。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -388,6 +391,7 @@ mod tests {
             capability: InitCapability {
                 verified_work_budget: None,
                 needs_short_steps: false,
+                reason: "无匹配档案".into(),
             },
         };
         let value = serde_json::to_value(&init).unwrap();

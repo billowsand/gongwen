@@ -66,6 +66,18 @@ impl PiWorkspace {
         catalog: &Catalog,
         selected: Option<&str>,
     ) -> Result<(Self, Vec<PiMaterialMeta>), String> {
+        let skills = SkillSnapshot::build(catalog, selected)?;
+        Self::prepare_with_snapshot(base, doc_key, current, request, materials, &skills)
+    }
+
+    pub(crate) fn prepare_with_snapshot(
+        base: &Path,
+        doc_key: u64,
+        current: &str,
+        request: &str,
+        materials: &[PiMaterialInput],
+        skills: &SkillSnapshot,
+    ) -> Result<(Self, Vec<PiMaterialMeta>), String> {
         let doc_dir = base.join(format!("doc-{doc_key}"));
         std::fs::create_dir_all(&doc_dir)
             .map_err(|error| format!("建不了工作区子目录（{}）：{error}", doc_dir.display()))?;
@@ -81,7 +93,6 @@ impl PiWorkspace {
         }
         write_text(&root.join("input").join("current.md"), current)?;
         // 先按同一份内存快照落盘技能与索引，再用同一份快照写要求文件。
-        let skills = SkillSnapshot::build(catalog, selected)?;
         skills.write_to(&root)?;
         let mut request_file = vec![request.trim().to_string()];
         request_file.push(String::new());

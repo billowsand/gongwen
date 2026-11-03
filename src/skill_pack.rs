@@ -630,11 +630,17 @@ mod tests {
         );
         let year_heading =
             "# ××工作要点\n\n<!-- [正文] -->\n\n### 2026 年第三季度共享数据统计\n\n内容。\n";
+        assert_eq!(
+            syntax_problems_in_model_output("plain-document", year_heading),
+            Vec::<String>::new(),
+            "年份标题不应被当作手写编号"
+        );
+        let manual_number_heading = "# ××工作要点\n\n<!-- [正文] -->\n\n### 1 事项\n\n内容。\n";
         assert!(
-            syntax_problems_in_model_output("plain-document", year_heading)
+            syntax_problems_in_model_output("plain-document", manual_number_heading)
                 .iter()
                 .any(|problem| problem.contains("手写了编号")),
-            "「数字 + 空格」开头的标题没被挑出来"
+            "真正的阿拉伯数字序号仍应被挑出"
         );
 
         // 校验器对比：技能文档要求的 `【待核实：……】` 占位不算写错；

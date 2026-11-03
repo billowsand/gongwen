@@ -6,11 +6,34 @@
 
 import fs from "node:fs";
 import { chunkChars } from "./budget.mjs";
+import { MAX_QUOTE_CHARS } from "./progress.mjs";
 
 export const RECORD_TOOL_NAME = "record_progress";
 
 const MAX_PHASES = 20;
 const MAX_SECTION_PHASES = 12;
+
+/** 给模型一条处于当前块内的完整非空行，避免让它重抄日期和数字。 */
+function firstSourceLine(text, start, end) {
+  let offset = start;
+  if (start > 0 && text[start - 1] !== "\n") {
+    const newline = text.indexOf("\n", start);
+    if (newline < 0) return undefined;
+    offset = newline + 1;
+  }
+  while (offset < end) {
+    const newline = text.indexOf("\n", offset);
+    const finish = newline < 0 ? text.length : newline;
+    if (finish > end) return undefined;
+    const line = text.slice(offset, finish);
+    if (line.trim().length >= 2 && line.length <= MAX_QUOTE_CHARS) {
+      return text.slice(0, offset).split("\n").length;
+    }
+    if (newline < 0) break;
+    offset = newline + 1;
+  }
+  return undefined;
+}
 
 /** 读材料原文用于分块（材料总量已由 Rust 侧限制在 4 MiB 内）。 */
 function readMaterial(guard, file, maxFileBytes) {
@@ -61,6 +84,7 @@ export function buildPlan({ config, decision, guard }) {
           role: material.role,
           start: index * chunkSize,
           end: Math.min(text.length, (index + 1) * chunkSize),
+          sourceLine: firstSourceLine(text, index * chunkSize, Math.min(text.length, (index + 1) * chunkSize)),
           chars: Math.min(chunkSize, text.length - index * chunkSize),
         });
       }
@@ -74,6 +98,7 @@ export function buildPlan({ config, decision, guard }) {
         title: material.title,
         role: material.role,
         chars: text.length,
+        sourceLine: firstSourceLine(text, 0, text.length),
       });
     }
   }
@@ -212,11 +237,14 @@ function unitLines(units) {
 }
 
 function recordExample(unit) {
+  const locator = Number.isInteger(unit.sourceLine)
+    ? `fromLine: ${unit.sourceLine}, toLine: ${unit.sourceLine}`
+    : 'quote: "从当前块逐字复制的短原句，数字与空格保持原样"';
   if (unit.kind === "distill") {
-    return `record_progress({ phase: "distill", unit: "${unit.unit}", path: "work/notes/${unit.unit.replace(/[^\w]+/g, "-")}.md", summary: "这一块的关键事实", sources: [{ path: "${unit.file}", quote: "原文里的完整一句" }] })`;
+    return `record_progress({ phase: "distill", unit: "${unit.unit}", path: "work/notes/${unit.unit.replace(/[^\w]+/g, "-")}.md", summary: "这一块的关键事实", sources: [{ path: "${unit.file}", ${locator} }] })`;
   }
   if (unit.kind === "study") {
-    return `record_progress({ phase: "distill", unit: "${unit.unit}", path: "work/notes/style.md", summary: "写法 / 结构小结", sources: [{ path: "${unit.file}", quote: "原文里的一句" }] })`;
+    return `record_progress({ phase: "distill", unit: "${unit.unit}", path: "work/notes/style.md", summary: "写法 / 结构小结", sources: [{ path: "${unit.file}", ${locator} }] })`;
   }
   if (unit.kind === "outline") {
     return `record_progress({ phase: "outline", unit: "outline", path: "work/outline.md", summary: "提纲", uses: [已登记的材料单元], sections: ["总体要求", "工作安排"] })`;
@@ -260,7 +288,7 @@ ${unitLines(phase.units)}
 做法：
 1. 本步只处理一个单元。事实块直接读取字符范围：${phase.units[0]?.kind === "distill" ? `read({ path: "${phase.units[0].file}", start: ${phase.units[0].start}, end: ${phase.units[0].end} })` : `read({ path: "${phase.units[0]?.file ?? "输入文件"}" })`}，按返回的未读位置继续；不要读别的材料块。
 2. 在这一块的摘记里写：与本次要求相关的事实（数字、日期、单位、责任、期限照抄原文）、以及可用的写法 / 结构要点（样稿只写写法）。
-3. 写完后立刻登记这一块，引文必须是原文里连续的一句，能回查：
+3. 写完后立刻登记这一块。优先使用下面示例的原文行号，宿主会提取原句；使用行号时不填 quote。没有可用完整行时才逐字填写短 quote（不改数字或空格）。自行找行号可用 read({path, numbered:true})，数字与竖线前缀不属于原文：
    ${recordExample(phase.units[0])}
 4. 重复直到上面每一块都有登记。不要调用 submit_document。${correction}${retry}`;
   }

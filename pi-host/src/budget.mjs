@@ -92,6 +92,9 @@ export function decideStrategy(config, estimate = taskEstimate(config)) {
   const materialsBudget = workBudget - INSTRUCTION_RESERVE - outputReserve - toolReserve - SAFETY_RESERVE;
   const reasons = [];
   const preference = config.strategy?.preference === "phased" ? "phased" : "auto";
+  if (typeof capability.reason === "string" && capability.reason.trim()) {
+    reasons.push(`能力档案：${capability.reason.slice(0, 500)}`);
+  }
 
   if (materialsBudget >= 1_024 && (estimate.selection || (estimate.materialCount === 0 && estimate.requestTokens + estimate.currentTokens < 400))) {
     reasons.push("局部修改或很小的任务，按常规一轮完成");

@@ -17,6 +17,7 @@
 use super::delivery::sha256_hex;
 use super::materials::PiMaterialMeta;
 use super::protocol::{HOST_VERSION, PROTOCOL_VERSION};
+use super::strategy::PiCapabilitySnapshot;
 use super::strategy::PiStrategyPreference;
 use super::workspace::PiWorkspace;
 use serde::{Deserialize, Serialize};
@@ -108,6 +109,9 @@ pub(crate) struct PiRunRecord {
     /// 当前选的是什么；旧记录没有这一项，按自动（与旧行为一致）。
     #[serde(default)]
     pub(crate) strategy: PiStrategyPreference,
+    /// 启动时选中的能力档案快照；恢复严格沿用当次快照。
+    #[serde(default)]
+    pub(crate) capability: PiCapabilitySnapshot,
     #[serde(default)]
     pub(crate) selection: Option<PiRunSelection>,
     #[serde(default)]
@@ -291,6 +295,7 @@ impl PiRunRecord {
             system_date: system_date.to_string(),
             skill: skill.map(str::to_string),
             strategy: PiStrategyPreference::Auto,
+            capability: PiCapabilitySnapshot::default(),
             selection,
             materials,
             model_provider: model_provider.to_string(),
@@ -316,6 +321,11 @@ impl PiRunRecord {
     /// 不会因为输入框后来换了选择而在中途把常规任务变成分阶段。
     pub(crate) fn with_strategy(mut self, strategy: PiStrategyPreference) -> Self {
         self.strategy = strategy;
+        self
+    }
+
+    pub(crate) fn with_capability(mut self, capability: PiCapabilitySnapshot) -> Self {
+        self.capability = capability;
         self
     }
 

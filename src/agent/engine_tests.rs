@@ -1117,7 +1117,11 @@ fn polish_runs_through_the_engine_with_the_selection_pinned() {
     assert_eq!(calls.len(), 1);
     let (role, prompt) = &calls[0];
     assert_eq!(*role, ModelRole::Draft);
-    assert!(prompt.contains("精简篇幅\n\n压缩"), "{prompt}");
+    assert!(prompt.contains("【本次优化任务】\n压缩"), "{prompt}");
+    assert!(
+        !prompt.contains("{preset}"),
+        "已退役的预设变量不能残留：{prompt}"
+    );
     assert!(
         prompt.contains("【唯一允许修改的原文片段】\n二、乙。"),
         "{prompt}"

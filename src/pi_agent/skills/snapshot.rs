@@ -56,6 +56,23 @@ pub(crate) struct SkillSnapshot {
 impl SkillSnapshot {
     /// 从当前目录生成本轮快照。选中技能必须在这份快照里且可执行。
     pub(crate) fn build(catalog: &Catalog, selected: Option<&str>) -> Result<Self, String> {
+        Self::build_with(catalog, selected, store::load_package)
+    }
+
+    /// 合成校准只读取编入程序的技能，不读用户目录或停用清单。
+    pub(crate) fn build_builtin(selected: Option<&str>) -> Result<Self, String> {
+        Self::build_with(
+            &super::catalog::builtins(),
+            selected,
+            store::builtin_package,
+        )
+    }
+
+    fn build_with(
+        catalog: &Catalog,
+        selected: Option<&str>,
+        load_package: impl Fn(&str) -> Result<Package, String>,
+    ) -> Result<Self, String> {
         let selected = catalog.resolve(selected)?;
         let enabled = catalog.enabled();
         if enabled.is_empty() {
@@ -68,7 +85,7 @@ impl SkillSnapshot {
         let mut packages = Vec::new();
         let mut total_bytes = 0usize;
         for entry in enabled {
-            let package = store::load_package(&entry.name)?;
+            let package = load_package(&entry.name)?;
             total_bytes =
                 total_bytes.saturating_add(package.files.values().map(Vec::len).sum::<usize>());
             if total_bytes > 128 * 1024 * 1024 {
@@ -191,6 +208,16 @@ impl SkillSnapshot {
     }
 }
 
+/// 内容身份不含本轮选择；相同技能内容的自动/显式选择共用校准。
+pub(crate) fn content_digest(workspace: &Path) -> Result<String, String> {
+    let bytes = super::super::recovery::read_bounded(&workspace.join(INDEX_FILE), 512 * 1024)?;
+    let index: SkillIndex =
+        serde_json::from_slice(&bytes).map_err(|error| format!("技能快照索引无效：{error}"))?;
+    let bytes = serde_json::to_vec(&(index.protocol, index.skills, crate::skill_pack::FILES))
+        .map_err(|error| format!("无法核对技能内容：{error}"))?;
+    Ok(hash_bytes(&bytes))
+}
+
 fn hash_bytes(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -259,6 +286,42 @@ mod tests {
             crate::storage::set_test_config_dir(None);
             let _ = &self.dir;
         }
+    }
+
+    #[test]
+    fn calibration_builtin_snapshot_ignores_user_overrides_and_selection_is_not_content_identity() {
+        let _config = ConfigDir::new();
+        store::copy_builtin("gongwen-draft").unwrap();
+        store::save_text(
+            "gongwen-draft",
+            "references/private.md",
+            "不得送入合成校准的用户私有内容",
+        )
+        .unwrap();
+        store::set_enabled("gongwen-draft", false).unwrap();
+        let selected = SkillSnapshot::build_builtin(Some("gongwen-draft")).unwrap();
+        assert!(
+            !selected
+                .packages
+                .iter()
+                .any(|(_, package)| package.files.contains_key("references/private.md"))
+        );
+        let automatic = SkillSnapshot::build_builtin(None).unwrap();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        selected.write_to(a.path()).unwrap();
+        automatic.write_to(b.path()).unwrap();
+        assert_eq!(
+            content_digest(a.path()).unwrap(),
+            content_digest(b.path()).unwrap()
+        );
+        let mut changed = automatic.clone();
+        changed.index.skills[0].files[0].sha256 = "different-content".into();
+        changed.write_to(b.path()).unwrap();
+        assert_ne!(
+            content_digest(a.path()).unwrap(),
+            content_digest(b.path()).unwrap()
+        );
     }
 
     #[test]

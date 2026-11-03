@@ -554,6 +554,7 @@ impl GongwenApp {
                     });
             },
         );
+        self.pi_capability_ui(ui);
 
         ui.add_space(10.0);
 
@@ -891,9 +892,412 @@ impl GongwenApp {
     }
 }
 
+impl GongwenApp {
+    fn pi_capability_ui(&mut self, ui: &mut egui::Ui) {
+        let current_key = self
+            .config
+            .pi_chat()
+            .ok()
+            .and_then(|chat| crate::ai_panel::pi_job::pi_model(&chat).ok())
+            .and_then(|model| {
+                crate::pi_agent::capability::CapabilityIdentity::new(
+                    &model.base_url,
+                    &model.model_id,
+                    model.context_window,
+                    model.window_source,
+                    if model.reasoning {
+                        model.thinking_level.as_deref().unwrap_or("enabled")
+                    } else {
+                        "default"
+                    },
+                    "",
+                )
+                .ok()
+            })
+            .map(|identity| identity.key())
+            .unwrap_or_default();
+        if current_key != self.pi_calibration_view_key {
+            self.pi_calibration_view_key = current_key;
+            self.pi_calibration_note = self.latest_pi_calibration_summary();
+        }
+        self.poll_pi_calibration();
+        if self.pi_calibration_rx.is_some() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        if self.pi_calibration_note.is_empty() {
+            self.pi_calibration_note = self.latest_pi_calibration_summary();
+        }
+        setting_row(
+            ui,
+            "能力校准",
+            Some(
+                "只发送程序生成的通知材料；在隔离临时目录运行，不读取当前稿件与真实知识库。测试最多运行四个同题写作轮次，可随时停止。",
+            ),
+            |ui| {
+                ui.label(egui::RichText::new(&self.pi_calibration_note).color(theme::text_muted()));
+                if self.pi_calibration_rx.is_some() {
+                    if ui.button("停止测试").clicked() {
+                        if let Some(cancel) = &self.pi_calibration_cancel {
+                            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        self.pi_calibration_note = "正在停止合成能力测试…".into();
+                    }
+                } else if ui.button("测试写作能力").clicked() {
+                    self.start_pi_calibration();
+                }
+            },
+        );
+        ui.weak("短合成测试只给工具与策略建议；不验证长上下文工作预算。");
+    }
+
+    fn latest_pi_calibration_summary(&self) -> String {
+        let Ok(path) = crate::storage::config_dir().map(|dir| dir.join("pi/capability.json"))
+        else {
+            return "尚未校准。普通 Pi 写作按保守预算运行。".into();
+        };
+        match crate::pi_agent::capability::load(&path) {
+            Ok(entries) => entries
+                .iter()
+                .rev()
+                .find(|entry| self.pi_calibration_profile_matches_current(entry))
+                .map(|entry| {
+                    format!(
+                        "上次：{} · 当时窗口 {} token（{}）· {}；每轮写作仍核对实际部署与技能内容。",
+                        entry.conclusion.completed_at,
+                        entry
+                            .identity
+                            .as_ref()
+                            .map(|id| id.context_window)
+                            .unwrap_or_default(),
+                        entry
+                            .identity
+                            .as_ref()
+                            .map(|id| id.window_source.description())
+                            .unwrap_or("窗口来源未知"),
+                        entry.conclusion.recommendation
+                    )
+                })
+                .unwrap_or_else(|| "尚未校准。普通 Pi 写作按保守预算运行。".into()),
+            Err(error) => format!("校准档案不可用：{error}。普通 Pi 写作按保守预算运行。"),
+        }
+    }
+
+    fn start_pi_calibration(&mut self) {
+        let chat = match self.config.pi_chat() {
+            Ok(chat) => chat,
+            Err(error) => {
+                self.pi_calibration_note = format!("未启动：{error}");
+                return;
+            }
+        };
+        let mut model = match crate::ai_panel::pi_job::pi_model(&chat) {
+            Ok(model) => model,
+            Err(error) => {
+                self.pi_calibration_note = format!("未启动：{error}");
+                return;
+            }
+        };
+        let probe_chat = chat.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        match std::thread::Builder::new()
+            .name("pi-capability-calibration".into())
+            .spawn(move || {
+                let mut probe = probe_chat;
+                probe.timeout_seconds = probe.timeout_seconds.clamp(1, 3);
+                let actual = crate::lmstudio::context::window(&probe);
+                model.context_window = actual.tokens.min(u32::MAX as usize).max(1) as u32;
+                model.window_source =
+                    crate::pi_agent::capability::CapabilityWindowSource::from_window(actual.source);
+                model.max_tokens = model
+                    .max_tokens
+                    .min(model.context_window.saturating_sub(1_024).max(1));
+                let checked_window = model.context_window;
+                let checked_source = model.window_source;
+                let mut result = crate::pi_agent::capability::run_paired_calibration(
+                    model,
+                    worker_cancel,
+                    |_| {},
+                );
+                if let Ok((profile, _)) = &result {
+                    let after = crate::lmstudio::context::window(&probe);
+                    let after_window = after.tokens.min(u32::MAX as usize).max(1) as u32;
+                    let after_source =
+                        crate::pi_agent::capability::CapabilityWindowSource::from_window(
+                            after.source,
+                        );
+                    if after_window != checked_window
+                        || after_source != checked_source
+                        || profile.identity.as_ref().is_none_or(|identity| {
+                            identity.context_window != checked_window
+                                || identity.window_source != checked_source
+                        })
+                    {
+                        result = Err("测试期间实际加载窗口发生变化；旧窗口结果已丢弃。".into());
+                    }
+                }
+                let _ = tx.send(result);
+            }) {
+            Ok(_) => {
+                self.pi_calibration_rx = Some(rx);
+                self.pi_calibration_cancel = Some(cancel);
+                self.pi_calibration_note = "正在运行隔离合成测试…".into();
+            }
+            Err(error) => self.pi_calibration_note = format!("启动校准后台线程失败：{error}"),
+        }
+    }
+
+    fn poll_pi_calibration(&mut self) {
+        let Some(receiver) = &self.pi_calibration_rx else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err("Pi 能力测试后台线程意外退出。".into()))
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+        };
+        let Some(result) = result else {
+            return;
+        };
+        let cancelled = self
+            .pi_calibration_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed));
+        self.pi_calibration_rx = None;
+        self.pi_calibration_cancel = None;
+        if cancelled {
+            self.pi_calibration_note = "能力测试已停止，本次结果未保存。".into();
+            return;
+        }
+        match result {
+            Ok((mut profile, evidence))
+                if self.pi_calibration_profile_matches_current(&profile) =>
+            {
+                let saved = (|| -> anyhow::Result<()> {
+                    let config_dir = crate::storage::config_dir()?;
+                    profile.evidence_digest = crate::pi_agent::capability::save_evidence(
+                        &config_dir.join("pi/calibration-evidence"),
+                        &evidence,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    let path = config_dir.join("pi/capability.json");
+                    let mut entries = crate::pi_agent::capability::load(&path).unwrap_or_default();
+                    entries.retain(|entry| entry.identity != profile.identity);
+                    entries.push(profile.clone());
+                    if entries.len() > 32 {
+                        entries.drain(..entries.len() - 32);
+                    }
+                    crate::pi_agent::capability::save(&path, &entries).map_err(anyhow::Error::msg)
+                })();
+                self.pi_calibration_note = match saved {
+                    Ok(()) => format!(
+                        "校准完成：{} · 窗口 {} token（{}）· {} · 证据 {}",
+                        profile.conclusion.completed_at,
+                        profile
+                            .identity
+                            .as_ref()
+                            .map(|identity| identity.context_window)
+                            .unwrap_or_default(),
+                        profile
+                            .identity
+                            .as_ref()
+                            .map(|identity| identity.window_source.description())
+                            .unwrap_or("窗口来源未知"),
+                        profile.conclusion.recommendation,
+                        &profile.evidence_digest[..12]
+                    ),
+                    Err(error) => format!("校准结果未保存：{error}。普通 Pi 写作按保守预算运行。"),
+                };
+            }
+            Ok(_) => {
+                self.pi_calibration_note =
+                    "测试期间 Pi 模型服务或思考设置已更改；本次结果已丢弃。".into()
+            }
+            Err(error) => {
+                self.pi_calibration_note =
+                    format!("校准未完成：{error}。普通 Pi 写作按保守预算运行。")
+            }
+        }
+    }
+
+    fn pi_calibration_profile_matches_current(
+        &self,
+        profile: &crate::pi_agent::capability::CapabilityProfile,
+    ) -> bool {
+        let (Some(identity), Ok(chat)) = (&profile.identity, self.config.pi_chat()) else {
+            return false;
+        };
+        let Ok(model) = crate::ai_panel::pi_job::pi_model(&chat) else {
+            return false;
+        };
+        // 校准身份必须包含当前有效窗口值。若用户在后台测试期间修改了窗口，
+        // 不要用档案旧值重建身份而误把过期结果显示为当前结果。
+        if model.context_window != identity.context_window {
+            return false;
+        }
+        crate::pi_agent::capability::CapabilityIdentity::new(
+            &model.base_url,
+            &model.model_id,
+            model.context_window,
+            model.window_source,
+            model
+                .thinking_level
+                .as_deref()
+                .unwrap_or(if model.reasoning {
+                    "enabled"
+                } else {
+                    "default"
+                }),
+            &identity.skill_digest,
+        )
+        .is_ok_and(|current| current == *identity)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_calibration_discards_an_already_queued_success_without_touching_the_document() {
+        use crate::pi_agent::capability::{
+            CalibrationEvidence, CapabilityIdentity, CapabilityProfile,
+        };
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::storage::set_test_config_dir(None);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        let _reset = Reset;
+        let mut app = crate::app::management_samples::fixture();
+        app.config.providers = vec![crate::models::ProviderConfig {
+            id: "local".into(),
+            name: "测试服务".into(),
+            enabled: true,
+            base_url: "http://127.0.0.1:12345/v1".into(),
+            ..Default::default()
+        }];
+        app.config.pi_model = crate::models::ModelRef {
+            provider_id: "local".into(),
+            model: "test-model".into(),
+        };
+        let model = crate::ai_panel::pi_job::pi_model(&app.config.pi_chat().unwrap()).unwrap();
+        app.docs[0].generated_markdown = "测试前正文保持不变".into();
+        let profile = CapabilityProfile {
+            identity: Some(
+                CapabilityIdentity::new(
+                    "http://127.0.0.1:12345/v1",
+                    "test-model",
+                    model.context_window,
+                    model.window_source,
+                    "default",
+                    "test",
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert!(app.pi_calibration_profile_matches_current(&profile));
+        let evidence = CalibrationEvidence {
+            version: 1,
+            task: "自造任务".into(),
+            materials: vec![],
+            knowledge_fact: String::new(),
+            manuscript: String::new(),
+            runs: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Ok((profile, evidence))).unwrap();
+        app.pi_calibration_rx = Some(rx);
+        app.pi_calibration_cancel = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            true,
+        )));
+        app.poll_pi_calibration();
+        assert!(app.pi_calibration_note.contains("已停止"));
+        assert!(!dir.path().join("pi/capability.json").exists());
+        assert!(!dir.path().join("pi/calibration-evidence").exists());
+        assert_eq!(app.docs[0].generated_markdown, "测试前正文保持不变");
+    }
+
+    #[test]
+    fn same_numeric_window_from_a_different_source_does_not_match_calibration() {
+        use crate::pi_agent::capability::{
+            CapabilityIdentity, CapabilityProfile, CapabilityWindowSource,
+        };
+        let mut app = crate::app::management_samples::fixture();
+        app.config.providers = vec![crate::models::ProviderConfig {
+            id: "local".into(),
+            name: "测试服务".into(),
+            enabled: true,
+            base_url: "http://127.0.0.1:12345/v1".into(),
+            ..Default::default()
+        }];
+        app.config.pi_model = crate::models::ModelRef {
+            provider_id: "local".into(),
+            model: "test-model".into(),
+        };
+        let model = crate::ai_panel::pi_job::pi_model(&app.config.pi_chat().unwrap()).unwrap();
+        let other_source = if model.window_source == CapabilityWindowSource::NativeLoaded {
+            CapabilityWindowSource::Service
+        } else {
+            CapabilityWindowSource::NativeLoaded
+        };
+        let profile = CapabilityProfile {
+            identity: Some(
+                CapabilityIdentity::new(
+                    &model.base_url,
+                    &model.model_id,
+                    model.context_window,
+                    other_source,
+                    "default",
+                    "test",
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert!(!app.pi_calibration_profile_matches_current(&profile));
+    }
+
+    #[test]
+    fn same_window_source_with_a_different_numeric_window_does_not_match_calibration() {
+        use crate::pi_agent::capability::{CapabilityIdentity, CapabilityProfile};
+        let mut app = crate::app::management_samples::fixture();
+        app.config.providers = vec![crate::models::ProviderConfig {
+            id: "local".into(),
+            name: "测试服务".into(),
+            enabled: true,
+            base_url: "http://127.0.0.1:12345/v1".into(),
+            ..Default::default()
+        }];
+        app.config.pi_model = crate::models::ModelRef {
+            provider_id: "local".into(),
+            model: "test-model".into(),
+        };
+        let model = crate::ai_panel::pi_job::pi_model(&app.config.pi_chat().unwrap()).unwrap();
+        let profile = CapabilityProfile {
+            identity: Some(
+                CapabilityIdentity::new(
+                    &model.base_url,
+                    &model.model_id,
+                    model.context_window.saturating_add(1),
+                    model.window_source,
+                    "default",
+                    "test",
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert!(!app.pi_calibration_profile_matches_current(&profile));
+    }
 
     /// 设置搬家后每个分区都还在菜单里，而且只出现一次。
     #[test]

@@ -34,8 +34,14 @@ const STYLE_NOTE: &str = "风格档案与范例是写法样稿（style_sample）
 /// 知识库检索结果的窄接口（生产用现有 RAG，测试可换假库）。
 pub(crate) trait PiKnowledge: Send + Sync {
     fn enabled(&self) -> bool;
-    fn search(&self, query: &str, top: usize) -> Result<Vec<PiChunk>, String>;
+    fn search(&self, query: &str, top: usize) -> Result<PiSearchOutcome, String>;
     fn read(&self, doc_id: i64) -> Result<Option<(String, String)>, String>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PiSearchOutcome {
+    pub(crate) chunks: Vec<PiChunk>,
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,19 +195,22 @@ impl PiKnowledge for RagSearch {
         KnowledgeSearch::enabled(self)
     }
 
-    fn search(&self, query: &str, top: usize) -> Result<Vec<PiChunk>, String> {
-        let (chunks, _warnings) = KnowledgeSearch::search(self, query)
+    fn search(&self, query: &str, top: usize) -> Result<PiSearchOutcome, String> {
+        let (chunks, warnings) = KnowledgeSearch::search(self, query)
             .map_err(|error| format!("知识库检索失败：{error:#}"))?;
-        Ok(chunks
-            .into_iter()
-            .take(top)
-            .map(|chunk| PiChunk {
-                doc_id: chunk.doc_id,
-                title: chunk.doc_title,
-                section: chunk.section,
-                text: chunk.text,
-            })
-            .collect())
+        Ok(PiSearchOutcome {
+            chunks: chunks
+                .into_iter()
+                .take(top)
+                .map(|chunk| PiChunk {
+                    doc_id: chunk.doc_id,
+                    title: chunk.doc_title,
+                    section: chunk.section,
+                    text: chunk.text,
+                })
+                .collect(),
+            warnings,
+        })
     }
 
     fn read(&self, doc_id: i64) -> Result<Option<(String, String)>, String> {
@@ -514,12 +523,18 @@ impl PiToolContext {
         }
         let query = required_str(args, "query")?;
         let top = usize_arg(args, "top", MAX_SEARCH_RESULTS);
-        let chunks = self.kb.search(&query, top)?;
-        if chunks.is_empty() {
-            return Ok(json!({"results": [], "note": "知识库没有找到相关片段"}));
+        let outcome = self.kb.search(&query, top)?;
+        let warnings = outcome.warnings;
+        if outcome.chunks.is_empty() {
+            return Ok(json!({
+                "results": [],
+                "zero_hits": true,
+                "note": "知识库没有找到相关片段。可缩短查询词或换用材料中的关键术语后重试。",
+                "warnings": warnings,
+            }));
         }
         let mut results = Vec::new();
-        for chunk in chunks {
+        for chunk in outcome.chunks {
             let id = self.record(
                 "kb_search",
                 &chunk.title,
@@ -536,7 +551,7 @@ impl PiToolContext {
                 "text": chunk.text,
             }));
         }
-        Ok(json!({"results": results}))
+        Ok(json!({"results": results, "zero_hits": false, "warnings": warnings}))
     }
 
     fn kb_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
@@ -842,7 +857,7 @@ impl PiKnowledge for DisabledKnowledge {
         false
     }
 
-    fn search(&self, _query: &str, _top: usize) -> Result<Vec<PiChunk>, String> {
+    fn search(&self, _query: &str, _top: usize) -> Result<PiSearchOutcome, String> {
         Err("知识库未启用".into())
     }
 
@@ -1030,6 +1045,7 @@ mod tests {
 
     struct FakeKb {
         text: String,
+        warnings: Vec<String>,
     }
 
     impl PiKnowledge for FakeKb {
@@ -1037,13 +1053,16 @@ mod tests {
             true
         }
 
-        fn search(&self, _query: &str, _top: usize) -> Result<Vec<PiChunk>, String> {
-            Ok(vec![PiChunk {
-                doc_id: 7,
-                title: "森林防火规定".into(),
-                section: "第三条".into(),
-                text: self.text.clone(),
-            }])
+        fn search(&self, _query: &str, _top: usize) -> Result<PiSearchOutcome, String> {
+            Ok(PiSearchOutcome {
+                chunks: vec![PiChunk {
+                    doc_id: 7,
+                    title: "森林防火规定".into(),
+                    section: "第三条".into(),
+                    text: self.text.clone(),
+                }],
+                warnings: self.warnings.clone(),
+            })
         }
 
         fn read(&self, doc_id: i64) -> Result<Option<(String, String)>, String> {
@@ -1090,6 +1109,7 @@ mod tests {
             vec![],
             Arc::new(FakeKb {
                 text: kb_text.into(),
+                warnings: Vec::new(),
             }),
             Arc::new(FakeManuscripts),
         )
@@ -1172,7 +1192,10 @@ mod tests {
             "按风格改。".into(),
             vec![],
             PiSources {
-                knowledge: Arc::new(FakeKb { text: "x".into() }),
+                knowledge: Arc::new(FakeKb {
+                    text: "x".into(),
+                    warnings: Vec::new(),
+                }),
                 manuscripts: Arc::new(FakeManuscripts),
                 styles: Arc::new(FakeStyles),
             },
@@ -1270,6 +1293,8 @@ mod tests {
             .unwrap();
         let id = value["results"][0]["evidence"].as_str().unwrap();
         assert_eq!(id, "E1");
+        assert_eq!(value["zero_hits"], false);
+        assert_eq!(value["warnings"], json!([]));
         let ledger = ctx.evidence();
         assert_eq!(ledger.len(), 1);
         assert_eq!(ledger[0].id, "E1");
@@ -1280,6 +1305,205 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("每年十月"))
         );
+    }
+
+    #[test]
+    fn kb_warnings_survive_with_hits_and_zero_hits_remain_distinct() {
+        let mut config = AppConfig::default();
+        config.rag.enabled = true;
+        let kb: Arc<dyn PiKnowledge> = Arc::new(FakeKb {
+            text: "检索命中内容".into(),
+            warnings: vec!["embedding不可用，本次只用关键词检索".into()],
+        });
+        let ctx = PiToolContext::with_sources(
+            Arc::new(config.clone()),
+            DraftInput::default(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            kb,
+            Arc::new(FakeManuscripts),
+        );
+        let hit = ctx.call("kb_search", &json!({"query":"检索"})).unwrap();
+        assert_eq!(hit["zero_hits"], false);
+        assert_eq!(hit["warnings"][0], "embedding不可用，本次只用关键词检索");
+        assert!(hit["results"][0]["evidence"].is_string());
+
+        let empty_kb: Arc<dyn PiKnowledge> = Arc::new(EmptyWarningKb);
+        let empty = PiToolContext::with_sources(
+            Arc::new(config),
+            DraftInput::default(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            empty_kb,
+            Arc::new(FakeManuscripts),
+        );
+        let miss = empty.call("kb_search", &json!({"query":"无匹配"})).unwrap();
+        assert_eq!(miss["zero_hits"], true);
+        assert_eq!(miss["results"], json!([]));
+        assert_eq!(miss["warnings"][0], "rerank不可用，已保留关键词结果");
+    }
+
+    #[test]
+    fn pi_tool_context_uses_real_temporary_sqlite_knowledge_chain() {
+        struct ConfigReset;
+        impl Drop for ConfigReset {
+            fn drop(&mut self) {
+                crate::storage::set_test_config_dir(None);
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(directory.path().to_path_buf()));
+        let _reset = ConfigReset;
+        let manuscript_db = crate::storage::manuscript_db_path().unwrap();
+        let mut manuscripts = crate::manuscript::ManuscriptStore::open(&manuscript_db).unwrap();
+        let manuscript_id = manuscripts
+            .create(
+                &crate::manuscript::NewManuscript {
+                    snapshot: DraftInput {
+                        title_hint: "森林防火通知".into(),
+                        ..Default::default()
+                    },
+                    content_markdown: "# 森林防火通知\n\n咨询电话010-12345678。\n".into(),
+                    status: crate::models::ManuscriptStatus::Draft,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        drop(manuscripts);
+        let db = crate::storage::manuscript_db_path().unwrap();
+        let mut store = crate::knowledge::KnowledgeStore::open(&db).unwrap();
+        let doc_id = store
+            .import_document(&crate::knowledge::KnowledgeImportItem {
+                source: crate::knowledge::KnowledgeSource::Markdown,
+                source_manuscript_id: None,
+                source_path: "fixture.md".into(),
+                kind: TemplateKind::OfficialLetter,
+                title: "森林防火通知".into(),
+                content_markdown: format!(
+                    "# 森林防火通知\n\n## 工作要求\n\n{}\n",
+                    "各单位应于十月开展森林防火检查，并记录隐患整改情况。".repeat(20)
+                ),
+            })
+            .unwrap();
+        let text = "各单位应于十月开展森林防火检查，并记录隐患整改情况。";
+        store
+            .replace_chunks(
+                doc_id,
+                &[crate::knowledge::NewKnowledgeChunk {
+                    ord: 0,
+                    section: "工作要求".into(),
+                    text: text.into(),
+                    tokens: crate::rag::tokenize(text),
+                    embedding: None,
+                    dims: 0,
+                }],
+                "isolated-test-embedding",
+            )
+            .unwrap();
+        drop(store);
+
+        let rag = crate::models::RagConfig {
+            enabled: true,
+            embedding: crate::models::EmbeddingConfig {
+                model: "isolated-test-embedding".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                timeout_seconds: 1,
+                ..Default::default()
+            },
+            rerank: crate::models::RerankConfig {
+                mode: crate::models::RerankMode::None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let knowledge: Arc<dyn PiKnowledge> = Arc::new(RagSearch {
+            enabled: true,
+            rag,
+            chat: crate::models::LmStudioConfig::default(),
+            kind_filter: None,
+        });
+        let ctx = PiToolContext::with_all_sources(
+            Arc::new(AppConfig::default()),
+            DraftInput::default(),
+            String::new(),
+            "真实资料检索评测".into(),
+            Vec::new(),
+            PiSources {
+                knowledge,
+                manuscripts: Arc::new(crate::ai_services::manuscripts::SqliteManuscripts),
+                styles: Arc::new(FakeStyles),
+            },
+        );
+        let hit = ctx
+            .call("kb_search", &json!({"query":"森林防火通知", "top":1}))
+            .unwrap();
+        assert_eq!(
+            hit["zero_hits"], false,
+            "本地 SQLite FTS 应有真实命中：{hit}"
+        );
+        assert_eq!(hit["results"].as_array().unwrap().len(), 1);
+        assert!(
+            !hit["warnings"].as_array().unwrap().is_empty(),
+            "embed loopback 失败应明确作为降级警告：{hit}"
+        );
+        let evidence = hit["results"][0]["evidence"].as_str().unwrap();
+        assert_eq!(evidence, "E1");
+        let read = ctx
+            .call(
+                "kb_read",
+                &json!({"doc_id":doc_id, "offset":0, "limit_chars":100}),
+            )
+            .unwrap();
+        assert_eq!(read["offset"], 0);
+        assert!(read["next_offset"].is_number());
+        assert!(
+            ctx.evidence()
+                .iter()
+                .any(|item| item.id == evidence && item.fact)
+        );
+        let manuscript_hit = ctx
+            .call("ms_search", &json!({"query":"森林防火通知", "limit":3}))
+            .unwrap();
+        assert!(
+            manuscript_hit["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == manuscript_id)
+        );
+        let manuscript_read = ctx
+            .call("ms_read", &json!({"id": manuscript_id, "limit_chars": 100}))
+            .unwrap();
+        assert!(
+            manuscript_read["markdown"]
+                .as_str()
+                .unwrap()
+                .contains("010-12345678")
+        );
+        assert!(
+            ctx.evidence()
+                .iter()
+                .any(|item| item.tool == "ms_read" && item.text.contains("010-12345678"))
+        );
+    }
+
+    struct EmptyWarningKb;
+    impl PiKnowledge for EmptyWarningKb {
+        fn enabled(&self) -> bool {
+            true
+        }
+        fn search(&self, _query: &str, _top: usize) -> Result<PiSearchOutcome, String> {
+            Ok(PiSearchOutcome {
+                chunks: Vec::new(),
+                warnings: vec!["rerank不可用，已保留关键词结果".into()],
+            })
+        }
+        fn read(&self, _doc_id: i64) -> Result<Option<(String, String)>, String> {
+            Ok(None)
+        }
     }
 
     #[test]
@@ -1357,7 +1581,10 @@ mod tests {
             String::new(),
             String::new(),
             vec![],
-            Arc::new(FakeKb { text: "x".into() }),
+            Arc::new(FakeKb {
+                text: "x".into(),
+                warnings: Vec::new(),
+            }),
             Arc::new(FakeManuscripts),
         );
         let value = ctx

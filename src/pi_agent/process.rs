@@ -40,11 +40,13 @@ const MAX_QUESTIONS_PER_BATCH: u32 = 3;
 const MAX_QUESTION_BATCHES: u32 = 2;
 
 /// 交给 host 的模型参数。`api_key` 只进 stdin，不进 argv / 日志。
+#[derive(Clone)]
 pub(crate) struct PiModel {
     pub(crate) base_url: String,
     pub(crate) api_key: String,
     pub(crate) model_id: String,
     pub(crate) context_window: u32,
+    pub(crate) window_source: super::capability::CapabilityWindowSource,
     pub(crate) max_tokens: u32,
     pub(crate) reasoning: bool,
     pub(crate) thinking_level: Option<String>,
@@ -58,6 +60,7 @@ pub(crate) struct PiTask {
     pub(crate) skill: Option<String>,
     /// 统一写作入口的策略倾向；实际策略由 host 按窗口与任务规模决定。
     pub(crate) strategy: super::strategy::PiStrategyPreference,
+    pub(crate) capability: super::strategy::PiCapabilitySnapshot,
     pub(crate) selection: Option<PiSelection>,
     pub(crate) materials: Vec<PiMaterialMeta>,
 }
@@ -562,11 +565,12 @@ pub(crate) fn run(
         },
         strategy: InitStrategy {
             preference: job.task.strategy.as_str(),
-            // 尚无写回运行记录的实测工作预算：明确按「未验证」交给 host 保守规划，
+            // 沿用准备阶段匹配的能力快照；未验证的预算由 host 保守规划，
             // 不按模型名称或参数量猜。任务规模与窗口由 host 现算。
             capability: InitCapability {
-                verified_work_budget: None,
-                needs_short_steps: false,
+                verified_work_budget: job.task.capability.verified_work_budget,
+                needs_short_steps: job.task.capability.needs_short_steps,
+                reason: job.task.capability.reason.clone(),
             },
         },
         task: InitTask {
@@ -675,6 +679,18 @@ pub(crate) fn run(
                     Err(error) => (false, serde_json::Value::Null, error),
                 };
                 if ok {
+                    if let Some(warnings) =
+                        result.get("warnings").and_then(serde_json::Value::as_array)
+                    {
+                        for warning in warnings
+                            .iter()
+                            .take(3)
+                            .filter_map(serde_json::Value::as_str)
+                        {
+                            let short: String = warning.chars().take(300).collect();
+                            on_event(PiEvent::Tool(format!("Pi · kb_search 降级说明：{short}")));
+                        }
+                    }
                     let ledger = job.tools.evidence();
                     if let Some(item) = ledger.get(done.evidence_before) {
                         job.record.evidence(&item.line());
@@ -1290,7 +1306,7 @@ rl.on("line", (line) => {
   if (value.type === "init" && !handled) {
     handled = true;
     init = value;
-    emit({ type: "ready", hostVersion: "0.3.0", nodeVersion: process.versions.node, model: init.model.modelId });
+    emit({ type: "ready", hostVersion: "0.3.2", nodeVersion: process.versions.node, model: init.model.modelId });
     if (init.recovery?.mode === "resume") {
       const dir = init.workspace.delivery;
       const receipt = JSON.parse(fs.readFileSync(path.join(dir, "receipt.json"), "utf8"));
@@ -1316,6 +1332,15 @@ rl.on("line", (line) => {
       return;
     }
     if (mode === "hang") return;
+    if (mode === "capability") {
+      if (init.strategy?.capability?.verifiedWorkBudget !== 4096 || init.strategy.capability.needsShortSteps !== true || init.strategy.capability.reason !== "matched evidence") {
+        emit({ type: "error", code: "capability_missing", message: "InitCapability did not carry matched evidence" });
+        setTimeout(() => process.exit(1), 20);
+        return;
+      }
+      submit();
+      return;
+    }
     if (mode === "badargs") {
       emit({ type: "tool_request", callId: "c1", name: "kb_search", args: { query: "x" } });
       return;
@@ -1368,6 +1393,24 @@ rl.on("line", (line) => {
             .is_ok_and(|status| status.success())
     }
 
+    #[test]
+    fn production_init_carries_the_matched_capability_snapshot() {
+        if !node_available() {
+            eprintln!("skip: node runtime is unavailable");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut job = job(temp.path(), "capability");
+        job.task.capability = super::super::strategy::PiCapabilitySnapshot {
+            verified_work_budget: Some(4096),
+            needs_short_steps: true,
+            identity_key: "identity-hash".into(),
+            reason: "matched evidence".into(),
+        };
+        let outcome = run(job, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        assert!(matches!(outcome, PiOutcome::Document(_)));
+    }
+
     fn fixture(dir: &Path) -> PathBuf {
         let path = dir.join("host-fixture.mjs");
         std::fs::write(&path, FIXTURE).unwrap();
@@ -1383,13 +1426,16 @@ rl.on("line", (line) => {
             &self,
             _query: &str,
             _top: usize,
-        ) -> Result<Vec<super::super::tools::PiChunk>, String> {
-            Ok(vec![super::super::tools::PiChunk {
-                doc_id: 1,
-                title: "防火规定".into(),
-                section: "第一条".into(),
-                text: "各单位应于每年十月开展一次检查。".into(),
-            }])
+        ) -> Result<super::super::tools::PiSearchOutcome, String> {
+            Ok(super::super::tools::PiSearchOutcome {
+                chunks: vec![super::super::tools::PiChunk {
+                    doc_id: 1,
+                    title: "防火规定".into(),
+                    section: "第一条".into(),
+                    text: "各单位应于每年十月开展一次检查。".into(),
+                }],
+                warnings: Vec::new(),
+            })
         }
         fn read(&self, _doc_id: i64) -> Result<Option<(String, String)>, String> {
             Ok(None)
@@ -1447,6 +1493,7 @@ rl.on("line", (line) => {
                 api_key: "sk-test-secret-1234".into(),
                 model_id: "fixture".into(),
                 context_window: 8192,
+                window_source: super::super::capability::CapabilityWindowSource::Default,
                 max_tokens: 1024,
                 reasoning: false,
                 thinking_level: None,
@@ -1457,6 +1504,7 @@ rl.on("line", (line) => {
                 system_date: "2026-11-01".into(),
                 skill: None,
                 strategy: super::super::strategy::PiStrategyPreference::Auto,
+                capability: super::super::strategy::PiCapabilitySnapshot::default(),
                 selection: None,
                 materials: Vec::new(),
             },
@@ -1786,7 +1834,7 @@ rl.on("line", (line) => {{
   const value = JSON.parse(line);
   if (value.type === "init") {{
     init = value;
-    emit({{ type: "ready", hostVersion: "0.3.0", nodeVersion: process.versions.node, model: init.model.modelId }});
+  emit({{ type: "ready", hostVersion: "0.3.2", nodeVersion: process.versions.node, model: init.model.modelId }});
     emit({{ type: "tool_request", callId: "c1", name: "kb_search", args: {args} }});
   }}
   if (value.type === "tool_result") {{ setTimeout(() => process.exit(0), 10); }}
@@ -1858,14 +1906,17 @@ rl.on("line", (line) => {{
                 &self,
                 _query: &str,
                 _top: usize,
-            ) -> Result<Vec<super::super::tools::PiChunk>, String> {
+            ) -> Result<super::super::tools::PiSearchOutcome, String> {
                 std::thread::sleep(Duration::from_millis(400));
-                Ok(vec![super::super::tools::PiChunk {
-                    doc_id: 1,
-                    title: "防火规定".into(),
-                    section: "第一条".into(),
-                    text: "各单位应于每年十月开展一次检查。".into(),
-                }])
+                Ok(super::super::tools::PiSearchOutcome {
+                    chunks: vec![super::super::tools::PiChunk {
+                        doc_id: 1,
+                        title: "防火规定".into(),
+                        section: "第一条".into(),
+                        text: "各单位应于每年十月开展一次检查。".into(),
+                    }],
+                    warnings: Vec::new(),
+                })
             }
             fn read(&self, _doc_id: i64) -> Result<Option<(String, String)>, String> {
                 Ok(None)

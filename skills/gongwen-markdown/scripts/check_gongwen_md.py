@@ -64,7 +64,7 @@ MANUAL_NUMBER_PATTERNS = (
     r"^\(\d+\)\s*[、.．]?\s*",
     r"^\d+(?:\.\d+)+[.．]?\s*",
     r"^\d+[.．、]\s+",
-    r"^\d+\s+",
+    r"^\d{1,3}\s+",
 )
 MANUAL_NUMBER = re.compile("(?:" + "|".join(pattern[1:] for pattern in MANUAL_NUMBER_PATTERNS) + ")")
 COMMENT = re.compile(r"^<!--\s*(.+?)\s*-->$")
@@ -467,6 +467,16 @@ def selftest() -> int:
         (
             "official-letter",
             "# 关于××××的函\n\n<!-- [正文] -->\n\n## 一、总体要求\n\n内容。\n",
+            "手写了编号",
+        ),
+        (
+            "official-letter",
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n## 2027 年度系统运维经费保障意见\n\n内容。\n",
+            None,
+        ),
+        (
+            "official-letter",
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n## 1 事项\n\n内容。\n",
             "手写了编号",
         ),
         (

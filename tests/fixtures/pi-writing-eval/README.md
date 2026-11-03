@@ -11,6 +11,11 @@
 所以评测结论只说明「在这几个自造任务上，模型 + 真实 host + 标准技能」的表现，
 不代表内网知识库联机效果，也不代表写作质量总分。
 
+本夹具的 `bridge.json` 一直是 JavaScript 模拟资料，不是 Rust 检索证据。真实临时 SQLite/FTS
+资料链由针对性 Rust 用例 `pi_tool_context_uses_real_temporary_sqlite_knowledge_chain` 覆盖；
+该用例的 embedding loopback 端点故意不可用，因此只证明 SQLite/FTS 与 Pi 工具包装接通，
+不证明真实 embedding / rerank 服务。
+
 ## 案例
 
 | 名称 | 考什么 |
