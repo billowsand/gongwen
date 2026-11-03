@@ -603,6 +603,38 @@ fn explicit_reselection_refreshes_frozen_person_and_announces_dictionary_changes
 }
 
 #[test]
+fn receiving_contact_is_captured_and_survives_export_without_global_vocabulary() {
+    let entries = fixture();
+    let unit = key(&entries, "A0101");
+    let person = person(&entries, "010-1111");
+    let mut draft = DraftInput {
+        kind: TemplateKind::OfficialLetter,
+        ..Default::default()
+    };
+    apply_field(&mut draft, FieldId::Recipient, &unit, &entries);
+    draft.profile.receiving_contacts = vec![crate::models::ReceivingContact {
+        unit,
+        name: person.clone(),
+        phone: "010-1111".into(),
+    }];
+    identity::capture_input(&mut draft, &entries);
+
+    assert!(
+        draft
+            .profile
+            .vocabulary_snapshot
+            .iter()
+            .any(|entry| entry.key() == person)
+    );
+    let display = UnitDisplay::new(&[]).for_input(&draft);
+    assert_eq!(display.person_name(&person), "张宁");
+    let receivers = crate::export::typst::transmit::receivers(&draft, &UnitDisplay::new(&[]));
+    assert_eq!(receivers.len(), 1);
+    assert_eq!(receivers[0].person, "张宁");
+    assert_eq!(receivers[0].phone, "010-1111");
+}
+
+#[test]
 fn literal_brackets_and_uuid_letter_case_cannot_confuse_identity_checks() {
     let mut entries = fixture();
     let e = entries.iter_mut().find(|e| e.code == "A").unwrap();

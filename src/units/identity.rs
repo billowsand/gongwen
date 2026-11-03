@@ -329,6 +329,11 @@ fn fields(profile: &mut TemplateProfile, mut visit: impl FnMut(&mut String, Cate
         visit(&mut contact.unit, Category::Unit);
         visit(&mut contact.name, Category::Person);
     }
+    // 公函《传发任务单》的收件人也存人员身份；必须纳入同一份快照，
+    // 否则导出时 for_input 只带表单其他字段的快照，会把刚选的人判成失效。
+    for contact in &mut profile.receiving_contacts {
+        visit(&mut contact.name, Category::Person);
+    }
 }
 
 pub(crate) fn selected(profile: &TemplateProfile) -> Vec<String> {

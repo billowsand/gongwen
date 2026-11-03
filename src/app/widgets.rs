@@ -1027,6 +1027,8 @@ pub(crate) fn receiving_contacts_editor(
     });
     if changed {
         profile.receiving_contacts = entries;
+        // 选择后立即保存人员及祖先快照；导出不能只依赖表单下一帧再补齐。
+        crate::units::identity::capture(profile, vocabulary);
     }
     changed
 }
