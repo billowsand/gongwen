@@ -958,6 +958,79 @@ pub(crate) fn sort_by_vocabulary(mut units: Vec<String>, options: &[SelectOption
     units
 }
 
+/// 公函收件人：按接收单位（主送 + 抄送）逐个选收件人。
+///
+/// 导出《传发任务单》时按单位取用：收件人姓名与电话都印在单子上。单位在词库里
+/// 只登记了一个人时自动带出他；登记了多人要人来挑，没登记的留白，单子上手写。
+///
+/// 返回是否改过。写值走 [`crate::models::sync_receiving_contacts`]：单位清单变了
+/// （主送、抄送改了）时，多余的条目被丢弃，新单位补一条空条目。
+pub(crate) fn receiving_contacts_editor(
+    ui: &mut egui::Ui,
+    profile: &mut crate::models::TemplateProfile,
+    units: &[String],
+    vocabulary: &[VocabularyEntry],
+    external_names: bool,
+    width: f32,
+) -> bool {
+    let display = crate::units::UnitDisplay::new(vocabulary);
+    // 先按当前单位清单对齐：单位改了，条目跟着增删。
+    let mut entries: Vec<crate::models::ReceivingContact> =
+        crate::models::sync_receiving_contacts(profile, units);
+    let mut changed = false;
+    let name_width = (width * 0.46).max(120.0);
+    ui.vertical(|ui| {
+        for entry in entries.iter_mut() {
+            let unit_label = display.full_name_for(&entry.unit, external_names);
+            let people = display.responsible_people_of(&entry.unit);
+            let chosen = entry.name.trim().to_string();
+            let selected_text = if chosen.is_empty() {
+                "（未选，单子上手写）".to_string()
+            } else {
+                crate::units::identity::label(vocabulary, &chosen)
+            };
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(
+                    egui::RichText::new(unit_label)
+                        .size(theme::font_sizes::SMALL)
+                        .color(theme::text_muted()),
+                );
+                egui::ComboBox::from_id_salt(format!("recv_contact_{}", entry.unit))
+                    .selected_text(selected_text)
+                    .width(name_width)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(chosen.is_empty(), "（未选，单子上手写）")
+                            .clicked()
+                        {
+                            entry.name.clear();
+                            entry.phone.clear();
+                            changed = true;
+                            ui.close();
+                        }
+                        if people.is_empty() {
+                            ui.weak("该单位下暂无可选收件人");
+                        }
+                        for (person, phone) in &people {
+                            let label = crate::units::identity::label(vocabulary, person);
+                            if ui.selectable_label(chosen == *person, label).clicked() {
+                                entry.name = person.clone();
+                                entry.phone = phone.clone();
+                                changed = true;
+                                ui.close();
+                            }
+                        }
+                    });
+            });
+        }
+    });
+    if changed {
+        profile.receiving_contacts = entries;
+    }
+    changed
+}
+
 /// 联系人与电话是一组：从词库选人时自动带出绑定电话，电话框只读回显。
 /// 带出电话走的是 `element_fields::apply_profile_field`，与 AI 建议采纳同一条写值路径；
 /// 手填的人名不查词库、不动电话。
@@ -1153,6 +1226,8 @@ pub(crate) struct ExportOutcome {
     /// 导出本身成功但 PDF 排版失败时填这个；走审校抽屉顶部的红色框，
     /// 不与"缺少一级标题"这类样式提示混在一起。
     pub(crate) compile_error: Option<String>,
+    /// 公函两类随行单据的份数。状态栏据此把「出了哪些单据」说清楚。
+    pub(crate) sheets: crate::export::SheetOutputs,
 }
 
 /// 导出全部勾选格式。PDF 由 Typst 在进程内排出；排版失败不阻断导出，记到
@@ -1191,6 +1266,7 @@ pub(crate) fn export_and_compile(
     )?;
     let compile_error = artifacts.compile_error;
     let files = artifacts.files;
+    let sheets = artifacts.sheets;
     if let Some(outcome) = artifacts.typst {
         // 孤行只有排完版才知道：模板在段首段尾留下位置，拼成探针报告。
         if let Some(report) = &outcome.proof {
@@ -1222,5 +1298,6 @@ pub(crate) fn export_and_compile(
         proof_warnings,
         proof_measured,
         compile_error,
+        sheets,
     })
 }

@@ -1179,6 +1179,27 @@ impl<'a> UnitDisplay<'a> {
             .collect()
     }
 
+    /// 某个接收单位的收件人：优先取表单登记的收件人；没登记时，该单位在标准词库
+    /// 里只登记了一个人就用他（连同绑定的电话）。有多个或一个都没有就留空，
+    /// 由人在《传发任务单》上手写——程序不替人挑收件人。
+    pub(crate) fn receiver_contact(
+        &self,
+        profile: &crate::models::TemplateProfile,
+        unit: &str,
+    ) -> Option<(String, String)> {
+        if let Some(contact) = crate::models::receiving_contact_of(profile, unit) {
+            let name = contact.name.trim();
+            if !name.is_empty() {
+                return Some((name.to_string(), contact.phone.trim().to_string()));
+            }
+        }
+        let people = self.responsible_people_of(unit);
+        if people.len() == 1 {
+            return Some(people[0].clone());
+        }
+        None
+    }
+
     /// 返回可在指定单位公函版记中担任联系人的人员。
     ///
     /// 直属人员始终可选；勾选“承办上级单位”的人员，还可在其所属单位的任一级

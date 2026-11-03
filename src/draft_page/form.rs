@@ -1709,6 +1709,69 @@ impl DraftPage<'_> {
                             }
                             ui.end_row();
                             field_error(ui, &check, "recipient");
+
+                            // 收件人：每家接收单位一个，导出《传发任务单》时按单位带出。
+                            let receiving_units = crate::models::receiving_units(
+                                &self.doc.draft.profile,
+                            );
+                            if !receiving_units.is_empty() {
+                                required_row_label(
+                                    ui,
+                                    "收件人",
+                                    Some("《传发任务单》上的收件人：按单位选人，电话随词条带出；没登记的留白，单子上手写。"),
+                                );
+                                crate::app::widgets::receiving_contacts_editor(
+                                    ui,
+                                    &mut self.doc.draft.profile,
+                                    &receiving_units,
+                                    &self.config.vocabulary,
+                                    external_names,
+                                    field_width,
+                                );
+                                ui.end_row();
+                            }
+
+                            // 传输任务：《传发任务单》的题名。留空时按密级自动带。
+                            required_row_label(
+                                ui,
+                                "传输任务",
+                                Some("《传发任务单》的题名：说清这次传的是什么任务。留空时按密级自动带（有密级为涉密信息加密，无密级为公开信息明文）。"),
+                            );
+                            {
+                                let current =
+                                    self.doc.draft.profile.transmit_task.trim().to_string();
+                                let auto =
+                                    crate::models::resolve_transmit_task(&self.doc.draft.profile);
+                                let shown = if current.is_empty() {
+                                    format!("按密级自动：{auto}")
+                                } else {
+                                    current.clone()
+                                };
+                                egui::ComboBox::from_id_salt("transmit_task")
+                                    .selected_text(shown)
+                                    .width(field_width)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                current.is_empty(),
+                                                format!("按密级自动：{auto}"),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.doc.draft.profile.transmit_task.clear();
+                                        }
+                                        for task in &self.config.transmit_tasks {
+                                            if ui
+                                                .selectable_label(current == *task, task)
+                                                .clicked()
+                                            {
+                                                self.doc.draft.profile.transmit_task =
+                                                    task.clone();
+                                            }
+                                        }
+                                    });
+                            }
+                            ui.end_row();
                         }
                         TemplateKind::PhoneNotice => {
                             required_row_label(ui, "主送单位", None);

@@ -142,10 +142,12 @@ impl ExportKind {
         }
     }
 
-    /// 文件是不是这种成品。zip 只认 Typst 包，源码包与签收记录单都不能混进来。
+    /// 文件是不是这种成品。zip 只认 Typst 包，源码包与两种随行单据
+    /// （签收记录单、传发任务单）都不能混进来。
     fn matches_file(self, path: &Path) -> bool {
         let name = path.file_name().and_then(|name| name.to_str());
-        if name.is_some_and(|name| name.contains("_签收记录单.")) {
+        if name.is_some_and(|name| name.contains("_签收记录单.") || name.contains("传发任务单-"))
+        {
             return false;
         }
         let extension_matches = path

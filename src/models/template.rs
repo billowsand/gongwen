@@ -221,9 +221,55 @@ pub struct JointResponsibleEntry {
     pub phone: String,
 }
 
+/// 公函收件人：每个接收单位一条，收件人与电话填进《传发任务单》。
+///
+/// 与承办条目一样按单位配对：单位取词条编码（手填时是单位名），姓名取词条
+/// 编码，电话随姓名绑定。没有登记收件人的单位留空，导出时留出手写横线。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReceivingContact {
+    /// 接收单位（与主送、抄送里的单位一致）。
+    pub unit: String,
+    /// 收件人（词条编码）。
+    pub name: String,
+    /// 联系电话（与收件人绑定，也可手填改写）。
+    pub phone: String,
+}
+
 /// 红头呈批件承办条目数量上限：首页底部承办区每条占一行，超过 4 条会把批示框
 /// 和首页正文区挤没，界面按此上限封顶，旧稿件超限时由校验提示。
 pub const RED_APPROVAL_MAX_RESPONSIBLE: usize = 4;
+
+/// 传输任务类型（《传发任务单》的题名）默认项。
+///
+/// 题名说的是「这次传的是什么任务」，不是公文标题——公文标题印在表内的
+/// 「标题」一栏里。默认三项：涉密信息加密、公开信息明文、公开信息密文。
+/// 用户可在设置页增删，改的是这份字典。
+pub const DEFAULT_TRANSMIT_TASKS: [&str; 3] = [
+    "涉密信息加密传发任务单",
+    "公开信息明文传发任务单",
+    "公开信息密文传发任务单",
+];
+
+/// 没有登记密级时用的传输任务：公开信息明文。
+const TRANSMIT_TASK_PUBLIC: &str = "公开信息明文传发任务单";
+
+/// 有密级时用的传输任务：涉密信息加密。
+const TRANSMIT_TASK_SECRET: &str = "涉密信息加密传发任务单";
+
+/// 这份公函用哪个传输任务：表单里选了就用选的，没选按密级自动带
+/// （有密级 → 涉密信息加密，没密级 → 公开信息明文）。
+pub(crate) fn resolve_transmit_task(profile: &TemplateProfile) -> String {
+    let chosen = profile.transmit_task.trim();
+    if !chosen.is_empty() {
+        return chosen.to_string();
+    }
+    if profile.security_level.trim().is_empty() {
+        TRANSMIT_TASK_PUBLIC.to_string()
+    } else {
+        TRANSMIT_TASK_SECRET.to_string()
+    }
+}
 
 /// 把联合发文承办单位列表与联系人列表归一化成成对条目。
 /// 旧稿件联系人未绑承办单位（`unit` 为空）时，按索引回落
@@ -274,6 +320,61 @@ pub(crate) fn sync_joint_responsible(
         .collect();
 }
 
+/// 收文单位清单：主送在前、抄送在后，按身份去重。
+///
+/// 《传发任务单》与《公文签收记录单》都以它为准：每家单位一份电子传输单，
+/// 纸质签收单按它逐行列单位。返回的是身份引用（词条编码或手填的单位名），
+/// 显示名由 [`crate::units::UnitDisplay`] 换算。
+pub(crate) fn receiving_units(profile: &TemplateProfile) -> Vec<String> {
+    let mut units: Vec<String> = Vec::new();
+    for unit in split_units(&profile.recipient)
+        .into_iter()
+        .chain(split_units(&profile.copies_to))
+    {
+        let unit = unit.trim().to_string();
+        if unit.is_empty() || units.iter().any(|seen| seen == &unit) {
+            continue;
+        }
+        units.push(unit);
+    }
+    units
+}
+
+/// 某个接收单位登记的收件人条目。
+pub(crate) fn receiving_contact_of<'a>(
+    profile: &'a TemplateProfile,
+    unit: &str,
+) -> Option<&'a ReceivingContact> {
+    profile
+        .receiving_contacts
+        .iter()
+        .find(|contact| contact.unit.trim() == unit.trim())
+}
+
+/// 按接收单位清单对齐收件人条目：单位还在就保留已填的收件人，新单位补一条空条目，
+/// 清单里没有的单位（主送、抄送改动后）被丢弃。返回对齐后的条目。
+pub(crate) fn sync_receiving_contacts(
+    profile: &mut TemplateProfile,
+    units: &[String],
+) -> Vec<ReceivingContact> {
+    let previous = profile.receiving_contacts.clone();
+    let mut synced = Vec::with_capacity(units.len());
+    for unit in units {
+        let kept = previous
+            .iter()
+            .find(|contact| contact.unit.trim() == unit.trim())
+            .cloned()
+            .unwrap_or_default();
+        synced.push(ReceivingContact {
+            unit: unit.clone(),
+            name: kept.name,
+            phone: kept.phone,
+        });
+    }
+    profile.receiving_contacts = synced.clone();
+    synced
+}
+
 /// 份号位宽固定两位；超过 99 份才用三位，避免版头忽宽忽窄。
 pub(crate) fn format_copy_number(value: u32) -> String {
     if value < 100 {
@@ -305,6 +406,14 @@ pub struct TemplateProfile {
     pub contact_person: String,
     pub contact_phone: String,
     pub joint_contacts: Vec<JointContact>,
+    /// 公函收件人清单：按接收单位（主送 + 抄送）逐个记收件人与电话，
+    /// 导出《传发任务单》时按单位取用。空时导出留白手写。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receiving_contacts: Vec<ReceivingContact>,
+    /// 本篇公函用的传输任务（《传发任务单》的题名），取自设置页的传输任务字典。
+    /// 空时按密级自动带（见 [`resolve_transmit_task`]）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub transmit_task: String,
     pub reporting_leaders: String,
     pub signing_unit: String,
     /// 白头件落款是否使用简称。勾选后落款单位显示词库简称（未维护简称的
@@ -363,6 +472,8 @@ impl Default for TemplateProfile {
             contact_person: String::new(),
             contact_phone: String::new(),
             joint_contacts: Vec::new(),
+            receiving_contacts: Vec::new(),
+            transmit_task: String::new(),
             reporting_leaders: String::new(),
             signing_unit: String::new(),
             use_short_name_for_signature: false,

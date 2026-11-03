@@ -1701,6 +1701,48 @@ impl GongwenApp {
         }
     }
 
+    /// 传输任务类型字典（《传发任务单》的题名）。可增删改。
+    ///
+    /// 题名说的是「这次传的是什么任务」，不是公文标题——公文标题印在单子表内的
+    /// 「标题」一栏。字典默认三项，用户按自己的口径增删；公函表单里选其中一项。
+    fn transmit_tasks_editor(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new("传输任务类型（传发任务单的题名）")
+                .size(theme::font_sizes::SMALL)
+                .color(theme::text_muted()),
+        );
+        let mut remove = None;
+        ui.vertical(|ui| {
+            for (index, task) in self.config.transmit_tasks.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(task)
+                            .desired_width((ui.available_width() - 40.0).max(120.0)),
+                    );
+                    if theme::danger_icon_button(ui, theme::Icon::Trash, "删除这一项").clicked()
+                    {
+                        remove = Some(index);
+                    }
+                });
+            }
+        });
+        if let Some(index) = remove {
+            self.config.transmit_tasks.remove(index);
+        }
+        if ui
+            .add(egui::Button::new("＋ 添加一项").min_size(egui::vec2(0.0, 24.0)))
+            .clicked()
+        {
+            self.config.transmit_tasks.push("新的传发任务单".into());
+        }
+        if self.config.transmit_tasks.is_empty() {
+            ui.colored_label(
+                warn(),
+                "字典空了：公函表单里就选不到传输任务，导出的传发任务单会退回按密级自动带。",
+            );
+        }
+    }
+
     fn export_section_ui(&mut self, ui: &mut egui::Ui) {
         // Word 导出尚未达到 PDF 的成熟度，入口保留但暂不允许启用。
         self.config.export.docx = false;
@@ -1725,11 +1767,15 @@ impl GongwenApp {
         ui.add_space(6.0);
         ui.checkbox(
             &mut self.config.export.receipt,
-            "同时导出公文签收记录单（仅公函）",
+            "同时导出签收记录单与传发任务单（仅公函）",
         )
         .on_hover_text(
-            "公函勾选后随本次选中的 PDF / Word 各出一份《公文签收记录单》，与原公函分开成文件；其他文种不生成",
+            "公函勾选后每次导出都出两类随行单据：纸质《公文签收记录单》一份（收件人手写签名），\
+             电子《传发任务单》每家接收单位一份（只出 PDF，不用签字）。都与原公函分开成文件；其他文种不生成",
         );
+        setting_continuation(ui, |ui| {
+            self.transmit_tasks_editor(ui);
+        });
         ui.checkbox(
             &mut self.config.auto_export,
             "AI 起草或优化完成后自动导出一次",

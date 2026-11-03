@@ -20,6 +20,7 @@ mod research_sample_tests;
 pub(crate) mod runs;
 #[cfg(test)]
 mod sample_tests;
+pub(crate) mod transmit;
 
 use std::path::Path;
 

@@ -217,6 +217,18 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   与方案的出入和已知坑见 `docs/meeting-minutes-design.md`（单文件，第十节是交接）。
   三端共用的文字规则在 `src/export/minutes.rs`，改「一是」楷体或名单排法只改那里。
 
+- **公函两类随行单据**（纸质《公文签收记录单》+ 电子《传发任务单》，只出 PDF、
+  每家接收单位一份）：**已实现，待真机验收**（真机导出后目视单据与目录、
+  多单位各一份、只导 Word 时也出传输单）。方案与实现取舍见
+  `docs/signoff-transmission-design.md`（单文件）。要点：模板 `assets/typst/transmit.typ`
+  （`Template::Transmit`，照用户给的 Word 模板复刻），数据 `src/export/typst/transmit.rs`，
+  接线在 `src/export/mod.rs::export_artifacts`；**单子必须只有一页**，靠收紧阶梯
+  （`FITS` 七档：题名空白 → 题名字号字距 → 表格字号 → 行高备注 → 页边距）排版后数页数
+  重排实现，`TypstOutcome.pages` 为此加的字段；题名是**传输任务字典项**（设置页可增删，
+  默认涉密信息加密 / 公开信息明文 / 公开信息密文），不是公文标题，公文标题印在表内
+  「标题」一栏；传输单文件名 `传发任务单-<单位>.pdf` **不带文种主干名**（带上会超
+  42 字符上限、把公文标题截短）。
+
 - **跟随 Omarchy 主题**（读 Omarchy 当前主题的 `colors.toml` 现算界面配色，分三期）：
   **第一期（探测、解析、换算、`Theme::on_accent`、`ThemeName::Omarchy` 与设置页 / 菜单入口、
   23 套官方样本对比度测试）、第二期（后台每秒轮询即时跟随 `omarchy/watch.rs`、

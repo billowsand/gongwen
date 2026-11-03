@@ -1871,6 +1871,9 @@ impl GongwenApp {
                 } else {
                     String::new()
                 };
+                // 公函两类随行单据出了几份，一并说出来：光看文件数不知道签收单与
+                // 传发任务单是不是真的出来了。
+                let sheets_tail = outcome.sheets.describe();
                 // 孤行、编译失败、要素未齐都是这一下才摆到眼前的，弹抽屉把它们顶出来，
                 // 别让提示躺在折叠面板里看不见。
                 if orphans > 0 || mustfix > 0 || self.docs[index].export_error.is_some() {
@@ -1878,17 +1881,17 @@ impl GongwenApp {
                 }
                 self.status = if self.docs[index].export_error.is_some() {
                     format!(
-                        "{prefix}当前审校稿已导出 {} 个文件；PDF 编译失败，请查看审校提示。",
+                        "{prefix}当前审校稿已导出 {} 个文件{sheets_tail}；PDF 编译失败，请查看审校提示。",
                         self.docs[index].output_files.len()
                     )
                 } else if orphans > 0 {
                     format!(
-                        "{prefix}当前审校稿已导出 {} 个文件；实测发现 {orphans} 处排版问题，见审校提示{mustfix_tail}。",
+                        "{prefix}当前审校稿已导出 {} 个文件{sheets_tail}；实测发现 {orphans} 处排版问题，见审校提示{mustfix_tail}。",
                         self.docs[index].output_files.len()
                     )
                 } else {
                     format!(
-                        "{prefix}当前审校稿已导出 {} 个文件{mustfix_tail}。",
+                        "{prefix}当前审校稿已导出 {} 个文件{sheets_tail}{mustfix_tail}。",
                         self.docs[index].output_files.len()
                     )
                 };

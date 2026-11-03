@@ -33,6 +33,8 @@ pub const TEMPLATE: &str = include_str!("../assets/typst/gongwen.typ");
 pub const RESEARCH_TEMPLATE: &str = include_str!("../assets/typst/research.typ");
 /// 公函签收记录单模板：公函的附属件，与原公函分开成文件。
 pub const RECEIPT_TEMPLATE: &str = include_str!("../assets/typst/receipt.typ");
+/// 电子加密传输单（《传发任务单》）模板：每家接收单位一份，只出 PDF。
+pub const TRANSMIT_TEMPLATE: &str = include_str!("../assets/typst/transmit.typ");
 
 const DATA_PATH: &str = "/doc.json";
 
@@ -43,6 +45,7 @@ pub enum Template {
     Official,
     Research,
     Receipt,
+    Transmit,
 }
 
 impl Template {
@@ -51,6 +54,7 @@ impl Template {
             Self::Official => "/gongwen.typ",
             Self::Research => "/research.typ",
             Self::Receipt => "/receipt.typ",
+            Self::Transmit => "/transmit.typ",
         }
     }
 
@@ -59,6 +63,7 @@ impl Template {
             Self::Official => TEMPLATE,
             Self::Research => RESEARCH_TEMPLATE,
             Self::Receipt => RECEIPT_TEMPLATE,
+            Self::Transmit => TRANSMIT_TEMPLATE,
         }
     }
 }
@@ -94,12 +99,24 @@ impl<'a> TypstJob<'a> {
             files: HashMap::new(),
         }
     }
+
+    /// 电子加密传输单（《传发任务单》）：每家接收单位一份，只出 PDF。
+    pub fn transmit(data: String, base_dir: &'a Path) -> Self {
+        Self {
+            data,
+            base_dir,
+            template: Template::Transmit,
+            files: HashMap::new(),
+        }
+    }
 }
 
 /// 一次排版的产物。
 #[derive(Debug, Default)]
 pub struct TypstOutcome {
     pub pdf: Vec<u8>,
+    /// 排出来的页数。传发任务单要靠它判断有没有超页（见 `export::typst::transmit`）。
+    pub pages: usize,
     /// 孤行探针报告，格式与 `.gwaproof` 相同（见 `orphan_probe`），没开探针时为 `None`。
     pub proof: Option<String>,
     /// Typst 的警告（排版不收敛之类），不阻断导出，交给调用方决定是否提示。
@@ -425,6 +442,7 @@ pub fn compile(job: &TypstJob, set: &FontSet) -> Result<TypstOutcome> {
     let pdf = rotate_landscape_pages(pdf)?;
     Ok(TypstOutcome {
         pdf,
+        pages: document.pages().len(),
         proof,
         warnings,
     })

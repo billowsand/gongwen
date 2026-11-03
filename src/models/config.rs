@@ -4,12 +4,12 @@
 //! `models` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::models::{
-    AiPrompt, DiagramTheme, EditorFontScheme, ExportSelection, FontConfig, ImeConfig,
-    LmStudioConfig, ModelRef, ModelRefError, NumberingConfig, PROVIDER_PRESETS, PaperMode,
-    PrintConfig, ProofreadConfig, ProviderConfig, ProxyConfig, RagConfig, ReasoningEffort,
-    ReasoningFormat, RerankMode, ReviseModelConfig, RibbonTab, SecurityRules, TemplateKind,
-    TemplateProfile, ThemeName, VocabularyEntry, VocabularySetupStatus, builtin_ai_prompts,
-    preset_for_url,
+    AiPrompt, DEFAULT_TRANSMIT_TASKS, DiagramTheme, EditorFontScheme, ExportSelection, FontConfig,
+    ImeConfig, LmStudioConfig, ModelRef, ModelRefError, NumberingConfig, PROVIDER_PRESETS,
+    PaperMode, PrintConfig, ProofreadConfig, ProviderConfig, ProxyConfig, RagConfig,
+    ReasoningEffort, ReasoningFormat, RerankMode, ReviseModelConfig, RibbonTab, SecurityRules,
+    TemplateKind, TemplateProfile, ThemeName, VocabularyEntry, VocabularySetupStatus,
+    builtin_ai_prompts, preset_for_url,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,10 @@ pub struct AppConfig {
     pub profiles: Vec<TemplateProfile>,
     pub last_template: TemplateKind,
     pub export: ExportSelection,
+    /// 传输任务类型（《传发任务单》的题名）字典。默认三项，用户可增删；
+    /// 旧配置没有这一项时按默认补齐（见 [`AppConfig::ensure_transmit_tasks`]）。
+    #[serde(default)]
+    pub transmit_tasks: Vec<String>,
     /// 打印对话框记住的选择（上次用的打印机）。
     pub print: PrintConfig,
     /// AI 起草或优化完成后是否立即按勾选格式导出一次。
@@ -141,6 +145,7 @@ impl Default for AppConfig {
                 .collect(),
             last_template: TemplateKind::OfficialLetter,
             export: ExportSelection::default(),
+            transmit_tasks: Vec::new(),
             print: PrintConfig::default(),
             auto_export: false,
             auto_save: true,
@@ -709,6 +714,18 @@ impl AppConfig {
             .max()
             .unwrap_or(0)
             + 1
+    }
+
+    /// 载入配置后补齐传输任务字典：旧配置没有这一项，用户也没自己加过，
+    /// 就按默认三项补上。用户删空了就尊重用户的选择，不再补。
+    pub(crate) fn ensure_transmit_tasks(&mut self) {
+        if self.transmit_tasks.is_empty() {
+            self.transmit_tasks = DEFAULT_TRANSMIT_TASKS
+                .iter()
+                .map(|task| (*task).to_string())
+                .collect();
+        }
+        self.transmit_tasks.retain(|task| !task.trim().is_empty());
     }
 }
 

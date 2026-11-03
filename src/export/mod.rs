@@ -349,6 +349,36 @@ pub(crate) struct ExportArtifacts {
     /// 排出了 PDF 时的附带信息（孤行探针报告、排版警告）；只出 Typst 包时，
     /// 这里也装着出包警告（缺图等），由界面照常提示。
     pub typst: Option<typst_engine::TypstOutcome>,
+    /// 公函两类随行单据的产出份数。界面靠它把「出了哪些单据」说清楚，
+    /// 不用去猜文件名。
+    pub sheets: SheetOutputs,
+}
+
+/// 公函随行单据的产出情况：纸质《公文签收记录单》一份，电子《传发任务单》
+/// 每家接收单位一份。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SheetOutputs {
+    /// 纸质签收单的份数（Word 与 PDF 各算一份；同一份内容出了两种格式）。
+    pub receipt: usize,
+    /// 电子传发任务单的份数。
+    pub transmit: usize,
+}
+
+impl SheetOutputs {
+    /// 状态栏里的一句交代：出了哪几类单据、各几份。
+    pub(crate) fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if self.receipt > 0 {
+            parts.push(format!("签收记录单 {} 份", self.receipt));
+        }
+        if self.transmit > 0 {
+            parts.push(format!("传发任务单 {} 份", self.transmit));
+        }
+        if parts.is_empty() {
+            return String::new();
+        }
+        format!("（含{}）", parts.join("、"))
+    }
 }
 
 const MAX_EXPORT_FILENAME_CHARS: usize = 42;
@@ -444,6 +474,8 @@ pub(crate) fn export_artifacts(
     fs::create_dir_all(&document_dir)
         .with_context(|| format!("无法创建文稿导出目录：{}", document_dir.display()))?;
     let mut files = Vec::new();
+    // 公函两类随行单据的份数；非公函或没勾选时保持为零。
+    let mut sheet_outputs = SheetOutputs::default();
 
     if selection.markdown {
         let path = document_dir.join(format!("{file_stem}-源码包.zip"));
@@ -468,12 +500,6 @@ pub(crate) fn export_artifacts(
             )?;
         }
         files.push(path);
-        if receipt {
-            let path = document_dir.join(format!("{file_stem}_签收记录单.docx"));
-            docx::write_receipt_docx(&path, input, markdown, display)
-                .context("生成《公文签收记录单》Word 失败")?;
-            files.push(path);
-        }
     }
     let mut typst = None;
     let mut compile_error = None;
@@ -494,25 +520,6 @@ pub(crate) fn export_artifacts(
                 typst = Some(outcome);
             }
             Err(error) => compile_error = Some(format!("{error:#}")),
-        }
-        if receipt {
-            let path = document_dir.join(format!("{file_stem}_签收记录单.pdf"));
-            match typst::receipt::write_pdf(&path, input, markdown, display, fonts) {
-                Ok(outcome) => {
-                    files.push(path);
-                    if let Some(main) = typst.as_mut() {
-                        main.warnings.extend(outcome.warnings);
-                    }
-                }
-                Err(error) => {
-                    // 签收单排版失败只追加错误，不抹掉主 PDF 的错误。
-                    let message = format!("《公文签收记录单》排版失败：{error:#}");
-                    compile_error = Some(match compile_error.take() {
-                        Some(existing) => format!("{existing}\n{message}"),
-                        None => message,
-                    });
-                }
-            }
         }
     }
     if selection.typst {
@@ -537,11 +544,147 @@ pub(crate) fn export_artifacts(
             }
         }
     }
+    // 公函的两类随行单据（见 docs/signoff-transmission-design.md）：
+    // - 纸质《公文签收记录单》：一份，收件人手写签名与日期；
+    // - 电子《传发任务单》：每家接收单位一份，不用签字，只出 PDF。
+    // 两者都与原公函分开成文件，绝不拼进公函正文。
+    if receipt {
+        let mut sheets = SheetOutputs::default();
+        if selection.docx {
+            let path = document_dir.join(format!("{file_stem}_签收记录单.docx"));
+            docx::write_receipt_docx(&path, input, markdown, display)
+                .context("生成《公文签收记录单》Word 失败")?;
+            files.push(path);
+            sheets.receipt += 1;
+        }
+        // 纸单至少要有一份：Word 与 PDF 都没选时也出一份 PDF，
+        // 免得勾了这一项却看不到纸单。
+        if selection.pdf || !selection.docx {
+            let path = document_dir.join(format!("{file_stem}_签收记录单.pdf"));
+            match typst::receipt::write_pdf(&path, input, markdown, display, fonts) {
+                Ok(outcome) => {
+                    files.push(path);
+                    sheets.receipt += 1;
+                    if let Some(main) = typst.as_mut() {
+                        main.warnings.extend(outcome.warnings);
+                    }
+                }
+                Err(error) => {
+                    // 签收单排版失败只追加错误，不抹掉主 PDF 的错误。
+                    append_error(
+                        &mut compile_error,
+                        format!("《公文签收记录单》排版失败：{error:#}"),
+                    );
+                }
+            }
+        }
+        sheets.transmit = write_transmission_sheets(
+            &document_dir,
+            input,
+            markdown,
+            display,
+            fonts,
+            numbering,
+            &mut files,
+            &mut typst,
+            &mut compile_error,
+        );
+        sheet_outputs = sheets;
+    }
     Ok(ExportArtifacts {
         files,
         typst,
         compile_error,
+        sheets: sheet_outputs,
     })
+}
+
+/// 追加一条导出错误：已有的错误留在前面，两条都留。
+fn append_error(compile_error: &mut Option<String>, message: String) {
+    *compile_error = Some(match compile_error.take() {
+        Some(existing) => format!("{existing}\n{message}"),
+        None => message,
+    });
+}
+
+/// 电子加密传输单的文件名前缀。文件名是「传发任务单-<接收单位>.pdf」。
+///
+/// 不带文稿主干名：主干名加上单位名会超过 42 字符上限，标题会被截得很短；
+/// 传输单本来就放在本次导出的文稿目录里，题名与函号也印在单子上。
+const TRANSMIT_FILE_PREFIX: &str = "传发任务单-";
+
+/// 传输单的文件名（不含目录）：「传发任务单-<单位>.pdf」。单位名过长时按
+/// [`MAX_EXPORT_FILENAME_CHARS`] 截短，整个文件名不超限。
+fn transmit_file_name(unit: &str) -> String {
+    let suffix = ".pdf";
+    let budget =
+        MAX_EXPORT_FILENAME_CHARS - TRANSMIT_FILE_PREFIX.chars().count() - suffix.chars().count();
+    let unit = safe_filename(unit);
+    let cut: String = unit.chars().take(budget).collect();
+    // 截断处不留半截的分隔符，免得文件名以「-」之类收尾。
+    let cut = cut
+        .trim_end_matches(|c: char| c.is_whitespace() || "-_—、，,；;：（(《〈【“‘".contains(c))
+        .to_string();
+    format!("{TRANSMIT_FILE_PREFIX}{cut}{suffix}")
+}
+
+/// 出电子《传发任务单》：每家接收单位一份，只出 PDF。返回实际出成的份数。
+///
+/// 模板的「纸质文件（N 页）」要填正文页数，自动取：导了 PDF 就按正文排版的结果算，
+/// 没导 PDF 时为拿页数多排一次版（只排不写文件，几十毫秒）。
+///
+/// 排版失败只记错误，不影响其余产物。
+#[allow(clippy::too_many_arguments)]
+fn write_transmission_sheets(
+    dir: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+    files: &mut Vec<PathBuf>,
+    typst: &mut Option<typst_engine::TypstOutcome>,
+    compile_error: &mut Option<String>,
+) -> usize {
+    let receivers = typst::transmit::receivers(input, display);
+    if receivers.is_empty() {
+        return 0;
+    }
+    let pages = match typst::page_count(input, markdown, display, fonts, numbering) {
+        Ok(pages) => pages.max(1),
+        Err(error) => {
+            append_error(
+                compile_error,
+                format!("计算正文页数失败，传发任务单的页数按 1 页填：{error:#}"),
+            );
+            1
+        }
+    };
+    // 上一份单子用过的版面档位：同一批的单位内容几乎一样，接着往下试即可。
+    let mut hint = 0;
+    let mut written = 0;
+    for receiver in &receivers {
+        let path = dir.join(transmit_file_name(&receiver.unit));
+        match typst::transmit::write_pdf(
+            &path, input, markdown, display, fonts, receiver, pages, hint,
+        ) {
+            Ok((outcome, index)) => {
+                hint = index;
+                files.push(path);
+                written += 1;
+                if let Some(main) = typst.as_mut() {
+                    main.warnings.extend(outcome.warnings);
+                }
+            }
+            Err(error) => {
+                append_error(
+                    compile_error,
+                    format!("《传发任务单》排版失败（{}）：{error:#}", receiver.unit),
+                );
+            }
+        }
+    }
+    written
 }
 
 /// 排一份 PDF 写到 `path`：研究报告走 `typst::research`，其余文种走公文模板。
@@ -2694,5 +2837,174 @@ mod tests {
             .expect("没有生成签收记录单 PDF");
         assert!(receipt.metadata().unwrap().len() > 0);
         assert_eq!(receipt.parent().unwrap(), files[0].parent().unwrap());
+    }
+
+    /// 公函勾了单据且选了 PDF：纸质签收单一份，电子传发任务单每家接收单位一份。
+    #[test]
+    fn both_sheet_kinds_are_produced_for_every_receiving_unit() {
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        input.profile.issuing_unit = "某某市民政局".into();
+        input.profile.recipient = "甲单位、乙单位".into();
+        input.profile.copies_to = "丙单位".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            pdf: true,
+            typst: false,
+            receipt: true,
+            overwrite: true,
+        };
+        let files = export_all(
+            temp.path(),
+            &input,
+            "# 关于商洽的函\n\n甲单位、乙单位：\n\n现就有关事项函告如下。",
+            &selection,
+            &UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        // 纸质签收单：一份。
+        assert_eq!(
+            files
+                .iter()
+                .filter(|path| path.to_string_lossy().ends_with("_签收记录单.pdf"))
+                .count(),
+            1
+        );
+        // 电子传输单：主送两家、抄送一家，各一份。
+        let sheets: Vec<&PathBuf> = files
+            .iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("传发任务单-"))
+            })
+            .collect();
+        assert_eq!(sheets.len(), 3, "每家接收单位一份：{sheets:?}");
+        let names: Vec<String> = sheets
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"传发任务单-甲单位.pdf".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"传发任务单-丙单位.pdf".to_string()),
+            "{names:?}"
+        );
+        for sheet in &sheets {
+            assert!(sheet.metadata().unwrap().len() > 0);
+        }
+    }
+
+    /// 随行单据的份数要能说出来：签收单一份、传发任务单每家接收单位一份，
+    /// 状态栏据此交代「含哪几类单据、各几份」。
+    #[test]
+    fn the_sheet_counts_are_reported_for_the_status_line() {
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        input.profile.issuing_unit = "某某市民政局".into();
+        input.profile.recipient = "甲单位、乙单位".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            pdf: true,
+            typst: false,
+            receipt: true,
+            overwrite: true,
+        };
+        let artifacts = export_artifacts(
+            temp.path(),
+            &input,
+            "# 关于商洽的函\n\n甲单位、乙单位：\n\n现就有关事项函告如下。",
+            &selection,
+            &UnitDisplay::new(&[]),
+            &FontConfig::default(),
+            &NumberingConfig::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(artifacts.sheets.receipt, 1);
+        assert_eq!(artifacts.sheets.transmit, 2);
+        assert_eq!(
+            artifacts.sheets.describe(),
+            "（含签收记录单 1 份、传发任务单 2 份）"
+        );
+    }
+
+    /// 没勾单据时不提单据：状态栏那句话只讲文件本身。
+    #[test]
+    fn no_sheets_means_nothing_to_say_about_them() {
+        let sheets = SheetOutputs::default();
+        assert_eq!(sheets.describe(), "");
+        assert_eq!(
+            SheetOutputs {
+                receipt: 1,
+                transmit: 0
+            }
+            .describe(),
+            "（含签收记录单 1 份）"
+        );
+    }
+
+    /// 只导 Word、不导 PDF 时，电子传输单照样出（它本来就是 PDF）。
+    #[test]
+    fn the_transmission_sheet_is_produced_even_without_a_pdf_export() {
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        input.profile.issuing_unit = "某某市民政局".into();
+        input.profile.recipient = "甲单位".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: true,
+            pdf: false,
+            typst: false,
+            receipt: true,
+            overwrite: true,
+        };
+        let files = export_all(
+            temp.path(),
+            &input,
+            "# 关于商洽的函\n\n甲单位：\n\n现就有关事项函告如下。",
+            &selection,
+            &UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            files
+                .iter()
+                .any(|path| path.to_string_lossy().ends_with("传发任务单-甲单位.pdf")),
+            "只导 Word 时也要出电子传输单：{files:?}"
+        );
+    }
+
+    /// 传输单的文件名不超 42 字符上限：单位名过长时截短。
+    #[test]
+    fn the_transmission_sheet_name_fits_the_filename_budget() {
+        let name = transmit_file_name(&"很长的接收单位名称".repeat(6));
+        assert!(name.starts_with("传发任务单-"), "{name}");
+        assert!(name.ends_with(".pdf"), "{name}");
+        assert!(name.chars().count() <= MAX_EXPORT_FILENAME_CHARS, "{name}");
     }
 }

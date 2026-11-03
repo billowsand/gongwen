@@ -503,6 +503,8 @@ impl GongwenApp {
         }
         // 旧配置没有提示词库，这里补齐预置项并给未编号的条目分配 id。
         config.ensure_ai_prompts();
+        // 传输任务字典（旧配置没有这一项）按默认补齐。
+        config.ensure_transmit_tasks();
         // 密级现在是所有文稿类型的必要填报项目：旧配置里的空密级回填默认“机密、20年”。
         config.ensure_security_defaults();
         if config.output_dir.trim().is_empty() {
