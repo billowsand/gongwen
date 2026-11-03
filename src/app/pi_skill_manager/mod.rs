@@ -560,15 +560,24 @@ impl PiSkillsPage {
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::Label::new(egui::RichText::new(&entry.label).strong())
-                                    .truncate(),
+                                    .truncate()
+                                    // 卡片整块是一个可点选项：标签不可框选，否则悬停变
+                                    // 文本光标且点击被文本选择吃掉，卡片点不中。
+                                    .selectable(false),
                             );
-                            ui.label(
-                                egui::RichText::new(origin_label(entry))
-                                    .small()
-                                    .color(theme::text_muted()),
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(origin_label(entry))
+                                        .small()
+                                        .color(theme::text_muted()),
+                                )
+                                .selectable(false),
                             );
                             if self.dirty(&entry.name) {
-                                ui.colored_label(theme::warn(), "●");
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new("●").color(theme::warn()))
+                                        .selectable(false),
+                                );
                             }
                         });
                         let detail = if let Some(error) = &entry.error {
@@ -582,10 +591,13 @@ impl PiSkillsPage {
                                     .small()
                                     .color(theme::text_soft()),
                             )
-                            .truncate(),
+                            .truncate()
+                            .selectable(false),
                         );
                     });
                     if response
+                        // 整块是选项，悬停显示手指而不是默认箭头。
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text(if let Some(error) = &entry.error {
                             error.clone()
                         } else {
