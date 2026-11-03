@@ -257,12 +257,21 @@ const TRANSMIT_TASK_PUBLIC: &str = "公开信息明文传发任务单";
 /// 有密级时用的传输任务：涉密信息加密。
 const TRANSMIT_TASK_SECRET: &str = "涉密信息加密传发任务单";
 
-/// 这份公函用哪个传输任务：表单里选了就用选的，没选按密级自动带
-/// （有密级 → 涉密信息加密，没密级 → 公开信息明文）。
-pub(crate) fn resolve_transmit_task(profile: &TemplateProfile) -> String {
-    let chosen = profile.transmit_task.trim();
-    if !chosen.is_empty() {
-        return chosen.to_string();
+/// 这份公函用哪个传输任务：取值顺序是——
+///
+/// 1. 稿件里选过题名（旧稿件遗留的逐稿选择）就用它；
+/// 2. 设置页「加密传输单」里选了默认题名就用它；
+/// 3. 都没选按密级自动带（有密级 → 涉密信息加密，没密级 → 公开信息明文）。
+///
+/// 题名选择权在设置页，表单不再逐稿改；这里保留稿件字段只为旧稿件不重出。
+pub(crate) fn resolve_transmit_task(
+    profile: &TemplateProfile,
+    defaults: &crate::models::config::TransmitDefaults,
+) -> String {
+    for chosen in [profile.transmit_task.trim(), defaults.task.trim()] {
+        if !chosen.is_empty() {
+            return chosen.to_string();
+        }
     }
     if profile.security_level.trim().is_empty() {
         TRANSMIT_TASK_PUBLIC.to_string()

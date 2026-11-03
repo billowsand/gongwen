@@ -162,8 +162,8 @@ impl SettingsSection {
                 "这里的选择对所有稿件生效；起草页的「导出」按钮按这里勾选的格式产出。"
             }
             SettingsSection::Transmit => {
-                "公函导出时随《传发任务单》一同印出的固定内容：传字、签批人、时效要求、\
-                 发后处理、备注与保密负责单位。留空的仍在单子上留白手写。"
+                "公函导出时随《传发任务单》一同印出的内容：题名（传输任务，留空按密级自动带）、\
+                 传字、签批人、时效要求、发后处理、备注与保密负责单位。留空的仍在单子上留白手写。"
             }
             SettingsSection::Persistence => {
                 "新建的稿件在第一次真正改动时自动入库；下次启动会恢复本次打开的标签。"
@@ -1717,10 +1717,11 @@ impl GongwenApp {
     /// 传输任务类型字典（《传发任务单》的题名）。可增删改。
     ///
     /// 题名说的是「这次传的是什么任务」，不是公文标题——公文标题印在单子表内的
-    /// 「标题」一栏。字典默认三项，用户按自己的口径增删；公函表单里选其中一项。
+    /// 「标题」一栏。字典默认三项，用户按自己的口径增删；上面「传输任务」行从
+    /// 字典里挑默认题名。
     fn transmit_tasks_editor(&mut self, ui: &mut egui::Ui) {
         ui.label(
-            egui::RichText::new("传输任务类型（传发任务单的题名）")
+            egui::RichText::new("传输任务类型（可增删改，供上面挑选）")
                 .size(theme::font_sizes::SMALL)
                 .color(theme::text_muted()),
         );
@@ -1730,7 +1731,8 @@ impl GongwenApp {
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(task)
-                            .desired_width((ui.available_width() - 40.0).max(120.0)),
+                            .desired_width(320.0)
+                            .margin(egui::Margin::symmetric(8, 4)),
                     );
                     if theme::danger_icon_button(ui, theme::Icon::Trash, "删除这一项").clicked()
                     {
@@ -1751,7 +1753,7 @@ impl GongwenApp {
         if self.config.transmit_tasks.is_empty() {
             ui.colored_label(
                 warn(),
-                "字典空了：公函表单里就选不到传输任务，导出的传发任务单会退回按密级自动带。",
+                "字典空了：传输任务只能按密级自动带，无法在字典里挑选。",
             );
         }
     }
@@ -1786,9 +1788,6 @@ impl GongwenApp {
             "公函勾选后每次导出都出两类随行单据：纸质《公文签收记录单》一份（收件人手写签名），\
              电子《传发任务单》每家接收单位一份（只出 PDF，不用签字）。都与原公函分开成文件；其他文种不生成",
         );
-        setting_continuation(ui, |ui| {
-            self.transmit_tasks_editor(ui);
-        });
         ui.checkbox(
             &mut self.config.auto_export,
             "AI 起草或优化完成后自动导出一次",
@@ -1803,10 +1802,52 @@ impl GongwenApp {
     /// 这些内容程序不替人编造，但每次手填一遍太折腾：做成默认配置，导出时照填。
     /// 留空的仍在单子上留白手写——位置要留着，人签字、填号。
     fn transmit_section_ui(&mut self, ui: &mut egui::Ui) {
+        sub_heading(ui, "题名", None);
+        setting_row(
+            ui,
+            "传输任务",
+            Some(
+                "《传发任务单》的题名：说清这次传的是什么任务。留空则按密级自动带（有密级为涉密信息加密，无密级为公开信息明文）。",
+            ),
+            |ui| {
+                let current = self.config.transmit_defaults.task.trim().to_string();
+                let shown = if current.is_empty() {
+                    "按密级自动".to_string()
+                } else {
+                    current.clone()
+                };
+                egui::ComboBox::from_id_salt("transmit_default_task")
+                    .selected_text(shown)
+                    .width(240.0)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(current.is_empty(), "按密级自动")
+                            .clicked()
+                        {
+                            self.config.transmit_defaults.task.clear();
+                        }
+                        for task in &self.config.transmit_tasks {
+                            if ui.selectable_label(current == *task, task).clicked() {
+                                self.config.transmit_defaults.task = task.clone();
+                            }
+                        }
+                    });
+            },
+        );
+        setting_continuation(ui, |ui| {
+            self.transmit_tasks_editor(ui);
+        });
+
         let defaults = &mut self.config.transmit_defaults;
 
         sub_heading(ui, "单据抬头", None);
-        setting_field(ui, "传字", &mut defaults.serial_prefix, "如「传」");
+        setting_row(ui, "传字", None, |ui| {
+            crate::ime::exempt(ui.add(theme::field(
+                &mut defaults.serial_prefix,
+                "如「传」",
+                200.0,
+            )));
+        });
         setting_continuation(ui, |ui| {
             ui.weak("印在右上角「传　　号」里，传字照填、不加方括号，号码留白手写。");
         });
@@ -1815,7 +1856,7 @@ impl GongwenApp {
         setting_row(ui, "签批人", None, |ui| {
             crate::ime::exempt(ui.add_enabled(
                 !defaults.signatory_blank,
-                theme::field(&mut defaults.signatory, "如「张三」", 180.0),
+                theme::field(&mut defaults.signatory, "如「张三」", 200.0),
             ));
         });
         setting_continuation(ui, |ui| {
@@ -1826,7 +1867,9 @@ impl GongwenApp {
         });
 
         sub_heading(ui, "涉密信息要素", None);
-        setting_field(ui, "时效要求", &mut defaults.urgency, "如「急」");
+        setting_row(ui, "时效要求", None, |ui| {
+            crate::ime::exempt(ui.add(theme::field(&mut defaults.urgency, "如「急」", 200.0)));
+        });
         setting_continuation(ui, |ui| {
             ui.weak("留空则这一栏留白手写。");
         });
@@ -1852,12 +1895,13 @@ impl GongwenApp {
                 ),
             );
         });
-        setting_field(
-            ui,
-            "保密单位",
-            &mut defaults.security_unit,
-            "如「某某市保密局」",
-        );
+        setting_row(ui, "保密单位", None, |ui| {
+            crate::ime::exempt(ui.add(theme::field(
+                &mut defaults.security_unit,
+                "如「某某市保密局」",
+                200.0,
+            )));
+        });
         setting_continuation(ui, |ui| {
             ui.weak("保密负责单位，印在单子末行；留空则保留模板上的「【保密单位】」字样。");
         });

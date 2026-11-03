@@ -380,7 +380,7 @@ pub(crate) fn build(
     let mut cells: Vec<TransmitCell> = Vec::new();
 
     // 题名：传输任务名。题名越长字号越小，尽量排在一行里；再长就压字距。
-    let title = crate::models::resolve_transmit_task(&input.profile);
+    let title = crate::models::resolve_transmit_task(&input.profile, defaults);
     let title_chars = title.chars().count().max(1) as f64;
     // 标题与字距各留一点余量，别让最后一个字顶到版心边上。
     let one_line_pt = (TITLE_LINE_WIDTH_PT * 0.98 / (title_chars + 0.25))
@@ -1053,6 +1053,7 @@ mod tests {
             phone: "0571-66666666".into(),
         };
         let defaults = TransmitDefaults {
+            task: String::new(),
             serial_prefix: "机要".into(),
             signatory: "李四".into(),
             signatory_blank: false,
@@ -1213,24 +1214,34 @@ mod tests {
         assert!(doc.cells[sign_index + 1].runs.is_empty());
     }
 
-    /// 题名取自传输任务字典：有登记的用登记的，没登记的按密级自动带。
+    /// 题名取自传输任务字典：稿件里选过用稿件的，否则用设置页默认，都没选按密级自动带。
     #[test]
     fn the_title_comes_from_the_transmit_task_dictionary() {
         let mut input = letter();
+        let empty = TransmitDefaults::default();
         assert_eq!(
-            crate::models::resolve_transmit_task(&input.profile),
+            crate::models::resolve_transmit_task(&input.profile, &empty),
             "涉密信息加密传发任务单"
         );
         input.profile.transmit_task = "公开信息密文传发任务单".into();
         assert_eq!(
-            crate::models::resolve_transmit_task(&input.profile),
+            crate::models::resolve_transmit_task(&input.profile, &empty),
             "公开信息密文传发任务单"
         );
         input.profile.transmit_task.clear();
         input.profile.security_level.clear();
         assert_eq!(
-            crate::models::resolve_transmit_task(&input.profile),
+            crate::models::resolve_transmit_task(&input.profile, &empty),
             "公开信息明文传发任务单"
+        );
+        // 设置页选了默认题名，稿件没选时用它。
+        let configured = TransmitDefaults {
+            task: "公开信息密文传发任务单".into(),
+            ..TransmitDefaults::default()
+        };
+        assert_eq!(
+            crate::models::resolve_transmit_task(&input.profile, &configured),
+            "公开信息密文传发任务单"
         );
     }
 
@@ -1253,6 +1264,7 @@ mod tests {
     /// 样张用的默认填写内容：把设置页能填的都填上，好一次看全单子的样子。
     fn filled_defaults() -> TransmitDefaults {
         TransmitDefaults {
+            task: String::new(),
             serial_prefix: "传".into(),
             signatory: "王主任".into(),
             signatory_blank: false,

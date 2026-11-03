@@ -962,6 +962,7 @@ pub(crate) fn sort_by_vocabulary(mut units: Vec<String>, options: &[SelectOption
 ///
 /// 导出《传发任务单》时按单位取用：收件人姓名与电话都印在单子上。单位在词库里
 /// 只登记了一个人时自动带出他；登记了多人要人来挑，没登记的留白，单子上手写。
+/// 每家单位名前标「主送」「抄送」，接收单位清单本来就是两者合并，标出来才不混。
 ///
 /// 返回是否改过。写值走 [`crate::models::sync_receiving_contacts`]：单位清单变了
 /// （主送、抄送改了）时，多余的条目被丢弃，新单位补一条空条目。
@@ -979,6 +980,17 @@ pub(crate) fn receiving_contacts_editor(
         crate::models::sync_receiving_contacts(profile, units);
     let mut changed = false;
     let name_width = (width * 0.46).max(120.0);
+    let recipients = crate::models::split_units(&profile.recipient);
+    let copies = crate::models::split_units(&profile.copies_to);
+    let role_of = |unit: &str| {
+        if recipients.iter().any(|seen| seen.trim() == unit.trim()) {
+            "主送"
+        } else if copies.iter().any(|seen| seen.trim() == unit.trim()) {
+            "抄送"
+        } else {
+            ""
+        }
+    };
     ui.vertical(|ui| {
         for entry in entries.iter_mut() {
             let unit_label = display.full_name_for(&entry.unit, external_names);
@@ -991,6 +1003,18 @@ pub(crate) fn receiving_contacts_editor(
             };
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
+                let role = role_of(&entry.unit);
+                if !role.is_empty() {
+                    ui.label(
+                        egui::RichText::new(role)
+                            .size(theme::font_sizes::SMALL)
+                            .color(if role == "主送" {
+                                theme::accent_text()
+                            } else {
+                                theme::text_muted()
+                            }),
+                    );
+                }
                 ui.label(
                     egui::RichText::new(unit_label)
                         .size(theme::font_sizes::SMALL)

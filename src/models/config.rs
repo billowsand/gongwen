@@ -807,6 +807,10 @@ impl Default for PiOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TransmitDefaults {
+    /// 传输任务（单子题名）：从传输任务类型字典里选一项。留空则按密级自动带
+    /// （有密级为涉密信息加密，无密级为公开信息明文，见
+    /// [`crate::models::resolve_transmit_task`]）。
+    pub task: String,
     /// 传字：印在右上角「传　　号」里，号码只留空白手写，不加方括号与横线。
     pub serial_prefix: String,
     /// 默认签批人姓名。配合 [`TransmitDefaults::signatory_blank`] 用。
@@ -826,6 +830,7 @@ pub struct TransmitDefaults {
 impl Default for TransmitDefaults {
     fn default() -> Self {
         Self {
+            task: String::new(),
             serial_prefix: "传".into(),
             signatory: String::new(),
             signatory_blank: true,

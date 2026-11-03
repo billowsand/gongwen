@@ -27,9 +27,12 @@ use std::collections::BTreeSet;
 
 mod research;
 
-/// 文档要素按纸面部位分成的三段。填表的人脑子里是一张纸：先版头、再主体、
+/// 文档要素按纸面部位分成的段。填表的人脑子里是一张纸：先版头、再主体、
 /// 最后版记。表单顺序与打印出来的纸一致，比按数据类型分组好找得多——
 /// 密级印在纸的最上面，就不该排在表单第三节。
+///
+/// 「传输单」是例外：它不在公文纸上，而是公函随行的《传发任务单》，数据
+/// 归属不属于主体也不属于版记，单列一段跟在版记后面，只有公函显示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FormSection {
     /// 密级、发文机关标志（红头）、文号。
@@ -38,16 +41,28 @@ pub(crate) enum FormSection {
     Body,
     /// 抄送、承办、落款、成文日期、印发。
     Record,
+    /// 收件人（《传发任务单》按主送、抄送单位逐个登记收件人）。仅公函。
+    Transmit,
 }
 
 impl FormSection {
-    pub(crate) const ALL: [Self; 3] = [Self::Header, Self::Body, Self::Record];
+    pub(crate) const ALL: [Self; 4] = [Self::Header, Self::Body, Self::Record, Self::Transmit];
 
     pub(crate) fn index(self) -> usize {
         match self {
             Self::Header => 0,
             Self::Body => 1,
             Self::Record => 2,
+            Self::Transmit => 3,
+        }
+    }
+
+    /// 这一段在该文种下是否显示。传输单只有公函导出随行单据，其余文种不渲染，
+    /// 进度与导航也一并跳过。
+    pub(crate) fn visible(self, kind: TemplateKind) -> bool {
+        match self {
+            Self::Transmit => kind == TemplateKind::OfficialLetter,
+            _ => true,
         }
     }
 
@@ -56,6 +71,7 @@ impl FormSection {
             Self::Header => "版头",
             Self::Body => "主体",
             Self::Record => "版记",
+            Self::Transmit => "传输单",
         }
     }
 
@@ -86,6 +102,7 @@ impl FormSection {
                 "落款 · 承办 · 成文日期"
             }
             (Self::Record, _) => "抄送 · 承办 · 成文日期",
+            (Self::Transmit, _) => "收件人",
         }
     }
 
@@ -94,13 +111,14 @@ impl FormSection {
             Self::Header => theme::Icon::Building,
             Self::Body => theme::Icon::Type,
             Self::Record => theme::Icon::Rows,
+            Self::Transmit => theme::Icon::Package,
         }
     }
 }
 
-/// 三段的展开状态，外加缩略导航图点下的待跳转目标。
+/// 各段的展开状态，外加缩略导航图点下的待跳转目标。
 pub(crate) struct FormSectionState {
-    open: [bool; 3],
+    open: [bool; 4],
     pending_jump: Option<FormSection>,
 }
 
@@ -108,7 +126,7 @@ impl Default for FormSectionState {
     fn default() -> Self {
         Self {
             // 默认全开：要素区本来就默认收起，展开它的人就是来看全貌的。
-            open: [true; 3],
+            open: [true; 4],
             pending_jump: None,
         }
     }
@@ -133,7 +151,7 @@ impl SectionProgress {
 /// 时才跑、结果进右侧抽屉，这边每帧就地算，直接标在字段下面。
 #[derive(Default)]
 pub(crate) struct FormCheck {
-    pub(crate) progress: [SectionProgress; 3],
+    pub(crate) progress: [SectionProgress; 4],
     pub(crate) errors: std::collections::BTreeMap<&'static str, String>,
 }
 
@@ -629,12 +647,19 @@ pub(crate) fn layout_thumbnail(
         egui::StrokeKind::Inside,
     );
     let inner = rect.shrink(5.0);
-    // 版头最高、版记最矮，大致是公文在纸上的实际比例。
+    // 版头最高、版记最矮，大致是公文在纸上的实际比例。传输单不在纸上，
+    // 在缩略图下方单独画一张小单据。
     let ratios = [0.38, 0.36, 0.26];
+    let show_transmit = FormSection::Transmit.visible(kind);
+    let slip_height = if show_transmit { 13.0 } else { 0.0 };
+    let paper_height = inner.height() - slip_height - if show_transmit { 4.0 } else { 0.0 };
     let mut picked = None;
     let mut top = inner.top();
-    for (index, section) in FormSection::ALL.into_iter().enumerate() {
-        let height = inner.height() * ratios[index] - 3.0;
+    for (index, section) in [FormSection::Header, FormSection::Body, FormSection::Record]
+        .into_iter()
+        .enumerate()
+    {
+        let height = paper_height * ratios[index] - 3.0;
         let zone = egui::Rect::from_min_size(
             egui::pos2(inner.left(), top),
             egui::vec2(inner.width(), height),
@@ -676,6 +701,47 @@ pub(crate) fn layout_thumbnail(
             .clicked()
         {
             picked = Some(section);
+        }
+    }
+    if show_transmit {
+        let zone = egui::Rect::from_min_size(
+            egui::pos2(inner.left(), top),
+            egui::vec2(inner.width(), slip_height),
+        );
+        let response = ui.interact(
+            zone,
+            ui.id()
+                .with(("form_thumbnail", FormSection::Transmit.index())),
+            egui::Sense::click(),
+        );
+        let hovered = response.hovered();
+        painter.rect_filled(
+            zone,
+            theme::chrome_radius(2),
+            if hovered {
+                theme::accent_soft()
+            } else {
+                theme::surface_sunk()
+            },
+        );
+        if hovered {
+            painter.rect_stroke(
+                zone,
+                theme::chrome_radius(2),
+                egui::Stroke::new(1.0, theme::accent()),
+                egui::StrokeKind::Inside,
+            );
+        }
+        thumbnail_marks(&painter, zone, FormSection::Transmit, kind);
+        if response
+            .on_hover_text(format!(
+                "{}：{}",
+                FormSection::Transmit.label(),
+                FormSection::Transmit.hint(kind)
+            ))
+            .clicked()
+        {
+            picked = Some(FormSection::Transmit);
         }
     }
     picked
@@ -737,6 +803,30 @@ pub(crate) fn thumbnail_marks(
             line(zone.top() + 4.0, 5.0, w * 0.46, 1.5, muted);
             line(zone.top() + 10.0, 5.0, w * 0.72, 1.5, muted);
             line(zone.top() + 16.0, 5.0, w * 0.3, 1.5, muted);
+        }
+        FormSection::Transmit => {
+            // 随行单据：居中题名红线，下面两行三列的表格框。
+            line(zone.top() + 3.0, w * 0.3, w * 0.4, 1.5, theme::danger());
+            let top = zone.top() + 7.0;
+            let height = zone.bottom() - 2.0 - top;
+            painter.rect_stroke(
+                egui::Rect::from_min_size(
+                    egui::pos2(zone.left() + 4.0, top),
+                    egui::vec2(w - 8.0, height),
+                ),
+                egui::CornerRadius::same(1),
+                egui::Stroke::new(0.75, muted),
+                egui::StrokeKind::Inside,
+            );
+            line(top + height / 2.0, zone.left() + 4.0, w - 8.0, 0.75, muted);
+            for column in 1..3 {
+                let x = zone.left() + 4.0 + (w - 8.0) * column as f32 / 3.0;
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::pos2(x, top), egui::vec2(0.75, height)),
+                    egui::CornerRadius::ZERO,
+                    muted,
+                );
+            }
         }
     }
 }
@@ -1709,69 +1799,6 @@ impl DraftPage<'_> {
                             }
                             ui.end_row();
                             field_error(ui, &check, "recipient");
-
-                            // 收件人：每家接收单位一个，导出《传发任务单》时按单位带出。
-                            let receiving_units = crate::models::receiving_units(
-                                &self.doc.draft.profile,
-                            );
-                            if !receiving_units.is_empty() {
-                                required_row_label(
-                                    ui,
-                                    "收件人",
-                                    Some("《传发任务单》上的收件人：按单位选人，电话随词条带出；没登记的留白，单子上手写。"),
-                                );
-                                crate::app::widgets::receiving_contacts_editor(
-                                    ui,
-                                    &mut self.doc.draft.profile,
-                                    &receiving_units,
-                                    &self.config.vocabulary,
-                                    external_names,
-                                    field_width,
-                                );
-                                ui.end_row();
-                            }
-
-                            // 传输任务：《传发任务单》的题名。留空时按密级自动带。
-                            required_row_label(
-                                ui,
-                                "传输任务",
-                                Some("《传发任务单》的题名：说清这次传的是什么任务。留空时按密级自动带（有密级为涉密信息加密，无密级为公开信息明文）。"),
-                            );
-                            {
-                                let current =
-                                    self.doc.draft.profile.transmit_task.trim().to_string();
-                                let auto =
-                                    crate::models::resolve_transmit_task(&self.doc.draft.profile);
-                                let shown = if current.is_empty() {
-                                    format!("按密级自动：{auto}")
-                                } else {
-                                    current.clone()
-                                };
-                                egui::ComboBox::from_id_salt("transmit_task")
-                                    .selected_text(shown)
-                                    .width(field_width)
-                                    .show_ui(ui, |ui| {
-                                        if ui
-                                            .selectable_label(
-                                                current.is_empty(),
-                                                format!("按密级自动：{auto}"),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.doc.draft.profile.transmit_task.clear();
-                                        }
-                                        for task in &self.config.transmit_tasks {
-                                            if ui
-                                                .selectable_label(current == *task, task)
-                                                .clicked()
-                                            {
-                                                self.doc.draft.profile.transmit_task =
-                                                    task.clone();
-                                            }
-                                        }
-                                    });
-                            }
-                            ui.end_row();
                         }
                         TemplateKind::PhoneNotice => {
                             required_row_label(ui, "主送单位", None);
@@ -2357,6 +2384,59 @@ impl DraftPage<'_> {
                         }
                     }
                 });
+        }
+
+        // ================= 传输单：收件人 =================
+        // 不在公文纸上，是随公函导出的《传发任务单》：每家接收单位（主送 + 抄送）
+        // 登记一个收件人。题名等固定内容在设置页「加密传输单」里维护。
+        if FormSection::Transmit.visible(kind) {
+            ui.add_space(10.0);
+            let mut open = self.doc.form_sections.open[FormSection::Transmit.index()];
+            let response = section_header_ui(
+                ui,
+                FormSection::Transmit,
+                kind,
+                &mut open,
+                check.progress[FormSection::Transmit.index()],
+            );
+            if jump == Some(FormSection::Transmit) {
+                response.scroll_to_me(Some(egui::Align::TOP));
+            }
+            self.doc.form_sections.open[FormSection::Transmit.index()] = open;
+            if open {
+                egui::Grid::new("transmit_grid")
+                    .num_columns(2)
+                    .striped(false)
+                    .min_row_height(FORM_CONTROL_HEIGHT)
+                    .spacing([10.0, 8.0])
+                    .show(ui, |ui| {
+                        // 收件人：每家接收单位一个，导出《传发任务单》时按单位带出。
+                        let receiving_units =
+                            crate::models::receiving_units(&self.doc.draft.profile);
+                        if receiving_units.is_empty() {
+                            row_label(ui, "收件人");
+                            ui.weak("先在主体里填主送单位、在版记里填抄送单位，这里按单位登记收件人。");
+                            ui.end_row();
+                        } else {
+                            // 收件人不算必填：没登记的单子上留白手写，所以不标星号。
+                            row_label_with_info(
+                                ui,
+                                "收件人",
+                                "《传发任务单》上的收件人：按单位选人，电话随词条带出；没登记的留白，单子上手写。"
+                                    .to_string(),
+                            );
+                            crate::app::widgets::receiving_contacts_editor(
+                                ui,
+                                &mut self.doc.draft.profile,
+                                &receiving_units,
+                                &self.config.vocabulary,
+                                external_names,
+                                field_width,
+                            );
+                            ui.end_row();
+                        }
+                    });
+            }
         }
 
         if kind == TemplateKind::MeetingAgenda {

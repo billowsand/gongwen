@@ -68,6 +68,27 @@ fn form_check_clears_once_required_letter_elements_are_filled() {
     }
 }
 
+/// 传输单段只有公函显示：随行单据是公函专属，其余文种不渲染这一段，
+/// 缩略图与填报进度也一并跳过。
+#[test]
+fn transmit_section_only_shows_for_official_letters() {
+    assert!(FormSection::Transmit.visible(TemplateKind::OfficialLetter));
+    for kind in TemplateKind::ALL {
+        if kind != TemplateKind::OfficialLetter {
+            assert!(
+                !FormSection::Transmit.visible(kind),
+                "{kind:?} 不该有传输单段"
+            );
+        }
+    }
+    for section in [FormSection::Header, FormSection::Body, FormSection::Record] {
+        assert!(
+            section.visible(TemplateKind::PhoneNotice),
+            "{section:?} 各文种都显示"
+        );
+    }
+}
+
 /// 三段折叠头、必填标签、内联报错、文号复合行和缩略导航图都是纯绘制代码，
 /// 编译期查不出 id 冲突、越界或 0 宽度这类问题，拿真实布局跑一遍每个文种。
 #[test]
