@@ -1808,7 +1808,7 @@ impl GongwenApp {
         sub_heading(ui, "单据抬头", None);
         setting_field(ui, "传字", &mut defaults.serial_prefix, "如「传」");
         setting_continuation(ui, |ui| {
-            ui.weak("印在右上角「【传】 号」里，号码留白手写。");
+            ui.weak("印在右上角「传　　号」里，传字照填、不加方括号，号码留白手写。");
         });
 
         sub_heading(ui, "签批", None);

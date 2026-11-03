@@ -176,9 +176,9 @@ pub(crate) struct TransmitDoc {
     /// 上下页边距（毫米）。
     pub top_margin_mm: f64,
     pub bottom_margin_mm: f64,
-    /// 传字：印在右上角「【传】 号」里，号码留白手写。空则不印方括号。
+    /// 传字：印在右上角「传　　号」里，号码留白手写，不加方括号与横线。
     pub serial_prefix: String,
-    /// 保密负责单位：印在末行，替掉模板上的「【保密单位】」占位。空则保留占位。
+    /// 保密负责单位：印在末行，直接替掉模板上的「【保密单位】」占位。空则保留占位。
     pub security_unit: String,
     /// 主表列宽（毫米）。
     pub column_widths_mm: Vec<f64>,
@@ -512,10 +512,11 @@ pub(crate) fn build(
 }
 
 /// 签批人：默认留空手签（设置里勾「留空手签」），取消勾选才印默认姓名。
+/// 留白是供手签的空白，不画横线；其他需要横线的栏位仍由 `blank_value` 处理。
 fn signatory_cell(defaults: &TransmitDefaults) -> TransmitCell {
     let name = defaults.signatory.trim();
     if defaults.signatory_blank || name.is_empty() {
-        blank_value(3, 10)
+        blank_value(3, 0)
     } else {
         value(name, 3, 0.0)
     }
@@ -1038,7 +1039,8 @@ mod tests {
         let sign = &doc.cells[sign_index];
         let after = &doc.cells[sign_index + 1];
         assert_eq!(sign.blank_chars, 0);
-        assert!(after.blank_chars > 0);
+        assert_eq!(after.blank_chars, 0);
+        assert!(after.runs.is_empty());
     }
 
     /// 设置页「加密传输单」里填的每一项都要落到单子上。
@@ -1175,7 +1177,40 @@ mod tests {
             .iter()
             .position(|cell| cell.runs.iter().any(|run| run.text == "签批人"))
             .unwrap();
-        assert!(doc.cells[sign_index + 1].blank_chars > 0);
+        assert_eq!(doc.cells[sign_index + 1].blank_chars, 0);
+        assert!(doc.cells[sign_index + 1].runs.is_empty());
+    }
+
+    /// 没填默认姓名、但关闭了「留空手签」时，也只留空白，不画横线。
+    #[test]
+    fn an_empty_signatory_name_does_not_draw_a_line() {
+        let input = letter();
+        let receiver = Receiver {
+            unit: "甲单位".into(),
+            person: String::new(),
+            phone: String::new(),
+        };
+        let defaults = TransmitDefaults {
+            signatory: "  ".into(),
+            signatory_blank: false,
+            ..TransmitDefaults::default()
+        };
+        let doc = build(
+            &input,
+            "# 关于商洽的函\n\n正文。",
+            &UnitDisplay::new(&[]),
+            &receiver,
+            3,
+            &FITS[0],
+            &defaults,
+        );
+        let sign_index = doc
+            .cells
+            .iter()
+            .position(|cell| cell.runs.iter().any(|run| run.text == "签批人"))
+            .unwrap();
+        assert_eq!(doc.cells[sign_index + 1].blank_chars, 0);
+        assert!(doc.cells[sign_index + 1].runs.is_empty());
     }
 
     /// 题名取自传输任务字典：有登记的用登记的，没登记的按密级自动带。
@@ -1273,7 +1308,7 @@ mod tests {
         save_page_images(&outcome.pdf, &dir);
     }
 
-    /// 超长公文标题也必须排在一页里：表内「标题」一栏会长高，收紧阶梯按需降档。
+    /// 超长公文标题与保密单位也必须排在一页里：标题走收紧阶梯，末行只横向压缩。
     ///
     /// ```text
     /// cargo test --locked typst_samples_transmit_long -- --ignored --nocapture
@@ -1296,6 +1331,9 @@ mod tests {
             person: "李四".into(),
             phone: "0571-88888888".into(),
         };
+        let mut defaults = filled_defaults();
+        defaults.signatory_blank = true;
+        defaults.security_unit = "某某市国家保密行政管理部门机要密码传输安全监督管理中心".into();
         let (outcome, index) = write_pdf_with_base(
             &dir.join("typst.pdf"),
             &input,
@@ -1305,11 +1343,11 @@ mod tests {
             &receiver,
             3,
             0,
-            &filled_defaults(),
+            &defaults,
             &dir,
         )
         .unwrap();
-        println!("超长标题用的版面档位：{index}");
+        println!("超长标题与保密单位用的版面档位：{index}");
         assert_eq!(
             outcome.pages, 1,
             "收紧到底仍应排在一页里（用的档位 {index}）"

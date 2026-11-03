@@ -807,11 +807,11 @@ impl Default for PiOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TransmitDefaults {
-    /// 传字：印在右上角「【传】 号」里，号码留白手写。留空则不印方括号。
+    /// 传字：印在右上角「传　　号」里，号码只留空白手写，不加方括号与横线。
     pub serial_prefix: String,
     /// 默认签批人姓名。配合 [`TransmitDefaults::signatory_blank`] 用。
     pub signatory: String,
-    /// 签批人留空（手签）。默认开：多数情况是纸质手签，姓名由人在单子上写。
+    /// 签批人留空（手签），只留空白、不画横线。默认开：多数情况是纸质手签，姓名由人在单子上写。
     pub signatory_blank: bool,
     /// 时效要求。默认「急」；留空则这一栏留白手写。
     pub urgency: String,
@@ -819,7 +819,7 @@ pub struct TransmitDefaults {
     pub disposal: TransmitDisposal,
     /// 备注：可粘多行，印在单子的备注栏；留空则那一栏留白手写。
     pub remark: String,
-    /// 保密负责单位：印在末行，替掉模板上的「【保密单位】」占位。
+    /// 保密负责单位：印在末行，整体替掉模板上的「【保密单位】」占位，不保留方括号。
     pub security_unit: String,
 }
 

@@ -46,6 +46,17 @@
 #let blank(n) = box(width: n * 1em, height: 0.62em, baseline: bottom,
   stroke: (bottom: 0.4pt), outset: (bottom: 1.5pt))
 
+// 横向压窄：只压字宽、字高不变。先按自然宽度排成一行，超出栏宽时只沿 X 方向压缩；
+// 外层再包 box，避免 scale(reflow) 作为块级元素放进段落时被丢掉。
+#let fit-width(width, body) = context {
+  let natural = measure(body).width
+  if natural <= width {
+    body
+  } else {
+    box(scale(x: width / natural * 100%, reflow: true, box(width: natural, body)))
+  }
+}
+
 // 勾选框：字体里没有 ☑（GB2312 不含），空框用线画，勾选的框填黑、里面画一个白勾。
 // 框要与文字排在同一行，所以用行内的 box。模板里的框是全角字（占一个字宽），
 // 这里也让框占一个字宽，后面的文字才接得上。
@@ -166,14 +177,16 @@
 #v(doc.title_gap_pt * 1pt, weak: false)
 
 // 传字号：右对齐到表格右边界。传字取自设置（「传」这样的一个字），号码留白手写。
+// 这里用全角空格留号位，不画横线，也不给传字加方括号。
 // 注意：Typst 的代码块按行断句，表达式不能跨行续写，整条都要写在一行里。
-#block(width: table-w, inset: (left: table-offset), {
+// 负左 inset 会把内容盒向右多出 2.6mm；右对齐的盒子减去这段，「号」才与主表右缘齐平。
+#block(width: table-w + table-offset, inset: (left: table-offset), {
   set par(leading: 0pt)
   let size = doc.label_size_pt * 1pt
   let serial = if doc.serial_prefix != "" {
-    text(font: hei, size: size, "【" + doc.serial_prefix + "】") + blank(4) + text(font: hei, size: size, "号")
+    text(font: hei, size: size, doc.serial_prefix + "　　　　号")
   } else {
-    blank(5) + text(font: hei, size: size, "号")
+    text(font: hei, size: size, "　　　　　号")
   }
   align(right, serial)
 })
@@ -191,16 +204,16 @@
 })
 
 // 末行：保密单位（红色小标宋）与收 / 发时间（仿宋，日期留白手填）。
-// 保密负责单位取自设置；没填就保留模板上的「【保密单位】」占位。
+// 填了保密负责单位就整体替换占位，不保留方括号；整行始终单行，过长时只横向压缩。
 #let security-unit-text = if doc.security_unit != "" {
-  "【" + doc.security_unit + "】"
+  doc.security_unit
 } else {
   "【保密单位】"
 }
-#block(width: table-w, inset: (left: table-offset), {
+#block(width: table-w + table-offset, inset: (left: table-offset), {
   set par(leading: 0pt)
   v(2mm, weak: false)
-  text(font: xbs, size: note-size, fill: red, security-unit-text)
-  h(1em)
-  text(font: fs, size: note-size, "20　年　月　日　时　分收到、　月　日　时　分发出")
+  let unit = text(font: xbs, size: note-size, fill: red, security-unit-text)
+  let dates = text(font: fs, size: note-size, "20　年　月　日　时　分收到、　月　日　时　分发出")
+  fit-width(table-w, unit + h(1em) + dates)
 })
