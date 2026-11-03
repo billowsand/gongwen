@@ -29,7 +29,6 @@ use std::sync::mpsc::{Receiver, Sender};
 
 mod agent_settings;
 mod ai_manage;
-mod ai_prompts;
 pub(crate) mod ai_proposal;
 mod api_settings;
 mod chrome;
@@ -58,7 +57,6 @@ pub(crate) mod widgets;
 mod writing;
 
 pub(crate) use ai_manage::AiSection;
-pub(crate) use ai_prompts::AiPromptDraft;
 pub(crate) use jobs::{DocJob, KnowledgeMode, WorkerResult};
 pub(crate) use lexicon_jobs::LexiconJob;
 pub(crate) use manuscript_ui::{
@@ -201,18 +199,7 @@ pub struct GongwenApp {
     vocabulary_delete_confirm: Option<u64>,
     /// 清空整库需要单独二次确认。
     vocabulary_clear_confirm: bool,
-    /// “AI 优化”按钮弹出的提示词选择面板；None 表示未打开。
-    /// 起草页统一 AI 工作台：仿照起草、知识起草、材料成文、受控润色。
-    /// AI 管理页当前编辑的提示词。
     proofread_page: ProofreadPageState,
-    ai_prompt_editor: Option<AiPromptDraft>,
-    /// AI 管理页列表里选中的提示词 id。
-    ai_prompt_selected: Option<u32>,
-    /// 等待二次确认的提示词删除目标。
-    ai_prompt_delete_confirm: Option<u32>,
-    /// 内置输出标准预览区选的文种。独立于 `draft.kind`——在 AI 管理页翻看
-    /// 别的文种，不该把起草页正在写的稿件换掉。
-    ai_contract_preview_kind: TemplateKind,
     /// 稿件库（SQLite）。初始化失败时为 None，稿件管理页显示错误但不影响其他功能。
     manuscript_store: Option<ManuscriptStore>,
     /// 个人任务助手复用 manuscripts.db 的独立连接。
@@ -401,7 +388,7 @@ pub struct GongwenApp {
     settings_section: SettingsSection,
     /// AI 管理页当前的分区。
     ai_section: AiSection,
-    /// AI 管理页「智能体」分组（技能、数据接口、工具调试台）的状态。
+    /// AI 管理页「智能体」分组（技能、数据接口）的状态。
     agent_settings: agent_settings::AgentSettings,
     /// AI 管理页「风格」分区的状态。
     styles_page: style_settings::StylesPage,
@@ -501,8 +488,6 @@ impl GongwenApp {
         {
             config.vocabulary_setup = VocabularySetupStatus::Completed;
         }
-        // 旧配置没有提示词库，这里补齐预置项并给未编号的条目分配 id。
-        config.ensure_ai_prompts();
         // 传输任务字典（旧配置没有这一项）按默认补齐。
         config.ensure_transmit_tasks();
         // 密级现在是所有文稿类型的必要填报项目：旧配置里的空密级回填默认“机密、20年”。
@@ -514,7 +499,6 @@ impl GongwenApp {
                 .display()
                 .to_string();
         }
-        let kind = config.last_template;
         // 按配置装：配置里关掉了输入法就不装配引擎，不白读词库和语言模型。
         let ime = crate::ime::Ime::new(session::ime_settings_of(&config.ime));
         let (sender, receiver) = mpsc::channel();
@@ -612,10 +596,6 @@ impl GongwenApp {
             vocabulary_delete_confirm: None,
             vocabulary_clear_confirm: false,
             proofread_page: ProofreadPageState::default(),
-            ai_prompt_editor: None,
-            ai_prompt_selected: None,
-            ai_prompt_delete_confirm: None,
-            ai_contract_preview_kind: kind,
             manuscript_store,
             task_store,
             task_error,

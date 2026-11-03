@@ -395,7 +395,8 @@ impl GongwenApp {
     /// 删除提供商：引用它的功能保留选择（界面上出警示芯片），这里提示一声。
     fn delete_provider(&mut self, id: &str) {
         let used: Vec<&str> = [
-            (&self.config.draft_model, "文字起草"),
+            (&self.config.pi_model, "智能写作（Pi）"),
+            (&self.config.draft_model, "辅助模型"),
             (&self.config.draft_backup_model, "文字起草备用"),
             (&self.config.revise_model.model_ref, "文字复核"),
             (&self.config.revise_model.backup_model_ref, "文字复核备用"),

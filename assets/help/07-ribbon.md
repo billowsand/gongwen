@@ -41,7 +41,7 @@ flowchart LR
 | AI 文字复核 | 小模型逐句查语病，结果进**修订建议** |
 | 规则校验 | 重新跑要素校验与词表复扫 |
 
-AI 侧栏见第{@chap:ai-workbench}章「AI 侧栏与技能」，文字复核见第{@chap:ai-polish}章「AI 管理：模型、技能与润色预设」。
+AI 侧栏见第{@chap:ai-workbench}章「AI 侧栏与技能」，文字复核见第{@chap:ai-polish}章「AI 管理：模型、技能与风格」。
 
 ### 插入
 

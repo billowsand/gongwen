@@ -103,7 +103,6 @@ pub(crate) struct TurnRequest {
     pub(crate) skill: Option<String>,
     pub(crate) text: String,
     pub(crate) selection: Option<(Range<usize>, String)>,
-    pub(crate) preset: Option<u32>,
     pub(crate) use_rag: bool,
     /// `@` 引用的文章。
     pub(crate) refs: Vec<Reference>,
@@ -812,13 +811,9 @@ pub(crate) fn locate_selection(
     hits.next().is_none().then(|| first.1.to_string())
 }
 
-/// 拼润色指令：预设 + 用户的话 + 选区硬约束。
-pub(crate) fn polish_instruction(preset: &str, custom: &str, selected: Option<&str>) -> String {
-    let mut instruction = [preset.trim(), custom.trim()]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+/// 拼润色指令：用户的话 + 选区硬约束。
+pub(crate) fn polish_instruction(custom: &str, selected: Option<&str>) -> String {
+    let mut instruction = custom.trim().to_string();
     if instruction.is_empty() {
         instruction = "只做公文格式规整，不改写事实和措辞。".into();
     }
@@ -1098,16 +1093,12 @@ mod tests {
     }
 
     #[test]
-    fn polish_instruction_joins_parts_and_pins_the_selection() {
+    fn polish_instruction_falls_back_and_pins_the_selection() {
         assert_eq!(
-            polish_instruction("", "  ", None),
+            polish_instruction("  ", None),
             "只做公文格式规整，不改写事实和措辞。"
         );
-        assert_eq!(
-            polish_instruction("精简", "不改时限", None),
-            "精简\n\n不改时限"
-        );
-        let pinned = polish_instruction("", "压缩", Some("二、乙"));
+        let pinned = polish_instruction("压缩", Some("二、乙"));
         assert!(pinned.starts_with("压缩"));
         assert!(pinned.contains("【唯一允许修改的原文片段】\n二、乙"));
     }

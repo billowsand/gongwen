@@ -30,7 +30,9 @@ pub(crate) use crate::ai_services::knowledge::KnowledgeSearch;
 pub(crate) use crate::ai_services::knowledge::RagSearch;
 #[cfg(test)]
 pub(crate) use crate::ai_services::manuscripts::ManuscriptDoc;
-pub(crate) use crate::ai_services::manuscripts::{ManuscriptSource, SqliteManuscripts};
+pub(crate) use crate::ai_services::manuscripts::ManuscriptSource;
+#[cfg(test)]
+pub(crate) use crate::ai_services::manuscripts::SqliteManuscripts;
 
 use super::api::{ApiSecrets, ApiStore};
 use super::backend::ModelBackend;
@@ -65,16 +67,6 @@ impl Permission {
             Self::WriteWorkspace => "✎",
             Self::External => "⇄",
             Self::AskUser => "?",
-        }
-    }
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Read => "只读",
-            Self::Check => "检查",
-            Self::WriteWorkspace => "写工作稿",
-            Self::External => "外部调用",
-            Self::AskUser => "问用户",
         }
     }
 }

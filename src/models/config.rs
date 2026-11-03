@@ -4,12 +4,11 @@
 //! `models` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::models::{
-    AiPrompt, DEFAULT_TRANSMIT_TASKS, DiagramTheme, EditorFontScheme, ExportSelection, FontConfig,
-    ImeConfig, LmStudioConfig, ModelRef, ModelRefError, NumberingConfig, PROVIDER_PRESETS,
-    PaperMode, PrintConfig, ProofreadConfig, ProviderConfig, ProxyConfig, RagConfig,
-    ReasoningEffort, ReasoningFormat, RerankMode, ReviseModelConfig, RibbonTab, SecurityRules,
-    TemplateKind, TemplateProfile, ThemeName, VocabularyEntry, VocabularySetupStatus,
-    builtin_ai_prompts, preset_for_url,
+    DEFAULT_TRANSMIT_TASKS, DiagramTheme, EditorFontScheme, ExportSelection, FontConfig, ImeConfig,
+    LmStudioConfig, ModelRef, ModelRefError, NumberingConfig, PROVIDER_PRESETS, PaperMode,
+    PrintConfig, ProofreadConfig, ProviderConfig, ProxyConfig, RagConfig, ReasoningEffort,
+    ReasoningFormat, RerankMode, ReviseModelConfig, RibbonTab, SecurityRules, TemplateKind,
+    TemplateProfile, ThemeName, VocabularyEntry, VocabularySetupStatus, preset_for_url,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -91,10 +90,6 @@ pub struct AppConfig {
     /// 首次启动的示例稿是否已写入稿件库。旧配置没有该字段时视为尚未写入。
     #[serde(default)]
     pub samples_seeded: bool,
-    /// AI 优化提示词库。首次载入为空时补齐预置项，见 `ensure_ai_prompts`。
-    pub ai_prompts: Vec<AiPrompt>,
-    /// 上次使用的提示词 id，供选择面板默认高亮。
-    pub last_ai_prompt: u32,
     /// 知识库检索增强（RAG）配置。
     pub rag: RagConfig,
     /// 校对词表的用户层：对内置条目的改动与自建条目。
@@ -166,8 +161,6 @@ impl Default for AppConfig {
             ui_scale: 1.0,
             update_check_url: default_update_check_url(),
             samples_seeded: false,
-            ai_prompts: vec![],
-            last_ai_prompt: 0,
             rag: RagConfig::default(),
             proofread: ProofreadConfig::default(),
             revise_model: ReviseModelConfig::default(),
@@ -667,37 +660,6 @@ impl AppConfig {
         }
     }
 
-    /// 载入配置后整理提示词库：补齐缺失的预置项、给未编号的条目分配 id。
-    /// 旧配置里没有 `ai_prompts` 字段，这里一次性补全；用户删过的内置项不会
-    /// 复活——内置项本就不可删，缺失只可能来自旧版本或手工编辑。
-    pub(crate) fn ensure_ai_prompts(&mut self) {
-        for builtin in builtin_ai_prompts() {
-            if !self
-                .ai_prompts
-                .iter()
-                .any(|entry| entry.builtin_key == builtin.builtin_key)
-            {
-                self.ai_prompts.push(builtin);
-            }
-        }
-        let mut next = self
-            .ai_prompts
-            .iter()
-            .map(|entry| entry.id)
-            .max()
-            .unwrap_or(0);
-        for entry in &mut self.ai_prompts {
-            if entry.id == 0 {
-                next += 1;
-                entry.id = next;
-            }
-        }
-    }
-
-    pub(crate) fn ai_prompt(&self, id: u32) -> Option<&AiPrompt> {
-        self.ai_prompts.iter().find(|entry| entry.id == id)
-    }
-
     /// 密级从 v0.4 起是所有文稿类型的必要填报项目，默认机密、保密期限 20 年。
     /// 旧配置里各模板可能存了空密级（当时允许“不标注密级”），载入时统一回填默认值，
     /// 保证老用户新建稿件也带默认密级；用户显式保存过的非空密级一律不动。
@@ -708,16 +670,6 @@ impl AppConfig {
                 profile.security_period = "20年".into();
             }
         }
-    }
-
-    /// 分配一个未占用的提示词 id。
-    pub(crate) fn next_ai_prompt_id(&self) -> u32 {
-        self.ai_prompts
-            .iter()
-            .map(|entry| entry.id)
-            .max()
-            .unwrap_or(0)
-            + 1
     }
 
     /// 载入配置后补齐传输任务字典：旧配置没有这一项，用户也没自己加过，

@@ -21,6 +21,4 @@ flow:
 
 ## 润色
 
-{preset}
-
 {request}

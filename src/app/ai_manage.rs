@@ -1,13 +1,13 @@
 //! AI 管理页：AI 相关的设置都收在这里——模型服务商管理、模型服务（按功能选模型）、
-//! 技能、数据接口、工具调试台、润色预设与输出标准。
+//! 技能、数据接口与风格。
 //!
 //! 布局与设置页相同：左侧分区菜单、右侧当前分区、底部常驻保存条。表单行、
 //! 小标题、菜单项这些画法直接复用 `app::settings` 的，两页看起来是一套东西。
-//! 网络代理是全局的（起草、复核、知识库都走它），留在设置页。
+//! 网络代理是全局的（Pi、辅助模型、复核、知识库都走它），留在设置页。
 //!
 //! 模型分两层管：「模型服务商管理」只管连接身份（地址、密钥、模型清单缓存，
-//! 见 `app::provider_settings`）；「模型服务」按功能（文字起草 / 文字复核 /
-//! 知识库检索）各自挑一个提供商的模型，不再碰地址密钥。
+//! 见 `app::provider_settings`）；「模型服务」按功能（智能写作（Pi）/ 辅助模型 /
+//! 文字复核 / 知识库检索）各自挑一个提供商的模型，不再碰地址密钥。
 
 use super::provider_settings::{model_picker, provider_ref_chip};
 use super::settings::{
@@ -19,8 +19,6 @@ use crate::models::{ModelKind, RerankMode};
 use crate::theme;
 use eframe::egui;
 
-/// 润色预设分区的正文最大宽度：列表和编辑区并排，比表单类分区要宽。
-const PRESETS_MAX_WIDTH: f32 = 1180.0;
 /// 服务商卡片需要同时容纳名称、状态和操作区，比普通设置表单稍宽。
 const PROVIDERS_MAX_WIDTH: f32 = 1040.0;
 
@@ -30,50 +28,31 @@ pub(crate) enum AiSection {
     /// 服务提供商：接口地址、密钥与模型清单缓存。
     #[default]
     Providers,
-    /// 按功能配模型：文字起草、文字复核、知识库检索。
+    /// 按功能配模型：智能写作（Pi）、辅助模型、文字复核、知识库检索。
     ModelService,
     /// 技能：SKILL.md 的管理。
     Skills,
     /// 数据接口：内网查询接口。
     DataApis,
-    /// 工具调试台。
-    ToolConsole,
     /// 写法风格档案（16.15 C）。
     Styles,
-    /// 润色预设库（侧栏技能的 `{preset}`）。
-    Presets,
-    /// 内置输出标准（只读）。
-    Contract,
 }
 
 /// 左侧菜单的分组。
 const MENU_GROUPS: [(&str, &[AiSection]); 3] = [
     ("模型", &[AiSection::Providers, AiSection::ModelService]),
-    (
-        "智能体",
-        &[
-            AiSection::Skills,
-            AiSection::DataApis,
-            AiSection::ToolConsole,
-        ],
-    ),
-    (
-        "写法",
-        &[AiSection::Styles, AiSection::Presets, AiSection::Contract],
-    ),
+    ("智能体", &[AiSection::Skills, AiSection::DataApis]),
+    ("写法", &[AiSection::Styles]),
 ];
 
 impl AiSection {
     #[cfg(test)]
-    const ALL: [AiSection; 8] = [
+    const ALL: [AiSection; 5] = [
         AiSection::Providers,
         AiSection::ModelService,
         AiSection::Skills,
         AiSection::DataApis,
-        AiSection::ToolConsole,
         AiSection::Styles,
-        AiSection::Presets,
-        AiSection::Contract,
     ];
 
     /// 菜单里显示的中文名，同时是右栏的标题。
@@ -83,10 +62,7 @@ impl AiSection {
             AiSection::ModelService => "模型服务",
             AiSection::Skills => "技能",
             AiSection::DataApis => "数据接口",
-            AiSection::ToolConsole => "工具调试台",
             AiSection::Styles => "风格",
-            AiSection::Presets => "润色预设",
-            AiSection::Contract => "输出标准",
         }
     }
 
@@ -96,42 +72,31 @@ impl AiSection {
             AiSection::ModelService => theme::Icon::PlugZap,
             AiSection::Skills => theme::Icon::WandSparkles,
             AiSection::DataApis => theme::Icon::Braces,
-            AiSection::ToolConsole => theme::Icon::Settings,
             AiSection::Styles => theme::Icon::Quote,
-            AiSection::Presets => theme::Icon::Edit,
-            AiSection::Contract => theme::Icon::Shield,
         }
     }
 
     fn description(self) -> &'static str {
         match self {
             AiSection::Providers => {
-                "管理连接地址与密钥，在「模型服务」中为起草、复核和知识库选择模型。"
+                "管理连接地址与密钥。「模型服务」里的每个功能都从这里挑一个提供商的模型。"
             }
             AiSection::ModelService => {
-                "每个功能各自挑一个提供商的模型；地址与密钥到「模型服务商管理」里统一维护。\
-                 换服务商不用各处改，在这里重选一次即可。"
+                "「智能写作（Pi）」是侧栏统一写作入口的模型；「辅助模型」服务复核、知识库问答、风格学习、\
+                 数据接口等非 Pi 调用。地址与密钥到「模型服务商管理」里统一维护。"
             }
             AiSection::Skills => {
                 "Pi 标准技能：标准 SKILL.md（YAML frontmatter + 自然语言步骤）与随包辅助文件。\
                  可以编辑、新建、复制内置、启停、恢复内置、导入导出；旧流程技能不再供 Pi 执行。"
             }
             AiSection::DataApis => {
-                "让技能查内网系统（统计、政策库、业务系统、算法服务）的数据。只做查询，不发任何会改变\
-                 对方状态的请求；接口地址与密钥只存在本机，不写进技能文件。"
-            }
-            AiSection::ToolConsole => {
-                "选一个工具、填参数、看输出，写技能时用来试工具。对象是当前稿件的副本，改不到正文。"
+                "配置内网查询接口（统计、政策库、业务系统、算法服务），供写作时取用数据。只做查询，\
+                 不发任何会改变对方状态的请求；接口地址与密钥只存在本机。Pi 写作调用接口还在接入，\
+                 这里先提供配置与测试。"
             }
             AiSection::Styles => {
-                "从指定的几篇稿子学出一份写法风格（基调、开头、结构、常用表达、结尾），以后起草、改写时按文种与场合\
-                 自动挑一份带上，也可以在侧栏输入框底栏指定。只学写法不学事实；档案只存本机，可导出给同事。"
-            }
-            AiSection::Presets => {
-                "润色、语气等技能里的 {preset}：选了预设，它的指令就拼进提示词。在侧栏输入框底栏的预设标签里选用。"
-            }
-            AiSection::Contract => {
-                "每次让模型写正文都会自动拼上这段输出标准，并声明优先级更高：预设或技能里的要求与它冲突时，一律以它为准。只读。"
+                "从指定的几篇稿子学出一份写法风格（基调、开头、结构、常用表达、结尾），Pi 起草、改写时\
+                 按文种与场合用 style_list / style_read 只读取用。只学写法不学事实；档案只存本机，可导出给同事。"
             }
         }
     }
@@ -241,7 +206,6 @@ impl GongwenApp {
     fn ai_detail_ui(&mut self, ui: &mut egui::Ui) {
         let section = self.ai_section;
         let max_width = match section {
-            AiSection::Presets => PRESETS_MAX_WIDTH,
             AiSection::Providers => PROVIDERS_MAX_WIDTH,
             _ => DETAIL_MAX_WIDTH,
         };
@@ -290,17 +254,14 @@ impl GongwenApp {
                             AiSection::ModelService => self.model_service_section_ui(ui),
                             AiSection::Skills => self.skills_section_ui(ui),
                             AiSection::DataApis => self.apis_section_ui(ui),
-                            AiSection::ToolConsole => self.tool_console_section_ui(ui),
                             AiSection::Styles => self.styles_section_ui(ui),
-                            AiSection::Presets => self.ai_presets_section_ui(ui),
-                            AiSection::Contract => self.output_contract_ui(ui),
                         }
                         ui.add_space(8.0);
                     });
             });
     }
 
-    /// 底部常驻保存条：润色预设编辑区没应用的内容、数据接口没保存的修改一并落盘。
+    /// 底部常驻保存条：数据接口没保存的修改一并落盘。
     fn ai_footer_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.separator();
@@ -318,13 +279,8 @@ impl GongwenApp {
         });
     }
 
-    /// 保存 AI 管理页：先应用润色预设的编辑区（名称不合格就停在那里提示），
-    /// 再写配置与数据接口。
+    /// 保存 AI 管理页：写配置与数据接口。
     pub(crate) fn save_ai_manage(&mut self) {
-        if !self.apply_pending_ai_prompt() {
-            self.ai_section = AiSection::Presets;
-            return;
-        }
         self.persist();
         self.save_pending_apis();
     }
@@ -529,22 +485,89 @@ impl GongwenApp {
         }
     }
 
-    /// 「模型服务」分区：按功能配模型——文字起草、文字复核、知识库检索。
+    /// 「模型服务」分区：按功能配模型——智能写作（Pi）、辅助模型、文字复核、知识库检索。
     /// 地址与密钥不在这里填；模型从「模型服务商管理」缓存的清单里挑，
     /// 选择器按提供商分组、可筛选（与字体选择同一套交互）。
     fn model_service_section_ui(&mut self, ui: &mut egui::Ui) {
         let providers = self.config.providers.clone();
 
-        // ── 文字起草 ────────────────────────────────────────────────
+        // ── 智能写作（Pi） ──────────────────────────────────────────
+        ui.add_space(10.0);
         ui.horizontal(|ui| {
-            sub_heading(ui, "文字起草", None);
+            sub_heading(ui, "智能写作（Pi）", None);
+            let mref = self.config.pi_model.clone();
+            provider_ref_chip(ui, &self.config, &mref);
+        });
+        ui.label(
+            egui::RichText::new(
+                "侧栏智能写作使用的模型，与下方的辅助模型分开选。不选就不启动 Pi，\
+                 不会偷偷回落到辅助模型。地址与密钥仍在「模型服务商管理」里维护；\
+                 上下文与输出预算自动管理，不沿用辅助模型的窗口和最大输出 Token；\
+                 思考深度在下面单独设置，与辅助模型互不影响。\
+                 每轮执行上限 15 分钟，等用户回答时暂停计时。",
+            )
+            .size(theme::font_sizes::SMALL)
+            .color(theme::text_muted()),
+        );
+        setting_row(
+            ui,
+            "模型",
+            Some("不配置时 Pi 入口给出明确的配置提示"),
+            |ui| {
+                let (mut filter, mut show_all) = self.picker_state("pi");
+                model_picker(
+                    ui,
+                    "pi",
+                    &providers,
+                    &mut self.config.pi_model,
+                    Some("未选择"),
+                    &["chat"],
+                    ModelKind::Chat,
+                    &mut filter,
+                    &mut show_all,
+                );
+                self.store_picker_state("pi", filter, show_all);
+            },
+        );
+        setting_row(
+            ui,
+            "思考深度",
+            Some(
+                "只对支持深度参数的模型生效；默认「沿用服务端」，即不发送深度参数。\
+                 与辅助模型的思考深度互不影响。",
+            ),
+            |ui| {
+                let options = self
+                    .config
+                    .pi_options
+                    .get_or_insert_with(crate::models::PiOptions::default);
+                egui::ComboBox::from_id_salt("pi_reasoning_effort")
+                    .selected_text(options.reasoning_effort.label())
+                    .show_ui(ui, |ui| {
+                        for effort in crate::models::ReasoningEffort::ALL {
+                            ui.selectable_value(
+                                &mut options.reasoning_effort,
+                                effort,
+                                effort.label(),
+                            );
+                        }
+                    });
+            },
+        );
+
+        ui.add_space(10.0);
+
+        // ── 辅助模型 ────────────────────────────────────────────────
+        ui.horizontal(|ui| {
+            sub_heading(ui, "辅助模型", None);
             let mref = self.config.draft_model.clone();
             provider_ref_chip(ui, &self.config, &mref);
         });
         ui.label(
             egui::RichText::new(
-                "这里的模型用于复核、要素抽取、风格学习、数据接口与工具等辅助调用；\
-                 侧栏的新任务一律走下方「智能写作（Pi）」，不用这里的模型。",
+                "这里的模型用于复核、要素抽取、风格学习、数据接口与知识库问答等辅助调用；\
+                 侧栏的新任务一律走下方「智能写作（Pi）」，不用这里的模型。只做写作、\
+                 不用这些功能时可以不配。",
             )
             .size(theme::font_sizes::SMALL)
             .color(theme::text_muted()),
@@ -609,7 +632,7 @@ impl GongwenApp {
                 ui,
                 "深度参数格式",
                 Some(
-                    "按模型服务的接口文档选择；此设置也用于起草备用模型。只调整深度，不负责开启服务端的思考模式。",
+                    "按模型服务的接口文档选择；此设置也用于辅助模型的备用模型。只调整深度，不负责开启服务端的思考模式。",
                 ),
                 |ui| {
                     use crate::models::ReasoningFormat;
@@ -663,70 +686,6 @@ impl GongwenApp {
             );
         });
 
-        // ── 智能写作（Pi） ──────────────────────────────────────────
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            sub_heading(ui, "智能写作（Pi）", None);
-            let mref = self.config.pi_model.clone();
-            provider_ref_chip(ui, &self.config, &mref);
-        });
-        ui.label(
-            egui::RichText::new(
-                "侧栏智能写作使用的模型，与上方的辅助调用模型分开选。不选就不启动 Pi，\
-                 不会偷偷回落到起草模型。地址与密钥仍在「模型服务商管理」里维护；\
-                 上下文与输出预算自动管理，不沿用上方的窗口和最大输出 Token；思考深度\
-                 在下方单独设置，与上方互不影响。\
-                 每轮执行上限 15 分钟，等用户回答时暂停计时。",
-            )
-            .size(theme::font_sizes::SMALL)
-            .color(theme::text_muted()),
-        );
-        setting_row(
-            ui,
-            "模型",
-            Some("不配置时 Pi 入口给出明确的配置提示"),
-            |ui| {
-                let (mut filter, mut show_all) = self.picker_state("pi");
-                model_picker(
-                    ui,
-                    "pi",
-                    &providers,
-                    &mut self.config.pi_model,
-                    Some("未选择"),
-                    &["chat"],
-                    ModelKind::Chat,
-                    &mut filter,
-                    &mut show_all,
-                );
-                self.store_picker_state("pi", filter, show_all);
-            },
-        );
-        setting_row(
-            ui,
-            "思考深度",
-            Some(
-                "只对支持深度参数的模型生效；默认「沿用服务端」，即不发送深度参数。\
-                 与上方辅助调用的思考深度互不影响。",
-            ),
-            |ui| {
-                let options = self
-                    .config
-                    .pi_options
-                    .get_or_insert_with(crate::models::PiOptions::default);
-                egui::ComboBox::from_id_salt("pi_reasoning_effort")
-                    .selected_text(options.reasoning_effort.label())
-                    .show_ui(ui, |ui| {
-                        for effort in crate::models::ReasoningEffort::ALL {
-                            ui.selectable_value(
-                                &mut options.reasoning_effort,
-                                effort,
-                                effort.label(),
-                            );
-                        }
-                    });
-            },
-        );
-
         // ── 文字复核 ────────────────────────────────────────────────
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -736,9 +695,9 @@ impl GongwenApp {
         });
         ui.label(
             egui::RichText::new(
-                "逐句检查语病，结果进「修订建议」，逐条确认后才改正文。与起草模型分开配：\
-                 起草要发挥，复核只要稳——Qwen3 4B/8B 一类的小模型温度 0 反而更好使，也快得多。\
-                 选技能、澄清等辅助步骤也使用复核模型；未配置时沿用起草模型及其上下文窗口。\
+                "逐句检查语病与错别字，结果进「修订建议」，逐条确认后才改正文。这是独立的小模型查错，\
+                 Pi 写作不使用它，与 Pi 的整篇审校是两回事。与辅助模型分开配：起草要发挥，复核只要稳——\
+                 Qwen3 4B/8B 一类的小模型温度 0 反而更好使，也快得多；未配置时沿用辅助模型及其上下文窗口。\
                  复核请求会自动带上关闭思考的开关，服务端不认时会自动去掉重试。",
             )
             .size(theme::font_sizes::SMALL)
@@ -749,14 +708,14 @@ impl GongwenApp {
             "启用文字复核（起草页「审校」分区出现入口）",
         );
         ui.add_enabled_ui(self.config.revise_model.enabled, |ui| {
-            setting_row(ui, "模型", Some("留空 = 沿用起草模型"), |ui| {
+            setting_row(ui, "模型", Some("留空 = 沿用辅助模型"), |ui| {
                 let (mut filter, mut show_all) = self.picker_state("revise");
                 model_picker(
                     ui,
                     "revise",
                     &providers,
                     &mut self.config.revise_model.model_ref,
-                    Some("沿用起草模型"),
+                    Some("沿用辅助模型"),
                     &["chat"],
                     ModelKind::Chat,
                     &mut filter,
@@ -768,7 +727,7 @@ impl GongwenApp {
             setting_row(
                 ui,
                 "备用模型（可不选）",
-                Some("复核模型在吐出第一个字之前不可用时，本次改用它。不选时：若复核沿用起草模型，就沿用起草的备用模型"),
+                Some("复核模型在吐出第一个字之前不可用时，本次改用它。不选时：若复核沿用辅助模型，就沿用辅助模型的备用模型"),
                 |ui| {
                 let (mut filter, mut show_all) = self.picker_state("revise_backup");
                 model_picker(
@@ -834,8 +793,8 @@ impl GongwenApp {
         });
         ui.label(
             egui::RichText::new(
-                "用 embedding 与 rerank 模型检索知识库，技能起草时据此取证据。\
-                 两个模型与起草对话模型相互独立。",
+                "用 embedding 与 rerank 模型检索知识库，Pi 写作时据此取证据。\
+                 两个模型与写作模型、辅助模型相互独立。",
             )
             .size(theme::font_sizes::SMALL)
             .color(theme::text_muted()),

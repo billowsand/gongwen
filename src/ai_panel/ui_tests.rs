@@ -444,7 +444,7 @@ fn sending_opens_a_turn_and_stop_releases_the_document() {
 }
 
 #[test]
-fn polish_needs_a_request_or_a_preset() {
+fn polish_needs_a_request() {
     let mut harness = Harness::new("# 标题\n\n正文\n");
     harness.with_page(|page| page.send_ai_panel(false));
     assert!(harness.doc.ai_panel.turns.is_empty());
@@ -509,7 +509,6 @@ fn panel_request(skill: Option<&str>, text: &str) -> crate::ai_panel::TurnReques
         skill: skill.map(str::to_string),
         text: text.into(),
         selection: None,
-        preset: None,
         use_rag: false,
         refs: Vec::new(),
         materials: Vec::new(),
@@ -2403,7 +2402,6 @@ fn follow_ups_work_on_the_pending_proposal_and_carry_the_session() {
         skill: None,
         text: "写个通知".into(),
         selection: None,
-        preset: None,
         use_rag: false,
         refs: Vec::new(),
         materials: Vec::new(),
@@ -2438,7 +2436,6 @@ fn follow_ups_work_on_the_pending_proposal_and_carry_the_session() {
         skill: Some(crate::agent::skill::CONDENSE.into()),
         text: "再短一点".into(),
         selection: None,
-        preset: None,
         use_rag: false,
         refs: Vec::new(),
         materials: Vec::new(),
@@ -2849,7 +2846,6 @@ fn suspended_draft(harness: &mut Harness, date: &str) -> (u64, crate::ai_panel::
         skill: Some(RESEARCH_DRAFT.into()),
         text: "起草一份商洽函".into(),
         selection: None,
-        preset: None,
         use_rag: false,
         refs: Vec::new(),
         materials: Vec::new(),
@@ -2921,7 +2917,6 @@ fn resuming_refreshes_the_authorised_elements_and_dates_from_the_ui() {
         time_sources: "昨天".into(),
         request: "起草".into(),
         selection: Some("锁的选区".into()),
-        preset: "精简篇幅".into(),
         history: "上一轮：交了提案".into(),
         style: "写法风格".into(),
         ..Board::default()
@@ -2939,7 +2934,6 @@ fn resuming_refreshes_the_authorised_elements_and_dates_from_the_ui() {
     // 这一轮任务本身的输入不重灌。
     assert_eq!(board.request, "起草");
     assert_eq!(board.selection.as_deref(), Some("锁的选区"));
-    assert_eq!(board.preset, "精简篇幅");
     assert_eq!(board.history, "上一轮：交了提案");
     assert_eq!(board.style, "写法风格");
 }
@@ -3233,7 +3227,6 @@ fn request() -> crate::ai_panel::TurnRequest {
         skill: Some(RESEARCH_DRAFT.into()),
         text: "起草".into(),
         selection: None,
-        preset: None,
         use_rag: false,
         refs: Vec::new(),
         materials: Vec::new(),

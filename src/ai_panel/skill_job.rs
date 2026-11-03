@@ -234,7 +234,7 @@ impl DraftPage<'_> {
                 let mut board = suspension.checkpoint.board;
                 let at = suspension.checkpoint.at;
                 // 只读区一律以界面当前值重灌（红线 2）：要素、正文、系统提示与合法日期。
-                // 不重灌 request / selection / preset / refs / history / style——它们是这一轮
+                // 不重灌 request / selection / refs / history / style——它们是这一轮
                 // 任务本身的输入，换成界面当前值就成了另一个任务。
                 let draft = self.doc.draft.clone();
                 let document = self.doc.generated_markdown.clone();
@@ -505,30 +505,16 @@ impl DraftPage<'_> {
             Pick::Fixed(skill) => vec![&**skill],
             Pick::Ask(list) => list.iter().collect(),
         };
-        let preset = request
-            .preset
-            .filter(|_| candidates.iter().any(|skill| skill.uses_preset()))
-            .and_then(|id| self.config.ai_prompt(id))
-            // 旧会话重跑也要核对适用文种，不能再依赖已移除的输入区下拉过滤。
-            .filter(|preset| preset.applies_to(self.doc.draft.kind));
-        if text.trim().is_empty() && preset.is_none() && request.materials.is_empty() {
-            return Err(if candidates.iter().any(|skill| skill.uses_preset()) {
-                "写下要求，或选一个润色预设。".into()
-            } else {
-                "写下材料或要求。".into()
-            });
+        if text.trim().is_empty() && request.materials.is_empty() {
+            return Err("写下材料或要求。".into());
         }
         let use_rag = request.use_rag
             && self.config.rag.enabled
             && candidates.iter().any(|skill| skill.uses_knowledge());
-        let mut title = match &pick {
+        let title = match &pick {
             Pick::Fixed(skill) => skill.name.clone(),
             Pick::Ask(_) => "自动选择技能".to_string(),
         };
-        if let Some(prompt) = preset {
-            title.push_str(" · ");
-            title.push_str(&prompt.name);
-        }
         let mut context = Vec::new();
         if proposal_text.is_some() {
             context.push("改提案".to_string());
@@ -578,7 +564,6 @@ impl DraftPage<'_> {
             document: markdown.clone(),
             workspace: markdown.clone(),
             selection: selected,
-            preset: preset.map(|p| p.instruction.clone()).unwrap_or_default(),
             refs: request.refs.clone(),
             time_sources: [
                 &time.now,

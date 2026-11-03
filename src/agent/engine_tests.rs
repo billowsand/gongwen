@@ -1105,7 +1105,6 @@ fn polish_runs_through_the_engine_with_the_selection_pinned() {
     let document = "# 标题\n\n一、甲。\n\n二、乙。\n".to_string();
     let board = Board {
         request: "压缩".into(),
-        preset: "精简篇幅".into(),
         selection: Some("二、乙。".into()),
         workspace: document.clone(),
         document,

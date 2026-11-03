@@ -32,8 +32,6 @@ pub(crate) struct Board {
     pub(crate) document: String,
     /// 用户锁定的选区原文。
     pub(crate) selection: Option<String>,
-    /// 润色预设的指令文字。
-    pub(crate) preset: String,
     /// AI 工作稿：流程唯一能写的稿子。
     pub(crate) workspace: String,
     pub(crate) evidence: EvidencePack,
@@ -119,7 +117,6 @@ impl Board {
             "document" => Some(self.document.clone()),
             "selection" => Some(self.selection.clone().unwrap_or_default()),
             "workspace" => Some(self.workspace.clone()),
-            "preset" => Some(self.preset.clone()),
             "history" => Some(self.history.clone()),
             "style" => Some(self.style.clone()),
             _ => None,
@@ -245,7 +242,7 @@ impl Board {
     /// 恢复前按界面当前值重灌只读区（红线 2：要素与正文快照以用户手上的为准，
     /// 系统提示与合法日期按现在重建——隔天恢复，「今天」得是今天）。
     ///
-    /// `request` / `selection` / `preset` / `refs` / `history` / `style` **不**重灌：它们是
+    /// `request` / `selection` / `refs` / `history` / `style` **不**重灌：它们是
     /// 这一轮任务本身的输入（发起时说的话、锁的选区、当时挑的风格），换成界面当前值就成了
     /// 另一个任务（`docs/agent-kernel-hardening.md` 第 4 期与方案的出入 1）。
     ///

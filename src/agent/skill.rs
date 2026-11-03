@@ -337,11 +337,6 @@ impl Skill {
         walk(&self.flow, &agent_uses_kb)
     }
 
-    /// 提示词里用不用润色预设（`{preset}`）。侧栏据此显示预设下拉框。
-    pub(crate) fn uses_preset(&self) -> bool {
-        self.sections.values().any(|text| text.contains("{preset}"))
-    }
-
     /// 白名单里有没有这个工具。`http.call:接口` 这类带限定的写法，写了 `http.call` 也算全放行。
     pub(crate) fn allows_tool(&self, id: &str) -> bool {
         self.tools.iter().any(|allowed| {

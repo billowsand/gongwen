@@ -12,7 +12,6 @@ pub(super) fn fixture() -> GongwenApp {
         vocabulary_setup: VocabularySetupStatus::Completed,
         ..Default::default()
     };
-    let kind = config.last_template;
     let ime = crate::ime::Ime::new(session::ime_settings_of(&config.ime));
     let docs = vec![DraftSession::blank(0, &config)];
     let (sender, receiver) = mpsc::channel();
@@ -72,10 +71,6 @@ pub(super) fn fixture() -> GongwenApp {
         vocabulary_delete_confirm: None,
         vocabulary_clear_confirm: false,
         proofread_page: ProofreadPageState::default(),
-        ai_prompt_editor: None,
-        ai_prompt_selected: None,
-        ai_prompt_delete_confirm: None,
-        ai_contract_preview_kind: kind,
         manuscript_store,
         task_store,
         task_error: None,

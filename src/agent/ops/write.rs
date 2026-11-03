@@ -226,7 +226,7 @@ fn rewrite_instruction(ctx: &ToolCtx<'_, '_>, step: &StepSpec) -> String {
         Some(template) => board.render(template),
         None => board.request.clone(),
     };
-    crate::ai_panel::polish_instruction("", &request, board.selection.as_deref())
+    crate::ai_panel::polish_instruction(&request, board.selection.as_deref())
 }
 
 fn rewrite_prompt(ctx: &ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<String> {

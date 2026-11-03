@@ -13,11 +13,9 @@ mod template;
 mod typography;
 mod vocabulary;
 
-pub(crate) use ai::AiPrompt;
 pub(crate) use ai::ProofreadConfig;
 pub(crate) use ai::ProofreadOverride;
 pub(crate) use ai::ProofreadRule;
-pub(crate) use ai::builtin_ai_prompts;
 pub(crate) use config::AUTO_SAVE_INTERVAL_MAX_SECS;
 pub(crate) use config::AUTO_SAVE_INTERVAL_MIN_SECS;
 pub(crate) use config::AppConfig;
@@ -516,31 +514,6 @@ mod tests {
         }
     }
 
-    /// 旧配置没有 `ai_prompts` 字段，载入后必须补齐全部预置项并编好 id。
-    #[test]
-    fn missing_ai_prompts_are_backfilled_with_unique_ids() {
-        let mut config = AppConfig::default();
-        assert!(config.ai_prompts.is_empty());
-        config.ensure_ai_prompts();
-
-        assert_eq!(config.ai_prompts.len(), builtin_ai_prompts().len());
-        assert!(config.ai_prompts.iter().all(|entry| entry.id != 0));
-        let ids = config
-            .ai_prompts
-            .iter()
-            .map(|entry| entry.id)
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(ids.len(), config.ai_prompts.len(), "id 不得重复");
-        // 保底项永远在，指令为空即“只规整格式”。
-        let format = config
-            .ai_prompts
-            .iter()
-            .find(|entry| entry.builtin_key == "format")
-            .expect("应有格式规整预置项");
-        assert!(format.instruction.is_empty());
-        assert!(format.kinds.is_empty());
-    }
-
     /// 密级是所有文稿类型的必要填报项目：新模板默认“机密、20年”。
     #[test]
     fn profile_defaults_to_confidential_20_years() {
@@ -781,101 +754,6 @@ mod tests {
             assert_eq!(migrated.theme, ThemeName::Claude);
             assert_eq!(migrated.paper, back.paper);
         }
-    }
-
-    /// 补齐是幂等的：反复载入不会把预置项复制成好几份，也不会重排用户改过的内容。
-    #[test]
-    fn backfilling_ai_prompts_is_idempotent_and_keeps_user_edits() {
-        let mut config = AppConfig::default();
-        config.ensure_ai_prompts();
-        let polish_id = config
-            .ai_prompts
-            .iter()
-            .find(|entry| entry.builtin_key == "polish")
-            .expect("应有润色预置项")
-            .id;
-        config
-            .ai_prompts
-            .iter_mut()
-            .find(|entry| entry.id == polish_id)
-            .unwrap()
-            .instruction = "我改过的内容".into();
-
-        let before = config.ai_prompts.clone();
-        config.ensure_ai_prompts();
-        assert_eq!(config.ai_prompts, before);
-    }
-
-    /// 自定义条目和预置项混在一起时，补齐只补缺的那条，并给新条目排不冲突的 id。
-    #[test]
-    fn backfilling_only_adds_the_missing_builtins() {
-        let mut config = AppConfig::default();
-        config.ai_prompts = vec![AiPrompt {
-            id: 7,
-            name: "我的提示词".into(),
-            instruction: "精简".into(),
-            kinds: vec![TemplateKind::WhitePaper],
-            builtin_key: String::new(),
-        }];
-        config.ensure_ai_prompts();
-
-        assert_eq!(config.ai_prompts.len(), builtin_ai_prompts().len() + 1);
-        assert_eq!(config.ai_prompts[0].id, 7, "已有条目的 id 不变");
-        assert!(
-            config.ai_prompts.iter().skip(1).all(|entry| entry.id > 7),
-            "新补的 id 必须避开已用的 7"
-        );
-        assert_eq!(config.next_ai_prompt_id(), 12);
-    }
-
-    #[test]
-    fn prompts_without_kinds_apply_to_every_template() {
-        let general = AiPrompt {
-            kinds: vec![],
-            ..Default::default()
-        };
-        assert!(
-            TemplateKind::ALL
-                .into_iter()
-                .all(|kind| general.applies_to(kind))
-        );
-        assert_eq!(general.kinds_label(), "全部文种");
-        assert!(!general.is_builtin());
-
-        let scoped = AiPrompt {
-            kinds: vec![TemplateKind::WhitePaper, TemplateKind::PlainDocument],
-            builtin_key: "expand".into(),
-            ..Default::default()
-        };
-        assert!(scoped.applies_to(TemplateKind::WhitePaper));
-        assert!(!scoped.applies_to(TemplateKind::MeetingAgenda));
-        assert_eq!(scoped.kinds_label(), "白头件（呈批件）、普通公文");
-        assert!(scoped.is_builtin());
-    }
-
-    /// 扩写类提示词不该出现在会议议程和电话通知的选择面板里——那两种文种没有
-    /// 可展开的论述段落。
-    #[test]
-    fn expand_preset_is_scoped_away_from_agenda_and_phone_notice() {
-        let expand = builtin_ai_prompts()
-            .into_iter()
-            .find(|entry| entry.builtin_key == "expand")
-            .expect("应有充实论述预置项");
-        assert!(!expand.applies_to(TemplateKind::MeetingAgenda));
-        assert!(!expand.applies_to(TemplateKind::PhoneNotice));
-        assert!(expand.applies_to(TemplateKind::WhitePaper));
-    }
-
-    /// 预置项的 key 是恢复默认时的锚点，必须唯一。
-    #[test]
-    fn builtin_keys_are_unique_and_non_empty() {
-        let keys = builtin_ai_prompts()
-            .into_iter()
-            .map(|entry| entry.builtin_key)
-            .collect::<Vec<_>>();
-        assert!(keys.iter().all(|key| !key.is_empty()));
-        let unique = keys.iter().collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(unique.len(), keys.len());
     }
 
     #[test]
