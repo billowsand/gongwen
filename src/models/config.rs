@@ -45,6 +45,9 @@ pub struct AppConfig {
     /// 旧配置没有这一项时按默认补齐（见 [`AppConfig::ensure_transmit_tasks`]）。
     #[serde(default)]
     pub transmit_tasks: Vec<String>,
+    /// 《传发任务单》上由用户预先定好的填写内容（设置页「加密传输单」一节）。
+    #[serde(default)]
+    pub transmit_defaults: TransmitDefaults,
     /// 打印对话框记住的选择（上次用的打印机）。
     pub print: PrintConfig,
     /// AI 起草或优化完成后是否立即按勾选格式导出一次。
@@ -146,6 +149,7 @@ impl Default for AppConfig {
             last_template: TemplateKind::OfficialLetter,
             export: ExportSelection::default(),
             transmit_tasks: Vec::new(),
+            transmit_defaults: TransmitDefaults::default(),
             print: PrintConfig::default(),
             auto_export: false,
             auto_save: true,
@@ -791,6 +795,68 @@ impl Default for PiOptions {
     fn default() -> Self {
         Self {
             reasoning_effort: ReasoningEffort::Default,
+        }
+    }
+}
+
+/// 《传发任务单》上的默认填写内容（设置页「加密传输单」一节）。
+///
+/// 这些是机要单据上「得由人确认」的部分：编号与签名程序不替人编造，但每次手填
+/// 一遍也折腾，所以做成默认配置，导出时照填。**留空的仍留白手写**——单子上要
+/// 留出位置，人签字、填号。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TransmitDefaults {
+    /// 传字：印在右上角「【传】 号」里，号码留白手写。留空则不印方括号。
+    pub serial_prefix: String,
+    /// 默认签批人姓名。配合 [`TransmitDefaults::signatory_blank`] 用。
+    pub signatory: String,
+    /// 签批人留空（手签）。默认开：多数情况是纸质手签，姓名由人在单子上写。
+    pub signatory_blank: bool,
+    /// 时效要求。默认「急」；留空则这一栏留白手写。
+    pub urgency: String,
+    /// 发后处理：销毁或退还。
+    pub disposal: TransmitDisposal,
+    /// 备注：可粘多行，印在单子的备注栏；留空则那一栏留白手写。
+    pub remark: String,
+    /// 保密负责单位：印在末行，替掉模板上的「【保密单位】」占位。
+    pub security_unit: String,
+}
+
+impl Default for TransmitDefaults {
+    fn default() -> Self {
+        Self {
+            serial_prefix: "传".into(),
+            signatory: String::new(),
+            signatory_blank: true,
+            urgency: "急".into(),
+            disposal: TransmitDisposal::default(),
+            remark: String::new(),
+            security_unit: String::new(),
+        }
+    }
+}
+
+/// 发后处理：传输单上的「□退还 √销毁」二选一。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransmitDisposal {
+    /// 销毁（默认，与模板原样一致）。
+    #[default]
+    Destroy,
+    /// 退还。
+    Return,
+}
+
+impl TransmitDisposal {
+    /// 全部选项，按单子上出现的先后排列。
+    pub const ALL: [Self; 2] = [Self::Destroy, Self::Return];
+
+    /// 设置页里的显示名。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Destroy => "销毁",
+            Self::Return => "退还",
         }
     }
 }

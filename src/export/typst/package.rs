@@ -643,6 +643,7 @@ mod tests {
             &crate::models::FontConfig::default(),
             &NumberingConfig::default(),
             None,
+            &crate::models::TransmitDefaults::default(),
         )
         .unwrap();
         assert_eq!(artifacts.files.len(), 1);
@@ -689,6 +690,7 @@ mod tests {
             &fonts,
             &numbering,
             None,
+            &crate::models::TransmitDefaults::default(),
         )
         .unwrap();
         let package = first.files.last().unwrap();
@@ -711,6 +713,7 @@ mod tests {
             &fonts,
             &numbering,
             None,
+            &crate::models::TransmitDefaults::default(),
         )
         .unwrap();
         assert!(second.compile_error.is_some());

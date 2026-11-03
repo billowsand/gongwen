@@ -1241,6 +1241,7 @@ pub(crate) fn export_and_compile(
     vocabulary: &[VocabularyEntry],
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    transmit_defaults: &crate::models::TransmitDefaults,
     version_name: Option<&str>,
     mut progress: impl FnMut(&str),
 ) -> anyhow::Result<ExportOutcome> {
@@ -1263,6 +1264,7 @@ pub(crate) fn export_and_compile(
         &fonts,
         numbering,
         version_name,
+        transmit_defaults,
     )?;
     let compile_error = artifacts.compile_error;
     let files = artifacts.files;

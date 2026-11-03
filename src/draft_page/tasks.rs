@@ -189,6 +189,8 @@ impl DraftPage<'_> {
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
         let numbering = self.config.numbering;
+        // 设置页「加密传输单」里的默认填写内容：传发任务单上照填。
+        let transmit_defaults = self.config.transmit_defaults.clone();
         let tx = self.sender.clone();
         thread::spawn(move || {
             let result = export_and_compile(
@@ -199,6 +201,7 @@ impl DraftPage<'_> {
                 &vocabulary,
                 &fonts,
                 &numbering,
+                &transmit_defaults,
                 version_name.as_deref(),
                 |message| {
                     let _ = tx.send(WorkerResult::Doc {

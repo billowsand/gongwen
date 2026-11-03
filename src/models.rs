@@ -22,6 +22,8 @@ pub(crate) use config::AUTO_SAVE_INTERVAL_MAX_SECS;
 pub(crate) use config::AUTO_SAVE_INTERVAL_MIN_SECS;
 pub(crate) use config::AppConfig;
 pub(crate) use config::PiOptions;
+pub(crate) use config::TransmitDefaults;
+pub(crate) use config::TransmitDisposal;
 pub(crate) use config::UI_SCALE_MAX;
 pub(crate) use config::UI_SCALE_MIN;
 pub(crate) use config::UI_SCALE_PRESETS;

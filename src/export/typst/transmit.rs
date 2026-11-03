@@ -23,7 +23,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::export::element_display;
-use crate::models::{DraftInput, FontConfig};
+use crate::models::{DraftInput, FontConfig, TransmitDefaults, TransmitDisposal};
 use crate::typst_engine::{self, FontFamilies, TypstJob, TypstOutcome};
 use crate::units::UnitDisplay;
 
@@ -49,14 +49,23 @@ const TITLE_SIZE_MIN_PT: f64 = 17.0;
 /// 题名能排在一行里的版心宽（磅）：156mm。字宽按全角一字一算。
 const TITLE_LINE_WIDTH_PT: f64 = 156.0 * 72.0 / 25.4;
 
-/// 文字样式。模板里表格文字用黑体，勾选字形用楷体。
+/// 备注的字号（磅）与固定行距（磅）：照模板，仿宋小四（12pt）、行距固定 14pt。
+const REMARK_SIZE_PT: f64 = 12.0;
+const REMARK_LINE_PT: f64 = 14.0;
+
+/// 备注格的净宽（毫米）：跨第 2 至第 5 列，去掉左右留白。
+const REMARK_WIDTH_MM: f64 = 25.0 + 51.7 + 28.1 + 42.7 - 2.0;
+
+/// 文字样式。模板里表格文字用黑体，勾选字形用楷体，备注用仿宋。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum TransmitStyle {
     /// 黑体：标签与取值。
     Hei,
-    /// 楷体：勾选字形（√）。
+    /// 楷体：勾选字形（□ / ☑）。
     Kai,
+    /// 仿宋：备注（模板的事例就是仿宋小四）。
+    Fs,
 }
 
 /// 表格里的对齐方式。
@@ -88,6 +97,38 @@ impl TransmitRun {
             style: TransmitStyle::Kai,
         }
     }
+
+    /// 仿宋：备注。
+    fn fs(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            style: TransmitStyle::Fs,
+        }
+    }
+}
+
+/// 竖直对齐方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum TransmitValign {
+    /// 居中：模板里绝大多数格子。
+    #[default]
+    Center,
+    /// 顶对齐：备注格——文字在上，底下留出手写 / 续写的空白。
+    Top,
+}
+
+/// 格内的排版细节。默认按全局的表格字号与行距排。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
+pub(crate) struct TransmitLayout {
+    /// 竖直对齐方式。
+    pub valign: TransmitValign,
+    /// 本格的行距（磅）：0 表示跟全局的走。备注格用模板的固定行距。
+    pub lead_pt: f64,
+    /// 首行缩进（字）：模板里「通知收件人情况」等格子缩进一字。
+    pub indent_em: f64,
+    /// 顶对齐的格子里，内容下面补的空白（毫米）。
+    pub tail_mm: f64,
 }
 
 /// 主表的一格。
@@ -109,6 +150,8 @@ pub(crate) struct TransmitCell {
     pub vertical: bool,
     /// 本格的字号（磅）；0 表示跟全局的表格字号走。
     pub size_pt: f64,
+    /// 格内的排版细节（对齐、行距、缩进、底部留白）。
+    pub layout: TransmitLayout,
 }
 
 /// 传输单的全部数据。字段名与 `assets/typst/transmit.typ` 一一对应。
@@ -133,8 +176,10 @@ pub(crate) struct TransmitDoc {
     /// 上下页边距（毫米）。
     pub top_margin_mm: f64,
     pub bottom_margin_mm: f64,
-    /// 传字号：没有编号时留白手写。
-    pub serial: String,
+    /// 传字：印在右上角「【传】 号」里，号码留白手写。空则不印方括号。
+    pub serial_prefix: String,
+    /// 保密负责单位：印在末行，替掉模板上的「【保密单位】」占位。空则保留占位。
+    pub security_unit: String,
     /// 主表列宽（毫米）。
     pub column_widths_mm: Vec<f64>,
     /// 主表的格子，按行序排列。
@@ -200,6 +245,8 @@ pub(crate) struct Fit {
     label_pt: f64,
     /// 表格里「标题」一栏的字号（磅）：模板本来就是 12pt，比别处小一号。
     doc_title_pt: f64,
+    /// 备注的字号（磅）：模板是仿宋小四（12pt）。
+    remark_pt: f64,
     /// 段落行距（磅）。
     lead_pt: f64,
     /// 单元格上下留白（毫米）。
@@ -221,6 +268,7 @@ const FITS: [Fit; 7] = [
         title_gap_pt: 11.0,
         label_pt: 14.0,
         doc_title_pt: 12.0,
+        remark_pt: 12.0,
         lead_pt: 6.0,
         inset_y_mm: 3.0,
         row_scale: 1.0,
@@ -234,6 +282,7 @@ const FITS: [Fit; 7] = [
         title_gap_pt: 6.0,
         label_pt: 14.0,
         doc_title_pt: 12.0,
+        remark_pt: 12.0,
         lead_pt: 6.0,
         inset_y_mm: 3.0,
         row_scale: 1.0,
@@ -247,6 +296,7 @@ const FITS: [Fit; 7] = [
         title_gap_pt: 4.0,
         label_pt: 14.0,
         doc_title_pt: 12.0,
+        remark_pt: 12.0,
         lead_pt: 6.0,
         inset_y_mm: 3.0,
         row_scale: 1.0,
@@ -260,6 +310,7 @@ const FITS: [Fit; 7] = [
         title_gap_pt: 3.0,
         label_pt: 13.0,
         doc_title_pt: 11.5,
+        remark_pt: 11.5,
         lead_pt: 5.0,
         inset_y_mm: 2.5,
         row_scale: 0.97,
@@ -273,6 +324,7 @@ const FITS: [Fit; 7] = [
         title_gap_pt: 2.0,
         label_pt: 12.5,
         doc_title_pt: 11.0,
+        remark_pt: 11.0,
         lead_pt: 4.5,
         inset_y_mm: 2.5,
         row_scale: 0.94,
@@ -286,6 +338,7 @@ const FITS: [Fit; 7] = [
         title_gap_pt: 2.0,
         label_pt: 12.0,
         doc_title_pt: 10.5,
+        remark_pt: 10.5,
         lead_pt: 4.0,
         inset_y_mm: 2.0,
         row_scale: 0.9,
@@ -299,6 +352,7 @@ const FITS: [Fit; 7] = [
         title_gap_pt: 2.0,
         label_pt: 11.0,
         doc_title_pt: 10.0,
+        remark_pt: 10.0,
         lead_pt: 3.0,
         inset_y_mm: 1.5,
         row_scale: 0.85,
@@ -309,6 +363,9 @@ const FITS: [Fit; 7] = [
 ];
 
 /// 按公函要素构造一份传输单的数据。
+///
+/// `defaults` 是设置页「加密传输单」里的默认填写内容：传字、签批人、时效要求、
+/// 发后处理、备注与保密负责单位。留空的仍留白手写。
 pub(crate) fn build(
     input: &DraftInput,
     markdown: &str,
@@ -316,6 +373,7 @@ pub(crate) fn build(
     receiver: &Receiver,
     pages: usize,
     fit: &Fit,
+    defaults: &TransmitDefaults,
 ) -> TransmitDoc {
     let scoped = display.for_input(input);
     let display = &scoped;
@@ -349,7 +407,7 @@ pub(crate) fn build(
         0.0,
     ));
     cells.push(label("签批人", row(3)));
-    cells.push(blank_value(3, 10));
+    cells.push(signatory_cell(defaults));
     cells.push(label("联系人", row(4)));
     cells.push(text_or_blank(&contact_name(input, display), 6, 1, 0.0));
     cells.push(label2("联系电话"));
@@ -358,16 +416,16 @@ pub(crate) fn build(
     cells.push(TransmitCell {
         colspan: 3,
         rowspan: 1,
-        runs: vec![
-            TransmitRun::hei("□已通知收件人　"),
-            TransmitRun::kai("√"),
-            TransmitRun::hei("未通知收件人"),
-        ],
-        align: TransmitAlign::Center,
+        runs: box_choice_runs("已通知收件人", false, "未通知收件人", true, &"　".repeat(6)),
+        align: TransmitAlign::Left,
         blank_chars: 0,
         strut_mm: 0.0,
         vertical: false,
         size_pt: 0.0,
+        layout: TransmitLayout {
+            indent_em: 1.0,
+            ..Default::default()
+        },
     });
 
     // 涉密信息要素：密级、时效要求、发后处理、信息类型与标题。
@@ -375,36 +433,50 @@ pub(crate) fn build(
     cells.push(label("密级", row(6)));
     cells.push(value(&security_text(input), 1, 0.0));
     cells.push(label2("时效要求"));
-    cells.push(blank_value(1, 4));
+    cells.push(text_or_blank(&defaults.urgency, 4, 1, 0.0));
     cells.push(label("发后处理", row(7)));
     cells.push(TransmitCell {
         colspan: 3,
         rowspan: 1,
-        runs: vec![
-            TransmitRun::hei("□退还　"),
-            TransmitRun::kai("√"),
-            TransmitRun::hei("销毁"),
-        ],
-        align: TransmitAlign::Center,
+        // 模板里这一栏勾中的只印一个「√」，不画框。
+        runs: match defaults.disposal {
+            TransmitDisposal::Destroy => {
+                plain_choice_runs("退还", false, "销毁", true, &"　".repeat(9))
+            }
+            TransmitDisposal::Return => {
+                plain_choice_runs("退还", true, "销毁", false, &"　".repeat(9))
+            }
+        },
+        align: TransmitAlign::Left,
         blank_chars: 0,
         strut_mm: 0.0,
         vertical: false,
         size_pt: 0.0,
+        layout: TransmitLayout {
+            indent_em: 1.0,
+            ..Default::default()
+        },
     });
     cells.push(label("信息类型", row(8)));
     cells.push(TransmitCell {
         colspan: 3,
         rowspan: 1,
         runs: vec![
-            TransmitRun::kai("√"),
-            TransmitRun::hei(format!("纸质文件（{pages} 页）　")),
-            TransmitRun::hei("□电子文件（____MB）"),
+            TransmitRun::kai("☑"),
+            TransmitRun::hei(format!("纸质文件（{pages} 页）")),
+            TransmitRun::hei("　　"),
+            TransmitRun::kai("□"),
+            TransmitRun::hei("电子文件（＿＿MB）"),
         ],
-        align: TransmitAlign::Center,
+        align: TransmitAlign::Left,
         blank_chars: 0,
         strut_mm: 0.0,
         vertical: false,
         size_pt: 0.0,
+        layout: TransmitLayout {
+            indent_em: 1.0,
+            ..Default::default()
+        },
     });
     cells.push(label("标题", row(9)));
     // 公文标题印在这一栏：它可能很长，字号比别处小一号（模板原样），
@@ -415,18 +487,10 @@ pub(crate) fn build(
         fit.doc_title_pt,
     ));
 
-    // 备注：留给机要人员手写。
+    // 备注：照模板的事例排——仿宋小四、固定行距，每行一条、序号「1.」「2.」……
+    // 没填内容就留出手写的大块空白。
     cells.push(group("备\n注", 1));
-    cells.push(TransmitCell {
-        colspan: 4,
-        rowspan: 1,
-        runs: Vec::new(),
-        align: TransmitAlign::Left,
-        blank_chars: 0,
-        strut_mm: fit.remark_mm,
-        vertical: false,
-        size_pt: 0.0,
-    });
+    cells.push(remark_cell(&defaults.remark, fit));
 
     TransmitDoc {
         fonts: empty_families(),
@@ -439,11 +503,170 @@ pub(crate) fn build(
         cell_inset_y_mm: fit.inset_y_mm,
         top_margin_mm: fit.top_mm,
         bottom_margin_mm: fit.bottom_mm,
-        serial: String::new(),
+        serial_prefix: defaults.serial_prefix.trim().to_string(),
+        security_unit: defaults.security_unit.trim().to_string(),
         column_widths_mm: COLUMN_WIDTHS_MM.to_vec(),
         cells,
         machine_column_widths_mm: MACHINE_COLUMN_WIDTHS_MM.to_vec(),
     }
+}
+
+/// 签批人：默认留空手签（设置里勾「留空手签」），取消勾选才印默认姓名。
+fn signatory_cell(defaults: &TransmitDefaults) -> TransmitCell {
+    let name = defaults.signatory.trim();
+    if defaults.signatory_blank || name.is_empty() {
+        blank_value(3, 10)
+    } else {
+        value(name, 3, 0.0)
+    }
+}
+
+/// 二选一的勾选栏：勾中的印「☑」（排版时画成实心带勾的框），没勾的印「□」
+/// （排版时画成空框），两项之间隔一段空白。模板里「通知收件人情况」与
+/// 「信息类型」两栏都是这个样子。
+fn box_choice_runs(
+    first: &str,
+    first_checked: bool,
+    second: &str,
+    second_checked: bool,
+    gap: &str,
+) -> Vec<TransmitRun> {
+    let mut runs = Vec::new();
+    for (index, (text, checked)) in [(first, first_checked), (second, second_checked)]
+        .into_iter()
+        .enumerate()
+    {
+        if index == 1 {
+            runs.push(TransmitRun::hei(gap));
+        }
+        runs.push(TransmitRun::kai(if checked { "☑" } else { "□" }));
+        runs.push(TransmitRun::hei(text));
+    }
+    runs
+}
+
+/// 二选一的勾选栏，但勾中的只印一个「√」、不画框——模板的「发后处理」一栏
+/// 就是这么写的。
+fn plain_choice_runs(
+    first: &str,
+    first_checked: bool,
+    second: &str,
+    second_checked: bool,
+    gap: &str,
+) -> Vec<TransmitRun> {
+    let mut runs = Vec::new();
+    for (index, (text, checked)) in [(first, first_checked), (second, second_checked)]
+        .into_iter()
+        .enumerate()
+    {
+        if index == 1 {
+            runs.push(TransmitRun::hei(gap));
+        }
+        if checked {
+            runs.push(TransmitRun::hei("√"));
+        } else {
+            runs.push(TransmitRun::hei("□"));
+        }
+        runs.push(TransmitRun::hei(text));
+    }
+    runs
+}
+
+/// 备注格：仿宋小四、固定行距，每行一条、序号「1.」「2.」……
+///
+/// 内容短时底下补一段空白，把这一行撑到模板给的高度；内容长了就让它长，
+/// 不截断。
+fn remark_cell(remark: &str, fit: &Fit) -> TransmitCell {
+    let items = number_items(remark.trim());
+    let text = items.join("\n");
+    let size_pt = fit.remark_pt;
+    // 模板的备注是仿宋小四、固定行距 14 磅；字号收紧时行距按比例跟着收。
+    let lead_pt = (size_pt * (REMARK_LINE_PT / REMARK_SIZE_PT - 1.0)).max(0.5);
+    let content_mm = estimate_text_height_mm(&text, size_pt, lead_pt, REMARK_WIDTH_MM);
+    let tail_mm = (fit.remark_mm - 2.0 * fit.inset_y_mm - content_mm).max(0.0);
+    TransmitCell {
+        colspan: 4,
+        rowspan: 1,
+        runs: if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![TransmitRun::fs(text)]
+        },
+        align: TransmitAlign::Left,
+        blank_chars: 0,
+        strut_mm: 0.0,
+        vertical: false,
+        size_pt,
+        layout: TransmitLayout {
+            valign: TransmitValign::Top,
+            lead_pt,
+            indent_em: 0.0,
+            tail_mm,
+        },
+    }
+}
+
+/// 备注按模板的事例排成编号条目：每行一条、序号「1.」「2.」…… 已经带序号的
+/// 行原样保留，免得出现两个序号。
+fn number_items(text: &str) -> Vec<String> {
+    let mut items: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if has_item_number(line) {
+            items.push(line.to_string());
+        } else {
+            items.push(format!("{}.{}", items.len() + 1, line));
+        }
+    }
+    items
+}
+
+/// 行首是不是序号（`1.` / `1、` / `1)` / `1．`）。
+fn has_item_number(line: &str) -> bool {
+    let mut chars = line.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_digit() && !matches!(first, '０'..='９') {
+        return false;
+    }
+    matches!(chars.next(), Some('.' | '．' | '、' | ')' | '）'))
+}
+
+/// 估算一段文字排出来有多高（毫米）：按格子的净宽折行，行距按固定行距算。
+///
+/// 只用来给备注格补底部的空白，估得高一点也只是多留一点白，不影响内容。
+fn estimate_text_height_mm(text: &str, size_pt: f64, lead_pt: f64, width_mm: f64) -> f64 {
+    let width_pt = width_mm * 72.0 / 25.4;
+    let mut lines = 0usize;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut used = 0.0;
+        for (index, ch) in line.chars().enumerate() {
+            let advance = if ch.is_ascii() {
+                size_pt * 0.5
+            } else {
+                size_pt
+            };
+            if index > 0 && used + advance > width_pt {
+                lines += 1;
+                used = 0.0;
+            }
+            used += advance;
+        }
+        lines += 1;
+    }
+    if lines == 0 {
+        return 0.0;
+    }
+    let content_pt = size_pt + (lines - 1) as f64 * (size_pt + lead_pt);
+    content_pt * 25.4 / 72.0
 }
 
 /// 第 1 列的竖排分组标签。
@@ -457,6 +680,7 @@ fn group(text: &str, rowspan: usize) -> TransmitCell {
         strut_mm: 0.0,
         vertical: true,
         size_pt: 0.0,
+        layout: TransmitLayout::default(),
     }
 }
 
@@ -471,6 +695,7 @@ fn label(text: &str, strut_mm: f64) -> TransmitCell {
         strut_mm,
         vertical: false,
         size_pt: 0.0,
+        layout: TransmitLayout::default(),
     }
 }
 
@@ -485,6 +710,7 @@ fn label2(text: &str) -> TransmitCell {
         strut_mm: 0.0,
         vertical: false,
         size_pt: 0.0,
+        layout: TransmitLayout::default(),
     }
 }
 
@@ -499,6 +725,7 @@ fn value(text: &str, colspan: usize, size_pt: f64) -> TransmitCell {
         strut_mm: 0.0,
         vertical: false,
         size_pt,
+        layout: TransmitLayout::default(),
     }
 }
 
@@ -523,6 +750,7 @@ fn blank_value(colspan: usize, blank_chars: usize) -> TransmitCell {
         strut_mm: 0.0,
         vertical: false,
         size_pt: 0.0,
+        layout: TransmitLayout::default(),
     }
 }
 
@@ -589,10 +817,11 @@ pub(crate) fn write_pdf(
     receiver: &Receiver,
     pages: usize,
     hint: usize,
+    defaults: &TransmitDefaults,
 ) -> Result<(TypstOutcome, usize)> {
     let base = crate::storage::config_dir()?;
     write_pdf_with_base(
-        path, input, markdown, display, fonts, receiver, pages, hint, &base,
+        path, input, markdown, display, fonts, receiver, pages, hint, defaults, &base,
     )
 }
 
@@ -607,6 +836,7 @@ pub(crate) fn write_pdf_with_base(
     receiver: &Receiver,
     pages: usize,
     hint: usize,
+    defaults: &TransmitDefaults,
     base_dir: &Path,
 ) -> Result<(TypstOutcome, usize)> {
     display
@@ -617,7 +847,7 @@ pub(crate) fn write_pdf_with_base(
     let start = hint.min(FITS.len() - 1);
     let mut last: Option<(TypstOutcome, usize)> = None;
     for (index, fit) in FITS.iter().enumerate().skip(start) {
-        let mut doc = build(input, markdown, display, receiver, pages, fit);
+        let mut doc = build(input, markdown, display, receiver, pages, fit, defaults);
         doc.fonts = set.families.clone();
         let data = serde_json::to_string(&doc).context("无法序列化传发任务单数据")?;
         let outcome = typst_engine::compile(&TypstJob::transmit(data, base_dir), &set)?;
@@ -771,6 +1001,7 @@ mod tests {
             &receiver,
             3,
             &FITS[0],
+            &TransmitDefaults::default(),
         );
         // 题名是传输任务名，不是公文标题；公文标题在表内的「标题」一栏。
         assert_eq!(doc.title, "涉密信息加密传发任务单");
@@ -790,8 +1021,15 @@ mod tests {
                 .iter()
                 .any(|t| t == "关于商洽的函（某民函〔2026〕18号）")
         );
-        // 只由机要人员掌握或公文里没有的：留白。
-        assert!(doc.serial.is_empty());
+        // 默认设置：传字「传」、时效要求「急」、发后处理「销毁」；签批人默认留空手签。
+        assert_eq!(doc.serial_prefix, "传");
+        assert!(texts.iter().any(|t| t == "急"));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.starts_with("□退还") && t.ends_with("√销毁"))
+        );
+        assert!(doc.security_unit.is_empty());
         let sign_index = doc
             .cells
             .iter()
@@ -801,6 +1039,143 @@ mod tests {
         let after = &doc.cells[sign_index + 1];
         assert_eq!(sign.blank_chars, 0);
         assert!(after.blank_chars > 0);
+    }
+
+    /// 设置页「加密传输单」里填的每一项都要落到单子上。
+    #[test]
+    fn the_configured_defaults_reach_the_sheet() {
+        let input = letter();
+        let receiver = Receiver {
+            unit: "甲单位".into(),
+            person: "赵六".into(),
+            phone: "0571-66666666".into(),
+        };
+        let defaults = TransmitDefaults {
+            serial_prefix: "机要".into(),
+            signatory: "李四".into(),
+            signatory_blank: false,
+            urgency: "特急".into(),
+            disposal: TransmitDisposal::Return,
+            remark: "第一行：加急办理\n第二行：当天回执".into(),
+            security_unit: "某某市保密局".into(),
+        };
+        let doc = build(
+            &input,
+            "# 关于商洽的函\n\n正文。",
+            &UnitDisplay::new(&[]),
+            &receiver,
+            3,
+            &FITS[0],
+            &defaults,
+        );
+        let texts = texts(&doc);
+        assert_eq!(doc.serial_prefix, "机要");
+        assert_eq!(doc.security_unit, "某某市保密局");
+        // 签批人：取消「留空手签」后印姓名。
+        let sign_index = doc
+            .cells
+            .iter()
+            .position(|cell| cell.runs.iter().any(|run| run.text == "签批人"))
+            .unwrap();
+        assert!(texts[sign_index + 1] == "李四");
+        // 时效要求、发后处理、备注。
+        assert!(texts.iter().any(|t| t == "特急"));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.starts_with("√退还") && t.ends_with("□销毁"))
+        );
+        assert!(texts.iter().any(|t| t.contains("第一行：加急办理")));
+        // 填了备注就不必再留手写高度。
+        let remark_index = doc
+            .cells
+            .iter()
+            .position(|cell| cell.runs.iter().any(|run| run.text.contains("第一行")))
+            .unwrap();
+        assert_eq!(doc.cells[remark_index].strut_mm, 0.0);
+    }
+
+    /// 备注按模板的事例排：仿宋小四、每行一条、序号「1.」「2.」……
+    #[test]
+    fn the_remark_follows_the_examples_in_the_template() {
+        let input = letter();
+        let receiver = Receiver {
+            unit: "甲单位".into(),
+            person: String::new(),
+            phone: String::new(),
+        };
+        let defaults = TransmitDefaults {
+            remark: "当面交接，不得邮寄。\n限当日回执。".into(),
+            ..TransmitDefaults::default()
+        };
+        let doc = build(
+            &input,
+            "# 关于商洽的函\n\n正文。",
+            &UnitDisplay::new(&[]),
+            &receiver,
+            3,
+            &FITS[0],
+            &defaults,
+        );
+        let remark = doc
+            .cells
+            .iter()
+            .find(|cell| cell.runs.iter().any(|run| run.text.contains("当面交接")))
+            .expect("备注格里应有内容");
+        // 每行一条，前面带序号。
+        assert_eq!(
+            remark.runs[0].text,
+            "1.当面交接，不得邮寄。\n2.限当日回执。"
+        );
+        // 仿宋、模板的字号（12pt）与固定行距（14pt）。
+        assert_eq!(remark.runs[0].style, TransmitStyle::Fs);
+        assert_eq!(remark.size_pt, REMARK_SIZE_PT);
+        assert!((remark.layout.lead_pt - 2.0).abs() < 0.01);
+        // 顶对齐，底下补空白把行高撑到模板给的高度。
+        assert_eq!(remark.layout.valign, TransmitValign::Top);
+        assert!(remark.layout.tail_mm > 0.0);
+    }
+
+    /// 备注里已经带序号的行原样保留，免得出现两个序号。
+    #[test]
+    fn the_remark_keeps_the_numbers_it_already_has() {
+        assert_eq!(number_items("1.第一条\n2.第二条"), ["1.第一条", "2.第二条"]);
+        assert_eq!(number_items("第一条\n2、第二条"), ["1.第一条", "2、第二条"]);
+        // 空行不算一条。
+        assert_eq!(number_items("第一条\n\n第二条"), ["1.第一条", "2.第二条"]);
+        // 数字开头但不是序号的行照旧编号。
+        assert_eq!(number_items("2026 年的任务"), ["1.2026 年的任务"]);
+    }
+
+    /// 勾了「留空手签」时，签批人那一栏留白，哪怕填了姓名也不印。
+    #[test]
+    fn the_signatory_stays_blank_when_the_sheet_is_signed_by_hand() {
+        let input = letter();
+        let receiver = Receiver {
+            unit: "甲单位".into(),
+            person: String::new(),
+            phone: String::new(),
+        };
+        let defaults = TransmitDefaults {
+            signatory: "李四".into(),
+            signatory_blank: true,
+            ..TransmitDefaults::default()
+        };
+        let doc = build(
+            &input,
+            "# 关于商洽的函\n\n正文。",
+            &UnitDisplay::new(&[]),
+            &receiver,
+            3,
+            &FITS[0],
+            &defaults,
+        );
+        let sign_index = doc
+            .cells
+            .iter()
+            .position(|cell| cell.runs.iter().any(|run| run.text == "签批人"))
+            .unwrap();
+        assert!(doc.cells[sign_index + 1].blank_chars > 0);
     }
 
     /// 题名取自传输任务字典：有登记的用登记的，没登记的按密级自动带。
@@ -840,6 +1215,19 @@ mod tests {
         }
     }
 
+    /// 样张用的默认填写内容：把设置页能填的都填上，好一次看全单子的样子。
+    fn filled_defaults() -> TransmitDefaults {
+        TransmitDefaults {
+            serial_prefix: "传".into(),
+            signatory: "王主任".into(),
+            signatory_blank: false,
+            urgency: "急".into(),
+            disposal: TransmitDisposal::Destroy,
+            remark: "本件为涉密材料，请按保密规定办理；\n当面交接，不得邮寄。".into(),
+            security_unit: "某某市保密局".into(),
+        }
+    }
+
     /// 样张：PDF、模板数据与逐页 PNG 写到 `tmp/typst-samples/transmit/`，
     /// 改模板后目视检查用。依赖本机随包字体，默认忽略：
     ///
@@ -866,13 +1254,22 @@ mod tests {
         };
 
         let set = typst_engine::font_set(&fonts).unwrap();
-        let mut doc = build(&input, markdown, &display, &receiver, 3, &FITS[0]);
+        let mut doc = build(
+            &input,
+            markdown,
+            &display,
+            &receiver,
+            3,
+            &FITS[0],
+            &filled_defaults(),
+        );
         doc.fonts = set.families.clone();
         let data = serde_json::to_string_pretty(&doc).unwrap();
         std::fs::write(dir.join("doc.json"), &data).unwrap();
 
         let outcome = typst_engine::compile(&TypstJob::transmit(data, &dir), &set).unwrap();
         std::fs::write(dir.join("typst.pdf"), &outcome.pdf).unwrap();
+        assert_eq!(outcome.pages, 1, "样张应排在一页里");
         save_page_images(&outcome.pdf, &dir);
     }
 
@@ -908,6 +1305,7 @@ mod tests {
             &receiver,
             3,
             0,
+            &filled_defaults(),
             &dir,
         )
         .unwrap();

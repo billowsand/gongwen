@@ -46,32 +46,53 @@
 #let blank(n) = box(width: n * 1em, height: 0.62em, baseline: bottom,
   stroke: (bottom: 0.4pt), outset: (bottom: 1.5pt))
 
-// 勾选框：字体里没有 ☑（GB2312 不含），空框用线画，打勾用「√」——模板自己的
-// 「√销毁」也是这个写法。框要与文字排在同一行，所以用行内的 box。
-#let cb-size = 0.8em
-#let cb() = box(width: cb-size, height: cb-size, inset: 0pt, baseline: bottom, stroke: 0.6pt)
+// 勾选框：字体里没有 ☑（GB2312 不含），空框用线画，勾选的框填黑、里面画一个白勾。
+// 框要与文字排在同一行，所以用行内的 box。模板里的框是全角字（占一个字宽），
+// 这里也让框占一个字宽，后面的文字才接得上。
+#let cb-size = 0.6em
+#let cb-checked-size = 0.85em
+#let cb() = box(width: 1em, height: 1em, inset: 0pt, baseline: bottom,
+  align(center + horizon, box(width: cb-size, height: cb-size, inset: 0pt, stroke: 0.5pt)))
+#let cb-checked() = box(width: 1em, height: 1em, inset: 0pt, baseline: bottom,
+  align(center + horizon, box(width: cb-checked-size, height: cb-checked-size, inset: 0pt,
+    fill: black, radius: 0.08em,
+    align(center + horizon, text(font: kai, size: 0.75em, fill: white, "√")))))
 
-// 文字样式：黑体（标签与取值）、楷体（勾选字形）。字号由数据给的是磅，这里换成长度。
-#let style-font(style) = if style == "kai" { kai } else { hei }
+// 文字样式：黑体（标签与取值）、楷体（勾选字形）、仿宋（备注）。字号由数据给的是磅，
+// 这里换成长度。
+#let style-font(style) = if style == "kai" { kai } else if style == "fs" { fs } else { hei }
 #let style-size(style, base) = base * 1pt
 
-// 一段文字里的「□」换成线画的空框，其余原样排出。
+// 一段文字里的「□」「☑」换成画的框，「＿」换成一条填空的横线，
+// 「\n」换成换行（备注可以粘多行），其余原样排出。
 #let run-content(r, size) = {
   let parts = ()
-  let buf = ""
-  for ch in r.text {
-    if ch == "□" {
-      if buf != "" {
-        parts.push(text(font: style-font(r.style), size: style-size(r.style, size), buf))
-        buf = ""
-      }
-      parts.push(cb())
-    } else {
-      buf = buf + ch
+  let lines = r.text.split("\n")
+  for (index, line) in lines.enumerate() {
+    if index > 0 {
+      parts.push(linebreak())
     }
-  }
-  if buf != "" {
-    parts.push(text(font: style-font(r.style), size: style-size(r.style, size), buf))
+    let buf = ""
+    for ch in line {
+      if ch == "□" or ch == "☑" or ch == "＿" {
+        if buf != "" {
+          parts.push(text(font: style-font(r.style), size: style-size(r.style, size), buf))
+          buf = ""
+        }
+        if ch == "□" {
+          parts.push(cb())
+        } else if ch == "☑" {
+          parts.push(cb-checked())
+        } else {
+          parts.push(blank(1))
+        }
+      } else {
+        buf = buf + ch
+      }
+    }
+    if buf != "" {
+      parts.push(text(font: style-font(r.style), size: style-size(r.style, size), buf))
+    }
   }
   parts.join()
 }
@@ -84,11 +105,17 @@
 #let cell-content(c) = {
   // 本格自己的字号（表格里的「标题」一栏比别处小一号），没给就跟全局的走。
   let size = if c.size_pt > 0 { c.size_pt } else { doc.label_size_pt }
+  // 本格自己的行距（备注格用模板的固定行距）。
+  // 注意：set 规则只在本块内有效，所以要写在函数体里，不能塞进 if 分支。
+  set par(leading: if c.layout.lead_pt > 0 { c.layout.lead_pt * 1pt } else { doc.lead_pt * 1pt })
   let body = if c.blank_chars > 0 { blank(c.blank_chars) } else { runs-content(c.runs, size) }
   // 竖排标签每行拉开一点，读起来才像模板里的竖排字。
   if c.vertical {
     set par(leading: vert-lead)
     body
+  } else if c.layout.valign == "top" {
+    // 顶对齐：文字在上，底下补一段空白，把这一行撑到模板给的高度。
+    block(width: 100%, align(left + top, body + v(c.layout.tail_mm * 1mm, weak: false)))
   } else if c.strut_mm > 0 {
     block(width: 100%, height: c.strut_mm * 1mm - 2 * doc.cell_inset_y_mm * 1mm,
       align(center + horizon, body))
@@ -100,7 +127,9 @@
 #let cells = doc.cells.map(c => table.cell(
   colspan: c.colspan,
   rowspan: c.rowspan,
-  inset: (x: cell-inset-x, y: doc.cell_inset_y_mm * 1mm),
+  // 首行缩进做在左留白上：表格单元格里排版不认 first-line-indent。
+  inset: (left: cell-inset-x + c.layout.indent_em * doc.label_size_pt * 1pt,
+    right: cell-inset-x, y: doc.cell_inset_y_mm * 1mm),
   align: if c.align == "left" { left + horizon } else { center + horizon },
   stroke: 0.5pt,
   cell-content(c),
@@ -136,14 +165,17 @@
 ))
 #v(doc.title_gap_pt * 1pt, weak: false)
 
-// 传字号：右对齐到表格右边界；没有编号时留手写横线。
+// 传字号：右对齐到表格右边界。传字取自设置（「传」这样的一个字），号码留白手写。
+// 注意：Typst 的代码块按行断句，表达式不能跨行续写，整条都要写在一行里。
 #block(width: table-w, inset: (left: table-offset), {
   set par(leading: 0pt)
-  align(right, if doc.serial != "" {
-    text(font: hei, size: doc.label_size_pt * 1pt, doc.serial)
+  let size = doc.label_size_pt * 1pt
+  let serial = if doc.serial_prefix != "" {
+    text(font: hei, size: size, "【" + doc.serial_prefix + "】") + blank(4) + text(font: hei, size: size, "号")
   } else {
-    blank(5) + text(font: hei, size: doc.label_size_pt * 1pt, "号")
-  })
+    blank(5) + text(font: hei, size: size, "号")
+  }
+  align(right, serial)
 })
 #v(1.5pt, weak: false)
 
@@ -159,10 +191,16 @@
 })
 
 // 末行：保密单位（红色小标宋）与收 / 发时间（仿宋，日期留白手填）。
+// 保密负责单位取自设置；没填就保留模板上的「【保密单位】」占位。
+#let security-unit-text = if doc.security_unit != "" {
+  "【" + doc.security_unit + "】"
+} else {
+  "【保密单位】"
+}
 #block(width: table-w, inset: (left: table-offset), {
   set par(leading: 0pt)
   v(2mm, weak: false)
-  text(font: xbs, size: note-size, fill: red, "【保密单位】")
+  text(font: xbs, size: note-size, fill: red, security-unit-text)
   h(1em)
   text(font: fs, size: note-size, "20　年　月　日　时　分收到、　月　日　时　分发出")
 })

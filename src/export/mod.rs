@@ -25,7 +25,8 @@ pub(crate) use docx::marked_runs;
 pub(crate) use research::write_docx as write_docx_research;
 
 use crate::models::{
-    DraftInput, ExportSelection, FontConfig, NumberingConfig, TemplateKind, split_units,
+    DraftInput, ExportSelection, FontConfig, NumberingConfig, TemplateKind, TransmitDefaults,
+    split_units,
 };
 use crate::typst_engine;
 use crate::units::UnitDisplay;
@@ -333,7 +334,15 @@ pub fn export_all_with_numbering(
     numbering: &NumberingConfig,
 ) -> Result<Vec<PathBuf>> {
     let artifacts = export_artifacts(
-        output_dir, input, markdown, selection, display, fonts, numbering, None,
+        output_dir,
+        input,
+        markdown,
+        selection,
+        display,
+        fonts,
+        numbering,
+        None,
+        &TransmitDefaults::default(),
     )?;
     if let Some(error) = artifacts.compile_error {
         anyhow::bail!("{error}");
@@ -438,6 +447,9 @@ fn export_file_stem(
 }
 
 /// 导出勾选的格式。PDF 由 Typst 在进程内直接排出（研究报告走 `typst::research`）。
+///
+/// `transmit_defaults` 是设置页「加密传输单」里的默认填写内容，只对公函的
+/// 《传发任务单》有效；别的文种不看它。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn export_artifacts(
     output_dir: &Path,
@@ -448,6 +460,7 @@ pub(crate) fn export_artifacts(
     fonts: &FontConfig,
     numbering: &NumberingConfig,
     version_name: Option<&str>,
+    transmit_defaults: &TransmitDefaults,
 ) -> Result<ExportArtifacts> {
     display
         .for_input(input)
@@ -585,6 +598,7 @@ pub(crate) fn export_artifacts(
             display,
             fonts,
             numbering,
+            transmit_defaults,
             &mut files,
             &mut typst,
             &mut compile_error,
@@ -642,6 +656,7 @@ fn write_transmission_sheets(
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    defaults: &TransmitDefaults,
     files: &mut Vec<PathBuf>,
     typst: &mut Option<typst_engine::TypstOutcome>,
     compile_error: &mut Option<String>,
@@ -666,7 +681,7 @@ fn write_transmission_sheets(
     for receiver in &receivers {
         let path = dir.join(transmit_file_name(&receiver.unit));
         match typst::transmit::write_pdf(
-            &path, input, markdown, display, fonts, receiver, pages, hint,
+            &path, input, markdown, display, fonts, receiver, pages, hint, defaults,
         ) {
             Ok((outcome, index)) => {
                 hint = index;
@@ -2217,6 +2232,7 @@ mod tests {
                 &FontConfig::default(),
                 &NumberingConfig::default(),
                 Some("送审稿"),
+                &TransmitDefaults::default(),
             )
             .unwrap()
             .files
@@ -2445,6 +2461,7 @@ mod tests {
             &FontConfig::default(),
             &NumberingConfig::default(),
             Some("送审稿"),
+            &TransmitDefaults::default(),
         )
         .unwrap();
         let names = artifacts
@@ -2485,6 +2502,7 @@ mod tests {
             &FontConfig::default(),
             &NumberingConfig::default(),
             Some("送审稿"),
+            &TransmitDefaults::default(),
         )
         .unwrap();
         assert_eq!(artifacts.files.len(), 3);
@@ -2545,6 +2563,7 @@ mod tests {
             &FontConfig::default(),
             &NumberingConfig::default(),
             Some(&"版本".repeat(40)),
+            &TransmitDefaults::default(),
         );
         assert!(result.is_err());
         assert!(!output.exists());
@@ -2936,6 +2955,7 @@ mod tests {
             &FontConfig::default(),
             &NumberingConfig::default(),
             None,
+            &TransmitDefaults::default(),
         )
         .unwrap();
         assert_eq!(artifacts.sheets.receipt, 1);

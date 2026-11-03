@@ -54,6 +54,8 @@ pub(crate) enum SettingsSection {
     Numbering,
     /// 导出格式。
     Export,
+    /// 加密传输单（《传发任务单》）的默认填写内容。
+    Transmit,
     /// 保存与现场。
     Persistence,
     /// 数据备份与恢复。
@@ -79,7 +81,11 @@ const MENU_GROUPS: [(&str, &[SettingsSection]); 4] = [
     ),
     (
         "公文排版",
-        &[SettingsSection::Numbering, SettingsSection::Security],
+        &[
+            SettingsSection::Numbering,
+            SettingsSection::Security,
+            SettingsSection::Transmit,
+        ],
     ),
     (
         "文件与现场",
@@ -106,6 +112,7 @@ impl SettingsSection {
             SettingsSection::Font => "字体",
             SettingsSection::Numbering => "标题与列表编号",
             SettingsSection::Export => "导出格式",
+            SettingsSection::Transmit => "加密传输单",
             SettingsSection::Persistence => "保存与现场",
             SettingsSection::Backup => "数据备份",
             SettingsSection::Security => "密级规则",
@@ -123,6 +130,7 @@ impl SettingsSection {
             SettingsSection::Font => theme::Icon::Type,
             SettingsSection::Numbering => theme::Icon::ListOrdered,
             SettingsSection::Export => theme::Icon::FileDown,
+            SettingsSection::Transmit => theme::Icon::Package,
             SettingsSection::Persistence => theme::Icon::Save,
             SettingsSection::Backup => theme::Icon::Archive,
             SettingsSection::Security => theme::Icon::Shield,
@@ -152,6 +160,10 @@ impl SettingsSection {
             }
             SettingsSection::Export => {
                 "这里的选择对所有稿件生效；起草页的「导出」按钮按这里勾选的格式产出。"
+            }
+            SettingsSection::Transmit => {
+                "公函导出时随《传发任务单》一同印出的固定内容：传字、签批人、时效要求、\
+                 发后处理、备注与保密负责单位。留空的仍在单子上留白手写。"
             }
             SettingsSection::Persistence => {
                 "新建的稿件在第一次真正改动时自动入库；下次启动会恢复本次打开的标签。"
@@ -1429,6 +1441,7 @@ impl GongwenApp {
                             SettingsSection::Font => self.font_settings_ui(ui),
                             SettingsSection::Numbering => self.numbering_settings_ui(ui),
                             SettingsSection::Export => self.export_section_ui(ui),
+                            SettingsSection::Transmit => self.transmit_section_ui(ui),
                             SettingsSection::Persistence => self.persistence_section_ui(ui),
                             SettingsSection::Backup => self.backup_section_ui(ui),
                             SettingsSection::Security => self.security_section_ui(ui),
@@ -1783,6 +1796,75 @@ impl GongwenApp {
         .on_hover_text("不勾选则只出稿，什么时候导出完全由你决定");
         ui.checkbox(&mut self.config.export.overwrite, "覆盖同名文件")
             .on_hover_text("不勾选时每次导出都会生成“标题-2、标题-3”这样的新文件");
+    }
+
+    /// 加密传输单（《传发任务单》）的默认填写内容。
+    ///
+    /// 这些内容程序不替人编造，但每次手填一遍太折腾：做成默认配置，导出时照填。
+    /// 留空的仍在单子上留白手写——位置要留着，人签字、填号。
+    fn transmit_section_ui(&mut self, ui: &mut egui::Ui) {
+        let defaults = &mut self.config.transmit_defaults;
+
+        sub_heading(ui, "单据抬头", None);
+        setting_field(ui, "传字", &mut defaults.serial_prefix, "如「传」");
+        setting_continuation(ui, |ui| {
+            ui.weak("印在右上角「【传】 号」里，号码留白手写。");
+        });
+
+        sub_heading(ui, "签批", None);
+        setting_row(ui, "签批人", None, |ui| {
+            crate::ime::exempt(ui.add_enabled(
+                !defaults.signatory_blank,
+                theme::field(&mut defaults.signatory, "如「张三」", 180.0),
+            ));
+        });
+        setting_continuation(ui, |ui| {
+            ui.checkbox(&mut defaults.signatory_blank, "留空手签（纸质手签）");
+        });
+        setting_continuation(ui, |ui| {
+            ui.weak("勾上时这一栏留白，由人在单子上签名；取消勾选才印上面填的姓名。");
+        });
+
+        sub_heading(ui, "涉密信息要素", None);
+        setting_field(ui, "时效要求", &mut defaults.urgency, "如「急」");
+        setting_continuation(ui, |ui| {
+            ui.weak("留空则这一栏留白手写。");
+        });
+        setting_row(ui, "发后处理", None, |ui| {
+            for disposal in crate::models::TransmitDisposal::ALL {
+                ui.radio_value(&mut defaults.disposal, disposal, disposal.label())
+                    .on_hover_text(match disposal {
+                        crate::models::TransmitDisposal::Destroy => "传输后销毁原件",
+                        crate::models::TransmitDisposal::Return => "传输后退回原件",
+                    });
+            }
+        });
+
+        sub_heading(ui, "备注与保密", None);
+        setting_row(ui, "备注", None, |ui| {
+            crate::ime::exempt(
+                ui.add(
+                    egui::TextEdit::multiline(&mut defaults.remark)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(4)
+                        .margin(egui::Margin::symmetric(8, 4))
+                        .hint_text("可粘多行，印在单子的备注栏；留空则那一栏留白手写"),
+                ),
+            );
+        });
+        setting_field(
+            ui,
+            "保密单位",
+            &mut defaults.security_unit,
+            "如「某某市保密局」",
+        );
+        setting_continuation(ui, |ui| {
+            ui.weak("保密负责单位，印在单子末行；留空则保留模板上的「【保密单位】」字样。");
+        });
+
+        setting_continuation(ui, |ui| {
+            ui.weak("这些内容对所有公函的传发任务单生效；单据本身在「导出格式」里勾选导出。");
+        });
     }
 
     /// 词表输入法设置：查询行为、候选窗与词表维护。
