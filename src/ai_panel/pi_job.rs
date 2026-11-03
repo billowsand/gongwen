@@ -1,8 +1,7 @@
 //! 侧栏里的「智能写作（Pi 试用）」入口。
 //!
-//! 它和普通技能发送是两条独立操作：用当前输入的要求、锁定选区、`@` 引用与粘贴
-//! 材料开一轮 Pi Durable 文件工作区写作，结果仍然只能交成提案或侧栏清单，由用户
-//! 接受。模型与生成参数只认「智能写作（Pi）」的独立配置，不回落起草模型。
+//! 当前输入的要求、锁定选区、`@` 引用与粘贴材料统一进入 Pi Durable 文件工作区写作，
+//! 明确提交的完整 Markdown 由界面线程写入并保留撤销；提炼清单只进侧栏。模型与生成参数只认「智能写作（Pi）」的独立配置，不回落起草模型。
 //!
 //! 界面线程只做纯内存校验、创建等待中的轮次与任务；运行时定位、`@` 引用读取、
 //! 工作区 / 材料快照、恢复快照与来源读取都在后台线程完成。准备好以后后台把稳定的
@@ -129,7 +128,7 @@ impl DraftPage<'_> {
             .pi_skills
             .as_ref()
             .expect("刚刷新过 Pi 技能目录");
-        let skill = catalog.resolve(selected.as_deref())?;
+        let skill = catalog.resolve_writing(selected.as_deref())?;
         let skill_label = skill.as_deref().map(|name| catalog.label_for(name));
         let composer = &self.doc.ai_panel.composer;
         let chat = self.config.pi_chat().map_err(|error| error.to_string())?;
@@ -1347,7 +1346,7 @@ fn matched_capability(
         Ok(identity) => identity,
         Err(error) => {
             return crate::pi_agent::PiCapabilitySnapshot {
-                reason: format!("{source_note}能力档案身份无效：{error}；本轮按保守预算运行"),
+                reason: format!("{source_note}能力档案身份无效：{error}；本轮按实际窗口预算运行"),
                 ..Default::default()
             };
         }
@@ -1356,7 +1355,9 @@ fn matched_capability(
         Ok(dir) => dir.join("pi").join("capability.json"),
         Err(error) => {
             return crate::pi_agent::PiCapabilitySnapshot {
-                reason: format!("{source_note}无法读取能力档案目录：{error:#}；本轮按保守预算运行"),
+                reason: format!(
+                    "{source_note}无法读取能力档案目录：{error:#}；本轮按实际窗口预算运行"
+                ),
                 ..Default::default()
             };
         }
@@ -1365,7 +1366,7 @@ fn matched_capability(
         Ok(entries) => entries,
         Err(error) => {
             return crate::pi_agent::PiCapabilitySnapshot {
-                reason: format!("{source_note}{error}；本轮按保守预算运行"),
+                reason: format!("{source_note}{error}；本轮按实际窗口预算运行"),
                 ..Default::default()
             };
         }
@@ -1378,7 +1379,7 @@ fn matched_capability(
         return crate::pi_agent::PiCapabilitySnapshot {
             identity_key: identity.key(),
             reason: format!(
-                "{source_note}模型服务、窗口、思考设置或技能版本没有匹配的校准证据；按保守预算运行"
+                "{source_note}模型服务、窗口、思考设置或技能版本没有匹配的校准证据；按实际窗口预算运行"
             ),
             ..Default::default()
         };
@@ -1388,7 +1389,7 @@ fn matched_capability(
         Err(_) => {
             return crate::pi_agent::PiCapabilitySnapshot {
                 identity_key: identity.key(),
-                reason: format!("{source_note}校准证据目录不可用；按保守预算运行"),
+                reason: format!("{source_note}校准证据目录不可用；按实际窗口预算运行"),
                 ..Default::default()
             };
         }
@@ -1396,7 +1397,7 @@ fn matched_capability(
     if !crate::pi_agent::capability::verify_evidence(&evidence_dir, &profile.evidence_digest) {
         return crate::pi_agent::PiCapabilitySnapshot {
             identity_key: identity.key(),
-            reason: format!("{source_note}校准证据缺失或校验失败；按保守预算运行"),
+            reason: format!("{source_note}校准证据缺失或校验失败；按实际窗口预算运行"),
             ..Default::default()
         };
     }

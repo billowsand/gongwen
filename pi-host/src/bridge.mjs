@@ -31,11 +31,15 @@ export const DOMAIN_TOOLS = [
     id: Type.Number({ description: "稿件编号" }),
     version: Type.Optional(Type.Number({ description: "历史版本号；省略读当前版本" })),
   })],
-  ["vocab_search", "查标准词库里的单位 / 人员写法", Type.Object({
-    query: Type.String({ description: "名称或编码的一部分" }),
+  ["current_date", "读取本机当前日期、星期、时区及本周下周范围", Type.Object({})],
+  ["vocab_search", "查标准单位名称、职能任务、人员职务简介及所属单位", Type.Object({
+    query: Type.Optional(Type.String({ description: "名称、编码、职能或人员简介关键词；留空按类别列出" })),
+    unit: Type.Optional(Type.String({ description: "按所属单位筛选人员或下属单位，优先用查询返回的单位 identity" })),
+    offset: Type.Optional(Type.Integer({ minimum: 0, description: "继续查询使用 next_offset" })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 40 })),
     category: Type.Optional(Type.String({ description: "unit / person，省略为不限" })),
   })],
-  ["check_document", "跑程序的确定性检查（事实来源、公文引用、要素、词表）", Type.Object({
+  ["check_document", "检查文稿格式、公文引用保护、要素和文字规则（不做事实核查）", Type.Object({
     path: Type.Optional(Type.String({ description: "优先使用：work/ 下待检查的 Markdown 文件路径；host 读取全文，不要重复生成全文参数" })),
     text: Type.Optional(Type.String({ description: "要检查的 Markdown；省略检查本轮正文" })),
   })],

@@ -248,10 +248,6 @@ impl PiReceipt {
             call_id: self.call_id.clone(),
         }
     }
-
-    pub(crate) fn is_document(&self) -> bool {
-        self.kind == "document"
-    }
 }
 
 impl PiRunRecord {
@@ -637,7 +633,7 @@ pub(crate) fn read_receipt(run_dir: &Path, run_id: &str) -> Result<Option<PiRece
         return Err("Pi 交付回执缺少本轮的输入标识，已拒绝。".into());
     }
     match receipt.kind.as_str() {
-        "document" => {
+        "document" | "style" => {
             if !super::delivery::safe_work_path(&receipt.path) {
                 return Err("Pi 交付回执里的成品路径不合法，已拒绝。".into());
             }
@@ -664,10 +660,15 @@ pub(crate) fn read_receipt(run_dir: &Path, run_id: &str) -> Result<Option<PiRece
 
 /// 回执指向的成品快照。只读 `pi/final.md`，不读模型可写的 `work/`。
 pub(crate) fn read_snapshot(run_dir: &Path, receipt: &PiReceipt) -> Result<String, String> {
-    if !receipt.is_document() {
-        return Err("这份回执不是正文交付。".into());
+    if !matches!(receipt.kind.as_str(), "document" | "style") {
+        return Err("这份回执不是文件交付。".into());
     }
-    let bytes = read_bounded(&run_dir.join("final.md"), MAX_SNAPSHOT_BYTES)?;
+    let file = if receipt.kind == "style" {
+        "final.json"
+    } else {
+        "final.md"
+    };
+    let bytes = read_bounded(&run_dir.join(file), MAX_SNAPSHOT_BYTES)?;
     let text =
         String::from_utf8(bytes).map_err(|_| "Pi 成品快照不是合法 UTF-8，已拒绝。".to_string())?;
     if text.trim().is_empty() || text.contains('\0') {

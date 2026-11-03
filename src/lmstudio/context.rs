@@ -128,58 +128,48 @@ pub fn peek_window(config: &LmStudioConfig) -> Window {
         .unwrap_or_else(|e| e.into_inner())
         .get(&key)
         .copied();
-    if let Some(tokens) =
-        observed.filter(|t| config.context_window == 0 || *t < config.context_window as usize)
-    {
-        return Window {
+    let native = NATIVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .copied()
+        .flatten();
+    let service = SERVICE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .copied()
+        .flatten();
+    let mut resolved = native
+        .map(|tokens| Window {
             tokens,
-            source: WindowSource::Observed,
-        };
-    }
-    if config.context_window > 0 {
-        let manual = config.context_window as usize;
-        // 服务端报告的实际部署窗口比手动设置小时，以服务端为准：设大了请求只会
-        // 一次次被拒。手动值只在它更小（用户明确保守）时优先。
-        let service = SERVICE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .copied()
-            .flatten();
-        let native = NATIVE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .copied()
-            .flatten();
-        if let Some(tokens) = service.filter(|tokens| *tokens < manual) {
-            return Window {
+            source: WindowSource::NativeLoaded,
+        })
+        .or_else(|| {
+            service.map(|tokens| Window {
                 tokens,
                 source: WindowSource::Service,
-            };
+            })
+        });
+    if config.context_window > 0 {
+        let manual = config.context_window as usize;
+        if resolved.is_none_or(|window| manual <= window.tokens) {
+            resolved = Some(Window {
+                tokens: manual,
+                source: WindowSource::Manual,
+            });
         }
-        if let Some(tokens) = native.filter(|tokens| *tokens < manual) {
-            return Window {
-                tokens,
-                source: WindowSource::NativeLoaded,
-            };
-        }
-        return Window {
-            tokens: manual,
-            source: WindowSource::Manual,
-        };
     }
-    if let Some(Some(tokens)) = SERVICE.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-        return Window {
-            tokens: *tokens,
-            source: WindowSource::Service,
-        };
+    if let Some(tokens) = observed
+        && resolved.is_none_or(|window| tokens < window.tokens)
+    {
+        resolved = Some(Window {
+            tokens,
+            source: WindowSource::Observed,
+        });
     }
-    if let Some(Some(tokens)) = NATIVE.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-        return Window {
-            tokens: *tokens,
-            source: WindowSource::NativeLoaded,
-        };
+    if let Some(window) = resolved {
+        return window;
     }
     from_model_name(&config.model).unwrap_or(Window {
         tokens: DEFAULT_WINDOW,
@@ -288,6 +278,19 @@ mod native_window_tests {
         assert_eq!(window.tokens, 65_536);
         assert_eq!(window.source, WindowSource::NativeLoaded);
         assert!(window.label().contains("LM Studio 已加载窗口"));
+    }
+
+    #[test]
+    fn actual_loaded_capacity_wins_over_service_maximum() {
+        let mut config = config("http://127.0.0.1:12499/v1", "loaded-versus-max", 0);
+        record_service(&config.base_url, &[(config.model.clone(), Some(1_048_576))]);
+        record_native(&config.base_url, &config.model, Some(262_144));
+        assert_eq!(peek_window(&config).tokens, 262_144);
+        assert_eq!(peek_window(&config).source, WindowSource::NativeLoaded);
+        config.context_window = 524_288;
+        assert_eq!(peek_window(&config).tokens, 262_144);
+        config.context_window = 131_072;
+        assert_eq!(peek_window(&config).tokens, 131_072);
     }
 
     #[test]

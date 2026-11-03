@@ -59,7 +59,7 @@ pub(super) fn welcome(ui: &mut egui::Ui, has_text: bool, can_fill: bool) -> Opti
                         .color(theme::text()),
                 );
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("从起草、修改或审核开始").color(theme::text_soft()));
+                ui.label(egui::RichText::new("从起草、修改或提炼开始").color(theme::text_soft()));
             });
             ui.add_space(26.0);
             for (icon, label, prompt, needs_text) in [
@@ -72,8 +72,8 @@ pub(super) fn welcome(ui: &mut egui::Ui, has_text: bool, can_fill: bool) -> Opti
                 ),
                 (
                     theme::Icon::Search,
-                    "检查文字与依据",
-                    "签发前帮我审一下，检查文字表述和引用依据。",
+                    "按职能安排分工",
+                    "结合标准词库里的单位职能，为当前文稿安排牵头和配合分工。",
                     true,
                 ),
             ] {

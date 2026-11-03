@@ -5,8 +5,6 @@
 //! 1 token，再加 10% 余量；不引入分词器、不联网。策略依据任务规模与窗口，不按模型
 //! 名称、参数量或某个固定窗口阈值猜能力。
 
-/** 未验证模型工作预算时的保守默认：窗口再大也只按它规划一次任务。 */
-export const UNVERIFIED_WORK_BUDGET = 96 * 1024;
 /** 固定指令、技能索引与三条红线的预留。 */
 export const INSTRUCTION_RESERVE = 5_000;
 /** 安全余量。 */
@@ -41,7 +39,7 @@ export function taskEstimate(config) {
     const bytes = Number.isInteger(material?.bytes) && material.bytes > 0 ? material.bytes : 0;
     return sum + Math.ceil(bytes / 2);
   }, 0);
-  const requestTokens = estimateTokens(task.request ?? "");
+  const requestTokens = estimateTokens(task.request ?? "") + estimateTokens(JSON.stringify(task.writingContext ?? {}));
   const currentBytes = Number.isInteger(config.currentBytes) ? config.currentBytes : 0;
   const currentTokens = Math.ceil(currentBytes / 2);
   const selectionTokens = estimateTokens(task.selection?.text ?? "");
@@ -67,7 +65,7 @@ export function taskEstimate(config) {
 /** 报告型任务：只交侧栏清单，不生成正文。 */
 export function isReportTask(task) {
   const skill = typeof task?.skill === "string" ? task.skill : "";
-  return ["gongwen-review", "gongwen-extract", "gongwen-policy-check"].includes(skill);
+  return skill === "gongwen-extract" || skill === "gongwen-style-learn";
 }
 
 /**
@@ -82,7 +80,7 @@ export function decideStrategy(config, estimate = taskEstimate(config)) {
     Number.isInteger(capability.verifiedWorkBudget) && capability.verifiedWorkBudget > 0
       ? Math.min(capability.verifiedWorkBudget, window)
       : undefined;
-  const workBudget = verified ?? Math.min(window, UNVERIFIED_WORK_BUDGET);
+  const workBudget = verified ?? window;
   const maxTokens = Math.max(1, Number(config.model?.maxTokens) || 1);
   const outputReserve = Math.min(
     maxTokens,
@@ -132,16 +130,13 @@ export function decideStrategy(config, estimate = taskEstimate(config)) {
     };
   }
 
-  const largeMaterials = estimate.materialTokens > materialsBudget * 0.55;
-  const largeTask = estimate.inputTokens > materialsBudget * 0.75;
-  const manyMaterials = estimate.materialCount >= 3;
+  const largeMaterials = estimate.materialTokens > materialsBudget * 0.9;
+  const largeTask = estimate.inputTokens > materialsBudget * 0.9;
   const complex = estimate.materialCount > 0 || estimate.inputTokens > 6_000 || estimate.report;
-  const shortCapability = capability.needsShortSteps === true;
-  const smallWindow = workBudget < 65_536;
 
   let phased = false;
   if (verified) reasons.push("工作预算来自已验证记录");
-  else reasons.push("工作预算按未验证的保守默认值规划");
+  else reasons.push("按实际窗口规划，优先完整阅读材料（不代表长上下文质量已验证）");
 
   if (preference === "phased" && complex) {
     phased = true;
@@ -155,21 +150,11 @@ export function decideStrategy(config, estimate = taskEstimate(config)) {
     phased = true;
     reasons.push("正文、要求与材料的估算接近本次可用预算");
   }
-  if (shortCapability && complex) {
-    phased = true;
-    reasons.push("当前模型记录显示更适合短步骤");
-  }
-  if (smallWindow && manyMaterials) {
-    phased = true;
-    reasons.push(
-      `本次可用预算约 ${Math.floor(materialsBudget / 1024)}k，${estimate.materialCount} 份材料一次写完风险高`,
-    );
-  }
 
   if (!phased) {
     reasons.push("任务规模在当前预算内，按常规一轮完成");
   } else if (estimate.report) {
-    reasons.push("审核 / 提炼任务只做材料提炼与清单交付，不套长稿阶段");
+    reasons.push("提炼任务只做材料提炼与清单交付，不套长稿阶段");
   } else if (estimate.selection) {
     reasons.push("局部修改不走长稿阶段");
   }
@@ -203,10 +188,10 @@ export function budgetLabel(decision) {
 
 /** 单次工具结果能放多少字，由预算决定，不写死在读取工具里。 */
 export function readBudgetChars(decision) {
-  return clamp(Math.floor(Math.min(decision.toolReserve, decision.materialsBudget) * 0.8), 512, 24_000);
+  return clamp(Math.floor(decision.materialsBudget * 0.65), 512, 240_000);
 }
 
 /** 材料分块的字数上界。 */
 export function chunkChars(decision) {
-  return clamp(Math.floor(decision.materialsBudget / 8), 3_000, 12_000);
+  return clamp(Math.floor(decision.materialsBudget * 0.55), 3_000, 160_000);
 }

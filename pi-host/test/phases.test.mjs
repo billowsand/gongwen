@@ -236,12 +236,12 @@ test("带行号读取仍按工具结果预算分页", async () => {
 });
 
 test("相同窗口按任务规模路由：长材料分阶段，小任务常规", () => {
-  const space = workspace({ materials: [MATERIAL.repeat(1000)] });
+  const space = workspace({ materials: [MATERIAL.repeat(10000)] });
   const config = init(space, { contextWindow: 262144 });
   const estimate = taskEstimate({ ...config, currentBytes: 40 });
   const phased = decideStrategy({ ...config, currentBytes: 40 }, estimate);
   assert.equal(phased.mode, "phased", "材料超过可用预算时按分阶段");
-  assert.notEqual(phased.window, phased.workBudget, "实际窗口与工作预算必须是两个字段");
+  assert.equal(phased.window, phased.workBudget, "未知模型也使用实际窗口规划");
   const smallSpace = workspace({ materials: [] });
   const smallConfig = init(smallSpace, { contextWindow: 32768, request: "把「截止」改成「截至」。" });
   const smallEstimate = taskEstimate({ ...smallConfig, currentBytes: 30 });
@@ -275,6 +275,8 @@ test("已登记的阶段成果在恢复时跳过，不重复验证过的单元",
     requestId: config.requestId,
     identity,
   });
+  registry.plan = plan;
+  registry.planningBudget = decision.materialsBudget;
   fs.mkdirSync(path.join(space.root, "work/notes"), { recursive: true });
   fs.writeFileSync(path.join(space.root, "work/notes/01.md"), "检查时间：10月8日。");
   const spec = plan.phases.find((phase) => phase.id === "distill").units[0];

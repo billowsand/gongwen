@@ -12,8 +12,8 @@ import fs from "node:fs";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 
-export const MAX_READ_LINES = 800;
-const DEFAULT_LINES = 240;
+export const MAX_READ_LINES = 8_000;
+const DEFAULT_LINES = 8_000;
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -34,7 +34,7 @@ export function createBoundedReadTool({ guard, maxFileBytes = 8 * 1024 * 1024, m
     parameters: Type.Object({
       path: Type.String({ description: "工作区内的相对路径" }),
       offset: Type.Optional(Type.Number({ description: "起始行号（1 开始）" })),
-      limit: Type.Optional(Type.Number({ description: "最多读多少行，默认 240，最多 800" })),
+      limit: Type.Optional(Type.Number({ description: "最多读多少行，默认 8000，最多 8000" })),
       numbered: Type.Optional(Type.Boolean({ description: "为每行显示原文件行号，适合用fromLine/toLine登记原文依据；行号前缀不属于原文" })),
       start: Type.Optional(Type.Integer({ minimum: 0, description: "字符范围起点（0 开始），长单行或材料分块时使用，优先于行号" })),
       end: Type.Optional(Type.Integer({ minimum: 0, description: "字符范围终点（不含），配合 start；超预算时按返回的 next_start 继续" })),

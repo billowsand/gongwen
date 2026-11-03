@@ -48,9 +48,12 @@ import {
   missingUses,
   phasePrompt,
   planSummary,
+  recoverPlan,
 } from "./phases.mjs";
 import { ProgressError, ProgressRegistry, identityOf } from "./progress.mjs";
 import { createBoundedReadTool } from "./read.mjs";
+
+import { isStyleTask, createSubmitStyleTool } from "./style.mjs";
 
 const PROVIDER_ID = "gongwen";
 const CANDIDATE_INTERVAL_MS = 400;
@@ -481,6 +484,13 @@ function createExtension({
   readChars,
   onFatal,
 }) {
+  if (isStyleTask(phase.task)) {
+    return defineExtension({name:"gongwen-writing",tools:[
+      createBoundedReadTool({guard,maxFileBytes:limits.maxFileBytes,maxChars:readChars}),
+      createWriteTool(),createEditTool(),createRecordTool({guard,limits,phase,registry,emit,onFatal}),
+      createSubmitStyleTool({guard,limits,state,onSubmitted,deliveryDir,runId,requestId,phase,validateCoverage:validatePhaseDelivery}),
+    ]});
+  }
   const tools = [
     ...createDomainTools(bridge, {
       readChars,
@@ -537,6 +547,9 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
   if (config.recovery?.resume) {
     const receipt = readReceipt(deliveryDir, config.runId);
     if (receipt) {
+      if ((receipt.kind === "style") !== isStyleTask(config.task)) {
+        throw new AgentError("交付回执的产物类型与本轮任务不一致，已拒绝恢复。", "receipt_kind_mismatch");
+      }
       if (receipt.requestId !== config.requestId) {
         throw new AgentError("交付回执的输入标识与本轮不一致，已拒绝恢复。", "receipt_request_mismatch");
       }
@@ -592,6 +605,9 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       requestId: config.requestId,
       identity,
     });
+    const previousMode = decision.mode;
+    ({ plan, decision } = recoverPlan(plan, decision, registry));
+    if (decision.mode !== previousMode) emit({ type: "strategy", ...decision });
     registry.refresh({ guard, workspace: config.workspace, task: config.task });
   } catch (error) {
     throw toAgentError(error);
@@ -787,7 +803,9 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       root.submit(
         {
           type: "input",
-          content: attempt === 0 && firstContent
+          content: attempt > 0 && isStyleTask(config.task)
+            ? "继续读取work/中的文件，完成风格JSON文件并用submit_style提交。不得使用submit_document或finish_report，不要只在聊天中说完成。"
+            : attempt === 0 && firstContent
             ? firstContent
             : attempt === 0 ? userPrompt(config.task) :
             "上一段已经结束或达到输出长度上限，但本轮还没有交付回执。请继续完成剩余工作，不要重写已有成稿。先读取 work/ 中实际文件；检查稿件时用 check_document({path:\"work/文件名.md\"})，不要把全文再放进工具参数。生成/修改任务必须调用 submit_document({path,summary}) 提交你确认的完整成品；仅审核/找资料用 finish_report。不要只用聊天文字说已完成。",
@@ -963,6 +981,9 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       if (!convertible) throw agentError;
       const phased = { ...decision, mode: "phased", reasons: [...decision.reasons, "常规一轮没有交出成品，转为分阶段继续"] };
       plan = buildPlan({ config, decision: phased, guard });
+      registry.plan = plan;
+      registry.planningBudget = phased.materialsBudget;
+      registry.persist();
       if (plan.phases.length === 0) throw agentError;
       decision = phased;
       phase.phased = true;

@@ -1,17 +1,7 @@
-//! 风格管理（`docs/ai-agent-workbench.md` 16.15 C）：从指定的几篇稿子学出一份「风格档案」，
-//! 起草、改写时按这次的内容挑一份带进提示词。
-//!
-//! - **档案**：写法描述（模型学、用户可改）、统计特征（程序算）、范例片段、适用文种与场合、学自哪些稿件；
-//! - **学**：程序先算统计特征、挑候选范例；样稿放不进上下文时分批先出小结；模型写写法描述并从候选里
-//!   定范例。只学写法、不学事实：样稿里的单位、人名、日期、数字出现在描述里的，标出来让用户删；
-//! - **用**：按文种与场合关键词给档案打分，只有一份最高就用它，几份分不出交辅助模型挑，都对不上不用；
-//!   用户也可以在输入框底栏指定或关掉。范例标明只学写法、不得照搬，也不进证据包——照抄进稿子的事实
-//!   照样会被来源不明检查查出来；
-//! - **存**：配置目录 `styles.json`，只存本机；可导出导入（`.json`）。
-//!
-//! 风格档案是学出来的一整套写法，由 Pi 技能按需只读调用。
-//!
-//! 从旧 `agent::style` 原样搬来：档案格式、提示词、打分与截断顺序不变；旧模块单向 re-export。
+//! 风格档案格式、持久化、统计、范例和旧流程兼容能力。
+//! 设置页新学习任务统一由 `pi_agent::style_learning` 调用 Pi 的风格学习Skill，
+//! 生成文件后由用户编辑保存；本模块的旧模型学习函数仅供历史流程兼容。
+//! Pi起草按需只读风格描述与范例，不把样稿事项作为本轮写作材料。
 
 use super::backend::{ASSIST_SYSTEM, ModelBackend, ModelRole};
 use super::references::RefSource;
@@ -50,6 +40,8 @@ pub(crate) struct StyleProfile {
     pub(crate) sources: Vec<StyleSource>,
     /// RFC3339。
     pub(crate) learned_at: String,
+    /// Pi 学习工作区，保留上传样稿快照及生成的风格文件，供重新学习。
+    pub(crate) learning_workspace: String,
     pub(crate) uses: u32,
     pub(crate) enabled: bool,
     /// 这些文种分不出时默认用它。
@@ -69,6 +61,7 @@ impl Default for StyleProfile {
             examples: Vec::new(),
             sources: Vec::new(),
             learned_at: String::new(),
+            learning_workspace: String::new(),
             uses: 0,
             enabled: true,
             default_for: Vec::new(),

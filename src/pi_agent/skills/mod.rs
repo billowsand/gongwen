@@ -40,6 +40,8 @@ macro_rules! skill_file {
 /// 不依赖安装目录里恰好带着 `assets/pi-skills/`。新增文件必须登记在这里，
 /// `every_builtin_file_on_disk_is_embedded` 会核对两边一致。
 pub(crate) const FILES: &[(&str, &str, &str)] = &[
+    skill_file!("gongwen-style-learn", "SKILL.md"),
+    skill_file!("gongwen-style-learn", "references/style-profile.md"),
     skill_file!("gongwen-draft", "SKILL.md"),
     skill_file!("gongwen-draft", "references/material-drafting.md"),
     skill_file!("gongwen-draft", "references/phased-writing.md"),
@@ -66,20 +68,25 @@ pub(crate) const FILES: &[(&str, &str, &str)] = &[
 ];
 
 /// 内置技能目录名，同时是 frontmatter 的 name。顺序就是管理页里的固定顺序。
+pub(crate) const STYLE_SKILL: &str = "gongwen-style-learn";
+
 pub(crate) const BUILTINS: &[&str] = &[
     "gongwen-draft",
     "gongwen-revise",
-    "gongwen-review",
     "gongwen-imitate",
     "gongwen-research",
     "gongwen-reply",
     "gongwen-extract",
-    "gongwen-policy-check",
+    STYLE_SKILL,
 ];
+
+/// 已退出新任务的审校技能。历史文件和用户副本保留，不再列入可执行目录。
+pub(crate) const RETIRED: &[&str] = &["gongwen-review", "gongwen-policy-check"];
 
 /// 内置技能的中文显示名。用户副本没有写 metadata 显示名时沿用。
 pub(crate) fn builtin_label(name: &str) -> Option<&'static str> {
     match name {
+        "gongwen-style-learn" => Some("风格学习"),
         "gongwen-draft" => Some("起草"),
         "gongwen-revise" => Some("修改"),
         "gongwen-review" => Some("审核"),
@@ -144,8 +151,8 @@ mod tests {
     }
 
     #[test]
-    fn eight_builtin_skills_are_valid_standard_skills() {
-        assert_eq!(BUILTINS.len(), 8);
+    fn active_builtin_skills_are_valid_standard_skills() {
+        assert_eq!(BUILTINS.len(), 7);
         for name in BUILTINS {
             let text = builtin_text(name).unwrap_or_else(|| panic!("{name} 缺 SKILL.md"));
             let parsed = parser::parse(name, text).unwrap_or_else(|error| panic!("{error}"));
@@ -153,7 +160,11 @@ mod tests {
             assert!(!parsed.description.is_empty());
             assert!(!text.contains("```flow"));
             assert!(!text.contains("{{"));
-            assert!(text.contains("submit_document") || text.contains("finish_report"));
+            assert!(
+                text.contains("submit_document")
+                    || text.contains("finish_report")
+                    || text.contains("submit_style")
+            );
             assert!(builtin_label(name).is_some());
         }
     }

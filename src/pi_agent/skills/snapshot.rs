@@ -74,7 +74,17 @@ impl SkillSnapshot {
         load_package: impl Fn(&str) -> Result<Package, String>,
     ) -> Result<Self, String> {
         let selected = catalog.resolve(selected)?;
-        let enabled = catalog.enabled();
+        let enabled: Vec<_> = catalog
+            .enabled()
+            .into_iter()
+            .filter(|entry| {
+                if selected.as_deref() == Some(super::STYLE_SKILL) {
+                    entry.name == super::STYLE_SKILL
+                } else {
+                    entry.name != super::STYLE_SKILL
+                }
+            })
+            .collect();
         if enabled.is_empty() {
             return Err(
                 "现在没有启用的 Pi 技能，Pi 不会启动。请到「AI 管理 → 技能」里启用至少一个。"
@@ -330,7 +340,7 @@ mod tests {
         store::create("custom-skill", Some("自定义技能")).unwrap();
         store::save_text("custom-skill", "references/依据.md", "辅助文件").unwrap();
         store::save_text("custom-skill", "scripts/run.sh", "echo 不执行").unwrap();
-        store::set_enabled("gongwen-review", false).unwrap();
+        store::set_enabled("gongwen-imitate", false).unwrap();
         let snapshot = SkillSnapshot::build(
             &crate::pi_agent::pi_skills::load_catalog(),
             Some("custom-skill"),
@@ -341,7 +351,7 @@ mod tests {
             snapshot
                 .entries()
                 .iter()
-                .all(|entry| entry.name != "gongwen-review"),
+                .all(|entry| entry.name != "gongwen-imitate"),
             "停用的技能不进快照"
         );
         let custom = snapshot
@@ -376,7 +386,7 @@ mod tests {
         assert_eq!(index[0].name, snapshot.entries()[0].name);
         let request = snapshot.request_block();
         assert!(request.contains("custom-skill"), "{request}");
-        assert!(!request.contains("gongwen-review"), "{request}");
+        assert!(!request.contains("gongwen-imitate"), "{request}");
     }
 
     #[test]

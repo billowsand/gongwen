@@ -212,7 +212,7 @@ impl DraftPage<'_> {
                             .margin(egui::Margin::ZERO)
                             .desired_rows(3)
                             .desired_width(f32::INFINITY)
-                            .hint_text("告诉 Pi 要起草、修改或审核什么…")
+                            .hint_text("告诉 Pi 要起草、修改或提炼什么…")
                             // 弹出层开着时 Tab 是「确认」，不能让 egui 拿去切焦点。
                             .lock_focus(popup_open.is_some())
                             .show(ui)
@@ -415,12 +415,12 @@ impl DraftPage<'_> {
                                 if ui.add(theme::menu_selectable_item(composer.pi_skill.is_none(), "自动")).clicked() {
                                     composer.pi_skill = None;
                                 }
-                                for entry in catalog.enabled() {
+                                for entry in catalog.writing_enabled() {
                                     if ui.add(theme::menu_selectable_item(composer.pi_skill.as_deref() == Some(entry.name.as_str()), &entry.label)).on_hover_text(&entry.description).clicked() {
                                         composer.pi_skill = Some(entry.name.clone());
                                     }
                                 }
-                                let enabled = catalog.enabled();
+                                let enabled = catalog.writing_enabled();
                                 if enabled.is_empty() {
                                     ui.weak("没有启用的 Pi 技能，先到「AI 管理 → 技能」里启用。");
                                 }
@@ -1139,7 +1139,7 @@ fn popup_row(ui: &mut egui::Ui, row: &Row, highlighted: bool) -> egui::Response 
 
 /// 只列出 Pi 标准技能，不读取旧流程技能目录。
 fn pi_skill_rows(query: &str, catalog: &crate::pi_agent::pi_skills::Catalog) -> Vec<Row> {
-    let skills = catalog.enabled();
+    let skills = catalog.writing_enabled();
     mention::rank(query, &skills, |entry| {
         (entry.label.as_str(), entry.name.as_str())
     })

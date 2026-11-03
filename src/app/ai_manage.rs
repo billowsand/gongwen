@@ -82,7 +82,7 @@ impl AiSection {
                 "管理连接地址与密钥。「模型服务」里的每个功能都从这里挑一个提供商的模型。"
             }
             AiSection::ModelService => {
-                "「智能写作（Pi）」是侧栏统一写作入口的模型；「辅助模型」服务复核、知识库问答、风格学习、\
+                "「智能写作（Pi）」是侧栏统一写作入口的模型；「辅助模型」服务复核、知识库问答、任务识别、\
                  数据接口等非 Pi 调用。地址与密钥到「模型服务商管理」里统一维护。"
             }
             AiSection::Skills => {
@@ -95,7 +95,7 @@ impl AiSection {
                  这里先提供配置与测试。"
             }
             AiSection::Styles => {
-                "从指定的几篇稿子学出一份写法风格（基调、开头、结构、常用表达、结尾），Pi 起草、改写时\
+                "由 Pi 的风格学习技能从库内或上传样稿生成风格文件，查看、编辑并保存后，Pi 起草、改写时\
                  按文种与场合用 style_list / style_read 只读取用。只学写法不学事实；档案只存本机，可导出给同事。"
             }
         }
@@ -500,7 +500,7 @@ impl GongwenApp {
         });
         ui.label(
             egui::RichText::new(
-                "侧栏智能写作使用的模型，与下方的辅助模型分开选。不选就不启动 Pi，\
+                "智能写作和设置页风格学习使用的 Pi 模型，与下方的辅助模型分开选。不选就不启动 Pi，\
                  不会偷偷回落到辅助模型。地址与密钥仍在「模型服务商管理」里维护；\
                  上下文与输出预算自动管理，不沿用辅助模型的窗口和最大输出 Token；\
                  思考深度在下面单独设置，与辅助模型互不影响。\
@@ -566,7 +566,7 @@ impl GongwenApp {
         });
         ui.label(
             egui::RichText::new(
-                "这里的模型用于复核、要素抽取、风格学习、数据接口与知识库问答等辅助调用；\
+                "这里的模型用于复核、要素抽取、数据接口与知识库问答等辅助调用；\
                  侧栏的新任务一律走下方「智能写作（Pi）」，不用这里的模型。只做写作、\
                  不用这些功能时可以不配。",
             )
@@ -697,7 +697,7 @@ impl GongwenApp {
         ui.label(
             egui::RichText::new(
                 "逐句检查语病与错别字，结果进「修订建议」，逐条确认后才改正文。这是独立的小模型查错，\
-                 Pi 写作不使用它，与 Pi 的整篇审校是两回事。与辅助模型分开配：起草要发挥，复核只要稳——\
+                 Pi 写作和风格学习不使用它。与辅助模型分开配：起草要发挥，复核只要稳——\
                  Qwen3 4B/8B 一类的小模型温度 0 反而更好使，也快得多；未配置时沿用辅助模型及其上下文窗口。\
                  复核请求会自动带上关闭思考的开关，服务端不认时会自动去掉重试。",
             )
@@ -954,7 +954,7 @@ impl GongwenApp {
     fn latest_pi_calibration_summary(&self) -> String {
         let Ok(path) = crate::storage::config_dir().map(|dir| dir.join("pi/capability.json"))
         else {
-            return "尚未校准。普通 Pi 写作按保守预算运行。".into();
+            return "尚未校准。普通 Pi 写作按实际窗口预算运行。".into();
         };
         match crate::pi_agent::capability::load(&path) {
             Ok(entries) => entries
@@ -978,8 +978,8 @@ impl GongwenApp {
                         entry.conclusion.recommendation
                     )
                 })
-                .unwrap_or_else(|| "尚未校准。普通 Pi 写作按保守预算运行。".into()),
-            Err(error) => format!("校准档案不可用：{error}。普通 Pi 写作按保守预算运行。"),
+                .unwrap_or_else(|| "尚未校准。普通 Pi 写作按实际窗口预算运行。".into()),
+            Err(error) => format!("校准档案不可用：{error}。普通 Pi 写作按实际窗口预算运行。"),
         }
     }
 
@@ -1110,7 +1110,9 @@ impl GongwenApp {
                         profile.conclusion.recommendation,
                         &profile.evidence_digest[..12]
                     ),
-                    Err(error) => format!("校准结果未保存：{error}。普通 Pi 写作按保守预算运行。"),
+                    Err(error) => {
+                        format!("校准结果未保存：{error}。普通 Pi 写作按实际窗口预算运行。")
+                    }
                 };
             }
             Ok(_) => {
@@ -1119,7 +1121,7 @@ impl GongwenApp {
             }
             Err(error) => {
                 self.pi_calibration_note =
-                    format!("校准未完成：{error}。普通 Pi 写作按保守预算运行。")
+                    format!("校准未完成：{error}。普通 Pi 写作按实际窗口预算运行。")
             }
         }
     }

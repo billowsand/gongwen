@@ -2,7 +2,7 @@
 //!
 //! 产品契约（2026-11-02 用户确认，`docs/pi-implementation/pi-direct-write-task.md`）：Pi 明确
 //! 提交的有效 Markdown 由界面线程**直接写进当前可编辑正文**，普通流程不再弹人工校订窗、
-//! 不勾事实、不接受提案。事实来源、数字日期这类疑点照旧检查并展示，但只作提示；
+//! 不勾事实、不接受提案。新任务不执行事实核查、不生成事实提示；
 //! 路径 / 哈希 / 体积 / 选区 / 只读 / 基线这些技术性与权限保护照旧拦下。
 //! 报告型产物仍然只进侧栏。
 
@@ -51,6 +51,15 @@ impl GongwenApp {
             }
         };
         match outcome {
+            PiOutcome::Style(delivery) => {
+                doc.ai_review_baseline = None;
+                let reason = format!(
+                    "收到独立风格文件 {}，正文未改变。请从「AI 管理 → 风格」学习和保存风格。",
+                    delivery.path
+                );
+                doc.ai_panel.finish(TurnState::Failed(reason.clone()));
+                self.status = reason;
+            }
             PiOutcome::Report(report) => {
                 let notes = report.confirmed;
                 if let Some(turn) = doc.ai_panel.running_turn_mut() {
@@ -110,7 +119,7 @@ impl GongwenApp {
                     self.status = format!("{prefix}Pi 智能写作交付检查未通过：{error}");
                     return;
                 }
-                // 交付检查分两类：技术 / 权限保护挡住写入，事实来源这类疑点只作提示。
+                // 新交付只检查技术与权限保护，历史回执结构继续兼容。
                 let mut report = delivery_check(&self.config, &delivery, &delivery.content);
                 if let Some(reason) = report.blocking_reason() {
                     doc.ai_review_baseline = None;
@@ -284,6 +293,38 @@ mod pi_job_tests {
 
     /// 停止或新任务之后，迟到的 Pi 结果不能覆盖当前稿件；当前结果直接写进正文。
     #[test]
+    fn a_style_file_can_never_be_written_into_the_manuscript_body() {
+        let mut app = management_samples::fixture();
+        let before = "# 通知\n\n原文不能被风格JSON替换。\n";
+        app.docs[0].generated_markdown = before.into();
+        app.docs[0].job_seq = 3;
+        app.docs[0].busy = true;
+        app.docs[0]
+            .ai_panel
+            .push_turn("风格学习".into(), "学风格".into(), Vec::new(), None);
+        let key = app.docs[0].key;
+        app.apply_doc_job(
+            key,
+            3,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Style(delivery(
+                before,
+                r#"{"name":"风格","description":"写法"}"#,
+            ))))),
+        );
+        assert_eq!(app.docs[0].generated_markdown, before);
+        assert!(app.docs[0].ai_proposal.is_none());
+        assert!(
+            app.docs[0]
+                .ai_panel
+                .turns
+                .last()
+                .unwrap()
+                .pi_pending
+                .is_none()
+        );
+    }
+
+    #[test]
     fn a_late_pi_delivery_cannot_replace_a_newer_job() {
         let mut app = management_samples::fixture();
         let before = "# 通知\n\n原文。\n";
@@ -359,9 +400,9 @@ mod pi_job_tests {
         ));
     }
 
-    /// 事实疑点（新日期 / 数字）不再拦写入：成品照常进正文，提示摆在卡片与审校里。
+    /// 新日期、数字不产生事实核查卡片或待处理工作。
     #[test]
-    fn fact_doubts_are_shown_but_do_not_block_the_write() {
+    fn pi_writes_do_not_create_fact_review_tasks() {
         let mut app = management_samples::fixture();
         let before = "# 通知\n\n原文。\n";
         app.docs[0].generated_markdown = before.into();
@@ -389,16 +430,16 @@ mod pi_job_tests {
         let turn = app.docs[0].ai_panel.turns.last().unwrap();
         assert_eq!(turn.state, TurnState::Accepted);
         assert!(
-            turn.notes.iter().any(|note| note.contains("2026年10月8日")),
-            "提示要摆在卡片上：{:?}",
-            turn.notes
+            !turn
+                .notes
+                .iter()
+                .any(|note| note.contains("未在本轮") || note.contains("事实提示"))
         );
         assert!(
-            app.docs[0]
+            !app.docs[0]
                 .warnings
                 .iter()
-                .any(|note| note.message.contains("事实提示")),
-            "审校里也要看得到"
+                .any(|note| note.message.contains("事实提示"))
         );
     }
 

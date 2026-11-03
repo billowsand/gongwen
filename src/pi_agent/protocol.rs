@@ -8,7 +8,7 @@ use super::materials::PiMaterialMeta;
 /// 直接拒绝新 init，恢复时也不会拿旧 host 去开原工作区。
 pub(crate) const PROTOCOL_VERSION: u32 = 3;
 /// host 版本；运行记录里存一份，恢复时不一致就拒绝在原工作区接着写。
-pub(crate) const HOST_VERSION: &str = "0.3.2";
+pub(crate) const HOST_VERSION: &str = "0.3.4";
 /// 一条协议行的上限。host 侧同样按 16 MiB 卡住。
 pub(crate) const MAX_HOST_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// 整个进程最多处理多少条消息。
@@ -104,6 +104,7 @@ pub(crate) struct InitTask {
     pub(crate) request: String,
     pub(crate) kind: String,
     pub(crate) system_date: String,
+    pub(crate) writing_context: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) skill: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

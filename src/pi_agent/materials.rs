@@ -229,45 +229,6 @@ mod tests {
     }
 
     #[test]
-    fn style_sample_dates_cannot_cross_the_fact_gate() {
-        let temp = tempfile::tempdir().unwrap();
-        let inputs = vec![material(
-            "去年样稿",
-            MaterialRole::StyleSample,
-            "去年10月9日，市应急管理局开会。",
-        )];
-        let _ = write_all(temp.path(), &inputs).unwrap();
-        let fact_sources: Vec<String> = inputs
-            .iter()
-            .filter(|material| material.role.is_fact_source())
-            .map(|material| material.text.clone())
-            .collect();
-        let before = "# 通知\n\n请各单位报送材料。\n";
-        let content = "# 通知\n\n市应急管理局于2025年10月9日报送材料。\n";
-        let issues =
-            super::super::delivery::check_delivery(&super::super::delivery::DeliveryCheck {
-                before,
-                base: before,
-                request: "仿照样稿写",
-                content,
-                selection: None,
-                fact_sources: &fact_sources,
-                vocabulary: &[],
-            });
-        assert!(
-            issues
-                .advisories
-                .iter()
-                .any(|item| item.contains("2025年10月9日"))
-                && issues
-                    .advisories
-                    .iter()
-                    .any(|item| item.contains("市应急管理局")),
-            "样稿的日期与单位不能当事实：{issues:?}"
-        );
-    }
-
-    #[test]
     fn empty_and_oversized_materials_fail_loudly() {
         let temp = tempfile::tempdir().unwrap();
         assert!(write_all(temp.path(), &[material("空", MaterialRole::Fact, "  ")]).is_err());

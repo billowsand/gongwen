@@ -356,6 +356,8 @@ pub(crate) struct PiReport {
 #[derive(Debug)]
 pub(crate) enum PiOutcome {
     Document(PiDelivery),
+    /// 独立风格文件，只能由风格设置页接收；不能写正文。
+    Style(PiDelivery),
     Report(PiReport),
 }
 
@@ -418,6 +420,11 @@ pub(crate) fn run(
     cancel: Arc<AtomicBool>,
     mut on_event: impl FnMut(PiEvent),
 ) -> Result<PiOutcome, String> {
+    if job.task.skill.as_deref() == Some(super::pi_skills::STYLE_SKILL)
+        && job.task.kind != "风格档案"
+    {
+        return Err("风格学习只能提交独立风格档案，不能作为正文任务运行。".into());
+    }
     // 覆盖 Rust 侧的准备完成后更新、host 退出后落盘窗口；Node 自己另持 SQLite 锁，
     // 即使 Rust 崩溃而 host 尚存，也不能同时打开 Durable 库。
     let _run_owner = lock_run(&job.workspace.run)?;
@@ -577,6 +584,7 @@ pub(crate) fn run(
             request: job.task.request.clone(),
             kind: job.task.kind.clone(),
             system_date: job.task.system_date.clone(),
+            writing_context: job.tools.writing_context(),
             skill: job.task.skill.clone(),
             selection: job.task.selection.map(|selection| InitSelection {
                 start: selection.start,
@@ -967,7 +975,10 @@ pub(crate) fn run(
                 let Some(receipt) = read_receipt(&job.workspace.run, &job.run_id)? else {
                     return Err("Pi host 交了清单却没有落交付回执，已拒绝交付。".into());
                 };
-                if receipt.is_document() || receipt.items.len() > 100 {
+                if receipt.kind != "report"
+                    || receipt.items.len() > 100
+                    || job.task.skill.as_deref() == Some(super::pi_skills::STYLE_SKILL)
+                {
                     return Err("Pi 清单回执的内容不对，已拒绝。".into());
                 }
                 let items = receipt
@@ -1009,7 +1020,10 @@ pub(crate) fn run(
                 let Some(receipt) = read_receipt(&job.workspace.run, &job.run_id)? else {
                     return Err("Pi host 提交了正文却没有落交付回执，已拒绝交付。".into());
                 };
-                if !receipt.is_document()
+                let style_task = job.task.skill.as_deref() == Some(super::pi_skills::STYLE_SKILL)
+                    && job.task.kind == "风格档案";
+                let expected_kind = if style_task { "style" } else { "document" };
+                if receipt.kind != expected_kind
                     || receipt.path != path
                     || receipt.bytes != bytes
                     || receipt.sha256 != sha256.to_ascii_lowercase()
@@ -1040,6 +1054,10 @@ pub(crate) fn run(
                         &submission.receipt.sha256,
                         &content,
                     )?;
+                    let is_style = submission.receipt.kind == "style";
+                    if is_style {
+                        super::style_learning::validate_draft(&content)?;
+                    }
                     // 完成事件之后仍须确认进程正常退出，不能接受“先报成功再崩溃”。
                     successful_exit(&mut guard, &cancel)?;
                     // 成品要直接写进正文：修改前基线必须确实在盘上，撤销才有准确的原稿。
@@ -1047,7 +1065,7 @@ pub(crate) fn run(
                     let sources = job.tools.fact_sources();
                     let sources_sha256 =
                         job.record.delivered(&submission.receipt, Some(&sources))?;
-                    return Ok(PiOutcome::Document(PiDelivery {
+                    let delivery = PiDelivery {
                         before: job.before,
                         base: job.base,
                         request: job.task.request,
@@ -1063,7 +1081,12 @@ pub(crate) fn run(
                         elapsed: started.elapsed().saturating_sub(paused),
                         recovered: submission.recovered,
                         sources_sha256,
-                    }));
+                    };
+                    return Ok(if is_style {
+                        PiOutcome::Style(delivery)
+                    } else {
+                        PiOutcome::Document(delivery)
+                    });
                 }
                 if submitted.is_some() {
                     return Err("Pi host 前后矛盾：送来了成品却报告未提交".into());
@@ -1306,7 +1329,7 @@ rl.on("line", (line) => {
   if (value.type === "init" && !handled) {
     handled = true;
     init = value;
-    emit({ type: "ready", hostVersion: "0.3.2", nodeVersion: process.versions.node, model: init.model.modelId });
+    emit({ type: "ready", hostVersion: "0.3.4", nodeVersion: process.versions.node, model: init.model.modelId });
     if (init.recovery?.mode === "resume") {
       const dir = init.workspace.delivery;
       const receipt = JSON.parse(fs.readFileSync(path.join(dir, "receipt.json"), "utf8"));
@@ -1332,7 +1355,22 @@ rl.on("line", (line) => {
       return;
     }
     if (mode === "hang") return;
+    if (mode === "style") {
+      const text = JSON.stringify({name:"简洁部署",description:"开头直接说明目的，主体按任务安排。",example_numbers:[]});
+      const hash = createHash("sha256").update(text).digest("hex");
+      fs.writeFileSync(path.join(delivery(),"final.json"),text);
+      fs.writeFileSync(path.join(delivery(),"receipt.json"),JSON.stringify({version:1,runId:init.runId,requestId:init.requestId,kind:"style",path:"work/style.json",sha256:hash,bytes:Buffer.byteLength(text),summary:"风格",callId:"style"}));
+      emit({type:"submitted",path:"work/style.json",summary:"风格",content:text,sha256:hash,bytes:Buffer.byteLength(text)});
+      emit({type:"completed",submitted:true});
+      setTimeout(()=>process.exit(0),20);
+      return;
+    }
     if (mode === "capability") {
+      if (!init.task.writingContext?.date?.now?.includes("星期") || !init.task.writingContext?.date?.timezone || !Array.isArray(init.task.writingContext?.organization?.results)) {
+        emit({ type: "error", code: "context_missing", message: "Init did not carry date and organization context" });
+        setTimeout(() => process.exit(1), 20);
+        return;
+      }
       if (init.strategy?.capability?.verifiedWorkBudget !== 4096 || init.strategy.capability.needsShortSteps !== true || init.strategy.capability.reason !== "matched evidence") {
         emit({ type: "error", code: "capability_missing", message: "InitCapability did not carry matched evidence" });
         setTimeout(() => process.exit(1), 20);
@@ -1409,6 +1447,26 @@ rl.on("line", (line) => {
         };
         let outcome = run(job, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
         assert!(matches!(outcome, PiOutcome::Document(_)));
+    }
+
+    #[test]
+    fn style_receipt_is_a_separate_outcome_and_wrong_task_cannot_accept_it() {
+        if !node_available() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut style = job(temp.path(), "style");
+        style.task.skill = Some(super::super::pi_skills::STYLE_SKILL.into());
+        style.task.kind = "风格档案".into();
+        let outcome = run(style, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        assert!(matches!(outcome, PiOutcome::Style(_)));
+        let temp = tempfile::tempdir().unwrap();
+        let wrong = job(temp.path(), "style");
+        assert!(
+            run(wrong, Arc::new(AtomicBool::new(false)), |_| {})
+                .unwrap_err()
+                .contains("回执与提交内容不一致")
+        );
     }
 
     fn fixture(dir: &Path) -> PathBuf {
@@ -1834,7 +1892,7 @@ rl.on("line", (line) => {{
   const value = JSON.parse(line);
   if (value.type === "init") {{
     init = value;
-  emit({{ type: "ready", hostVersion: "0.3.2", nodeVersion: process.versions.node, model: init.model.modelId }});
+  emit({{ type: "ready", hostVersion: "0.3.4", nodeVersion: process.versions.node, model: init.model.modelId }});
     emit({{ type: "tool_request", callId: "c1", name: "kb_search", args: {args} }});
   }}
   if (value.type === "tool_result") {{ setTimeout(() => process.exit(0), 10); }}

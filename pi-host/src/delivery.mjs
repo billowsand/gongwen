@@ -52,16 +52,17 @@ function writeJson(target, value) {
  * 写正文交付：`final.md` 是调用时的固定内容（不是之后文件的样子），`receipt.json`
  * 绑定 runId、requestId、路径、字节数、哈希、摘要与调用标识。
  */
-export function writeDocumentReceipt(deliveryDir, { runId, requestId, relative, content, sha256, bytes, summary, callId }) {
+export function writeDocumentReceipt(deliveryDir, { runId, requestId, relative, content, sha256, bytes, summary, callId, kind = "document" }) {
   if (typeof deliveryDir !== "string" || deliveryDir === "") {
     throw new DeliveryError("缺少交付目录，已拒绝交付", "receipt_no_dir");
   }
-  atomicWrite(path.join(deliveryDir, "final.md"), content);
+  if (!["document", "style"].includes(kind)) throw new DeliveryError("不支持的文件产物类型", "receipt_kind");
+  atomicWrite(path.join(deliveryDir, kind === "style" ? "final.json" : "final.md"), content);
   const receipt = {
     version: RECEIPT_VERSION,
     runId,
     requestId,
-    kind: "document",
+    kind,
     path: relative,
     sha256,
     bytes,
@@ -143,8 +144,8 @@ export function readReceipt(deliveryDir, runId) {
   if (receipt.runId !== runId) {
     throw new DeliveryError("交付回执属于另一轮运行，已拒绝", "receipt_run_mismatch");
   }
-  if (receipt.kind === "document") {
-    const final = path.join(deliveryDir, "final.md");
+  if (["document", "style"].includes(receipt.kind)) {
+    const final = path.join(deliveryDir, receipt.kind === "style" ? "final.json" : "final.md");
     let text;
     try {
       const size = fs.statSync(final).size;
@@ -171,10 +172,10 @@ export function readReceipt(deliveryDir, runId) {
 
 /** 回执指向的不可变成品全文。 */
 export function readReceiptDocument(deliveryDir, receipt) {
-  if (receipt?.kind !== "document") {
+  if (!["document", "style"].includes(receipt?.kind)) {
     throw new DeliveryError("这份回执不是正文交付", "receipt_kind");
   }
-  const file = path.join(deliveryDir, "final.md");
+  const file = path.join(deliveryDir, receipt.kind === "style" ? "final.json" : "final.md");
   if (fs.statSync(file).size > 8 * 1024 * 1024) {
     throw new DeliveryError("成品快照超过读取上限", "receipt_snapshot");
   }
@@ -183,7 +184,7 @@ export function readReceiptDocument(deliveryDir, receipt) {
 
 /** 回执给 Rust 的事件（正文 / 清单两种形态）。 */
 export function receiptEvents(deliveryDir, receipt) {
-  if (receipt.kind === "document") {
+  if (["document", "style"].includes(receipt.kind)) {
     const content = readReceiptDocument(deliveryDir, receipt);
     return [
       {

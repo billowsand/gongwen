@@ -6,12 +6,31 @@
 
 import fs from "node:fs";
 import { chunkChars } from "./budget.mjs";
-import { MAX_QUOTE_CHARS } from "./progress.mjs";
+import { MAX_QUOTE_CHARS, ProgressError } from "./progress.mjs";
+import { isStyleTask } from "./style.mjs";
+import { writingContextBlock } from "./prompt.mjs";
 
 export const RECORD_TOOL_NAME = "record_progress";
 
 const MAX_PHASES = 20;
 const MAX_SECTION_PHASES = 12;
+
+/** 恢复只用原计划；扩大窗口不能把旧 #1 摘记误认为覆盖更大的新 #1。 */
+export function recoverPlan(plan, decision, registry) {
+  if (registry.plan?.phases?.length) {
+    if (!Number.isFinite(registry.planningBudget) || decision.materialsBudget < registry.planningBudget) {
+      throw new ProgressError("当前可用窗口小于原任务规划，不能改变分块后复用旧成果；请恢复原窗口或从头写。", "progress_plan_changed");
+    }
+    plan = registry.plan;
+    decision = { ...decision, mode: "phased", reasons: [...decision.reasons, "沿用原任务分块计划"] };
+  } else if (registry.records.length > 0 || registry.cursor?.phased) {
+    throw new ProgressError("旧任务没有保存完整分块计划，不能安全接续；请从头写。", "progress_plan_missing");
+  }
+  registry.plan = plan;
+  registry.planningBudget ??= decision.materialsBudget;
+  registry.persist();
+  return { plan, decision };
+}
 
 /** 给模型一条处于当前块内的完整非空行，避免让它重抄日期和数字。 */
 function firstSourceLine(text, start, end) {
@@ -33,6 +52,28 @@ function firstSourceLine(text, start, end) {
     offset = newline + 1;
   }
   return undefined;
+}
+
+/** 保持整篇；超限优先在后半段的章节边界切，再选段落，最后才按字符切。 */
+export function materialRanges(text, maxChars) {
+  const ranges = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(text.length, start + maxChars);
+    if (end < text.length) {
+      const floor = start + Math.floor(maxChars * 0.6);
+      const slice = text.slice(floor, end);
+      const headings = [...slice.matchAll(/\n(?=#{1,6}\s)/gu)];
+      const chapter = headings.at(-1);
+      const paragraph = slice.lastIndexOf("\n\n");
+      if (chapter) end = floor + chapter.index + 1;
+      else if (paragraph >= 0) end = floor + paragraph + 2;
+      if (/[\uD800-\uDBFF]/u.test(text[end - 1]) && /[\uDC00-\uDFFF]/u.test(text[end])) end -= 1;
+    }
+    ranges.push([start, end]);
+    start = end;
+  }
+  return ranges.length ? ranges : [[0, 0]];
 }
 
 /** 读材料原文用于分块（材料总量已由 Rust 侧限制在 4 MiB 内）。 */
@@ -72,20 +113,13 @@ export function buildPlan({ config, decision, guard }) {
   for (const material of materials) {
     const text = readMaterial(guard, material.file, limit);
     if (material.role === "fact" || material.role === "incoming_letter") {
-      const total = Math.max(1, Math.ceil(text.length / chunkSize));
-      for (let index = 0; index < total; index += 1) {
+      const ranges = materialRanges(text, chunkSize);
+      for (const [index, [start, end]] of ranges.entries()) {
         chunks.push({
-          phase: "distill",
-          id: `distill:${material.file}#${index + 1}`,
-          unit: `distill:${material.file}#${index + 1}`,
-          kind: "distill",
-          file: material.file,
-          title: material.title,
-          role: material.role,
-          start: index * chunkSize,
-          end: Math.min(text.length, (index + 1) * chunkSize),
-          sourceLine: firstSourceLine(text, index * chunkSize, Math.min(text.length, (index + 1) * chunkSize)),
-          chars: Math.min(chunkSize, text.length - index * chunkSize),
+          phase: "distill", id: `distill:${material.file}#${index + 1}`,
+          unit: `distill:${material.file}#${index + 1}`, kind: "distill", file: material.file,
+          title: material.title, role: material.role, start, end,
+          sourceLine: firstSourceLine(text, start, end), chars: end - start,
         });
       }
     } else {
@@ -257,19 +291,19 @@ function recordExample(unit) {
 
 function commonBlock(decision) {
   return `分阶段写作说明（程序控制，不是可选建议）：
-- 目的：把长任务拆成短步骤，每一步只处理很少的内容。本轮策略：分阶段。
+- 目的：把长任务拆成短步骤，优先整篇理解，容量不足时按大章节处理。本轮策略：分阶段。
 - 窗口 ${decision.window} token，本次工作预算 ${decision.workBudget} token；材料一次放不下时按块处理。
 - 中间阶段**不要**调用 submit_document / finish_report；本步完成并写文件后，必须调用 ${RECORD_TOOL_NAME} 登记。
 - 宿主只认磁盘上真实存在、哈希对得上、引文能在原文里找到的成果。不要声称「已全部读完」；没登记的单元就是没做。
 - 不要手写章节编号（如「一、」「1.」），编号由公文语法与导出程序处理；不要重复写主送单位；遵守要求里的字数与选区限制。
-- 事实只能来自事实材料 / 来函 / input/current.md / input/request.md，以及知识库、稿件库工具实际返回的只读快照；样稿与范文只学写法，不搬用其中的单位、人员、日期、数字和结论。
+- 事项内容来自材料与实际读到的资料；日期基准和标准组织背景可用于规范名称、理解相对时间及结合职责安排分工。样稿与范文只学写法，不搬用其中的事项、日期、数字和结论。
 - 需要读长文件时按行范围读（read 的 offset / limit），看返回里的「未读」范围继续，不要要求一次返回全文。`;
 }
 
 /** 某一步的完整用户消息。`missing` 非空时是纠错重试。 */
 export function phasePrompt({ config, decision, phase, registry, plan, attempt = 1, missing = [] }) {
   const task = config.task ?? {};
-  const header = `本轮用户要求（原文，事实来源）：
+  const header = `${writingContextBlock(task)}\n任务开始日期：${task.systemDate ?? ""}\n本轮材料全貌：${JSON.stringify(plan.materials.map(({title, role, file}) => ({title, role, file})))}\n本轮用户要求（原文，事实来源）：
 ${task.request}${registry.answers?.length ? `\n\n用户此前经提问工具确认的信息：\n${registry.answers.map((answer) => JSON.stringify(answer)).join("\n")}` : ""}${registry.evidence?.length ? `\n\n此前知识库/稿件库工具实际返回的只读快照，按需回读，不凭记忆补写：\n${registry.evidence.map((record) => record.path).join("\n")}` : ""}`;
   const correction = missing.length > 0
     ? `\n\n上一次这一步没有通过宿主核对，缺这些单元或依赖：\n${missing.map((item) => `- ${item}`).join("\n")}\n请补齐后重新登记；已登记的成果不要重写。`
@@ -286,7 +320,7 @@ ${header}
 ${unitLines(phase.units)}
 
 做法：
-1. 本步只处理一个单元。事实块直接读取字符范围：${phase.units[0]?.kind === "distill" ? `read({ path: "${phase.units[0].file}", start: ${phase.units[0].start}, end: ${phase.units[0].end} })` : `read({ path: "${phase.units[0]?.file ?? "输入文件"}" })`}，按返回的未读位置继续；不要读别的材料块。
+1. 本步只处理一个单元。事实块直接读取字符范围：${phase.units[0]?.kind === "distill" ? `read({ path: "${phase.units[0].file}", start: ${phase.units[0].start}, end: ${phase.units[0].end} })` : `read({ path: "${phase.units[0]?.file ?? "输入文件"}" })`}，按返回的未读位置继续；可回读材料目录与其他部分以理解全局，但只登记本单元范围。
 2. 在这一块的摘记里写：与本次要求相关的事实（数字、日期、单位、责任、期限照抄原文）、以及可用的写法 / 结构要点（样稿只写写法）。
 3. 写完后立刻登记这一块。优先使用下面示例的原文行号，宿主会提取原句；使用行号时不填 quote。没有可用完整行时才逐字填写短 quote（不改数字或空格）。自行找行号可用 read({path, numbered:true})，数字与竖线前缀不属于原文：
    ${recordExample(phase.units[0])}
@@ -342,6 +376,13 @@ ${header}
 uses 必须包含 outline 与全部章节单元：${["outline", ...sections.map((item) => item.unit)].join("、")}。
 不要调用 submit_document。${correction}${retry}`;
   }
+
+  if (isStyleTask(task)) return `${commonBlock(decision)}
+## 最后一步：交付风格档案
+${header}
+读取全部样稿分析摘记：${registry.active().map(record=>record.path).join("、")}。
+按input/request.md中的统计与候选范例写work/style.json，调用submit_style({path:"work/style.json",summary:"写法总结"})。
+不调用submit_document或finish_report，不写公文正文或全局风格库。`;
 
   return `${commonBlock(decision)}
 

@@ -110,6 +110,8 @@ export class ProgressRegistry {
     this.invalidated = [];
     this.phases = {};
     this.cursor = undefined;
+    this.plan = undefined;
+    this.planningBudget = undefined;
     this.answers = [];
     this.evidence = [];
   }
@@ -153,6 +155,8 @@ export class ProgressRegistry {
     registry.records = Array.isArray(value.records) ? value.records : [];
     registry.invalidated = Array.isArray(value.invalidated) ? value.invalidated : [];
     registry.phases = value.phases && typeof value.phases === "object" ? value.phases : {};
+    registry.plan = value.plan;
+    registry.planningBudget = value.planningBudget;
     registry.cursor = value.cursor;
     registry.answers = Array.isArray(value.answers) ? value.answers.slice(-6) : [];
     registry.evidence = Array.isArray(value.evidence) ? value.evidence.slice(-200) : [];
@@ -183,8 +187,8 @@ export class ProgressRegistry {
   /** 把文件被改、来源被换、依赖失效的登记改成 invalid，并返回原因。 */
   refresh({ guard, workspace, task }) {
     for (const evidence of this.evidence) {
-      const file = guard.read(evidence.path, guard.root, 256 * 1024);
-      if (!file.ok || sha256(readTextFile(file.value, 256 * 1024)) !== evidence.sha256) {
+      const file = guard.read(evidence.path, guard.root, 1024 * 1024);
+      if (!file.ok || sha256(readTextFile(file.value, 1024 * 1024)) !== evidence.sha256) {
         throw new ProgressError("知识库/稿件库工具快照已被改动，不能作为原工具返回继续使用", "progress_identity_mismatch");
       }
     }
@@ -469,12 +473,12 @@ export class ProgressRegistry {
   cacheEvidence(name, value, guard) {
     if (!["kb_search", "kb_read", "ms_search", "ms_read"].includes(name)) return;
     const text = `# ${name} 工具实际返回\n\n${JSON.stringify(value, null, 2)}\n`;
-    if (Buffer.byteLength(text, "utf8") > 256 * 1024) throw new ProgressError("工具资料超过快照上限，请缩小检索或分页读取");
+    if (Buffer.byteLength(text, "utf8") > 1024 * 1024) throw new ProgressError("工具资料超过快照上限，请缩小检索或分页读取");
     const hash = sha256(text);
     if (this.evidence.some((record) => record.sha256 === hash)) return;
     if (this.evidence.length >= 200) throw new ProgressError("本轮工具资料快照达到上限，请缩小任务");
     const relative = `input/evidence/${hash}.md`;
-    const resolved = guard.read(relative, guard.root, 256 * 1024);
+    const resolved = guard.read(relative, guard.root, 1024 * 1024);
     if (!resolved.ok) throw new ProgressError("工具资料快照路径不安全");
     atomicWrite(resolved.value, Buffer.from(text, "utf8"));
     this.evidence.push({ path: relative, name, sha256: hash });
@@ -494,6 +498,8 @@ export class ProgressRegistry {
       runId: this.runId,
       requestId: this.requestId,
       identity: this.identity,
+      plan: this.plan,
+      planningBudget: this.planningBudget,
       records: this.records,
       invalidated: this.invalidated.slice(-200),
       phases: this.phases,

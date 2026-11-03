@@ -1077,8 +1077,10 @@ fn pi_composer_has_one_execution_path_and_no_legacy_controls() {
     harness.frame_texts();
     let texts = harness.frame_texts();
     assert!(has(&texts, "Pi · 自动"), "{texts:?}");
-    assert!(has(&texts, "告诉 Pi 要起草、修改或审核什么…"), "{texts:?}");
+    assert!(has(&texts, "告诉 Pi 要起草、修改或提炼什么…"), "{texts:?}");
     for obsolete in [
+        "签发前帮我审一下",
+        "核对一下文中引用的文件名称和文号",
         "Pi 设置",
         "Pi 试用",
         "检索知识库",
@@ -1091,9 +1093,9 @@ fn pi_composer_has_one_execution_path_and_no_legacy_controls() {
             "不再显示旧控件 {obsolete}: {texts:?}"
         );
     }
-    harness.doc.ai_panel.composer.pi_skill = Some("gongwen-review".into());
+    harness.doc.ai_panel.composer.pi_skill = Some("gongwen-revise".into());
     let texts = harness.frame_texts();
-    assert!(has(&texts, "Pi · 审核"), "{texts:?}");
+    assert!(has(&texts, "Pi · 修改"), "{texts:?}");
 }
 
 #[test]

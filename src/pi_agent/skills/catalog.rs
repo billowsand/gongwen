@@ -48,6 +48,23 @@ impl Catalog {
             .collect()
     }
 
+    pub(crate) fn writing_enabled(&self) -> Vec<&Entry> {
+        self.enabled()
+            .into_iter()
+            .filter(|entry| entry.name != super::STYLE_SKILL)
+            .collect()
+    }
+
+    pub(crate) fn resolve_writing(&self, selected: Option<&str>) -> Result<Option<String>, String> {
+        if selected == Some(super::STYLE_SKILL) {
+            return Err("风格学习请从「AI 管理 → 风格」选择样稿开始，不写正文。".into());
+        }
+        if self.writing_enabled().is_empty() {
+            return Err("没有启用的写作技能，请先到技能管理启用。".into());
+        }
+        self.resolve(selected)
+    }
+
     /// 选了停用 / 删除 / 损坏的技能时给出明确原因，不偷偷切成自动。
     pub(crate) fn resolve(&self, selected: Option<&str>) -> Result<Option<String>, String> {
         let Some(selected) = selected else {
@@ -59,6 +76,11 @@ impl Catalog {
             }
             return Ok(None);
         };
+        if super::RETIRED.contains(&selected) {
+            return Err(
+                "AI 全面审校与事实核查已下线；查错别字请使用文字复核。历史结果仍可查看。".into(),
+            );
+        }
         let Some(entry) = self.get(selected) else {
             return Err(format!(
                 "选中的 Pi 技能「{selected}」已经被删除或改名。请回到侧栏重新选择技能，或改为自动。"
@@ -110,6 +132,9 @@ pub(crate) fn load() -> Catalog {
     match store::user_dirs() {
         Ok(dirs) => {
             for (name, dir) in dirs {
+                if super::RETIRED.contains(&name.as_str()) {
+                    continue;
+                }
                 if name == store::RESERVED_NAME {
                     catalog.notes.push(format!(
                         "配置目录里的「{name}」是公共语法包名称，已忽略；用户技能不能覆盖它。"
@@ -279,28 +304,72 @@ mod tests {
     fn builtins_are_listed_with_chinese_labels_and_catalog_can_be_empty() {
         let _dir = ConfigDir::new();
         let catalog = load();
-        assert_eq!(catalog.enabled().len(), 8);
+        assert_eq!(catalog.enabled().len(), 7);
         assert_eq!(catalog.label_for("gongwen-draft"), "起草");
         assert_eq!(catalog.label_for("gongwen-research"), "研究报告");
         assert_eq!(catalog.label_for("gongwen-reply"), "复函");
         assert_eq!(catalog.label_for("gongwen-extract"), "要点提炼");
-        assert_eq!(catalog.label_for("gongwen-policy-check"), "政策依据核对");
-        for name in ["gongwen-draft", "gongwen-revise", "gongwen-review"] {
+        assert!(catalog.resolve(Some("gongwen-policy-check")).is_err());
+        for name in ["gongwen-draft", "gongwen-revise", "gongwen-imitate"] {
             store::set_enabled(name, false).unwrap();
         }
         let catalog = load();
-        assert_eq!(catalog.enabled().len(), 5);
-        store::set_enabled("gongwen-review", true).unwrap();
-        assert_eq!(load().enabled().len(), 6);
+        assert_eq!(catalog.enabled().len(), 4);
+        store::set_enabled("gongwen-imitate", true).unwrap();
+        assert_eq!(load().enabled().len(), 5);
         assert_eq!(
-            load().resolve(Some("gongwen-review")),
-            Ok(Some("gongwen-review".into()))
+            load().resolve(Some("gongwen-imitate")),
+            Ok(Some("gongwen-imitate".into()))
         );
-        assert!(load().resolve(Some("gongwen-review")).is_ok());
-        store::set_enabled("gongwen-review", false).unwrap();
-        let error = load().resolve(Some("gongwen-review")).unwrap_err();
+        assert!(load().resolve(Some("gongwen-imitate")).is_ok());
+        store::set_enabled("gongwen-imitate", false).unwrap();
+        let error = load().resolve(Some("gongwen-imitate")).unwrap_err();
         assert!(error.contains("已停用"), "{error}");
         assert!(load().resolve(Some("no-such")).is_err());
+    }
+
+    #[test]
+    fn style_learning_is_a_managed_skill_but_not_a_composer_writing_task() {
+        let _dir = ConfigDir::new();
+        let catalog = load();
+        assert!(catalog.get(super::super::STYLE_SKILL).unwrap().loadable());
+        assert!(
+            !catalog
+                .writing_enabled()
+                .iter()
+                .any(|entry| entry.name == super::super::STYLE_SKILL)
+        );
+        assert!(
+            catalog
+                .resolve_writing(Some(super::super::STYLE_SKILL))
+                .is_err()
+        );
+        assert!(catalog.resolve(Some(super::super::STYLE_SKILL)).is_ok());
+    }
+
+    #[test]
+    fn retired_review_skills_and_their_user_copies_are_not_executable() {
+        let _dir = ConfigDir::new();
+        let dir = store::skills_root().unwrap().join("gongwen-review");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            super::super::builtin_text("gongwen-review").unwrap(),
+        )
+        .unwrap();
+        let catalog = load();
+        assert!(catalog.get("gongwen-review").is_none());
+        assert!(catalog.get("gongwen-policy-check").is_none());
+        assert!(
+            catalog
+                .resolve(Some("gongwen-review"))
+                .unwrap_err()
+                .contains("已下线")
+        );
+        assert!(
+            store::user_dir("gongwen-review").unwrap().is_dir(),
+            "保留用户副本"
+        );
     }
 
     #[test]

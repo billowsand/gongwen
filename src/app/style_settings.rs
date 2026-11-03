@@ -1,8 +1,8 @@
 //! AI 管理页「风格」分区（`docs/ai-agent-workbench.md` 16.15 C）：风格档案的学习与管理。
 //!
 //! - 列出全部档案：启用 / 停用、样稿有更新的提示、编辑、删除，导出导入；
-//! - 「新建风格」：从稿件库与知识库里挑 2–10 篇样稿，后台学出一份档案草稿，看过、改过点「保存」才生效；
-//!   写法描述里出现样稿事实的标出来让用户删；
+//! - 「新建风格」：选择库内或上传样稿，由同一Pi Durable内核执行风格学习Skill，交付JSON草稿；
+//!   看过、改过点「保存」才生效，不运行额外事实核查；
 //! - 编辑：名称、说明、适用文种与场合、设为哪些文种的默认、写法描述、增删范例；可以「重新学习」
 //!   （照原来的样稿再学一次，保留名称、文种、场合这些用户定的东西）。
 //!
@@ -10,8 +10,6 @@
 
 use super::file_dialog::FileDialogSpec;
 use super::settings::setting_row;
-use crate::ai_services::backend::LmBackend;
-use crate::ai_services::knowledge::{KnowledgeSearch, RagSearch};
 use crate::ai_services::manuscripts::{ManuscriptSource, SqliteManuscripts};
 use crate::ai_services::references::RefSource;
 use crate::ai_services::style::{
@@ -23,7 +21,10 @@ use crate::theme;
 use eframe::egui;
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 /// 分区状态。纯当次会话，不进配置。
@@ -39,9 +40,18 @@ pub(crate) struct StylesPage {
     /// 挑样稿。
     picker: Option<Picker>,
     learning: Option<Receiver<LearnOutcome>>,
+    cancel: Option<Arc<AtomicBool>>,
     phase: String,
     confirm_remove: Option<String>,
     message: Option<(bool, String)>,
+}
+
+impl Drop for StylesPage {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 struct Editor {
@@ -65,13 +75,14 @@ impl Editor {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Picker {
     query: String,
     catalog: Vec<Entry>,
     chosen: Vec<(RefSource, i64)>,
     /// 重新学习时保留的档案。
     relearn: Option<StyleProfile>,
+    files: Vec<std::path::PathBuf>,
 }
 
 #[derive(Clone)]
@@ -121,11 +132,7 @@ fn catalog() -> Vec<Entry> {
 }
 
 /// 读一篇样稿的正文与文种。
-fn read_sample(
-    source: RefSource,
-    id: i64,
-    kb: &dyn KnowledgeSearch,
-) -> anyhow::Result<Option<Sample>> {
+fn read_sample(source: RefSource, id: i64) -> anyhow::Result<Option<Sample>> {
     Ok(match source {
         RefSource::Manuscript => SqliteManuscripts.read(id, None)?.map(|doc| Sample {
             source,
@@ -134,33 +141,27 @@ fn read_sample(
             kind: Some(doc.kind),
             text: doc.markdown,
         }),
-        RefSource::Knowledge => kb.read(id)?.map(|(title, text)| Sample {
-            source,
-            id,
-            title,
-            kind: None,
-            text,
-        }),
+        RefSource::Knowledge => {
+            crate::knowledge::KnowledgeStore::open(&crate::storage::manuscript_db_path()?)?
+                .get_doc_content(id)?
+                .map(|(title, text)| Sample {
+                    source,
+                    id,
+                    title,
+                    kind: None,
+                    text,
+                })
+        }
     })
 }
 
-fn knowledge(config: &crate::models::AppConfig) -> RagSearch {
-    RagSearch {
-        enabled: true,
-        rag: config.resolved_rag(),
-        chat: config.draft_chat().unwrap_or_default(),
-        kind_filter: None,
-    }
-}
-
 /// 各档案的样稿有没有改过。
-fn stale_map(book: &StyleBook, config: &crate::models::AppConfig) -> BTreeMap<String, Vec<String>> {
-    let kb = knowledge(config);
+fn stale_map(book: &StyleBook) -> BTreeMap<String, Vec<String>> {
     book.styles
         .iter()
         .map(|profile| {
             let changed = style::stale_sources(profile, &|source| {
-                read_sample(source.source, source.id, &kb)
+                read_sample(source.source, source.id)
                     .ok()
                     .flatten()
                     .map(|sample| style::content_hash(&sample.text))
@@ -188,7 +189,7 @@ impl GongwenApp {
                 theme::Icon::Plus,
                 "新建风格",
             )
-            .on_hover_text("从稿件库、知识库里挑 2–10 篇同类稿子，学出一份写法风格")
+            .on_hover_text("从稿件库、知识库里挑 1–10 篇同类稿子，学出一份写法风格")
             .clicked()
             {
                 page.picker = Some(Picker {
@@ -197,14 +198,20 @@ impl GongwenApp {
                 });
                 page.editor = None;
             }
-            if theme::icon_button(ui, theme::Icon::FileUp, "导入风格档案…").clicked() {
+            if ui
+                .add_enabled(
+                    page.learning.is_none(),
+                    theme::secondary_icon_button(theme::Icon::FileUp, "导入风格档案…"),
+                )
+                .clicked()
+            {
                 file_request = Some(PageAction::ChooseImportFile);
             }
             if theme::icon_button(ui, theme::Icon::FileDown, "导出全部风格档案…").clicked()
             {
                 file_request = Some(PageAction::ChooseExportFile);
             }
-            ui.weak("也可以在 AI 侧栏 @ 几篇稿子，说「学一下这几篇的风格」。");
+            ui.weak("由 Pi 的风格学习技能生成；可选库内样稿，也可上传文件，查看后保存。");
         });
         if let Some((ok, text)) = &page.message {
             ui.colored_label(
@@ -219,6 +226,12 @@ impl GongwenApp {
         if page.learning.is_some() {
             ui.horizontal(|ui| {
                 theme::spinner(ui, 14.0, theme::accent());
+                if ui.button("停止学习").clicked() {
+                    if let Some(cancel) = &page.cancel {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                    page.phase = "正在停止 Pi 风格学习…".into();
+                }
                 ui.weak(if page.phase.is_empty() {
                     "正在学习…"
                 } else {
@@ -229,8 +242,18 @@ impl GongwenApp {
         }
         ui.add_space(6.0);
 
+        let can_pick = page.learning.is_none();
         if let Some(picker) = page.picker.as_mut() {
-            match picker_ui(ui, picker) {
+            if ui
+                .add_enabled(can_pick, egui::Button::new("上传样稿文件…"))
+                .clicked()
+            {
+                file_request = Some(PageAction::ChooseSamples);
+            }
+            match ui
+                .add_enabled_ui(can_pick, |ui| picker_ui(ui, picker))
+                .inner
+            {
                 Some(true) => action = Some(PageAction::Learn),
                 Some(false) => page.picker = None,
                 None => {}
@@ -244,6 +267,9 @@ impl GongwenApp {
         }
         for profile in &mut page.book.styles {
             ui.horizontal(|ui| {
+                if page.learning.is_some() {
+                    ui.disable();
+                }
                 if ui
                     .checkbox(&mut profile.enabled, "")
                     .on_hover_text("停用的不参与自动挑选")
@@ -253,7 +279,13 @@ impl GongwenApp {
                 }
                 let selected = page.selected.as_deref() == Some(profile.id.as_str());
                 if ui
-                    .selectable_label(selected, egui::RichText::new(&profile.name).strong())
+                    .add_enabled(
+                        page.learning.is_none(),
+                        egui::Button::selectable(
+                            selected,
+                            egui::RichText::new(&profile.name).strong(),
+                        ),
+                    )
                     .clicked()
                 {
                     action = Some(PageAction::Edit(profile.id.clone()));
@@ -303,7 +335,10 @@ impl GongwenApp {
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(6.0);
-            match editor_ui(ui, editor, page.learning.is_some()) {
+            match ui
+                .add_enabled_ui(page.learning.is_none(), |ui| editor_ui(ui, editor, false))
+                .inner
+            {
                 Some(EditorAction::Save) => action = Some(PageAction::Save),
                 Some(EditorAction::Cancel) => action = Some(PageAction::CloseEditor),
                 Some(EditorAction::Relearn) => action = Some(PageAction::Relearn),
@@ -326,7 +361,7 @@ impl GongwenApp {
             Ok(book) => page.book = book,
             Err(error) => page.message = Some((false, format!("{error:#}"))),
         }
-        page.stale = stale_map(&page.book, &self.config);
+        page.stale = stale_map(&page.book);
     }
 
     fn poll_style_learning(&mut self, ctx: &egui::Context) {
@@ -340,8 +375,17 @@ impl GongwenApp {
                 Ok(LearnOutcome::Done(result)) => {
                     page.learning = None;
                     page.phase.clear();
+                    if page
+                        .cancel
+                        .take()
+                        .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+                    {
+                        page.message = Some((false, "Pi 风格学习已停止，本轮结果未采纳。".into()));
+                        return;
+                    }
                     match *result {
                         Ok((learned, keep)) => {
+                            page.picker = None;
                             let mut profile = learned.profile;
                             let fresh = keep.is_none();
                             if let Some(old) = keep {
@@ -368,36 +412,83 @@ impl GongwenApp {
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => {
                     page.learning = None;
-                    page.message = Some((false, "学习中断了".into()));
+                    page.cancel = None;
+                    page.message = Some((false, "Pi 风格学习中断了，原风格未改变。".into()));
                     return;
                 }
             }
         }
     }
 
-    fn start_style_learning(&mut self, chosen: Vec<(RefSource, i64)>, keep: Option<StyleProfile>) {
+    fn start_style_learning(
+        &mut self,
+        chosen: Vec<(RefSource, i64)>,
+        files: Vec<std::path::PathBuf>,
+        keep: Option<StyleProfile>,
+    ) {
+        if self.styles_page.learning.is_some() {
+            return;
+        }
+        if let Err(error) = self.config.pi_chat() {
+            self.styles_page.message = Some((false, format!("无法学习风格：{error}")));
+            return;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.styles_page.cancel = Some(cancel.clone());
         self.styles_page.learning = Some(rx);
-        self.styles_page.phase = "读样稿…".into();
+        self.styles_page.phase = "读取样稿，准备 Pi…".into();
         self.styles_page.message = None;
-        let config = self.config.clone();
+        let config = Arc::new(self.config.clone());
         std::thread::spawn(move || {
-            let kb = knowledge(&config);
-            let mut samples = Vec::new();
-            for (source, id) in chosen.into_iter().take(MAX_SAMPLES) {
-                if let Ok(Some(sample)) = read_sample(source, id, &kb)
-                    && !sample.text.trim().is_empty()
-                {
+            let result = (|| -> Result<_, String> {
+                if chosen.len() + files.len() > MAX_SAMPLES {
+                    return Err("一次最多选择10篇样稿。".into());
+                }
+                let mut samples = Vec::new();
+                for (source, id) in chosen {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err("已停止".into());
+                    }
+                    let sample = read_sample(source, id)
+                        .map_err(|e| format!("读取样稿失败：{e:#}"))?
+                        .ok_or("选择的样稿已不存在，请重新选择。")?;
+                    if sample.text.len() > 512 * 1024 {
+                        return Err(format!("样稿《{}》超过512 KiB，请缩减材料。", sample.title));
+                    }
+                    if sample.text.trim().is_empty() {
+                        return Err(format!("样稿《{}》为空，未启动Pi。", sample.title));
+                    }
                     samples.push(sample);
                 }
-            }
-            let model = LmBackend::new(&config, Arc::new(AtomicBool::new(false)));
-            let phase_tx = tx.clone();
-            let result = style::learn(&model, &samples, &config.vocabulary, &mut |phase| {
-                let _ = phase_tx.send(LearnOutcome::Phase(phase));
-            })
-            .map(|learned| (learned, keep))
-            .map_err(|error| format!("{error:#}"));
+                if let Some(old) = &keep {
+                    samples.extend(crate::pi_agent::style_learning::uploaded_samples(
+                        &old.learning_workspace,
+                    )?);
+                }
+                for path in files {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err("已停止".into());
+                    }
+                    let text = crate::doc_import::to_knowledge_markdown(&path)
+                        .map_err(|e| format!("读取上传样稿失败：{e:#}"))?;
+                    if text.trim().is_empty() || text.len() > 512 * 1024 {
+                        return Err("上传样稿为空或转换后超过512 KiB，请缩减材料。".into());
+                    }
+                    // id=0仅用于共享统计函数；持久化来源由Pi工作区记录，不冒充知识库条目。
+                    samples.push(Sample {
+                        source: RefSource::Knowledge,
+                        id: 0,
+                        title: crate::doc_import::file_label(&path),
+                        kind: None,
+                        text,
+                    });
+                }
+                crate::pi_agent::style_learning::learn(config, samples, cancel, |message| {
+                    let _ = tx.send(LearnOutcome::Phase(message));
+                })
+            })()
+            .map(|learned| (learned, keep));
             let _ = tx.send(LearnOutcome::Done(Box::new(result)));
         });
     }
@@ -405,6 +496,28 @@ impl GongwenApp {
     fn apply_styles_action(&mut self, action: PageAction) {
         // 要开对话框的两种先走：它们要拿整个应用（页面状态在 self 里）。
         match action {
+            PageAction::ChooseSamples => {
+                self.request_files(crate::doc_import::knowledge_files_spec(), |app, paths| {
+                    let Some(paths) = paths else {
+                        return;
+                    };
+                    if let Some(picker) = &mut app.styles_page.picker {
+                        let mut files = picker.files.clone();
+                        for path in paths {
+                            if !files.contains(&path) {
+                                files.push(path);
+                            }
+                        }
+                        if picker.chosen.len() + files.len() > MAX_SAMPLES {
+                            app.styles_page.message =
+                                Some((false, "一次最多选10篇样稿；本批文件未加入。".into()));
+                        } else {
+                            picker.files = files;
+                        }
+                    }
+                });
+                return;
+            }
             PageAction::ChooseImportFile => {
                 self.request_file(
                     FileDialogSpec::pick_file().filter("风格档案", &["json"]),
@@ -474,13 +587,17 @@ impl GongwenApp {
                         return;
                     }
                     let name = editor.profile.name.clone();
-                    page.book.upsert(editor.profile.clone());
-                    editor.fresh = false;
-                    page.message = Some(match page.book.save() {
-                        Ok(()) => (true, format!("已保存风格「{name}」。")),
+                    let mut updated = page.book.clone();
+                    updated.upsert(editor.profile.clone());
+                    page.message = Some(match updated.save() {
+                        Ok(()) => {
+                            page.book = updated;
+                            editor.fresh = false;
+                            (true, format!("已保存风格「{name}」。"))
+                        }
                         Err(error) => (false, format!("保存失败：{error:#}")),
                     });
-                    page.stale = stale_map(&page.book, &self.config);
+                    page.stale = stale_map(&page.book);
                 }
             }
             PageAction::CloseEditor => {
@@ -488,8 +605,8 @@ impl GongwenApp {
                 page.selected = None;
             }
             PageAction::Learn => {
-                if let Some(picker) = page.picker.take() {
-                    self.start_style_learning(picker.chosen, picker.relearn);
+                if let Some(picker) = page.picker.clone() {
+                    self.start_style_learning(picker.chosen, picker.files, picker.relearn);
                 }
             }
             PageAction::Relearn => {
@@ -501,13 +618,15 @@ impl GongwenApp {
                         .map(|source| (source.source, source.id))
                         .collect();
                     let keep = editor.profile.clone();
-                    self.start_style_learning(chosen, Some(keep));
+                    self.start_style_learning(chosen, Vec::new(), Some(keep));
                 }
             }
             PageAction::Import(path) => self.import_styles(path),
             PageAction::Export(path) => self.export_styles(path),
             // 要开对话框的两种已经在前面处理过了。
-            PageAction::ChooseImportFile | PageAction::ChooseExportFile => {}
+            PageAction::ChooseImportFile
+            | PageAction::ChooseExportFile
+            | PageAction::ChooseSamples => {}
         }
     }
 
@@ -523,7 +642,7 @@ impl GongwenApp {
                 Err(error) => (false, format!("导入失败：{error:#}")),
             },
         );
-        page.stale = stale_map(&page.book, &self.config);
+        page.stale = stale_map(&page.book);
     }
 
     /// 导出全部风格档案到一个文件。
@@ -544,7 +663,9 @@ enum PageAction {
     CloseEditor,
     Learn,
     Relearn,
-    /// 请求打开「导入风格档案」的文件对话框（路径要等用户挑完才有）。
+    /// 上传样稿，路径经应用层异步文件对话框返回。
+    ChooseSamples,
+    /// 导入已有风格档案。
     ChooseImportFile,
     /// 请求打开「导出风格档案」的文件对话框（路径要等用户挑完才有）。
     ChooseExportFile,
@@ -561,14 +682,14 @@ enum EditorAction {
 /// 挑样稿：搜索框 + 勾选列表。返回 Some(true) 开始学，Some(false) 取消。
 fn picker_ui(ui: &mut egui::Ui, picker: &mut Picker) -> Option<bool> {
     let mut result = None;
-    ui.label(egui::RichText::new("挑样稿（2–10 篇同类稿子）").strong());
+    ui.label(egui::RichText::new("挑样稿（1–10 篇同类稿子，建议至少两篇）").strong());
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut picker.query)
                 .hint_text("按标题筛选")
                 .desired_width(260.0),
         );
-        let count = picker.chosen.len();
+        let count = picker.chosen.len() + picker.files.len();
         if theme::primary_icon_button_enabled(
             ui,
             count >= 1,
@@ -584,6 +705,18 @@ fn picker_ui(ui: &mut egui::Ui, picker: &mut Picker) -> Option<bool> {
             result = Some(false);
         }
     });
+    let mut remove = None;
+    for (index, path) in picker.files.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(format!("上传样稿：{}", crate::doc_import::file_label(path)));
+            if ui.small_button("移除").clicked() {
+                remove = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove {
+        picker.files.remove(index);
+    }
     let query = picker.query.trim().to_string();
     egui::ScrollArea::vertical()
         .id_salt("style_picker")
@@ -609,7 +742,7 @@ fn picker_ui(ui: &mut egui::Ui, picker: &mut Picker) -> Option<bool> {
                 for entry in items {
                     let key = (entry.source, entry.id);
                     let mut checked = picker.chosen.contains(&key);
-                    let full = picker.chosen.len() >= MAX_SAMPLES && !checked;
+                    let full = picker.chosen.len() + picker.files.len() >= MAX_SAMPLES && !checked;
                     if ui
                         .add_enabled(
                             !full,
@@ -766,7 +899,7 @@ fn editor_ui(ui: &mut egui::Ui, editor: &mut Editor, busy: bool) -> Option<Edito
         {
             result = Some(EditorAction::Cancel);
         }
-        if !profile.sources.is_empty()
+        if (!profile.sources.is_empty() || !profile.learning_workspace.is_empty())
             && ui
                 .add_enabled(
                     !busy,
@@ -779,4 +912,101 @@ fn editor_ui(ui: &mut egui::Ui, editor: &mut Editor, busy: bool) -> Option<Edito
         }
     });
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn learning_requires_pi_and_never_falls_back_to_the_auxiliary_model() {
+        let mut app = crate::app::management_samples::fixture();
+        app.config.pi_model = Default::default();
+        app.start_style_learning(Vec::new(), Vec::new(), None);
+        assert!(app.styles_page.learning.is_none());
+        assert!(
+            app.styles_page
+                .message
+                .as_ref()
+                .unwrap()
+                .1
+                .contains("智能写作")
+        );
+        assert!(app.styles_page.editor.is_none());
+    }
+
+    #[test]
+    fn cancelled_queued_style_result_is_not_installed_or_written_into_a_document() {
+        let mut app = crate::app::management_samples::fixture();
+        let before = app.docs[0].generated_markdown.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(LearnOutcome::Done(Box::new(Ok((
+            Learned {
+                profile: StyleProfile {
+                    name: "不该采纳".into(),
+                    ..Default::default()
+                },
+                flagged: Vec::new(),
+            },
+            None,
+        )))))
+        .unwrap();
+        app.styles_page.learning = Some(rx);
+        app.styles_page.cancel = Some(Arc::new(AtomicBool::new(true)));
+        app.poll_style_learning(&egui::Context::default());
+        assert!(app.styles_page.editor.is_none());
+        assert!(app.styles_page.book.styles.is_empty());
+        assert_eq!(app.docs[0].generated_markdown, before);
+    }
+
+    #[test]
+    fn relearning_preserves_user_metadata_and_only_save_changes_the_style_book() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::storage::set_test_config_dir(None);
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(temp.path().to_owned()));
+        let _reset = Reset;
+        let mut app = crate::app::management_samples::fixture();
+        let old = StyleProfile {
+            id: "existing".into(),
+            name: "用户名称".into(),
+            note: "用户说明".into(),
+            enabled: false,
+            uses: 9,
+            description: "旧描述".into(),
+            ..Default::default()
+        };
+        app.styles_page.book.upsert(old.clone());
+        app.styles_page.book.save().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(LearnOutcome::Done(Box::new(Ok((
+            Learned {
+                profile: StyleProfile {
+                    name: "模型名称".into(),
+                    description: "Pi学到的新写法".into(),
+                    learning_workspace: "pi/workspaces/doc-0/run-new".into(),
+                    ..Default::default()
+                },
+                flagged: Vec::new(),
+            },
+            Some(old),
+        )))))
+        .unwrap();
+        app.styles_page.learning = Some(rx);
+        app.poll_style_learning(&egui::Context::default());
+        let editor = app.styles_page.editor.as_ref().unwrap();
+        assert_eq!(editor.profile.name, "用户名称");
+        assert!(!editor.profile.enabled);
+        assert_eq!(editor.profile.uses, 9);
+        assert_eq!(StyleBook::load().unwrap().styles[0].description, "旧描述");
+        app.apply_styles_action(PageAction::Save);
+        assert_eq!(
+            StyleBook::load().unwrap().styles[0].description,
+            "Pi学到的新写法"
+        );
+    }
 }

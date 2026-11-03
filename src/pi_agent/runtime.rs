@@ -343,13 +343,15 @@ fn node_version(node: &Path) -> Result<(u32, u32, u32), String> {
 
 /// Windows 上隐藏控制台窗口；其余平台原样启动。参数用结构化数组，从不拼 shell。
 pub(crate) fn hidden_command(program: &Path) -> Command {
-    let mut command = Command::new(program);
+    let command = Command::new(program);
     #[cfg(windows)]
-    {
+    let command = {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = command;
         command.creation_flags(CREATE_NO_WINDOW);
-    }
+        command
+    };
     command
 }
 

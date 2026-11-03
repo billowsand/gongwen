@@ -2,7 +2,7 @@
 //!
 //! 应用只负责收集本轮要求与正文快照，把工作区、模型参数交给随包的 Node host；
 //! host 在专属工作区里用文件工具写作，最后通过 `submit_document` 交出**一份固定
-//! 版本的 Markdown**。Rust 侧验证技术与权限保护，事实疑点只提示；交付成功由
+//! 版本的 Markdown**。Rust 侧验证技术与权限保护，不执行事实核查；交付成功由
 //! 界面线程直接写入正文并保留撤销记录（2026-11-02 产品修订）。
 //!
 //! 本模块不解析聊天正文，不按文件名拼章节，不注册 shell；未提交、超时、取消、
@@ -17,8 +17,10 @@ pub(crate) mod recovery;
 mod runtime;
 pub(crate) mod skills;
 mod strategy;
+pub(crate) mod style_learning;
 mod tools;
 mod workspace;
+mod writing_context;
 
 pub(crate) use delivery::sha256_hex;
 pub(crate) use delivery::{

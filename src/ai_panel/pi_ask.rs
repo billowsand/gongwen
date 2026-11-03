@@ -93,7 +93,7 @@ pub(crate) fn pi_report_ui(ui: &mut egui::Ui, report: &PiReportView, running: bo
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            theme::chip(ui, "Pi 审核清单", theme::accent(), theme::accent_soft());
+            theme::chip(ui, "Pi 资料清单", theme::accent(), theme::accent_soft());
             ui.weak(format!(
                 "{} 项 · 仅侧栏报告，不替换正文",
                 report.items.len()

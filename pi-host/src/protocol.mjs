@@ -6,7 +6,7 @@
 import path from "node:path";
 
 export const PROTOCOL_VERSION = 3;
-export const HOST_VERSION = "0.3.2";
+export const HOST_VERSION = "0.3.4";
 
 /** 单行输出的上限（含换行）。正文最多 8 MiB，JSON 转义后留出余量。 */
 export const MAX_OUTPUT_LINE_BYTES = 16 * 1024 * 1024;
@@ -153,6 +153,7 @@ export function validateInit(value) {
       request,
       kind,
       systemDate,
+      writingContext: boundedWritingContext(task.writingContext),
       skill: optionalText(task.skill, "task.skill", 100),
       selection: optionalSelection(task.selection),
       materials: optionalMaterials(task.materials),
@@ -192,6 +193,14 @@ function validateStrategy(value) {
 }
 
 /** 恢复模式：只认 `resume`，旧 host 遇到新字段会直接拒绝而不是猜。 */
+function boundedWritingContext(value) {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value) || Buffer.byteLength(JSON.stringify(value), "utf8") > 48 * 1024) {
+    throw new ProtocolError("写作背景必须是 48 KiB 内的对象");
+  }
+  return value;
+}
+
 function validateRecovery(value) {
   if (value === undefined || value === null) return undefined;
   if (!value || typeof value !== "object") {

@@ -1,5 +1,8 @@
 # 随包 Pi 运行时（Node + host + 生产依赖）
 
+> **2026-11-04 用户确认的 Pi 写作取舍（优先于下文历史方案）。** 新任务按 256K 及以上窗口作为主要使用场景，预算采用实际部署容量，取消未知模型 96K 封顶、材料份数与旧短步骤偏好触发的自动细分；材料优先整篇阅读，超限按大章节/大段切分。每次运行提供当前日期、星期、时区及相关组织背景，`current_date` 可重读实时日期，`vocab_search` 支持职能/简介与所属单位。Pi 不执行事实核查、不生成事实疑点或额外 AI 审校清单；全面审校和政策核查技能退出新任务目录。现有文字复核、格式检查、引用保护、授权表单权限、正文基线及精确撤销保留。旧提案和历史记录权限不变。实现与验收见 [写作上下文首版](pi-implementation/writing-context-v1.md)。
+
+
 本文说明智能写作（Pi）在目标机上的固定运行时：怎么组装、manifest 是什么、打包怎么接入、
 怎么验收，以及恢复与所有权的边界。设计与协议见 `docs/pi-implementation/phase-3.md`、
 `docs/pi-implementation/phase-3-report.md`。
@@ -27,7 +30,7 @@ runtime/pi/
 | --- | --- |
 | Node | `22.22.3`（与本机已验版本一致，不跟随 latest） |
 | `@earendil-works/chord` / `pi-ai` / `pi-durable` | `1.4.0` |
-| host | `0.3.2`，协议 `3` |
+| host | `0.3.4`，协议 `3` |
 | lockfile | `pi-host/package-lock.json` 的 SHA-256 写进 manifest |
 
 官方压缩包与 SHA-256（来源 `https://nodejs.org/download/release/v22.22.3/SHASUMS256.txt`）：
@@ -98,7 +101,7 @@ runtime\pi\node.exe scripts\pi-offline-acceptance.mjs --runtime .\runtime\pi
   回执绑定与哈希、`final.md` 快照、Durable `session.sqlite` 已落盘；
 - 再用 `recovery: { mode: "resume" }` 启动一次：必须交回同一份成品，且**不再调用模型**。
 
-注意：验收脚本工作区里的技能是**简化夹具**（只验证文件工具与交付链），真实 8 份标准技能由
+注意：验收脚本工作区里的技能是**简化夹具**（只验证文件工具与交付链），当前 6 份标准技能由
 应用内嵌资源（`cargo test --locked skill_pack`）与界面集成验收覆盖，本脚本不冒充真实技能验收。
 
 本机已对 Windows x64 组装运行时实测通过（4 次模型调用、回执重放 0 次新调用）。Linux ARM64 /
@@ -121,7 +124,7 @@ x64 的组装与验收只能在对应架构的 CI 上跑，本机结果不能代
 
 Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 
-- 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.3.2`、协议 `3` 与配置一致；
+- 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.3.4`、协议 `3` 与配置一致；
 - 在执行 Node 前核对 Node 本身的 SHA-256，并检查依赖锁文件哈希；抽查关键入口
   （`host/main.mjs`、`host/package.json`、三个 Pi 包的 `package.json`）的
   SHA-256；不会每帧遍历 `node_modules`（manifest 只在每次开跑定位时读一次）；
@@ -133,7 +136,7 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 
 ## 六、所有权、恢复与工作区
 
-### 统一策略、分阶段与阶段成果（协议 3，host 0.3.2）
+### 统一策略、分阶段与阶段成果（协议 3，host 0.3.4）
 
 模型能力档案由「测试写作能力」后台动作生成：四次同题自动 / 分阶段合成写作都经生产 Rust Pi 运行链，
 工具源显式绑定到临时 SQLite 知识库 / 稿件库与空风格源。结果与独立原始证据按 SHA-256 关联；资料、模型成品、
@@ -248,11 +251,11 @@ AI 管理 → 技能管理实际提供给 Pi 的标准 SKILL.md，不再编辑�
 
 ### 内置技能与参考文件（4D）
 
-八份内置技能：起草 `gongwen-draft`、修改 `gongwen-revise`、审核 `gongwen-review`、
-仿写 `gongwen-imitate`、研究报告 `gongwen-research`、复函 `gongwen-reply`、
-要点提炼 `gongwen-extract`、政策依据核对 `gongwen-policy-check`。
+六份在用技能：起草 `gongwen-draft`、修改 `gongwen-revise`、仿写 `gongwen-imitate`、
+研究报告 `gongwen-research`、复函 `gongwen-reply`、要点提炼 `gongwen-extract`。
+全面审校和政策核查只保留历史文件，不再作为新任务技能。
 润色 / 精简 / 语气 / 规范化是修改技能按任务选择的 `references/`，材料成文归起草，
-事实核对归审核；旧 15 份技能的映射、取舍与未覆盖能力见 `docs/pi-skill-migration.md`。
+旧 15 份技能的历史映射、取舍与未覆盖能力见 `docs/pi-skill-migration.md`。
 
 `assets/pi-skills/` 下的每个文件都通过 `FILES` 表 `include_str!` 编进二进制：
 新建工作区、复制为用户副本、导出技能包都带上完整 references，不依赖源码目录或
@@ -260,7 +263,7 @@ AI 管理 → 技能管理实际提供给 Pi 的标准 SKILL.md，不再编辑�
 
 技能按需读 `skills/gongwen-markdown/` 的语法与文种规则、材料角色、选区与已填要素；
 只有会让整篇方向写错的事才 `ask_user`，授权要素不建议、不出题，也没有「先确认清单
-才能生成」或「事实勾选才能进正文」的闸门。交付分流：只审核 / 提炼 / 风格分析用
+才能生成」或「事实勾选才能进正文」的闸门。交付分流：只提炼 / 风格分析用
 `finish_report`；生成或修改正文才用 `submit_document` 交完整 Markdown。
 
 ### 只读风格工具（4D）
@@ -297,3 +300,18 @@ Pi 增加两个只读领域工具：`style_list`（按当前文种列出启用�
   本机只真验 Windows x64。
 - **manifest 较大**（约 2.6 MB）：启动时解析一次，不在每帧或每个工具调用重复读。
 - **不自动清理孤立工作区**：见第六节。
+
+## 风格学习的独立文件交付（host 0.3.4）
+
+设置页通过同一 `PiJob` / `run` / Durable Harness 执行 `gongwen-style-learn`，任务文种标识为“风格档案”。
+风格任务只注册文件、阶段登记及 `submit_style`，不注册正文提交、表单、知识库或辅助模型工具。
+程序提供的样稿角色为 `style_sample`，候选范例和统计保存在只读 `input/style-guide.json`。
+
+`submit_style` 校验64 KiB内的JSON、字段上限、候选范例编号和路径，再使用现有不可变文件回执。
+回执 `kind=style`、成品快照 `final.json`；JSONL仍用submitted/completed传输，由Rust核对任务与回执类型后返回独立 `PiOutcome::Style`。
+普通正文任务拒收style回执，风格任务拒收document/report回执；恢复时类型不一致同样拒绝。
+已有style回执可通过同一回执重放链返回同一文件，不重跑模型。设置页当前提供停止、重新学习，不提供单独的“接着学习”恢复按钮。
+
+模型只生成风格内容，程序填身份、来源、统计和范例原文；结果进入设置页编辑器，只有用户保存才更新风格库。
+上传样稿留在工作区；档案里的 `learning_workspace` 是本机相对引用，用于重新学习上传样稿，读取前校验材料哈希。
+详情见 `pi-implementation/style-learning-v1.md`。

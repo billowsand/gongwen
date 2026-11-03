@@ -3,14 +3,13 @@
 //! host 发 `tool_request`，Rust 在这里校验工具名与参数并执行，再把结果按调用 ID 回去。
 //! 这里**不**复用旧的 `Board` / `ToolCtx` / 流程引擎：只调用现有的知识库检索、
 //! 稿件库、词库与确定性检查。每个真正返回给模型的资料都登记一条证据（编号、来源、
-//! 哈希、片段、角色）；提交时的来源闸门只认这份台账与用户材料，不采信模型自报的引用。
+//! 哈希、片段、角色），用于回查和恢复；不据此判断正文事实真伪。
 
 use crate::ai_services::knowledge::{KnowledgeSearch, RagSearch};
 use crate::ai_services::manuscripts::ManuscriptSource;
 use crate::ai_services::style::{self, StyleBook};
-use crate::ai_services::vocabulary as vocab;
 use crate::manuscript::ManuscriptFilter;
-use crate::models::{AppConfig, DraftInput, TemplateKind, VocabularyCategory};
+use crate::models::{AppConfig, DraftInput, TemplateKind};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,7 +18,7 @@ use std::sync::{Arc, Mutex};
 /// 一次工具调用最多返回多少资料。
 const MAX_SEARCH_RESULTS: usize = 10;
 /// 读全文的字符上限；超限时按 offset 分页继续，不静默截断。
-const MAX_READ_CHARS: usize = 24_000;
+const MAX_READ_CHARS: usize = 160_000;
 /// 一条证据交给模型的片段上限。
 const MAX_SNIPPET_CHARS: usize = 600;
 /// 一次最多列几份风格档案。
@@ -432,6 +431,7 @@ impl PiToolContext {
                 | "ms_search"
                 | "ms_read"
                 | "vocab_search"
+                | "current_date"
                 | "check_document"
                 | "doc_elements"
                 | "style_list"
@@ -509,6 +509,7 @@ impl PiToolContext {
             "ms_search" => self.ms_search(args),
             "ms_read" => self.ms_read(args),
             "vocab_search" => self.vocab_search(args),
+            "current_date" => Ok(super::writing_context::date_context()),
             "check_document" => self.check_document(args),
             "doc_elements" => Ok(self.doc_elements()),
             "style_list" => self.style_list(),
@@ -650,35 +651,14 @@ impl PiToolContext {
     }
 
     fn vocab_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
-        let query = required_str(args, "query")?;
-        let category = match args.get("category").and_then(Value::as_str) {
-            Some("unit" | "单位") => Some(VocabularyCategory::Unit),
-            Some("person" | "人员") => Some(VocabularyCategory::Person),
-            Some(other) => return Err(format!("不认识的词库类别：{other}")),
-            None => None,
-        };
-        let mut rows = Vec::new();
-        for entry in &self.config.vocabulary {
-            if category.is_some_and(|category| entry.category != category) {
-                continue;
-            }
-            if !vocab::matches(entry, &query) {
-                continue;
-            }
-            rows.push(json!({
-                "name": entry.canonical,
-                "category": entry.category.label(),
-                "code": entry.code,
-                "position": entry.position,
-                "phone": entry.phone,
-                "aliases": entry.aliases,
-                "note": entry.note,
-            }));
-            if rows.len() >= 20 {
-                break;
-            }
-        }
-        Ok(json!({"results": rows, "note": "词库只提供标准写法，不产生事实证据"}))
+        super::writing_context::search(&self.config.vocabulary, args)
+    }
+
+    pub(crate) fn writing_context(&self) -> Value {
+        json!({
+            "date": super::writing_context::date_context(),
+            "organization": super::writing_context::organization_context(&self.config.vocabulary, &self.request),
+        })
     }
 
     fn check_document(&self, args: &Map<String, Value>) -> Result<Value, String> {
@@ -694,19 +674,6 @@ impl PiToolContext {
         let mut soft = Vec::new();
         if let Err(error) = crate::document_reference::ensure_preserved(&self.current, &text) {
             hard.push(format!("公文引用检查未通过：{error}"));
-        }
-        let stripped = crate::ai_services::citations::strip_citations(&text);
-        let mut sources = vec![self.current.clone(), self.request.clone()];
-        sources.extend(self.fact_sources());
-        let joined = sources.join("\n");
-        for fact in crate::ai_guard::extract_key_facts(&stripped, &self.config.vocabulary) {
-            if !joined.contains(&fact.value) {
-                hard.push(format!(
-                    "{}「{}」找不到出处：补充依据，或改成【待核实】",
-                    fact.kind.label(),
-                    fact.value
-                ));
-            }
         }
         let lexicon = crate::proofread::Lexicon::resolved(&self.config.proofread);
         for note in lexicon.check(&text) {
@@ -730,7 +697,7 @@ impl PiToolContext {
         Ok(json!({
             "hard": hard,
             "soft": soft,
-            "note": "检查结果用于自查；技术与权限问题会阻止写入，事实来源疑点只提示；成品由程序直接写入并保留撤销。",
+            "note": "只检查文稿格式、引用保护与文字规则，不判断事实真伪；成品由程序直接写入并保留撤销。",
         }))
     }
 
@@ -967,6 +934,7 @@ fn sha256_hex(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::VocabularyCategory;
 
     #[test]
     fn long_documents_page_with_an_explicit_unread_remainder() {
@@ -991,7 +959,11 @@ mod tests {
     #[test]
     fn the_read_budget_cannot_exceed_the_hard_limit() {
         let hard = super::MAX_READ_CHARS;
-        assert_eq!(super::read_limit_arg(&Map::new()), hard, "缺省仍是 24k");
+        assert_eq!(
+            super::read_limit_arg(&Map::new()),
+            hard,
+            "缺省允许整篇大材料，调用时仍受 host 预算约束"
+        );
         assert_eq!(
             super::read_limit_arg(&args_of(json!({"limit_chars": 3200}))),
             3200
@@ -1260,11 +1232,11 @@ mod tests {
     }
 
     #[test]
-    fn user_answer_becomes_a_fact_source_for_checking() {
+    fn user_answers_are_retained_without_requiring_fact_confirmation() {
         let ctx = context("");
         let candidate = "# 通知\n\n请于2026年11月8日完成工作。";
         assert!(
-            !ctx.call("check_document", &json!({"text":candidate}))
+            ctx.call("check_document", &json!({"text":candidate}))
                 .unwrap()["hard"]
                 .as_array()
                 .unwrap()
@@ -1533,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn check_document_rejects_untraced_facts_and_accepts_evidence() {
+    fn check_document_does_not_run_fact_verification() {
         let ctx = context("各单位应于每年十月开展一次检查。");
         let bad = ctx
             .call(
@@ -1541,7 +1513,7 @@ mod tests {
                 &json!({"text": "# 通知\n\n请于2026年10月8日报送。\n"}),
             )
             .unwrap();
-        assert!(!bad["hard"].as_array().unwrap().is_empty());
+        assert!(bad["hard"].as_array().unwrap().is_empty());
         let good = ctx
             .call(
                 "check_document",
@@ -1549,6 +1521,21 @@ mod tests {
             )
             .unwrap();
         assert!(good["hard"].as_array().unwrap().is_empty(), "{good}");
+    }
+
+    #[test]
+    fn current_date_is_a_read_only_tool_and_writing_context_is_provided() {
+        let ctx = context("原文");
+        let before = ctx.current.clone();
+        assert!(PiToolContext::known("current_date"));
+        let date = ctx.call("current_date", &json!({})).unwrap();
+        assert!(date["now"].as_str().unwrap().contains("星期"));
+        assert!(!date["timezone"].as_str().unwrap().is_empty());
+        assert!(ctx.evidence().is_empty());
+        let snapshot = ctx.writing_context();
+        assert_eq!(snapshot["date"]["today"], date["today"]);
+        assert!(snapshot["organization"]["results"].is_array());
+        assert_eq!(ctx.current, before);
     }
 
     #[test]
