@@ -827,8 +827,11 @@ impl PiToolContext {
         }
         let total_items = called.items.len();
         let shown = total_items.min(MAX_API_ITEMS);
+        let mut truncated = called.total > shown || total_items > shown;
         let mut results = Vec::new();
         for item in called.items.into_iter().take(MAX_API_ITEMS) {
+            let text_truncated = item.text.chars().count() > MAX_API_ITEM_CHARS;
+            truncated |= text_truncated;
             let text: String = item.text.chars().take(MAX_API_ITEM_CHARS).collect();
             let evidence = self.record("api_call", &item.title, "数据接口", "资料", &text, true);
             results.push(json!({
@@ -836,6 +839,7 @@ impl PiToolContext {
                 "title": item.title,
                 "source": item.source,
                 "text": text,
+                "text_truncated": text_truncated,
             }));
         }
         Ok(json!({
@@ -843,8 +847,12 @@ impl PiToolContext {
             "name": called.name,
             "items": results,
             "total": called.total,
-            "truncated": called.total > shown,
-            "note": "返回条目是资料，可据以写正文；不要写返回里没有的字段。",
+            "truncated": truncated,
+            "note": if truncated {
+                "返回条目或正文已截断，不能视为完整结果。请缩小查询条件再查；无法取得全文时说明资料不完整，不要据片段作完整统计或结论。"
+            } else {
+                "返回条目是资料，可据以写正文；不要写返回里没有的字段。"
+            },
         }))
     }
 
@@ -1902,6 +1910,37 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("region"), "{error}");
         assert!(ctx.evidence().is_empty());
+    }
+
+    #[test]
+    fn api_call_marks_a_single_long_item_as_incomplete() {
+        struct LongApi;
+        impl PiApis for LongApi {
+            fn search(&self, _: &str, _: usize) -> Result<Vec<PiApiHit>, String> {
+                Ok(Vec::new())
+            }
+            fn call(&self, _: &str, _: &Map<String, Value>) -> Result<PiApiCall, String> {
+                Ok(PiApiCall {
+                    name: "长资料".into(),
+                    total: 1,
+                    items: vec![PiApiItem {
+                        title: "统计说明".into(),
+                        source: "统计系统".into(),
+                        text: "中".repeat(MAX_API_ITEM_CHARS + 1),
+                    }],
+                })
+            }
+        }
+        let ctx = context("x").with_apis(Arc::new(LongApi));
+        let result = ctx.call("api_call", &json!({"api": "long"})).unwrap();
+        assert_eq!(result["truncated"], true);
+        assert_eq!(result["items"][0]["text_truncated"], true);
+        assert!(result["note"].as_str().unwrap().contains("不完整"));
+        assert_eq!(
+            result["items"][0]["text"].as_str().unwrap().chars().count(),
+            MAX_API_ITEM_CHARS
+        );
+        assert_eq!(ctx.evidence()[0].text.chars().count(), MAX_API_ITEM_CHARS);
     }
 
     #[test]

@@ -1102,7 +1102,7 @@ fn check_status(raw: &RawResponse) -> Result<(), String> {
 /// 发出请求，读回返回体，不管状态码（实测要把出错时的返回也给人看）。
 fn send(prepared: &Prepared, timeout_seconds: u64) -> Result<RawResponse, String> {
     let client =
-        crate::net::client(&prepared.url, timeout_seconds).map_err(|e| format!("{e:#}"))?;
+        crate::net::api_client(&prepared.url, timeout_seconds).map_err(|e| format!("{e:#}"))?;
     let method = reqwest::Method::from_bytes(prepared.method.label().as_bytes())
         .map_err(|e| e.to_string())?;
     let mut request = client.request(method, &prepared.url);
@@ -1616,6 +1616,45 @@ mod tests {
     use super::test_server::TestServer;
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn redirects_never_forward_api_credentials_or_call_another_endpoint() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_url = format!("http://{}", origin.local_addr().unwrap());
+        let target_url = format!("http://{}/other", target.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = origin.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            write!(stream, "HTTP/1.1 307 Temporary Redirect\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let mut endpoint = stat_endpoint(&origin_url);
+        endpoint.timeout_seconds = 1;
+        endpoint.headers.push(ApiHeader {
+            name: "X-Api-Key".into(),
+            value: "{secret:stat_token}".into(),
+        });
+        let args = json!({"region": "全省", "year": 2026});
+        let error = call(&endpoint, args.as_object().unwrap(), &secrets()).unwrap_err();
+        assert!(error.contains("307"), "{error}");
+        assert!(server.join().unwrap().contains("s3cr3t"));
+        assert_eq!(
+            target.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 
     fn stat_endpoint(url: &str) -> ApiEndpoint {
         ApiEndpoint {

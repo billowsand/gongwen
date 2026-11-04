@@ -328,12 +328,12 @@ impl AppConfig {
     /// 2026-11-05 起「文字复核」是唯一保留的专门小模型；`assist` 只为旧会话回放保留，
     /// 新流程的一次性辅助调用走 [`Self::aux_chat`]。
     pub(crate) fn revise_chat(&self, assist: bool) -> Result<LmStudioConfig, ModelRefError> {
-        let aux = self.aux_chat()?;
         let revise = &self.revise_model;
         let mut config = if revise.enabled && !revise.model_ref.is_empty() {
             let provider = self.require_provider(&revise.model_ref.provider_id, "文字复核")?;
             LmStudioConfig {
-                session_id: aux.session_id.clone(),
+                // 独立复核只依赖自己的提供商；写作配置失效不能连带禁用复核。
+                session_id: self.lm_studio.session_id.clone(),
                 base_url: provider.base_url.clone(),
                 model: revise.model_ref.model.trim().to_string(),
                 api_key: provider.api_key.clone(),
@@ -347,8 +347,9 @@ impl AppConfig {
             }
         } else if revise.enabled && !revise.model.trim().is_empty() {
             // 旧内联字段（未迁移 / 测试直填）。
-            revise.resolve(&aux)
+            revise.resolve(&self.aux_chat()?)
         } else {
+            let aux = self.aux_chat()?;
             LmStudioConfig {
                 temperature: 0.0,
                 max_tokens: 512,

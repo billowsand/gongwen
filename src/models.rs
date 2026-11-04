@@ -151,6 +151,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn independent_revision_does_not_require_a_working_writing_provider() {
+        let mut config = AppConfig::default();
+        config.pi_model = ModelRef {
+            provider_id: "deleted".into(),
+            model: "writing".into(),
+        };
+        config.providers.push(ProviderConfig {
+            id: "revision".into(),
+            base_url: "http://127.0.0.1:1234/v1".into(),
+            ..Default::default()
+        });
+        config.revise_model.enabled = true;
+        config.revise_model.model_ref = ModelRef {
+            provider_id: "revision".into(),
+            model: "proofreader".into(),
+        };
+        assert!(config.aux_chat().is_err());
+        let revision = config.revise_chat(false).unwrap();
+        assert_eq!(revision.model, "proofreader");
+        assert_eq!(revision.session_id, config.lm_studio.session_id);
+        config.revise_model.model_ref = ModelRef::default();
+        assert!(
+            config.revise_chat(false).is_err(),
+            "借用写作模型时仍要报配置错误"
+        );
+    }
+
+    #[test]
     fn backup_models_load_old_config_and_report_deleted_providers() {
         let mut config: AppConfig = serde_json::from_str("{}").unwrap();
         assert!(config.draft_backup_chat().unwrap().is_none());
