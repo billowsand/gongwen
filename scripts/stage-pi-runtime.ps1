@@ -21,6 +21,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+
+# Get-FileHash 是 PowerShell 4.0+ 的内置 cmdlet（位于 Microsoft.PowerShell.Utility）。
+# 精简过的 Windows 镜像（只带 Utility 3.1.0.0）会缺它；用与 package-portable.ps1
+# 相同的 .NET SHA256 兜底，输出格式完全一致（小写 64 位十六进制）。
+if (-not (Get-Command -Name "Get-FileHash" -CommandType Cmdlet -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot "package-portable.hash-polyfill.ps1")
+}
+
 $configPath = [System.IO.Path]::Combine($projectRoot, "packaging", "pi-runtime.json")
 $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
 

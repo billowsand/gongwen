@@ -16,6 +16,11 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 
+# Get-FileHash 缺失的精简镜像用 .NET SHA256 兜底（与 stage-pi-runtime.ps1 同一份 polyfill）。
+if (-not (Get-Command -Name "Get-FileHash" -CommandType Cmdlet -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot "package-portable.hash-polyfill.ps1")
+}
+
 if ([string]::IsNullOrWhiteSpace($RuntimeDir)) {
     $RuntimeDir = [System.IO.Path]::Combine($projectRoot, "runtime", "pi")
 }
