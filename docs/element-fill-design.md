@@ -1,5 +1,12 @@
 # 公文要素填写框架：AI 按标准词库补全表单要素
 
+> **2026-11-05 已退役。** 用户拍板：要素抽取不迁到 Pi，直接退役。旧 AI 写作流程里的
+> 「要素抽取」生成链路（`element_fields::plan`、`Event::FieldSuggestions` 生成、`Target::Field`
+> 出题）已删除；`Target::Field`、`resolve_answers`、`board.field_suggestions`、
+> `Event::FieldSuggestions` 与侧栏建议卡只保留给旧会话回放/采纳。Pi 写作只读表单
+> （`doc_elements`），缺要素写【待核实】。本文以下内容是历史方案，不再作为现行实现依据；
+> 当前架构见 `docs/ai-model-unification-design.md`。
+
 > 2026-10-09 立项。需求经两轮选择题确认（见第一节）。本文是方案、分期与交接的唯一文档。
 
 ## 一、要解决的问题与已定的需求

@@ -318,22 +318,16 @@ impl PiToolContext {
         request: String,
         material_facts: Vec<String>,
     ) -> Self {
-        let kb: Arc<dyn PiKnowledge> = match config.assist_chat() {
+        // 检索里的对话模型只用于 `rerank.mode=Llm` 的 LLM 重排，统一用写作模型：
+        // 不再隐式借用「辅助模型」或文字复核的小模型（2026-11-05 模型通道收敛）。
+        let kb: Arc<dyn PiKnowledge> = match config.pi_chat() {
             Ok(chat) => Arc::new(RagSearch {
                 enabled: config.rag.enabled,
                 rag: config.resolved_rag(),
                 chat,
                 kind_filter: None,
             }),
-            Err(_) => match config.pi_chat() {
-                Ok(chat) => Arc::new(RagSearch {
-                    enabled: config.rag.enabled,
-                    rag: config.resolved_rag(),
-                    chat,
-                    kind_filter: None,
-                }),
-                Err(_) => Arc::new(DisabledKnowledge),
-            },
+            Err(_) => Arc::new(DisabledKnowledge),
         };
         Self::with_sources(
             config,

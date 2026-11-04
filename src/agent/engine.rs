@@ -43,6 +43,10 @@ pub(crate) enum Event {
     /// 动笔前「要素抽取」直接给出的要素建议（不出题的那部分）：界面收到就挂到
     /// 这一轮的建议卡上，起草照常往下跑（`docs/element-fill-design.md` 3.3）。
     /// 只携带建议，流程不碰 `DraftInput`（红线 2）。
+    ///
+    /// 要素抽取已于 2026-11-05 退役，新流程不再产生这个事件；保留它只为旧会话/旧事件
+    /// 回放仍能认出并画出建议卡。
+    #[allow(dead_code)]
     FieldSuggestions(Vec<crate::element_fields::FieldSuggestion>),
 }
 

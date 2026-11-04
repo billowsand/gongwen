@@ -28,30 +28,6 @@ fn board(kind: TemplateKind, title: &str, request: &str) -> Board {
     }
 }
 
-/// 要素填写框架第 2 期：公函类文种动笔前先出必填的表单要素题（Target::Field）。
-/// 测试不关心要素题时用它跳过：全部答「跳过」，返回下一批挂起（或跑完返回 None）。
-fn past_field_questions(
-    driver: &mut Driver,
-    suspension: super::engine::Suspension,
-) -> Option<super::engine::Suspension> {
-    let mut suspension = suspension;
-    while !suspension.questions.is_empty()
-        && suspension
-            .questions
-            .iter()
-            .all(|q| matches!(q.target, Target::Field(_)))
-    {
-        let replies: Vec<_> = suspension
-            .questions
-            .iter()
-            .map(|q| (q.id, Reply::Skip))
-            .collect();
-        driver.answer(&suspension, &replies);
-        suspension = driver.run()?;
-    }
-    Some(suspension)
-}
-
 #[test]
 fn policy_report_uses_a_specific_title_without_changing_document_elements() {
     for hint in ["", "研究报告", "调研报告", "用户指定的报告名称"] {
@@ -465,8 +441,7 @@ fn reply_letter_lists_the_items_retrieves_basis_and_answers_each() {
             "来函：《关于商请支援森林防火物资的函》（林函〔2026〕5号），请求支援帐篷20顶。答复意见：同意支援。",
         ),
     );
-    let suspended = driver.run().expect("动笔前有题");
-    let items = past_field_questions(&mut driver, suspended).expect("来函事项要你确认");
+    let items = driver.run().expect("来函事项要你确认");
     assert_eq!(items.questions[0].prefill, "物资支援：请求支援帐篷20顶");
     // 点「就按这个写」：清单保持原样。
     driver.answer(&items, &[(1, Reply::Choice(0))]);
@@ -985,8 +960,7 @@ fn reply_letter_takes_an_at_referenced_document_as_the_incoming_letter() {
         "关于商请支援森林防火物资的函",
     )];
     let mut driver = Driver::new(&skill, &model, &kb, start);
-    let suspended = driver.run().expect("动笔前有题");
-    past_field_questions(&mut driver, suspended).expect("来函事项要你确认");
+    driver.run().expect("来函事项要你确认");
     let request = &driver.board.request;
     assert!(
         request.starts_with("【来函《关于商请支援森林防火物资的函》】\n请求支援帐篷20顶"),
@@ -1168,29 +1142,23 @@ fn letters_ask_the_six_elements_before_drafting_and_write_the_answers_in() {
             "给市数据局发函，商请共建公共数据研究平台。根据市政府常务会议要求。请书面函复。",
         ),
     );
-    let asked = driver.run().expect("动笔前要问要素与六要素");
-    // 必填的发文单位、主送没填也没提，公函的联系人没填：先出要素题；字段题覆盖「何人」，
-    // 六要素不再单问何人（要素填写框架第 2 期），同批只剩「何时」。
+    let asked = driver.run().expect("动笔前要问六要素");
+    // 表单要素抽取已退役：动笔前只剩六要素题。何事、何因、何法原文写明，何地不适用；
+    // 「何人」「何时」缺，两项都要问（不再由表单要素题覆盖「何人」）。
     let targets: Vec<_> = asked.questions.iter().map(|q| q.target).collect();
     assert_eq!(
         targets,
         [
-            Target::Field(crate::element_fields::FieldId::IssuingUnit),
-            Target::Field(crate::element_fields::FieldId::Recipient),
-            Target::Field(crate::element_fields::FieldId::ContactPerson),
+            Target::Element(super::elements::Element::Who),
             Target::Element(super::elements::Element::When),
         ]
     );
+    // 何人跳过（正文写待核实占位），何时自己写：答案都交给起草。
     driver.answer(
         &asked,
-        &[
-            (1, Reply::Skip),
-            (2, Reply::Skip),
-            (3, Reply::Skip),
-            (4, Reply::Custom("10月31日前".into())),
-        ],
+        &[(1, Reply::Skip), (2, Reply::Custom("10月31日前".into()))],
     );
-    // 正文里的「【待核实：联系人及电话】」不再被「何人」题的跳过提前销账；知识库没启用、
+    // 「何人」题跳过，正文里的「【待核实：联系人及电话】」照旧留着；知识库没启用、
     // 模型也补不了，按既定规则泛化处理、不再问（与「泛泛而谈的缺口不问」一致）。
     assert!(driver.run().is_none());
     let draft_prompt = &model
@@ -1202,23 +1170,15 @@ fn letters_ask_the_six_elements_before_drafting_and_write_the_answers_in() {
         draft_prompt.contains("回复时限（请对方办理或回复的时限）：10月31日前（起草人确认）"),
         "{draft_prompt}"
     );
-    // 表单要素题选了「先不定」：之后在表单里选，正文不写也不留占位（版式从表单渲染）。
     assert!(
-        draft_prompt.contains(&crate::element_fields::skipped_note(
-            crate::element_fields::FieldId::Recipient
-        )),
-        "{draft_prompt}"
-    );
-    assert!(
-        !draft_prompt.contains("【待核实：主送单位】"),
-        "{draft_prompt}"
+        draft_prompt.contains("联系人及电话暂未确定"),
+        "跳过「何人」要留一句待核实说明：{draft_prompt}"
     );
     let report = SkillReport::from_board(&driver.board);
     let pending: Vec<_> = report.questions.iter().map(|q| q.text.as_str()).collect();
-    assert_eq!(
-        pending,
-        ["「联系人及电话」是多少？"],
-        "答过的时限不再问；联系人动笔前没答过，随交付问一次"
+    assert!(
+        pending.is_empty(),
+        "答过的时限不再问；联系人跳过已按待核实占位处理：{pending:?}"
     );
 }
 
@@ -1507,53 +1467,4 @@ fn live_checkpoint_resume_after_an_interruption() {
         report.questions.len()
     );
     assert!(!report.markdown.trim().is_empty(), "恢复后照样出稿");
-}
-
-/// 复函（要素填写框架第 4 期）：技能自带「要素抽取」节，说明主送是来函的发文机关、
-/// 摘录照来函原文。脚本模型照它回答时，主送直接进建议清单；摘录核对不放宽。
-#[test]
-fn reply_letter_suggests_the_incoming_letters_sender_as_recipient() {
-    let skill = builtin(REPLY_LETTER);
-    let model = ScriptedModel::new(|_, prompt| {
-        if prompt.contains("核对表单要素在原文里写没写") {
-            "发文单位｜未提\n主送单位｜已给｜市数据局\n抄送单位｜未提\n承办单位｜未提\n联系人｜未提"
-                .into()
-        } else if prompt.contains("逐项检查起草所需的六要素") {
-            "何事｜缺｜答复什么？".into()
-        } else {
-            "无".into()
-        }
-    });
-    let kb = KeywordKb::new(vec![]);
-    // 来函：抬头是本单位（市财政局），落款署名是来函的发文机关（市数据局）。
-    let start = board(
-        TemplateKind::OfficialLetter,
-        "",
-        "市财政局：\n\n现将我局公共数据归集情况函告如下……请于10月底前函复。\n\n此致\n\n市数据局\n\n答复要求：同意第一项，第二项暂缓。",
-    );
-    let mut driver = Driver::new(&skill, &model, &kb, start);
-    driver.vocabulary = vec![crate::models::VocabularyEntry {
-        canonical: "市数据局".into(),
-        ..Default::default()
-    }];
-    let suspended = driver.run().expect("何事没讲清，动笔前要出题");
-    assert!(!suspended.questions.is_empty(), "何事缺了要挂起");
-    // 发给模型的是技能自带的复函版「要素抽取」，不是内置通用的一份。
-    assert!(
-        model.prompts("核对表单要素在原文里写没写")[0].contains("来函的发文机关"),
-        "{:?}",
-        model.prompts("核对表单要素在原文里写没写")
-    );
-    let suggestion = driver
-        .board
-        .field_suggestions
-        .iter()
-        .find(|s| s.field == crate::element_fields::FieldId::Recipient)
-        .expect("主送要进建议清单");
-    assert_eq!(suggestion.value, "市数据局");
-    assert!(
-        suggestion.source.contains("材料原文"),
-        "{}",
-        suggestion.source
-    );
 }
