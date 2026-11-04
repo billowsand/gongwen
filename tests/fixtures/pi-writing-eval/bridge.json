@@ -79,6 +79,26 @@
       "phone": "",
       "aliases": [],
       "note": "夹具词条：只证明写法，不证明参与本次事项"
+    },
+    {
+      "name": "周宁",
+      "category": "人员",
+      "code": "",
+      "position": "业务联络员",
+      "phone": "",
+      "aliases": [],
+      "unit": "市数据局",
+      "note": "负责整理系统运行情况"
+    },
+    {
+      "name": "周宁",
+      "category": "人员",
+      "code": "",
+      "position": "业务联络员",
+      "phone": "",
+      "aliases": [],
+      "unit": "市应急管理局",
+      "note": "负责核对应急联络信息"
     }
   ],
   "styles": [

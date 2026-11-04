@@ -33,6 +33,11 @@ export const PROTOCOL_VERSION = 3;
 const MAX_EVENT_BYTES = 32 * 1024 * 1024;
 const MAX_TOOL_ERROR = 2_000;
 const DEFAULT_TIMEOUT_SECONDS = 600;
+const ACTIVE_WRITING_SKILLS = new Set([
+  "gongwen-draft", "gongwen-extract", "gongwen-imitate", "gongwen-reply",
+  "gongwen-research", "gongwen-revise",
+]);
+const STYLE_SKILL = "gongwen-style-learn";
 
 const HELP = `Pi 写作业务评测
 
@@ -183,8 +188,8 @@ export function validateCases(fixtures) {
       problems.push(`${name} 指定的技能不存在：${item.skill}`);
     }
     const delivery = item.expect?.delivery;
-    if (delivery !== "document" && delivery !== "report") {
-      problems.push(`${name} 的 delivery 必须是 document 或 report`);
+    if (!["document", "report", "style"].includes(delivery)) {
+      problems.push(`${name} 的 delivery 必须是 document、report 或 style`);
     }
     if (item.strategy !== undefined && item.strategy !== "phased" && item.strategy !== "auto") {
       problems.push(`${name} 的 strategy 只能是 phased 或 auto`);
@@ -380,12 +385,13 @@ function listFiles(root, base = root) {
 }
 
 /** 技能快照：与 Rust `SkillSnapshot` 相同的目录结构、`input/skills.json` 与 request 块。 */
-export function installSkills(workspace, selected) {
+export function installSkills(workspace, selected, kind = "") {
   const target = path.join(workspace, "skills", "pi-skills");
   const entries = [];
-  for (const name of fs.readdirSync(SKILLS_DIR).sort()) {
+  const allowed = kind === "风格档案" ? new Set([STYLE_SKILL]) : ACTIVE_WRITING_SKILLS;
+  for (const name of [...allowed].sort()) {
     const source = path.join(SKILLS_DIR, name);
-    if (!fs.statSync(source).isDirectory()) continue;
+    if (!fs.existsSync(path.join(source, "SKILL.md"))) throw new Error(`当前内置技能不存在：${name}`);
     const text = fs.readFileSync(path.join(source, "SKILL.md"), "utf8");
     const meta = parseFrontmatter(text);
     fs.cpSync(source, path.join(target, name), { recursive: true });
@@ -408,6 +414,24 @@ export function installSkills(workspace, selected) {
     skills: entries,
   });
   return entries;
+}
+
+function fixtureDateContext(caseDef) {
+  const todayText = caseDef.systemDate || "2026-11-04";
+  const today = new Date(`${todayText}T00:00:00Z`);
+  if (!Number.isFinite(today.getTime())) throw new Error(`无效的自造日期：${todayText}`);
+  const monday = new Date(today.getTime() - ((today.getUTCDay() + 6) % 7) * 86_400_000);
+  const dateOnly = (date) => date.toISOString().slice(0, 10);
+  const weekday = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"][today.getUTCDay()];
+  return {
+    now: `${todayText}T09:00:00+08:00`,
+    timezone: "Asia/Shanghai (+08:00)",
+    today: `${todayText}（${weekday}）`,
+    tomorrow: dateOnly(new Date(today.getTime() + 86_400_000)),
+    this_week: `${dateOnly(monday)} 至 ${dateOnly(new Date(monday.getTime() + 6 * 86_400_000))}`,
+    next_week: `${dateOnly(new Date(monday.getTime() + 7 * 86_400_000))} 至 ${dateOnly(new Date(monday.getTime() + 13 * 86_400_000))}`,
+    note: "评测使用自造固定时钟，不代表运行当天真实日期。",
+  };
 }
 
 export function buildRequestFile({ request, caseDef, fixtures, workspace }) {
@@ -528,6 +552,7 @@ export function createFixtureBridge({ caseDef, fixtures, bridge, workspace, base
     "ms_search",
     "ms_read",
     "vocab_search",
+    "current_date",
     "check_document",
     "doc_elements",
     "style_list",
@@ -634,8 +659,11 @@ export function createFixtureBridge({ caseDef, fixtures, bridge, workspace, base
           : values.category === "person" || values.category === "人员"
             ? "人员"
             : "";
+        const unit = String(values.unit ?? "").trim();
         const hits = vocabulary
-          .filter((entry) => (category === "" || entry.category === category) && `${entry.name}${idList(entry.aliases).join("")}`.includes(query))
+          .filter((entry) => (category === "" || entry.category === category)
+            && (!unit || entry.unitIdentity === unit || entry.unit === unit)
+            && `${entry.name}${idList(entry.aliases).join("")}`.includes(query))
           .slice(0, 20);
         return {
           ok: true,
@@ -645,6 +673,7 @@ export function createFixtureBridge({ caseDef, fixtures, bridge, workspace, base
               category: entry.category,
               code: entry.code,
               position: entry.position,
+              unit: entry.unit ?? "",
               phone: entry.phone,
               aliases: entry.aliases,
               note: entry.note,
@@ -669,6 +698,8 @@ export function createFixtureBridge({ caseDef, fixtures, bridge, workspace, base
         if (text.trim() === "") return { ok: false, error: "没有可检查的正文" };
         return { ok: true, result: fixtureCheckDocument(text, corpusText()) };
       }
+      case "current_date":
+        return { ok: true, result: { ...fixtureDateContext(caseDef), fixtureNote: "评测自造固定时钟，不代表真实环境日期。" } };
       case "doc_elements": {
         const elements = caseDef.elements ?? {};
         return {
@@ -815,7 +846,7 @@ export function prepareWorkspace({ caseDef, fixtures, bridge, root }) {
     ? fs.readFileSync(path.join(fixtures.dir, caseDef.current), "utf8")
     : "";
   fs.writeFileSync(path.join(workspace, "input", "current.md"), base, "utf8");
-  installSkills(workspace, caseDef.skill);
+  installSkills(workspace, caseDef.skill, caseDef.kind);
   copyMarkdownSkill(workspace);
   const materialTexts = (caseDef.materials ?? []).map((material) =>
     fs.readFileSync(path.join(fixtures.dir, material.file), "utf8"),
@@ -842,6 +873,29 @@ export function prepareWorkspace({ caseDef, fixtures, bridge, root }) {
   });
   fs.mkdirSync(path.join(workspace, "input", "materials"), { recursive: true });
   writeJson(path.join(workspace, "input", "materials", "index.json"), materials);
+  let styleCandidates = 0;
+  if (caseDef.skill === STYLE_SKILL && caseDef.kind === "风格档案") {
+    // 与 src/ai_services/style.rs 的候选策略保持一致：每篇取开头、匹配过渡、结尾段并去重。
+    const candidates = [];
+    for (const [index, text] of materialTexts.entries()) {
+      const sampleTitle = caseDef.materials[index]?.title ?? `样稿${index + 1}`;
+      const paragraphs = text.replace(/^#{1,6}\s+/gmu, "").split(/\n\s*\n/u)
+        .map((paragraph) => paragraph.trim()).filter((paragraph) => [...paragraph].length >= 30);
+      const push = (role, paragraph) => {
+        const candidate = { role, text: [...paragraph].slice(0, 800).join(""), source: sampleTitle };
+        if (!candidates.some((item) => item.text === candidate.text)) candidates.push(candidate);
+      };
+      if (paragraphs[0]) push("开头", paragraphs[0]);
+      const middle = paragraphs.slice(1).find((paragraph) => ["为此", "同时", "此外", "一是", "要", "各地", "各单位", "下一步"].some((lead) => paragraph.startsWith(lead)));
+      if (middle) push("过渡", middle);
+      if (paragraphs.length >= 2) push("结尾", paragraphs.at(-1));
+    }
+    styleCandidates = candidates.length;
+    writeJson(path.join(workspace, "input", "style-guide.json"), {
+      stats: { docs: materialTexts.length, chars: materialTexts.reduce((sum, text) => sum + [...text].length, 0) },
+      candidates,
+    });
+  }
   return {
     workspace,
     run,
@@ -849,6 +903,7 @@ export function prepareWorkspace({ caseDef, fixtures, bridge, root }) {
     selection,
     materials,
     materialTexts,
+    styleCandidates,
     bridge,
   };
 }
@@ -891,6 +946,11 @@ function hostInit({ caseDef, requestId, runId, prepared, model, timeoutSeconds }
       request: caseDef.request,
       kind: caseDef.kind ?? "",
       systemDate: caseDef.systemDate ?? "",
+      writingContext: caseDef.writingContext ?? {
+        date: fixtureDateContext(caseDef),
+        organization: { results: [], note: "模拟夹具未设置组织背景；需要时使用本轮合成词库查询。" },
+        fixtureNote: "当前日期和空组织背景均为本评测自造数据，不表示真实环境。",
+      },
       ...(caseDef.skill ? { skill: caseDef.skill } : {}),
       ...(prepared.selection ? { selection: prepared.selection } : {}),
       materials: prepared.materials,
@@ -1044,7 +1104,11 @@ export async function runCase({
   const submittedEvent = events.find((event) => event.type === "submitted");
   const reportEvent = events.find((event) => event.type === "report");
   const receipt = readReceiptIfAny(prepared.run);
-  const receiptContent = receipt && receipt.kind === "document" ? readIfPresent(path.join(prepared.run, "final.md")) : "";
+  const receiptContent = receipt?.kind === "document"
+    ? readIfPresent(path.join(prepared.run, "final.md"))
+    : receipt?.kind === "style"
+      ? readIfPresent(path.join(prepared.run, "final.json"))
+      : "";
   const progressText = readIfPresent(path.join(prepared.run, "progress.json"));
   let progress;
   if (progressText) {
@@ -1080,6 +1144,7 @@ export async function runCase({
     report,
     receipt,
     receiptContent,
+    styleCandidates: prepared.styleCandidates,
     progress,
     base: prepared.base,
     selection: prepared.selection,
@@ -1151,6 +1216,7 @@ export function judgeCase(caseDef, result) {
   const business = [];
   const expect = caseDef.expect ?? {};
   const wantsDocument = expect.delivery === "document";
+  const wantsStyle = expect.delivery === "style";
   const delivered = deliveredText(result);
   // 事实关键词比对用数字空格等价形式；字数与选区检查仍用原文。
   const matchable = compactNumbers(delivered);
@@ -1187,10 +1253,34 @@ export function judgeCase(caseDef, result) {
         result.receiptContent ? "final.md 与 submitted.content 不同" : "没有 final.md",
       );
     }
-  } else {
+  } else if (expect.delivery === "report") {
     check(technical, "走了清单交付", Boolean(result.report), result.report ? "finish_report" : "没有 report 事件");
     check(technical, "没有提交正文", !result.submitted, result.submitted?.path);
     check(technical, "清单不是空的", (result.report?.items ?? []).length > 0 || String(result.report?.summary ?? "").trim() !== "");
+  } else if (wantsStyle) {
+    check(technical, "交付了独立风格文件", Boolean(result.submitted), result.submitted?.path);
+    check(technical, "没有同时交正文或清单", !result.report && !result.events.some((event) => event.type === "report"));
+    if (result.submitted) {
+      const content = result.submitted.content ?? "";
+      check(technical, "风格JSON位于work/下", /^work\/[^\0]+\.json$/iu.test(result.submitted.path ?? ""), result.submitted.path);
+      check(technical, "风格回执类型正确", result.receipt?.kind === "style", result.receipt?.kind);
+      check(technical, "风格哈希与字节数正确", Buffer.byteLength(content, "utf8") <= 64 * 1024 && result.submitted.sha256 === sha256(content) && result.submitted.bytes === Buffer.byteLength(content, "utf8"));
+      check(technical, "风格回执哈希与字节数正确", result.receipt?.sha256 === result.submitted.sha256 && result.receipt?.bytes === Buffer.byteLength(content, "utf8"));
+      check(technical, "风格快照与交付相同", result.receiptContent === content, result.receiptContent ? undefined : "没有 final.json");
+      let profile;
+      try { profile = JSON.parse(content); } catch { profile = undefined; }
+      const allowed = new Set(["name", "note", "occasions", "description", "example_numbers"]);
+      const objectOk = Boolean(profile && typeof profile === "object" && !Array.isArray(profile));
+      check(business, "风格交付为JSON对象", objectOk);
+      check(business, "风格字段符合独立草稿契约", objectOk && Object.keys(profile).every((key) => allowed.has(key)) && typeof profile.name === "string" && Boolean(profile.name.trim()) && [...profile.name].length <= 40 && typeof profile.description === "string" && Boolean(profile.description.trim()) && [...profile.description].length <= 12000, objectOk ? Object.keys(profile).join(",") : "JSON无效或不是对象");
+      check(business, "风格可选字段类型与范围正确", objectOk && (profile.note === undefined || (typeof profile.note === "string" && [...profile.note].length <= 500)) && (profile.occasions === undefined || (Array.isArray(profile.occasions) && profile.occasions.length <= 8 && profile.occasions.every((item) => typeof item === "string" && Boolean(item.trim()) && [...item].length <= 60))) && (profile.example_numbers === undefined || (Array.isArray(profile.example_numbers) && profile.example_numbers.length <= 5 && profile.example_numbers.every((n) => Number.isSafeInteger(n) && n >= 1 && n <= 30))), objectOk ? "检查 note、occasions、example_numbers" : undefined);
+      const numbers = profile?.example_numbers ?? [];
+      check(business, "风格范例编号属于本轮候选且不重复", Array.isArray(numbers) && new Set(numbers).size === numbers.length && numbers.every((n) => Number.isSafeInteger(n) && n >= 1 && n <= Math.min(30, result.styleCandidates ?? 0)), JSON.stringify(numbers));
+      for (const group of expect.requirePhrasesAny ?? []) {
+        const hit = group.find((phrase) => content.includes(phrase));
+        check(business, `风格倾向覆盖「${group[0]}」同义项`, Boolean(hit), hit ? `命中「${hit}」` : "该组说法均未出现");
+      }
+    }
   }
 
   if (expect.unchangedOutsideSelection) {
@@ -1302,7 +1392,7 @@ export function renderReport({ run }) {
     const judge = item.judge;
     const mark = judge.technicalPassed && judge.businessPassed ? "通过" : "未通过";
     lines.push(`## ${item.case}（${mark}）`, "");
-    lines.push(`- 交付：${item.result.submitted ? `正文 \`${item.result.submitted.path}\`` : item.result.report ? "侧栏清单" : "无"}`);
+    lines.push(`- 交付：${item.result.submitted ? `${item.result.receipt?.kind === "style" ? "风格JSON" : "正文"} \`${item.result.submitted.path}\`` : item.result.report ? "侧栏清单" : "无"}`);
     lines.push(`- 技术判据：${judge.technical.filter((check) => check.ok).length}/${judge.technical.length}`);
     for (const check of judge.technical.filter((check) => !check.ok)) {
       lines.push(`  - 未过：${check.name}${check.detail ? `（${check.detail}）` : ""}`);
@@ -1341,7 +1431,8 @@ function storeCase(outDir, caseDef, result, judge) {
   );
   if (result.submitted) {
     fs.mkdirSync(path.join(dir, "artifacts"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "artifacts", "final.md"), result.submitted.content ?? "", "utf8");
+    const fileName = result.receipt?.kind === "style" ? "style.json" : "final.md";
+    fs.writeFileSync(path.join(dir, "artifacts", fileName), result.submitted.content ?? "", "utf8");
   }
   const receiptFile = path.join(dir, "run", "receipt.json");
   if (fs.existsSync(receiptFile)) {
@@ -1520,6 +1611,32 @@ export function selftest() {
     }),
   );
   expect(phasedOk.technicalPassed, `完整分阶段登记应通过技术判据：${JSON.stringify(phasedOk.technical)}`);
+
+  const styleCase = {
+    name: "style-selftest",
+    expect: { delivery: "style", requirePhrasesAny: [["分条", "逐条列举"]], manual: [] },
+  };
+  const makeStyleResult = (profile, overrides = {}) => {
+    const content = typeof profile === "string" ? profile : JSON.stringify(profile);
+    const digest = sha256(content);
+    return syntheticResult({
+      submitted: { path: "work/style.json", summary: "识别风格", content, sha256: digest, bytes: Buffer.byteLength(content) },
+      report: null,
+      receipt: { kind: "style", sha256: digest, bytes: Buffer.byteLength(content) },
+      receiptContent: content,
+      styleCandidates: 2,
+      ...overrides,
+    });
+  };
+  const goodStyle = { name: "通知表达", description: "主体逐条列举工作安排。", example_numbers: [1] };
+  const validStyle = judgeCase(styleCase, makeStyleResult(goodStyle));
+  expect(validStyle.technicalPassed && validStyle.businessPassed, "有效风格 JSON 与候选编号应通过");
+  const emptyStyle = judgeCase(styleCase, makeStyleResult({}));
+  expect(!emptyStyle.businessPassed, "缺 name / description 的空对象不得通过风格判据");
+  const invalidCandidateStyle = judgeCase(styleCase, makeStyleResult({ ...goodStyle, example_numbers: [99] }));
+  expect(!invalidCandidateStyle.businessPassed, "不属于本轮候选的风格编号不得通过");
+  const forgedStyleSnapshot = judgeCase(styleCase, makeStyleResult(goodStyle, { receiptContent: "{}" }));
+  expect(!forgedStyleSnapshot.technicalPassed, "风格回执快照与提交不同不得通过");
 
   const args = parseArgs(["--case", "a", "--case", "b", "--timeout", "30", "--out", "tmp/x"]);
   expect(args.cases.length === 2 && args.timeoutSeconds === 30 && args.out === "tmp/x", "CLI 参数解析不对");

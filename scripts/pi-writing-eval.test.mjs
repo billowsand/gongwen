@@ -71,7 +71,7 @@ test("fixtures validate and every case declares its own criteria", () => {
   const names = fixtures.cases.map((item) => item.name);
   assert.equal(new Set(names).size, names.length);
   for (const item of fixtures.cases) {
-    assert.ok(item.expect.delivery === "document" || item.expect.delivery === "report", item.name);
+    assert.ok(["document", "report", "style"].includes(item.expect.delivery), item.name);
     assert.ok(Array.isArray(item.expect.manual) && item.expect.manual.length > 0, `${item.name} 没有人工判断项`);
     assert.ok(fs.existsSync(path.join("assets", "pi-skills", item.skill, "SKILL.md")), item.name);
   }
@@ -81,9 +81,11 @@ test("fixtures validate and every case declares its own criteria", () => {
     "condense-selection",
     "reply-unknown-stance",
     "material-conflict",
-    "policy-source-missing",
     "extract-only",
     "research-sources",
+    "date-and-person",
+    "whole-document-large",
+    "style-learning",
     "style-apply",
     "phased-multi-source",
   ]) {
@@ -98,6 +100,40 @@ test("评测脚本与随包 host 的协议版本一致", () => {
   assert.equal(EVAL_PROTOCOL_VERSION, HOST_PROTOCOL_VERSION);
   const runtime = JSON.parse(fs.readFileSync(path.join("packaging", "pi-runtime.json"), "utf8"));
   assert.equal(runtime.host.protocol, HOST_PROTOCOL_VERSION);
+});
+
+test("新任务技能快照按任务隔离，风格样稿元数据与日期词库夹具可用", () => {
+  const fixtures = loadCases();
+  const styleCase = fixtures.cases.find((item) => item.name === "style-learning");
+  const draftCase = fixtures.cases.find((item) => item.name === "date-and-person");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-eval-workspace-"));
+  try {
+    const style = prepareWorkspace({ caseDef: styleCase, fixtures: { dir: fixtures.dir }, bridge: {}, root });
+    const styleIndex = JSON.parse(fs.readFileSync(path.join(style.workspace, "input", "skills.json"), "utf8"));
+    assert.deepEqual(styleIndex.skills.map((item) => item.name), ["gongwen-style-learn"]);
+    assert.equal(styleIndex.selected, "gongwen-style-learn");
+    const guide = JSON.parse(fs.readFileSync(path.join(style.workspace, "input", "style-guide.json"), "utf8"));
+    assert.equal(guide.stats.docs, 2);
+    assert.equal(guide.candidates.length, style.styleCandidates);
+    assert.ok(guide.candidates.length > 0);
+
+    const draftRoot = path.join(root, "draft");
+    const draft = prepareWorkspace({ caseDef: draftCase, fixtures: { dir: fixtures.dir }, bridge: {}, root: draftRoot });
+    const writingNames = JSON.parse(fs.readFileSync(path.join(draft.workspace, "input", "skills.json"), "utf8")).skills.map((item) => item.name);
+    assert.ok(writingNames.includes("gongwen-draft"));
+    assert.ok(!writingNames.includes("gongwen-style-learn"));
+    assert.ok(!writingNames.includes("gongwen-review"));
+    assert.ok(!writingNames.includes("gongwen-policy-check"));
+    const bridge = createFixtureBridge({ caseDef: draftCase, fixtures: { dir: fixtures.dir }, bridge: { vocabulary: [
+      { name: "周宁", category: "人员", unit: "市数据局", unitIdentity: "unit:data", duties: "数据工作" },
+      { name: "周宁", category: "人员", unit: "市应急管理局", unitIdentity: "unit:emergency", duties: "应急工作" },
+    ] }, workspace: draft.workspace, base: "", request: "", materialTexts: [] });
+    const person = bridge.handle("vocab_search", { query: "周宁", category: "person", unit: "unit:emergency" }).result.results;
+    assert.deepEqual(person.map((item) => item.unit), ["市应急管理局"]);
+    assert.equal(bridge.handle("current_date", {}).result.today.includes("2026-11-04"), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("数字空格等价但字数判据不放宽", () => {
@@ -193,9 +229,9 @@ test("bridge fixtures use the production tool shapes and are marked as fixtures"
     assert.ok(typeof style.id === "string" && style.id !== "", "style id");
     assert.ok(Array.isArray(style.kinds), "style kinds");
   }
-  const policy = loadCases().cases.find((item) => item.name === "policy-source-missing");
-  assert.equal(policy.expect.delivery, "report");
-  assert.equal(policy.expect.reportOnly, true);
+  const caseNames = loadCases().cases.map((item) => item.name);
+  assert.equal(caseNames.includes("policy-source-missing"), false, "退役政策核查不再进入新任务评测");
+  assert.equal(loadCases().cases.find(item => item.name === "style-learning").expect.delivery, "style");
 });
 
 test("a clean delivery passes both technical and business criteria", () => {
@@ -312,6 +348,55 @@ test("the judge distinguishes a report-only task from a document task", () => {
 
   const documentForReportTask = judgeCase(reportCase, goodResult());
   assert.equal(documentForReportTask.technicalPassed, false);
+});
+
+test("风格交付判据检查JSON字段、范围、候选编号和回执快照", () => {
+  const styleCase = loadCases().cases.find((item) => item.name === "style-learning");
+  const makeResult = (profile, overrides = {}) => {
+    const content = typeof profile === "string" ? profile : JSON.stringify(profile);
+    const digest = sha256(content);
+    return goodResult({
+      events: [{ type: "submitted" }, { type: "completed", submitted: true }],
+      submitted: { path: "work/style.json", summary: "识别通知写法", content, sha256: digest, bytes: Buffer.byteLength(content) },
+      report: null,
+      receipt: { kind: "style", sha256: digest, bytes: Buffer.byteLength(content) },
+      receiptContent: content,
+      styleCandidates: 4,
+      ...overrides,
+    });
+  };
+  const valid = {
+    name: "通知表达倾向",
+    note: "来自两篇样稿的共性观察",
+    occasions: ["通知"],
+    description: "开头说明目的，主体逐条列举工作安排；句式简洁。",
+    example_numbers: [1, 3],
+  };
+  const accepted = judgeCase(styleCase, makeResult(valid));
+  assert.equal(accepted.technicalPassed, true, JSON.stringify(accepted.technical));
+  assert.equal(accepted.businessPassed, true, JSON.stringify(accepted.business));
+
+  for (const [label, profile] of [
+    ["empty", {}],
+    ["blank name", { ...valid, name: " " }],
+    ["overlong name", { ...valid, name: "名".repeat(41) }],
+    ["blank description", { ...valid, description: "" }],
+    ["overlong description", { ...valid, description: "描".repeat(12001) }],
+    ["wrong note type", { ...valid, note: [] }],
+    ["overlong occasion", { ...valid, occasions: ["场".repeat(61)] }],
+    ["duplicate candidates", { ...valid, example_numbers: [1, 1] }],
+    ["out of current candidates", { ...valid, example_numbers: [5] }],
+    ["unknown field", { ...valid, enabled: true }],
+  ]) {
+    const result = judgeCase(styleCase, makeResult(profile));
+    assert.equal(result.businessPassed, false, `${label} must fail business validation`);
+  }
+  const oversized = judgeCase(styleCase, makeResult(`${JSON.stringify(valid)}${" ".repeat(64 * 1024)}`));
+  assert.equal(oversized.technicalPassed, false, "大于64KiB的JSON不能技术通过");
+  const brokenReceipt = judgeCase(styleCase, makeResult(valid, { receiptContent: "{}" }));
+  assert.equal(brokenReceipt.technicalPassed, false, "回执快照不同不能通过");
+  const wrongChannel = judgeCase(styleCase, makeResult(valid, { receipt: { kind: "document" } }));
+  assert.equal(wrongChannel.technicalPassed, false, "style receipt不能伪装成document");
 });
 
 test("failed tools and an abnormal exit are technical failures, not business ones", () => {

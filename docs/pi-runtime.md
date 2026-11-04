@@ -37,7 +37,7 @@ runtime/pi/
 | 平台 | `win-x64`、`linux-arm64`、`linux-x64`、`darwin-arm64`、`darwin-x64`（macOS 用官方 `.tar.gz`） |
 | Node | `22.22.3`（与本机已验版本一致，不跟随 latest） |
 | `@earendil-works/chord` / `pi-ai` / `pi-durable` | `1.4.0` |
-| host | `0.3.4`，协议 `3` |
+| host | `0.3.5`，协议 `3` |
 | lockfile | `pi-host/package-lock.json` 的 SHA-256 写进 manifest |
 
 官方压缩包与 SHA-256（来源 `https://nodejs.org/download/release/v22.22.3/SHASUMS256.txt`）：
@@ -164,7 +164,7 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
   一律当 `linux-*`：Windows x64 → `win-x64`，Linux arm64 / x64 → `linux-arm64` / `linux-x64`，
   macOS arm64 / x64 → `darwin-arm64` / `darwin-x64`（manifest 的平台名也用 `darwin-*`）；
   未知平台明确报「不支持的系统」，不再误接受一份别的平台的运行时；
-- 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.3.4`、协议 `3` 与配置一致；
+- 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.3.5`、协议 `3` 与配置一致；
 - 在执行 Node 前核对 Node 本身的 SHA-256，并检查依赖锁文件哈希；抽查关键入口
   （`host/main.mjs`、`host/package.json`、三个 Pi 包的 `package.json`）的
   SHA-256；不会每帧遍历 `node_modules`（manifest 只在每次开跑定位时读一次）；
@@ -178,7 +178,7 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 
 ## 六、所有权、恢复与工作区
 
-### 统一策略、分阶段与阶段成果（协议 3，host 0.3.4）
+### 统一策略、分阶段与阶段成果（协议 3，host 0.3.5）
 
 模型能力档案由「测试写作能力」后台动作生成：四次同题自动 / 分阶段合成写作都经生产 Rust Pi 运行链，
 工具源显式绑定到临时 SQLite 知识库 / 稿件库与空风格源。单轮限时 **300 秒**、四轮总计 **15 分钟**，
@@ -206,6 +206,9 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 - `record_progress({ phase, unit, path, summary, sources?, uses?, sections? })` 登记中间成果。
   host 只认 `work/` 下真实存在、哈希对得上、引文能在 `input/` 原文里定位的成果；材料角色以
   本轮索引为准，样稿 / 范文不能登记成事实摘录。登记幂等，重复同一份成果不产生第二条记录。
+- 阶段依赖由**宿主补齐**，不再要求模型手填 `uses`：提纲继承全部材料单元，章节继承提纲与
+  全部材料，合稿继承提纲与全部章节。非提炼 / 样稿研究阶段再填 `sources` 会被直接拒绝，
+  并回一条带可用单元编号与建议路径的提示；依赖编号写错时同样提示当前已登记编号。
 - 登记写在运行目录（工作区之外）的 `progress.json`：记录输入身份哈希、单元、文件哈希、
   来源定位、依赖与阶段。文件被改、来源被换、依赖失效都会让成果失效；重新登记同一单元会让
   依赖它的章节与合稿失效重做。恢复前核对 run / request / 正文 / 要求 / 材料 / 选区身份，
@@ -221,6 +224,8 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
   返回「已读第 x–y 行 / 未读第 y+1–N 行，继续用 offset」，单次结果受本次工作预算限制。
   知识库 / 稿件库的全文本工具同样支持 `offset`，返回 `total_chars` / `next_offset` /
   `unread_chars`，不再静默截断后当全文。最终交付仍读完整文件并独立校验。
+- 读工具按本次预算声明 `outputLimits`，避免 Durable Harness 再按默认上限二次截断
+  （长材料曾被截成约 50 KiB / 2000 行）；知识库与稿件库全文工具同样按字符预算声明上限。
 - 单轮执行上限 **30 分钟（1800 秒）**，等待用户回答的时间不计入；卡片显示「执行上限 30 分钟」。
   超时按可续写失败收尾并保留工作区，已登记的阶段成果可「接着写」，不重付整轮成本。
 - 事实与写入权限不变：中间成果不写正文，登记不能代替 `submit_document`；正文仍由界面线程
@@ -268,6 +273,10 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 - 交付通道按任务类型分三类：正文 `document`（`submit_document`）、清单 `report`
   （`finish_report`）、独立风格文件 `style`（`submit_style`，只进设置页编辑器，不能写正文）；
   技能目录按任务类型隔离，互不串用。
+- 通道与内置技能**双向对齐**：五个正文技能（起草 / 修改 / 仿写 / 研究报告 / 复函）只能
+  `submit_document`，提炼技能只能 `finish_report`，风格学习只能 `submit_style`。Rust 侧按
+  技能校验回执类型，正文技能收到清单回执（或反之）一律拒绝；host 侧同样拒绝用错通道。
+  恢复回放只认启动前已存在、类型与摘要一致的历史回执，不能凭伪造的 `recovered` 标记绕过。
 - 每次写入保留精确的修改前后文本与运行标识（`ai_panel::pi_write::PiWrite`，随会话存盘）：
   卡片上有「撤销本次写入」，并经 `replace_with_undo` 记一个撤销点。编辑器状态按稿件
   隔离；后台标签写入后切回来，也能一次 Ctrl+Z 撤回该稿件的 Pi 写入。
@@ -394,7 +403,7 @@ Pi 增加两个只读领域工具：`style_list`（按当前文种列出启用�
 - **manifest 较大**（约 2.6 MB）：启动时解析一次，不在每帧或每个工具调用重复读。
 - **工作区自动清理规则见第六节**：只删已写入正文或超期孤儿目录；其余目录保留以支撑「接着写」，不会无提示整目录回收。
 
-## 风格学习的独立文件交付（host 0.3.4）
+## 风格学习的独立文件交付（host 0.3.5）
 
 设置页通过同一 `PiJob` / `run` / Durable Harness 执行 `gongwen-style-learn`，任务文种标识为“风格档案”。
 风格任务只注册文件、阶段登记及 `submit_style`，不注册正文提交、表单、知识库或辅助模型工具。

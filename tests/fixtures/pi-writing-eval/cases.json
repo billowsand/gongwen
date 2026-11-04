@@ -128,27 +128,6 @@
       }
     },
     {
-      "name": "policy-source-missing",
-      "skill": "gongwen-policy-check",
-      "kind": "意见",
-      "systemDate": "2026-11-20",
-      "current": "cases/policy-source-missing/current.md",
-      "request": "核对文中引用的政策依据，逐条给结论。",
-      "materials": [],
-      "answers": {},
-      "expect": {
-        "delivery": "report",
-        "reportOnly": true,
-        "requirePhrasesAny": [["未找到原文", "未找到", "没有找到原文", "未检索到原文"]],
-        "forbidden": ["已核实", "经核对无误"],
-        "manual": [
-          "有没有在找不到原文时编出原文内容",
-          "名称、文号、引文三项是否分开给结论",
-          "有没有顺手重写一份正文"
-        ]
-      }
-    },
-    {
       "name": "extract-only",
       "skill": "gongwen-extract",
       "kind": "通报",
@@ -192,6 +171,96 @@
           "关键数据是否都能在知识库结果里找到",
           "有没有编造文献、作者、年份或链接",
           "对策建议是否与前文问题对应，而不是空话"
+        ]
+      }
+    },
+    {
+      "name": "date-and-person",
+      "skill": "gongwen-draft",
+      "kind": "通知",
+      "systemDate": "2026-11-04",
+      "current": null,
+      "request": "根据材料起草通知。把‘本周四’和‘下周一’写成具体日期；按标准词库中周宁的所属单位区分两项工作，不要把当前日期写成事项发生日。",
+      "materials": [
+        {
+          "file": "cases/date-and-person/materials/01-schedule.md",
+          "title": "工作安排（夹具材料）",
+          "source": "夹具材料",
+          "role": "fact"
+        }
+      ],
+      "answers": {},
+      "expect": {
+        "delivery": "document",
+        "required": ["2026年11月5日", "2026年11月9日", "2026年11月15日", "市数据局周宁", "市应急管理局周宁"],
+        "forbidden": ["2026年11月4日召开", "2026年11月4日启动"],
+        "requiredToolsAny": ["vocab_search"],
+        "manual": [
+          "‘本周四/下周一’是否按任务日期换算，且没有把当前日期编成活动发生日",
+          "两个同名周宁是否按所属单位对应各自职责",
+          "有没有保留截止日期并遵守标准组织背景"
+        ]
+      }
+    },
+    {
+      "name": "whole-document-large",
+      "skill": "gongwen-draft",
+      "kind": "通知",
+      "systemDate": "2026-11-04",
+      "current": null,
+      "request": "依据整篇工作安排材料起草通知，写清三项任务、责任单位、数量与时限。长材料优先整体理解；如需分页读取，要覆盖全文，不要声称未读到的中段已读完。",
+      "materials": [
+        {
+          "file": "cases/whole-document-large/materials/01-workplan.md",
+          "title": "专题工作安排（长材料夹具）",
+          "source": "夹具材料",
+          "role": "fact"
+        }
+      ],
+      "answers": {},
+      "expect": {
+        "delivery": "document",
+        "required": ["2026年11月20日", "4个跨部门工作组", "市城市运行中心", "2026年12月8日", "9个片区", "市数据局", "2027年1月12日", "14个联络点", "市政务服务和大数据管理局"],
+        "forbidden": [],
+        "manual": [
+          "交付是否保留材料首、中、尾三处任务及其所属单位",
+          "实际read工具返回是否未被Harness默认50 KiB/2000行二次截断；长材料是否完整送达",
+          "有没有将材料外的具体日期、决策或成效写成事实"
+        ]
+      }
+    },
+    {
+      "name": "style-learning",
+      "skill": "gongwen-style-learn",
+      "kind": "风格档案",
+      "systemDate": "2026-11-04",
+      "current": null,
+      "request": "从两篇样稿总结适用于通知的表达倾向，优先选择能代表共性的范例。样稿具体事项只作写法例子；不得把样稿没有日期或数量概括成禁令，也不要规定标题必须多少字或只能用某个固定开头。",
+      "materials": [
+        {
+          "file": "cases/style-learning/materials/01-sample-a.md",
+          "title": "年度运行检查通知（样稿A）",
+          "source": "上传样稿",
+          "role": "style_sample"
+        },
+        {
+          "file": "cases/style-learning/materials/02-sample-b.md",
+          "title": "专项数据核验通知（样稿B）",
+          "source": "上传样稿",
+          "role": "style_sample"
+        }
+      ],
+      "answers": {},
+      "expect": {
+        "delivery": "style",
+        "required": [],
+        "forbidden": ["一律不写具体日期", "不得出现具体数量", "固定使用现就", "只能用现就"],
+        "requirePhrasesAny": [["分条", "分项", "逐条", "逐项", "逐项列举", "逐条列举"]],
+        "requiredToolsAny": [],
+        "manual": [
+          "是否将样稿共有表达归纳为可复用倾向，而非固定禁令",
+          "有没有逐字照抄样稿中的具体事项、日期或单位",
+          "JSON是否独立交付并进入风格草稿通道，没有改正文或声称保存"
         ]
       }
     },
