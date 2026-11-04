@@ -207,10 +207,33 @@ revise_chat() 第一行就是 draft_chat()?（config.rs:314）
 
 | 期 | 内容 | 状态 |
 | --- | --- | --- |
-| P0 | 要素抽取退役；Pi 检索重排解耦；文案/文档口径 | 进行中 |
+| P0 | 要素抽取退役；Pi 检索重排解耦；文案/文档口径 | 已完成 |
 | P1 | 任务助手、知识库问答、知识库检索/验证、数据接口 AI 系列改写作模型；删除「辅助模型」设置；简化文字复核；配置兼容与帮助 | 已完成（`aux_chat` 统一解析；文字复核只留启用/模型/检查器） |
 | P2 | 数据接口只读工具进 Pi（api_search / api_call + 授权 + 证据 + 技能指引） | 已完成 |
-| P3 | 收尾：文档、全量回归、旧引擎退役边界说明 | 进行中 |
+| P3 | 收尾：文档、全量回归、旧引擎退役边界说明 | 已完成 |
 
 旧引擎整体删除（原 P4）依赖 5E 退役门槛，不在本次范围；旧会话继续只读兼容。
 
+
+## 九、实施记录（2026-11-05）
+
+三个提交，均通过 `cargo fmt --check`、`cargo clippy -D warnings`、`cargo test --all-targets`
+与 `pi-host npm test`：
+
+| 提交 | 内容 |
+| --- | --- |
+| `35665a1` refactor: 退役要素抽取并把 Pi 检索重排改走写作模型 | 旧流程删除要素抽取生成链路（`element_fields` 2401→1130 行）；Pi 检索重排不再借辅助/复核模型；兼容面保留 |
+| `d8b0763` refactor: 模型通道收敛为写作模型与文字复核两个用途 | 新增 `AppConfig::aux_chat`；删除「辅助模型」设置；问答/检索重排/数据接口 AI/任务助手改写作模型；文字复核只留启用、模型、检查器 |
+| `a329f4a` feat: Pi 写作接入只读数据接口工具 | `api_search` / `api_call` + 只读授权 + 参数校验 + 证据台账；技能与文档同步 |
+
+**代码落点**：`src/models/config.rs`（`aux_chat` / `pi_model_label`）、`src/pi_agent/tools.rs`
+（`PiApis` / `ApiCatalog` / 工具方法）、`pi-host/src/bridge.mjs` + `prompt.mjs`（工具注册与说明）、
+`src/app/ai_manage.rs`（模型服务分区）、`src/app/jobs.rs` / `task_assistant.rs` / `api_settings/**`
+（一次性调用改 `aux_chat`）、`src/element_fields.rs`（保留登记表、写值、旧会话回答落地）。
+
+**后续（不在本次范围）**：
+1. 旧 `agent` 引擎整体退役仍按 5E 门槛执行；旧会话继续只读兼容，`draft_model` / 备用模型字段保留。
+2. Pi host 源码已改，发布前需按 `docs/pi-runtime.md` 重建随包 `runtime/pi` 并跑
+   `shipped_pi_runtime_manifest` 验收。
+3. 真实内网接口的 `api_search` / `api_call` 联调（接口数量、参数 schema、证据可用性）待真机验证。
+4. 知识库问答仍是一次性调用（`pi_chat`），有 Pi 模型即可用；不做多轮 Pi 任务。
