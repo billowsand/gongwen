@@ -68,6 +68,12 @@ impl Look {
     fn body(self) -> f32 {
         theme::font_sizes::BODY * self.scale
     }
+
+    /// 展开是候选条的浏览延伸，汉字略小以减轻多行网格的视觉分量。
+    /// 测量与绘制共用此值，随输入法字号及全局 / 屏幕缩放保持同一比例。
+    fn grid_body(self) -> f32 {
+        self.body() * 0.95
+    }
 }
 
 /// 候选窗中的序号、文字、业务词加粗与词后小字。
@@ -635,7 +641,7 @@ fn grid_cell_size(ui: &egui::Ui, ime: &Ime, look: Look) -> egui::Vec2 {
             .layout_no_wrap(text, ime_font(size), theme::text())
             .size()
     };
-    let body = measure("国".into(), look.body() * 1.2);
+    let body = measure("国".into(), look.grid_body());
     let code = measure("m".repeat(corner), look.small() * 0.85);
     let number = measure("8".into(), look.small() * 0.85);
     egui::vec2(
@@ -684,7 +690,7 @@ fn grid_cell(
         .layout_no_wrap("8".into(), small.clone(), muted)
         .size()
         .x;
-    let body = painter.layout_no_wrap(row.text.clone(), ime_font(look.body() * 1.2), text_color);
+    let body = painter.layout_no_wrap(row.text.clone(), ime_font(look.grid_body()), text_color);
     // 字的横向位置不随辅码长短变化；码和字之间始终留出独立的空隙。
     let body_pos = egui::pos2(
         inner.left() + number_width + 3.0 * look.scale,
@@ -1101,17 +1107,22 @@ mod tests {
     #[test]
     #[ignore = "生成输入法扩展选词样张到 tmp/，供目视检查"]
     fn expanded_candidates_samples() {
-        for (name, theme_name, percent) in [
-            ("dark", crate::models::ThemeName::GruvboxDark, 100),
-            ("light", crate::models::ThemeName::Claude, 100),
-            ("large", crate::models::ThemeName::GruvboxDark, 200),
+        for (name, theme_name, percent, density) in [
+            ("dark", crate::models::ThemeName::GruvboxDark, 100, 2.0),
+            ("light", crate::models::ThemeName::Claude, 100, 2.0),
+            ("font125", crate::models::ThemeName::GruvboxDark, 125, 2.0),
+            ("font150", crate::models::ThemeName::GruvboxDark, 150, 2.0),
+            ("large", crate::models::ThemeName::GruvboxDark, 200, 2.0),
+            ("dpi100", crate::models::ThemeName::Claude, 100, 1.0),
+            ("dpi125", crate::models::ThemeName::Claude, 100, 1.25),
+            ("dpi150", crate::models::ThemeName::Claude, 100, 1.5),
         ] {
             theme::set_current(theme_name);
             let ctx = egui::Context::default();
             theme::configure_fonts(&ctx, &Default::default());
             theme::configure_style(&ctx);
             theme::configure_icons(&ctx);
-            ctx.set_pixels_per_point(2.0);
+            ctx.set_pixels_per_point(density);
             let mut state = ime("uj");
             state.settings.font_percent = percent;
             let chars = "山鳝单删汕潸陕擅扇蟮杉赡闪姗膳衫缮挺舢跚善缮苫煽";
@@ -1128,38 +1139,44 @@ mod tests {
                 })
                 .collect();
             state.table.base = table::parse(&text, false).entries;
+            // 同一码同一批字，分别输出候选条与展开网格，便于比较实际字面。
+            state
+                .table
+                .base
+                .extend(table::parse("uj,1=山\nuj,2=单\nuj,3=删\nuj,4=汕\nuj,5=潸", false).entries);
             state.table.rebuild();
             state.refresh(false);
-            state.expand_browser();
             state.anchor = Some(egui::Rect::from_min_size(
                 egui::pos2(20.0, 20.0),
                 egui::vec2(2.0, 16.0),
             ));
-            let size = if percent == 200 {
-                egui::vec2(760.0, 520.0)
-            } else {
-                egui::vec2(420.0, 330.0)
-            };
+            let size = egui::vec2(420.0, 330.0) * (f32::from(percent) / 100.0);
             let mut canvas = crate::ui_snapshot::Canvas::default();
-            for frame in 0..4 {
-                let mut output = ctx.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-                        time: Some(frame as f64),
-                        ..Default::default()
-                    },
-                    |_ui| state.candidates_ui(&ctx),
-                );
-                if frame < 3 {
-                    canvas.absorb(&mut output.textures_delta);
-                } else {
-                    canvas.render(
-                        &ctx,
-                        output,
-                        size,
-                        theme::canvas(),
-                        std::path::Path::new(&format!("tmp/ime-expanded-{name}.png")),
+            for expanded in [false, true] {
+                if expanded {
+                    state.expand_browser();
+                }
+                let mode = if expanded { "expanded" } else { "bar" };
+                for frame in 0..4 {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                            time: Some((usize::from(expanded) * 4 + frame) as f64),
+                            ..Default::default()
+                        },
+                        |_ui| state.candidates_ui(&ctx),
                     );
+                    if frame < 3 {
+                        canvas.absorb(&mut output.textures_delta);
+                    } else {
+                        canvas.render(
+                            &ctx,
+                            output,
+                            size,
+                            theme::canvas(),
+                            std::path::Path::new(&format!("tmp/ime-{mode}-{name}.png")),
+                        );
+                    }
                 }
             }
         }
