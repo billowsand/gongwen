@@ -426,7 +426,7 @@ impl GongwenApp {
         self.rerank_verify_busy = true;
         self.status = "正在验证重排…".into();
         let cfg = self.config.resolved_rag().rerank;
-        let chat = match self.config.draft_chat() {
+        let chat = match self.config.aux_chat() {
             Ok(chat) => chat,
             Err(error) => {
                 self.rerank_verify_busy = false;
@@ -469,9 +469,9 @@ impl GongwenApp {
                             } else {
                                 format!("连接成功，发现 {} 个模型。", models.len())
                             };
-                            // 只有一个模型且起草还没选时自动选上，省去手选。
-                            if self.config.draft_model.is_empty() && models.len() == 1 {
-                                self.config.draft_model = crate::models::ModelRef {
+                            // 只有一个模型且写作模型还没选时自动选上，省去手选。
+                            if self.config.pi_model.is_empty() && models.len() == 1 {
+                                self.config.pi_model = crate::models::ModelRef {
                                     provider_id: provider_id.clone(),
                                     model: models[0].clone(),
                                 };
@@ -1242,7 +1242,7 @@ impl GongwenApp {
         self.knowledge_search_warnings.clear();
         let cfg = self.config.resolved_rag();
         // 重排走「对话大模型」模式时要用到聊天模型的配置。
-        let chat = self.config.draft_chat().unwrap_or_default();
+        let chat = self.config.aux_chat().unwrap_or_default();
         let kind = self.knowledge_filter_kind;
         let tx = self.sender.clone();
         thread::spawn(move || {
@@ -1273,7 +1273,7 @@ impl GongwenApp {
         self.knowledge_qa_pending = Some(question.clone());
         let cfg = self.config.resolved_rag();
         // 问答要调对话模型生成答案，重排若走「对话大模型」模式也需要聊天配置。
-        let chat = self.config.draft_chat().unwrap_or_default();
+        let chat = self.config.aux_chat().unwrap_or_default();
         let kind = self.knowledge_filter_kind;
         let history = self.knowledge_qa_history.clone();
         let tx = self.sender.clone();

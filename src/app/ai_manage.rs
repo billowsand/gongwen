@@ -3,16 +3,16 @@
 //!
 //! 布局与设置页相同：左侧分区菜单、右侧当前分区、底部常驻保存条。表单行、
 //! 小标题、菜单项这些画法直接复用 `app::settings` 的，两页看起来是一套东西。
-//! 网络代理是全局的（Pi、辅助模型、复核、知识库都走它），留在设置页。
+//! 网络代理是全局的（写作、复核、知识库都走它），留在设置页。
 //!
 //! 模型分两层管：「模型服务商管理」只管连接身份（地址、密钥、模型清单缓存，
-//! 见 `app::provider_settings`）；「模型服务」按功能（智能写作（Pi）/ 辅助模型 /
-//! 文字复核 / 知识库检索）各自挑一个提供商的模型，不再碰地址密钥。
+//! 见 `app::provider_settings`）；「模型服务」按功能（智能写作（Pi）/ 文字复核 /
+//! 知识库检索）各自挑一个提供商的模型，不再碰地址密钥。
 
 use super::provider_settings::{model_picker, provider_ref_chip};
 use super::settings::{
     DETAIL_MAX_WIDTH, FOOTER_HEIGHT, MENU_COLUMN_WIDTH, MENU_PANEL_MARGIN, MENU_WIDTH,
-    setting_continuation, setting_label, setting_row, settings_menu_item, sub_heading,
+    setting_continuation, setting_row, settings_menu_item, sub_heading,
 };
 use crate::app::{GongwenApp, warn};
 use crate::models::{ModelKind, RerankMode};
@@ -28,7 +28,7 @@ pub(crate) enum AiSection {
     /// 服务提供商：接口地址、密钥与模型清单缓存。
     #[default]
     Providers,
-    /// 按功能配模型：智能写作（Pi）、辅助模型、文字复核、知识库检索。
+    /// 按功能配模型：智能写作（Pi）、文字复核、知识库检索。
     ModelService,
     /// 技能：SKILL.md 的管理。
     Skills,
@@ -82,8 +82,8 @@ impl AiSection {
                 "管理连接地址与密钥。「模型服务」里的每个功能都从这里挑一个提供商的模型。"
             }
             AiSection::ModelService => {
-                "「智能写作（Pi）」是侧栏统一写作入口的模型；「辅助模型」服务复核、知识库问答、任务识别、\
-                 数据接口等非 Pi 调用。地址与密钥到「模型服务商管理」里统一维护。"
+                "「智能写作（Pi）」是唯一的写作模型，也服务知识库问答、检索重排、数据接口 AI 调用与\
+                 任务助手识别；「文字复核」可另配一个小模型。地址与密钥到「模型服务商管理」里统一维护。"
             }
             AiSection::Skills => {
                 "Pi 标准技能：标准 SKILL.md（YAML frontmatter + 自然语言步骤）与随包辅助文件。\
@@ -302,168 +302,12 @@ impl GongwenApp {
                 if ui.checkbox(&mut on, task.label).changed() {
                     self.config.revise_model.set_task_enabled(task.id, on);
                 }
-                // 默认关着的那些要标出来，别让人以为它和默认开的几条一样有把握。
                 if crate::revise_model::DEFAULT_DISABLED_TASKS.contains(&task.id) {
                     theme::chip(ui, "默认关闭", warn(), theme::surface());
                 }
             });
-            setting_continuation(ui, |ui| {
-                ui.weak(task.criteria);
-            });
-        }
-        setting_continuation(ui, |ui| {
-            ui.weak(
-                "标「默认关闭」的项在回归集上还有误报未复测。开之前先跑一遍：\
-                 cargo test --bin gongwen-assistant revise_cases -- --ignored --nocapture",
-            );
-        });
-    }
-
-    /// 文字复核的埋点面板：这个检查器到底在帮忙还是在添乱。
-    ///
-    /// 三个数字要一起看：闸门拦截多说明模型不合用；采纳率低说明这类检查本身
-    /// 不受用；两者都低才说明它真的有价值。只报一个数会误导人。
-    fn revise_metrics_ui(&mut self, ui: &mut egui::Ui) {
-        let mut any = false;
-        let mut clear = false;
-        let mut copied = false;
-        for task in &crate::revise_model::TASKS {
-            let stat = self.metrics.get(task.id);
-            if stat.decisions() == 0 && stat.gate_rejected == 0 {
-                continue;
-            }
-            any = true;
-            ui.horizontal_wrapped(|ui| {
-                setting_label(ui, task.label, None);
-                match stat.adoption() {
-                    Some(rate) if stat.decisions() >= crate::metrics::MIN_SAMPLES => {
-                        ui.colored_label(
-                            if stat.is_underperforming() {
-                                warn()
-                            } else {
-                                theme::text_soft()
-                            },
-                            format!(
-                                "采纳 {:.0}%（采纳 {} / 忽略 {}）",
-                                rate * 100.0,
-                                stat.accepted,
-                                stat.ignored
-                            ),
-                        );
-                    }
-                    _ => {
-                        ui.weak(format!(
-                            "采纳 {} / 忽略 {}（样本不足，暂不计采纳率）",
-                            stat.accepted, stat.ignored
-                        ));
-                    }
-                }
-                if stat.gate_rejected > 0 {
-                    ui.weak(format!("· 闸门拦下 {} 条", stat.gate_rejected));
-                }
-                if stat.undone > 0 {
-                    ui.weak(format!("· 采纳后撤销 {} 次", stat.undone));
-                }
-            });
-            // 拦截原因的分布才是调阈值的依据。只报总数的话，看不出是阈值太紧
-            // 还是提示词让模型话太多。
-            let reasons: Vec<String> = crate::revise_model::GateReason::ALL
-                .into_iter()
-                .map(|reason| (reason, self.metrics.gate_reason_count(task.id, reason)))
-                .filter(|(_, count)| *count > 0)
-                .map(|(reason, count)| format!("{} {count}", reason.label()))
-                .collect();
-            if !reasons.is_empty() {
-                setting_continuation(ui, |ui| {
-                    ui.weak(format!("拦截原因：{}", reasons.join("、")));
-                });
-            }
-            if stat.is_underperforming() {
-                setting_continuation(ui, |ui| {
-                    ui.colored_label(
-                        warn(),
-                        "这个检查器的建议多数被划掉，建议关掉——留着只会让人习惯性忽略整个建议面板。",
-                    );
-                });
-            }
-        }
-        if !any {
-            ui.weak("还没有复核记录。跑过几轮、逐条处理过之后，这里会显示采纳率。");
-            return;
-        }
-        setting_continuation(ui, |ui| {
-            if ui
-                .add(theme::icon_text_button(theme::Icon::Copy, "复制统计摘要"))
-                .on_hover_text("只有编号和计数，不含任何稿件内容，可以拿出内网讨论怎么调阈值")
-                .clicked()
-            {
-                ui.ctx().copy_text(self.metrics.report());
-                copied = true;
-            }
-            if ui
-                .add(theme::icon_text_button(theme::Icon::RotateCcw, "清空统计"))
-                .on_hover_text("换了模型或改了提示词之后，旧统计不再可比，清掉重新攒")
-                .clicked()
-            {
-                clear = true;
-            }
-        });
-        if copied {
-            self.status = "统计摘要已复制到剪贴板（仅计数，不含稿件内容）。".into();
-        }
-        if clear {
-            self.metrics.clear();
-            crate::metrics::save(&mut self.metrics);
-            self.status = "检查器统计已清空。".into();
         }
     }
-}
-
-/// 「上下文窗口」一行（16.15 A.1）：自动 / 常用档位 / 手填；自动时写明现在按多少算、从哪来。
-fn context_window_row(
-    ui: &mut egui::Ui,
-    salt: &str,
-    value: &mut u32,
-    auto: crate::lmstudio::context::Window,
-) {
-    use crate::lmstudio::context::tokens_label;
-    const PRESETS: [u32; 8] = [
-        8192, 16_384, 32_768, 65_536, 131_072, 204_800, 524_288, 1_048_576,
-    ];
-    setting_row(
-        ui,
-        "上下文窗口",
-        Some(
-            "一次请求里输入加输出最多多少 token。自动：先问服务（点「测试连接」时读到），问不到按模型名估，再不行按 32k；服务端报过超长时按它说的算。",
-        ),
-        |ui| {
-            let text = if *value == 0 {
-                format!("自动：{}", auto.label())
-            } else {
-                tokens_label(*value as usize)
-            };
-            egui::ComboBox::from_id_salt(salt)
-                .selected_text(text)
-                .width(240.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(value, 0, "自动");
-                    for preset in PRESETS {
-                        ui.selectable_value(value, preset, tokens_label(preset as usize));
-                    }
-                });
-            if *value != 0 {
-                ui.add(
-                    egui::DragValue::new(value)
-                        .range(2048..=2_000_000)
-                        .speed(256)
-                        .suffix(" token"),
-                )
-                .on_hover_text("双击数字可直接输入 token 数；按实际服务的窗口填写");
-            } else if ui.button("手工设置").clicked() {
-                *value = (auto.tokens as u32).clamp(2048, 2_000_000);
-            }
-        },
-    );
 }
 
 impl GongwenApp {
@@ -485,7 +329,7 @@ impl GongwenApp {
         }
     }
 
-    /// 「模型服务」分区：按功能配模型——智能写作（Pi）、辅助模型、文字复核、知识库检索。
+    /// 「模型服务」分区：按功能配模型——智能写作（Pi）、文字复核、知识库检索。
     /// 地址与密钥不在这里填；模型从「模型服务商管理」缓存的清单里挑，
     /// 选择器按提供商分组、可筛选（与字体选择同一套交互）。
     fn model_service_section_ui(&mut self, ui: &mut egui::Ui) {
@@ -500,11 +344,10 @@ impl GongwenApp {
         });
         ui.label(
             egui::RichText::new(
-                "智能写作和设置页风格学习使用的 Pi 模型，与下方的辅助模型分开选。不选就不启动 Pi，\
-                 不会偷偷回落到辅助模型。地址与密钥仍在「模型服务商管理」里维护；\
-                 上下文与输出预算自动管理，不沿用辅助模型的窗口和最大输出 Token；\
-                 思考深度在下面单独设置，与辅助模型互不影响。\
-                 每轮执行上限 15 分钟，等用户回答时暂停计时。",
+                "唯一的写作模型：侧栏写作/修改/提炼/风格学习，以及知识库问答、检索重排、\
+                 数据接口 AI 调用、任务助手识别都改用它。不选就不启动 Pi，也不回落到旧起草模型；\
+                 地址与密钥仍在「模型服务商管理」里维护；上下文与输出预算自动管理。\
+                 每轮执行上限 30 分钟，等用户回答时暂停计时。",
             )
             .size(theme::font_sizes::SMALL)
             .color(theme::text_muted()),
@@ -532,10 +375,7 @@ impl GongwenApp {
         setting_row(
             ui,
             "思考深度",
-            Some(
-                "只对支持深度参数的模型生效；默认「沿用服务端」，即不发送深度参数。\
-                 与辅助模型的思考深度互不影响。",
-            ),
+            Some("只对支持深度参数的模型生效；默认「沿用服务端」，即不发送深度参数。"),
             |ui| {
                 let options = self
                     .config
@@ -558,137 +398,7 @@ impl GongwenApp {
 
         ui.add_space(10.0);
 
-        // ── 辅助模型 ────────────────────────────────────────────────
-        ui.horizontal(|ui| {
-            sub_heading(ui, "辅助模型", None);
-            let mref = self.config.draft_model.clone();
-            provider_ref_chip(ui, &self.config, &mref);
-        });
-        ui.label(
-            egui::RichText::new(
-                "这里的模型用于复核、要素抽取、数据接口与知识库问答等辅助调用；\
-                 侧栏的新任务一律走下方「智能写作（Pi）」，不用这里的模型。只做写作、\
-                 不用这些功能时可以不配。",
-            )
-            .size(theme::font_sizes::SMALL)
-            .color(theme::text_muted()),
-        );
-        setting_row(ui, "模型", None, |ui| {
-            let (mut filter, mut show_all) = self.picker_state("draft");
-            model_picker(
-                ui,
-                "draft",
-                &providers,
-                &mut self.config.draft_model,
-                None,
-                &["chat"],
-                ModelKind::Chat,
-                &mut filter,
-                &mut show_all,
-            );
-            self.store_picker_state("draft", filter, show_all);
-        });
-        setting_row(ui, "备用模型（可不选）", None, |ui| {
-            let (mut filter, mut show_all) = self.picker_state("draft_backup");
-            model_picker(
-                ui,
-                "draft_backup",
-                &providers,
-                &mut self.config.draft_backup_model,
-                Some("不配置备用"),
-                &["chat"],
-                ModelKind::Chat,
-                &mut filter,
-                &mut show_all,
-            );
-            self.store_picker_state("draft_backup", filter, show_all);
-        });
-        setting_row(ui, "温度", None, |ui| {
-            ui.add(
-                egui::Slider::new(&mut self.config.lm_studio.temperature, 0.0..=1.2).step_by(0.05),
-            );
-        });
-        setting_row(
-            ui,
-            "思考深度",
-            Some(
-                "只对支持深度参数的模型生效；越高通常越慢、消耗越多。可用档位由服务端决定，报参数错误时选「沿用服务端」。",
-            ),
-            |ui| {
-                egui::ComboBox::from_id_salt("draft_reasoning_effort")
-                    .selected_text(self.config.lm_studio.reasoning_effort.label())
-                    .show_ui(ui, |ui| {
-                        for effort in crate::models::ReasoningEffort::ALL {
-                            ui.selectable_value(
-                                &mut self.config.lm_studio.reasoning_effort,
-                                effort,
-                                effort.label(),
-                            );
-                        }
-                    });
-            },
-        );
-        if self.config.lm_studio.reasoning_effort != crate::models::ReasoningEffort::Default {
-            setting_row(
-                ui,
-                "深度参数格式",
-                Some(
-                    "按模型服务的接口文档选择；此设置也用于辅助模型的备用模型。只调整深度，不负责开启服务端的思考模式。",
-                ),
-                |ui| {
-                    use crate::models::ReasoningFormat;
-                    egui::ComboBox::from_id_salt("draft_reasoning_format")
-                        .selected_text(match self.config.lm_studio.reasoning_format {
-                            ReasoningFormat::ReasoningEffort => "reasoning_effort（兼容接口）",
-                            ReasoningFormat::ReasoningObject => "reasoning.effort（OpenRouter 等）",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.config.lm_studio.reasoning_format,
-                                ReasoningFormat::ReasoningEffort,
-                                "reasoning_effort（兼容接口）",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.lm_studio.reasoning_format,
-                                ReasoningFormat::ReasoningObject,
-                                "reasoning.effort（OpenRouter 等）",
-                            );
-                        });
-                },
-            );
-        }
-        setting_row(
-            ui,
-            "最大输出 Token",
-            Some(
-                "用于上述辅助调用与数据接口；Pi（智能写作）自动管理生成预算，不使用此设置。\
-                 每次请求还会按上下文剩余空间收紧",
-            ),
-            |ui| {
-                ui.add(
-                    egui::DragValue::new(&mut self.config.lm_studio.max_tokens).range(256..=32768),
-                );
-            },
-        );
-        let auto = {
-            let mut probe = self.config.draft_chat().unwrap_or_default();
-            probe.context_window = 0;
-            crate::lmstudio::context::peek_window(&probe)
-        };
-        context_window_row(
-            ui,
-            "draft_context_window",
-            &mut self.config.lm_studio.context_window,
-            auto,
-        );
-        setting_row(ui, "超时（秒）", None, |ui| {
-            ui.add(
-                egui::DragValue::new(&mut self.config.lm_studio.timeout_seconds).range(5..=1800),
-            );
-        });
-
         // ── 文字复核 ────────────────────────────────────────────────
-        ui.add_space(10.0);
         ui.horizontal(|ui| {
             sub_heading(ui, "文字复核", None);
             let mref = self.config.revise_model.model_ref.clone();
@@ -696,10 +406,8 @@ impl GongwenApp {
         });
         ui.label(
             egui::RichText::new(
-                "逐句检查语病与错别字，结果进「修订建议」，逐条确认后才改正文。这是独立的小模型查错，\
-                 Pi 写作和风格学习不使用它。与辅助模型分开配：起草要发挥，复核只要稳——\
-                 Qwen3 4B/8B 一类的小模型温度 0 反而更好使，也快得多；未配置时沿用辅助模型及其上下文窗口。\
-                 复核请求会自动带上关闭思考的开关，服务端不认时会自动去掉重试。",
+                "逐句检查语病与错别字，结果进「修订建议」，逐条确认后才改正文。\
+                 独立的小模型查错，Pi 写作和风格学习不使用它；不配模型就沿用写作模型。",
             )
             .size(theme::font_sizes::SMALL)
             .color(theme::text_muted()),
@@ -709,14 +417,14 @@ impl GongwenApp {
             "启用文字复核（起草页「审校」分区出现入口）",
         );
         ui.add_enabled_ui(self.config.revise_model.enabled, |ui| {
-            setting_row(ui, "模型", Some("留空 = 沿用辅助模型"), |ui| {
+            setting_row(ui, "模型", Some("留空 = 沿用写作模型"), |ui| {
                 let (mut filter, mut show_all) = self.picker_state("revise");
                 model_picker(
                     ui,
                     "revise",
                     &providers,
                     &mut self.config.revise_model.model_ref,
-                    Some("沿用辅助模型"),
+                    Some("沿用写作模型"),
                     &["chat"],
                     ModelKind::Chat,
                     &mut filter,
@@ -725,64 +433,8 @@ impl GongwenApp {
                 self.store_picker_state("revise", filter, show_all);
             });
 
-            setting_row(
-                ui,
-                "备用模型（可不选）",
-                Some("复核模型在吐出第一个字之前不可用时，本次改用它。不选时：若复核沿用辅助模型，就沿用辅助模型的备用模型"),
-                |ui| {
-                let (mut filter, mut show_all) = self.picker_state("revise_backup");
-                model_picker(
-                    ui,
-                    "revise_backup",
-                    &providers,
-                    &mut self.config.revise_model.backup_model_ref,
-                    Some("不配置备用"),
-                    &["chat"],
-                    ModelKind::Chat,
-                    &mut filter,
-                    &mut show_all,
-                );
-                self.store_picker_state("revise_backup", filter, show_all);
-                },
-            );
-            sub_heading(ui, "送检范围", None);
-            setting_row(ui, "单句字数上限", None, |ui| {
-                ui.add(
-                    egui::DragValue::new(&mut self.config.revise_model.max_sentence_chars)
-                        .range(40..=400),
-                )
-                .on_hover_text("超过这个长度的多半是整段没断句，交给小模型只会跑飞，直接跳过");
-            });
-            setting_row(ui, "单轮送检句数上限", None, |ui| {
-                ui.add(
-                    egui::DragValue::new(&mut self.config.revise_model.max_sentences)
-                        .range(10..=1000),
-                )
-                .on_hover_text("逐句顺序调用，句数越多等得越久");
-            });
-            setting_row(ui, "超时（秒）", None, |ui| {
-                ui.add(
-                    egui::DragValue::new(&mut self.config.revise_model.timeout_seconds)
-                        .range(5..=600),
-                );
-            });
-            let auto = {
-                let mut probe = self.config.revise_chat(false).unwrap_or_default();
-                probe.context_window = 0;
-                crate::lmstudio::context::peek_window(&probe)
-            };
-            context_window_row(
-                ui,
-                "revise_context_window",
-                &mut self.config.revise_model.context_window,
-                auto,
-            );
-
             sub_heading(ui, "检查器", None);
             self.revise_tasks_ui(ui);
-
-            sub_heading(ui, "采纳统计", None);
-            self.revise_metrics_ui(ui);
         });
 
         // ── 知识库检索 ──────────────────────────────────────────────
@@ -795,7 +447,7 @@ impl GongwenApp {
         ui.label(
             egui::RichText::new(
                 "用 embedding 与 rerank 模型检索知识库，Pi 写作时据此取证据。\
-                 两个模型与写作模型、辅助模型相互独立。",
+                 两个模型与写作模型相互独立。",
             )
             .size(theme::font_sizes::SMALL)
             .color(theme::text_muted()),

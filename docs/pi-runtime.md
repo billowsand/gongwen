@@ -406,7 +406,7 @@ Pi 增加两个只读领域工具：`style_list`（按当前文种列出启用�
 ## 风格学习的独立文件交付（host 0.3.5）
 
 设置页通过同一 `PiJob` / `run` / Durable Harness 执行 `gongwen-style-learn`，任务文种标识为“风格档案”。
-风格任务只注册文件、阶段登记及 `submit_style`，不注册正文提交、表单、知识库或辅助模型工具。
+风格任务只注册文件、阶段登记及 `submit_style`，不注册正文提交、表单、知识库或写作模型工具。
 程序提供的样稿角色为 `style_sample`，候选范例和统计保存在只读 `input/style-guide.json`。
 
 `submit_style` 校验64 KiB内的JSON、字段上限、候选范例编号和路径，再使用现有不可变文件回执。

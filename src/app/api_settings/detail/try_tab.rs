@@ -274,7 +274,7 @@ pub(super) fn request_box(
     let mut generate = false;
     let mut picked = None;
     let running = page.detail.test.is_some();
-    let has_model = config.draft_chat().is_ok();
+    let has_model = config.aux_chat().is_ok();
     let generating = page.detail.generating.is_some();
     let running_all = page.detail.runs.is_some();
     let examples_count = page.store.endpoints[index].examples.len();

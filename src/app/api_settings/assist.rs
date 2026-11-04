@@ -174,7 +174,7 @@ impl Assist {
             steps: vec![if use_model {
                 "接入助手开始：逐个试调，缺什么问你，要对照资料改的交模型改".into()
             } else {
-                "接入助手开始（没配起草模型：只能试调、问你补的东西，配置要自己改）".into()
+                "接入助手开始（没配写作模型：只能试调、问你补的东西，配置要自己改）".into()
             }],
             pending: None,
             report: None,

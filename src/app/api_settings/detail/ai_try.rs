@@ -9,10 +9,10 @@ use super::*;
 use crate::agent::apidef::tooling;
 use crate::ai_services::text::value_to_text;
 
-/// 起草模型的名字，记进测试记录（换模型可以对比）。
+/// 写作模型的名字，记进测试记录（换模型可以对比）。
 fn model_name(config: &AppConfig) -> String {
     config
-        .draft_chat()
+        .aux_chat()
         .map(|chat| chat.model.trim().to_string())
         .unwrap_or_default()
 }
@@ -263,7 +263,7 @@ fn cases_bar(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) -> Option<usi
 fn ask_box(ui: &mut egui::Ui, page: &mut ApisPage, index: usize, config: &AppConfig) {
     let endpoint = page.store.endpoints[index].clone();
     let scope = ai_cases::scope(&page.store, &endpoint);
-    let has_model = config.draft_chat().is_ok();
+    let has_model = config.aux_chat().is_ok();
     let mut ask = false;
     let mut run_all = false;
     let mut propose = false;
@@ -293,7 +293,7 @@ fn ask_box(ui: &mut egui::Ui, page: &mut ApisPage, index: usize, config: &AppCon
                     theme::Icon::TriangleAlert,
                     theme::warn(),
                     theme::warn_soft(),
-                    "还没有选起草模型：到「AI 管理 → 模型服务」选好再试。",
+                    "还没有选写作模型：到「AI 管理 → 模型服务」选好再试。",
                 );
                 return;
             }

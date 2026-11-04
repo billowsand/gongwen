@@ -1463,7 +1463,7 @@ pub(super) mod tests {
         let texts = draw(&mut page);
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
         assert!(
-            has("让 AI 调") || has("还没有选起草模型"),
+            has("让 AI 调") || has("还没有选写作模型"),
             "只查询的接口能让 AI 试（没配模型时说清楚）：{texts:?}"
         );
     }

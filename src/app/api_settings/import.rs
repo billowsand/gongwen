@@ -1,6 +1,6 @@
 //! 「从文档添加」：粘贴接口文档或选文件 → 识别 → 逐个核对候选接口 → 加入。
 //!
-//! 识别（程序解析 + 起草模型整理，见 `agent::api_import`）在后台跑；识别出的只查询接口
+//! 识别（程序解析 + 写作模型整理，见 `agent::api_import`）在后台跑；识别出的只查询接口
 //! 配置齐了就自动用样例值试调一次，调通后按真实返回补返回映射。改数据的接口不能加入，
 //! 判断不了的要人确认只查询。密钥先进一份工作副本，点「加入」才写进本机密钥表。
 //!
@@ -169,9 +169,9 @@ impl Candidate {
     }
 }
 
-/// 起草模型配了没有。
+/// 写作模型配了没有。
 fn model_name(config: &AppConfig) -> Option<String> {
-    config.draft_chat().ok().map(|c| c.model)
+    config.aux_chat().ok().map(|c| c.model)
 }
 
 /// 底部「加入」条的高度。
@@ -441,7 +441,7 @@ fn input_ui(
         Some(model) => theme::caption(
             ui,
             &format!(
-                "识别时程序先解析 cURL、请求行和 JSON 示例，再把资料（密钥遮掉后）交给起草模型「{model}」整理名称、说明和参数含义。"
+                "识别时程序先解析 cURL、请求行和 JSON 示例，再把资料（密钥遮掉后）交给写作模型「{model}」整理名称、说明和参数含义。"
             ),
         ),
         None => theme::notice(
@@ -449,7 +449,7 @@ fn input_ui(
             theme::Icon::TriangleAlert,
             theme::warn(),
             theme::warn_soft(),
-            "没有配置起草模型：只能识别 cURL、请求行等结构，名称和说明要自己填。可在「模型服务」里配置。",
+            "没有配置写作模型：只能识别 cURL、请求行等结构，名称和说明要自己填。可在「模型服务」里配置。",
         ),
     };
     ui.add_space(4.0);

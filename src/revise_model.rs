@@ -115,7 +115,8 @@ pub const TASKS: [ReviseTask; 3] = [
 /// 稳定误报。**单次结果不是测量值**，这是这一路上代价最大的一课。
 pub const DEFAULT_DISABLED_TASKS: [&str; 1] = ["MDL-ADDRESS"];
 
-/// 按 id 找检查器。
+/// 按 id 找检查器（只给测试与回归评测用）。
+#[cfg(test)]
 pub fn task_by_id(id: &str) -> Option<&'static ReviseTask> {
     TASKS.iter().find(|task| task.id == id)
 }
@@ -328,18 +329,6 @@ impl GateReason {
             Self::Scope => "超出检查范围",
         }
     }
-
-    pub const ALL: [Self; 9] = [
-        Self::Shape,
-        Self::Length,
-        Self::Facts,
-        Self::Digits,
-        Self::Markup,
-        Self::NewTypo,
-        Self::Protocol,
-        Self::Rewrite,
-        Self::Scope,
-    ];
 }
 
 /// 改写结果落地前的闸门。任何一条不过就整条丢弃。

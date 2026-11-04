@@ -396,10 +396,13 @@ impl GongwenApp {
     fn delete_provider(&mut self, id: &str) {
         let used: Vec<&str> = [
             (&self.config.pi_model, "智能写作（Pi）"),
-            (&self.config.draft_model, "辅助模型"),
-            (&self.config.draft_backup_model, "文字起草备用"),
+            (&self.config.draft_model, "旧起草模型（兼容）"),
+            (&self.config.draft_backup_model, "旧起草备用（兼容）"),
             (&self.config.revise_model.model_ref, "文字复核"),
-            (&self.config.revise_model.backup_model_ref, "文字复核备用"),
+            (
+                &self.config.revise_model.backup_model_ref,
+                "旧复核备用（兼容）",
+            ),
             (&self.config.rag.embedding.model_ref, "知识库 embedding"),
             (&self.config.rag.rerank.model_ref, "知识库 rerank"),
         ]

@@ -28,7 +28,7 @@ fn a_curl_document_is_parsed_without_a_model() {
     assert_eq!(material.masked(), 1);
     let analysis = analyze(&material, None, &["policy_search".into()]);
     assert!(!analysis.model_used);
-    assert!(analysis.notes[0].contains("没有配置起草模型"));
+    assert!(analysis.notes[0].contains("没有配置写作模型"));
     assert_eq!(analysis.drafts.len(), 1);
     let draft = &analysis.drafts[0];
     let endpoint = &draft.endpoint;

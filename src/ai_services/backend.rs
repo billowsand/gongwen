@@ -26,7 +26,7 @@ static NATIVE_TOOLS_REJECTED: AtomicBool = AtomicBool::new(false);
 /// 这一步该用哪个模型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ModelRole {
-    /// 起草与补全：要写得好，用起草模型。
+    /// 起草与补全：要写得好，用写作模型。
     Draft,
     /// 列问题、核对来源、出澄清题：要稳定可复现，温度 0；配了复核模型就用它。
     Assist,
@@ -132,7 +132,7 @@ impl LmBackend {
             assist_backup: config.assist_backup_chat(),
             notices: Mutex::new(Vec::new()),
             usage: Mutex::new(UsageTotals::default()),
-            draft: config.draft_chat(),
+            draft: config.aux_chat(),
             assist: config.assist_chat(),
             cancel,
         }

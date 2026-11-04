@@ -222,7 +222,7 @@ fn without_a_model_fixable_failures_stop_with_a_reason() {
         report
             .open
             .iter()
-            .all(|o| o.contains("卡住") && o.contains("404") && o.contains("没配起草模型")),
+            .all(|o| o.contains("卡住") && o.contains("404") && o.contains("没配写作模型")),
         "{:?}",
         report.open
     );

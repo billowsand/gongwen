@@ -38,7 +38,10 @@
     修改，公文表可导入、停用与撤销。公文词表只加载已接受且为四码的词。
   - 旧 `dict.qj`、`lm.qj`、辅码与拼音学习数据不再使用，也不再随安装包分发。
 - 模型接入：本机 LM Studio / Ollama，走 OpenAI 兼容接口（`src/lmstudio.rs`、
-  `src/rag.rs`、`src/rag_client.rs`）。
+  `src/rag.rs`、`src/rag_client.rs`）。**2026-11-05 起模型通道收敛为两个用途**：
+  写作模型（Pi，`pi_model`）同时服务知识库问答、检索重排、数据接口 AI 调用与任务助手识别
+  （`AppConfig::aux_chat`）；文字复核（`revise_model`）是唯一保留的专门小模型。
+  「辅助模型」设置已删除，`draft_model` 只作旧配置兼容回落。
 
 ## 常用命令
 
@@ -119,7 +122,7 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   `history.rs`、`manuscript/ai_sessions.rs`；风格管理 `agent/style.rs`、`app/style_settings.rs`、技能「风格学习」）已完成，
   DMXAPI 上真机跑通。模型配置已提供商化：地址密钥收进「模型服务商管理」
   （`src/app/provider_settings.rs`，预设模板 + 提供商卡片），「模型服务」按功能
-  （起草 / 复核 / 知识库）选模型（`ModelRef` 引用 + `AppConfig` 中央解析器），
+  （写作 / 复核 / 知识库）选模型（`ModelRef` 引用 + `AppConfig` 中央解析器），
   旧内联地址字段随启动自动迁移；详见 `docs/ai-agent-workbench.md` 第十三节。对比分析、数据分析段落、正文区审阅再讨论（见第十六节 F16；opencode 接入已作废）。
   方案、红线修订记录、分期、各期进度与已知坑见 `docs/ai-agent-workbench.md`（单文件，第十三节是交接）。
   **2026-11-04 审查后 Pi 修复（待真机验收）**：单轮执行上限改为 30 分钟（等用户回答不计，
