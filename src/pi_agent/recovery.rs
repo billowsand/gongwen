@@ -7,12 +7,12 @@
 //! run.json          Rust 写的运行记录：身份、基线、要求、材料、模型引用、状态
 //! receipt.json      host 写的交付回执：成品快照路径、哈希、字节数、摘要
 //! final.md          host 写的成品不可变快照（回执指向它）
-//! sources/<哈希>.md 本轮真正的事实来源，供会话重载后继续改未采纳提案
+//! sources/index-<哈希>.json 事实来源索引（单项在 sources/items/<哈希>.md）
 //! pi/session.sqlite Durable 数据库
 //! ```
 //!
 //! 记录只放元数据，不放密钥、模型地址与正文：正文快照在工作区 `input/` 里，
-//! 事实来源单独一份，都有哈希。读坏记录返回中文问题，不崩窗口。
+//! 事实来源单独保存，都有哈希。读坏记录返回中文问题，不崩窗口。
 
 use super::delivery::sha256_hex;
 use super::materials::PiMaterialMeta;
@@ -23,6 +23,7 @@ use super::workspace::PiWorkspace;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// 运行记录格式版本；旧版本记录按「不能恢复」处理并说明原因。
 pub(crate) const RUN_VERSION: u32 = 1;
@@ -33,8 +34,17 @@ pub(crate) const MAX_RECORD_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_RECEIPT_BYTES: u64 = 2 * 1024 * 1024;
 /// 成品快照的读取上限（与交付上限一致）。
 pub(crate) const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
-/// 事实来源文件的读取上限。
+/// 恢复时读回的事实来源总量上限（所有单项相加）。
 pub(crate) const MAX_SOURCES_BYTES: u64 = 8 * 1024 * 1024;
+/// 单条事实来源（材料全文 / 一次工具返回全文）的上限。材料单份 ≤512 KiB，
+/// 整篇知识库读取 ≤160K 字符（中文约 480 KiB），2 MiB 足够覆盖且能挡住异常大项。
+const MAX_SOURCE_ITEM_BYTES: u64 = 2 * 1024 * 1024;
+/// 来源索引（一项一条哈希）的上限。
+const MAX_SOURCES_INDEX_BYTES: u64 = 512 * 1024;
+/// 每个运行只保留最近几个来源索引版本；更旧的索引删掉，避免目录无限增长。
+const MAX_SOURCE_INDEX_VERSIONS: usize = 2;
+/// 没被任何保留索引引用的项文件，超过这么久才删除（给并发恢复留余量）。
+const SOURCE_ITEM_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// 已确认回答最多保留多少条。
 pub(crate) const MAX_CONFIRMED: usize = 100;
 /// 记录里最多留多少行证据摘要。
@@ -139,7 +149,8 @@ pub(crate) struct PiRunRecord {
     /// 用户可显式取回或丢弃。旧记录没有此项，按否。
     #[serde(default)]
     pub(crate) delivery_rejected: bool,
-    /// 本轮事实来源文件的哈希，用于会话重载后继续改未采纳提案。
+    /// 本轮事实来源索引的哈希（`sources/index-<hash>.json`），用于会话重载后
+    /// 继续改未采纳提案；旧运行仍可能是单一 `sources/<hash>.md`。
     #[serde(default)]
     pub(crate) sources: Option<String>,
     pub(crate) created_at: String,
@@ -530,6 +541,72 @@ pub(crate) fn check_workspace_files(
             ));
         }
     }
+    verify_skill_snapshot(workspace)?;
+    Ok(())
+}
+
+/// 恢复前按 `input/skills.json` 回验技能快照内容。文件名存在不等于内容还是原来那一份：
+/// 备份工具、同步盘或手工改动都可能换掉文件。旧运行没有索引时不拦（保持兼容）。
+fn verify_skill_snapshot(workspace: &PiWorkspace) -> Result<(), String> {
+    let path = workspace.root.join("input/skills.json");
+    if !path.exists() {
+        return Ok(());
+    }
+    let bytes = read_bounded(&path, MAX_SOURCES_INDEX_BYTES)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Pi 技能索引读不出来，不能接着写：{error}"))?;
+    let Some(skills) = value.get("skills").and_then(serde_json::Value::as_array) else {
+        return Err("Pi 技能索引格式不正确，不能接着写。".into());
+    };
+    let mut total = 0u64;
+    for skill in skills.iter().take(64) {
+        let Some(dir) = skill.get("path").and_then(serde_json::Value::as_str) else {
+            return Err("Pi 技能索引缺少目录，不能接着写。".into());
+        };
+        if !dir.starts_with("skills/pi-skills/")
+            || dir.contains('\\')
+            || dir
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return Err("Pi 技能索引里的目录不合法，不能接着写。".into());
+        }
+        let Some(files) = skill.get("files").and_then(serde_json::Value::as_array) else {
+            return Err("Pi 技能索引缺少文件清单，不能接着写。".into());
+        };
+        for file in files.iter().take(256) {
+            let Some(relative) = file.get("path").and_then(serde_json::Value::as_str) else {
+                return Err("Pi 技能索引里的文件路径不合法，不能接着写。".into());
+            };
+            let Some(expected) = file.get("sha256").and_then(serde_json::Value::as_str) else {
+                return Err("Pi 技能索引里的文件哈希缺失，不能接着写。".into());
+            };
+            if relative.is_empty()
+                || relative.starts_with('/')
+                || relative.contains('\\')
+                || relative
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "." || part == "..")
+                || expected.len() != 64
+                || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("Pi 技能索引里的文件记录不合法，不能接着写。".into());
+            }
+            let file_path = workspace.root.join(dir).join(relative);
+            let content = read_bounded(&file_path, MAX_SNAPSHOT_BYTES)?;
+            total = total.saturating_add(content.len() as u64);
+            if total > 128 * 1024 * 1024 {
+                return Err(
+                    "Pi 技能快照超过校验上限，不能接着写；可以点「从头写」重新开始。".into(),
+                );
+            }
+            if sha256_hex_bytes(&content) != expected.to_ascii_lowercase() {
+                return Err(format!(
+                    "技能快照文件内容变了（{dir}/{relative}），不能接着写；可以点「从头写」重新开始。"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -719,36 +796,213 @@ pub(crate) fn read_snapshot(run_dir: &Path, receipt: &PiReceipt) -> Result<Strin
     Ok(text)
 }
 
-/// 来源按哈希保存为不可变版本，先写文件再切运行记录指针；中断不会破坏旧版本。
+/// 字节内容的 SHA-256（索引与来源项都按字节哈希）。
+fn sha256_hex_bytes(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn modified_secs(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// 来源按「单项文件 + 索引」保存：每次工具返回只新写变化的单项，索引极小且幂等。
+/// 旧版单一聚合文件的路径仍在 [`read_sources`] 里兼容读取。
+///
+/// 返回索引内容的哈希（写入 `run.json` 的 `sources` 指针）。
 pub(crate) fn write_sources(run_dir: &Path, sources: &[String]) -> Result<String, String> {
-    let text = sources.join("\n\n---\n\n");
-    if text.len() as u64 > MAX_SOURCES_BYTES {
-        return Err("本轮事实来源超过大小上限，未保存。".into());
-    }
-    let hash = sha256_hex(&text);
     let dir = run_dir.join("sources");
-    std::fs::create_dir_all(&dir).map_err(|error| format!("建立来源目录失败：{error}"))?;
-    let path = dir.join(format!("{hash}.md"));
-    if path.exists() && read_sources(run_dir, &hash)?.is_some() {
-        return Ok(hash);
+    let items = dir.join("items");
+    std::fs::create_dir_all(&items).map_err(|error| format!("建立来源目录失败：{error}"))?;
+    let mut hashes: Vec<String> = Vec::with_capacity(sources.len());
+    for source in sources {
+        let bytes = source.as_bytes();
+        if bytes.len() as u64 > MAX_SOURCE_ITEM_BYTES {
+            return Err(format!(
+                "单条事实来源超过上限（{} / {} 字节），未保存。",
+                bytes.len(),
+                MAX_SOURCE_ITEM_BYTES
+            ));
+        }
+        let hash = sha256_hex_bytes(bytes);
+        let path = items.join(format!("{hash}.md"));
+        if !path.exists() {
+            crate::storage::atomic_write(&path, |file| {
+                std::io::Write::write_all(file, bytes)?;
+                Ok(())
+            })
+            .map_err(|error| format!("写不出 Pi 事实来源：{error:#}"))?;
+        }
+        hashes.push(hash);
     }
-    crate::storage::atomic_write(&path, |file| {
-        std::io::Write::write_all(file, text.as_bytes())?;
-        Ok(())
-    })
-    .map_err(|error| format!("写不出 Pi 事实来源：{error:#}"))?;
+    let index = serde_json::json!({ "version": 1, "items": hashes });
+    let bytes =
+        serde_json::to_vec(&index).map_err(|error| format!("组装事实来源索引失败：{error}"))?;
+    if bytes.len() as u64 > MAX_SOURCES_INDEX_BYTES {
+        return Err("事实来源条目过多，索引超过上限，未保存。".into());
+    }
+    let hash = sha256_hex_bytes(&bytes);
+    let path = dir.join(format!("index-{hash}.json"));
+    if !path.exists() {
+        crate::storage::atomic_write(&path, |file| {
+            std::io::Write::write_all(file, &bytes)?;
+            Ok(())
+        })
+        .map_err(|error| format!("写不出 Pi 事实来源索引：{error:#}"))?;
+    }
+    // 只清理没有索引引用的项文件；索引本身等运行记录指针切换成功后再清
+    // （见 [`prune_sources`]），否则“写新索引成功、改指针失败”会删掉仍被
+    // 旧指针指向的那一份，恢复时读不到来源。
+    prune_source_items(&dir, &items);
     Ok(hash)
 }
 
-/// 读回 `pi/sources.md` 并校验哈希。哈希对不上就当没有，不把不可信内容当依据。
+/// 运行记录指针已经切到 `current` 之后，保留最新几个索引版本并清理项文件。
+/// 无论 mtime 排序如何，`current` 必须保留。清理失败一律忽略：它是节省磁盘，
+/// 不能反过来影响本轮。
+fn prune_sources(run_dir: &Path, current: &str) {
+    let dir = run_dir.join("sources");
+    let items = dir.join("items");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let current_path = dir.join(format!("index-{}.json", current.to_ascii_lowercase()));
+    let mut indexes: Vec<(u64, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            (name.starts_with("index-") && name.ends_with(".json"))
+                .then_some((modified_secs(&path), path))
+        })
+        .collect();
+    indexes.sort_by_key(|right| std::cmp::Reverse(right.0));
+    let mut kept: Vec<PathBuf> = indexes
+        .iter()
+        .take(MAX_SOURCE_INDEX_VERSIONS)
+        .map(|(_, path)| path.clone())
+        .collect();
+    if current_path.exists() && !kept.contains(&current_path) {
+        kept.push(current_path);
+    }
+    for (_, path) in &indexes {
+        if !kept.iter().any(|kept| kept == path) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    prune_source_items(&dir, &items);
+}
+
+/// 删掉没被任何现存索引引用的项文件（超过 TTL 才删）。
+fn prune_source_items(dir: &Path, items: &Path) {
+    let mut referenced = std::collections::HashSet::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !(name.starts_with("index-") && name.ends_with(".json")) {
+            continue;
+        }
+        let Ok(bytes) = read_bounded(&path, MAX_SOURCES_INDEX_BYTES) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if let Some(hashes) = value.get("items").and_then(serde_json::Value::as_array) {
+            for hash in hashes {
+                if let Some(hash) = hash.as_str() {
+                    referenced.insert(hash.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(items) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".md") else {
+            continue;
+        };
+        if referenced.contains(&stem.to_ascii_lowercase()) {
+            continue;
+        }
+        let old_enough = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| now.duration_since(time).ok())
+            .is_some_and(|age| age > SOURCE_ITEM_TTL);
+        if old_enough {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// 读回事实来源并校验哈希。优先读新的「索引 + 单项」格式，兼容旧的单一聚合文件。
+/// 哈希对不上就当没有，不把不可信内容当依据。
 pub(crate) fn read_sources(run_dir: &Path, expected: &str) -> Result<Option<String>, String> {
     if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("事实来源哈希写法不合法。".into());
     }
-    let versioned = run_dir
-        .join("sources")
-        .join(format!("{}.md", expected.to_ascii_lowercase()));
-    // 兼容本阶段早期开发记录；只在哈希核对通过时使用旧文件。
+    let expected = expected.to_ascii_lowercase();
+    let dir = run_dir.join("sources");
+    let index = dir.join(format!("index-{expected}.json"));
+    if index.exists() {
+        let bytes = read_bounded(&index, MAX_SOURCES_INDEX_BYTES)?;
+        if sha256_hex_bytes(&bytes) != expected {
+            return Ok(None);
+        }
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("事实来源索引读不出来：{error}"))?;
+        let items = value
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("事实来源索引格式不正确")?;
+        let mut parts = Vec::with_capacity(items.len());
+        let mut total = 0u64;
+        for item in items {
+            let Some(hash) = item.as_str() else {
+                return Err("事实来源索引项不是字符串。".into());
+            };
+            if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err("事实来源索引项哈希写法不合法。".into());
+            }
+            let path = dir
+                .join("items")
+                .join(format!("{}.md", hash.to_ascii_lowercase()));
+            let bytes = read_bounded(&path, MAX_SOURCE_ITEM_BYTES)?;
+            if sha256_hex_bytes(&bytes) != hash.to_ascii_lowercase() {
+                return Ok(None);
+            }
+            total = total.saturating_add(bytes.len() as u64);
+            if total > MAX_SOURCES_BYTES {
+                return Err(
+                    "本轮事实来源超过恢复上限（8 MiB），不能接着写；请「从头写」重新开始。".into(),
+                );
+            }
+            parts.push(
+                String::from_utf8(bytes)
+                    .map_err(|_| "Pi 事实来源不是合法 UTF-8，未采用。".to_string())?,
+            );
+        }
+        return Ok(Some(parts.join("\n\n---\n\n")));
+    }
+    // 兼容本阶段早期开发记录（单一聚合文件）：只在哈希核对通过时使用。
+    let versioned = dir.join(format!("{expected}.md"));
     let path = if versioned.exists() {
         versioned
     } else {
@@ -760,7 +1014,7 @@ pub(crate) fn read_sources(run_dir: &Path, expected: &str) -> Result<Option<Stri
     let bytes = read_bounded(&path, MAX_SOURCES_BYTES)?;
     let text =
         String::from_utf8(bytes).map_err(|_| "Pi 事实来源不是合法 UTF-8，未采用。".to_string())?;
-    if sha256_hex(&text) != expected.to_ascii_lowercase() {
+    if sha256_hex(&text) != expected {
         return Ok(None);
     }
     Ok(Some(text))
@@ -875,6 +1129,7 @@ impl PiRunLog {
     pub(crate) fn persist_sources(&self, sources: &[String]) -> Result<Option<String>, String> {
         let hash = write_sources(&self.workspace.run, sources)?;
         self.try_update(|record| record.sources = Some(hash.clone()))?;
+        prune_sources(&self.workspace.run, &hash);
         Ok(Some(hash))
     }
 
@@ -901,8 +1156,10 @@ impl PiRunLog {
             );
             record.confirmed.truncate(MAX_CONFIRMED);
             record.answers.truncate(MAX_CONFIRMED);
-            record.sources = Some(hash);
-        })
+            record.sources = Some(hash.clone());
+        })?;
+        prune_sources(&self.workspace.run, &hash);
+        Ok(())
     }
 
     pub(crate) fn evidence(&self, line: &str) {
@@ -914,12 +1171,14 @@ impl PiRunLog {
         });
     }
 
-    pub(crate) fn finished(&self, status: PiRunStatus, message: &str) {
+    /// 写终态。写盘失败向调用方返回原因：失败现场要能在错误串里说出来，
+    /// 不能悄悄停在 Running。
+    pub(crate) fn finished(&self, status: PiRunStatus, message: &str) -> Result<(), String> {
         let message: String = message.chars().take(2_000).collect();
-        self.update(|record| {
+        self.try_update(|record| {
             record.status = status;
             record.message = message;
-        });
+        })
     }
 
     pub(crate) fn delivered(
@@ -927,8 +1186,20 @@ impl PiRunLog {
         receipt: &PiReceipt,
         sources: Option<&[String]>,
     ) -> Result<Option<String>, String> {
+        // 来源只是恢复用的辅助材料：写不出来不能反过来否掉已经落盘的成品，
+        // 否则回执重放会在同一个错误上无限循环。失败时保留旧指针并在证据里留痕。
         let sources = match sources {
-            Some(sources) => Some(write_sources(&self.workspace.run, sources)?),
+            Some(sources) => match write_sources(&self.workspace.run, sources) {
+                Ok(hash) => Some(hash),
+                Err(error) => {
+                    self.evidence(&format!("本轮事实来源未落盘：{error}"));
+                    self.record
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .sources
+                        .clone()
+                }
+            },
             None => self
                 .record
                 .lock()
@@ -944,8 +1215,22 @@ impl PiRunLog {
             record.receipt = Some(summary);
             record.sources = sources;
         })?;
+        if let Some(hash) = &hash {
+            prune_sources(&self.workspace.run, hash);
+        }
         Ok(hash)
     }
+}
+
+/// 从轮次里的薄引用读回盘上的运行状态；读不到返回 None（界面保持原值，不猜）。
+pub(crate) fn run_status(run: &PiRunRef) -> Option<PiRunStatus> {
+    if run.is_empty() {
+        return None;
+    }
+    let root = resolve_workspace(&run.workspace).ok()?;
+    let dir = root.parent()?;
+    let record = PiRunRecord::read_from(dir).ok()?;
+    (record.run_id == run.run_id).then_some(record.status)
 }
 
 #[cfg(test)]
@@ -1054,6 +1339,38 @@ mod tests {
         assert_eq!(
             read_sources(&workspace.run, &first).unwrap().as_deref(),
             Some("旧依据")
+        );
+    }
+
+    /// 指针更新成功后才会清理旧索引：当前指针指向的那一份必须一直可读，
+    /// 索引版本数有上限，不能随工具调用次数无限增长。
+    #[test]
+    fn source_indexes_keep_the_current_pointer_and_bound_the_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = workspace(dir.path());
+        let log = PiRunLog::open(&workspace, record(&workspace)).unwrap();
+        let mut hashes = Vec::new();
+        for index in 0..5 {
+            let source = format!("依据{index}");
+            hashes.push(
+                log.persist_sources(&[source])
+                    .unwrap()
+                    .expect("每次落盘都有索引"),
+            );
+        }
+        let current = hashes.last().unwrap();
+        assert_eq!(
+            read_sources(&workspace.run, current).unwrap().as_deref(),
+            Some("依据4")
+        );
+        let indexes = std::fs::read_dir(workspace.run.join("sources"))
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("index-"))
+            .count();
+        assert!(
+            indexes <= MAX_SOURCE_INDEX_VERSIONS + 1,
+            "旧索引没有清理：{indexes} 个"
         );
     }
 

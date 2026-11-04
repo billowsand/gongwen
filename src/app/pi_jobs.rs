@@ -49,6 +49,16 @@ impl GongwenApp {
             Ok(outcome) => outcome,
             Err(error) => {
                 doc.ai_review_baseline = None;
+                // 失败原因可能是超时、进程被杀、模型服务掉线：盘上的运行记录里
+                // 有 host 最后写的状态（失败 / 中断 / 交付过）。读得到就按它回写，
+                // 读不到保持原值；不解析中文错误串猜类别。
+                if let Some(turn) = doc.ai_panel.running_turn_mut()
+                    && let Some(run) = turn.pi_run.as_mut()
+                    && let Some(status) = crate::pi_agent::run_status(&*run)
+                {
+                    run.status = status;
+                    run.updated_at = chrono::Local::now().to_rfc3339();
+                }
                 doc.ai_panel.finish(TurnState::Failed(error.clone()));
                 self.status = format!("{prefix}Pi 智能写作未完成：{error}");
                 return;
@@ -1222,5 +1232,36 @@ mod pi_job_tests {
         app.apply_doc_job(key, 5, DocJob::PiDone(Box::new(Err("读不到引用".into()))));
         assert!(app.docs[0].ai_proposal.is_some(), "准备失败要保留旧提案");
         assert!(!app.docs[0].busy);
+    }
+
+    /// 失败收尾会按盘上运行记录回写状态；读不到记录就保持原值，不靠解析中文错误串猜类别。
+    #[test]
+    fn a_failed_run_keeps_the_saved_status_when_the_record_is_unreadable() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::storage::set_test_config_dir(None);
+            }
+        }
+        let mut app = management_samples::fixture();
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        let _reset = Reset;
+        let before = "# 通知\n\n原文。\n";
+        app.docs[0].generated_markdown = before.into();
+        app.docs[0].job_seq = 3;
+        app.docs[0].busy = true;
+        let turn = waiting_turn(&mut app, 3);
+        app.docs[0].ai_panel.turn_mut(turn).unwrap().pi_run = Some(run_ref(before));
+        let key = app.docs[0].key;
+        app.apply_doc_job(key, 3, DocJob::PiDone(Box::new(Err("超时未完成".into()))));
+        let turn = app.docs[0].ai_panel.turn_mut(turn).unwrap();
+        assert!(matches!(turn.state, TurnState::Failed(_)));
+        assert_eq!(
+            turn.pi_run.as_ref().unwrap().status,
+            crate::pi_agent::PiRunStatus::Running,
+            "读不到运行记录时保持原值"
+        );
+        assert!(!app.docs[0].busy, "失败收尾要释放忙碌");
     }
 }

@@ -66,7 +66,8 @@ pub(crate) enum DraftAction {
 }
 
 impl GongwenApp {
-    /// 关闭标签。稿件有未保存改动时先弹确认，别把人写了一半的稿子直接扔掉。
+    /// 关闭标签。有未保存改动、或者还有 Pi 任务在跑时先弹确认，别把人写了一半的
+    /// 稿子直接扔掉，也别在用户不知情时停掉正在跑的那一轮。
     pub(crate) fn request_close_tab(&mut self, tab: usize) {
         match self.tabs.get(tab) {
             Some(TabRef::Doc(key)) => {
@@ -74,13 +75,20 @@ impl GongwenApp {
                     self.close_tab(tab);
                     return;
                 };
-                if self.docs[index].is_dirty() {
+                // 任务在跑时即使正文没改也要确认：关闭会把这一轮取消，未交付的成品不再写入。
+                let running = self.docs[index].busy || self.docs[index].ai_panel.running();
+                if running || self.docs[index].is_dirty() {
                     self.close_confirm = Some(*key);
+                    self.close_confirm_running = running;
                 } else {
+                    self.close_confirm_running = false;
                     self.close_tab(tab);
                 }
             }
-            Some(TabRef::Page(_) | TabRef::Pdf(_)) => self.close_tab(tab),
+            Some(TabRef::Page(_) | TabRef::Pdf(_)) => {
+                self.close_confirm_running = false;
+                self.close_tab(tab);
+            }
             None => {}
         }
     }
@@ -142,18 +150,21 @@ impl GongwenApp {
         self.remember_session();
     }
 
-    /// 关闭未保存稿件的二次确认。按稿件 `key` 绑定，每帧重新定位，
+    /// 关闭未保存稿件 / 还有任务在跑的稿件的二次确认。按稿件 `key` 绑定，每帧重新定位，
     /// 确认期间别的标签关掉、`docs` 下标错位也不会处理到别的稿件。
     pub(crate) fn close_confirm_window(&mut self, ctx: &egui::Context) {
         let Some(key) = self.close_confirm else {
             return;
         };
-        let Some(doc) = self.doc_index_of_key(key).map(|index| &self.docs[index]) else {
+        let Some(index) = self.doc_index_of_key(key) else {
             // 稿件已经不在了（比如被别处关掉），确认失去对象，直接撤掉。
             self.close_confirm = None;
+            self.close_confirm_running = false;
             return;
         };
-        let title = doc.title();
+        let title = self.docs[index].title();
+        let dirty = self.docs[index].is_dirty();
+        let running = self.close_confirm_running;
         let dialog = modal::dialog(
             ctx,
             egui::Id::new("close_confirm"),
@@ -161,7 +172,17 @@ impl GongwenApp {
             360.0,
             Dismiss::EscOrBackdrop,
             |ui| {
-                ui.label(format!("《{title}》有未保存的改动。"));
+                if dirty {
+                    ui.label(format!("《{title}》有未保存的改动。"));
+                } else {
+                    ui.label(format!("要关闭《{title}》吗？"));
+                }
+                if running {
+                    ui.add_space(4.0);
+                    ui.label(
+                        "这篇稿件还有 Pi 任务在跑，关闭会停止任务，未交付的成品不再写入正文。",
+                    );
+                }
                 ui.add_space(10.0);
                 let mut save = None;
                 ui.horizontal(|ui| {
@@ -185,12 +206,14 @@ impl GongwenApp {
         let Some(save) = dialog.inner else {
             if dialog.dismissed {
                 self.close_confirm = None;
+                self.close_confirm_running = false;
             }
             return;
         };
         self.close_confirm = None;
         if save {
             let Some(index) = self.doc_index_of_key(key) else {
+                self.close_confirm_running = false;
                 return;
             };
             let previous = self.active_doc;
@@ -200,12 +223,36 @@ impl GongwenApp {
             self.active_doc = previous;
             if !saved {
                 // 保存失败（归档稿、库不可用等），保留标签，状态栏已说明原因。
+                self.close_confirm_running = false;
                 return;
             }
         }
+        // 关标签不会等后台线程：先置取消标志、断开问答通道，否则 host 会跑到超时，
+        // 还可能把成品写进一篇已经不在的稿件。
+        if self.close_confirm_running
+            && let Some(index) = self.doc_index_of_key(key)
+        {
+            self.stop_doc_tasks(index);
+        }
+        self.close_confirm_running = false;
         if let Some(tab) = self.tabs.iter().position(|item| *item == TabRef::Doc(key)) {
             self.close_tab(tab);
         }
+    }
+
+    /// 取消这一篇稿件正在跑的任务（关标签前、退出前）：置取消标志、断开问答通道、
+    /// 让在途回执作废，并释放「忙碌」。只改字段，不借道起草页。
+    pub(crate) fn stop_doc_tasks(&mut self, index: usize) {
+        let Some(doc) = self.docs.get_mut(index) else {
+            return;
+        };
+        if let Some(cancel) = doc.ai_panel.cancel.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        doc.ai_panel.pi_bridge = None;
+        doc.ai_panel.pi_ask = None;
+        doc.job_seq = doc.job_seq.wrapping_add(1);
+        doc.busy = false;
     }
 
     /// 关窗请求的入口。有未保存或未提交的稿件就先拦下来问一次。
@@ -259,6 +306,7 @@ impl GongwenApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         // 汇总框覆盖了所有稿件，单篇的关闭确认让位，免得两个模态叠在一起。
         self.close_confirm = None;
+        self.close_confirm_running = false;
         self.exit_prompt = Some(ExitPrompt {
             unsaved,
             uncommitted,

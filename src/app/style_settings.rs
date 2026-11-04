@@ -54,6 +54,20 @@ impl Drop for StylesPage {
     }
 }
 
+impl StylesPage {
+    /// 关窗时应用层统一取消仍在跑的风格学习。
+    pub(crate) fn cancel_learning(&self) {
+        if let Some(cancel) = &self.cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// 是否有一轮风格学习还没收尾（关窗时要等它退出 Node）。
+    pub(crate) fn learning_in_progress(&self) -> bool {
+        self.learning.is_some()
+    }
+}
+
 struct Editor {
     profile: StyleProfile,
     /// 适用场合的输入框（顿号分隔）。
@@ -433,6 +447,19 @@ impl GongwenApp {
             self.styles_page.message = Some((false, format!("无法学习风格：{error}")));
             return;
         }
+        // 风格学习同样起一轮 Pi：和正文写作共用全局门禁，避免两个 Node 抢同一个模型。
+        if crate::pi_agent::writing_active() {
+            self.styles_page.message =
+                Some((false, "有 Pi 写作正在运行，等它结束后再学习风格。".into()));
+            return;
+        }
+        let writing = match crate::pi_agent::begin_writing() {
+            Ok(writing) => writing,
+            Err(error) => {
+                self.styles_page.message = Some((false, error));
+                return;
+            }
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         self.styles_page.cancel = Some(cancel.clone());
@@ -441,6 +468,7 @@ impl GongwenApp {
         self.styles_page.message = None;
         let config = Arc::new(self.config.clone());
         std::thread::spawn(move || {
+            let _writing = writing;
             let result = (|| -> Result<_, String> {
                 if chosen.len() + files.len() > MAX_SAMPLES {
                     return Err("一次最多选择10篇样稿。".into());

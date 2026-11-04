@@ -2,6 +2,12 @@
 
 > **2026-11-04 用户确认的 Pi 写作取舍（优先于下文历史方案）。** 新任务按 256K 及以上窗口作为主要使用场景，预算采用实际部署容量，取消未知模型 96K 封顶、材料份数与旧短步骤偏好触发的自动细分；材料优先整篇阅读，超限按大章节/大段切分。每次运行提供当前日期、星期、时区及相关组织背景，`current_date` 可重读实时日期，`vocab_search` 支持职能/简介与所属单位。Pi 不执行事实核查、不生成事实疑点或额外 AI 审校清单；全面审校和政策核查技能退出新任务目录。现有文字复核、格式检查、引用保护、授权表单权限、正文基线及精确撤销保留。旧提案和历史记录权限不变。实现与验收见 [写作上下文首版](pi-implementation/writing-context-v1.md)。
 
+> **2026-11-04 审查后修复（本轮已改，待真机验收）。** 单轮执行上限改为 **30 分钟**（等待用户
+> 回答的时间不计），卡片显示「执行上限 30 分钟」；工具调用常规 60 次，分阶段由宿主按阶段
+> 追加额度、硬上限 **84 次**；事实来源改为「单项 + 索引」落盘（旧格式仍可读），落盘失败不再
+> 中止本轮；运行目录新增自动清理，AI 管理页显示占用并可「清理旧工作区」；生产 host 改为
+> `env_clear` 后最小环境白名单并透传代理设置；macOS 的 `darwin-arm64` / `darwin-x64` 运行时、
+> 打包、签名公证（可选）与 CI 骨架已补齐，macOS 真机与发布验证仍未做。各条详见下文对应节。
 
 本文说明智能写作（Pi）在目标机上的固定运行时：怎么组装、manifest 是什么、打包怎么接入、
 怎么验收，以及恢复与所有权的边界。设计与协议见 `docs/pi-implementation/phase-3.md`、
@@ -14,7 +20,7 @@
 ```text
 runtime/pi/
   manifest.json              平台、Node / Pi / host / 协议版本、lockfile 哈希、文件清单
-  node.exe                   Windows（Linux 是 bin/node）
+  node.exe                   Windows（Linux / macOS 是 bin/node）
   licenses/LICENSE.node      Node 官方许可证
   licenses/DEPENDENCIES.json 完整生产依赖的 name / version / license
   licenses/deps/<name@ver>/  各依赖的 LICENSE / COPYING / NOTICE 原文
@@ -28,6 +34,7 @@ runtime/pi/
 
 | 项 | 值 |
 | --- | --- |
+| 平台 | `win-x64`、`linux-arm64`、`linux-x64`、`darwin-arm64`、`darwin-x64`（macOS 用官方 `.tar.gz`） |
 | Node | `22.22.3`（与本机已验版本一致，不跟随 latest） |
 | `@earendil-works/chord` / `pi-ai` / `pi-durable` | `1.4.0` |
 | host | `0.3.4`，协议 `3` |
@@ -38,8 +45,11 @@ runtime/pi/
 - `node-v22.22.3-win-x64.zip`：`6c8d54f635feff4df76c2ca80f45332eb2ff57d25226edce36592e51a177ee33`
 - `node-v22.22.3-linux-arm64.tar.xz`：`1c4a9933a5e45bc88f54f70b5f91232c127ec49f1a5989d23fb85824c7adf9b7`
 - `node-v22.22.3-linux-x64.tar.xz`：`2e5d13569282d016861fae7c8f935e741693c269101a5bebcf761a5376d1f99f`
+- `node-v22.22.3-darwin-arm64.tar.gz` / `node-v22.22.3-darwin-x64.tar.gz`：官方归档是 **gzip**
+  （`.tar.gz`，不是 Linux 的 `.tar.xz`）；SHA-256 记在 `packaging/pi-runtime.json`，组装时按清单
+  校验，并与官方 `SHASUMS256.txt` 核对。
 
-**升级步骤**：同时改 `packaging/pi-runtime.json`（版本 + 三个 SHA-256）、host 的
+**升级步骤**：同时改 `packaging/pi-runtime.json`（版本 + 五个平台归档的 SHA-256）、host 的
 `PROTOCOL_VERSION` / `HOST_VERSION`（若协议或 host 变了，Rust 侧 `protocol.rs` 同步）、
 重新组装并出 manifest，然后跑无公网验收。不允许「自动跟随 latest」。
 
@@ -59,10 +69,21 @@ bash scripts/stage-pi-runtime.sh --platform linux-arm64 --force
 bash scripts/stage-pi-runtime.sh --platform linux-x64 --force
 ```
 
+macOS（arm64 / x64，同样必须在目标架构上组装）：
+
+```bash
+bash scripts/stage-pi-runtime.sh --platform darwin-arm64 --force
+bash scripts/stage-pi-runtime.sh --platform darwin-x64 --force
+```
+
+macOS 走 BSD 工具：校验和用 `shasum -a 256`，解包用 `tar -xzf`（官方 darwin 归档是 gzip），
+不要求 GNU coreutils；脚本已按平台分支，不要拿 Linux 归档或 `sha256sum` 硬套。
+
 组装脚本只做这些事：
 
 1. 找官方压缩包（缓存目录 / `-NodeArchive` / 构建期下载），**先校验 SHA-256 再解包**；
-2. 只取 `node` / `node.exe` 与 `LICENSE`，不把 npm、头文件、文档塞进安装包；
+2. 只取 `node` / `node.exe` 与 `LICENSE`，不把 npm、头文件、文档塞进安装包；Unix（Linux /
+   macOS）上放 `bin/node`，打包脚本负责补可执行位；
 3. 用**该 Node 自带的 npm** 在临时目录跑
    `npm ci --omit=dev --ignore-scripts --no-audit --no-fund`
    （`GONGWEN_PI_NPM_OFFLINE=1` 时加 `--offline`，需要完整 npm 缓存）；
@@ -84,6 +105,8 @@ manifest 的 `source` 必须是 `npm-ci`，不接受把开发目录复制进来�
 runtime\pi\node.exe scripts\pi-offline-acceptance.mjs --runtime .\runtime\pi
 # Linux
 ./runtime/pi/bin/node scripts/pi-offline-acceptance.mjs --runtime ./runtime/pi
+# macOS
+./runtime/pi/bin/node scripts/pi-offline-acceptance.mjs --runtime ./runtime/pi
 ```
 
 脚本从**安装目录**启动 `host/main.mjs`，不 import 源码、不依赖开发 node_modules：
@@ -91,9 +114,9 @@ runtime\pi\node.exe scripts\pi-offline-acceptance.mjs --runtime .\runtime\pi
 - 本地假 OpenAI 服务只监听 `127.0.0.1`；host 以 `node --import scripts/pi-offline-guard.mjs` 启动，
   守卫在导入 host **之前**接管 `net.connect` / `tls.connect` / `dns.lookup` / `dns.resolve*` /
   `fetch`：只放 `127.0.0.1` / `::1` / `localhost`，其它目标写进审计 JSONL 并直接报错；
-  运行期间另用 `netstat -ano`（Windows）/ `ss -tnp`（Linux）采样 host 子进程的
-  ESTABLISHED 连接作补充（采样只能观察，不能单独证明无公网）；守卫没生效或工具缺失
-  都按失败处理；
+  运行期间另用 `netstat -ano`（Windows）/ `ss -tnp`（Linux）/ `lsof -nP -iTCP -sTCP:ESTABLISHED -a -p <pid>`
+  （macOS，系统没有 `ss`）采样 host 子进程的 ESTABLISHED 连接作补充（采样只能观察，不能单独
+  证明无公网）；守卫没生效或工具缺失都按失败处理；
 - 子进程环境是最小白名单：`PATH` 只含随包 Node 与系统目录，`HOME` / `USERPROFILE` /
   `XDG_CONFIG_HOME` / `APPDATA` / `TEMP` 指向临时目录；不继承 `NODE_PATH`、
   `NODE_OPTIONS`、`LD_LIBRARY_PATH` 与任何模型 / 云凭据，不依赖用户缓存；
@@ -101,11 +124,14 @@ runtime\pi\node.exe scripts\pi-offline-acceptance.mjs --runtime .\runtime\pi
   回执绑定与哈希、`final.md` 快照、Durable `session.sqlite` 已落盘；
 - 再用 `recovery: { mode: "resume" }` 启动一次：必须交回同一份成品，且**不再调用模型**。
 
-注意：验收脚本工作区里的技能是**简化夹具**（只验证文件工具与交付链），当前 6 份标准技能由
-应用内嵌资源（`cargo test --locked skill_pack`）与界面集成验收覆盖，本脚本不冒充真实技能验收。
+注意：验收脚本工作区里的技能是**简化夹具**（只验证文件工具与交付链），7 份内置技能
+（6 份写作 + 1 份风格学习 `gongwen-style-learn`）由应用内嵌资源（`cargo test --locked skill_pack`）
+与界面集成验收覆盖，本脚本不冒充真实技能验收。
 
-本机已对 Windows x64 组装运行时实测通过（4 次模型调用、回执重放 0 次新调用）。Linux ARM64 /
-x64 的组装与验收只能在对应架构的 CI 上跑，本机结果不能代替。
+本机已对 Windows x64 组装运行时实测通过（4 次模型调用、回执重放 0 次新调用）。Linux 骨架已进
+CI（buster 作业组装 `linux-arm64` 运行时 + 离线验收 + Pi 的 Rust 进程 / 锁 / 交付测试），
+**Linux 真机整链仍待验**；macOS 的组装、离线验收与打包脚本已按 darwin 分支补齐，尚未在真机与
+发布环境验证。本机结果不能代替真机验收。
 
 ## 四、打包接入
 
@@ -115,8 +141,18 @@ x64 的组装与验收只能在对应架构的 CI 上跑，本机结果不能代
 - `scripts/stage-linux-portable.sh`、`package-deb.sh`、`package-arch-pkg.sh`：同样先调用
   `scripts/pi-runtime-verify.mjs`，再复制 / 出包；`check-node-glibc.sh` 核查随包 Node 的
   GLIBC 符号版本不超过 2.28、并打印解释器与 GLIBCXX 需求。
-- `release.yml` 三个平台作业都先组装运行时、跑无公网验收，再进入原有打包流程；
-  `ci.yml` 在 Windows 与 Ubuntu 20.04 ARM64 上跑同样的组装 + 验收（Linux 真架构检查）。
+- macOS：`package-dmg.sh` / `package-macos.sh` 出包前同样校验 manifest 与全部文件哈希，并把
+  `runtime/pi` 复制进 `Contents/MacOS/runtime/pi`（不再只搬字体）；`packaging/macos/entitlements.plist`
+  给随包 Node 授予 JIT 所需权限。签名与公证是**可选**步骤：配置了
+  `GONGWEN_MACOS_SIGN_IDENTITY` / `GONGWEN_MACOS_NOTARY_PROFILE` 才执行 hardened runtime
+  签名、`notarytool` 与 `staple`，未配置时出未签名包（本机可用，别人机器上 Gatekeeper 会拦）。
+  证书与 Apple 账号的准备见 `packaging/macos/README.md`。
+- `release.yml` 各平台作业都先组装运行时、跑无公网验收，再进入原有打包流程；新增 macOS
+  arm64 的 `.dmg`（先只出 arm64，x64 可按同一办法出包）。`ci.yml` 在 Windows、Ubuntu 20.04
+  ARM64 与 `macos-14` 上跑同样的组装 + 验收；Debian buster 作业会组装 `linux-arm64` 运行时
+  并把 `runtime/pi/bin` 加进 PATH，Pi 的进程 / 锁 / 交付 Rust 测试因此真正执行；Linux 与
+  Windows 作业另跑 `cargo test --locked --release shipped_pi_runtime_manifest -- --ignored`
+  做随包运行时 manifest 的端到端校验。
 - 最终 `SHA256SUMS.txt` 与增量升级差分自然包含 `runtime/pi/**`：Node 或依赖变了就进升级包，
   没变就不带。卸载 / 升级只按现有 `InstallDelete` 处理，不碰用户配置与稿件。
 
@@ -124,10 +160,16 @@ x64 的组装与验收只能在对应架构的 CI 上跑，本机结果不能代
 
 Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 
+- 平台在**运行期**判定（`std::env::consts::OS` / `ARCH`），不再用编译期 `cfg!` 把「非 Windows」
+  一律当 `linux-*`：Windows x64 → `win-x64`，Linux arm64 / x64 → `linux-arm64` / `linux-x64`，
+  macOS arm64 / x64 → `darwin-arm64` / `darwin-x64`（manifest 的平台名也用 `darwin-*`）；
+  未知平台明确报「不支持的系统」，不再误接受一份别的平台的运行时；
 - 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.3.4`、协议 `3` 与配置一致；
 - 在执行 Node 前核对 Node 本身的 SHA-256，并检查依赖锁文件哈希；抽查关键入口
   （`host/main.mjs`、`host/package.json`、三个 Pi 包的 `package.json`）的
   SHA-256；不会每帧遍历 `node_modules`（manifest 只在每次开跑定位时读一次）；
+  定位与哈希校验的结果按运行时目录在进程内缓存，同一进程后续开跑复用，不重复整读
+  80 MB 级的 Node；开发运行时（环境变量模式）不读 manifest，也不走这份缓存；
 - 缺文件 / 版本不符 / 哈希不符都给中文错误并指向「重装」。
 
 开发时仍可用 `GONGWEN_PI_RUNTIME_DIR` / `GONGWEN_PI_NODE` 指向源码目录：这条路径会明确
@@ -139,20 +181,24 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 ### 统一策略、分阶段与阶段成果（协议 3，host 0.3.4）
 
 模型能力档案由「测试写作能力」后台动作生成：四次同题自动 / 分阶段合成写作都经生产 Rust Pi 运行链，
-工具源显式绑定到临时 SQLite 知识库 / 稿件库与空风格源。结果与独立原始证据按 SHA-256 关联；资料、模型成品、
+工具源显式绑定到临时 SQLite 知识库 / 稿件库与空风格源。单轮限时 **300 秒**、四轮总计 **15 分钟**，
+并分别记录「超时」与「能力不足」——工具链超时不算模型能力不足；校准仍**不产生**
+`verifiedWorkBudget`。结果与独立原始证据按 SHA-256 关联；资料、模型成品、
 工具覆盖和机器判据可回看。当前测试只验证 FTS/关键词与工具闭环，模拟 embedding 服务不可达，因此不代表真实向量
-或 rerank 服务验收，也不验证长上下文工作预算。`verifiedWorkBudget` 保持为空；证据不足时不推断「必须短步骤」。
+或 rerank 服务验收，也不验证长上下文工作预算。
 
 匹配时检查规范化端点（去除 userinfo / query / fragment）、模型 ID、窗口数值及来源、思考设置、host/判据版本与技能快照摘要。
 校准档案在 `配置目录/pi/capability.json`，不保存密钥或稿件；原始合成证据在 `pi/calibration-evidence/<sha256>.json`，
 按单文件 256 KiB、单次四轮和单篇成品 16 KiB 限额约束。超限明确报错，不静默截断成品。新运行在后台匹配档案后把能力摘要写进 Init；恢复沿用运行开始时
-保存的能力快照，不受以后校准影响。旧证据不匹配、缺失或损坏时按保守预算继续，不阻断写作。
+保存的能力快照，不受以后校准影响。旧证据不匹配、缺失或损坏时按实际窗口预算继续，不阻断写作。
 
 新任务统一从「智能写作」入口发起，不再由用户选择小模型版 / 大模型版。init 增加可选
 `strategy: { preference: "auto" | "phased", capability: { verifiedWorkBudget?, needsShortSteps? } }`：
 用户只选「自动 / 倾向分阶段」，host 按**实际窗口**（`model.contextWindow`）与本轮任务规模
 （要求、正文、材料字节、报告型任务）算出**工作预算**，两个字段分开上报在 `strategy` 事件里
-（`window` / `workBudget` / `materialsBudget` / `reasons`）。默认工作预算未验证时按保守值，
+（`window` / `workBudget` / `materialsBudget` / `reasons`）。未验证模型 / 未验证工作预算时，
+`workBudget` = **实际服务窗口**（不会伪造一个更小的「保守值」），并在策略事件里标注「未验证」；
+结构上不产生 `verifiedWorkBudget`（校准只做短任务观察，不验证长上下文能力），
 不按模型名、参数量或 256K 阈值猜能力，也没有输出长度设置。
 
 分阶段与常规共用同一个 Durable Harness 和同一套交付权限：
@@ -170,10 +216,13 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
   每阶段最多纠正两次，无有效成果即暂停，不冒充完成。
 - 常规一轮没交出成品且任务带材料时，有一次有界转换到分阶段，已登记成果为 0，不重复任何单元；
   没有材料的空转不转换，避免用阶段循环掩盖「无成果」。
-- 工具调用额度按阶段有上限上调（常规 60，分阶段总计不超过 60 + 16）；`read` 改为有界分页，
+- 工具调用额度：常规 **60 次**；分阶段由宿主按阶段追加额度，硬上限 **84 次**（Rust 侧也按
+  84 判定，超过即终止并说明原因，旧文档的「60 + 16」说法作废）。`read` 改为有界分页，
   返回「已读第 x–y 行 / 未读第 y+1–N 行，继续用 offset」，单次结果受本次工作预算限制。
   知识库 / 稿件库的全文本工具同样支持 `offset`，返回 `total_chars` / `next_offset` /
   `unread_chars`，不再静默截断后当全文。最终交付仍读完整文件并独立校验。
+- 单轮执行上限 **30 分钟（1800 秒）**，等待用户回答的时间不计入；卡片显示「执行上限 30 分钟」。
+  超时按可续写失败收尾并保留工作区，已登记的阶段成果可「接着写」，不重付整轮成本。
 - 事实与写入权限不变：中间成果不写正文，登记不能代替 `submit_document`；正文仍由界面线程
   在用户可见的 Pi 交付流程里写入，并保留整次撤销。
 
@@ -189,24 +238,46 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 - 「接着写」必须启动 host，由 host 在锁内重放交付回执；Rust 不绕过锁直读回执。
 - 「从头写」不校验旧正文 / 旧模型 / 旧 Durable 库，只安全读取旧材料（路径 + 哈希 + 体积），
   以当前正文与当前 Pi 模型建立新 run；过期锁定选区明确丢弃并提示。
-- 每次工具返回与用户回答都会在交给 host 之前把真实事实来源写入运行目录的
-  `sources/<SHA256>.md`，再原子更新 `run.json` 中的引用；旧版本保留，中断不覆盖旧来源；
-  恢复时重灌，避免崩溃后闸门把真实依据当成无来源。用户回答另存纯答案值（`answers`），
-  「问题：回答」的显示字符串不当事实。- 工作区不自动清理：中断 / 停止 / 删除会话后，`配置目录/pi/workspaces/` 下的运行目录保留，
-  便于人工查看与恢复。本期不做自动回收，也不把工作区放进 GWX 同步包；需要清理时由用户
-  先停止所有窗口的 Pi 任务并退出应用，再手动清理 `pi/workspaces`。未保存到稿件库的新稿只在本次会话里保留运行引用，
-  关掉应用后无法「接着写」——界面上有这句说明，不显示假入口。
+- 事实来源存储（本轮已改）：每次工具返回与用户回答后，把**单项**写入运行目录的
+  `sources/items/<SHA256>.md`，再写 `sources/index-<hash>.json` 索引并原子更新 `run.json`
+  的引用。单项上限 2 MiB、索引上限 512 KiB、恢复读取总量上限 8 MiB；旧格式
+  `sources/<hash>.md` 仍可读，兼容历史运行。索引清理在运行记录指针切换成功之后做：
+  保留最近 2 个版本以及当前指针指向的那一份（最多 3 个），未被任何现存索引引用的项文件
+  超过 24 小时后清理。**来源落盘失败不再中止本轮**，只在过程记录里留一行
+  提示（Pi 交付本身不做事实核查，这层数据只服务历史记录与恢复），恢复时重灌。用户回答另存
+  纯答案值（`answers`），「问题：回答」的显示字符串不当事实。
+- 工作区自动清理（本轮已改）：每个稿件保留最近 3 轮；只自动删除**已写入正文（Accepted）**
+  或**没有 `run.json` 的孤儿目录（超过 1 小时）**、且最后修改超过 7 天的运行目录；
+  Running / Interrupted / Failed / Parked / Delivered 的目录不自动删（它们支撑「接着写」）。
+  AI 管理页显示 `Pi 工作区占用 X MB（N 轮）` 并提供「清理旧工作区」按钮，按同一规则清理。
+  运行目录仍不放进 GWX 同步包；需要手动清理时，先停止所有窗口的 Pi 任务并退出应用，再删
+  `pi/workspaces`。未保存到稿件库的新稿只在本次会话里保留运行引用，关掉应用后无法
+  「接着写」——界面上有这句说明，不显示假入口。
+- 生产 host 启动环境（本轮已改）：不再继承完整环境，而是 `env_clear` 后只注入最小白名单
+  （`PATH`、`SystemRoot`、`TEMP` / `TMP`、`HOME` / `USERPROFILE` / `APPDATA` / `LOCALAPPDATA`、
+  `XDG_*`、`LANG` / `LC_ALL`、`TZ` 等），**不继承** `NODE_OPTIONS` / `NODE_PATH` /
+  `LD_LIBRARY_PATH`。应用内代理设置会以 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` /
+  `NO_PROXY`（含小写形式与 `NODE_USE_ENV_PROXY=1`）传给 host；直连模式设 `NO_PROXY=*`，
+  跟随系统模式原样传递系统代理变量。
 
 ### 成品写入正文与撤销（2026-11-02）
 
 - 宿主交回的正文成品由界面线程**直接写进当前编辑正文**（普通流程不弹人工校订窗、
-  不勾事实、不接受提案）；报告型产物只进侧栏。事实来源疑点只作提示。
+  不勾事实、不接受提案）；报告型产物只进侧栏。Pi 交付检查**不做事实核查**，不产生事实疑点
+  清单（`DeliveryReport.advisories` 仅为兼容历史记录保留、新交付恒空）。
+- 交付通道按任务类型分三类：正文 `document`（`submit_document`）、清单 `report`
+  （`finish_report`）、独立风格文件 `style`（`submit_style`，只进设置页编辑器，不能写正文）；
+  技能目录按任务类型隔离，互不串用。
 - 每次写入保留精确的修改前后文本与运行标识（`ai_panel::pi_write::PiWrite`，随会话存盘）：
   卡片上有「撤销本次写入」，并经 `replace_with_undo` 记一个撤销点。编辑器状态按稿件
   隔离；后台标签写入后切回来，也能一次 Ctrl+Z 撤回该稿件的 Pi 写入。
 - 写入前先确认修改前基线在盘上：工作区的 `input/current.md` 在交付时重新核对（
   `pi_agent::recovery::check_baseline_snapshot`），有库稿件还要先把撤销记录写进会话；
   任一失败就不换正文，成品留在轮次里可显式取回。
+- 被硬闸门拦下（空稿、路径 / 体积 / 哈希、基线与选区、公文引用、只读）的成品不丢弃，
+  保留在这一轮里；只能由用户显式点「**取回 AI 成品**」写入正文——取回路径不重跑闸门，
+  但保留精确撤销记录（2026-11-02 / 11-04 确认的产品口径）。红线 3 说的「照旧拦下」指
+  自动写入路径。
 - 写入成功后运行记录标成 `Accepted`（旧提案接受用的也是它，语义都是「成品已进正文」）；
   这一轮不再可恢复，重启后重放回执也不会自动再覆盖一次。
 - 运行期间用户改过正文时**不自动覆盖**：AI 成品留在这一轮（`TurnState::Conflict`），
@@ -242,6 +313,16 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 4. 升级：`dpkg -i` / `pacman -U` 新包；确认 `runtime/pi/manifest.json` 版本变化、
    用户数据未动。
 
+**macOS arm64（dmg，待真机验收）**
+
+1. 打开 dmg，把应用拖进「应用程序」，确认 `Contents/MacOS/runtime/pi/bin/node --version`
+   为 `v22.22.3`；未签名的开发包会被 Gatekeeper 拦，需要右键「打开」或先移除隔离属性。
+2. 首次启动后跑一轮 Pi（同上），确认随包 Node 能 exec、卡片能写入/撤销；`.gwx` 的**双击
+   打开在 macOS 不支持**（未接 Apple Event open-file），用拖放或应用内「导入」。
+3. 签名、公证与证书/Apple 账号的准备见 `packaging/macos/README.md`；CI 未配 secrets 时
+   发布的是未签名包。卸载时注意 `~/Library/Application Support/` 下配置目录（含
+   `pi/workspaces`）需要手动清理。
+
 ## 八、Pi 标准技能管理（4C）
 
 AI 管理 → 技能管理实际提供给 Pi 的标准 SKILL.md，不再编辑旧 flow 流程。
@@ -251,9 +332,11 @@ AI 管理 → 技能管理实际提供给 Pi 的标准 SKILL.md，不再编辑�
 
 ### 内置技能与参考文件（4D）
 
-六份在用技能：起草 `gongwen-draft`、修改 `gongwen-revise`、仿写 `gongwen-imitate`、
-研究报告 `gongwen-research`、复函 `gongwen-reply`、要点提炼 `gongwen-extract`。
-全面审校和政策核查只保留历史文件，不再作为新任务技能。
+内置 **7 个**技能：6 个写作技能——起草 `gongwen-draft`、修改 `gongwen-revise`、仿写
+`gongwen-imitate`、研究报告 `gongwen-research`、复函 `gongwen-reply`、要点提炼
+`gongwen-extract`——加 1 个风格学习 `gongwen-style-learn`（设置页入口，不写正文，见文末）。
+全面审校 `gongwen-review` 与政策核查 `gongwen-policy-check` 已退役：只保留历史文件，
+不再进新任务技能目录（旧 15 份技能的映射见 `docs/pi-skill-migration.md`）。
 润色 / 精简 / 语气 / 规范化是修改技能按任务选择的 `references/`，材料成文归起草，
 旧 15 份技能的历史映射、取舍与未覆盖能力见 `docs/pi-skill-migration.md`。
 
@@ -263,8 +346,10 @@ AI 管理 → 技能管理实际提供给 Pi 的标准 SKILL.md，不再编辑�
 
 技能按需读 `skills/gongwen-markdown/` 的语法与文种规则、材料角色、选区与已填要素；
 只有会让整篇方向写错的事才 `ask_user`，授权要素不建议、不出题，也没有「先确认清单
-才能生成」或「事实勾选才能进正文」的闸门。交付分流：只提炼 / 风格分析用
-`finish_report`；生成或修改正文才用 `submit_document` 交完整 Markdown。
+才能生成」或「事实勾选才能进正文」的闸门。交付通道按任务类型分三类：正文用
+`submit_document` 交完整 Markdown；只提炼 / 清单 / 报告型产物用 `finish_report`；
+风格学习用 `submit_style` 交独立 JSON 草稿（只进设置页编辑器，不能写正文）。技能目录
+按任务类型隔离：常规写作快照不含风格学习技能，风格任务快照只含它。
 
 ### 只读风格工具（4D）
 
@@ -288,18 +373,26 @@ Pi 增加两个只读领域工具：`style_list`（按当前文种列出启用�
 
 ## 九、已知限制
 
-- **能力校准**：AI 管理 → 模型服务 →「测试写作能力」在后台做两组自动/分阶段合成通知对照；最多四轮，每轮120秒、总计8分钟，可停止。仅使用内置技能、空风格库、临时SQLite资料，不读取用户稿件/知识库。档案在配置目录 `pi/capability.json`，原始合成输入/成品与机器判据在 `pi/calibration-evidence/<SHA-256>.json`。窗口数值或来源、模型、服务、思考参数、host/判据、技能内容变化后重新匹配；服务器不暴露的权重/默认参数变化仍需要用户重测。
-- **校准结论边界**：当前短任务测试只支持工具调用和成对策略观察；不验证长输入预算，不因一次网络/超时失败设置短步骤偏好。没有充分证据时保持未知，普通写作仍按保守规则工作。恢复任务使用原快照；“从头重来”才读取新证据。
+- **能力校准**：AI 管理 → 模型服务 →「测试写作能力」在后台做两组自动/分阶段合成通知对照；最多四轮，每轮 **300 秒**、总计 **15 分钟**，可停止；「超时」与「能力不足」分开记录（工具链超时不算能力不足），校准仍不产生 `verifiedWorkBudget`。仅使用内置技能、空风格库、临时SQLite资料，不读取用户稿件/知识库。档案在配置目录 `pi/capability.json`，原始合成输入/成品与机器判据在 `pi/calibration-evidence/<SHA-256>.json`。窗口数值或来源、模型、服务、思考参数、host/判据、技能内容变化后重新匹配；服务器不暴露的权重/默认参数变化仍需要用户重测。
+- **校准结论边界**：当前短任务测试只支持工具调用和成对策略观察；不验证长输入预算，不因一次网络/超时失败设置短步骤偏好。没有充分证据时保持未知：`workBudget` 按实际服务窗口规划并标注「未验证」，经验证的更小工作预算 `verifiedWorkBudget` 当前结构上不可得。恢复任务使用原快照；「从头重来」才读取新证据。
 
 - **第五阶段策略恢复**：短步骤在同一个 Durable Harness 的空闲边界 reset。宿主登记保存 active cursor、输入/成果哈希、依赖、用户回答与实际 kb/ms 只读证据快照；恢复先核验并还原阶段，再恢复 Harness。长单行可用字符范围续读，知识/稿件工具的单次结果同时受工作预算限制。最终交付仍完整读取并检查文件，不用片段读取冒充全文。
-- **技术反馈与事实提示**：显式提交时会反馈缺少题名、标题手写编号、研究报告脚注和附件标记等格式错误，模型可修改文件后重新提交；不自动清洗原稿。该检查不能证明模型完成了业务要求或查全依据，Qwen 的漏查与无据推断仍见第五阶段主审记录。
+- **技术反馈（Pi 不做事实核查）**：显式提交时会反馈缺少题名、标题手写编号、研究报告脚注和附件标记等格式错误，模型可修改文件后重新提交；不自动清洗原稿。Pi 交付检查不做事实核查、不生成事实疑点清单，因此它不能证明模型完成了业务要求或查全依据（Qwen 的漏查与无据推断仍见第五阶段主审记录）。
 
 - **体积**：Windows 组装后 `runtime/pi` 约 162 MB（Node 87 MB + 生产依赖约 75 MB，
   1.3 万个文件）；完整安装包会明显变大，增量包只带变化的文件。
-- **Linux 未在本机验证**：Node 的 GLIBC / GLIBCXX 与解释器要求由 CI 在目标架构检查；
-  本机只真验 Windows x64。
+- **Linux / macOS 真机未验收**：Linux 骨架已进 CI（buster 作业组装 `linux-arm64` 运行时 +
+  离线验收 + Pi 的 Rust 进程 / 锁 / 交付测试，GLIBC / GLIBCXX 与解释器也在目标架构检查），
+  **真机整链仍待验**；macOS 的运行时组装、离线验收（`lsof`）、打包与 `macos-14` CI 已补，
+  但尚未在真机和发布环境跑通，签名 / 公证需要证书与 Apple 账号（见
+  [`packaging/macos/README.md`](../packaging/macos/README.md)）。本机只真验 Windows x64。
+- **Windows 干净机整链未验收**：安装包在无开发环境机器上的安装 → 启动 → 内网模型 →
+  写入 / 撤销 → 重启「接着写」全链，仍按第七节清单待真机执行。
+- **5D / 5E 仍未通过**：较强模型同题对照、干净机安装、Linux / macOS 真机验收均未完成，
+  旧代码退役（旧会话只读 → 旧检查点 → `skill_job` → `engine/router/ops`）未开始；文档同步
+  不代表验收通过。
 - **manifest 较大**（约 2.6 MB）：启动时解析一次，不在每帧或每个工具调用重复读。
-- **不自动清理孤立工作区**：见第六节。
+- **工作区自动清理规则见第六节**：只删已写入正文或超期孤儿目录；其余目录保留以支撑「接着写」，不会无提示整目录回收。
 
 ## 风格学习的独立文件交付（host 0.3.4）
 

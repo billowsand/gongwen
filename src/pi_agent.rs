@@ -29,18 +29,18 @@ pub(crate) use delivery::{
 pub(crate) use materials::{MaterialRole, PiMaterialInput};
 pub(crate) use process::{
     PiAnswer, PiBridge, PiDelivery, PiEvent, PiJob, PiModel, PiOutcome, PiQuestionBatch, PiTask,
-    run,
+    PiWritingGuard, begin_writing, run, writing_active,
 };
 #[cfg(test)]
 pub(crate) use process::{PiQuestion, PiReport};
 pub(crate) use protocol::PiReportItem;
 pub(crate) use recovery::{
     PiRunLog, PiRunRecord, PiRunRef, PiRunSelection, PiRunStatus, consume_run, read_sources,
-    reject_run, resolve_workspace, run_delivery_rejected,
+    reject_run, resolve_workspace, run_delivery_rejected, run_status,
 };
 pub(crate) use runtime::PiRuntime;
 pub(crate) use skills as pi_skills;
 pub(crate) use strategy::PiCapabilitySnapshot;
 pub(crate) use strategy::PiStrategyPreference;
 pub(crate) use tools::PiToolContext;
-pub(crate) use workspace::{PiWorkspace, base_dir};
+pub(crate) use workspace::{PiWorkspace, base_dir, prune_workspaces, workspace_usage};

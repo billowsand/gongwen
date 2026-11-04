@@ -29,7 +29,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 /// 一轮 Pi 写作的最长执行时间（等用户回答的时间不计）。到期由 Rust 与 host 两边止损。
-const PI_TIMEOUT: Duration = Duration::from_secs(900);
+/// 30 分钟：整篇长材料 + 多轮工具调用是正常工作量，15 分钟会误伤。
+const PI_TIMEOUT: Duration = Duration::from_secs(1800);
 /// 准备完成后等界面确认运行引用的上限；超过就不启动 host，避免挂住后台线程。
 const PREPARE_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -93,6 +94,8 @@ struct PiLaunch {
     tools: Arc<PiToolContext>,
     bridge: Arc<PiBridge>,
     record: Arc<PiRunLog>,
+    /// 从应用代理设置派生的环境变量：host 在最小环境里运行，代理要显式传。
+    proxy_env: Vec<(String, String)>,
     request_id: String,
     run_id: String,
     resume: bool,
@@ -108,6 +111,9 @@ impl DraftPage<'_> {
         if self.doc.busy || self.doc.ai_panel.running() {
             return Err("这篇稿件还有任务在跑，稍等一下。".into());
         }
+        // 全局只允许一轮 Pi 正文写作：门禁在这里同步拿到，并发拒绝发生在创建
+        // 等待中的轮次之前，不会先挂一张再失败的空卡片。
+        let writing = crate::pi_agent::begin_writing()?;
         let composer = &self.doc.ai_panel.composer;
         if editor_has_selection && composer.selection.is_none() {
             return Err(
@@ -219,6 +225,7 @@ impl DraftPage<'_> {
                 "修改现稿".to_string()
             },
             format!("材料 {} 份", materials.len() + refs.len()),
+            format!("执行上限 {} 分钟", PI_TIMEOUT.as_secs() / 60),
         ];
 
         // 界面线程到此为止：只创建等待中的轮次，准备交给后台。
@@ -251,7 +258,7 @@ impl DraftPage<'_> {
             model_provider,
             model_id,
         };
-        spawn_prepare(prepare, self.panel_cancel(), self.sender.clone());
+        spawn_prepare(prepare, self.panel_cancel(), self.sender.clone(), writing);
         Ok(())
     }
 
@@ -517,6 +524,8 @@ impl DraftPage<'_> {
         if self.doc.busy || self.doc.ai_panel.running() {
             return Err("这篇稿件还有任务在跑，稍等一下。".into());
         }
+        // 接着写 / 从头写同样占全局写入门禁：拒绝发生在重开轮次之前。
+        let writing = crate::pi_agent::begin_writing()?;
         let (turn_title, reference) = {
             let Some(turn) = self.doc.ai_panel.turns.iter().find(|t| t.id == turn_id) else {
                 return Err("这一轮已经不在了。".into());
@@ -548,11 +557,12 @@ impl DraftPage<'_> {
         let time = crate::prompt::TimeContext::now();
         let before = self.doc.generated_markdown.clone();
         let base = crate::app::ai_proposal::pi_base(self.doc);
-        let context = if restart {
+        let mut context = if restart {
             vec!["Pi 文件工作区".to_string(), "从头重写".to_string()]
         } else {
             vec!["Pi 文件工作区".to_string(), "接着上次的进度".to_string()]
         };
+        context.push(format!("执行上限 {} 分钟", PI_TIMEOUT.as_secs() / 60));
 
         let (key, seq) = self.begin_job();
         if let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) {
@@ -600,7 +610,7 @@ impl DraftPage<'_> {
             model_provider: self.config.pi_model.provider_id.clone(),
             model_id: self.config.pi_model.model.clone(),
         };
-        spawn_prepare(prepare, self.panel_cancel(), self.sender.clone());
+        spawn_prepare(prepare, self.panel_cancel(), self.sender.clone(), writing);
         Ok(())
     }
 
@@ -692,20 +702,29 @@ impl DraftPage<'_> {
 }
 
 /// 后台准备 + 确认 + 启动 host。所有失败都走 `PiDone(Err)`，不会把 `busy` 留在 true。
-fn spawn_prepare(prepare: PiPrepare, cancel: Arc<AtomicBool>, sender: Sender<WorkerResult>) {
-    spawn_prepare_with(prepare, cancel, sender, prepare_pi);
+fn spawn_prepare(
+    prepare: PiPrepare,
+    cancel: Arc<AtomicBool>,
+    sender: Sender<WorkerResult>,
+    writing: crate::pi_agent::PiWritingGuard,
+) {
+    spawn_prepare_with(prepare, cancel, sender, writing, prepare_pi);
 }
 
 fn spawn_prepare_with(
     prepare: PiPrepare,
     cancel: Arc<AtomicBool>,
     sender: Sender<WorkerResult>,
+    writing: crate::pi_agent::PiWritingGuard,
     work: impl FnOnce(PiPrepare, &AtomicBool) -> Result<PiLaunch, String> + Send + 'static,
 ) {
     let key = prepare.key;
     let seq = prepare.seq;
     let turn_id = prepare.turn_id;
     std::thread::spawn(move || {
+        // 全局写作门禁跟着这轮任务活：准备、等界面确认、host 运行到收尾都在同一轮里，
+        // 线程结束（成功、失败或被取消）才释放，别的稿件这时才能开始。
+        let _writing = writing;
         let send = |job: DocJob| {
             let _ = sender.send(WorkerResult::Doc { key, seq, job });
         };
@@ -848,6 +867,8 @@ fn prepare_start(
         model_id,
         ..
     } = prepare;
+    // host 在 env_clear 后的最小环境里跑，代理要按应用设置显式下发。
+    let proxy_env = crate::net::proxy_env(&config.proxy);
     let mut probe_facts: Vec<String> = materials
         .iter()
         .filter(|material| material.role.is_fact_source())
@@ -959,6 +980,7 @@ fn prepare_start(
         tools,
         bridge: Arc::new(PiBridge::default()),
         record: log,
+        proxy_env,
         request_id,
         run_id,
         resume: false,
@@ -987,6 +1009,8 @@ fn prepare_resume(
         model_id,
         ..
     } = prepare;
+    // 恢复 / 重开也是同一个 host 最小环境，代理照样按当前应用设置下发。
+    let proxy_env = crate::net::proxy_env(&config.proxy);
     let reference = reference.ok_or("缺少 Pi 运行引用，不能恢复")?;
     let old_root = resolve_workspace(&reference.workspace)?;
     let old_workspace = PiWorkspace::reopen(old_root, reference.workspace.clone())?;
@@ -1090,6 +1114,7 @@ fn prepare_resume(
             tools,
             bridge: Arc::new(PiBridge::default()),
             record: log,
+            proxy_env,
             request_id,
             run_id,
             resume: false,
@@ -1177,6 +1202,7 @@ fn prepare_resume(
         tools,
         bridge: Arc::new(PiBridge::default()),
         record: log,
+        proxy_env,
         request_id: reference.request_id,
         run_id: reference.run_id,
         resume: true,
@@ -1199,6 +1225,7 @@ fn run_launch(
         tools,
         bridge,
         record,
+        proxy_env,
         request_id,
         run_id,
         resume,
@@ -1213,6 +1240,7 @@ fn run_launch(
         tools,
         bridge,
         record,
+        proxy_env,
         resume,
         request_id,
         run_id,
@@ -1476,12 +1504,20 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let before = Instant::now();
-        spawn_prepare_with(preparation(), cancel.clone(), sender, move |_, flag| {
-            started_tx.send(()).unwrap();
-            let _ = release_rx.recv_timeout(Duration::from_secs(2));
-            assert!(flag.load(Ordering::Relaxed));
-            Err("准备已取消".into())
-        });
+        // 这一处与被测线程共用全局写入门禁：测试里没有别的 Pi 写作，能拿到。
+        let writing = crate::pi_agent::begin_writing().expect("测试里应当没有别的 Pi 写作在跑");
+        spawn_prepare_with(
+            preparation(),
+            cancel.clone(),
+            sender,
+            writing,
+            move |_, flag| {
+                started_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(Duration::from_secs(2));
+                assert!(flag.load(Ordering::Relaxed));
+                Err("准备已取消".into())
+            },
+        );
         assert!(before.elapsed() < Duration::from_secs(1));
         started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         cancel.store(true, Ordering::Relaxed);

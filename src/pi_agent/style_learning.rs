@@ -258,7 +258,8 @@ pub(crate) fn learn(
             resume: false,
             request_id,
             run_id,
-            timeout: Duration::from_secs(900),
+            timeout: Duration::from_secs(1800),
+            proxy_env: crate::net::proxy_env(&config.proxy),
         },
         cancel.clone(),
         |event| {

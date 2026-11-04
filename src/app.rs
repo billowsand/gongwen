@@ -173,6 +173,12 @@ pub struct GongwenApp {
     pi_calibration_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pi_calibration_note: String,
     pi_calibration_view_key: String,
+    /// Pi 工作区占用（字节数、轮次数）；`None` 表示还没读到。
+    pi_workspace_usage: Option<(u64, usize)>,
+    /// 正在统计或清理 Pi 工作区。
+    pi_workspace_busy: bool,
+    /// 读取 Pi 工作区占用失败的原因；有值时不再每帧重试。
+    pi_workspace_error: Option<String>,
     /// 各模型选择器弹层的筛选词（键是选择器的 salt）。
     pub(crate) model_filter: BTreeMap<String, String>,
     /// 各模型选择器是否展开了「其他类型的模型」（键是选择器的 salt）。
@@ -287,6 +293,8 @@ pub struct GongwenApp {
     active_tab: usize,
     /// 关闭标签的二次确认：按 key 指向有未保存改动的那篇稿件。
     close_confirm: Option<DocKey>,
+    /// 关闭确认是不是因为「还有任务在跑」：文案据此追加一句「关闭会停止任务」。
+    close_confirm_running: bool,
     /// 退出前的汇总确认；None 表示没在退出流程里。
     exit_prompt: Option<ExitPrompt>,
     /// 汇总框已放行，下一帧真正关窗。
@@ -597,6 +605,9 @@ impl GongwenApp {
             pi_calibration_cancel: None,
             pi_calibration_note: String::new(),
             pi_calibration_view_key: String::new(),
+            pi_workspace_usage: None,
+            pi_workspace_busy: false,
+            pi_workspace_error: None,
             model_filter: BTreeMap::new(),
             model_picker_show_all: std::collections::HashSet::new(),
             vocabulary_import_conflicts: None,
@@ -660,6 +671,7 @@ impl GongwenApp {
             tabs: vec![TabRef::Doc(0)],
             active_tab: 0,
             close_confirm: None,
+            close_confirm_running: false,
             exit_prompt: None,
             exit_confirmed: false,
             last_autosave: std::time::Instant::now(),
@@ -1012,11 +1024,33 @@ impl eframe::App for GongwenApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         theme::canvas().to_normalized_gamma_f32()
     }
+
+    /// 关窗前停掉还在跑的 Pi 写作：先置取消标志（host 收到后会收尾退出），
+    /// 有任务时稍等一会儿，别让 Node 子进程在窗口消失后还占着模型与工作区。
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let running = self.docs.iter().any(|doc| doc.ai_panel.running());
+        for doc in &mut self.docs {
+            if let Some(cancel) = &doc.ai_panel.cancel {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        // 设置页的风格学习与「测试写作能力」也是 Pi 进程：一起取消，
+        // 别让它们在关窗后还占着模型。
+        self.styles_page.cancel_learning();
+        if let Some(cancel) = &self.pi_calibration_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let learning = self.styles_page.learning_in_progress() || self.pi_calibration_rx.is_some();
+        if running || learning {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::management_samples;
     use crate::models::{SecurityLevel, VocabularyCategory, VocabularyEntry};
 
     /// 构造一个单位候选池：`(取值, 上级)`，全称按上级递归拼接。
@@ -1218,6 +1252,59 @@ mod tests {
             "原函稿单位",
             "切换后仍应保存原模板的版式配置"
         );
+    }
+
+    /// 还有 Pi 任务在跑时，即使正文没改，关标签也要先确认——关闭会停掉这一轮。
+    #[test]
+    fn closing_a_running_tab_asks_before_it_stops_the_task() {
+        let mut app = management_samples::fixture();
+        let key = app.docs[0].key;
+        app.tabs = vec![TabRef::Doc(key)];
+        app.active_tab = 0;
+        let turn = app.docs[0].ai_panel.push_turn(
+            "智能写作（Pi）".into(),
+            "改一下正文。".into(),
+            Vec::new(),
+            None,
+        );
+        app.docs[0].ai_panel.turn_mut(turn).unwrap().state = crate::ai_panel::TurnState::Streaming;
+        assert!(!app.docs[0].is_dirty(), "正文没改也要确认");
+        app.request_close_tab(0);
+        assert_eq!(app.close_confirm, Some(key));
+        assert!(app.close_confirm_running);
+        assert_eq!(app.tabs.len(), 1, "确认之前不能关");
+    }
+
+    /// 没有任务、正文也没改时维持原行为：不弹确认，直接关。
+    #[test]
+    fn closing_an_idle_tab_keeps_closing_without_confirmation() {
+        let mut app = management_samples::fixture();
+        let key = app.docs[0].key;
+        app.tabs = vec![TabRef::Doc(key), TabRef::Page(NavPage::Manuscript)];
+        app.active_tab = 0;
+        app.close_confirm_running = true;
+        app.request_close_tab(0);
+        assert!(app.close_confirm.is_none());
+        assert!(!app.close_confirm_running);
+    }
+
+    /// 确认关闭前先把这一轮停掉：取消标志置位、在途回执作废、忙碌释放。
+    #[test]
+    fn closing_a_running_tab_stops_the_pi_task_before_it_disappears() {
+        let mut app = management_samples::fixture();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        app.docs[0].ai_panel.cancel = Some(cancel.clone());
+        app.docs[0].ai_panel.pi_bridge =
+            Some(std::sync::Arc::new(crate::pi_agent::PiBridge::default()));
+        app.docs[0].ai_panel.pi_ask = None;
+        app.docs[0].busy = true;
+        app.docs[0].job_seq = 4;
+        app.stop_doc_tasks(0);
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!app.docs[0].busy);
+        assert_eq!(app.docs[0].job_seq, 5, "在途回执要作废");
+        assert!(app.docs[0].ai_panel.cancel.is_none());
+        assert!(app.docs[0].ai_panel.pi_bridge.is_none());
     }
 }
 

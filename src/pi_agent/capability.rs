@@ -229,15 +229,61 @@ pub(crate) fn verify_evidence(directory: &Path, digest: &str) -> bool {
         == digest
 }
 
-type RunMetric = (Option<String>, bool, bool, u64, bool);
+/// 一轮合成校准的机器判定。
+///
+/// `timed_out` 把「跑完但没做对」与「超时没跑完」分开：超时既不算能力差（不能据此
+/// 认定模型需要分阶段），也绝不算成功——它只是没有形成可用观察。
+#[derive(Debug, Clone, Default)]
+struct RunMetric {
+    /// host 报的实际执行模式（regular / phased）。
+    mode: Option<String>,
+    /// 程序判定这轮成品是否包含合成事实、且没有编造周末安排。
+    success: bool,
+    /// 四个检索 / 读取工具是否都用过。
+    tools_ok: bool,
+    elapsed_ms: u64,
+    /// 技术执行是否跑完（超时、网络失败、取消都算否）。
+    technical_success: bool,
+    /// 是否因单轮执行超时结束。
+    timed_out: bool,
+}
+
+/// 单轮执行超时。分阶段模式两轮跑同一篇，原来的 120 秒会把「慢」误判成
+/// 「能力不足」，所以放宽到 300 秒。
+const ROUND_TIMEOUT: Duration = Duration::from_secs(300);
+/// 一次校准的总时限（含四轮）。
+const TOTAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+fn timed_out_count(metrics: &[RunMetric]) -> u16 {
+    metrics.iter().filter(|run| run.timed_out).count() as u16
+}
+
+fn completed_count(metrics: &[RunMetric]) -> u16 {
+    metrics.iter().filter(|run| !run.timed_out).count() as u16
+}
 
 fn has_reliable_paired_coverage(metrics: &[RunMetric]) -> bool {
     metrics.len() == 4
-        && metrics.iter().all(|run| run.0.is_some() && run.2 && run.4)
-        && metrics[0].0.as_deref() == Some("regular")
-        && metrics[1].0.as_deref() == Some("phased")
-        && metrics[2].0.as_deref() == Some("regular")
-        && metrics[3].0.as_deref() == Some("phased")
+        && metrics
+            .iter()
+            .all(|run| run.mode.is_some() && run.tools_ok && run.technical_success)
+        && metrics[0].mode.as_deref() == Some("regular")
+        && metrics[1].mode.as_deref() == Some("phased")
+        && metrics[2].mode.as_deref() == Some("regular")
+        && metrics[3].mode.as_deref() == Some("phased")
+}
+
+/// 是否两组都显示「分阶段更好」。
+///
+/// 额外要求没有任何一轮超时：超时说明这轮没跑完，不能当作「常规模式能力不够」的
+/// 证据；它只是没有形成策略观察。
+fn phased_was_better(paired: bool, metrics: &[RunMetric]) -> bool {
+    paired
+        && metrics.iter().all(|run| !run.timed_out)
+        && !metrics[0].success
+        && metrics[1].success
+        && !metrics[2].success
+        && metrics[3].success
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -452,8 +498,11 @@ pub(crate) fn run_paired_calibration(
         if cancel.load(Ordering::Relaxed) {
             return Err("Pi 能力测试已停止。".into());
         }
-        if started_all.elapsed() >= Duration::from_secs(8 * 60) {
-            return Err("Pi 能力测试超过 8 分钟总时限，未形成完整对照。".into());
+        if started_all.elapsed() >= TOTAL_TIMEOUT {
+            return Err(format!(
+                "Pi 能力测试超过 {} 分钟总时限，未形成完整对照。",
+                TOTAL_TIMEOUT.as_secs() / 60
+            ));
         }
         progress(
             if preference == super::strategy::PiStrategyPreference::Auto {
@@ -552,8 +601,9 @@ pub(crate) fn run_paired_calibration(
                 resume: false,
                 request_id,
                 run_id,
-                timeout: Duration::from_secs(120)
-                    .min(Duration::from_secs(8 * 60).saturating_sub(started_all.elapsed())),
+                timeout: ROUND_TIMEOUT.min(TOTAL_TIMEOUT.saturating_sub(started_all.elapsed())),
+                // 校准只连本地临时资料与模型服务，不经过用户代理。
+                proxy_env: Vec::new(),
             },
             cancel.clone(),
             |event| {
@@ -574,6 +624,11 @@ pub(crate) fn run_paired_calibration(
             && tools.evidence().iter().any(|item| item.tool == "ms_search")
             && tools.evidence().iter().any(|item| item.tool == "ms_read");
         let success = content.as_deref().is_some_and(calibration_facts_present) && tools_ok;
+        // 超时不是「能力不足」：单独记下来，既不据此偏好分阶段，也绝不算成功。
+        let timed_out = outcome
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.contains("Pi 智能写作超时"));
         run_evidence.push(CalibrationRunEvidence {
             strategy: if preference == super::strategy::PiStrategyPreference::Auto {
                 "auto"
@@ -596,7 +651,14 @@ pub(crate) fn run_paired_calibration(
                 error.chars().take(512).collect()
             }),
         });
-        run_metrics.push((mode, success, tools_ok, elapsed_ms, technical_success));
+        run_metrics.push(RunMetric {
+            mode,
+            success,
+            tools_ok,
+            elapsed_ms,
+            technical_success,
+            timed_out,
+        });
     }
     if cancel.load(Ordering::Relaxed) {
         return Err("Pi 能力测试已停止，未形成或保存结论。".into());
@@ -615,48 +677,63 @@ pub(crate) fn run_paired_calibration(
         &skill_digest,
     )?;
     let paired = has_reliable_paired_coverage(&run_metrics);
-    let phased_was_better = paired
-        && !run_metrics[0].1
-        && run_metrics[1].1
-        && !run_metrics[2].1
-        && run_metrics[3].1
-        && run_metrics.iter().all(|run| run.2 && run.4);
+    let phased_better = phased_was_better(paired, &run_metrics);
+    let timeouts = timed_out_count(&run_metrics);
+    let completed = completed_count(&run_metrics);
     let profile = CapabilityProfile {
         identity: Some(key_identity),
+        // 校准只做一轮短任务观察，不产生已验证工作预算（也不验证长上下文）：
+        // verified_work_budget 保持 None、long_context_verified 保持 false。
         conclusion: CapabilityConclusion {
             verified_work_budget: None,
-            needs_short_steps: phased_was_better.then_some(true),
+            needs_short_steps: phased_better.then_some(true),
             recommendation: if paired {
                 format!(
-                    "两组合成同题对照：自动 {} / 2，分阶段 {} / 2；{}。",
-                    run_metrics.iter().step_by(2).filter(|run| run.1).count(),
+                    "两组合成同题对照：自动 {} / 2，分阶段 {} / 2；超时 {timeouts} 轮 / 完成 {completed} 轮；{}。",
+                    run_metrics
+                        .iter()
+                        .step_by(2)
+                        .filter(|run| run.success)
+                        .count(),
                     run_metrics
                         .iter()
                         .skip(1)
                         .step_by(2)
-                        .filter(|run| run.1)
+                        .filter(|run| run.success)
                         .count(),
-                    if phased_was_better {
+                    if phased_better {
                         "两组均显示分阶段更适合短任务"
                     } else {
                         "本次未形成策略偏好"
                     }
                 )
             } else {
-                "网络/host失败或未取得有效常规/分阶段成对结果；不形成策略结论。".into()
+                format!(
+                    "网络/host失败或未取得有效常规/分阶段成对结果（超时 {timeouts} 轮 / 完成 {completed} 轮）；不形成策略结论。"
+                )
             },
-            tool_test_passed: run_metrics.iter().all(|run| run.2),
-            regular_success: run_metrics.iter().step_by(2).filter(|run| run.1).count() as u16,
+            tool_test_passed: run_metrics.iter().all(|run| run.tools_ok),
+            regular_success: run_metrics
+                .iter()
+                .step_by(2)
+                .filter(|run| run.success)
+                .count() as u16,
             phased_success: run_metrics
                 .iter()
                 .skip(1)
                 .step_by(2)
-                .filter(|run| run.1)
+                .filter(|run| run.success)
                 .count() as u16,
             paired_cases: if paired { 2 } else { 0 },
-            strategy_modes: run_metrics.iter().filter_map(|run| run.0.clone()).collect(),
-            elapsed_ms: run_metrics.iter().map(|run| run.3).sum(),
-            technical_failures: run_metrics.iter().filter(|run| !run.4).count() as u16,
+            strategy_modes: run_metrics
+                .iter()
+                .filter_map(|run| run.mode.clone())
+                .collect(),
+            elapsed_ms: run_metrics.iter().map(|run| run.elapsed_ms).sum(),
+            technical_failures: run_metrics
+                .iter()
+                .filter(|run| !run.technical_success)
+                .count() as u16,
             long_context_verified: false,
             completed_at: chrono::Local::now().to_rfc3339(),
         },
@@ -961,17 +1038,70 @@ mod tests {
         assert!(!verify_evidence(dir.path(), "../../anything"));
     }
 
+    fn metric(
+        mode: Option<&str>,
+        success: bool,
+        tools_ok: bool,
+        technical_success: bool,
+    ) -> RunMetric {
+        RunMetric {
+            mode: mode.map(str::to_string),
+            success,
+            tools_ok,
+            elapsed_ms: 10,
+            technical_success,
+            timed_out: false,
+        }
+    }
+
     #[test]
     fn transport_or_tool_failures_cannot_become_a_strategy_conclusion() {
-        let failed = vec![
-            (Some("regular".into()), false, false, 10, false),
-            (Some("phased".into()), false, false, 10, false),
-            (Some("regular".into()), false, false, 10, false),
-            (Some("phased".into()), false, false, 10, false),
-        ];
+        let failed = vec![metric(Some("regular"), false, false, false); 4];
         assert!(!has_reliable_paired_coverage(&failed));
-        let missing_strategy = vec![(None, false, false, 1, false); 4];
+        let missing_strategy = vec![metric(None, false, false, false); 4];
         assert!(!has_reliable_paired_coverage(&missing_strategy));
+    }
+
+    /// 超时不等于「能力不足」：常规两轮超时、分阶段两轮做对，也不能据此说模型
+    /// 需要分阶段；同时超时轮次绝不算成功。
+    #[test]
+    fn a_timeout_is_neither_capability_evidence_nor_success() {
+        let metrics = vec![
+            RunMetric {
+                timed_out: true,
+                technical_success: false,
+                ..metric(Some("regular"), false, true, false)
+            },
+            metric(Some("phased"), true, true, true),
+            RunMetric {
+                timed_out: true,
+                technical_success: false,
+                ..metric(Some("regular"), false, true, false)
+            },
+            metric(Some("phased"), true, true, true),
+        ];
+        assert_eq!(timed_out_count(&metrics), 2);
+        assert_eq!(completed_count(&metrics), 2);
+        assert!(
+            !has_reliable_paired_coverage(&metrics),
+            "超时的轮次不是有效对照"
+        );
+        assert!(
+            !phased_was_better(false, &metrics),
+            "超时不能算作常规模式能力差"
+        );
+        // 防御：即使某轮技术上「跑完」但被标记超时，也不参与策略偏好。
+        let paired_but_timed_out = vec![
+            RunMetric {
+                timed_out: true,
+                ..metric(Some("regular"), false, true, true)
+            },
+            metric(Some("phased"), true, true, true),
+            metric(Some("regular"), false, true, true),
+            metric(Some("phased"), true, true, true),
+        ];
+        assert!(has_reliable_paired_coverage(&paired_but_timed_out));
+        assert!(!phased_was_better(true, &paired_but_timed_out));
     }
 
     /// 本地模型验收入口。明确 opt-in；运行前需由验收者设置模型地址/ID及 Pi runtime 环境。

@@ -1,4 +1,4 @@
-﻿# 校验随包 Pi 运行时（runtime/pi）的 manifest 与文件清单。
+# 校验随包 Pi 运行时（runtime/pi）的 manifest 与文件清单。
 #
 # 打包阶段必须调用它：manifest 缺失、平台不符、Node / Pi / host / 协议版本不对、
 # 文件缺失或哈希不符都直接抛终止错误，绝不发出一个「只有按钮没有运行时」的包。
@@ -21,7 +21,8 @@ if ([string]::IsNullOrWhiteSpace($RuntimeDir)) {
 }
 $RuntimeDir = [System.IO.Path]::GetFullPath($RuntimeDir)
 if ([string]::IsNullOrWhiteSpace($Platform)) {
-    $Platform = if ($env:OS -eq "Windows_NT") { "win-x64" } else { "linux-x64" }
+    # 本脚本只处理 Windows 打包（macOS / Linux 走 pi-runtime-verify.mjs）。
+    $Platform = "win-x64"
 }
 
 $configPath = [System.IO.Path]::Combine($projectRoot, "packaging", "pi-runtime.json")
@@ -30,7 +31,7 @@ if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
 }
 $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
 if (-not $config.platforms.PSObject.Properties.Name.Contains($Platform)) {
-    throw "Unsupported Pi runtime platform: $Platform"
+    throw "Unsupported Pi runtime platform: $Platform (this script only validates win-x64; macOS / Linux use scripts/pi-runtime-verify.mjs)"
 }
 $platformConfig = $config.platforms.$Platform
 

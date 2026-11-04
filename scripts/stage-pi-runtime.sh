@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
-# 组装随包 Pi 运行时（Linux ARM64 / x64）：固定 Node 22.22.3 + Pi 1.4.0 host + 生产依赖。
+# 组装随包 Pi 运行时（Linux ARM64 / x64、macOS arm64 / x64）：固定 Node 22.22.3
+# + Pi 1.4.0 host + 生产依赖。
 #
 # 用法：
-#   scripts/stage-pi-runtime.sh --platform linux-arm64|linux-x64 \
-#       [--node-archive <tar.xz>] [--output runtime/pi] [--force]
+#   scripts/stage-pi-runtime.sh --platform linux-arm64|linux-x64|darwin-arm64|darwin-x64 \
+#       [--node-archive <tar>] [--output runtime/pi] [--force]
 #
+# 平台缺省按 uname 推导（Linux → linux-*，Darwin → darwin-*）。
 # 离线：把官方压缩包放进 tmp/pi-implementation/downloads/ 或传 --node-archive，
 # 仍然按 packaging/pi-runtime.json 的固定 SHA256 校验。生产依赖只允许用随包 Node
 # 自带的 npm 跑 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund`
 # （GONGWEN_PI_NPM_OFFLINE=1 时加 --offline，用完整 npm 缓存离线装）。
 # 读配置需要 jq / python3 / node 之一。
+#
+# 兼容 macOS 自带 bash 3.2 与 BSD 工具：不用 GNU 专属的 `find -mindepth`、
+# 不用 `sha256sum`（没有时退回 `shasum -a 256`），归档类型按 config 的
+# platforms.<platform>.archive 分派（.tar.xz / .tar.gz）。zip 归档只有 Windows
+# 用，走 scripts/stage-pi-runtime.ps1，这里直接报错。
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,13 +37,22 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$PLATFORM" ]; then
-    case "$(uname -m)" in
-        aarch64|arm64) PLATFORM="linux-arm64" ;;
-        x86_64|amd64) PLATFORM="linux-x64" ;;
-        *) echo "error: 认不出当前架构，请传 --platform" >&2; exit 2 ;;
+    case "$(uname -s)" in
+        Linux) os=linux ;;
+        Darwin) os=darwin ;;
+        *) echo "error: 认不出当前操作系统（$(uname -s)），请传 --platform" >&2; exit 2 ;;
     esac
+    case "$(uname -m)" in
+        aarch64|arm64) arch=arm64 ;;
+        x86_64|amd64) arch=x64 ;;
+        *) echo "error: 认不出当前架构（$(uname -m)），请传 --platform" >&2; exit 2 ;;
+    esac
+    PLATFORM="$os-$arch"
 fi
-case "$PLATFORM" in linux-arm64|linux-x64) ;; *) echo "error: Linux staging 只支持 linux-arm64 / linux-x64" >&2; exit 2 ;; esac
+case "$PLATFORM" in
+    linux-arm64|linux-x64|darwin-arm64|darwin-x64) ;;
+    *) echo "error: 只支持 linux-arm64 / linux-x64 / darwin-arm64 / darwin-x64（得到：$PLATFORM）" >&2; exit 2 ;;
+esac
 
 json_get() {
     local expr="$1"
@@ -76,10 +92,21 @@ PY
     fi
 }
 
+# sha256sum（GNU）与 shasum -a 256（macOS / BSD）都能用。
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256_of() { sha256sum "$1" | awk '{print $1}'; }
+elif command -v shasum >/dev/null 2>&1; then
+    sha256_of() { shasum -a 256 "$1" | awk '{print $1}'; }
+else
+    echo "error: 没有 sha256sum / shasum，无法校验 Node 压缩包" >&2
+    exit 1
+fi
+
 NODE_VERSION="$(json_get node)"
 DOWNLOAD_BASE="$(json_get downloadBase)"
 NODE_FILE="$(json_get "platforms.$PLATFORM.file")"
 NODE_SHA="$(json_get "platforms.$PLATFORM.sha256")"
+NODE_ARCHIVE_TYPE="$(json_get "platforms.$PLATFORM.archive")"
 NODE_BINARY="$(json_get "platforms.$PLATFORM.binary")"
 
 if [ -z "$OUTPUT" ]; then OUTPUT="$PROJECT_ROOT/runtime/pi"; fi
@@ -126,7 +153,7 @@ if [ -z "$NODE_ARCHIVE" ]; then
     echo "Downloading $DOWNLOAD_BASE$NODE_FILE"
     curl -fsSL "$DOWNLOAD_BASE$NODE_FILE" -o "$NODE_ARCHIVE"
 fi
-actual="$(sha256sum "$NODE_ARCHIVE" | awk '{print $1}')"
+actual="$(sha256_of "$NODE_ARCHIVE")"
 if [ "$actual" != "$NODE_SHA" ]; then
     echo "error: Node 压缩包 SHA256 不符：$NODE_ARCHIVE" >&2
     exit 1
@@ -136,11 +163,30 @@ TEMP="$(mktemp -d)"
 cleanup() { rm -rf -- "$TEMP"; }
 trap cleanup EXIT
 
-tar -xJf "$NODE_ARCHIVE" -C "$TEMP"
-NODE_ROOT="$(find "$TEMP" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+# 归档类型按 config 分派：Linux 是 .tar.xz，macOS 是 .tar.gz。
+case "$NODE_ARCHIVE_TYPE" in
+    tar.xz) tar -xJf "$NODE_ARCHIVE" -C "$TEMP" ;;
+    tar.gz|tgz) tar -xzf "$NODE_ARCHIVE" -C "$TEMP" ;;
+    zip)
+        echo "error: $PLATFORM 的 Node 归档是 zip；Windows 请用 scripts/stage-pi-runtime.ps1" >&2
+        exit 1
+        ;;
+    *) echo "error: 不认识的归档类型：$NODE_ARCHIVE_TYPE（$NODE_FILE）" >&2; exit 1 ;;
+esac
+
+# 顶层目录用 shell glob 找，别用 BSD find 不支持的 -mindepth / -maxdepth。
+NODE_ROOT=""
+for candidate in "$TEMP"/*/; do
+    [ -d "$candidate" ] || continue
+    NODE_ROOT="${candidate%/}"
+    break
+done
 [ -n "$NODE_ROOT" ] || { echo "error: Node 压缩包没有顶层目录" >&2; exit 1; }
 NODE_BIN="$NODE_ROOT/$NODE_BINARY"
-[ -x "$NODE_BIN" ] || { echo "error: 缺 $NODE_BINARY" >&2; exit 1; }
+[ -f "$NODE_BIN" ] || { echo "error: 缺 $NODE_BINARY" >&2; exit 1; }
+# 解出来的 node 必须可执行：tar.gz 通常保留权限，但跨文件系统解包或后续复制可能丢；
+# staging 阶段就统一修正，别留到运行期变成 EACCES。
+chmod 755 "$NODE_BIN"
 version="$("$NODE_BIN" --version)"
 [ "$version" = "v$NODE_VERSION" ] || { echo "error: Node 报告 $version，期望 v$NODE_VERSION" >&2; exit 1; }
 
@@ -182,6 +228,9 @@ fs.writeFileSync(process.argv[2], JSON.stringify(out, null, 2) + "\n");
 "$NODE_BIN" "$PROJECT_ROOT/scripts/pi-runtime-licenses.mjs" "$OUTPUT"
 "$NODE_BIN" "$PROJECT_ROOT/scripts/pi-runtime-manifest.mjs" "$OUTPUT" "$PLATFORM" "$CONFIG"
 "$NODE_BIN" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$OUTPUT" "$PLATFORM"
-bash "$PROJECT_ROOT/scripts/check-node-glibc.sh" "$OUTPUT/bin/node"
+# glibc / 动态库检查只对 Linux 有意义：macOS 上没有 objdump / readelf。
+case "$PLATFORM" in
+    linux-*) bash "$PROJECT_ROOT/scripts/check-node-glibc.sh" "$OUTPUT/bin/node" ;;
+esac
 
 echo "Pi runtime staged at $OUTPUT"

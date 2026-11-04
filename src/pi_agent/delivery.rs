@@ -6,13 +6,38 @@ use sha2::{Digest, Sha256};
 
 use super::protocol::MAX_DELIVERY_BYTES;
 
-/// host 声明的成品路径必须是 `work/` 下的相对路径。绝对路径、`..`、反斜杠都拒绝。
+/// 交付正文里不能出现的内部工作区痕迹：模型把成品路径、回执、数据库或技能目录
+/// 写进正文，说明它漏出了工作区。这是尽力而为的名单，宁可漏掉生僻名字，也不把
+/// 正常公文里的词误判成路径；命中任一就整份拦下。
+const INTERNAL_PATH_MARKERS: &[&str] = &[
+    "work/",
+    "input/current.md",
+    "input/request.md",
+    "input/candidate.md",
+    "input/materials",
+    "pi/workspaces",
+    "final.md",
+    "final.json",
+    "skills.json",
+    "skills/gongwen-markdown",
+    "skills/pi-skills",
+    "style-guide.json",
+    "session.sqlite",
+    "host-owner.sqlite",
+    "rust-owner.lock",
+];
+
+/// host 声明的成品路径必须是 `work/` 下的相对路径。
+///
+/// 绝对路径、`..`、反斜杠、任何位置的 `:`、ASCII 控制字符、空段、以 `.` 或空格
+/// 结尾的段、Windows 设备保留名都拒绝；中文等 Unicode 文件名与 `/` 分段照常允许。
 pub(crate) fn safe_work_path(path: &str) -> bool {
     if path.len() > 512
         || path.contains('\0')
         || path.contains('\\')
+        || path.contains(':')
         || path.starts_with('/')
-        || (path.len() > 1 && path.as_bytes()[1] == b':')
+        || path.chars().any(|ch| ch.is_ascii_control())
     {
         return false;
     }
@@ -24,7 +49,29 @@ pub(crate) fn safe_work_path(path: &str) -> bool {
     if rest.peek().is_none() {
         return false;
     }
-    rest.all(|part| !part.is_empty() && part != "." && part != "..")
+    rest.all(|part| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && !part.ends_with('.')
+            && !part.ends_with(' ')
+            && !is_windows_device_name(part)
+    })
+}
+
+/// Windows 设备保留名：段去掉扩展名后（`NUL`、`NUL.txt` 都算）不区分大小写等于
+/// `CON` / `PRN` / `AUX` / `NUL` / `COM1`-`COM9` / `LPT1`-`LPT9`。
+///
+/// 这些名字在 Windows 上会落到设备而不是普通文件，工作区里出现就是异常。
+fn is_windows_device_name(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or(part).to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    let bytes = stem.as_bytes();
+    bytes.len() == 4
+        && (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && (b'1'..=b'9').contains(&bytes[3])
 }
 
 pub(crate) fn sha256_hex(text: &str) -> String {
@@ -152,13 +199,9 @@ pub(crate) fn check_delivery(ctx: &DeliveryCheck<'_>) -> DeliveryReport {
     if content.trim().is_empty() {
         issues.push("提交稿为空".to_string());
     }
-    if content.contains("work/")
-        || content.contains("input/current.md")
-        || content.contains("input/request.md")
-        || content.contains("input/candidate.md")
-        || content.contains("input/materials")
-        || content.contains("skills/gongwen-markdown")
-        || content.contains("skills/pi-skills")
+    if INTERNAL_PATH_MARKERS
+        .iter()
+        .any(|marker| content.contains(*marker))
     {
         issues.push("交付正文里还留着内部工作区路径".to_string());
     }
@@ -363,7 +406,14 @@ mod tests {
 
     #[test]
     fn delivery_path_must_be_a_relative_work_file() {
-        for path in ["work/final.md", "work/sections/一.md", "work/a/b.md"] {
+        for path in [
+            "work/final.md",
+            "work/sections/一.md",
+            "work/a/b.md",
+            "work/中文.md",
+            "work/通知 2026.md",
+            "work/a.b.md",
+        ] {
             assert!(safe_work_path(path), "{path}");
         }
         for path in [
@@ -375,9 +425,45 @@ mod tests {
             "/work/final.md",
             "C:/work/final.md",
             "work/",
+            "work//a.md",
+            "work/a/",
+            "work/final.md:stream",
+            "work/NUL",
+            "work/nul.txt",
+            "work/con.txt",
+            "work/COM1.md",
+            "work/LPT9",
+            "work/a.",
+            "work/a ",
+            "work/...",
+            "work/a\tb.md",
+            "work/a\u{7f}b.md",
         ] {
-            assert!(!safe_work_path(path), "{path}");
+            assert!(!safe_work_path(path), "{path:?}");
         }
+    }
+
+    /// 内部工作区痕迹（成品路径、回执、数据库、技能目录）不能出现在交付正文里。
+    #[test]
+    fn internal_workspace_artifacts_do_not_leak_into_the_delivery() {
+        for marker in INTERNAL_PATH_MARKERS {
+            let content = format!("# 通知\n\n参见 {marker} 里的内容。\n");
+            let report = check("", "写一份通知。", &content);
+            assert!(
+                report
+                    .blockers
+                    .iter()
+                    .any(|issue| issue.contains("工作区路径")),
+                "应拦下内部路径 {marker}：{report:?}"
+            );
+        }
+        // 正常正文里没有这些痕迹时不拦。
+        let report = check(
+            "",
+            "写一份通知。",
+            "# 通知\n\n请各单位于10月8日前报送材料。\n",
+        );
+        assert!(clean(&report), "{report:?}");
     }
 
     /// 新数字、日期不再产生事实核查提示。

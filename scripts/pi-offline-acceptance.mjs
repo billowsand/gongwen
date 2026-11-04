@@ -50,8 +50,17 @@ if (!fs.existsSync(nodePath)) fail(`缺少随包 Node：${nodePath}`);
 if (!fs.existsSync(hostPath)) fail(`缺少随包 host：${hostPath}`);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 if (manifest.source !== "npm-ci") fail("运行时不是 npm ci 产物，拒绝验收");
-if (manifest.platform !== (process.platform === "win32" ? "win-x64" : process.arch === "arm64" ? "linux-arm64" : "linux-x64")) {
-  fail(`运行时平台是 ${manifest.platform}，与当前系统不符`);
+
+// 当前系统的运行时平台名，与 packaging/pi-runtime.json 的 platforms 键一致。
+// darwin 的 node 同样在 bin/node，运行路径无需特判。
+function currentPlatform() {
+  if (process.platform === "win32") return "win-x64";
+  if (process.platform === "darwin") return process.arch === "arm64" ? "darwin-arm64" : "darwin-x64";
+  return process.arch === "arm64" ? "linux-arm64" : "linux-x64";
+}
+
+if (manifest.platform !== currentPlatform()) {
+  fail(`运行时平台是 ${manifest.platform}，与当前系统不符（需要 ${currentPlatform()}）`);
 }
 
 const work = args.work ? path.resolve(args.work) : fs.mkdtempSync(path.join(os.tmpdir(), "gongwen-pi-offline-"));
@@ -349,30 +358,65 @@ function runHost(init) {
   });
 }
 
+// 旁路观察 host 子进程已建立的非回环 TCP 连接。注意：这只是观察，不能单独证明
+// host「没有访问公网的企图」——真正的拦截由 pi-offline-guard.mjs 的 preload 守卫做，
+// 这里补的是「有没有已经连出去」。
 function nonLoopbackConnections(pid) {
   if (!pid) return [];
-  let result;
-  if (process.platform === "win32") {
-    result = spawnSync("netstat", ["-ano", "-p", "TCP"], { encoding: "utf8" });
-  } else {
-    result = spawnSync("ss", ["-tnp"], { encoding: "utf8" });
-  }
-  if (result.error || result.status !== 0) {
-    throw new Error("无法检查 host 的网络连接（缺 netstat / ss），不能声称无公网访问");
-  }
   const found = [];
-  for (const line of String(result.stdout ?? "").split("\n")) {
-    if (!line.includes("ESTABLISHED") && !line.includes("ESTAB")) continue;
-    let remote;
-    if (process.platform === "win32") {
+  let output;
+  if (process.platform === "win32") {
+    const result = spawnSync("netstat", ["-ano", "-p", "TCP"], { encoding: "utf8" });
+    if (result.error || result.status !== 0) {
+      throw new Error("无法检查 host 的网络连接（缺 netstat），不能声称无公网访问");
+    }
+    output = String(result.stdout ?? "");
+    for (const line of output.split("\n")) {
+      if (!line.includes("ESTABLISHED") && !line.includes("ESTAB")) continue;
       const parts = line.trim().split(/\s+/);
       if (parts.length < 5 || parts[4] !== String(pid)) continue;
-      remote = parts[2] ?? "";
-    } else {
-      if (!line.includes(`pid=${pid},`)) continue;
-      const parts = line.trim().split(/\s+/);
-      remote = parts[4] ?? "";
+      const remote = parts[2] ?? "";
+      if (!/^(127\.0\.0\.1|\[::1\]|::1):/.test(remote)) found.push(remote);
     }
+    return found;
+  }
+  if (process.platform === "darwin") {
+    // macOS 没有 ss：用 lsof 按 pid 过滤已建立的 TCP 连接。
+    const result = spawnSync(
+      "lsof",
+      ["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-a", "-p", String(pid)],
+      { encoding: "utf8" },
+    );
+    if (result.error) {
+      throw new Error("无法检查 host 的网络连接（缺 lsof），不能声称无公网访问");
+    }
+    // 没有匹配项、或进程在两次采样之间退出时 lsof 返回 1；这不是工具缺失。
+    if (result.status !== 0 && result.status !== 1) {
+      throw new Error(
+        `lsof 检查 host 的网络连接失败（退出码 ${result.status}）：${String(result.stderr ?? "").trim()}`,
+      );
+    }
+    output = String(result.stdout ?? "");
+    for (const line of output.split("\n")) {
+      // 形如 `TCP 127.0.0.1:53211->127.0.0.1:8080 (ESTABLISHED)` 或
+      // `TCP [::1]:53211->[::1]:8080 (ESTABLISHED)`；取 -> 右侧的远端地址。
+      const match = line.match(/(\S+)->(\S+)/);
+      if (!match) continue;
+      const remote = match[2];
+      if (!/^(127\.0\.0\.1|\[::1\]|::1):/.test(remote)) found.push(remote);
+    }
+    return found;
+  }
+  const result = spawnSync("ss", ["-tnp"], { encoding: "utf8" });
+  if (result.error || result.status !== 0) {
+    throw new Error("无法检查 host 的网络连接（缺 ss），不能声称无公网访问");
+  }
+  output = String(result.stdout ?? "");
+  for (const line of output.split("\n")) {
+    if (!line.includes("ESTABLISHED") && !line.includes("ESTAB")) continue;
+    if (!line.includes(`pid=${pid},`)) continue;
+    const parts = line.trim().split(/\s+/);
+    const remote = parts[4] ?? "";
     if (!/^(127\.0\.0\.1|\[::1\]|::1):/.test(remote)) found.push(remote);
   }
   return found;

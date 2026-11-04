@@ -127,6 +127,10 @@ pub(crate) enum WorkerResult {
         dialog: Option<u64>,
         result: Result<crate::print::PrintOutcome, String>,
     },
+    /// Pi 工作区占用统计结果：总字节数与轮次数。
+    PiWorkspaceUsage(Result<(u64, usize), String>),
+    /// 清理旧 Pi 工作区：清掉几轮、释放多少字节。
+    PiWorkspacePruned(Result<(usize, u64), String>),
 }
 
 /// 知识库后台任务的结果。
@@ -687,6 +691,37 @@ impl GongwenApp {
                     dialog,
                     result,
                 } => self.apply_pdf_printed(path, printer, dialog, result),
+                WorkerResult::PiWorkspaceUsage(result) => {
+                    self.pi_workspace_busy = false;
+                    match result {
+                        Ok((bytes, runs)) => {
+                            self.pi_workspace_usage = Some((bytes, runs));
+                            self.pi_workspace_error = None;
+                        }
+                        Err(error) => {
+                            // 留个失败标记，别每帧重新起线程。
+                            self.pi_workspace_usage = None;
+                            self.pi_workspace_error = Some(error.clone());
+                            self.status = format!("读取 Pi 工作区占用失败：{error}");
+                        }
+                    }
+                }
+                WorkerResult::PiWorkspacePruned(result) => {
+                    self.pi_workspace_busy = false;
+                    // 清完让下一次进页面重新统计，看到的是清理后的占用。
+                    self.pi_workspace_usage = None;
+                    match result {
+                        Ok((pruned, bytes)) => {
+                            self.status = format!(
+                                "已清理 {pruned} 个旧工作区，释放 {} MB（只删已写入正文的旧轮次和孤儿目录）",
+                                bytes / (1024 * 1024)
+                            );
+                        }
+                        Err(error) => {
+                            self.status = format!("清理 Pi 工作区失败：{error}");
+                        }
+                    }
+                }
             }
             ctx.request_repaint();
         }
@@ -1672,10 +1707,19 @@ impl GongwenApp {
             DocJob::PiTool(line) => self.docs[index].ai_panel.step(line),
             DocJob::PiCandidate { path, content } => {
                 // 候选只是 AI 工作稿的预览；能不能接受由 PiDone 的交付检查决定。
-                self.docs[index].ai_panel.replace_content(content);
-                self.docs[index]
-                    .ai_panel
-                    .pi_progress(&format!("候选文件已更新：{path}"));
+                // 超大候选不要整段塞进侧栏并自动展开：那是界面线程上的同步排版，
+                // 几百 KB 的 Markdown 会让窗口卡住。交付后卡片里仍可查看。
+                if content.len() > 256 * 1024 {
+                    self.docs[index].ai_panel.pi_progress(&format!(
+                        "候选稿较大（{} KiB），运行中不自动展开，交付后可在卡片查看",
+                        content.len() / 1024
+                    ));
+                } else {
+                    self.docs[index].ai_panel.replace_content(content);
+                    self.docs[index]
+                        .ai_panel
+                        .pi_progress(&format!("候选文件已更新：{path}"));
+                }
             }
             DocJob::PiPrepared {
                 turn_id,
@@ -2016,4 +2060,80 @@ fn failure_summary(failed: &[(String, String)]) -> String {
         .join("；");
     let more = if failed.len() > 3 { "；…" } else { "" };
     format!("，{} 篇失败（{detail}{more}）", failed.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::management_samples;
+
+    /// 起一轮等待中的 Pi 任务，返回轮次 id 与本轮任务序号。
+    fn waiting_pi_turn(app: &mut GongwenApp, seq: u64) -> u64 {
+        let turn = app.docs[0].ai_panel.push_turn(
+            "智能写作（Pi）".into(),
+            "写一篇长材料".into(),
+            vec!["Pi 文件工作区".into()],
+            None,
+        );
+        let item = app.docs[0].ai_panel.turn_mut(turn).unwrap();
+        item.state = TurnState::Waiting;
+        item.usage_job_seq = Some(seq);
+        app.docs[0].job_seq = seq;
+        turn
+    }
+
+    /// 超大候选不整段塞进侧栏、不自动展开工作稿，只在卡片上写一行说明。
+    #[test]
+    fn a_large_candidate_is_not_auto_expanded() {
+        let mut app = management_samples::fixture();
+        let turn = waiting_pi_turn(&mut app, 7);
+        let key = app.docs[0].key;
+        let content = "长".repeat(256 * 1024);
+        app.apply_doc_job(
+            key,
+            7,
+            DocJob::PiCandidate {
+                path: "work/candidate.md".into(),
+                content,
+            },
+        );
+        assert!(
+            app.docs[0].ai_panel.workspace_view.is_none(),
+            "大候选不能自动展开工作稿"
+        );
+        let phase = &app.docs[0]
+            .ai_panel
+            .turns
+            .iter()
+            .find(|item| item.id == turn)
+            .unwrap()
+            .phase;
+        assert!(phase.contains("候选稿较大"), "{phase}");
+        assert!(phase.contains("不自动展开"), "{phase}");
+    }
+
+    /// 小候选保持原行为：整体换新工作稿并自动展开。
+    #[test]
+    fn a_small_candidate_still_opens_the_workspace_view() {
+        let mut app = management_samples::fixture();
+        let turn = waiting_pi_turn(&mut app, 8);
+        let key = app.docs[0].key;
+        app.apply_doc_job(
+            key,
+            8,
+            DocJob::PiCandidate {
+                path: "work/candidate.md".into(),
+                content: "# 通知\n\n改好了。\n".into(),
+            },
+        );
+        assert_eq!(app.docs[0].ai_panel.workspace_view, Some(turn));
+        let item = app.docs[0]
+            .ai_panel
+            .turns
+            .iter()
+            .find(|item| item.id == turn)
+            .unwrap();
+        assert!(item.is_workspace);
+        assert!(item.content.contains("改好了"));
+    }
 }

@@ -97,6 +97,59 @@ pub fn save_remembered_zip_password(password: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Windows 上杀软 / 索引器会短时占住目标文件，`persist` 报 sharing violation（32）
+/// 或 access denied（5）。这类错误等一会儿通常就过去，其它错误立即返回。
+#[cfg(windows)]
+fn is_transient_windows_lock(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5) | Some(32))
+}
+
+/// 把临时文件原子替换到目标路径。
+///
+/// Windows 上最多重试 6 次，退避 20/40/80/160/320 ms；每次失败要把 `PersistError`
+/// 里的临时文件取回来再 `persist`，否则下一次没有可替换的暂存文件。非 Windows 仍
+/// 只替换一次（POSIX rename 不会被占用挡住）。
+#[cfg(windows)]
+fn persist_with_retry(
+    mut temp: tempfile::NamedTempFile,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    const BACKOFF_MS: [u64; 5] = [20, 40, 80, 160, 320];
+    let mut attempt = 0;
+    loop {
+        match temp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                if !is_transient_windows_lock(&error.error) || attempt >= BACKOFF_MS.len() {
+                    return Err(error.error);
+                }
+                temp = error.file;
+                std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS[attempt]));
+                attempt += 1;
+            }
+        }
+    }
+}
+
+/// 临时文件刷盘。Windows 上同步刷盘也可能碰到同样的短暂占用，重试一次即可
+/// （主路径的保护在 `persist`）。
+#[cfg(windows)]
+fn sync_temp_file(file: &fs::File) -> std::io::Result<()> {
+    match file.sync_all() {
+        Ok(()) => Ok(()),
+        Err(error) if is_transient_windows_lock(&error) => {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            file.sync_all()
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(windows))]
+fn sync_temp_file(file: &fs::File) -> std::io::Result<()> {
+    file.sync_all()
+}
+
 /// 同目录暂存并刷盘后原子替换；失败时不删除原文件，暂存文件由 RAII 清理。
 /// 配置里也可能包含服务密钥，Unix 下和密码一样限制为仅当前用户可读写。
 ///
@@ -116,7 +169,10 @@ pub(crate) fn atomic_write(
             .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
     write(temp.as_file_mut())?;
-    temp.as_file().sync_all()?;
+    sync_temp_file(temp.as_file())?;
+    #[cfg(windows)]
+    persist_with_retry(temp, path)?;
+    #[cfg(not(windows))]
     temp.persist(path).map_err(|error| error.error)?;
     // Unix 上目录项也需刷盘。此处失败时新文件已替换，向调用方如实报告错误。
     #[cfg(unix)]
@@ -262,6 +318,39 @@ mod tests {
         );
         assert_eq!(fs::read(path.join("旧数据")).unwrap(), b"keep me");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// Windows 上杀软 / 索引器会短时占住目标文件：`persist` 应重试，占用一解除就
+    /// 写入成功。用 `share_mode(0)` 独占打开模拟这种占用，100 ms 后释放。
+    #[cfg(windows)]
+    #[test]
+    fn a_transient_windows_file_lock_is_retried() {
+        use std::io::Write;
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("被占用.txt");
+        fs::write(&path, b"old").unwrap();
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(lock);
+        });
+        atomic_write(&path, |file| {
+            file.write_all(b"new")?;
+            Ok(())
+        })
+        .expect("短暂占用解除后应写入成功");
+        release.join().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "暂存文件不能留下"
+        );
     }
 
     #[test]

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# 一键打包 macOS DMG：构建二进制 → 按 runtime 清单组装便携布局 → .app bundle
-# → ad-hoc 签名 → 带「应用程序」拖放链接的 DMG。供本机使用（发布流水线只产
-# Windows / Linux ARM64，不产 macOS 包）。
+# 一键打包 macOS DMG：构建二进制 → 按 runtime 清单组装便携布局 → 校验并放入 Pi
+# 运行时 → .app bundle → 签名（可选 Developer ID + 公证）→ 带「应用程序」拖放链接的 DMG。
 #
 # 用法：
 #   scripts/package-dmg.sh [选项]                                 # 一键完整打包
@@ -14,25 +13,39 @@
 #   --output DIR      产物目录；缺省 <仓库>/dist/macos。
 #   --staging DIR     复用现成便携目录，跳过构建与组装。
 #   --skip-build      不重新 cargo build，直接用 target/release/gongwen-assistant。
+#   --require-pi      必须包含 Pi 运行时（runtime/pi），缺失就失败；发布流水线用。
 #   -h, --help        显示帮助。
 #
 # 产物：dist/macos/gongwen-assistant-<版本>-macos-<架构>.dmg（附 .sha256）。
-# 打开 DMG 把「公文助手」拖进「应用程序」即可。未做 Developer ID 签名，
-# 仅 ad-hoc 签名（identity "-"），本机可直接运行。
+#
+# 签名 / 公证（可选，发布必备）：
+#   GONGWEN_MACOS_SIGN_IDENTITY    Developer ID Application 证书名。非空时先单独签
+#       Contents/MacOS/runtime/pi/bin/node，再签整个 .app，带 hardened runtime 与
+#       packaging/macos/entitlements.plist；为空时只做 ad-hoc 签名（仅本机测试）。
+#       ！注意！没有 identity 时不要用 --deep 去「掩盖」未签名；ad-hoc 产出的包
+#       换机器会被 Gatekeeper 拦。
+#   GONGWEN_MACOS_NOTARY_PROFILE   notarytool keychain profile。非空时在 DMG 生成后
+#       submit --wait 并 staple；失败非零退出但保留 DMG 便于查日志。
 #
 # 一键模式的 staging 组装与 scripts/package-portable.ps1 保持一致：
 #   - 校验 runtime/SHA256SUMS.<平台>.txt 里每个资产的 SHA-256；
 #   - 资产放进可执行文件旁的 runtime/（程序按它查找，见 src/portable_runtime.rs），
 #     旧清单里的 Tectonic / TeX bundle 不随包；
+#   - Pi 运行时（runtime/pi）先按 darwin-* manifest 全量校验，再复制进
+#     staging/runtime/pi；没有时默认警告（智能写作不可用），--require-pi 则失败；
 #   - 附 README / THIRD_PARTY_NOTICES / LICENSE / config.example.json；
-#   - 把 skills/gongwen-markdown/ 打成 skills/gongwen-markdown.skill（zip，
-#     顶层一个 gongwen-markdown/ 文件夹，条目名正斜杠）。
+#   - 把 skills/gongwen-markdown/ 打成 skills/gongwen-markdown.skill。
+#
+# Info.plist 故意不注册 .gwx 的 CFBundleDocumentTypes / UTI：应用还没有处理 macOS
+# 的 open-file Apple Event，注册后双击只会「打开应用但不导入」，反而更糟。.gwx 用
+# 拖放或应用内导入；见 packaging/macos/README.md。
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 BUNDLE_ID="com.billowsand.gongwen"
 APP_NAME="公文助手"
 BUNDLE_NAME="GongwenAssistant.app"
+ENTITLEMENTS="$PROJECT_ROOT/packaging/macos/entitlements.plist"
 
 die() {
     echo "error: $*" >&2
@@ -40,13 +53,14 @@ die() {
 }
 
 usage() {
-    sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
 }
 
 VERSION=""
 STAGING=""
 OUTPUT_DIR=""
 SKIP_BUILD=0
+REQUIRE_PI=0
 
 # 旧三段式接口：<version> <staging-dir> <output-dir>（首参数不以 - 开头）。
 if [ $# -eq 3 ] && [ "${1#-}" = "$1" ]; then
@@ -75,6 +89,10 @@ else
                 SKIP_BUILD=1
                 shift
                 ;;
+            --require-pi)
+                REQUIRE_PI=1
+                shift
+                ;;
             -h | --help)
                 usage
                 exit 0
@@ -90,6 +108,24 @@ case "$(uname -s)" in
     Darwin) ;;
     *) die "package-dmg.sh 只能在 macOS 上运行（需要 hdiutil / codesign / iconutil）" ;;
 esac
+
+# Pi 运行时的平台名与 packaging/pi-runtime.json 的 platforms 键一致；macOS 用
+# .tar.gz 归档，node 在 bin/node（与 Linux 相同）。
+case "$(uname -m)" in
+    arm64|aarch64) PI_PLATFORM="darwin-arm64" ;;
+    x86_64|amd64) PI_PLATFORM="darwin-x64" ;;
+    *) die "不支持的 macOS 架构：$(uname -m)（只有 darwin-arm64 / darwin-x64）" ;;
+esac
+
+# 校验一份组装好的 Pi 运行时：manifest 平台 / 哈希 / 可执行位；失败直接中止。
+verify_pi_runtime() {
+    local dir="$1"
+    [ -f "$dir/manifest.json" ] || die "Pi 运行时缺 manifest：$dir/manifest.json"
+    [ -f "$dir/bin/node" ] || die "Pi 运行时缺 node：$dir/bin/node"
+    [ -x "$dir/bin/node" ] || die "Pi 运行时 node 没有可执行位：$dir/bin/node（chmod 755 后重试）"
+    "$dir/bin/node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$dir" "$PI_PLATFORM" ||
+        die "Pi 运行时校验失败（要求平台 ${PI_PLATFORM}）：$dir"
+}
 
 # 版本号只维护在 Cargo.toml，与 bump-version.ps1 保持一致。
 if [ -z "$VERSION" ]; then
@@ -159,6 +195,20 @@ else
     [ -f "$STAGE/runtime/fonts/GWFangSong.ttf" ] ||
         die "runtime 清单未提供字体，PDF 排版将不可用（${SUFFIX}）"
 
+    # Pi 运行时：与字体 runtime 分开组装（SHA256SUMS 里没有它），复制进 staging。
+    # 缺 manifest 说明没跑 stage-pi-runtime.sh；这一轮默认只警告，--require-pi 必须失败。
+    PI_SOURCE="$PROJECT_ROOT/runtime/pi"
+    if [ -f "$PI_SOURCE/manifest.json" ]; then
+        verify_pi_runtime "$PI_SOURCE"
+        rm -rf "$STAGE/runtime/pi"
+        cp -a "$PI_SOURCE" "$STAGE/runtime/pi"
+        chmod 755 "$STAGE/runtime/pi/bin/node"
+    elif [ "$REQUIRE_PI" -eq 1 ]; then
+        die "没有 Pi 运行时（${PI_SOURCE}/manifest.json）。先运行 scripts/stage-pi-runtime.sh --platform ${PI_PLATFORM} --force，或去掉 --require-pi"
+    else
+        echo "警告：未包含 Pi 运行时，智能写作将不可用（缺 ${PI_SOURCE}/manifest.json）" >&2
+    fi
+
     for doc in README.md THIRD_PARTY_NOTICES.md LICENSE config.example.json; do
         [ -f "$PROJECT_ROOT/$doc" ] && cp "$PROJECT_ROOT/$doc" "$STAGE/"
     done
@@ -205,6 +255,21 @@ cp "$STAGE/gongwen-assistant" "$MACOS_DIR/gongwen-assistant"
 cp -a "$STAGE/runtime" "$MACOS_DIR/runtime"
 chmod 755 "$MACOS_DIR/gongwen-assistant"
 
+# Pi 运行时显式再落一次：校验 manifest / 哈希 / 可执行位后再复制并 chmod，
+# 避免某些复制方式丢可执行位，运行期才以 EACCES 暴露。
+PI_DIR="$STAGE/runtime/pi"
+if [ -f "$PI_DIR/manifest.json" ]; then
+    verify_pi_runtime "$PI_DIR"
+    rm -rf "$MACOS_DIR/runtime/pi"
+    cp -a "$PI_DIR" "$MACOS_DIR/runtime/pi"
+    chmod 755 "$MACOS_DIR/runtime/pi/bin/node"
+else
+    if [ "$REQUIRE_PI" -eq 1 ]; then
+        die "staging 里没有 Pi 运行时（${PI_DIR}/manifest.json），但传了 --require-pi"
+    fi
+    echo "警告：未包含 Pi 运行时，智能写作将不可用（缺 ${PI_DIR}/manifest.json）" >&2
+fi
+
 # 文档随包进 bundle，DMG 保持纯拖放布局。
 for doc in README.md THIRD_PARTY_NOTICES.md LICENSE; do
     if [ -f "$STAGE/$doc" ]; then
@@ -243,6 +308,9 @@ if ! iconutil -c icns "$ICONSET" -o "$RESOURCES_DIR/AppIcon.icns"; then
     echo "警告：系统 iconutil 无法转换图标，DMG 将使用默认应用图标" >&2
 fi
 
+# Info.plist 刻意不含 CFBundleDocumentTypes / UTExportedTypeDeclarations：
+# .gwx 双击走 macOS open-file Apple Event，当前 winit/eframe 外壳还没接，
+# 注册了只会「打开应用但不导入」。导入请用拖放 / 应用内导入。
 cat >"$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -280,14 +348,38 @@ if [ -f "$RESOURCES_DIR/AppIcon.icns" ]; then
         "$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist"
 fi
 
-# 没有 Developer ID，做 ad-hoc 签名（identity "-"），保证 Apple Silicon 上可直接运行。
-codesign --force --deep --sign - "$BUILD_ROOT/$BUNDLE_NAME"
-codesign --verify --deep --strict "$BUILD_ROOT/$BUNDLE_NAME"
+SIGN_IDENTITY="${GONGWEN_MACOS_SIGN_IDENTITY:-}"
+NOTARY_PROFILE="${GONGWEN_MACOS_NOTARY_PROFILE:-}"
+APP_BUNDLE="$BUILD_ROOT/$BUNDLE_NAME"
+
+if [ -n "$SIGN_IDENTITY" ]; then
+    [ -f "$ENTITLEMENTS" ] || die "缺少 entitlements：$ENTITLEMENTS"
+    # 先签 bundle 内的 Node（V8 JIT 权限必须挂在 node 自己身上），再签整个 .app。
+    # 不用 --deep：--deep 不会给嵌套可执行文件单独带 entitlements，也不该用来签
+    # node_modules 之类的资源。
+    echo "==> codesign（Developer ID + hardened runtime）：$SIGN_IDENTITY"
+    codesign --force --options runtime --timestamp \
+        --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" \
+        "$MACOS_DIR/runtime/pi/bin/node"
+    codesign --force --options runtime --timestamp \
+        --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" \
+        "$APP_BUNDLE"
+    codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+else
+    if [ -n "$NOTARY_PROFILE" ]; then
+        die "配置了 GONGWEN_MACOS_NOTARY_PROFILE 但没有 GONGWEN_MACOS_SIGN_IDENTITY；公证必须有 Developer ID 签名"
+    fi
+    # 没有 Developer ID，做 ad-hoc 签名（identity "-"），保证 Apple Silicon 上可直接运行。
+    echo "警告：未配置 GONGWEN_MACOS_SIGN_IDENTITY，仅 ad-hoc 签名——未签名/未公证，仅本机测试；" >&2
+    echo "      换机器下载会被 Gatekeeper 拦，不要作为发布产物分发。" >&2
+    codesign --force --deep --sign - "$APP_BUNDLE"
+    codesign --verify --deep --strict "$APP_BUNDLE"
+fi
 
 # 拖放到「应用程序」的 DMG：bundle 加 /Applications 符号链接。
 DMG_ROOT="$BUILD_ROOT/dmg"
 mkdir -p "$DMG_ROOT"
-cp -R "$BUILD_ROOT/$BUNDLE_NAME" "$DMG_ROOT/"
+cp -R "$APP_BUNDLE" "$DMG_ROOT/"
 ln -s /Applications "$DMG_ROOT/Applications"
 
 [ -n "$OUTPUT_DIR" ] || OUTPUT_DIR="$PROJECT_ROOT/dist/macos"
@@ -298,16 +390,33 @@ esac
 mkdir -p "$OUTPUT_DIR"
 
 DMG_NAME="gongwen-assistant-${VERSION}-macos-${ARCH}.dmg"
-echo "==> 生成磁盘映像：$OUTPUT_DIR/$DMG_NAME"
+DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
+echo "==> 生成磁盘映像：$DMG_PATH"
 hdiutil create \
     -volname "$APP_NAME" \
     -srcfolder "$DMG_ROOT" \
     -ov \
     -format UDZO \
-    "$OUTPUT_DIR/$DMG_NAME" >/dev/null
-hdiutil verify "$OUTPUT_DIR/$DMG_NAME" >/dev/null
+    "$DMG_PATH" >/dev/null
+hdiutil verify "$DMG_PATH" >/dev/null
 
-shasum -a 256 "$OUTPUT_DIR/$DMG_NAME" |
-    awk '{ printf "%s  %s\n", $1, $2 }' >"$OUTPUT_DIR/$DMG_NAME.sha256"
+# 公证必须在 DMG 生成之后、写 .sha256 之前：staple 会改写 DMG，先算哈希就作废。
+if [ -n "$NOTARY_PROFILE" ]; then
+    echo "==> 提交公证（notarytool profile: $NOTARY_PROFILE），等待结果……"
+    if ! xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait; then
+        echo "error: 公证失败，DMG 已保留：$DMG_PATH" >&2
+        echo "       用 xcrun notarytool log <submission-id> --keychain-profile $NOTARY_PROFILE 查原因" >&2
+        exit 1
+    fi
+    if ! xcrun stapler staple "$DMG_PATH"; then
+        echo "error: staple 失败，DMG 已保留：$DMG_PATH" >&2
+        exit 1
+    fi
+    xcrun stapler validate "$DMG_PATH" >/dev/null ||
+        { echo "error: staple 后校验失败：$DMG_PATH" >&2; exit 1; }
+fi
 
-echo "Created: $OUTPUT_DIR/$DMG_NAME"
+shasum -a 256 "$DMG_PATH" |
+    awk '{ printf "%s  %s\n", $1, $2 }' >"$DMG_PATH.sha256"
+
+echo "Created: $DMG_PATH"

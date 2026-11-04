@@ -104,6 +104,18 @@ for (const relative of required) {
   }
 }
 const node = path.join(runtimeDir, platformConfig.binary);
+// POSIX 平台必须带可执行位：zip 中转、ditto、cp 丢权限时，症状会是运行期
+// EACCES（「Pi 不可用」），而不是打包期失败。这里在打包阶段就拦下来。
+if (process.platform !== "win32") {
+  try {
+    fs.accessSync(node, fs.constants.X_OK);
+  } catch {
+    process.stderr.write(
+      `随包 Node 没有可执行位：${node}。请 chmod 755 后重新打包（staging 阶段请用 scripts/stage-pi-runtime.sh）。\n`,
+    );
+    process.exit(1);
+  }
+}
 const version = String(
   (await import("node:child_process")).execFileSync(node, ["--version"], { encoding: "utf8" }),
 ).trim();

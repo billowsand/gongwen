@@ -69,6 +69,73 @@ fn current_proxy() -> ProxyConfig {
     PROXY.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// 从当前代理配置派生 host 子进程要用的环境变量。
+///
+/// Pi 的 Node host 在最小环境里运行（`env_clear` 后只放运行必需项），代理设置
+/// 不会自己传过去：不显式下发的话，开着代理的机器上 Pi 会连不上模型服务。
+pub(crate) fn proxy_env(config: &ProxyConfig) -> Vec<(String, String)> {
+    proxy_env_from(config.mode, &config.url, &config.bypass, |name| {
+        std::env::var(name).ok()
+    })
+}
+
+/// 纯换算：`lookup` 由调用方给（生产读进程环境，测试直接给固定值），
+/// 免得单测改进程环境变量与并行用例互相踩。
+fn proxy_env_from(
+    mode: ProxyMode,
+    url: &str,
+    bypass: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = Vec::new();
+    match mode {
+        ProxyMode::Custom => {
+            for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+                push_proxy_env(&mut env, name, url);
+            }
+            push_proxy_env(&mut env, "NO_PROXY", bypass);
+            // Node / undici 只认小写变量名，两种写法各给一份。
+            for name in ["http_proxy", "https_proxy", "all_proxy"] {
+                push_proxy_env(&mut env, name, url);
+            }
+            push_proxy_env(&mut env, "no_proxy", bypass);
+            push_proxy_env(&mut env, "NODE_USE_ENV_PROXY", "1");
+        }
+        // 明确直连：host 侧已经 env_clear，不继承系统代理；这里再把绕过写死。
+        ProxyMode::Direct => {
+            push_proxy_env(&mut env, "NO_PROXY", "*");
+            push_proxy_env(&mut env, "no_proxy", "*");
+        }
+        // 跟随系统：把当前进程从系统代理读到的变量原样转发给 host。
+        ProxyMode::System => {
+            for name in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "NO_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+                "no_proxy",
+            ] {
+                if let Some(value) = lookup(name) {
+                    push_proxy_env(&mut env, name, &value);
+                }
+            }
+        }
+    }
+    env
+}
+
+/// 只收非空值，同名只留第一次出现的。
+fn push_proxy_env(env: &mut Vec<(String, String)>, name: &str, value: &str) {
+    let value = value.trim();
+    if value.is_empty() || env.iter().any(|(saved, _)| saved.as_str() == name) {
+        return;
+    }
+    env.push((name.to_string(), value.to_string()));
+}
+
 /// 为访问 `target`（接口地址）建一个客户端。
 pub fn client(target: &str, timeout_seconds: u64) -> Result<Client> {
     build(&current_proxy(), target, timeout_seconds)
@@ -172,6 +239,73 @@ mod tests {
             url: url.into(),
             bypass: String::new(),
         }
+    }
+
+    /// 自定义代理：大小写两套都下发，Node 靠小写变量名认代理。
+    #[test]
+    fn custom_proxy_env_sets_both_cases_and_node_flag() {
+        let env = proxy_env_from(
+            ProxyMode::Custom,
+            "http://127.0.0.1:7890",
+            "intranet.gov.cn",
+            |_| None,
+        );
+        let get = |name: &str| {
+            env.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(get("HTTP_PROXY"), Some("http://127.0.0.1:7890"));
+        assert_eq!(get("HTTPS_PROXY"), Some("http://127.0.0.1:7890"));
+        assert_eq!(get("ALL_PROXY"), Some("http://127.0.0.1:7890"));
+        assert_eq!(get("NO_PROXY"), Some("intranet.gov.cn"));
+        assert_eq!(get("http_proxy"), Some("http://127.0.0.1:7890"));
+        assert_eq!(get("https_proxy"), Some("http://127.0.0.1:7890"));
+        assert_eq!(get("all_proxy"), Some("http://127.0.0.1:7890"));
+        assert_eq!(get("no_proxy"), Some("intranet.gov.cn"));
+        assert_eq!(get("NODE_USE_ENV_PROXY"), Some("1"));
+        // 空地址 / 空绕过不传，免得 host 拿到空代理变量。
+        let env = proxy_env_from(ProxyMode::Custom, "", "", |_| None);
+        assert!(
+            env.iter().all(|(key, _)| key == "NODE_USE_ENV_PROXY"),
+            "{env:?}"
+        );
+    }
+
+    /// 直连：只写死绕过，不转发任何代理变量。
+    #[test]
+    fn direct_proxy_env_forces_no_proxy() {
+        let env = proxy_env_from(ProxyMode::Direct, "http://ignored:1", "", |_| {
+            Some("http://system-proxy:3128".into())
+        });
+        assert_eq!(
+            env,
+            vec![
+                ("NO_PROXY".to_string(), "*".to_string()),
+                ("no_proxy".to_string(), "*".to_string()),
+            ]
+        );
+    }
+
+    /// 跟随系统：当前进程环境里有的代理变量原样转发，大小写两种都带上。
+    #[test]
+    fn system_proxy_env_forwards_the_process_environment() {
+        let env = proxy_env_from(ProxyMode::System, "", "", |name| match name {
+            "HTTPS_PROXY" | "https_proxy" => Some("http://system-proxy:3128".into()),
+            "NO_PROXY" | "no_proxy" => Some("localhost,10.0.0.0/8".into()),
+            _ => None,
+        });
+        let get = |name: &str| {
+            env.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(get("HTTPS_PROXY"), Some("http://system-proxy:3128"));
+        assert_eq!(get("https_proxy"), Some("http://system-proxy:3128"));
+        assert_eq!(get("NO_PROXY"), Some("localhost,10.0.0.0/8"));
+        assert_eq!(get("no_proxy"), Some("localhost,10.0.0.0/8"));
+        assert_eq!(get("HTTP_PROXY"), None, "没设的变量不能凭空造一个");
+        assert!(env.iter().all(|(_, value)| !value.is_empty()));
     }
 
     #[test]

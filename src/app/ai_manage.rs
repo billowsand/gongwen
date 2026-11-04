@@ -921,6 +921,8 @@ impl GongwenApp {
             self.pi_calibration_note = self.latest_pi_calibration_summary();
         }
         self.poll_pi_calibration();
+        // 进入这一页顺手统计一次工作区占用；失败留标记，不每帧重试。
+        self.refresh_pi_workspace_usage();
         if self.pi_calibration_rx.is_some() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(500));
@@ -949,6 +951,36 @@ impl GongwenApp {
             },
         );
         ui.weak("短合成测试只给工具与策略建议；不验证长上下文工作预算。");
+        // 工作区只增不减会越占越多：给一个看得见的占用数字和一个保守的清理入口。
+        let usage = match (self.pi_workspace_usage, self.pi_workspace_error.as_deref()) {
+            (Some((bytes, runs)), _) => {
+                format!("Pi 工作区占用 {} MB（{runs} 轮）", bytes / (1024 * 1024))
+            }
+            (None, Some(error)) => format!("Pi 工作区占用读取失败：{error}"),
+            (None, None) => "正在统计 Pi 工作区占用…".to_string(),
+        };
+        let busy = self.pi_workspace_busy;
+        let mut prune = false;
+        setting_row(
+            ui,
+            "工作区",
+            Some(
+                "Pi 的工作区随轮次累积。清理只删已写入正文的旧轮次和孤儿目录，每篇稿件保留最近三轮与还没交付的轮次。",
+            ),
+            |ui| {
+                ui.label(egui::RichText::new(&usage).color(theme::text_muted()));
+                if ui
+                    .add_enabled(!busy, egui::Button::new("清理旧工作区"))
+                    .on_disabled_hover_text("正在统计或清理，请稍等")
+                    .clicked()
+                {
+                    prune = true;
+                }
+            },
+        );
+        if prune {
+            self.start_pi_workspace_prune();
+        }
     }
 
     fn latest_pi_calibration_summary(&self) -> String {
@@ -984,6 +1016,12 @@ impl GongwenApp {
     }
 
     fn start_pi_calibration(&mut self) {
+        // 同一时间只跑一轮 Pi 正文写作：校准会和写作抢同一个本地模型与服务端
+        // 并发额度，等写作结束再测试，结果才可信。
+        if crate::pi_agent::writing_active() {
+            self.pi_calibration_note = "有 Pi 任务正在运行，等它结束后再测试。".into();
+            return;
+        }
         let chat = match self.config.pi_chat() {
             Ok(chat) => chat,
             Err(error) => {
@@ -1002,9 +1040,18 @@ impl GongwenApp {
         let (tx, rx) = std::sync::mpsc::channel();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = cancel.clone();
+        // 校准也占全局 Pi 门禁：测试期间不让另一篇稿件开始写作。
+        let writing = match crate::pi_agent::begin_writing() {
+            Ok(writing) => writing,
+            Err(error) => {
+                self.pi_calibration_note = format!("未启动：{error}");
+                return;
+            }
+        };
         match std::thread::Builder::new()
             .name("pi-capability-calibration".into())
             .spawn(move || {
+                let _writing = writing;
                 let mut probe = probe_chat;
                 probe.timeout_seconds = probe.timeout_seconds.clamp(1, 3);
                 let actual = crate::lmstudio::context::window(&probe);
@@ -1157,6 +1204,39 @@ impl GongwenApp {
             &identity.skill_digest,
         )
         .is_ok_and(|current| current == *identity)
+    }
+
+    /// 进入模型服务页时统计一次 Pi 工作区占用。失败留标记，不每帧重试。
+    fn refresh_pi_workspace_usage(&mut self) {
+        if self.pi_workspace_busy
+            || self.pi_workspace_usage.is_some()
+            || self.pi_workspace_error.is_some()
+        {
+            return;
+        }
+        self.pi_workspace_busy = true;
+        let sender = self.sender.clone();
+        // 统计要遍历工作区目录，放到后台线程，别卡住界面。
+        std::thread::spawn(move || {
+            let result = crate::pi_agent::workspace_usage();
+            let _ = sender.send(crate::app::WorkerResult::PiWorkspaceUsage(result));
+        });
+    }
+
+    /// 清理旧 Pi 工作区：每篇稿件保留最近 3 轮，只删已写入正文的旧轮次与孤儿目录。
+    fn start_pi_workspace_prune(&mut self) {
+        if self.pi_workspace_busy {
+            return;
+        }
+        self.pi_workspace_busy = true;
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = crate::pi_agent::prune_workspaces(
+                3,
+                std::time::Duration::from_secs(7 * 24 * 60 * 60),
+            );
+            let _ = sender.send(crate::app::WorkerResult::PiWorkspacePruned(result));
+        });
     }
 }
 

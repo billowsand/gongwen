@@ -13,7 +13,8 @@
 //!   pi/session.sqlite      Durable 数据库，位于模型可读写区域之外
 //! ```
 //!
-//! 工作区不删除：中断、停止以后仍能查看本次文件。数据库也不放进 `workspace/`，
+//! 工作区默认保留：中断、停止以后仍能查看本次文件。AI 管理页可按稿件只保留最近几轮，
+//! 并清理已接受的旧轮次（见 [`prune_workspaces`]）。数据库也不放进 `workspace/`，
 //! 模型没有路径能读到它。
 
 use anyhow::Context;
@@ -44,6 +45,168 @@ pub(crate) fn base_dir() -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("建不了 Pi 工作区目录（{}）：{error}", dir.display()))?;
     Ok(dir)
+}
+
+/// 统计 / 清理时最多扫描多少个条目；超限就提前返回已统计值，不报错，界面不能被
+/// 一个异常大的目录卡住。
+const MAX_SCAN_ENTRIES: usize = 200_000;
+/// 没有可读 `run.json` 的孤儿运行目录，额外要老过这个时长才删。
+const ORPHAN_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// 工作区占用：（全部文件字节数, `run-*` 运行目录数）。只统计，不修改任何文件。
+pub(crate) fn workspace_usage() -> Result<(u64, usize), String> {
+    let base = base_dir()?;
+    let mut bytes = 0u64;
+    let mut runs = 0usize;
+    let mut entries = 0usize;
+    let mut pending = vec![base];
+    while let Some(dir) = pending.pop() {
+        let Ok(reader) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in reader.flatten() {
+            if entries >= MAX_SCAN_ENTRIES {
+                return Ok((bytes, runs));
+            }
+            entries += 1;
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if entry.file_name().to_string_lossy().starts_with("run-") {
+                    runs += 1;
+                }
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                bytes = bytes.saturating_add(entry.metadata().map(|meta| meta.len()).unwrap_or(0));
+            }
+        }
+    }
+    Ok((bytes, runs))
+}
+
+/// 清理旧工作区：每个 `doc-*` 下保留最新 `keep_per_doc` 个运行目录，其余只删
+/// 「mtime 超过 `min_age`」且「已接受（写进正文过）」的轮次；`run.json` 读不出的
+/// 孤儿目录额外要求超过 1 小时。Rust 正持着 `rust-owner.lock` 的目录不删，
+/// Running / Interrupted / Failed / Parked / Delivered 也不删——它们是「接着写」的依据。
+///
+/// 返回（删除的运行目录数, 释放的字节数）。
+pub(crate) fn prune_workspaces(
+    keep_per_doc: usize,
+    min_age: std::time::Duration,
+) -> Result<(usize, u64), String> {
+    let base = base_dir()?;
+    let now = std::time::SystemTime::now();
+    let mut pruned = 0usize;
+    let mut freed = 0u64;
+    let reader = std::fs::read_dir(&base)
+        .map_err(|error| format!("读不了 Pi 工作区目录（{}）：{error}", base.display()))?;
+    for entry in reader.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() || !entry.file_name().to_string_lossy().starts_with("doc-") {
+            continue;
+        }
+        let Ok(runs) = std::fs::read_dir(entry.path()) else {
+            continue;
+        };
+        // 目录名里带时间戳（`run-YYYYMMDD-HHMMSS-xxxxxxxx`），按名字降序即由新到旧。
+        let mut run_dirs: Vec<(String, PathBuf)> = Vec::new();
+        for run in runs.flatten() {
+            let name = run.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("run-") {
+                continue;
+            }
+            let Ok(file_type) = run.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                run_dirs.push((name, run.path()));
+            }
+        }
+        run_dirs.sort_by(|left, right| right.0.cmp(&left.0));
+        for (index, (_name, run_dir)) in run_dirs.into_iter().enumerate() {
+            if index < keep_per_doc {
+                continue;
+            }
+            let Ok(metadata) = std::fs::metadata(&run_dir) else {
+                continue;
+            };
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+            let age = now.duration_since(modified).unwrap_or_default();
+            if age < min_age {
+                continue;
+            }
+            match super::recovery::PiRunRecord::read_from(&run_dir) {
+                Ok(record) if record.status == super::recovery::PiRunStatus::Accepted => {}
+                // 有记录但不是「已接受」：这是接着写的依据，不删。
+                Ok(_) => continue,
+                // 读不出记录：视为孤儿，额外要求足够老，避免删掉正在写的目录。
+                Err(_) if age >= ORPHAN_MIN_AGE => {}
+                Err(_) => continue,
+            }
+            // 占用检查放在最后：它会在没有锁文件时创建一个，只对真准备删的目录做。
+            if run_is_active(&run_dir) {
+                continue;
+            }
+            let bytes = dir_bytes(&run_dir);
+            if std::fs::remove_dir_all(&run_dir).is_ok() {
+                pruned += 1;
+                freed = freed.saturating_add(bytes);
+            }
+        }
+    }
+    Ok((pruned, freed))
+}
+
+/// 运行目录是否正被占用。
+///
+/// Rust 在准备、等 host、写终态的整个运行期间都持着 `rust-owner.lock` 的
+/// `try_lock`；拿不到锁就跳过该目录。锁文件不存在时创建它再立即释放（视为空闲），
+/// 这样崩溃残留的空锁文件与从未开跑的目录都不影响清理。
+///
+/// 不用 `host-owner.sqlite` 判断：host 退出后它留在目录里是常态。
+fn run_is_active(run_dir: &Path) -> bool {
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(run_dir.join("rust-owner.lock"))
+    else {
+        // 打不开锁文件（权限、路径异常）时拿不准，保守跳过。
+        return true;
+    };
+    lock.try_lock().is_err()
+}
+
+/// 目录下文件总字节数（不跟随符号链接）。只用于回报释放空间，达到扫描上限即停。
+fn dir_bytes(root: &Path) -> u64 {
+    let mut bytes = 0u64;
+    let mut entries = 0usize;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(reader) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in reader.flatten() {
+            if entries >= MAX_SCAN_ENTRIES {
+                return bytes;
+            }
+            entries += 1;
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                bytes = bytes.saturating_add(entry.metadata().map(|meta| meta.len()).unwrap_or(0));
+            }
+        }
+    }
+    bytes
 }
 
 impl PiWorkspace {
@@ -86,30 +249,19 @@ impl PiWorkspace {
         let name = format!("run-{stamp}-{}", short_uuid());
         let run_dir = doc_dir.join(&name);
         let root = run_dir.join("workspace");
-        for sub in ["input", "work", "resources"] {
-            std::fs::create_dir_all(root.join(sub)).map_err(|error| {
-                format!("建不了工作区目录（{}）：{error}", root.join(sub).display())
-            })?;
-        }
-        write_text(&root.join("input").join("current.md"), current)?;
-        // 先按同一份内存快照落盘技能与索引，再用同一份快照写要求文件。
-        skills.write_to(&root)?;
-        let mut request_file = vec![request.trim().to_string()];
-        request_file.push(String::new());
-        request_file.push(skills.request_block());
-        request_file.push(String::new());
-        request_file.push("## 材料".into());
-        let metas = materials::write_all(&root, materials)?;
-        request_file.push(materials::prompt_block(&metas));
-        write_text(
-            &root.join("input").join("request.md"),
-            &request_file.join("\n"),
-        )?;
-        crate::skill_pack::write_directory(&root.join("skills"))
-            .map_err(|error| format!("写不出随包技能：{error:#}"))?;
         let state_dir = run_dir.join("pi");
-        std::fs::create_dir_all(&state_dir)
-            .map_err(|error| format!("建不了 Pi 状态目录（{}）：{error}", state_dir.display()))?;
+        // 建目录与写文件整段交给 `build_run`：材料 / 技能 / 要求写失败时下面统一删掉
+        // 这次刚建的运行目录，不留半成品孤儿目录。只删 `run_dir` 这一层，不碰 doc-*
+        // 与其它轮次的目录。
+        let prepared = build_run(&root, &state_dir, current, request, materials, skills);
+        let metas = match prepared {
+            Ok(metas) => metas,
+            Err(error) => {
+                // 清理失败只是留下目录，不能盖掉真正的准备错误。
+                let _ = std::fs::remove_dir_all(&run_dir);
+                return Err(error);
+            }
+        };
         let label = format!("pi/workspaces/doc-{doc_key}/{name}");
         Ok((
             Self {
@@ -178,6 +330,44 @@ impl PiWorkspace {
     }
 }
 
+/// 按同一份内存快照把一个运行目录的内容落盘；失败时调用方负责删掉 `run_dir`。
+///
+/// 建目录与写文件从这里开始：`input/current.md`、技能快照与索引、材料、要求文件、
+/// 随包技能目录、`pi/` 状态目录。
+fn build_run(
+    root: &Path,
+    state_dir: &Path,
+    current: &str,
+    request: &str,
+    materials: &[PiMaterialInput],
+    skills: &SkillSnapshot,
+) -> Result<Vec<PiMaterialMeta>, String> {
+    for sub in ["input", "work", "resources"] {
+        std::fs::create_dir_all(root.join(sub)).map_err(|error| {
+            format!("建不了工作区目录（{}）：{error}", root.join(sub).display())
+        })?;
+    }
+    write_text(&root.join("input").join("current.md"), current)?;
+    // 先按同一份内存快照落盘技能与索引，再用同一份快照写要求文件。
+    skills.write_to(root)?;
+    let mut request_file = vec![request.trim().to_string()];
+    request_file.push(String::new());
+    request_file.push(skills.request_block());
+    request_file.push(String::new());
+    request_file.push("## 材料".into());
+    let metas = materials::write_all(root, materials)?;
+    request_file.push(materials::prompt_block(&metas));
+    write_text(
+        &root.join("input").join("request.md"),
+        &request_file.join("\n"),
+    )?;
+    crate::skill_pack::write_directory(&root.join("skills"))
+        .map_err(|error| format!("写不出随包技能：{error:#}"))?;
+    std::fs::create_dir_all(state_dir)
+        .map_err(|error| format!("建不了 Pi 状态目录（{}）：{error}", state_dir.display()))?;
+    Ok(metas)
+}
+
 /// 目录名里用的短 UUID（只要唯一，不做密码学用途）。
 fn short_uuid() -> String {
     uuid::Uuid::new_v4()
@@ -199,6 +389,195 @@ fn write_text(path: &Path, text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path as FsPath;
+
+    /// 把测试线程的配置目录指到临时目录，测试结束自动恢复。
+    struct ConfigDirReset;
+    impl Drop for ConfigDirReset {
+        fn drop(&mut self) {
+            crate::storage::set_test_config_dir(None);
+        }
+    }
+
+    fn isolated_config_dir() -> (tempfile::TempDir, ConfigDirReset) {
+        let config = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(config.path().to_path_buf()));
+        (config, ConfigDirReset)
+    }
+
+    /// 造一个运行目录：工作区、锁文件与一份指定状态的运行记录都齐。
+    fn fake_run(
+        doc_dir: &FsPath,
+        name: &str,
+        status: super::super::recovery::PiRunStatus,
+    ) -> PathBuf {
+        let run_dir = doc_dir.join(name);
+        std::fs::create_dir_all(run_dir.join("workspace")).unwrap();
+        std::fs::write(run_dir.join("workspace/payload.md"), b"payload").unwrap();
+        // 真实的运行目录里 Rust 侧一直持有这把锁；解锁状态说明这一轮已经结束。
+        std::fs::write(run_dir.join("rust-owner.lock"), b"").unwrap();
+        let workspace = PiWorkspace {
+            root: run_dir.join("workspace"),
+            state: run_dir.join("pi/session.sqlite"),
+            run: run_dir.clone(),
+            label: format!("pi/workspaces/doc-test/{name}"),
+        };
+        let mut record = super::super::recovery::PiRunRecord::start(
+            "run-test".into(),
+            "request-test".into(),
+            &workspace,
+            "正文",
+            "正文",
+            "正文",
+            "要求",
+            None,
+            "要求",
+            "通知",
+            "2026-11-04",
+            None,
+            None,
+            Vec::new(),
+            "测试服务商",
+            "测试模型",
+        );
+        record.status = status;
+        record.write(&workspace).unwrap();
+        run_dir
+    }
+
+    /// 准备失败（材料超限）不能留下半成品运行目录；doc-* 仍保留。
+    #[test]
+    fn a_failed_preparation_leaves_no_run_directory() {
+        let base = tempfile::tempdir().unwrap();
+        let skills = super::super::skills::SkillSnapshot::build_builtin(None).unwrap();
+        let huge = "字".repeat(super::super::materials::MAX_MATERIAL_BYTES + 1);
+        let materials = vec![PiMaterialInput {
+            title: "超大材料".into(),
+            source: "测试".into(),
+            role: materials::MaterialRole::Fact,
+            text: huge,
+        }];
+        let error =
+            PiWorkspace::prepare_with_snapshot(base.path(), 7, "正文", "要求", &materials, &skills)
+                .unwrap_err();
+        assert!(error.contains("超过单份上限"), "{error}");
+        let doc_dir = base.path().join("doc-7");
+        assert!(doc_dir.is_dir(), "doc-* 里可能有别的轮次，不能删");
+        assert_eq!(
+            std::fs::read_dir(&doc_dir).unwrap().count(),
+            0,
+            "失败后不能留下 run 目录"
+        );
+    }
+
+    /// 清理：删掉旧的已接受轮次，保留最新 N 个、Running 与正被本进程锁住的目录；
+    /// `host-owner.sqlite` 留着不影响删除（host 退出后它是常态）。
+    #[test]
+    fn prune_removes_old_accepted_runs_and_keeps_what_is_needed() {
+        let (_config, _reset) = isolated_config_dir();
+        let base = crate::storage::config_dir().unwrap().join("pi/workspaces");
+        let doc = base.join("doc-1");
+        std::fs::create_dir_all(&doc).unwrap();
+        use super::super::recovery::PiRunStatus;
+        let old_a = fake_run(&doc, "run-20260101-000000-aaaaaaaa", PiRunStatus::Accepted);
+        let old_b = fake_run(&doc, "run-20260102-000000-bbbbbbbb", PiRunStatus::Accepted);
+        let running = fake_run(&doc, "run-20260103-000000-cccccccc", PiRunStatus::Running);
+        let hosted = fake_run(&doc, "run-20260104-000000-dddddddd", PiRunStatus::Accepted);
+        // host 退出后 host-owner.sqlite 还留在目录里，是常态，不能当成「正在跑」。
+        std::fs::write(hosted.join("host-owner.sqlite"), b"").unwrap();
+        let newest = fake_run(&doc, "run-20260105-000000-eeeeeeee", PiRunStatus::Accepted);
+        // 本进程持着 rust-owner.lock：这一轮正在跑，不能删（它也比最新一轮旧）。
+        let locked = fake_run(&doc, "run-20260106-000000-ffffffff", PiRunStatus::Accepted);
+        let held_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(locked.join("rust-owner.lock"))
+            .unwrap();
+        held_lock.try_lock().expect("测试进程应先拿到运行所有权锁");
+        let keep_newest = fake_run(&doc, "run-20260107-000000-gggggggg", PiRunStatus::Accepted);
+        // 第二个稿件：验证「保留最新 N 个」。
+        let other_doc = base.join("doc-2");
+        std::fs::create_dir_all(&other_doc).unwrap();
+        let other_old = fake_run(
+            &other_doc,
+            "run-20260101-000000-aaaaaaaa",
+            PiRunStatus::Accepted,
+        );
+        let other_older = fake_run(
+            &other_doc,
+            "run-20260102-000000-bbbbbbbb",
+            PiRunStatus::Accepted,
+        );
+        let other_newest = fake_run(
+            &other_doc,
+            "run-20260103-000000-cccccccc",
+            PiRunStatus::Accepted,
+        );
+
+        // keep_per_doc = 1：每个稿件只保留最新一轮（0107 / 0103）。
+        let (count, freed) = prune_workspaces(1, std::time::Duration::ZERO).unwrap();
+        assert_eq!(count, 6, "doc-1 删 4 个、doc-2 删 2 个");
+        assert!(freed >= 42, "要回报释放的字节数：{freed}");
+        assert!(
+            !hosted.exists(),
+            "host-owner.sqlite 留着不表示正在跑，应删除"
+        );
+        assert!(!newest.exists(), "不在最新 N 个里的已接受轮次应删除");
+        assert!(!old_a.exists(), "旧的已接受轮次应删除");
+        assert!(!old_b.exists(), "旧的已接受轮次应删除");
+        assert!(running.exists(), "Running 是接着写的依据，不能删");
+        assert!(locked.exists(), "本进程持着锁的目录不能删");
+        assert!(keep_newest.exists(), "每个稿件保留最新一轮");
+        assert!(!other_old.exists());
+        assert!(!other_older.exists());
+        assert!(other_newest.exists(), "每个稿件保留最新一轮");
+
+        // min_age 没到：即使不再保留也先不删。
+        let (count, freed) = prune_workspaces(0, std::time::Duration::from_secs(3600)).unwrap();
+        assert_eq!((count, freed), (0, 0));
+        assert!(other_newest.exists());
+        drop(held_lock);
+    }
+
+    /// 孤儿目录（run.json 读不出）额外要求超过 1 小时，刚建的不动。
+    #[test]
+    fn a_fresh_orphan_directory_is_not_pruned() {
+        let (_config, _reset) = isolated_config_dir();
+        let doc = crate::storage::config_dir()
+            .unwrap()
+            .join("pi/workspaces/doc-2");
+        std::fs::create_dir_all(&doc).unwrap();
+        let orphan = doc.join("run-20260101-000000-aaaaaaaa");
+        std::fs::create_dir_all(orphan.join("workspace")).unwrap();
+        std::fs::write(orphan.join("rust-owner.lock"), b"").unwrap();
+        std::fs::write(orphan.join("broken.json"), b"{").unwrap();
+        let (count, _) = prune_workspaces(0, std::time::Duration::ZERO).unwrap();
+        assert_eq!(count, 0);
+        assert!(orphan.exists(), "读不出记录但还很新：可能正在准备，不能删");
+    }
+
+    #[test]
+    fn workspace_usage_counts_files_and_run_directories() {
+        let (_config, _reset) = isolated_config_dir();
+        let doc = crate::storage::config_dir()
+            .unwrap()
+            .join("pi/workspaces/doc-1");
+        std::fs::create_dir_all(&doc).unwrap();
+        fake_run(
+            &doc,
+            "run-20260101-000000-aaaaaaaa",
+            super::super::recovery::PiRunStatus::Running,
+        );
+        fake_run(
+            &doc,
+            "run-20260102-000000-bbbbbbbb",
+            super::super::recovery::PiRunStatus::Delivered,
+        );
+        let (bytes, runs) = workspace_usage().unwrap();
+        assert_eq!(runs, 2);
+        assert!(bytes >= 14, "应统计到文件字节：{bytes}");
+    }
 
     #[test]
     fn candidate_is_delivered_separately_from_the_formal_snapshot() {

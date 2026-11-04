@@ -7,7 +7,7 @@
 
 用户已确认首版：面向 256K 及以上窗口，按实际容量优先整篇材料，超限按大章节切分；每轮提供当前日期/星期/时区及标准组织背景，词库按职能、人员简介及所属单位查询。Pi 新任务不做事实核查、不产生事实疑点清单，全面审校与政策核查技能退出新任务；现有文字复核、格式与引用保护、授权表单权限、基线和精确撤销保留。此口径取代下文 Pi 事实疑点“只提示”的旧表述，不改变旧提案历史的权限。详见 `docs/pi-implementation/writing-context-v1.md`。
 
-2026-11-04 后续：设置页风格学习也已统一到 Pi 的 `gongwen-style-learn`，支持库内/上传样稿，`submit_style` 交独立JSON草稿，用户编辑保存；不走辅助模型、不写正文。普通写作与风格学习按任务类型隔离技能和交付权限，见 `docs/pi-implementation/style-learning-v1.md`。
+2026-11-04 后续：设置页风格学习也已统一到 Pi 的 `gongwen-style-learn`，支持库内/上传样稿，`submit_style` 交独立JSON草稿，用户编辑保存；不走辅助模型、不写正文。普通写作与风格学习按任务类型隔离技能和交付权限，见 `docs/pi-implementation/style-learning-v1.md`。Pi 内置技能共 7 个（6 个写作 + 1 个风格学习），全面审校 `gongwen-review` 与政策核查 `gongwen-policy-check` 已退役、只保留历史文件。交付通道按任务类型分三类：正文 `document`（`submit_document`）、清单 `report`（`finish_report`）、独立风格文件 `style`（`submit_style`，只进设置页编辑器、不能写正文）。
 
 ## 技术栈
 
@@ -122,6 +122,13 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   （起草 / 复核 / 知识库）选模型（`ModelRef` 引用 + `AppConfig` 中央解析器），
   旧内联地址字段随启动自动迁移；详见 `docs/ai-agent-workbench.md` 第十三节。对比分析、数据分析段落、正文区审阅再讨论（见第十六节 F16；opencode 接入已作废）。
   方案、红线修订记录、分期、各期进度与已知坑见 `docs/ai-agent-workbench.md`（单文件，第十三节是交接）。
+  **2026-11-04 审查后 Pi 修复（待真机验收）**：单轮执行上限改为 30 分钟（等用户回答不计，
+  卡片显示「执行上限 30 分钟」）；工具调用常规 60 次、分阶段由宿主按阶段追加、硬上限 84 次；
+  事实来源改为 `sources/items/<sha256>.md` + `sources/index-<hash>.json`（单项 2 MiB / 索引
+  512 KiB / 恢复读取 8 MiB，旧格式可读），落盘失败不再中止本轮；运行目录按稿件保留最近 3 轮
+  并新增自动清理与 AI 管理页占用/清理入口；生产 host 改为 `env_clear` 后最小环境白名单并透传
+  代理变量；macOS `darwin-arm64` / `darwin-x64` 运行时、打包、签名公证（可选）与 CI 骨架已补齐，
+  待真机与发布验证。细节与已知限制见 `docs/pi-runtime.md`。
 - **公文要素填写框架**（AI 按标准词库补全表单要素：主送、抄送、呈报领导、承办单位、
   联系人、联系电话、发文单位、落款单位，分四期）：**第 1 期（字段登记表
   `src/element_fields.rs`、统一写值路径 `apply_field`、表单下拉框改调它、红线 2 文档
@@ -189,7 +196,8 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   包内格式不变、旧 `.zip` 照常导入，分三步）：**第一步（后缀与统一入口 `receive_import_package`、
   暂存副本与排队、启动参数、拖放）、第二步（已开窗口转交：`src/single_instance.rs` 锁文件 + 收件目录）
   、第三步（Inno 注册表登记、Linux MIME / desktop、
-  `assets/doc-icon/` 文档图标）均已实现，待真机验收**。方案、进度与已知坑见 `docs/gwx-package-design.md`（单文件，第十一节是进度）。
+  `assets/doc-icon/` 文档图标）均已实现，待真机验收**（macOS 未接 Apple Event open-file，
+  `.gwx` 双击在 macOS 不生效，用拖放或应用内导入；见 `docs/pi-runtime.md`）。方案、进度与已知坑见 `docs/gwx-package-design.md`（单文件，第十一节是进度）。
 
 - **人机决策模块**（把「问用户」从算子里抽成可组合的决策：决策形态随挂起交给界面、通用清单确认
   与修订、待决事项、自主步骤提问，分四期）：方案、分期、进度与已知坑见 `docs/decision-modules.md`
@@ -267,7 +275,7 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 > 2026-11-02 按用户已确认的产品修订（`docs/pi-implementation/pi-direct-write-task.md`）
 > 只在 **Pi 智能写作**这条路径上改了第 1 条：Pi 明确提交的有效 Markdown 由界面线程
 > 直接写进当前正文，每次写入保留精确的修改前后文本与运行标识，卡片上可整次撤销；
-> 事实来源疑点只提示，不再要求人工确认后才能写入。小模型分阶段流程、旧提案接受、
+> Pi 路径不做事实核查、不产生事实疑点清单（2026-11-04 口径）。小模型分阶段流程、旧提案接受、
 > 授权要素权限与只读保护全部不变。
 
 1. **AI 可以写自己的工作稿；正文只能经规定入口改写。** 智能体在 AI 工作稿里可以
@@ -289,10 +297,12 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
    用来自查自改；落地前程序必须再强制跑一遍。**硬闸门**挡住落地（未确认的关键事实
    变化、来源不明的数字和日期、授权要素被改动）；**软闸门**的问题转成修订建议附在
    提案上。小模型逐句复核的产物仍然是闸门不过就丢弃。
-   **Pi 路径的例外有且只有事实来源这一类**：交付检查把「挡住写入的问题」与「只作提示的
-   疑点」分成 `DeliveryReport` 的两个字段（`src/pi_agent/delivery.rs`），技术性与权限
-   问题（空稿、选区外改动、公文引用被删改、哈希 / 体积 / 路径）照旧拦下，来源不明的
-   数字与日期只在卡片与审校里提示。界面与状态机都不解析中文原因串来判断类别。
+   **Pi 路径不做事实核查**：交付检查（`src/pi_agent/delivery.rs`）只保留技术性与权限
+   保护——空稿、路径 / 体积 / 哈希、基线与选区、公文引用、只读；命中就拒绝**自动**写入。
+   事实来源不参与交付判定，`DeliveryReport.advisories` 仅为兼容历史记录保留、新交付恒空。
+   被硬闸门拦下的成品不丢弃，保留在这一轮里，只能由用户显式点「取回 AI 成品」写入正文：
+   取回路径不重跑闸门，但保留精确撤销记录（2026-11-02 / 11-04 确认的产品口径）；上面说的
+   「照旧拦下」指自动写入路径。界面与状态机都不解析中文原因串来判断类别。
 
 推论：确定性规则是 AI 的裁判，不是竞争者，不要为了迁就模型放宽规则。工具可以由
 模型自由调用，权限和「做完了没有」由程序判定。
@@ -302,12 +312,18 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 - 版本号只维护在两处：`Cargo.toml` 的根包 `version` 和 `Cargo.lock` 里
   `name = "gongwen-assistant"` 的 `version`。
 - 本机**没有 `pwsh`**，不要调用 `scripts/bump-version.ps1`，手动编辑上述两处。
-- `ci.yml` 在 push `main` 时触发（Windows x64 / Linux ARM64（GLIBC 2.28）两平台跑 fmt / clippy / test；
-  另在干净的 Ubuntu 20.04 ARM64 里装 deb 并用 Xvfb 真正启动一次，见 `scripts/smoke-launch-linux.sh`）；
-  `release.yml` 在 push `v*` tag 时触发，只产出 6 个资产：Windows x64 setup.exe、
-  Linux ARM64 deb（Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）、
+- `ci.yml` 在 push `main` 时触发：Windows x64、Linux ARM64（GLIBC 2.28）与 macOS arm64
+  （`macos-14`）三平台跑 fmt / clippy / test；Debian buster 作业会组装 `linux-arm64` 运行时
+  并把 `runtime/pi/bin` 加进 PATH，Pi 的进程 / 锁 / 交付 Rust 测试真正执行，Linux 与 Windows
+  作业还跑 `cargo test --locked --release shipped_pi_runtime_manifest -- --ignored`；
+  另在干净的 Ubuntu 20.04 ARM64 里装 deb 并用 Xvfb 真正启动一次，见 `scripts/smoke-launch-linux.sh`。
+  `release.yml` 在 push `v*` tag 时触发，产出 Windows x64 setup.exe、Linux ARM64 deb
+  （Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）、
   Linux x86_64 的 Arch / Omarchy pacman 包（`archlinux:base` 容器构建，`makepkg` 打成
-  `.pkg.tar.zst`，供离线机器 `pacman -U`），及各自 `.sha256`。macOS、Linux AMD64 的 deb 不再发布。
+  `.pkg.tar.zst`，供离线机器 `pacman -U`）与 macOS arm64 的 `.dmg`，各带 `.sha256`。
+  macOS 的签名与公证只在配置 `GONGWEN_MACOS_SIGN_IDENTITY` / `GONGWEN_MACOS_NOTARY_PROFILE`
+  时执行，CI 未配 secrets 时发布的是未签名包（Gatekeeper 会拦，需右键打开）；x64 dmg
+  可同法出包、暂不发布。Linux AMD64 的 deb 不再发布。
 - Release workflow 全程约 20–30 分钟。
 - 完整发布流程（bump → tag → 监控 → 写中文 release notes → 验证）见 skill `release`。
   **硬性要求：release 正文必须手写，不能用 `--generate-notes` 的占位说明。**

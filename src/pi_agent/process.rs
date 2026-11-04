@@ -25,19 +25,75 @@ use crate::agent::clarify::{Question, Reply};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// 一条工具请求参数的上限。
 const MAX_TOOL_ARGS_BYTES: usize = 1024 * 1024;
-/// 一轮最多执行多少次工具调用。
-const MAX_TOOL_CALLS: usize = 60;
+/// 分阶段写作时 host 会按阶段追加额度，总上限 84（常规 60 + 24）；Rust 侧按同一个
+/// 硬上限判定，避免宿主放开额度后仍被这里杀掉。
+const MAX_TOTAL_TOOL_CALLS: usize = 84;
 /// 一批最多几题（与 `clarify::agent_questions` 一致）。
 const MAX_QUESTIONS_PER_BATCH: u32 = 3;
 /// 一轮最多几批提问。
 const MAX_QUESTION_BATCHES: u32 = 2;
+/// 心跳：宿主 30 秒没有任何消息就 ping，再 30 秒没有 pong 判失联。
+const HEARTBEAT_QUIET: Duration = Duration::from_secs(30);
+/// 宿主心跳响应上限。
+const HEARTBEAT_DEAD: Duration = Duration::from_secs(30);
+
+/// 全局只允许一轮 Pi 任务（正文写作 / 风格学习 / 能力测试）同时进行：每篇稿件各自
+/// 起 Node 进程会抢同一个本地模型，最终一起超时。
+static WRITING_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+/// 一轮 Pi 任务的占位令牌，线程结束自动释放。
+pub(crate) struct PiWritingGuard {
+    /// 测试里不做全局互斥（并行 UI 用例会互相抢），因此也就不减计数。
+    counted: bool,
+}
+
+impl Drop for PiWritingGuard {
+    fn drop(&mut self) {
+        if self.counted {
+            WRITING_RUNS.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// 开始一轮 Pi 任务（正文写作 / 风格学习 / 能力测试）。已有任务在跑时返回可读错误。
+///
+/// 单元测试并行跑，多个用例会各自“启动 Pi”，全局门禁在测试里放行、只验证调用方
+/// 持有令牌的代码路径；生产构建里只有第一个能拿到。
+pub(crate) fn begin_writing() -> Result<PiWritingGuard, String> {
+    #[cfg(test)]
+    {
+        Ok(PiWritingGuard { counted: false })
+    }
+    #[cfg(not(test))]
+    {
+        if WRITING_RUNS.fetch_add(1, Ordering::AcqRel) > 0 {
+            WRITING_RUNS.fetch_sub(1, Ordering::AcqRel);
+            return Err(
+                "已有 Pi 任务（写作 / 风格学习 / 能力测试）正在运行，请等它结束后再开始。".into(),
+            );
+        }
+        Ok(PiWritingGuard { counted: true })
+    }
+}
+
+/// 当前是否有 Pi 任务在跑（能力校准、正文写作与风格学习共用同一门禁）。
+pub(crate) fn writing_active() -> bool {
+    #[cfg(test)]
+    {
+        false
+    }
+    #[cfg(not(test))]
+    {
+        WRITING_RUNS.load(Ordering::Acquire) > 0
+    }
+}
 
 /// 交给 host 的模型参数。`api_key` 只进 stdin，不进 argv / 日志。
 #[derive(Clone)]
@@ -83,6 +139,8 @@ pub(crate) struct PiJob {
     pub(crate) request_id: String,
     pub(crate) run_id: String,
     pub(crate) timeout: Duration,
+    /// 从应用代理设置派生的环境变量（`HTTP_PROXY` 等）；host 在最小环境里运行。
+    pub(crate) proxy_env: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -294,8 +352,21 @@ impl PiBridge {
         let Some(tx) = guard.as_ref() else {
             return Err("Pi 进程已经结束，回答没有送到。".into());
         };
-        tx.send(line)
-            .map_err(|_| "Pi 进程已经结束，回答没有送到。".to_string())
+        // 回答来自界面线程：队列满时不能在界面线程上阻塞等 host 读 stdin。
+        // 交给后台线程继续投递，保证“答了就是答了”，界面先返回。
+        match tx.try_send(line) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(line)) => {
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(line);
+                });
+                Ok(())
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                Err("Pi 进程已经结束，回答没有送到。".to_string())
+            }
+        }
     }
 }
 
@@ -432,7 +503,8 @@ pub(crate) fn run(
     let started = Instant::now();
     if cancel.load(Ordering::Relaxed) {
         if !job.resume {
-            job.record
+            let _ = job
+                .record
                 .finished(PiRunStatus::Interrupted, "用户在开跑前就停止了这一轮。");
         }
         return Err("已停止 Pi 智能写作，未交付任何提案。".into());
@@ -458,6 +530,12 @@ pub(crate) fn run(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // 生产同样用最小环境：不继承用户的 NODE_OPTIONS / NODE_PATH / LD_LIBRARY_PATH
+    // 或模型凭据；只放运行必需项和从应用代理设置派生的代理变量。
+    command.env_clear();
+    for (key, value) in host_environment(&job.proxy_env) {
+        command.env(key, value);
+    }
     let child = command.spawn().map_err(|error| {
         format!(
             "启动 Pi host 失败（{}）：{error}",
@@ -484,7 +562,21 @@ pub(crate) fn run(
         let secret = job.model.api_key.clone();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stderr);
-            while let Ok(buffer) = bounded_line(&mut reader, 32 * 1024) {
+            loop {
+                let buffer = match bounded_line(&mut reader, 32 * 1024) {
+                    Ok(buffer) => buffer,
+                    // 单行超长只丢这一行并继续排空：排空线程退出会让 host 写满管道后卡死。
+                    Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                        skip_line(&mut reader);
+                        let mut kept = lines.lock().unwrap_or_else(|poison| poison.into_inner());
+                        kept.push_back("（已跳过一行超长 host 诊断输出）".to_string());
+                        while kept.len() > 120 {
+                            kept.pop_front();
+                        }
+                        continue;
+                    }
+                    Err(_) => break,
+                };
                 if buffer.is_empty() {
                     break;
                 }
@@ -638,6 +730,9 @@ pub(crate) fn run(
     let mut ready = false;
     let mut events = 0usize;
     let mut cancel_sent: Option<Instant> = None;
+    // 心跳：模型长输出期间宿主可能很久不发消息，用 ping/pong 区分“还在跑”与“卡死”。
+    let mut last_message = Instant::now();
+    let mut ping_sent: Option<Instant> = None;
     loop {
         if cancel.load(Ordering::Relaxed) && cancel_sent.is_none() {
             let _ = control_tx.try_send("{\"type\":\"cancel\"}\n".into());
@@ -647,6 +742,28 @@ pub(crate) fn run(
             && at.elapsed() > Duration::from_secs(2)
         {
             return Err("已停止 Pi 智能写作，未交付任何提案。".into());
+        }
+        // 心跳放在等事件之前：没有输出时也定期问一次，失联按“可接着写”失败处理。
+        if ping_sent.is_none() && last_message.elapsed() > HEARTBEAT_QUIET {
+            if control_tx
+                .try_send("{\"type\":\"ping\"}\n".to_string())
+                .is_ok()
+            {
+                ping_sent = Some(Instant::now());
+            }
+        } else if let Some(sent) = ping_sent
+            && sent.elapsed() > HEARTBEAT_DEAD
+        {
+            let _ = control_tx.try_send("{\"type\":\"cancel\"}\n".into());
+            if ready || !job.resume {
+                let _ = job
+                    .record
+                    .finished(PiRunStatus::Failed, "Pi host 心跳超时，已停止本轮。");
+            }
+            return Err(
+                "Pi host 超过 60 秒没有响应（可能卡死），已停止本轮；工作区保留，可「接着写」。"
+                    .into(),
+            );
         }
         // 人在看题时不计执行超时；回答之后接着按剩余时间算。
         if let Some((_, answered, since)) = &waiting {
@@ -660,14 +777,18 @@ pub(crate) fn run(
         }
         if waiting.is_none() && started.elapsed().saturating_sub(paused) > job.timeout {
             let _ = control_tx.try_send("{\"type\":\"cancel\"}\n".into());
-            if ready || !job.resume {
-                job.record
-                    .finished(PiRunStatus::Failed, "Pi 智能写作执行超时。");
-            }
-            return Err(format!(
+            let mut message = format!(
                 "Pi 智能写作超时（{} 秒），未交付任何提案。",
                 job.timeout.as_secs()
-            ));
+            );
+            if (ready || !job.resume)
+                && let Err(error) = job
+                    .record
+                    .finished(PiRunStatus::Failed, "Pi 智能写作执行超时。")
+            {
+                message.push_str(&format!("（运行记录未写成：{error}）"));
+            }
+            return Err(message);
         }
         if !ready
             && cancel_sent.is_none()
@@ -705,9 +826,14 @@ pub(crate) fn run(
                         on_event(PiEvent::Evidence(item.line()));
                     }
                     // 工具实际返回的事实先落盘，再把结果交给 host：崩溃后恢复的闸门
-                    // 仍认这些依据，不会因为“还没到最后交付”就丢掉。
+                    // 仍认这些依据，不会因为“还没到最后交付”就丢掉。来源只是恢复辅助，
+                    // 落盘失败记一行提示、继续本轮，不能因此中止已经花掉模型时间的任务。
                     if let Err(error) = job.record.persist_sources(&job.tools.fact_sources()) {
-                        return Err(format!("记录本轮事实来源失败，已停止：{error}"));
+                        job.record
+                            .evidence(&format!("本轮事实来源暂未落盘：{error}"));
+                        on_event(PiEvent::Tool(format!(
+                            "Pi · 事实来源暂未落盘（不影响本轮）：{error}"
+                        )));
                     }
                 }
                 let line = serde_json::json!({
@@ -760,6 +886,8 @@ pub(crate) fn run(
         if cancel_sent.is_some() || cancel.load(Ordering::Relaxed) {
             return Err("已停止 Pi 智能写作，未交付任何提案。".into());
         }
+        last_message = Instant::now();
+        ping_sent = None;
         match event {
             HostEvent::Ready {
                 protocol,
@@ -862,8 +990,10 @@ pub(crate) fn run(
                     return Err("Pi host 的工具调用 ID 不合法".into());
                 }
                 tool_calls += 1;
-                if tool_calls > MAX_TOOL_CALLS {
-                    return Err("本轮工具调用次数过多，已停止。".into());
+                if tool_calls > MAX_TOTAL_TOOL_CALLS {
+                    return Err(format!(
+                        "本轮工具调用次数过多（最多 {MAX_TOTAL_TOOL_CALLS} 次），已停止；工作区保留，可「接着写」。"
+                    ));
                 }
                 let args_text = serde_json::to_vec(&args)
                     .map_err(|error| format!("工具参数无法序列化：{error}"))?;
@@ -1116,10 +1246,10 @@ pub(crate) fn run(
                 let message = if message.trim().is_empty() {
                     "已停止 Pi 智能写作，未交付任何提案。".to_string()
                 } else {
-                    short(&message)
+                    short(&scrub(&message, &job.model.api_key))
                 };
                 if ready || !job.resume {
-                    job.record.finished(PiRunStatus::Interrupted, &message);
+                    let _ = job.record.finished(PiRunStatus::Interrupted, &message);
                 }
                 return Err(message);
             }
@@ -1128,7 +1258,7 @@ pub(crate) fn run(
                 let message = scrub(&short(&message), &job.model.api_key);
                 let parked = code == "task_parked";
                 if ready || !job.resume {
-                    job.record.finished(
+                    let _ = job.record.finished(
                         if parked {
                             PiRunStatus::Parked
                         } else {
@@ -1163,6 +1293,61 @@ fn bounded_line(reader: &mut impl BufRead, max: usize) -> std::io::Result<Vec<u8
     Ok(buffer)
 }
 
+/// 丢掉当前这一行的剩余字节（已经读了前 max 字节），返回是否正常遇到换行。
+fn skip_line(reader: &mut impl BufRead) -> bool {
+    loop {
+        let chunk = match reader.fill_buf() {
+            Ok(chunk) => chunk,
+            Err(_) => return false,
+        };
+        if chunk.is_empty() {
+            return false;
+        }
+        if let Some(position) = chunk.iter().position(|byte| *byte == b'\n') {
+            reader.consume(position + 1);
+            return true;
+        }
+        let length = chunk.len();
+        reader.consume(length);
+    }
+}
+
+/// 交给 host 的最小环境：只保留运行必需项，再叠加应用代理设置派生的变量。
+/// 不继承 `NODE_OPTIONS` / `NODE_PATH` / `LD_LIBRARY_PATH` 或任何模型凭据。
+fn host_environment(proxy: &[(String, String)]) -> Vec<(String, String)> {
+    const KEEP: &[&str] = &[
+        "PATH",
+        "Path",
+        "SystemRoot",
+        "SYSTEMROOT",
+        "windir",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+    ];
+    let mut environment = Vec::new();
+    for key in KEEP {
+        if let Some(value) = std::env::var_os(key) {
+            environment.push(((*key).to_string(), value.to_string_lossy().into_owned()));
+        }
+    }
+    environment.extend(proxy.iter().cloned());
+    environment
+}
+
 fn successful_exit(guard: &mut ChildGuard, cancel: &AtomicBool) -> Result<(), String> {
     let started = Instant::now();
     loop {
@@ -1180,7 +1365,9 @@ fn successful_exit(guard: &mut ChildGuard, cancel: &AtomicBool) -> Result<(), St
                     "Pi host 报告完成后异常退出（{status}），未交付提案。"
                 ));
             }
-            None if started.elapsed() >= Duration::from_secs(2) => {
+            // host 报完成后还要等它自己退出；慢盘/杀软下 sqlite 收尾可能超过 2 秒，
+            // 给到 10 秒，避免成品已落盘却报“未正常退出”。
+            None if started.elapsed() >= Duration::from_secs(10) => {
                 return Err("Pi host 报告完成后未正常退出，未交付提案。".into());
             }
             None => std::thread::sleep(Duration::from_millis(10)),
@@ -1583,6 +1770,7 @@ rl.on("line", (line) => {
             request_id: "req-1".into(),
             run_id: "run-1".into(),
             timeout: Duration::from_secs(10),
+            proxy_env: Vec::new(),
         }
     }
 

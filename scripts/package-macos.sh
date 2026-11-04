@@ -17,9 +17,10 @@
 #   --force      覆盖已存在的 .app（否则报错退出）。
 #   --dmg        额外生成 .dmg 磁盘映像（需要 macOS 自带的 hdiutil 与 shasum）。
 #
-# 说明：gongwen-runtime 目前不发布 macOS 运行时资产；本地 runtime/ 目录若有字体
-# 则一并打进 .app（PDF 可用），否则只打包应用本体——程序仍可启动查看界面，
-# 仅 PDF 导出需要后续补充 runtime。
+# 说明：gongwen-runtime 的字体 runtime 是可选的（没有也能启动查看界面，仅 PDF
+# 不可用）；Pi 运行时（runtime/pi）若已由 scripts/stage-pi-runtime.sh 组装好，会
+# 校验平台与哈希后一并复制进 Contents/MacOS/runtime/pi，缺省只警告「智能写作不可用」。
+# 正式发布用 scripts/package-dmg.sh（带签名/公证与 --require-pi）。
 set -euo pipefail
 
 VERSION=""
@@ -30,7 +31,7 @@ SKIP_BUILD=0
 BUILD_DMG=0
 
 usage() {
-    sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
 }
 
 die() {
@@ -82,6 +83,13 @@ while [ $# -gt 0 ]; do
 done
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+# Pi 运行时的平台名与 packaging/pi-runtime.json 的 platforms 键一致。
+PI_PLATFORM=""
+case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64|Darwin-aarch64) PI_PLATFORM="darwin-arm64" ;;
+    Darwin-x86_64|Darwin-amd64) PI_PLATFORM="darwin-x64" ;;
+esac
 
 # 版本号只维护在 Cargo.toml，与 bump-version.ps1 保持一致。
 if [ -z "$VERSION" ]; then
@@ -193,6 +201,20 @@ cp "$STAGE/gongwen-assistant" "$MACOS_DIR/gongwen-assistant"
 chmod +x "$MACOS_DIR/gongwen-assistant"
 if [ -d "$STAGE/runtime" ]; then
     cp -a "$STAGE/runtime" "$MACOS_DIR/runtime"
+    # Pi 运行时：校验平台 / manifest / 全部文件哈希，并保证 node 带可执行位。
+    PI_DIR="$MACOS_DIR/runtime/pi"
+    if [ -f "$PI_DIR/manifest.json" ]; then
+        if [ -z "$PI_PLATFORM" ]; then
+            warn "not on macOS (or unsupported arch); skipping Pi runtime platform verification"
+        else
+            "$PI_DIR/bin/node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$PI_DIR" "$PI_PLATFORM" ||
+                die "Pi runtime failed verification (expected platform: $PI_PLATFORM): $PI_DIR"
+        fi
+        chmod 755 "$PI_DIR/bin/node"
+        echo "Pi runtime included: runtime/pi"
+    else
+        warn "未包含 Pi 运行时，智能写作将不可用（缺 runtime/pi/manifest.json；先跑 scripts/stage-pi-runtime.sh）"
+    fi
 fi
 for doc in README.md THIRD_PARTY_NOTICES.md LICENSE config.example.json; do
     [ -f "$STAGE/$doc" ] && cp "$STAGE/$doc" "$RESOURCES_DIR/"
@@ -201,6 +223,9 @@ if [ -n "$ICNS_FILE" ]; then
     cp "$ICNS_FILE" "$RESOURCES_DIR/app-icon.icns"
 fi
 
+# Info.plist 刻意不含 CFBundleDocumentTypes / UTExportedTypeDeclarations：
+# .gwx 双击走 macOS open-file Apple Event，当前 winit/eframe 外壳还没接，
+# 注册了只会「打开应用但不导入」。导入请用拖放 / 应用内导入。
 cat > "$APP_DIR/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

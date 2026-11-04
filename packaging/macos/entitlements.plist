@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  公文助手 macOS hardened runtime entitlements。
+
+  用法（scripts/package-dmg.sh 在配置了 GONGWEN_MACOS_SIGN_IDENTITY 时自动带上）：
+    codesign --force --options runtime --timestamp \
+      --entitlements packaging/macos/entitlements.plist --sign "$IDENTITY" \
+      ".../GongwenAssistant.app/Contents/MacOS/runtime/pi/bin/node"
+    codesign --force --options runtime --timestamp \
+      --entitlements packaging/macos/entitlements.plist --sign "$IDENTITY" \
+      ".../GongwenAssistant.app"
+
+  说明：
+  - allow-jit / allow-unsigned-executable-memory：Node（V8）需要可写可执行内存做
+    JIT；hardened runtime 默认禁止，缺这两项时随包 Node 一启动就被系统杀掉。
+  - disable-library-validation：bundle 内 node 与 host/node_modules 里的 dylib 不是
+    同一 Team ID 签出来的，不关掉库验证会被 dyld 拒绝加载。
+  这些权限只授予应用及其子进程（随包 Node），不放宽系统其他部分的限制。
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>
