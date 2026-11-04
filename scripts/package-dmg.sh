@@ -367,7 +367,10 @@ if [ -n "$SIGN_IDENTITY" ]; then
     codesign --force --options runtime --timestamp \
         --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" \
         "$APP_BUNDLE"
-    codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+    # 不要 --deep：随包 runtime 里有些资产（如许可证 txt）带可执行位，
+    # --deep 会把它们当嵌套代码要求签名并以 “In subcomponent” 失败。
+    codesign --verify --strict --verbose=2 "$APP_BUNDLE"
+    codesign --verify --strict "$MACOS_DIR/runtime/pi/bin/node"
 else
     if [ -n "$NOTARY_PROFILE" ]; then
         die "配置了 GONGWEN_MACOS_NOTARY_PROFILE 但没有 GONGWEN_MACOS_SIGN_IDENTITY；公证必须有 Developer ID 签名"
@@ -375,11 +378,11 @@ else
     # 没有 Developer ID，做 ad-hoc 签名（identity "-"），保证 Apple Silicon 上可直接运行。
     echo "警告：未配置 GONGWEN_MACOS_SIGN_IDENTITY，仅 ad-hoc 签名——未签名/未公证，仅本机测试；" >&2
     echo "      换机器下载会被 Gatekeeper 拦，不要作为发布产物分发。" >&2
-    # 只签真正的可执行文件再签 bundle，不用 --deep：--deep 会把 node_modules 里
-    # 的普通目录当成嵌套代码去签，在真实运行时树上会以 “In subcomponent” 失败。
+    # 只签真正的可执行文件再签 bundle，不用 --deep（原因同上）。
     codesign --force --sign - "$MACOS_DIR/runtime/pi/bin/node"
     codesign --force --sign - "$APP_BUNDLE"
-    codesign --verify --deep --strict "$APP_BUNDLE"
+    codesign --verify --strict "$APP_BUNDLE"
+    codesign --verify --strict "$MACOS_DIR/runtime/pi/bin/node"
 fi
 
 # 拖放到「应用程序」的 DMG：bundle 加 /Applications 符号链接。
