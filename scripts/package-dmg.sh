@@ -351,6 +351,9 @@ fi
 SIGN_IDENTITY="${GONGWEN_MACOS_SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${GONGWEN_MACOS_NOTARY_PROFILE:-}"
 APP_BUNDLE="$BUILD_ROOT/$BUNDLE_NAME"
+# 从 zip 解出来的运行时可能带 resource fork / quarantine 扩展属性，codesign 会以
+# 「resource fork, Finder information, or similar detritus not allowed」失败。
+xattr -cr "$APP_BUNDLE" 2>/dev/null || true
 
 if [ -n "$SIGN_IDENTITY" ]; then
     [ -f "$ENTITLEMENTS" ] || die "缺少 entitlements：$ENTITLEMENTS"
@@ -372,7 +375,10 @@ else
     # 没有 Developer ID，做 ad-hoc 签名（identity "-"），保证 Apple Silicon 上可直接运行。
     echo "警告：未配置 GONGWEN_MACOS_SIGN_IDENTITY，仅 ad-hoc 签名——未签名/未公证，仅本机测试；" >&2
     echo "      换机器下载会被 Gatekeeper 拦，不要作为发布产物分发。" >&2
-    codesign --force --deep --sign - "$APP_BUNDLE"
+    # 只签真正的可执行文件再签 bundle，不用 --deep：--deep 会把 node_modules 里
+    # 的普通目录当成嵌套代码去签，在真实运行时树上会以 “In subcomponent” 失败。
+    codesign --force --sign - "$MACOS_DIR/runtime/pi/bin/node"
+    codesign --force --sign - "$APP_BUNDLE"
     codesign --verify --deep --strict "$APP_BUNDLE"
 fi
 

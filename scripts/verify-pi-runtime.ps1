@@ -1,4 +1,4 @@
-# 校验随包 Pi 运行时（runtime/pi）的 manifest 与文件清单。
+﻿# 校验随包 Pi 运行时（runtime/pi）的 manifest 与文件清单。
 #
 # 打包阶段必须调用它：manifest 缺失、平台不符、Node / Pi / host / 协议版本不对、
 # 文件缺失或哈希不符都直接抛终止错误，绝不发出一个「只有按钮没有运行时」的包。

@@ -46,7 +46,14 @@ function resolveLinkTarget(target, depth) {
       const link = fs.readlinkSync(next);
       current = resolveLinkTarget(path.resolve(path.dirname(next), link), depth + 1);
     } else {
-      current = next;
+      // 用系统 realpath 归一化每一段：Windows 的 8.3 短名（RUNNER~1）与
+      // macOS 的 /var → /private/var、大小写差异都会在这里被拉成同一种写法，
+      // 否则后面的 within() 会把同一个目录当成两个。
+      try {
+        current = fs.realpathSync.native(next);
+      } catch {
+        current = next;
+      }
     }
   }
   return current;
