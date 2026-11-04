@@ -285,9 +285,9 @@ if [ "$BUILD_DMG" -eq 1 ]; then
         echo "==> Creating disk image: $DMG_PATH"
         hdiutil create -volname "公文助手" -srcfolder "$APP_DIR" -ov -format UDZO "$DMG_PATH" >/dev/null
         if command -v shasum >/dev/null 2>&1; then
-            shasum -a 256 "$DMG_PATH" | awk '{ print $1 "  " $2 }' > "$DMG_PATH.sha256"
+            shasum -a 256 "$DMG_PATH" | awk -v name="$DMG_NAME" '{ print $1 "  " name }' > "$DMG_PATH.sha256"
         elif command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$DMG_PATH" | awk '{ print $1 "  " $2 }' > "$DMG_PATH.sha256"
+            sha256sum "$DMG_PATH" | awk -v name="$DMG_NAME" '{ print $1 "  " name }' > "$DMG_PATH.sha256"
         fi
         echo "Disk image created: $DMG_PATH"
     else
