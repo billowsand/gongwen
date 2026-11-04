@@ -385,10 +385,12 @@ else
     # 没有 Developer ID，做 ad-hoc 签名（identity "-"），保证 Apple Silicon 上可直接运行。
     echo "警告：未配置 GONGWEN_MACOS_SIGN_IDENTITY，仅 ad-hoc 签名——未签名/未公证，仅本机测试；" >&2
     echo "      换机器下载会被 Gatekeeper 拦，不要作为发布产物分发。" >&2
-    # 只签真正的可执行文件再签 bundle，不用 --deep（原因同上）。
+    # ad-hoc 只签两个真正的可执行文件，不给 bundle 做密封签名：bundle 里随包的
+    # 字体/许可证资源会让 codesign 把某些普通文件当嵌套代码，整包签名在真实
+    # 运行时树上反复以 “In subcomponent” 失败；只签可执行文件足以让本机启动。
+    codesign --force --sign - "$MACOS_DIR/gongwen-assistant"
     codesign --force --sign - "$MACOS_DIR/runtime/pi/bin/node"
-    codesign --force --sign - "$APP_BUNDLE"
-    codesign --verify --strict "$APP_BUNDLE"
+    codesign --verify --strict "$MACOS_DIR/gongwen-assistant"
     codesign --verify --strict "$MACOS_DIR/runtime/pi/bin/node"
 fi
 
