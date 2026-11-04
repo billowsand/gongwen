@@ -246,16 +246,14 @@ if [ ! -f "$STAGE/runtime/fonts/GWFangSong.ttf" ]; then
 fi
 
 # 没有 Developer ID 时，ad-hoc 签名必须在**放进 .app 之前**对 staging 里的
-# 两个可执行文件做：codesign 一旦看到 .app 内的路径，会把它当成 bundle 的
+# 可执行文件做：codesign 一旦看到 .app 内的路径，会把它当成 bundle 的
 # 主可执行文件并尝试签整个 bundle，随包字体 / 许可证资源会被当成嵌套代码，
 # 报 “code object is not signed at all In subcomponent”。
+# 注意：node 不能在这里签——它随后还要按 manifest 校验 SHA-256；签名会改写文件，
+# 校验就过不去。node 的签名放在 verify_pi_runtime 之后、复制进 .app 之前。
 if [ -z "${GONGWEN_MACOS_SIGN_IDENTITY:-}" ]; then
     codesign --force --sign - "$STAGE/gongwen-assistant"
     codesign --verify --strict "$STAGE/gongwen-assistant"
-    if [ -f "$STAGE/runtime/pi/bin/node" ]; then
-        codesign --force --sign - "$STAGE/runtime/pi/bin/node"
-        codesign --verify --strict "$STAGE/runtime/pi/bin/node"
-    fi
 fi
 
 MACOS_DIR="$BUILD_ROOT/$BUNDLE_NAME/Contents/MacOS"
@@ -273,6 +271,11 @@ chmod 755 "$MACOS_DIR/gongwen-assistant"
 PI_DIR="$STAGE/runtime/pi"
 if [ -f "$PI_DIR/manifest.json" ]; then
     verify_pi_runtime "$PI_DIR"
+    # 校验通过后再签 node（签名会改写文件，必须在哈希校验之后）。
+    if [ -z "${GONGWEN_MACOS_SIGN_IDENTITY:-}" ]; then
+        codesign --force --sign - "$PI_DIR/bin/node"
+        codesign --verify --strict "$PI_DIR/bin/node"
+    fi
     rm -rf "$MACOS_DIR/runtime/pi"
     cp -a "$PI_DIR" "$MACOS_DIR/runtime/pi"
     chmod 755 "$MACOS_DIR/runtime/pi/bin/node"
