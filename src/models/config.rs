@@ -266,14 +266,16 @@ impl AppConfig {
     /// 这些调用不需要多步工具循环，但需要理解与表达；2026-11-05 起不再单独维护「辅助模型」。
     /// 旧配置只选了文字起草模型时回落到它，避免升级后这些功能直接不可用。
     pub(crate) fn aux_chat(&self) -> Result<LmStudioConfig, ModelRefError> {
-        match self.pi_chat() {
-            Ok(config) => Ok(config),
-            Err(_) => self.draft_chat().map_err(|_| {
-                ModelRefError(
-                    "还没有选择写作模型：请到「AI 管理 → 模型服务 → 智能写作（Pi）」选择。".into(),
-                )
-            }),
+        // 选了 Pi 就以 Pi 为准：提供商被删 / 停用要如实报错，不能偷偷用旧起草模型。
+        // 只有完全没选 Pi 的旧配置才回落 `draft_model`（兼容升级前的机器）。
+        if !self.pi_model.is_empty() {
+            return self.pi_chat();
         }
+        self.draft_chat().map_err(|_| {
+            ModelRefError(
+                "还没有选择写作模型：请到「AI 管理 → 模型服务 → 智能写作（Pi）」选择。".into(),
+            )
+        })
     }
 
     /// Pi 只认独立模型；上下文自动按该服务与模型解析，不继承小模型的手动窗口和输出上限。
