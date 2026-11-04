@@ -281,12 +281,12 @@ function recordExample(unit) {
     return `record_progress({ phase: "distill", unit: "${unit.unit}", path: "work/notes/style.md", summary: "写法 / 结构小结", sources: [{ path: "${unit.file}", ${locator} }] })`;
   }
   if (unit.kind === "outline") {
-    return `record_progress({ phase: "outline", unit: "outline", path: "work/outline.md", summary: "提纲", uses: [已登记的材料单元], sections: ["总体要求", "工作安排"] })`;
+    return `record_progress({ phase: "outline", unit: "outline", path: "work/outline.md", summary: "提纲", sections: ["总体要求", "工作安排"] })`;
   }
   if (unit.kind === "section") {
-    return `record_progress({ phase: "sections", unit: "${unit.unit}", path: "work/sections/${String(unit.index).padStart(2, "0")}.md", summary: "第 ${unit.index} 节", uses: ["outline", 已登记的材料单元] })`;
+    return `record_progress({ phase: "sections", unit: "${unit.unit}", path: "work/sections/${String(unit.index).padStart(2, "0")}.md", summary: "第 ${unit.index} 节" })`;
   }
-  return `record_progress({ phase: "review", unit: "final", path: "work/final.md", summary: "合稿完成", uses: ["outline", 全部章节单元] })`;
+  return `record_progress({ phase: "review", unit: "final", path: "work/final.md", summary: "合稿完成" })`;
 }
 
 function commonBlock(decision) {
@@ -296,7 +296,7 @@ function commonBlock(decision) {
 - 中间阶段**不要**调用 submit_document / finish_report；本步完成并写文件后，必须调用 ${RECORD_TOOL_NAME} 登记。
 - 宿主只认磁盘上真实存在、哈希对得上、引文能在原文里找到的成果。不要声称「已全部读完」；没登记的单元就是没做。
 - 不要手写章节编号（如「一、」「1.」），编号由公文语法与导出程序处理；不要重复写主送单位；遵守要求里的字数与选区限制。
-- 事项内容来自材料与实际读到的资料；日期基准和标准组织背景可用于规范名称、理解相对时间及结合职责安排分工。样稿与范文只学写法，不搬用其中的事项、日期、数字和结论。
+- 事项内容来自材料与实际读到的资料；当前日期只帮助解释相对时间，不能凭空当作事项发生日。标准组织背景可用于规范名称及结合职责安排分工。样稿与范文只学写法，不搬用其中的事项、日期、数字和结论。
 - 需要读长文件时按行范围读（read 的 offset / limit），看返回里的「未读」范围继续，不要要求一次返回全文。`;
 }
 
@@ -338,10 +338,11 @@ ${header}
 - 只用 Markdown 标题层级表达章节（# / ##），不要手写「一、」「（一）」「1.」这类编号。
 - 每节写一句写作目标，并标出依据来自哪些已登记的摘记。
 - 章节数控制在 2–8 节；短通知可以只写 1–2 节。
+- 登记时不要填写 sources；材料来源由宿主从已登记摘记继承。只提交提示要求的字段和 sections。
 
 写完后登记（sections 必须与 outline.md 里的章节标题逐字一致）：
 ${recordExample(phase.units[0])}
-其中 uses 填全部已登记的材料单元：${registered.map((item) => item.unit).join("、") || "（本轮没有材料）"}。
+必需的材料依赖由宿主自动补齐，通常不填 uses。
 不要调用 submit_document。${correction}${retry}`;
   }
 
@@ -356,7 +357,7 @@ ${header}
 1. 先读 work/outline.md（${outline?.path ?? "work/outline.md"}）看全篇目标，只写本节，不要把相邻章节的内容也写进来。
 2. 需要事实时读已登记的摘记：${registry.active().filter((item) => item.kind === "distill" || item.kind === "study").map((item) => item.path).join("、") || "input/current.md"}。
 3. 本节稿写到 work/sections/${String(section.index).padStart(2, "0")}.md，只写本节正文，不写标题编号、不重复主送。
-4. 写完后登记：
+4. 写完后登记，不要填写 sources；本节的材料依据由宿主从已登记摘记继承：
    ${recordExample(phase.units[0])}
 不要调用 submit_document。${correction}${retry}`;
   }
@@ -370,10 +371,10 @@ ${header}
 
 1. 读取这些章节稿：${sections.map((item) => item.path).join("、")}，以及 work/outline.md。
 2. 合成一份完整候选稿 work/final.md：补齐过渡、去重、检查是否漏掉要求里的事项；事实以已登记摘记与原文为准，不要新增无依据的数字和日期。
-3. 用 check_document({ path: "work/final.md" }) 自查一遍；权限与技术问题必须修正，事实来源疑点只作提示，不要为了「解锁交付」反复改写数字日期或强迫用户确认。
-4. 写完后登记：
+3. 用 check_document({ path: "work/final.md" }) 自查一遍；修正程序指出的格式、文字规则及技术问题。本任务不做额外事实核查。
+4. 写完后登记，不要填写 sources；来源与章节依赖由宿主从已登记成果继承：
    ${recordExample(phase.units[0])}
-uses 必须包含 outline 与全部章节单元：${["outline", ...sections.map((item) => item.unit)].join("、")}。
+outline 与全部章节单元会由宿主自动登记为依赖，通常不填 uses。
 不要调用 submit_document。${correction}${retry}`;
   }
 
@@ -390,8 +391,7 @@ ${header}
 ${header}
 
 ${phase.report ? `读取已登记的材料摘记：${registry.active().filter((record) => record.kind === "distill" || record.kind === "study").map((record) => record.path).join("、") || "input/current.md"}，整理用户要求的清单。无需生成正文文件。` : "读取 work/final.md，确认它就是完整成品（不是半稿、没有工作区路径、选区外没有被改）。"}然后：
-- 生成 / 修改正文：调用 submit_document({ path: "work/final.md", summary: "一句话说明改了什么、依据了哪些材料" })。
-- 只审核 / 找资料：调用 finish_report({ summary, items: [...] })。
+${phase.report ? `- 当前是清单任务：调用 finish_report({ summary, items: [...] })。不要提交正文。` : `- 当前是正文任务：调用 submit_document({ path: "work/final.md", summary: "一句话说明改了什么、依据了哪些材料" })。finish_report 不能代替正文交付。`}
 
 提交内容在调用时固定。不要只写聊天回复；没有调用工具就是没有完成。`;
 }

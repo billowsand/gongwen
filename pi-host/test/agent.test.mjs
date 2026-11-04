@@ -13,6 +13,7 @@ import {
 import { AgentError, findHandNumberedHeadings, runAgentJob, writingCompaction } from "../src/agent.mjs";
 import { PROTOCOL_VERSION, validateInit } from "../src/protocol.mjs";
 import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
+import { outputLimitsForChars } from "../src/read.mjs";
 
 // 这些测试用 faux provider，只验证真实 Durable harness、工作区限制与提交协议；
 // 生产入口 main.mjs 永远构造 OpenAI 兼容 provider，不走这里。
@@ -58,8 +59,8 @@ test("分阶段登记对同一单元连续失败三次后由宿主终止Harness�
   );
   assert.ok(Date.now() - started < 10_000, "应立即终止，不等到任务总超时");
   assert.equal(invalidAttempts, 3, "真实Harness只应允许当前单元三次无效登记尝试");
-  assert.match(correctionContext, /数字、日期和其中的空格也必须原样复制/);
-  assert.match(correctionContext, /用于校验引文的原始材料内容/);
+  assert.match(correctionContext, /fromLine:1,toLine:1/);
+  assert.match(correctionContext, /删除 quote/);
   assert.equal(fs.readFileSync(path.join(workspace.root, "work", "distill.md"), "utf8"), "已摘录材料要点。\n");
 });
 
@@ -151,6 +152,65 @@ test("同轮批量工具经真实 Durable harness 顺序往返后完成正文与
   assert.equal(result.snapshot.content, content);
   assert.equal(fs.readFileSync(path.join(workspace.delivery, "final.md"), "utf8"), content);
   assert.equal(JSON.parse(fs.readFileSync(path.join(workspace.delivery, "receipt.json"), "utf8")).kind, "document");
+});
+
+test("budgeted read and kb/ms full reads survive Durable Harness output limits", { timeout: 30_000 }, async () => {
+  const workspace = makeWorkspace();
+  const config = makeConfig(workspace);
+  config.model.contextWindow = 262_144;
+  const longText = `FIRST-MARKER${"中".repeat(35_000)}MIDDLE-MARKER${"文".repeat(35_000)}LAST-MARKER`;
+  fs.writeFileSync(path.join(workspace.root, "input", "long.md"), longText);
+  fs.writeFileSync(path.join(workspace.root, "input", "line-heavy.md"), `${"\n".repeat(3_000)}LINE-TAIL-MARKER\n`);
+  const { faux, models, model } = fakeBackend();
+  const final = "# 完成\n\n已读取材料。\n";
+  const assertDeliveredText = (context, markers, label) => {
+    const messages = JSON.stringify(context);
+    for (const marker of markers) assert.ok(messages.includes(marker), `${label} missing ${marker}`);
+    assert.equal(/Output truncated|output truncated|bytes dropped|lines dropped/i.test(messages), false, `${label} has truncation diagnostic`);
+  };
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall("read", { path: "input/long.md" })], { stopReason: "toolUse" }),
+    (context) => {
+      assertDeliveredText(context, ["FIRST-MARKER", "MIDDLE-MARKER", "LAST-MARKER"], "read long Unicode line");
+      return fauxAssistantMessage([fauxToolCall("read", { path: "input/line-heavy.md" })], { stopReason: "toolUse" });
+    },
+    (context) => {
+      assertDeliveredText(context, ["LINE-TAIL-MARKER"], "read line-heavy file");
+      return fauxAssistantMessage([fauxToolCall("kb_read", { doc_id: 1, offset: 0 })], { stopReason: "toolUse" });
+    },
+    (context) => {
+      assertDeliveredText(context, ["KB-FIRST", "KB-MIDDLE", "KB-LAST"], "kb_read");
+      return fauxAssistantMessage([fauxToolCall("ms_read", { id: 7, offset: 0 })], { stopReason: "toolUse" });
+    },
+    (context) => {
+      assertDeliveredText(context, ["MS-FIRST", "MS-MIDDLE", "MS-LAST"], "ms_read");
+      return fauxAssistantMessage([fauxToolCall("write", { path: "work/final.md", content: final })], { stopReason: "toolUse" });
+    },
+    fauxAssistantMessage([fauxToolCall("submit_document", { path: "work/final.md", summary: "已完成读取" })], { stopReason: "toolUse" }),
+  ]);
+  const kbText = `KB-FIRST${"知".repeat(35_000)}KB-MIDDLE${"识".repeat(35_000)}KB-LAST`;
+  const msText = `MS-FIRST${"稿".repeat(35_000)}MS-MIDDLE${"件".repeat(35_000)}MS-LAST`;
+  const limits = outputLimitsForChars(240_000);
+  assert.ok(limits.maxBytes > 50 * 1024);
+  assert.ok(limits.maxLines > 2_000);
+  const names = [];
+  const bridgeResult = (event) => {
+    names.push(event.name);
+    const result = event.name === "kb_read"
+      ? { title: "KB fixture", text: kbText, next_offset: null }
+      : { title: "MS fixture", text: msText, next_offset: null };
+    queueMicrotask(() => bridge.handle({ type: "tool_result", callId: event.callId, ok: true, result }));
+  };
+  let bridge;
+  const result = await runAgentJob({
+    config,
+    models,
+    model,
+    onBridge: (value) => { bridge = value; },
+    emit: (event) => { if (event.type === "tool_request") bridgeResult(event); },
+  });
+  assert.deepEqual(names, ["kb_read", "ms_read"]);
+  assert.equal(result.snapshot.content, final);
 });
 
 test("a long 32k task compacts before continuing instead of shrinking output to one token", async () => {

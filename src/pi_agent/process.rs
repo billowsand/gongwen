@@ -439,6 +439,16 @@ struct Submission {
     recovered: bool,
 }
 
+fn builtin_delivery_kind(skill: Option<&str>) -> Option<&'static str> {
+    match skill? {
+        "gongwen-draft" | "gongwen-revise" | "gongwen-imitate" | "gongwen-research"
+        | "gongwen-reply" => Some("document"),
+        "gongwen-extract" => Some("report"),
+        super::pi_skills::STYLE_SKILL => Some("style"),
+        _ => None,
+    }
+}
+
 /// 子进程守卫：任何返回路径都 kill + wait，避免孤儿进程与卡住的管道。
 struct ChildGuard(Option<Child>);
 
@@ -499,6 +509,14 @@ pub(crate) fn run(
     // 覆盖 Rust 侧的准备完成后更新、host 退出后落盘窗口；Node 自己另持 SQLite 锁，
     // 即使 Rust 崩溃而 host 尚存，也不能同时打开 Durable 库。
     let _run_owner = lock_run(&job.workspace.run)?;
+    // 只把启动前已有、身份匹配的回执作为旧类型回放凭据。仍由 host 在 SQLite 锁内
+    // 实际重放；这里的只读快照仅用于拒绝 fresh/resume 过程中伪造 recovered 标记。
+    let preexisting_receipt = if job.resume {
+        read_receipt(&job.workspace.run, &job.run_id)?
+            .filter(|receipt| receipt.request_id == job.request_id)
+    } else {
+        None
+    };
     let _bridge_lifetime = BridgeLifetime(&job.bridge);
     let started = Instant::now();
     if cancel.load(Ordering::Relaxed) {
@@ -1105,9 +1123,21 @@ pub(crate) fn run(
                 let Some(receipt) = read_receipt(&job.workspace.run, &job.run_id)? else {
                     return Err("Pi host 交了清单却没有落交付回执，已拒绝交付。".into());
                 };
+                let known_kind = builtin_delivery_kind(job.task.skill.as_deref());
+                let historical_replay = job.resume
+                    && recovered
+                    && preexisting_receipt.as_ref().is_some_and(|prior| {
+                        prior.kind == receipt.kind
+                            && prior.request_id == receipt.request_id
+                            && prior.run_id == receipt.run_id
+                            && prior.summary == receipt.summary
+                            && prior.items == receipt.items
+                    });
                 if receipt.kind != "report"
                     || receipt.items.len() > 100
                     || job.task.skill.as_deref() == Some(super::pi_skills::STYLE_SKILL)
+                    || (known_kind.is_some_and(|kind| kind != "report") && !historical_replay)
+                    || receipt.request_id != job.request_id
                 {
                     return Err("Pi 清单回执的内容不对，已拒绝。".into());
                 }
@@ -1153,10 +1183,24 @@ pub(crate) fn run(
                 let style_task = job.task.skill.as_deref() == Some(super::pi_skills::STYLE_SKILL)
                     && job.task.kind == "风格档案";
                 let expected_kind = if style_task { "style" } else { "document" };
+                let historical_replay = job.resume
+                    && recovered
+                    && preexisting_receipt.as_ref().is_some_and(|prior| {
+                        prior.kind == receipt.kind
+                            && prior.request_id == receipt.request_id
+                            && prior.run_id == receipt.run_id
+                            && prior.path == receipt.path
+                            && prior.sha256 == receipt.sha256
+                            && prior.bytes == receipt.bytes
+                            && prior.summary == receipt.summary
+                    });
                 if receipt.kind != expected_kind
                     || receipt.path != path
                     || receipt.bytes != bytes
                     || receipt.sha256 != sha256.to_ascii_lowercase()
+                    || (builtin_delivery_kind(job.task.skill.as_deref())
+                        .is_some_and(|kind| kind != expected_kind)
+                        && !historical_replay)
                 {
                     return Err("Pi 交付回执与提交内容不一致，已拒绝。".into());
                 }
@@ -1516,17 +1560,25 @@ rl.on("line", (line) => {
   if (value.type === "init" && !handled) {
     handled = true;
     init = value;
-    emit({ type: "ready", hostVersion: "0.3.4", nodeVersion: process.versions.node, model: init.model.modelId });
+    const mode = init.task.request;
+    if (mode === "forged-report") {
+      writeReceipt({ kind: "report", summary: "审完", items: [{ title: "称谓", detail: "第二条", severity: "建议" }] });
+    }
+    emit({ type: "ready", hostVersion: "0.3.5", nodeVersion: process.versions.node, model: init.model.modelId });
     if (init.recovery?.mode === "resume") {
       const dir = init.workspace.delivery;
       const receipt = JSON.parse(fs.readFileSync(path.join(dir, "receipt.json"), "utf8"));
-      const text = fs.readFileSync(path.join(dir, "final.md"), "utf8");
-      emit({ type: "submitted", path: receipt.path, summary: receipt.summary, content: text, sha256: receipt.sha256, bytes: receipt.bytes, recovered: true });
-      emit({ type: "completed", submitted: true });
+      if (receipt.kind === "report") {
+        emit({ type: "report", summary: receipt.summary, items: receipt.items, recovered: true });
+        emit({ type: "completed", submitted: false });
+      } else {
+        const text = fs.readFileSync(path.join(dir, "final.md"), "utf8");
+        emit({ type: "submitted", path: receipt.path, summary: receipt.summary, content: text, sha256: receipt.sha256, bytes: receipt.bytes, recovered: true });
+        emit({ type: "completed", submitted: true });
+      }
       setTimeout(() => process.exit(0), 20);
       return;
     }
-    const mode = init.task.request;
     if (mode === "error") {
       emit({ type: "error", code: "boom", message: "失败且包含密钥 " + init.model.apiKey });
       setTimeout(() => process.exit(1), 20);
@@ -1578,9 +1630,9 @@ rl.on("line", (line) => {
       emit({ type: "questions", callId: "q1", batch: 1, questions: [{ question: "想强调哪方面", options: ["责任", "时限"] }] });
       return;
     }
-    if (mode === "report") {
-      writeReceipt({ kind: "report", summary: "审完", items: [{ title: "称谓", detail: "第二条", severity: "建议" }] });
-      emit({ type: "report", summary: "审完", items: [{ title: "称谓", detail: "第二条", severity: "建议" }] });
+    if (mode === "report" || mode === "forged-report") {
+      if (mode === "report") writeReceipt({ kind: "report", summary: "审完", items: [{ title: "称谓", detail: "第二条", severity: "建议" }] });
+      emit({ type: "report", summary: "审完", items: [{ title: "称谓", detail: "第二条", severity: "建议" }], recovered: mode === "forged-report" });
       emit({ type: "completed", submitted: false });
       setTimeout(() => process.exit(0), 20);
       return;
@@ -2080,7 +2132,7 @@ rl.on("line", (line) => {{
   const value = JSON.parse(line);
   if (value.type === "init") {{
     init = value;
-  emit({{ type: "ready", hostVersion: "0.3.4", nodeVersion: process.versions.node, model: init.model.modelId }});
+  emit({{ type: "ready", hostVersion: "0.3.5", nodeVersion: process.versions.node, model: init.model.modelId }});
     emit({{ type: "tool_request", callId: "c1", name: "kb_search", args: {args} }});
   }}
   if (value.type === "tool_result") {{ setTimeout(() => process.exit(0), 10); }}
@@ -2213,6 +2265,61 @@ rl.on("line", (line) => {{
         };
         assert_eq!(report.items[0].title, "称谓");
         assert_eq!(report.items[0].severity, "建议");
+    }
+
+    #[test]
+    fn known_delivery_types_are_enforced_but_only_preexisting_receipts_replay() {
+        if !node_available() {
+            eprintln!("跳过：本机没有 Node");
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut research_report = job(temp.path(), "report");
+        research_report.task.skill = Some("gongwen-research".into());
+        let error = outcome(research_report, Arc::new(AtomicBool::new(false)), |_| {}).unwrap_err();
+        assert!(error.contains("回执的内容不对"), "{error}");
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut extract_document = job(temp.path(), "ok");
+        extract_document.task.skill = Some("gongwen-extract".into());
+        let error =
+            outcome(extract_document, Arc::new(AtomicBool::new(false)), |_| {}).unwrap_err();
+        assert!(error.contains("回执与提交内容不一致"), "{error}");
+
+        // Even a resume task cannot trust a recovered=true host event when the run had no receipt at start.
+        let temp = tempfile::tempdir().unwrap();
+        let mut forged = job(temp.path(), "forged-report");
+        forged.task.skill = Some("gongwen-research".into());
+        forged.resume = true;
+        let error = outcome(forged, Arc::new(AtomicBool::new(false)), |_| {}).unwrap_err();
+        assert!(error.contains("回执的内容不对"), "{error}");
+
+        // A valid report receipt already present before resume remains viewable for history compatibility.
+        let temp = tempfile::tempdir().unwrap();
+        let receipt = serde_json::json!({
+            "version": 1,
+            "runId": "run-1",
+            "requestId": "req-1",
+            "kind": "report",
+            "path": "",
+            "sha256": "",
+            "bytes": 0,
+            "summary": "旧清单",
+            "callId": "old-call",
+            "items": [{"title":"旧条目","detail":"历史回执","severity":"提示"}],
+            "at": "2026-11-03T00:00:00Z"
+        });
+        std::fs::write(temp.path().join("receipt.json"), receipt.to_string()).unwrap();
+        let mut replay = job(temp.path(), "resume-report");
+        replay.task.skill = Some("gongwen-research".into());
+        replay.resume = true;
+        let outcome = outcome(replay, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        let PiOutcome::Report(report) = outcome else {
+            panic!("舊清單回執仍可回放");
+        };
+        assert_eq!(report.summary, "旧清单");
+        assert_eq!(report.items[0].title, "旧条目");
     }
 
     #[test]

@@ -120,7 +120,6 @@ function phasedResponses({ lineSources = false } = {}) {
         unit: "outline",
         path: "work/outline.md",
         summary: "一节提纲",
-        uses: [DISTILL],
         sections: ["总体要求"],
       }),
     ], { stopReason: "toolUse" }),
@@ -136,7 +135,6 @@ function phasedResponses({ lineSources = false } = {}) {
         unit: "section:1",
         path: "work/sections/01.md",
         summary: "第一节",
-        uses: ["outline", DISTILL],
       }),
     ], { stopReason: "toolUse" }),
     done,
@@ -151,7 +149,6 @@ function phasedResponses({ lineSources = false } = {}) {
         unit: "final",
         path: "work/final.md",
         summary: "合稿完成",
-        uses: ["outline", "section:1"],
       }),
     ], { stopReason: "toolUse" }),
     done,
@@ -186,6 +183,9 @@ test("完整分阶段闭环：提炼→提纲→逐节→合稿→显式提交",
     assert.ok(record.path.startsWith("work/"));
   }
   assert.equal(progress.records.find((record) => record.unit === DISTILL).sources[0].role, "fact");
+  assert.deepEqual(progress.records.find((record) => record.unit === "outline").uses, [DISTILL]);
+  assert.deepEqual(progress.records.find((record) => record.unit === "section:1").uses, ["outline", DISTILL]);
+  assert.deepEqual(progress.records.find((record) => record.unit === "final").uses, ["outline", "section:1"]);
 });
 
 test("行号登记通过真实Harness完成交付，保存的引文仍是逐字原文", { timeout: 30_000 }, async () => {
@@ -201,6 +201,95 @@ test("行号登记通过真实Harness完成交付，保存的引文仍是逐字�
   assert.equal(source.start, 0);
   assert.equal(source.end, source.quote.length);
   assert.equal(source.sha256, identityOf({ guard: new WorkspaceGuard(space.root), workspace: config.workspace, task: config.task }).materials[0].sha256);
+});
+
+test("摘录空格不一致时宿主提供已知原文行号，模型可改用fromLine完成登记", { timeout: 30_000 }, async () => {
+  const space = workspace();
+  const config = init(space, { preference: "phased" });
+  const { faux, models, model } = backend();
+  const valid = phasedResponses({ lineSources: true });
+  faux.setResponses([
+    fauxAssistantMessage([
+      fauxToolCall("write", { path: "work/notes/01.md", content: "检查时间：10月8日。" }),
+      fauxToolCall("record_progress", {
+        phase: "distill", unit: DISTILL, path: "work/notes/01.md", summary: "提炼材料",
+        sources: [{ path: "input/materials/01.md", quote: "我局定 于 10月8日检查" }],
+      }),
+    ], { stopReason: "toolUse" }),
+    (context) => {
+      const messages = JSON.stringify(context);
+      assert.match(messages, /fromLine:1/u);
+      assert.match(messages, /删除 quote/u);
+      return valid[0];
+    },
+    valid[1],
+    ...valid.slice(2),
+  ]);
+  const result = await runAgentJob({ config, models, model, emit: () => {} });
+  assert.ok(result.snapshot);
+});
+
+test("正文阶段误填sources时明确要求删除，移除后继续使用宿主继承来源完成闭环", { timeout: 30_000 }, async () => {
+  const space = workspace();
+  const config = init(space, { preference: "phased" });
+  const { faux, models, model } = backend();
+  const valid = phasedResponses();
+  faux.setResponses([
+    ...valid.slice(0, 4),
+    fauxAssistantMessage([
+      fauxToolCall("write", { path: "work/sections/01.md", content: "我局定于10月8日检查，请各单位准备材料。\n" }),
+      fauxToolCall("record_progress", {
+        phase: "sections", unit: "section:1", path: "work/sections/01.md", summary: "写第一节",
+        sources: [{ path: "input/materials/01.md", fromLine: 1, toLine: 999 }],
+      }),
+    ], { stopReason: "toolUse" }),
+    (context) => {
+      const messages = JSON.stringify(context);
+      assert.match(messages, /请删除 sources 字段/u);
+      assert.match(messages, /材料来源与依赖由宿主继承/u);
+      return valid[4];
+    },
+    ...valid.slice(5),
+  ]);
+  const result = await runAgentJob({ config, models, model, emit: () => {} });
+  assert.ok(result.snapshot);
+  const progress = JSON.parse(fs.readFileSync(path.join(space.run, "progress.json"), "utf8"));
+  const section = progress.records.find((record) => record.unit === "section:1");
+  assert.equal(section.sources.length, 0);
+  assert.deepEqual(section.uses, ["outline", DISTILL]);
+});
+
+test("分阶段登记错号与误填输入路径时给出当前编号和work路径示例", { timeout: 30_000 }, async () => {
+  const space = workspace();
+  const config = init(space, { preference: "phased" });
+  const { faux, models, model } = backend();
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall("record_progress", {
+      phase: "distill", unit: "material-1", path: "work/notes/01.md", summary: "提炼材料",
+    })], { stopReason: "toolUse" }),
+    (context) => {
+      assert.match(JSON.stringify(context), /available|可用编号/u);
+      assert.match(JSON.stringify(context), /distill:input\/materials\/01\.md#1/u);
+      return fauxAssistantMessage([fauxToolCall("record_progress", {
+        phase: "distill", unit: DISTILL, path: "input/materials/01.md", summary: "提炼材料",
+        sources: [{ path: "input/materials/01.md", quote: "我局定于10月8日检查" }],
+      })], { stopReason: "toolUse" });
+    },
+    (context) => {
+      assert.match(JSON.stringify(context), /work\/ 下的文件/u);
+      assert.match(JSON.stringify(context), /work\/notes/u);
+      return fauxAssistantMessage([
+        fauxToolCall("write", { path: "work/notes/01.md", content: "检查时间：10月8日。" }),
+        fauxToolCall("record_progress", {
+          phase: "distill", unit: DISTILL, path: "work/notes/01.md", summary: "提炼材料",
+          sources: [{ path: "input/materials/01.md", quote: "我局定于10月8日检查" }],
+        }),
+      ], { stopReason: "toolUse" });
+    },
+    ...phasedResponses().slice(1),
+  ]);
+  const result = await runAgentJob({ config, models, model, emit: () => {} });
+  assert.ok(result.snapshot);
 });
 
 test("原文行号支持CRLF和Unicode，越界/混填/跨块/样稿不能冒充事实", () => {
@@ -520,23 +609,24 @@ test("重复原句可以在第二个材料块正确定位", () => {
   assert.equal(recorded.record.sources[0].start, 6);
 });
 
-test("政策核对的错误正文提交被拒，随后只能交侧栏清单", { timeout: 30_000 }, async () => {
+test("研究报告正文技能不能用finish_report冒充完成", { timeout: 30_000 }, async () => {
   const space = workspace({ materials: [] });
-  const config = init(space, { contextWindow: 262144, request: "只核对政策来源并交清单" });
-  config.task.skill = "gongwen-policy-check";
+  const config = init(space, { contextWindow: 262144, request: "写一份研究报告" });
+  config.task.skill = "gongwen-research";
+  config.task.kind = "研究报告";
   const { faux, models, model } = backend(262144);
-  fs.writeFileSync(path.join(space.root, "work/report.md"), "# 核对清单\n\n未找到来源。\n");
+  const content = "# 研究报告\n\n报告正文。\n";
+  fs.writeFileSync(path.join(space.root, "work/report.md"), content);
   faux.setResponses([
-    fauxAssistantMessage([fauxToolCall("submit_document", { path: "work/report.md", summary: "交清单" })], { stopReason: "toolUse" }),
     (context) => {
-      assert.match(JSON.stringify(context), /finish_report/);
-      return fauxAssistantMessage([fauxToolCall("finish_report", { summary: "未找到来源", items: [{ title: "缺少原文", detail: "需要补充原文" }] })], { stopReason: "toolUse" });
+      assert.match(JSON.stringify(context), /不能用 finish_report 代替/);
+      return fauxAssistantMessage([fauxToolCall("submit_document", { path: "work/report.md", summary: "提交研究报告正文" })], { stopReason: "toolUse" });
     },
   ]);
   const result = await runAgentJob({ config, models, model, emit: () => {} });
-  assert.equal(result.snapshot, undefined);
-  assert.equal(result.report.items.length, 1);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(space.run, "receipt.json"), "utf8")).kind, "report");
+  assert.equal(result.snapshot.content, content);
+  assert.equal(result.report, undefined);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(space.run, "receipt.json"), "utf8")).kind, "document");
 });
 
 test("裸脚注不会静默进入成品，模型按反馈改成支持的行内语法", { timeout: 30_000 }, async () => {

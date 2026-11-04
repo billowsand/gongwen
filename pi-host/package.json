@@ -1,6 +1,6 @@
 {
   "name": "gongwen-pi-host",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "private": true,
   "type": "module",
   "description": "公文助手随包的 Pi Durable 写作宿主机（阶段一）",

@@ -3,6 +3,7 @@
 
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
+import { outputLimitsForChars } from "./read.mjs";
 
 /** 一轮最多多少次工具调用（与 Rust 上限一致）。 */
 export const MAX_TOOL_CALLS = 60;
@@ -22,6 +23,7 @@ export const DOMAIN_TOOLS = [
   })],
   ["kb_read", "读本机知识库的一篇文档全文", Type.Object({
     doc_id: Type.Number({ description: "kb_search 返回的 doc_id" }),
+    offset: Type.Optional(Type.Integer({ minimum: 0, description: "从字符位置继续读取；用上次返回的 next_offset，不是字节或行号" })),
   })],
   ["ms_search", "检索稿件库（标题 / 文号 / 备注）", Type.Object({
     query: Type.String({ description: "检索词" }),
@@ -30,6 +32,7 @@ export const DOMAIN_TOOLS = [
   ["ms_read", "读稿件库的一篇稿件（可指定版本）", Type.Object({
     id: Type.Number({ description: "稿件编号" }),
     version: Type.Optional(Type.Number({ description: "历史版本号；省略读当前版本" })),
+    offset: Type.Optional(Type.Integer({ minimum: 0, description: "从字符位置继续读取；用上次返回的 next_offset，不是字节或行号" })),
   })],
   ["current_date", "读取本机当前日期、星期、时区及本周下周范围", Type.Object({})],
   ["vocab_search", "查标准单位名称、职能任务、人员职务简介及所属单位", Type.Object({
@@ -224,6 +227,9 @@ export function createDomainTools(bridge, { readDocument, readChars, onAnswer, o
       name,
       description,
       parameters,
+      ...((name === "kb_read" || name === "ms_read") && Number.isInteger(readChars)
+        ? { outputLimits: outputLimitsForChars(readChars, { json: true }) }
+        : {}),
       execute: async (args) => {
         let values = args ?? {};
         if ((name === "kb_read" || name === "ms_read") && Number.isInteger(readChars)) {

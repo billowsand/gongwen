@@ -160,6 +160,25 @@ test("domain tools include every Rust-backed read-only tool plus doc_elements", 
   assert.ok(!names.some((name) => /style_(write|save|learn)/.test(name)));
 });
 
+test("knowledge and manuscript reads expose character offsets and retain the budgeted output ceiling", async () => {
+  const events = [];
+  const bridge = createToolBridge({ emit: (event) => events.push(event) });
+  const tools = createDomainTools(bridge, { readChars: 240_000 });
+  for (const name of ["kb_read", "ms_read"]) {
+    const tool = tools.find((item) => item.name === name);
+    assert.ok(tool.parameters.properties.offset, `${name} has offset schema`);
+    assert.equal(tool.outputLimits.maxBytes > 50 * 1024, true, `${name} output limit follows read budget`);
+    assert.equal(tool.outputLimits.retain, "head");
+  }
+  const pending = tools.find((item) => item.name === "kb_read").execute({ doc_id: 7, offset: 126 }, { callId: "kb" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events[0].name, "kb_read");
+  assert.deepEqual(events[0].args, { doc_id: 7, offset: 126, limit_chars: 240_000 });
+  bridge.handle({ type: "tool_result", callId: events[0].callId, ok: true, result: { text: "下一页", next_offset: null } });
+  const result = await pending;
+  assert.match(result.output[0].text, /下一页/);
+});
+
 test("prompt states material roles, selection protection and the two delivery paths", () => {
   const text = systemPrompt(
     { skills: "skills/gongwen-markdown", piSkills: "skills/pi-skills" },

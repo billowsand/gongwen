@@ -15,6 +15,18 @@ import { defineTool } from "@earendil-works/pi-durable";
 export const MAX_READ_LINES = 8_000;
 const DEFAULT_LINES = 8_000;
 
+/** Conservative UTF-8 / JSON bounds so Durable Harness doesn't truncate a budgeted result again. */
+export function outputLimitsForChars(maxChars, { json = false } = {}) {
+  const chars = Math.max(1, Math.trunc(Number(maxChars) || 1));
+  return {
+    // Plain text is at most 3 UTF-8 bytes per UTF-16 code unit; JSON string escaping can use 6.
+    maxBytes: chars * (json ? 6 : 3) + 8_192,
+    // Character pages may contain one newline per code unit; numbered line pages add at most 8,000 lines.
+    maxLines: chars + (json ? 32 : MAX_READ_LINES + 32),
+    retain: "head",
+  };
+}
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
@@ -29,6 +41,7 @@ function sliceStart(value) {
 export function createBoundedReadTool({ guard, maxFileBytes = 8 * 1024 * 1024, maxChars = 16_000 }) {
   return defineTool({
     name: "read",
+    outputLimits: outputLimitsForChars(maxChars),
     description:
       "读取工作区文本文件。大文件请用 offset（起始行，1 开始）/ limit（行数）分页；返回会写明已读与未读范围。单次结果受本次预算限制。",
     parameters: Type.Object({

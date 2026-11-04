@@ -173,7 +173,7 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir
       if (state.report) {
         throw new AgentError("本轮已经交了侧栏清单；同一轮不能再提交正文。", "submit_duplicate");
       }
-      if (["gongwen-extract", "gongwen-policy-check"].includes(phase?.task?.skill)) {
+      if (phase?.task?.skill === "gongwen-extract") {
         throw new AgentError("本技能只交侧栏清单，不提交正文文件。请调用 finish_report({summary,items})，不要调用 submit_document。", "report_required");
       }
       if (phase?.phased && phase.id !== "deliver") {
@@ -208,14 +208,17 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir
         if (research) {
           let appendix = false;
           let chapters = 0;
-          for (const line of prose.split("\n")) {
+          for (const [lineIndex, line] of prose.split("\n").entries()) {
             const marker = line.match(/^\s*<!--\s*\[([^\]]+)\]\s*-->\s*$/u)?.[1];
             if (marker && ["目录", "摘要", "正文", "附录", "附件", "版本变更记录", "参考文献"].includes(marker)) {
               appendix = marker === "附录" || marker === "附件";
               chapters = 0;
             } else if (appendix && /^##\s+[^#]/u.test(line)) {
               chapters += 1;
-              if (chapters > 1) { issues.push("一个附录标记下有多份附录：每份附录前各写 <!-- [附录] -->；版本变更记录前写 <!-- [版本变更记录] -->"); break; }
+              if (chapters > 1) {
+                issues.push(`附录区在第 ${lineIndex + 1} 行发现额外标题「${line.trim().slice(0, 100)}」；每份附录的 <!-- [附录] --> 标记必须放在对应 ## 标题之前，版本变更记录也要先写 <!-- [版本变更记录] -->。只在任务需要时添加附录或版本记录，不要为了模板而补空章节。`);
+                break;
+              }
             }
           }
         }
@@ -301,6 +304,9 @@ function createReportTool({ state, emit, deliveryDir, runId, requestId, phase })
       if (state.snapshot) {
         throw new AgentError("本轮已经提交了正文；同一轮不能再交清单。", "report_conflict");
       }
+      if (isDocumentSkill(phase?.task?.skill)) {
+        throw new AgentError("当前内置技能要求交付完整正文，不能用 finish_report 代替。请将完整 Markdown 写入 work/ 文件并调用 submit_document。", "document_required");
+      }
       if (phase?.phased && phase.id !== "deliver") {
         throw new AgentError(
           `现在还在分阶段写作的「${phase.title ?? phase.id}」这一步，不能提前交清单。请先完成材料提炼并登记，最后一步再交清单。`,
@@ -343,6 +349,36 @@ function createReportTool({ state, emit, deliveryDir, runId, requestId, phase })
   });
 }
 
+/** Required phase dependencies are derived from the host's plan and live registry. */
+function requiredPhaseUses(phase, spec) {
+  const registry = phase?.registry;
+  if (!registry) return spec.uses ?? [];
+  const materialUnits = registry.active()
+    .filter((record) => record.kind === "distill" || record.kind === "study")
+    .map((record) => record.unit);
+  if (spec.kind === "outline") return materialUnits;
+  if (spec.kind === "section") return ["outline", ...materialUnits];
+  if (spec.kind === "final") {
+    return [
+      "outline",
+      ...registry.active().filter((record) => record.kind === "section").map((record) => record.unit),
+    ];
+  }
+  return spec.uses ?? [];
+}
+
+const DOCUMENT_SKILLS = new Set([
+  "gongwen-draft",
+  "gongwen-revise",
+  "gongwen-imitate",
+  "gongwen-research",
+  "gongwen-reply",
+]);
+
+function isDocumentSkill(skill) {
+  return DOCUMENT_SKILLS.has(skill);
+}
+
 /**
  * 中间成果登记。模型只能提交「阶段 + 单元 + 路径 + 可回查引文」，由宿主核验文件、
  * 哈希、原文定位与依赖后写入运行目录；它不能写正文，也不能代替最终提交。
@@ -382,9 +418,10 @@ function createRecordTool({ guard, limits, phase, registry, emit, onFatal }) {
             toLine: Type.Optional(Type.Integer({ minimum: 1, description: "结束行号，含该行；不填则只取fromLine这一行" })),
             quote: Type.Optional(Type.String({ description: "兼容方式：原文里连续的一句，必须逐字一致；不要与行号同时填写" })),
           }),
+          { description: "仅distill材料提炼或study样稿研究登记原文来源；outline、sections、review不要填写sources，已登记来源由宿主继承" },
         ),
       ),
-      uses: Type.Optional(Type.Array(Type.String(), { description: "依赖的已登记单元编号" })),
+      uses: Type.Optional(Type.Array(Type.String(), { description: "可选：仅填写宿主未自动覆盖的额外已登记依赖；本轮必需依赖由宿主补齐" })),
       sections: Type.Optional(Type.Array(Type.String(), { description: "提纲阶段的章节标题" })),
     }),
     execute: async (args) => {
@@ -395,16 +432,23 @@ function createRecordTool({ guard, limits, phase, registry, emit, onFatal }) {
         ? phase.plan.phases.find((item) => item.id === "review") : undefined);
       const spec = (accepted?.units ?? []).find((unit) => unit.id === args?.unit);
       if (!spec) {
+        const available = (accepted?.units ?? []).map((item) => item.id).join("、") || "（无可登记单元）";
         return rejectRegistration(new AgentError(
-          `这一步没有单元「${String(args?.unit ?? "")}」。请按提示里列出的单元编号逐字登记。`,
+          `阶段成果编号「${String(args?.unit ?? "")}」不属于当前「${accepted?.phase ?? phase.id}」阶段。可用编号：${available}。请从中选一个，逐字填写 unit；文件请放在 work/ 下。`,
           "progress_invalid_unit",
+        ), args?.unit);
+      }
+      if (!(["distill", "study"].includes(spec.kind)) && Array.isArray(args?.sources) && args.sources.length > 0) {
+        return rejectRegistration(new AgentError(
+          "当前阶段不需要重复登记来源。请删除 sources 字段；本步只提交 phase、unit、path、summary（提纲另填 sections），已登记的材料来源与依赖由宿主继承。",
+          "progress_sources_unexpected",
         ), args?.unit);
       }
       let result;
       try {
         result = registry.record(
         {
-          spec: { ...spec, attempt: phase.attempt ?? 1 },
+          spec: { ...spec, uses: requiredPhaseUses(phase, spec), attempt: phase.attempt ?? 1 },
           phase: args?.phase,
           unit: args?.unit,
           file: args?.path,
@@ -422,8 +466,10 @@ function createRecordTool({ guard, limits, phase, registry, emit, onFatal }) {
         );
       } catch (error) {
         const failure = toAgentError(error);
-        let hint = "当前正文阶段不要重复填写 sources；沿用已登记材料即可。若本步是样稿研究，仍须按提示提供一条原文摘录。";
-        if (spec.kind === "distill" && spec.file) {
+        let hint = `本步文件路径应是 work/ 下的文件（建议：${spec.kind === "outline" ? "work/outline.md" : spec.kind === "section" ? `work/sections/${String(spec.index).padStart(2, "0")}.md` : spec.kind === "final" ? "work/final.md" : "work/notes/本步编号.md"}）。当前可用阶段编号：${(accepted?.units ?? []).map((item) => item.id).join("、") || "（无）"}。`;
+        if (Number.isInteger(spec.sourceLine) && spec.file) {
+          hint = `本单元已有原文行号。请直接将 sources 改为 [{path:${JSON.stringify(spec.file)},fromLine:${spec.sourceLine},toLine:${spec.sourceLine}}]，并删除 quote；不要自行重打原句。宿主会从该原文件行提取原文，仍会检查材料范围、来源角色和哈希。`;
+        } else if (spec.kind === "distill" && spec.file) {
           const opened = guard.read(spec.file, phase.workspace.root, limits.maxFileBytes);
           if (opened.ok) {
             try {

@@ -369,7 +369,8 @@ export class ProgressRegistry {
       if (value === "") continue;
       if (value === unit) throw new ProgressError("阶段成果不能依赖自己");
       if (!this.has(value)) {
-        throw new ProgressError(`要用的阶段成果还没有登记：${value}`);
+        const available = this.active().map((record) => record.unit).join("、") || "（当前还没有已登记成果）";
+        throw new ProgressError(`依赖编号「${value}」不存在或尚未登记。当前可用的已登记编号：${available}`);
       }
       normalizedUses.push(value);
     }

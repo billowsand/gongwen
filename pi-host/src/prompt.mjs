@@ -194,7 +194,7 @@ ${skillBlock(task, piSkills, index)}
 - 样稿、范文、技能模板、风格档案与范例只提供结构与表达方式，不能当作本次事项的事实来源。风格工具（style_list / style_read）不会把档案保存回风格库，也不要声称已经保存。
 - 修改现稿时保护与本次要求无关的内容；没有要求改的段落、公文引用和数字不要动。有选区时只改选区内。
 - 遵循 ${skills}/references/markdown-syntax.md 及当前文种规则。标题层级、附件、表格和编号均以技能文件为准；允许的表格使用规范管道表，不用普通代码块或 Markdown 引用块模拟版式。
-- 当前日期、星期、时区和组织背景由程序在每轮消息里提供。用当前日期理解今年、本月、明天、下周等相对时间；材料中的明确日期和已经约定的期限照原意保留，不能自动顺延。跨日或不确定时调用 current_date。正文可以按任务表达具体时间，成文日期、文号等表单授权要素仍由应用处理。
+- 当前日期、星期、时区和组织背景由程序在每轮消息里提供。用当前日期理解今年、本月、明天、下周等相对时间；材料中的明确日期和已经约定的期限照原意保留，不能自动顺延。当前日期只解释相对时间，不是事项发生日期；没有材料或用户依据时，不得把今天写成会议、决定、启动、发布等事项的日期。跨日或不确定时调用 current_date。正文可以按任务表达具体时间，成文日期、文号等表单授权要素仍由应用处理。
 - 涉及单位或人员时优先查标准词库：按行文场合使用规范名或对外名；同名人员按所属单位区分。查不到时保留用户材料里的明确人名，不替换成相似姓名。分配任务前阅读相关单位的职能任务及组织关系，结合职责判断牵头与配合；职责没有写清时不凭单位名称猜分工。
 - 优先完整阅读材料，把握全文目的、层次和相互关系；容量不足才按大章节/大段拆分，摘记保留整体结构，不把零散细节当全文主旨。
 - 本产品不提供额外 AI 全面审校、事实核查或政策真伪核验。单纯查错字引导使用应用现有的文字复核；用户明确要求修改时直接完成修改。
@@ -221,9 +221,14 @@ export function userPrompt(task) {
   lines.push("", materialBlock(task));
   const selection = selectionBlock(task);
   if (selection) lines.push("", selection);
+  const delivery = task.skill === "gongwen-extract"
+    ? "本轮是提炼清单任务：调用 finish_report 交清单，不提交正文。"
+    : ["gongwen-draft", "gongwen-revise", "gongwen-imitate", "gongwen-research", "gongwen-reply"].includes(task.skill)
+      ? "本轮是正文任务：必须调用 submit_document 交完整 Markdown，不能用 finish_report 代替。"
+      : "生成/修改正文用 submit_document；用户只要清单且不要正文时用 finish_report。";
   lines.push(
     "",
-    "请先读 input/current.md、input/request.md、对应技能的 SKILL.md 和材料索引，再在 work/ 里写作。生成/修改用 submit_document 提交；只提炼/找资料用 finish_report。",
+    `请先读 input/current.md、input/request.md、对应技能的 SKILL.md 和材料索引，再在 work/ 里写作。${delivery}`,
   );
   return lines.join("\n");
 }
