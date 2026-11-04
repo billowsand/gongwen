@@ -1565,6 +1565,11 @@ impl GongwenApp {
         });
     }
 
+    /// 打开输出目录（设置页入口）。只依赖配置与状态栏，不借起草会话。
+    pub(crate) fn open_output_dir(&mut self) {
+        super::widgets::open_output_dir(&self.config.output_dir, &mut self.status);
+    }
+
     /// 输出与录入分区：输出目录、字段录入方式与编辑器选项。
     fn output_section_ui(&mut self, ui: &mut egui::Ui) {
         setting_row(ui, "输出目录", None, |ui| {
@@ -1578,7 +1583,8 @@ impl GongwenApp {
                 });
             }
             if theme::icon_button(ui, theme::Icon::Open, "打开输出目录").clicked() {
-                self.draft_page().open_output_dir();
+                // 设置页没有起草会话，不能借 draft_page（空列表会越界崩溃）。
+                self.open_output_dir();
             }
         });
 

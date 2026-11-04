@@ -3,9 +3,7 @@
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::tasks`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::app::{
-    DocJob, DraftAction, WorkerResult, accent, export_and_compile, open_in_os, reveal_in_os,
-};
+use crate::app::{DocJob, DraftAction, WorkerResult, accent, export_and_compile, reveal_in_os};
 use crate::doc_import;
 use crate::draft_page::{DocKey, DraftPage, ExportKind, FileAction};
 use crate::export;
@@ -326,19 +324,7 @@ impl DraftPage<'_> {
     }
 
     pub(crate) fn open_output_dir(&mut self) {
-        let dir = PathBuf::from(self.config.output_dir.trim());
-        if dir.as_os_str().is_empty() {
-            *self.status = "尚未设置输出目录。".into();
-            return;
-        }
-        if let Err(error) = std::fs::create_dir_all(&dir) {
-            *self.status = format!("无法创建输出目录：{error}");
-            return;
-        }
-        match open_in_os(&dir) {
-            Ok(()) => *self.status = format!("已打开输出目录 {}。", dir.display()),
-            Err(error) => *self.status = format!("打开输出目录失败：{error}"),
-        }
+        crate::app::widgets::open_output_dir(&self.config.output_dir, self.status);
     }
 
     /// 成品入口：PDF / Word / Typst 包。单击按当前审校稿只导这一种并打开，

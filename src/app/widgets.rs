@@ -1202,6 +1202,24 @@ pub(crate) fn open_in_os(path: &Path) -> Result<(), String> {
     }
 }
 
+/// 打开输出目录：目录不存在就先创建，结果写进状态栏。
+/// 设置页与起草页共用；它只依赖配置与状态栏，不需要起草会话。
+pub(crate) fn open_output_dir(configured_dir: &str, status: &mut String) {
+    let dir = PathBuf::from(configured_dir.trim());
+    if dir.as_os_str().is_empty() {
+        *status = "尚未设置输出目录。".into();
+        return;
+    }
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        *status = format!("无法创建输出目录：{error}");
+        return;
+    }
+    match open_in_os(&dir) {
+        Ok(()) => *status = format!("已打开输出目录 {}。", dir.display()),
+        Err(error) => *status = format!("打开输出目录失败：{error}"),
+    }
+}
+
 /// 在文件管理器中定位并选中文件。
 pub(crate) fn reveal_in_os(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
