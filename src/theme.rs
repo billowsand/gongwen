@@ -24,9 +24,9 @@ mod style;
 mod widgets;
 
 pub(crate) use chrome::{
-    PANE_PADDING, PANE_RADIUS, card, clickable_card, comparison_pane, configure_comparison_scroll,
-    configure_ribbon_controls, connected_ribbon_shape, float_shadow, pane, panel, paper_shadow,
-    reset_window_anim, ribbon_tray_layout, window_enter_anim,
+    PANE_GAP, PANE_PADDING, PANE_RADIUS, card, clickable_card, comparison_pane,
+    configure_comparison_scroll, configure_ribbon_controls, connected_ribbon_shape, float_shadow,
+    pane, panel, paper_shadow, reset_window_anim, ribbon_tray_layout, window_enter_anim,
 };
 #[cfg(test)]
 pub(crate) use fonts::font_definitions;

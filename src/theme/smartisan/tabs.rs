@@ -283,5 +283,63 @@ pub fn rounded_gradient(
     painter.add(egui::Shape::mesh(mesh));
 }
 
+/// 稿纸上的视图纸签（正文 / AI 工作稿）：选中签与纸面同色、下沿压进纸边，
+/// 未选签是一张略深的牛皮纸。`base` 是纸面上沿（纸签脚线）。
+pub fn sheet_tab(
+    painter: &egui::Painter,
+    rect: Rect,
+    selected: bool,
+    hovered: bool,
+    pressed: bool,
+    paper: Color32,
+    base: f32,
+) {
+    let feather = 1.0 / painter.ctx().pixels_per_point();
+    let tab = Rect::from_min_max(
+        rect.min - egui::vec2(0.0, 2.0),
+        egui::pos2(rect.right(), base),
+    );
+    let fill = if selected {
+        paper
+    } else if pressed {
+        Color32::from_rgb(214, 198, 174)
+    } else if hovered {
+        Color32::from_rgb(235, 222, 202)
+    } else {
+        Color32::from_rgb(228, 214, 193)
+    };
+    painter.add(egui::Shape::mesh(paper_mesh(
+        &left_edge(tab, base),
+        tab.center().x,
+        fill,
+        feather,
+        // 选中签与纸面同色，脚边渐隐无妨；未选签要实到脚线，否则会透出木纹。
+        selected.then_some(base),
+    )));
+    if selected {
+        // 下沿补一块与纸同色的方角，盖住纸面的顶边，让纸签真正长在纸上。
+        painter.rect_filled(
+            Rect::from_min_max(
+                egui::pos2(tab.left(), base - 2.0),
+                egui::pos2(tab.right(), base + 1.5),
+            ),
+            0,
+            paper,
+        );
+        painter.hline(
+            (tab.left() + TOP_RADIUS)..=(tab.right() - TOP_RADIUS),
+            tab.top() + 0.5,
+            Stroke::new(1.0, Color32::from_white_alpha(120)),
+        );
+    } else if hovered || pressed {
+        // 未选中的牛皮纸签只在悬停时才亮顶边，常态不抢纸面的高光。
+        painter.hline(
+            (tab.left() + TOP_RADIUS)..=(tab.right() - TOP_RADIUS),
+            tab.top() + 0.5,
+            Stroke::new(1.0, Color32::from_white_alpha(80)),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests;

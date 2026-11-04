@@ -654,6 +654,20 @@ fn paint_editor_empty_hint(
     );
 }
 
+/// 是否走「同一张纸 + 贴边纸签」的 AI 写作版面。
+///
+/// 锤子稿纸是纸面隐喻的主题：正文与 AI 工作稿必须落在同一张纸上，切换才不会
+/// 从纸掉到木纹上。版式模式本身是一张虚拟 A4，只在正看 AI 稿时借用这张纸；
+/// 其它主题保持原来的标签行，不动它们的界面语义。
+pub(super) fn uses_workspace_sheet(
+    smartisan: bool,
+    preview: PreviewMode,
+    has_workspace: bool,
+    workspace_open: bool,
+) -> bool {
+    smartisan && has_workspace && (preview == PreviewMode::Source || workspace_open)
+}
+
 impl DraftPage<'_> {
     pub(crate) fn open_result_drawer(&mut self) {
         self.doc.result_drawer_open = true;
@@ -684,11 +698,20 @@ impl DraftPage<'_> {
 
     /// 返回正文里不透明、会把底板整片盖住的区域。
     fn preview_body_ui(&mut self, ui: &mut egui::Ui) -> Option<egui::Rect> {
+        if uses_workspace_sheet(
+            theme::smartisan::active(),
+            self.doc.preview_mode,
+            self.doc.ai_panel.workspace_turn_id().is_some(),
+            self.doc.ai_panel.workspace_view.is_some(),
+        ) && let Some(paper) = self.smartisan_workspace_sheet_ui(ui)
+        {
+            return Some(paper);
+        }
         if self.ai_workspace_ui(ui) {
             return None;
         }
         match self.doc.preview_mode {
-            PreviewMode::Source => return Some(self.source_editor_ui(ui)),
+            PreviewMode::Source => return Some(self.source_editor_ui(ui, theme::PANE_GAP)),
             PreviewMode::Rendered => {
                 let region = ui.max_rect();
                 self.markdown_render(ui);

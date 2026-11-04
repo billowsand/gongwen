@@ -308,6 +308,24 @@ pub(crate) struct AiPanel {
 }
 
 impl AiPanel {
+    /// 当前要显示的 AI 工作稿轮次：优先用户选中的那一轮，否则最近一轮工作稿。
+    /// 只是「有没有工作稿」的判断，不改视图状态；切换视图仍由界面点击决定。
+    pub(crate) fn workspace_turn_id(&self) -> Option<u64> {
+        self.workspace_view
+            .filter(|id| {
+                self.turns
+                    .iter()
+                    .any(|turn| turn.id == *id && turn.is_workspace)
+            })
+            .or_else(|| {
+                self.turns
+                    .iter()
+                    .rev()
+                    .find(|turn| turn.is_workspace)
+                    .map(|turn| turn.id)
+            })
+    }
+
     /// 按需刷新 Pi 技能目录。只比较一个原子计数，不每帧遍历技能包。
     pub(crate) fn ensure_pi_skills(&mut self) -> &crate::pi_agent::pi_skills::Catalog {
         let revision = crate::pi_agent::pi_skills::revision();
@@ -885,6 +903,38 @@ mod tests {
         let mut panel = AiPanel::default();
         panel.push_turn("润色".into(), "压一压".into(), vec![], None);
         panel
+    }
+
+    #[test]
+    fn workspace_turn_falls_back_to_the_latest_workspace_copy() {
+        let mut panel = panel_with_turn();
+        assert_eq!(
+            panel.workspace_turn_id(),
+            None,
+            "普通轮次不算工作稿，正文视图不该出现纸签"
+        );
+        panel.push_turn("起草".into(), "写一版".into(), vec![], None);
+        panel.turns[1].is_workspace = true;
+        assert_eq!(
+            panel.workspace_turn_id(),
+            Some(2),
+            "没选中时跟最近一轮工作稿"
+        );
+        panel.workspace_view = Some(1);
+        assert_eq!(
+            panel.workspace_turn_id(),
+            Some(2),
+            "选中的轮次已经不作工作稿时回落到最近一轮"
+        );
+        panel.workspace_view = Some(2);
+        assert_eq!(panel.workspace_turn_id(), Some(2));
+        panel.workspace_view = Some(99);
+        panel.turns[1].is_workspace = false;
+        assert_eq!(
+            panel.workspace_turn_id(),
+            None,
+            "没有工作稿时清掉失效的选中项"
+        );
     }
 
     #[test]
