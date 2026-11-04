@@ -217,7 +217,7 @@ revise_chat() 第一行就是 draft_chat()?（config.rs:314）
 
 ## 九、实施记录（2026-11-05）
 
-三个提交，均通过 `cargo fmt --check`、`cargo clippy -D warnings`、`cargo test --all-targets`
+五个提交，均通过 `cargo fmt --check`、`cargo clippy -D warnings`、`cargo test --all-targets`
 与 `pi-host npm test`：
 
 | 提交 | 内容 |
@@ -225,6 +225,8 @@ revise_chat() 第一行就是 draft_chat()?（config.rs:314）
 | `35665a1` refactor: 退役要素抽取并把 Pi 检索重排改走写作模型 | 旧流程删除要素抽取生成链路（`element_fields` 2401→1130 行）；Pi 检索重排不再借辅助/复核模型；兼容面保留 |
 | `d8b0763` refactor: 模型通道收敛为写作模型与文字复核两个用途 | 新增 `AppConfig::aux_chat`；删除「辅助模型」设置；问答/检索重排/数据接口 AI/任务助手改写作模型；文字复核只留启用、模型、检查器 |
 | `a329f4a` feat: Pi 写作接入只读数据接口工具 | `api_search` / `api_call` + 只读授权 + 参数校验 + 证据台账；技能与文档同步 |
+| `055d64f` docs: 记录实施结果与后续边界 | 设计文档补实施记录；AGENTS 增交接条目 |
+| `b478223` fix: 写作模型配置损坏时如实报错 | 选了 Pi 但提供商不可用时报 Pi 错误；只有没选 Pi 的旧配置才回落 `draft_model` |
 
 **代码落点**：`src/models/config.rs`（`aux_chat` / `pi_model_label`）、`src/pi_agent/tools.rs`
 （`PiApis` / `ApiCatalog` / 工具方法）、`pi-host/src/bridge.mjs` + `prompt.mjs`（工具注册与说明）、

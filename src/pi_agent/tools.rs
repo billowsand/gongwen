@@ -105,7 +105,7 @@ pub(crate) struct PiSources {
     pub(crate) styles: Arc<dyn PiStyles>,
 }
 
-/// 生产实现：只读 `styles.json`，不调辅助模型、不保存、不记使用次数。
+/// 生产实现：只读 `styles.json`，不调其它模型、不保存、不记使用次数。
 struct StyleArchives;
 
 impl PiStyles for StyleArchives {
