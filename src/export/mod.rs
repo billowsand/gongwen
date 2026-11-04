@@ -2721,6 +2721,11 @@ mod tests {
     /// 与原公函同目录，绝不拼进公函。
     #[test]
     fn receipt_signoff_sheet_is_opt_in_and_kept_separate() {
+        // 即便只勾 Word，签收单也要按 Typst 排一次数页数，需要随包字体；CI 没有
+        // runtime/fonts 时跳过（PDF 相关的同族用例已有同样处理）。
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let mut input = DraftInput {
             kind: TemplateKind::OfficialLetter,

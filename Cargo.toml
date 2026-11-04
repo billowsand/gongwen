@@ -25,7 +25,7 @@ anyhow = "1.0"
 # 研究报告的 .bib 解析：起草页文献引用下拉、悬停卡与审校要作者、题名、年份与出错行号。
 # 与 mdx、hayagriva 用的是同一份。
 biblatex = "0.12"
-calamine = "0.36.1"
+calamine = "0.38.0"
 chardetng = "1.0.0"
 chrono = { version = "0.4", features = ["serde"] }
 # 粘贴时的图片：内联 data: 图片用 data-url 解析（只认 image/*，解码后按体积上限收），
