@@ -212,6 +212,61 @@ pub(crate) fn check_delivery(ctx: &DeliveryCheck<'_>) -> DeliveryReport {
     report
 }
 
+/// 规整只许改变选区内的字节：把规整稿在选区外的改动还原成模型提交的原文。
+///
+/// 锁定选区的任务要求模型选区外逐字保持原样（第一道检查已保证提交稿选区外与
+/// 正文一致），但写入前还要过一遍确定性规整（清理版式回声、补标题、统一列表
+/// 标点），这些规整全篇生效，会改动选区外的字节，第二道检查因此把忠实复现
+/// 原文的稿子误拒。这里按字符做 Myers diff：规整造成的改动凡是不完全落在选区
+/// 内的，一律还原成提交稿原文；选区内的规整保留。没有选区时原样返回规整稿。
+///
+/// diff 有 200ms 上限：超时会把剩余部分当成一大块替换，整块不落在选区内就整体
+/// 还原——最坏结果是这轮不做规整，交付检查的安全性不变。
+pub(crate) fn restore_outside_selection(
+    submitted: &str,
+    normalized: &str,
+    selection: Option<PiSelection>,
+) -> String {
+    let Some(selection) = selection else {
+        return normalized.to_string();
+    };
+    let submitted_chars: Vec<char> = submitted.chars().collect();
+    let normalized_chars: Vec<char> = normalized.chars().collect();
+    let old_offsets = char_byte_offsets(&submitted_chars);
+    let new_offsets = char_byte_offsets(&normalized_chars);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    let mut out = String::with_capacity(normalized.len());
+    for op in similar::capture_diff_slices_deadline(
+        similar::Algorithm::Myers,
+        &submitted_chars,
+        &normalized_chars,
+        Some(deadline),
+    ) {
+        let old_range = op.old_range();
+        let new_range = op.new_range();
+        let old_start = old_offsets[old_range.start];
+        let old_end = old_offsets[old_range.end];
+        if selection.start <= old_start && old_end <= selection.end {
+            out.push_str(&normalized[new_offsets[new_range.start]..new_offsets[new_range.end]]);
+        } else {
+            out.push_str(&submitted[old_start..old_end]);
+        }
+    }
+    out
+}
+
+/// 每个字符的字节起点，末尾再多一个全文长度，便于把字符下标换算成字节区间。
+fn char_byte_offsets(chars: &[char]) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(chars.len() + 1);
+    let mut total = 0;
+    for ch in chars {
+        offsets.push(total);
+        total += ch.len_utf8();
+    }
+    offsets.push(total);
+    offsets
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +286,68 @@ mod tests {
     /// 没有任何阻止项，也没有事实提示。
     fn clean(report: &DeliveryReport) -> bool {
         report.blockers.is_empty() && report.advisories.is_empty()
+    }
+
+    /// 规整只许改动选区内：选区外被规整（如列表项补句号、版式回声行被剔除）
+    /// 的字节一律还原成提交稿原文；选区内的规整保留。
+    #[test]
+    fn normalization_outside_the_selection_is_reverted() {
+        let submitted = "# 通知\n\n1. 加强领导\n\n选中这段要改。\n";
+        // 规整：列表项补句号（选区外）、选区内文字按规整后的版本写入。
+        let normalized = "# 通知\n\n1. 加强领导。\n\n选中这段已改。\n";
+        let start = submitted.find("选中这段要改。").unwrap();
+        let selection = PiSelection {
+            start,
+            end: start + "选中这段要改。".len(),
+        };
+        let restored = restore_outside_selection(submitted, normalized, Some(selection));
+        assert_eq!(
+            restored, "# 通知\n\n1. 加强领导\n\n选中这段已改。\n",
+            "选区外的规整要还原，选区内的保留：{restored}"
+        );
+    }
+
+    /// 文首补标题落在选区之外：还原，标题维持原状。
+    #[test]
+    fn a_title_inserted_before_the_selection_is_reverted() {
+        let submitted = "正文。\n\n选中这段要改。\n";
+        let normalized = "# 【待核实：标题】\n\n正文。\n\n选中这段已改。\n";
+        let start = submitted.find("选中这段要改。").unwrap();
+        let selection = PiSelection {
+            start,
+            end: start + "选中这段要改。".len(),
+        };
+        let restored = restore_outside_selection(submitted, normalized, Some(selection));
+        assert_eq!(restored, "正文。\n\n选中这段已改。\n", "{restored}");
+    }
+
+    /// 没有选区：规整稿原样返回（整篇都允许规整）。
+    #[test]
+    fn without_a_selection_the_normalized_text_is_kept() {
+        let submitted = "# 通知\n\n1. 加强领导\n";
+        let normalized = "# 通知\n\n1. 加强领导。\n";
+        assert_eq!(
+            restore_outside_selection(submitted, normalized, None),
+            normalized
+        );
+    }
+
+    /// 中文等多字节字符的 diff 边界必须落在字符上，不能切在半截 UTF-8 里。
+    #[test]
+    fn multibyte_text_splices_on_char_boundaries() {
+        let submitted = "根据《通知》（某办函〔2026〕1号），选中这段要改。\n";
+        // 规整：选区内改写，文尾另起一行（选区外）——后者要还原。
+        let normalized = "根据《通知》（某办函〔2026〕1号），选中这段已改。\n\n文末规整新增。\n";
+        let start = submitted.find("选中这段要改。").unwrap();
+        let selection = PiSelection {
+            start,
+            end: start + "选中这段要改。".len(),
+        };
+        let restored = restore_outside_selection(submitted, normalized, Some(selection));
+        assert_eq!(
+            restored, "根据《通知》（某办函〔2026〕1号），选中这段已改。\n",
+            "{restored}"
+        );
     }
 
     #[test]

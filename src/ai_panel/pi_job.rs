@@ -534,6 +534,14 @@ impl DraftPage<'_> {
             };
             (turn.title.clone(), reference)
         };
+        if !restart && crate::pi_agent::run_delivery_rejected(&reference) {
+            return Err(
+                "上次的成品被交付检查拦下，「接着写」只会拿回同一份被拦的稿子，\
+                 已不允许这样恢复。请点「从头写」重开一轮；原成品仍在这一轮卡片上，\
+                 可显式「取回 AI 成品」（写入可撤销）或丢弃。"
+                    .into(),
+            );
+        }
         let chat = self.config.pi_chat().map_err(|error| error.to_string())?;
         let model = pi_model(&chat)?;
         let kind = self.doc.draft.kind;

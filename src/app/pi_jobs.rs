@@ -4,6 +4,10 @@
 //! 提交的有效 Markdown 由界面线程**直接写进当前可编辑正文**，普通流程不再弹人工校订窗、
 //! 不勾事实、不接受提案。新任务不执行事实核查、不生成事实提示；
 //! 路径 / 哈希 / 体积 / 选区 / 只读 / 基线这些技术性与权限保护照旧拦下。
+//! 2026-11-04 修订：被拦的成品不再丢弃——留在轮次里等用户显式「取回 AI 成品」（写入
+//! 同样可撤销）或丢弃；「接着写」不再重放同一份被拒回执，想再写只能从头开一轮。
+//! 锁定选区的任务里，写入前的确定性规整只许改动选区内的字节，选区外一律还原成
+//! 模型提交的原文（`pi_agent::restore_outside_selection`）。
 //! 报告型产物仍然只进侧栏。
 
 use super::GongwenApp;
@@ -119,13 +123,29 @@ impl GongwenApp {
                     self.status = format!("{prefix}Pi 智能写作交付检查未通过：{error}");
                     return;
                 }
+                // 轮次与运行引用先定位：写入、保留、被拒三条路都要用到；
+                // 卡片已经不在了就不碰正文，成品留在工作区里。
+                let located = doc
+                    .ai_panel
+                    .running_turn_mut()
+                    .map(|turn| (turn.id, turn.pi_run.clone()));
+                let Some((turn_id, reference)) = located else {
+                    doc.ai_review_baseline = None;
+                    self.status =
+                        format!("{prefix}Pi 交回了成品，但这一轮已经不在了，未写入正文。");
+                    return;
+                };
                 // 新交付只检查技术与权限保护，历史回执结构继续兼容。
                 let mut report = delivery_check(&self.config, &delivery, &delivery.content);
                 if let Some(reason) = report.blocking_reason() {
-                    doc.ai_review_baseline = None;
-                    doc.ai_panel.finish(TurnState::Failed(reason.clone()));
-                    self.status =
-                        format!("{prefix}Pi 智能写作交付检查未通过，未写入正文：{reason}");
+                    self.park_rejected_delivery(
+                        index,
+                        prefix,
+                        turn_id,
+                        &delivery.content,
+                        reason,
+                        reference.as_ref(),
+                    );
                     return;
                 }
                 // 规整（清理、文种、validator、版式估算）之后才真正写进正文：对规整后的
@@ -136,11 +156,23 @@ impl GongwenApp {
                     &delivery.content,
                     false,
                 );
-                report.absorb(delivery_check(&self.config, &delivery, &result.markdown));
+                // 规整全篇生效，但锁定选区只许改选区内：把选区外的规整改动还原成
+                // 模型提交的原文，免得「忠实复现选区外原文」反被第二道检查误拒。
+                let markdown = crate::pi_agent::restore_outside_selection(
+                    &delivery.content,
+                    &result.markdown,
+                    delivery.selection,
+                );
+                report.absorb(delivery_check(&self.config, &delivery, &markdown));
                 if let Some(reason) = report.blocking_reason() {
-                    doc.ai_review_baseline = None;
-                    doc.ai_panel.finish(TurnState::Failed(reason.clone()));
-                    self.status = format!("{prefix}Pi 文稿规整后未通过检查：{reason}");
+                    self.park_rejected_delivery(
+                        index,
+                        prefix,
+                        turn_id,
+                        &markdown,
+                        reason,
+                        reference.as_ref(),
+                    );
                     return;
                 }
                 let advisories = report.advisories.clone();
@@ -189,7 +221,7 @@ impl GongwenApp {
                     .unwrap_or_default();
                 let pending = crate::ai_panel::pi_write::PiPendingDelivery {
                     run_id,
-                    markdown: result.markdown.clone(),
+                    markdown: markdown.clone(),
                     advisories: advisories.clone(),
                 };
                 if let Some(turn) = doc.ai_panel.turn_mut(turn_id) {
@@ -218,7 +250,7 @@ impl GongwenApp {
                     self.manuscript_store.as_mut(),
                     ctx,
                     turn_id,
-                    result.markdown,
+                    markdown,
                     advisories.clone(),
                 ) {
                     Ok(()) => {
@@ -245,6 +277,51 @@ impl GongwenApp {
                 }
             }
         }
+    }
+}
+
+impl GongwenApp {
+    /// 交付检查拦下：正文不动，但成品不丢——留在轮次里等用户显式「取回 AI 成品」
+    /// （写入同样记撤销点、可撤销）或丢弃。运行记录标成被拒，「接着写」不再重放
+    /// 同一份被拒回执；想再写只能从头开一轮。与现稿逐字相同的成品没有取回价值。
+    fn park_rejected_delivery(
+        &mut self,
+        index: usize,
+        prefix: &str,
+        turn_id: u64,
+        markdown: &str,
+        reason: String,
+        reference: Option<&crate::pi_agent::PiRunRef>,
+    ) {
+        let doc = &mut self.docs[index];
+        doc.ai_review_baseline = None;
+        let mut note = reason;
+        if let Some(run) = reference
+            && let Err(error) = crate::pi_agent::reject_run(run)
+        {
+            note = format!("{note}（运行记录没能标成被拒：{error}）");
+        }
+        if markdown == doc.generated_markdown {
+            doc.ai_panel.finish(TurnState::Failed(note.clone()));
+            self.status = format!("{prefix}Pi 智能写作交付检查未通过，未写入正文：{note}");
+            return;
+        }
+        let pending = crate::ai_panel::pi_write::PiPendingDelivery {
+            run_id: reference.map(|run| run.run_id.clone()).unwrap_or_default(),
+            markdown: markdown.to_string(),
+            advisories: Vec::new(),
+        };
+        let parked = doc
+            .ai_panel
+            .park_pi_delivery(turn_id, pending, false, note.clone());
+        self.status = if parked {
+            format!(
+                "{prefix}Pi 成品未通过交付检查，未写入正文：{note}；成品留在这一轮里，\
+                 可检查后显式取回（写入可撤销）或丢弃。"
+            )
+        } else {
+            format!("{prefix}Pi 成品未通过交付检查，未写入正文：{note}")
+        };
     }
 }
 
@@ -369,7 +446,7 @@ mod pi_job_tests {
         assert_eq!(write.after, "# 通知\n\n改后的正文。\n");
     }
 
-    /// 技术 / 权限问题仍然拦下：正文不动，只有失败卡片。
+    /// 技术 / 权限问题仍然拦下：正文不动；成品留在这一轮里，可显式取回或丢弃。
     #[test]
     fn a_technical_blocker_keeps_the_document_untouched() {
         let mut app = management_samples::fixture();
@@ -394,10 +471,67 @@ mod pi_job_tests {
         );
         assert!(app.docs[0].ai_proposal.is_none());
         assert_eq!(app.docs[0].generated_markdown, before);
-        assert!(matches!(
-            app.docs[0].ai_panel.turns.last().map(|turn| &turn.state),
-            Some(TurnState::Failed(_))
-        ));
+        let turn = app.docs[0].ai_panel.turns.last().unwrap();
+        assert!(matches!(&turn.state, TurnState::Failed(reason) if reason.contains("工作区路径")));
+        assert!(
+            turn.pi_pending.is_some(),
+            "被拦的成品也要留在轮次里，用户检查后还能显式取回"
+        );
+    }
+
+    /// 选区任务 × 规整：模型忠实复现选区外原文（含无句号的列表项），规整若给
+    /// 选区外补标点，写入时只保留选区内的规整，选区外逐字不动——不再整轮误拒。
+    #[test]
+    fn normalization_never_changes_text_outside_the_selection() {
+        let mut app = management_samples::fixture();
+        app.docs[0].draft.kind = crate::models::TemplateKind::PlainDocument;
+        let before = "# 通知\n\n1. 加强领导\n\n第二段要改。\n\n第三段。\n";
+        app.docs[0].generated_markdown = before.into();
+        app.docs[0].job_seq = 5;
+        app.docs[0].busy = true;
+        app.docs[0].ai_panel.push_turn(
+            "智能写作（Pi 试用）".into(),
+            "只改第二段。".into(),
+            Vec::new(),
+            None,
+        );
+        let start = before.find("第二段要改。").unwrap();
+        let mut rejected = delivery(before, &before.replace("第二段要改。", "第二段已改。"));
+        rejected.selection = Some(PiSelection {
+            start,
+            end: start + "第二段要改。".len(),
+        });
+        rejected.request = "只改第二段".into();
+        // 先确认规整确实会动选区外的列表标点——否则这条回归形同虚设。
+        let normalized = crate::draft_page::reviewed_draft(
+            &app.docs[0].draft,
+            &app.config,
+            &rejected.content,
+            false,
+        );
+        assert!(
+            normalized.markdown.contains("1. 加强领导。"),
+            "规整应给无句号的列表项补句号：{}",
+            normalized.markdown
+        );
+        let key = app.docs[0].key;
+        app.apply_doc_job(
+            key,
+            5,
+            DocJob::PiDone(Box::new(Ok(PiOutcome::Document(rejected)))),
+        );
+        assert_eq!(
+            app.docs[0].generated_markdown, "# 通知\n\n1. 加强领导\n\n第二段已改。\n\n第三段。\n",
+            "选区外必须逐字保持原样（含规整想补句号的列表项）"
+        );
+        let turn = app.docs[0].ai_panel.turns.last().unwrap();
+        assert_eq!(turn.state, TurnState::Accepted);
+        assert!(
+            turn.pi_write
+                .as_ref()
+                .is_some_and(|write| write.before == before),
+            "照常留下撤销记录"
+        );
     }
 
     /// 新日期、数字不产生事实核查卡片或待处理工作。
@@ -776,10 +910,16 @@ mod pi_job_tests {
         );
         assert!(app.docs[0].ai_proposal.is_none());
         assert_eq!(app.docs[0].generated_markdown, before);
-        assert!(matches!(
-            app.docs[0].ai_panel.turns.last().map(|turn| &turn.state),
-            Some(TurnState::Failed(reason)) if reason.contains("选区以外")
-        ));
+        let turn = app.docs[0].ai_panel.turns.last().unwrap();
+        assert!(
+            matches!(&turn.state, TurnState::Failed(reason) if reason.contains("选区以外")),
+            "{:?}",
+            turn.state
+        );
+        assert!(
+            turn.pi_pending.is_some(),
+            "选区外改动被拦时成品也留着，用户确认后仍可显式取回"
+        );
     }
 
     fn run_ref(before: &str) -> crate::pi_agent::PiRunRef {

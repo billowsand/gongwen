@@ -22,9 +22,9 @@ mod tools;
 mod workspace;
 mod writing_context;
 
-pub(crate) use delivery::sha256_hex;
 pub(crate) use delivery::{
-    DeliveryCheck, DeliveryReport, PiSelection, check_delivery, verify_submission,
+    DeliveryCheck, DeliveryReport, PiSelection, check_delivery, restore_outside_selection,
+    sha256_hex, verify_submission,
 };
 pub(crate) use materials::{MaterialRole, PiMaterialInput};
 pub(crate) use process::{
@@ -36,7 +36,7 @@ pub(crate) use process::{PiQuestion, PiReport};
 pub(crate) use protocol::PiReportItem;
 pub(crate) use recovery::{
     PiRunLog, PiRunRecord, PiRunRef, PiRunSelection, PiRunStatus, consume_run, read_sources,
-    resolve_workspace,
+    reject_run, resolve_workspace, run_delivery_rejected,
 };
 pub(crate) use runtime::PiRuntime;
 pub(crate) use skills as pi_skills;

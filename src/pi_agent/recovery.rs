@@ -134,6 +134,11 @@ pub(crate) struct PiRunRecord {
     pub(crate) message: String,
     #[serde(default)]
     pub(crate) receipt: Option<PiReceiptSummary>,
+    /// 成品被交付检查拦下（程序侧拒绝）。「接着写」重放只会拿回同一份被拒稿，
+    /// 恢复时这一项为真就不允许接着写，只能从头开一轮；成品本身留在轮次卡片里，
+    /// 用户可显式取回或丢弃。旧记录没有此项，按否。
+    #[serde(default)]
+    pub(crate) delivery_rejected: bool,
     /// 本轮事实来源文件的哈希，用于会话重载后继续改未采纳提案。
     #[serde(default)]
     pub(crate) sources: Option<String>,
@@ -302,6 +307,7 @@ impl PiRunRecord {
             status: PiRunStatus::Running,
             message: String::new(),
             receipt: None,
+            delivery_rejected: false,
             sources: None,
             created_at: now.clone(),
             updated_at: now,
@@ -561,6 +567,42 @@ pub(crate) fn consume_run(run: &PiRunRef) -> Result<(), String> {
     record.status = PiRunStatus::Accepted;
     record.updated_at = chrono::Local::now().to_rfc3339();
     record.write_to_dir(dir)
+}
+
+/// 成品被程序拒收：标记运行记录。「接着写」重放只会拿回同一份被拒稿，
+/// 标记后恢复入口只允许从头写；成品留在轮次卡片里，可显式取回或丢弃。
+pub(crate) fn reject_run(run: &PiRunRef) -> Result<(), String> {
+    if run.is_empty() {
+        return Err("这一轮没有可标记的 Pi 运行记录".into());
+    }
+    let root = resolve_workspace(&run.workspace)?;
+    let Some(dir) = root.parent() else {
+        return Err("Pi 运行目录定位失败".into());
+    };
+    let mut record = PiRunRecord::read_from(dir)?;
+    if record.run_id != run.run_id {
+        return Err("运行记录与这一轮的运行标识对不上，未标记".into());
+    }
+    record.delivery_rejected = true;
+    record.updated_at = chrono::Local::now().to_rfc3339();
+    record.write_to_dir(dir)
+}
+
+/// 这一轮上次的成品是不是被交付检查拦下。读不到记录时按否处理，
+/// 由恢复路径上的其它校验（基线、快照、版本）兜底。
+pub(crate) fn run_delivery_rejected(run: &PiRunRef) -> bool {
+    if run.is_empty() {
+        return false;
+    }
+    let Ok(root) = resolve_workspace(&run.workspace) else {
+        return false;
+    };
+    let Some(dir) = root.parent() else {
+        return false;
+    };
+    PiRunRecord::read_from(dir)
+        .map(|record| record.run_id == run.run_id && record.delivery_rejected)
+        .unwrap_or(false)
 }
 
 /// 把工作区相对引用解析成真实目录，并确认它仍在配置目录的 Pi 工作区里。
@@ -1124,6 +1166,24 @@ mod tests {
             .check_resume(&workspace.label, "run-1", "正式正文")
             .unwrap();
         assert!(PiRunRef::from_record(&record).recoverable());
+    }
+
+    /// 被拒标记随记录落盘，旧记录（没有这一项）按否读回。
+    #[test]
+    fn delivery_rejected_survives_serialization_and_defaults_to_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = workspace(dir.path());
+        let mut record = record(&workspace);
+        record.delivery_rejected = true;
+        record.write(&workspace).unwrap();
+        let read = PiRunRecord::read_from(&workspace.run).unwrap();
+        assert!(read.delivery_rejected, "被拒标记要随记录落盘");
+        // 旧记录 JSON 没有这一项：按否读回，不影响其它字段。
+        let mut value = serde_json::to_value(&read).unwrap();
+        value.as_object_mut().unwrap().remove("deliveryRejected");
+        let old: PiRunRecord = serde_json::from_value(value).unwrap();
+        assert!(!old.delivery_rejected, "旧记录没有该项，按否处理");
+        assert_eq!(old.run_id, "run-1");
     }
 
     #[test]
