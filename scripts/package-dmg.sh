@@ -245,6 +245,19 @@ if [ ! -f "$STAGE/runtime/fonts/GWFangSong.ttf" ]; then
     die "staging 里没有 runtime 字体：$STAGE/runtime/fonts"
 fi
 
+# 没有 Developer ID 时，ad-hoc 签名必须在**放进 .app 之前**对 staging 里的
+# 两个可执行文件做：codesign 一旦看到 .app 内的路径，会把它当成 bundle 的
+# 主可执行文件并尝试签整个 bundle，随包字体 / 许可证资源会被当成嵌套代码，
+# 报 “code object is not signed at all In subcomponent”。
+if [ -z "${GONGWEN_MACOS_SIGN_IDENTITY:-}" ]; then
+    codesign --force --sign - "$STAGE/gongwen-assistant"
+    codesign --verify --strict "$STAGE/gongwen-assistant"
+    if [ -f "$STAGE/runtime/pi/bin/node" ]; then
+        codesign --force --sign - "$STAGE/runtime/pi/bin/node"
+        codesign --verify --strict "$STAGE/runtime/pi/bin/node"
+    fi
+fi
+
 MACOS_DIR="$BUILD_ROOT/$BUNDLE_NAME/Contents/MacOS"
 RESOURCES_DIR="$BUILD_ROOT/$BUNDLE_NAME/Contents/Resources"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
@@ -382,16 +395,10 @@ else
     if [ -n "$NOTARY_PROFILE" ]; then
         die "配置了 GONGWEN_MACOS_NOTARY_PROFILE 但没有 GONGWEN_MACOS_SIGN_IDENTITY；公证必须有 Developer ID 签名"
     fi
-    # 没有 Developer ID，做 ad-hoc 签名（identity "-"），保证 Apple Silicon 上可直接运行。
+    # 没有 Developer ID：可执行文件已在放进 .app 之前做过 ad-hoc 签名（见上方
+    # staging 段），这里只提示产物未签名/未公证，不再对 .app 内路径调用 codesign。
     echo "警告：未配置 GONGWEN_MACOS_SIGN_IDENTITY，仅 ad-hoc 签名——未签名/未公证，仅本机测试；" >&2
     echo "      换机器下载会被 Gatekeeper 拦，不要作为发布产物分发。" >&2
-    # ad-hoc 只签两个真正的可执行文件，不给 bundle 做密封签名：bundle 里随包的
-    # 字体/许可证资源会让 codesign 把某些普通文件当嵌套代码，整包签名在真实
-    # 运行时树上反复以 “In subcomponent” 失败；只签可执行文件足以让本机启动。
-    codesign --force --sign - "$MACOS_DIR/gongwen-assistant"
-    codesign --force --sign - "$MACOS_DIR/runtime/pi/bin/node"
-    codesign --verify --strict "$MACOS_DIR/gongwen-assistant"
-    codesign --verify --strict "$MACOS_DIR/runtime/pi/bin/node"
 fi
 
 # 拖放到「应用程序」的 DMG：bundle 加 /Applications 符号链接。
