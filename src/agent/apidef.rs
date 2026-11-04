@@ -200,7 +200,7 @@ pub(crate) fn lower_all(store: &ApiStore) -> Vec<ApiEndpoint> {
 }
 
 fn services_dir() -> anyhow::Result<PathBuf> {
-    Ok(crate::storage::config_dir()?.join("apis"))
+    crate::storage::slot_subdir("apis")
 }
 
 fn service_files(dir: &Path) -> Vec<(String, PathBuf)> {

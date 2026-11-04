@@ -896,6 +896,15 @@ impl GongwenApp {
                     }
                 });
                 self.nav_menu_item(ui, NavPage::Settings);
+                if self.vault_locked
+                    && ui
+                        .add(theme::menu_item(theme::Icon::Lock, "锁定窗口"))
+                        .on_hover_text("立即退回锁屏；闲置超时也会自动锁定。")
+                        .clicked()
+                {
+                    self.request_lock();
+                    ui.close();
+                }
                 ui.separator();
                 self.nav_menu_item(ui, NavPage::Help);
                 if ui

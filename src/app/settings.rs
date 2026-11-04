@@ -62,6 +62,8 @@ pub(crate) enum SettingsSection {
     Backup,
     /// 密级与保密期限规则。
     Security,
+    /// 应用锁：启动密码、空白系统第二密码与闲置自动锁定。
+    Vault,
     /// 输入法（应用内词表查询）。
     Input,
     /// 上手指引。
@@ -70,7 +72,7 @@ pub(crate) enum SettingsSection {
 
 /// 左侧主菜单的分组。分组名只是小字标题，不可点击——十几项平铺成一列时，
 /// 找一项要从头扫到尾；按「配什么」分成几摞，眼睛一次只在一摞里找。
-const MENU_GROUPS: [(&str, &[SettingsSection]); 4] = [
+const MENU_GROUPS: [(&str, &[SettingsSection]); 5] = [
     (
         "外观",
         &[
@@ -81,12 +83,9 @@ const MENU_GROUPS: [(&str, &[SettingsSection]); 4] = [
     ),
     (
         "公文排版",
-        &[
-            SettingsSection::Numbering,
-            SettingsSection::Security,
-            SettingsSection::Transmit,
-        ],
+        &[SettingsSection::Numbering, SettingsSection::Transmit],
     ),
+    ("安全", &[SettingsSection::Vault, SettingsSection::Security]),
     (
         "文件与现场",
         &[
@@ -116,6 +115,7 @@ impl SettingsSection {
             SettingsSection::Persistence => "保存与现场",
             SettingsSection::Backup => "数据备份",
             SettingsSection::Security => "密级规则",
+            SettingsSection::Vault => "应用锁",
             SettingsSection::Input => "输入法",
             SettingsSection::Guide => "上手指引",
         }
@@ -134,6 +134,7 @@ impl SettingsSection {
             SettingsSection::Persistence => theme::Icon::Save,
             SettingsSection::Backup => theme::Icon::Archive,
             SettingsSection::Security => theme::Icon::Shield,
+            SettingsSection::Vault => theme::Icon::Lock,
             SettingsSection::Input => theme::Icon::Edit,
             SettingsSection::Guide => theme::Icon::Book,
         }
@@ -174,6 +175,10 @@ impl SettingsSection {
             SettingsSection::Security => {
                 "默认取自《保守国家秘密法》第十五条：绝密级不超过三十年、机密级不超过二十年、\
                  秘密级不超过十年。本单位口径不同的，直接改下面三个上限。"
+            }
+            SettingsSection::Vault => {
+                "启动要输入密码；可另设一个进入空白系统的第二密码。忘记密码无法恢复数据，\
+                 闲置超时自动退回锁屏。"
             }
             SettingsSection::Input => {
                 "词表输入法按编码查找基础表与公文四码词表，维护后立即生效。单击 Shift 切中英。"
@@ -1445,6 +1450,7 @@ impl GongwenApp {
                             SettingsSection::Persistence => self.persistence_section_ui(ui),
                             SettingsSection::Backup => self.backup_section_ui(ui),
                             SettingsSection::Security => self.security_section_ui(ui),
+                            SettingsSection::Vault => self.vault_section_ui(ui),
                             SettingsSection::Input => self.ime_section_ui(ui),
                             SettingsSection::Guide => {
                                 guide_section_ui(&mut self.help, ui);

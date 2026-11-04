@@ -1,10 +1,64 @@
 use crate::models::AppConfig;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use std::{fs, path::PathBuf};
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 const ZIP_PASSWORD_FILE: &str = ".zip-password";
 const MAX_REMEMBERED_PASSWORD_BYTES: u64 = 1024;
+
+/// 数据槽位：真实系统与诱饵系统（第二密码进入的空白系统）各有一套独立文件。
+/// 解锁时由闸门设置；默认值是真实槽位，测试与未启用应用锁的环境不受影响。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataSlot {
+    /// 真实系统：沿用配置目录原有文件名（config.json、manuscripts.db…）。
+    Real,
+    /// 诱饵系统：同一目录下一套 `alt-` 前缀的中性文件名，磁盘上看不出语义。
+    Decoy,
+}
+
+/// 当前进程打开的是哪个槽位。后台线程也会读路径（后台任务、同步导入），
+/// 用原子量而不是线程局部；解锁与锁定时切换。
+static CURRENT_SLOT: AtomicU8 = AtomicU8::new(0);
+
+pub fn current_slot() -> DataSlot {
+    match CURRENT_SLOT.load(Ordering::Relaxed) {
+        1 => DataSlot::Decoy,
+        _ => DataSlot::Real,
+    }
+}
+
+/// 解锁成功时由闸门调用；锁定时回到真实槽位（中性状态）。
+pub fn set_current_slot(slot: DataSlot) {
+    CURRENT_SLOT.store(
+        match slot {
+            DataSlot::Real => 0,
+            DataSlot::Decoy => 1,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// 诱饵槽位文件名前缀。中性、不带语义；第二期 SQLCipher 落地后文件内容本身
+/// 已是密文，前缀只是第一道皮。注意：文件名映射是唯一入口，诱饵系统里任何
+/// 写入都不能落进真实文件——新增敏感文件时一律走 [`slot_file`] / [`slot_subdir`]。
+const DECOY_PREFIX: &str = "alt-";
+
+/// 按当前槽位映射配置目录里的文件名。真实槽位用原名；诱饵槽位一律加前缀，
+/// 包括未来新增的未知文件名（规则统一，不逐个点名）。
+pub fn slot_file(name: &str) -> Result<PathBuf> {
+    let name = match current_slot() {
+        DataSlot::Real => name.to_string(),
+        DataSlot::Decoy => format!("{DECOY_PREFIX}{name}"),
+    };
+    Ok(config_dir()?.join(name))
+}
+
+/// 按当前槽位映射配置目录里的子目录（pi、apis 这类整体敏感的目录）。
+pub fn slot_subdir(name: &str) -> Result<PathBuf> {
+    slot_file(name)
+}
 
 // 测试覆盖的用户目录：只让稿件包同步测试把图片写进临时目录，不影响真实配置目录。
 // 按线程覆盖：测试并行跑，全局覆盖会让同时在跑的别的测试（如稿件删除时清理孤儿
@@ -39,7 +93,7 @@ pub fn cache_dir() -> Result<PathBuf> {
 }
 
 pub fn config_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("config.json"))
+    slot_file("config.json")
 }
 
 /// 启动最早处只为取窗口图标主题时使用：只读解析，不迁移、不挪走损坏文件。
@@ -60,14 +114,15 @@ pub fn peek_theme() -> crate::models::ThemeName {
 }
 
 /// 稿件库 SQLite 文件，与 config.json 同目录，仅保存在本机。
+/// 槽位感知：真实系统用 manuscripts.db，诱饵系统用 alt-manuscripts.db。
 pub fn manuscript_db_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("manuscripts.db"))
+    slot_file("manuscripts.db")
 }
 
 /// 读取用户明确选择“记住”的 ZIP 密码。密码单独存放，避免进入 config.json、
 /// 配置版本历史或稿件导出包。Unix 下写入时把权限限制为仅当前用户可读写。
 pub fn load_remembered_zip_password() -> Result<Option<String>> {
-    let path = config_dir()?.join(ZIP_PASSWORD_FILE);
+    let path = slot_file(ZIP_PASSWORD_FILE)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -81,7 +136,7 @@ pub fn load_remembered_zip_password() -> Result<Option<String>> {
 }
 
 pub fn save_remembered_zip_password(password: Option<&str>) -> Result<()> {
-    let path = config_dir()?.join(ZIP_PASSWORD_FILE);
+    let path = slot_file(ZIP_PASSWORD_FILE)?;
     if let Some(password) = password {
         if password.len() as u64 > MAX_REMEMBERED_PASSWORD_BYTES {
             anyhow::bail!("ZIP 密码过长，无法记住");

@@ -59,6 +59,7 @@ pub enum Icon {
     Library,
     List,
     ListOrdered,
+    Lock,
     Menu,
     Open,
     Package,
@@ -232,6 +233,7 @@ impl Icon {
                 "list-ordered",
                 include_bytes!("../../assets/icons/list-ordered.svg"),
             ),
+            Self::Lock => ("lock", include_bytes!("../../assets/icons/lock.svg")),
             Self::Menu => ("menu", include_bytes!("../../assets/icons/menu.svg")),
             Self::Open => (
                 "external-link",

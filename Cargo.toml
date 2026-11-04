@@ -22,6 +22,9 @@ linux-portal-dialogs = ["rfd/xdg-portal", "rfd/wayland"]
 aho-corasick = "1.1.5"
 anydoc = "0.2.4"
 anyhow = "1.0"
+# 应用锁：Argon2id 派生密钥 + AES-256-GCM 验证器（见 docs/security-lock-design.md）。
+argon2 = "0.6"
+aes-gcm = "0.11"
 # 研究报告的 .bib 解析：起草页文献引用下拉、悬停卡与审校要作者、题名、年份与出错行号。
 # 与 mdx、hayagriva 用的是同一份。
 biblatex = "0.12"
@@ -92,6 +95,8 @@ typst-pdf = "0.15.1"
 url = "2.5"
 uuid = { version = "1.24", features = ["v4"] }
 zip = "8.6"
+# 锁屏与密钥派生的缓冲清零（argon2 已带，这里直接引用其 trait）。
+zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 # 应用内打印走原生 GDI：不依赖任何第三方 PDF 软件注册 print 谓词。

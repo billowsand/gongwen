@@ -132,6 +132,13 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path) -> Result<()> {
     if database.is_file() {
         snapshot_database(&database, &snapshot)?;
     }
+    // 诱饵系统的库（alt- 前缀）同样要一致快照：它也有自己的 WAL，
+    // 直接拷贝正在变化的文件会缺页（见 docs/security-lock-design.md）。
+    let alt_database = config_dir.join("alt-manuscripts.db");
+    let alt_snapshot = snapshot_dir.path().join("alt-manuscripts.db");
+    if alt_database.is_file() {
+        snapshot_database(&alt_database, &alt_snapshot)?;
+    }
     let files = collect_files(config_dir)?;
     // 先写同目录临时文件，写完再原子替换目标：导出中途失败不会留下半个 ZIP。
     let mut temp = tempfile::NamedTempFile::new_in(parent)
@@ -143,6 +150,8 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path) -> Result<()> {
         for rel in &files {
             let source = if rel == Path::new("manuscripts.db") {
                 snapshot.clone()
+            } else if rel == Path::new("alt-manuscripts.db") {
+                alt_snapshot.clone()
             } else {
                 config_dir.join(rel)
             };
@@ -153,7 +162,8 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path) -> Result<()> {
                 // 缺失或其他读取错误都应中止导出。
                 Err(error)
                     if error.kind() == std::io::ErrorKind::NotFound
-                        && rel != Path::new("manuscripts.db") =>
+                        && rel != Path::new("manuscripts.db")
+                        && rel != Path::new("alt-manuscripts.db") =>
                 {
                     continue;
                 }
@@ -359,10 +369,17 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
 
 /// 瞬态 / 诊断文件不进入备份。
 fn is_excluded(rel: &Path) -> bool {
-    // 主库已经独立生成一致快照，原库的日志与共享内存不能混进快照。
+    // 主库（含诱饵库）已经独立生成一致快照，原库的日志与共享内存不能混进快照。
     if matches!(
         rel.to_str(),
-        Some("manuscripts.db-wal" | "manuscripts.db-shm" | "manuscripts.db-journal")
+        Some(
+            "manuscripts.db-wal"
+                | "manuscripts.db-shm"
+                | "manuscripts.db-journal"
+                | "alt-manuscripts.db-wal"
+                | "alt-manuscripts.db-shm"
+                | "alt-manuscripts.db-journal"
+        )
     ) {
         return true;
     }

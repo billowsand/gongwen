@@ -57,6 +57,11 @@ pub struct AppConfig {
     /// 定时自动保存的间隔（秒）。旧配置没有该字段时按 2 分钟处理。
     #[serde(default = "default_auto_save_interval_secs")]
     pub auto_save_interval_secs: u64,
+    /// 应用锁空闲自动锁定的时限（分钟）：没有任何键盘 / 鼠标输入超过这个时长
+    /// 就退回锁屏。0 = 不自动锁定。仅启用应用锁后生效；旧配置没有该字段时
+    /// 按 15 分钟处理。
+    #[serde(default = "default_auto_lock_minutes")]
+    pub auto_lock_minutes: u32,
     pub security_rules: SecurityRules,
     /// 允许在词库之外手工填写单位、联系人等字段。
     pub allow_free_text: bool,
@@ -149,6 +154,7 @@ impl Default for AppConfig {
             auto_export: false,
             auto_save: true,
             auto_save_interval_secs: DEFAULT_AUTO_SAVE_INTERVAL_SECS,
+            auto_lock_minutes: default_auto_lock_minutes(),
             security_rules: SecurityRules::default(),
             allow_free_text: true,
             show_editor_line_numbers: true,
@@ -705,6 +711,11 @@ pub const DEFAULT_AUTO_SAVE_INTERVAL_SECS: u64 = 120;
 /// 旧配置文件没有自动保存间隔；缺省 2 分钟。
 pub(crate) fn default_auto_save_interval_secs() -> u64 {
     DEFAULT_AUTO_SAVE_INTERVAL_SECS
+}
+
+/// 旧配置文件没有自动锁定时限；缺省 15 分钟。
+pub(crate) fn default_auto_lock_minutes() -> u32 {
+    15
 }
 
 /// 旧配置文件没有界面缩放；缺省 100%。

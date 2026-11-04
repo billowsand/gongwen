@@ -34,6 +34,7 @@ mod api_settings;
 mod chrome;
 mod data_safety;
 pub(crate) mod file_dialog;
+pub(crate) mod gate;
 mod ime_page;
 mod jobs;
 mod knowledge_local;
@@ -51,6 +52,7 @@ mod settings;
 mod style_settings;
 mod tabs;
 mod task_assistant;
+mod vault_settings;
 mod versioning;
 mod vocabulary;
 pub(crate) mod widgets;
@@ -415,6 +417,16 @@ pub struct GongwenApp {
     agent_settings: agent_settings::AgentSettings,
     /// AI 管理页「风格」分区的状态。
     styles_page: style_settings::StylesPage,
+    /// 设置页「应用锁」分区的输入草稿与会话内提示。
+    vault_page: vault_settings::VaultPageState,
+    /// 应用锁启用状态：启动时按锁文件探测缓存一份，设置页改动后刷新。
+    /// 未启用时不锁定、菜单里也没有「锁定」入口。
+    vault_locked: bool,
+    /// 最近一次有键盘 / 鼠标输入的时刻（egui 秒）。空闲超过
+    /// `config.auto_lock_minutes` 就请求锁定；0 分钟 = 不自动锁定。
+    last_activity_secs: f64,
+    /// 本帧请求退回锁屏：外壳看到后置位就丢掉整个工作区（连接、内存数据）。
+    lock_requested: bool,
 }
 
 /// 导出面板要显示的那几个数，连同各词源占比。整份码表正文不留在这里——
@@ -449,10 +461,14 @@ pub(crate) struct KnowledgeImportDraft {
 impl GongwenApp {
     /// `startup_imports`：命令行带进来的稿件包，首帧起依次弹出导入流程。
     /// `instance`：主实例的锁，App 持有它并盯着后起进程转交过来的请求。
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
+    ///
+    /// 只有闸门（`app::gate`）解锁成功后才调用：此时 `storage::current_slot()`
+    /// 已是真实或诱饵槽位，这里打开的配置与数据库都按槽位取路径。
+    pub fn new_unlocked(
+        ctx: &egui::Context,
         startup_imports: Vec<PathBuf>,
         instance: Option<crate::single_instance::Instance>,
+        macos_titlebar_metrics: Option<crate::macos_window::NativeTitlebarMetrics>,
     ) -> Self {
         // 配置文件内容坏了就带着默认配置启动，并把留底路径交给首帧的提示窗；
         // 读取失败（权限、路径不是文件）仍按默认配置启动，但状态栏如实说明。
@@ -486,22 +502,23 @@ impl GongwenApp {
         theme::set_current(config.theme);
         theme::set_current_paper(config.paper);
         crate::mermaid::set_theme(config.diagram_theme);
-        theme::configure_fonts(&cc.egui_ctx, &config.fonts);
-        theme::configure_icons(&cc.egui_ctx);
-        theme::configure_style(&cc.egui_ctx);
-        theme::omarchy::start_watcher(&cc.egui_ctx);
+        theme::configure_fonts(ctx, &config.fonts);
+        theme::configure_icons(ctx);
+        theme::configure_style(ctx);
+        theme::omarchy::start_watcher(ctx);
         // 全局界面缩放要赶在测量原生标题栏之前应用：macOS 的避让宽度按
         // 当前 zoom_factor 折算（见 macos_window.rs），晚一步会按 100% 算错。
         let ui_scale = config.clamped_ui_scale();
         config.ui_scale = ui_scale;
         config.auto_save_interval_secs = config.clamped_auto_save_interval_secs();
-        cc.egui_ctx.options_mut(|options| {
+        ctx.options_mut(|options| {
             options.zoom_factor = ui_scale;
             // 全局缩放只认设置页：egui 内置的 Ctrl± 会绕开配置，且与源码编辑器
             // 用 Ctrl± 调字号冲突（编辑器在快捷键处理里先消费，页面切换后却会失灵）。
             options.zoom_with_keyboard = false;
         });
-        let macos_titlebar_metrics = crate::macos_window::configure_native_titlebar(cc);
+        let macos_titlebar_metrics =
+            macos_titlebar_metrics.or_else(crate::macos_window::configure_native_titlebar_fallback);
 
         // 载入即整理：补齐词条 id，按层级重排单位并重新生成层级编码。
         units::normalize(&mut config.vocabulary);
@@ -655,7 +672,7 @@ impl GongwenApp {
             active_import: None,
             forwarded_requests: instance
                 .as_ref()
-                .map(|instance| instance.watch(cc.egui_ctx.clone())),
+                .map(|instance| instance.watch(ctx.clone())),
             _instance: instance,
             pending_merge: None,
             version_commit: None,
@@ -737,9 +754,13 @@ impl GongwenApp {
             ai_section: AiSection::default(),
             agent_settings: Default::default(),
             styles_page: Default::default(),
+            vault_page: Default::default(),
             rerank_verify_busy: false,
             rerank_verify_result: None,
             knowledge_preview: None,
+            vault_locked: crate::vault::Vault::probe() == crate::vault::Probe::Locked,
+            last_activity_secs: ctx.input(|input| input.time),
+            lock_requested: false,
         };
         app.restore_session();
         app.seed_samples_once();
@@ -805,9 +826,12 @@ pub(crate) fn switch_template_profile(
     validator::validate(draft, markdown, &config.vocabulary, &config.security_rules)
 }
 
-impl eframe::App for GongwenApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl GongwenApp {
+    /// 外壳（`app::gate::AppShell`）解锁后每帧调用；锁屏期间整个工作区
+    /// 已被丢弃，本方法不运行。自动锁定在最前面检查，超时这一帧就不再往下走。
+    pub(crate) fn update_workspace(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.tick_vault_idle(&ctx);
         // 跟随系统明暗：窗口刚建好时首帧才拿到系统主题，这里校正一次配色与图标；
         // 之后系统在深浅模式之间切换（winit 的 ThemeChanged）也走同一条路。
         self.sync_system_theme(&ctx);
@@ -1021,27 +1045,56 @@ impl eframe::App for GongwenApp {
         }
     }
 
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        theme::canvas().to_normalized_gamma_f32()
+    /// 外壳每帧问一次：为真时丢掉整个工作区退回锁屏。
+    pub(crate) fn take_lock_requested(&mut self) -> bool {
+        std::mem::take(&mut self.lock_requested)
     }
 
-    /// 关窗前停掉还在跑的 Pi 写作：先置取消标志（host 收到后会收尾退出），
-    /// 有任务时稍等一会儿，别让 Node 子进程在窗口消失后还占着模型与工作区。
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        let running = self.docs.iter().any(|doc| doc.ai_panel.running());
-        for doc in &mut self.docs {
-            if let Some(cancel) = &doc.ai_panel.cancel {
-                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
+    /// 手动（菜单）或超时（空闲）锁定：停掉在跑的 Pi 任务，外壳下一帧丢弃
+    /// 工作区（数据库连接与内存数据随 Drop 释放）。未启用应用锁时不做任何事。
+    pub(crate) fn request_lock(&mut self) {
+        if !self.vault_locked {
+            return;
         }
-        // 设置页的风格学习与「测试写作能力」也是 Pi 进程：一起取消，
-        // 别让它们在关窗后还占着模型。
+        self.cancel_pi_tasks();
+        self.lock_requested = true;
+    }
+
+    /// 空闲自动锁定：任何键盘 / 鼠标事件都算「人在」。0 分钟 = 不自动锁定，
+    /// 但活动时间戳照更新，免得重新调短时限的那一帧立刻误锁。
+    fn tick_vault_idle(&mut self, ctx: &egui::Context) {
+        if !self.vault_locked {
+            return;
+        }
+        let now = ctx.input(|input| input.time);
+        if ctx.input(|input| !input.raw.events.is_empty()) {
+            self.last_activity_secs = now;
+        }
+        let minutes = self.config.auto_lock_minutes;
+        if minutes > 0 && now - self.last_activity_secs >= f64::from(minutes) * 60.0 {
+            self.request_lock();
+        }
+    }
+
+    /// 停掉在跑的 Pi 写作（锁定与关窗共用）：取消标志置位、在途回执作废、
+    /// Pi 子进程由 host 收尾退出。返回是否还有任务在收尾——关窗时据此多等
+    /// 一会儿，别让 Node 子进程在窗口消失后还占着模型与工作区。
+    pub(crate) fn cancel_pi_tasks(&mut self) -> bool {
+        let running = self.docs.iter().any(|doc| doc.ai_panel.running());
+        for index in 0..self.docs.len() {
+            self.stop_doc_tasks(index);
+        }
+        // 设置页的风格学习与「测试写作能力」也是 Pi 进程：一起取消。
         self.styles_page.cancel_learning();
         if let Some(cancel) = &self.pi_calibration_cancel {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        let learning = self.styles_page.learning_in_progress() || self.pi_calibration_rx.is_some();
-        if running || learning {
+        running || self.styles_page.learning_in_progress() || self.pi_calibration_rx.is_some()
+    }
+
+    /// 外壳关窗前调用。
+    pub(crate) fn shutdown(&mut self) {
+        if self.cancel_pi_tasks() {
             std::thread::sleep(std::time::Duration::from_millis(1500));
         }
     }

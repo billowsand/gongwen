@@ -95,6 +95,7 @@ mod ui_snapshot;
 mod units;
 mod update_check;
 mod validator;
+mod vault;
 mod version;
 mod version_link;
 mod version_pair_view;
@@ -104,7 +105,7 @@ mod vocabulary_xlsx;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use app::GongwenApp;
+use app::gate::AppShell;
 
 fn main() -> eframe::Result {
     // 最先装：之后读配置、装字体、建窗口任何一步 panic 都要留下日志。
@@ -169,7 +170,7 @@ fn main() -> eframe::Result {
                 cc.egui_ctx
                     .send_viewport_cmd(egui::ViewportCommand::Maximized(true));
             }
-            Ok(Box::new(GongwenApp::new(cc, startup_imports, instance)))
+            Ok(Box::new(AppShell::new(cc, startup_imports, instance)))
         }),
     );
     if let Err(error) = &result {

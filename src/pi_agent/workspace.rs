@@ -37,10 +37,10 @@ pub(crate) struct PiWorkspace {
 }
 
 /// 工作区根：`配置目录/pi/workspaces`，不存在就建。
+/// 槽位感知：诱饵系统用 `alt-pi`，绝不读真实系统的来源材料与运行记录。
 pub(crate) fn base_dir() -> Result<PathBuf, String> {
-    let dir = crate::storage::config_dir()
+    let dir = crate::storage::slot_subdir("pi")
         .map_err(|error| format!("读不到配置目录：{error:#}"))?
-        .join("pi")
         .join("workspaces");
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("建不了 Pi 工作区目录（{}）：{error}", dir.display()))?;

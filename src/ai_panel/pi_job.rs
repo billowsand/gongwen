@@ -1387,8 +1387,8 @@ fn matched_capability(
             };
         }
     };
-    let path = match crate::storage::config_dir() {
-        Ok(dir) => dir.join("pi").join("capability.json"),
+    let path = match crate::storage::slot_subdir("pi") {
+        Ok(dir) => dir.join("capability.json"),
         Err(error) => {
             return crate::pi_agent::PiCapabilitySnapshot {
                 reason: format!(
@@ -1420,8 +1420,8 @@ fn matched_capability(
             ..Default::default()
         };
     };
-    let evidence_dir = match crate::storage::config_dir() {
-        Ok(dir) => dir.join("pi").join("calibration-evidence"),
+    let evidence_dir = match crate::storage::slot_subdir("pi") {
+        Ok(dir) => dir.join("calibration-evidence"),
         Err(_) => {
             return crate::pi_agent::PiCapabilitySnapshot {
                 identity_key: identity.key(),

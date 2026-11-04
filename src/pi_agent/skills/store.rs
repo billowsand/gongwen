@@ -23,9 +23,8 @@ const MAX_DISABLED_BYTES: u64 = 64 * 1024;
 const TEMPLATE: &str = "---\nname: {name}\ndescription: 一句话写清这个技能做什么、什么时候用。\n{metadata}---\n\n# {title}\n\n## 什么时候用\n\n写清适用的任务和不该用的场景。\n\n## 怎么做\n\n用自然语言写步骤：先看哪些材料、按什么顺序写、哪些事实必须核对。\n\n## 交付\n\n生成或修改正文时调用 submit_document；只审核或找资料时调用 finish_report。\n";
 
 pub(crate) fn skills_root() -> Result<PathBuf, String> {
-    let config =
-        crate::storage::config_dir().map_err(|error| format!("读不到配置目录：{error:#}"))?;
-    let pi = config.join("pi");
+    let pi =
+        crate::storage::slot_subdir("pi").map_err(|error| format!("读不到配置目录：{error:#}"))?;
     no_link(&pi).map_err(|error| format!("{error:#}"))?;
     let root = pi.join("skills");
     no_link(&root).map_err(|error| format!("{error:#}"))?;
@@ -36,11 +35,10 @@ pub(crate) fn skills_root() -> Result<PathBuf, String> {
 }
 
 fn disabled_path() -> Result<PathBuf, String> {
-    let config =
-        crate::storage::config_dir().map_err(|error| format!("读不到配置目录：{error:#}"))?;
-    let pi = config.join("pi");
+    let pi =
+        crate::storage::slot_subdir("pi").map_err(|error| format!("读不到配置目录：{error:#}"))?;
     no_link(&pi).map_err(|error| format!("{error:#}"))?;
-    Ok(config.join(DISABLED_FILE))
+    crate::storage::slot_file(DISABLED_FILE).map_err(|error| format!("{error:#}"))
 }
 
 /// 用户技能目录。名字不合规或占用公共语法包目录时直接拒绝。

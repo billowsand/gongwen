@@ -93,6 +93,21 @@ pub(crate) fn configure_native_titlebar(
     None
 }
 
+/// 解锁后补建工作区时拿不到 `CreationContext`：按标准尺寸兜底，只影响
+/// macOS 顶栏的避让宽度，与创建时测量失败后的兜底值一致。
+#[cfg(target_os = "macos")]
+pub(crate) fn configure_native_titlebar_fallback() -> Option<NativeTitlebarMetrics> {
+    Some(NativeTitlebarMetrics {
+        reserved_width: 88.0,
+    })
+}
+
+/// 其它平台没有原生标题栏，兜底同样是无。
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn configure_native_titlebar_fallback() -> Option<NativeTitlebarMetrics> {
+    None
+}
+
 /// 按 macOS“桌面与程序坞”中的标题栏双击偏好执行动作。
 /// 未配置时采用系统常见默认值“缩放”。
 #[cfg(target_os = "macos")]

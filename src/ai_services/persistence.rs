@@ -8,7 +8,9 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 fn store_path(name: &str) -> anyhow::Result<PathBuf> {
-    Ok(crate::storage::config_dir()?.join(name))
+    // 槽位感知：真实系统用原名，诱饵系统一律 alt- 前缀——接口密钥、
+    // 环境地址这类敏感文件不能跨槽位共享（见 docs/security-lock-design.md）。
+    crate::storage::slot_file(name)
 }
 
 pub(crate) fn read_json<T: serde::de::DeserializeOwned + Default>(name: &str) -> anyhow::Result<T> {
