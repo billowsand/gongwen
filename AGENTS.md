@@ -152,7 +152,9 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   调试台界面，都放在现有「试一下」里。**第一期（中心格式、标准文件导入导出、旧 `apis.json`
   迁移）、第二期（接口用例：期望、整组跑一遍留记录、会改数据的接口确认后人工发送）、第三期
   （AI 调用：工具参数带 schema 与调用前校验、接口多时两级访问、「说一句话让 AI 调」与 AI 用例）
-  已完成，待真机验收**。接口存在
+  已完成，待真机验收**。**2026-11-05 起 Pi 写作也能调只读接口**：新增领域工具
+  `api_search`（按用途搜只读接口）与 `api_call`（按签名填参、调用前校验、返回进证据），
+  只开放 `readonly && ai && 配置受支持` 的接口；旧 `http.call` 仍只服务旧会话。接口存在
   `配置目录/apis/<服务>.openapi.json`，代码在 `src/agent/apidef/`，`ApiEndpoint` 是编译产物、
   存盘时写回（`apidef::absorb`）。方案、各期进度、出入与已知坑见 `docs/api-workbench.md`
   （第十二节是交接）；替代 `docs/http-skill-design.md` 第一节起的接口类技能方案。

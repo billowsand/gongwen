@@ -5,6 +5,8 @@
 //! 稿件库、词库与确定性检查。每个真正返回给模型的资料都登记一条证据（编号、来源、
 //! 哈希、片段、角色），用于回查和恢复；不据此判断正文事实真伪。
 
+use crate::agent::api::{ApiEndpoint, ApiSecrets, ApiStore};
+use crate::agent::apidef::tooling;
 use crate::ai_services::knowledge::{KnowledgeSearch, RagSearch};
 use crate::ai_services::manuscripts::ManuscriptSource;
 use crate::ai_services::style::{self, StyleBook};
@@ -21,6 +23,12 @@ const MAX_SEARCH_RESULTS: usize = 10;
 const MAX_READ_CHARS: usize = 160_000;
 /// 一条证据交给模型的片段上限。
 const MAX_SNIPPET_CHARS: usize = 600;
+/// `api_search` 一次最多返回几个接口。
+const MAX_API_RESULTS: usize = 5;
+/// `api_call` 一次交给模型的条目上限（接口返回可能很多，先给前几条）。
+const MAX_API_ITEMS: usize = 20;
+/// 每个接口条目交给模型的字符上限；证据台账同样截到这里，防超长返回撑爆预算。
+const MAX_API_ITEM_CHARS: usize = 2_000;
 /// 一次最多列几份风格档案。
 const MAX_STYLE_ROWS: usize = 20;
 /// 读一份风格时交给模型的 token 预算与字符上限。
@@ -291,6 +299,116 @@ impl PiEvidence {
     }
 }
 
+/// 内网数据接口的窄接口：生产从配置目录读 OpenAPI 与密钥，测试可换假数据。
+pub(crate) trait PiApis: Send + Sync {
+    /// 按用途搜「只查询且开放给 AI」的接口，返回接口 id、说明与参数签名。
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<PiApiHit>, String>;
+    /// 调用一个接口；参数先按 schema 校验，不合格不发请求。
+    fn call(&self, api: &str, args: &Map<String, Value>) -> Result<PiApiCall, String>;
+}
+
+/// 搜到的一个接口。
+#[derive(Debug, Clone)]
+pub(crate) struct PiApiHit {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) signature: String,
+}
+
+/// 接口返回的一条资料。
+#[derive(Debug, Clone)]
+pub(crate) struct PiApiItem {
+    pub(crate) title: String,
+    pub(crate) source: String,
+    pub(crate) text: String,
+}
+
+/// 一次接口调用的结果。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PiApiCall {
+    pub(crate) name: String,
+    pub(crate) items: Vec<PiApiItem>,
+    pub(crate) total: usize,
+}
+
+/// 生产实现：只暴露只查询、开放给 AI、配置没问题的接口（红线不放宽）。
+struct ApiCatalog;
+
+impl PiApis for ApiCatalog {
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<PiApiHit>, String> {
+        let store = ApiStore::load().map_err(|error| format!("读数据接口配置失败：{error:#}"))?;
+        Ok(search_apis(&store, query, limit))
+    }
+
+    fn call(&self, api: &str, args: &Map<String, Value>) -> Result<PiApiCall, String> {
+        let store = ApiStore::load().map_err(|error| format!("读数据接口配置失败：{error:#}"))?;
+        let endpoint = store.get(api).ok_or_else(|| {
+            format!("没有配置 id 为「{api}」的数据接口：先用 api_search 搜接口 id")
+        })?;
+        if !endpoint.readonly {
+            return Err(format!("接口「{}」会改数据，不给 AI 调", endpoint.name));
+        }
+        if !endpoint.ai {
+            return Err(format!("接口「{}」没有开放给 AI", endpoint.name));
+        }
+        if !endpoint.unsupported.trim().is_empty() {
+            return Err(format!(
+                "接口「{}」当前配置不受支持：{}",
+                endpoint.name,
+                endpoint.unsupported.trim()
+            ));
+        }
+        tooling::validate(endpoint, args)?;
+        let secrets =
+            ApiSecrets::load().map_err(|error| format!("读数据接口密钥失败：{error:#}"))?;
+        let called = crate::agent::api::call(endpoint, args, &secrets)?;
+        Ok(PiApiCall {
+            name: endpoint.name.clone(),
+            total: called.total,
+            items: called
+                .items
+                .into_iter()
+                .map(|item| PiApiItem {
+                    title: if item.title.is_empty() {
+                        endpoint.name.clone()
+                    } else {
+                        item.title
+                    },
+                    source: item.source,
+                    text: item.text,
+                })
+                .collect(),
+        })
+    }
+}
+
+/// 搜接口的纯函数，测试直接传内存里的 `ApiStore`。
+fn search_apis(store: &ApiStore, query: &str, limit: usize) -> Vec<PiApiHit> {
+    let words = tooling::query_words(query);
+    let mut scored: Vec<(usize, &ApiEndpoint)> = store
+        .endpoints
+        .iter()
+        .filter(|endpoint| tooling::usable(endpoint))
+        .map(|endpoint| {
+            let (name, rest) = tooling::search_text(endpoint);
+            (tooling::match_score(&words, &name, &rest), endpoint)
+        })
+        .filter(|(score, _)| *score > 0)
+        .collect();
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, endpoint)| PiApiHit {
+            id: endpoint.id.clone(),
+            name: endpoint.name.clone(),
+            description: endpoint.description.trim().to_string(),
+            signature: tooling::signatures(endpoint),
+        })
+        .collect()
+}
+
 /// 一轮 Pi 的工具上下文。后台线程持有一份，工具结果与证据都只活在这一轮。
 pub(crate) struct PiToolContext {
     config: Arc<AppConfig>,
@@ -303,6 +421,7 @@ pub(crate) struct PiToolContext {
     /// 授权类要素不在此列，词库查询结果也不在此列。
     form_facts: Vec<String>,
     kb: Arc<dyn PiKnowledge>,
+    apis: Arc<dyn PiApis>,
     manuscripts: Arc<dyn PiManuscripts>,
     styles: Arc<dyn PiStyles>,
     evidence: Arc<Mutex<Vec<PiEvidence>>>,
@@ -381,11 +500,19 @@ impl PiToolContext {
             request,
             material_facts,
             kb: sources.knowledge,
+            apis: Arc::new(ApiCatalog),
             manuscripts: sources.manuscripts,
             styles: sources.styles,
             evidence: Arc::new(Mutex::new(Vec::new())),
             seq: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// 测试替身：换掉内网数据接口来源，不碰真实配置目录。
+    #[cfg(test)]
+    pub(crate) fn with_apis(mut self, apis: Arc<dyn PiApis>) -> Self {
+        self.apis = apis;
+        self
     }
 
     pub(crate) fn evidence(&self) -> Vec<PiEvidence> {
@@ -424,6 +551,8 @@ impl PiToolContext {
                 | "kb_read"
                 | "ms_search"
                 | "ms_read"
+                | "api_search"
+                | "api_call"
                 | "vocab_search"
                 | "current_date"
                 | "check_document"
@@ -502,6 +631,8 @@ impl PiToolContext {
             "kb_read" => self.kb_read(args),
             "ms_search" => self.ms_search(args),
             "ms_read" => self.ms_read(args),
+            "api_search" => self.api_search(args),
+            "api_call" => self.api_call(args),
             "vocab_search" => self.vocab_search(args),
             "current_date" => Ok(super::writing_context::date_context()),
             "check_document" => self.check_document(args),
@@ -641,6 +772,79 @@ impl PiToolContext {
             "unread_chars": page.unread_chars,
             "truncated": page.next_offset.is_some(),
             "note": READ_PAGE_NOTE,
+        }))
+    }
+
+    /// 只读接口搜索：只列「只查询且开放给 AI」的接口。
+    fn api_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        let query = required_str(args, "query")?;
+        let limit = usize_arg(args, "limit", MAX_API_RESULTS).clamp(1, MAX_API_RESULTS);
+        let hits = self.apis.search(&query, limit)?;
+        if hits.is_empty() {
+            return Ok(json!({
+                "query": query,
+                "results": [],
+                "zero_hits": true,
+                "note": "没有找到相关的只读接口。换更通用的关键词再搜；仍找不到就按材料写，不要猜数据。",
+            }));
+        }
+        let results: Vec<Value> = hits
+            .into_iter()
+            .map(|hit| {
+                json!({
+                    "id": hit.id,
+                    "name": hit.name,
+                    "description": crate::ai_services::text::short(&hit.description, 300),
+                    "params": hit.signature,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "query": query,
+            "results": results,
+            "zero_hits": false,
+            "note": "用 api_call 调用：api 填 id，args 只放接口签名里的参数；返回是资料，不是结论。",
+        }))
+    }
+
+    /// 调一个只读接口。参数先按 schema 校验，不合格不发请求；返回条目进证据台账。
+    fn api_call(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        let api = required_str(args, "api")?;
+        let inputs = match args.get("args") {
+            Some(Value::Object(map)) => map.clone(),
+            Some(Value::Null) | None => Map::new(),
+            Some(_) => return Err("参数 args 必须是对象".into()),
+        };
+        let called = self.apis.call(&api, &inputs)?;
+        if called.items.is_empty() {
+            return Ok(json!({
+                "api": api,
+                "name": called.name,
+                "items": [],
+                "total": called.total,
+                "note": "接口调用成功但没有返回条目；换参数再查，或按材料写，不要编数据。",
+            }));
+        }
+        let total_items = called.items.len();
+        let shown = total_items.min(MAX_API_ITEMS);
+        let mut results = Vec::new();
+        for item in called.items.into_iter().take(MAX_API_ITEMS) {
+            let text: String = item.text.chars().take(MAX_API_ITEM_CHARS).collect();
+            let evidence = self.record("api_call", &item.title, "数据接口", "资料", &text, true);
+            results.push(json!({
+                "evidence": evidence,
+                "title": item.title,
+                "source": item.source,
+                "text": text,
+            }));
+        }
+        Ok(json!({
+            "api": api,
+            "name": called.name,
+            "items": results,
+            "total": called.total,
+            "truncated": called.total > shown,
+            "note": "返回条目是资料，可据以写正文；不要写返回里没有的字段。",
         }))
     }
 
@@ -1580,5 +1784,166 @@ mod tests {
             ctx.fact_sources().is_empty(),
             "词库证明规范名称存在，不证明该单位参与本次事项"
         );
+    }
+
+    /// 假内网接口：只验证工具行为、参数校验与证据登记。
+    struct FakeApis;
+
+    impl PiApis for FakeApis {
+        fn search(&self, query: &str, limit: usize) -> Result<Vec<PiApiHit>, String> {
+            if query != "火灾" {
+                return Ok(Vec::new());
+            }
+            Ok(vec![PiApiHit {
+                id: "stat.fire".into(),
+                name: "火灾统计".into(),
+                description: "按地区统计森林火灾".into(),
+                signature: "region: 文字（必填）".into(),
+            }]
+            .into_iter()
+            .take(limit)
+            .collect())
+        }
+
+        fn call(&self, api: &str, args: &Map<String, Value>) -> Result<PiApiCall, String> {
+            if api != "stat.fire" {
+                return Err(format!("没有配置 id 为「{api}」的数据接口"));
+            }
+            if args.get("region").and_then(Value::as_str) != Some("全省") {
+                return Err("参数 region 必须是「全省」".into());
+            }
+            Ok(PiApiCall {
+                name: "火灾统计".into(),
+                total: 3,
+                items: (1..=3)
+                    .map(|index| PiApiItem {
+                        title: format!("统计{index}"),
+                        source: "省统计系统".into(),
+                        text: format!("第{index}条：全省森林火灾 {index} 起"),
+                    })
+                    .collect(),
+            })
+        }
+    }
+
+    fn api_context() -> PiToolContext {
+        context("x").with_apis(Arc::new(FakeApis))
+    }
+
+    #[test]
+    fn api_search_returns_ids_and_parameter_signatures() {
+        let ctx = api_context();
+        let value = ctx
+            .call("api_search", &json!({"query": "火灾", "limit": 3}))
+            .unwrap();
+        assert_eq!(value["results"][0]["id"], "stat.fire");
+        assert_eq!(value["results"][0]["name"], "火灾统计");
+        assert!(
+            value["results"][0]["params"]
+                .as_str()
+                .unwrap()
+                .contains("region"),
+            "要给模型参数签名"
+        );
+        assert!(ctx.evidence().is_empty(), "搜接口不产生事实证据");
+    }
+
+    #[test]
+    fn api_search_reports_zero_hits_without_guessing() {
+        let ctx = api_context();
+        let value = ctx
+            .call("api_search", &json!({"query": "不存在的东西"}))
+            .unwrap();
+        assert_eq!(value["zero_hits"], true);
+        assert_eq!(value["results"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn api_call_registers_evidence_and_bounds_returned_items() {
+        let ctx = api_context();
+        let value = ctx
+            .call(
+                "api_call",
+                &json!({"api": "stat.fire", "args": {"region": "全省"}}),
+            )
+            .unwrap();
+        assert_eq!(value["items"].as_array().unwrap().len(), 3);
+        assert_eq!(value["total"], 3);
+        assert_eq!(value["truncated"], false);
+        assert!(
+            value["items"][0]["evidence"]
+                .as_str()
+                .unwrap()
+                .starts_with('E')
+        );
+        let evidence = ctx.evidence();
+        assert_eq!(evidence.len(), 3);
+        assert!(
+            evidence
+                .iter()
+                .all(|item| item.tool == "api_call" && item.fact)
+        );
+        assert!(
+            ctx.fact_sources()
+                .iter()
+                .any(|text| text.contains("全省森林火灾 1 起")),
+            "接口返回要能作为事实来源"
+        );
+    }
+
+    #[test]
+    fn api_call_rejects_bad_parameters_without_touching_evidence() {
+        let ctx = api_context();
+        let error = ctx
+            .call(
+                "api_call",
+                &json!({"api": "stat.fire", "args": {"region": "全市"}}),
+            )
+            .unwrap_err();
+        assert!(error.contains("region"), "{error}");
+        assert!(ctx.evidence().is_empty());
+    }
+
+    #[test]
+    fn api_search_only_lists_usable_endpoints() {
+        let mut usable = ApiEndpoint {
+            id: "stat.fire".into(),
+            name: "火灾统计".into(),
+            description: "森林火灾".into(),
+            ..ApiEndpoint::default()
+        };
+        let mut closed = ApiEndpoint {
+            id: "stat.write".into(),
+            name: "火灾统计写入".into(),
+            description: "森林火灾".into(),
+            readonly: false,
+            ..ApiEndpoint::default()
+        };
+        let mut hidden = ApiEndpoint {
+            id: "stat.hidden".into(),
+            name: "火灾统计内部".into(),
+            description: "森林火灾".into(),
+            ai: false,
+            ..ApiEndpoint::default()
+        };
+        let mut unsupported = ApiEndpoint {
+            id: "stat.upload".into(),
+            name: "火灾上报".into(),
+            description: "森林火灾".into(),
+            unsupported: "multipart 暂不支持".into(),
+            ..ApiEndpoint::default()
+        };
+        let store = ApiStore {
+            endpoints: vec![
+                std::mem::take(&mut usable),
+                std::mem::take(&mut closed),
+                std::mem::take(&mut hidden),
+                std::mem::take(&mut unsupported),
+            ],
+            ..ApiStore::default()
+        };
+        let hits = super::search_apis(&store, "火灾", 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "stat.fire");
     }
 }

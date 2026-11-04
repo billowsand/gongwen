@@ -577,3 +577,20 @@ DeepSeek-V4-Flash 与 MiniMax-M2.7 全部跑一遍看正确率；把一个参数
 - 验证：新增实际点击展开与删除确认测试、零高度行输入框测试；样张命令
   cargo test --locked api_workbench_ -- --ignored，输出在 tmp/api-workbench-*.png。
   样张涵盖浏览、试调、技术配置、小窗口、缺密钥与已调通的识别候选。接口执行、AI 权限和存储规则不变。
+### Pi 写作调用接口（2026-11-05）
+
+统一写作改走 Pi 后，数据接口也接进了 Pi 的工具层，写作任务能真正取内网数据：
+
+- 新增两个领域工具：`api_search`（按用途搜只读接口，返回 id、说明与参数签名）与
+  `api_call`（`api` 填接口 id，`args` 按签名填参；调用前先按 JSON Schema 校验，不合格不发请求）。
+  始终两级访问，不按接口数切换，避免接口多时撑爆上下文。
+- 授权口径只认 `readonly && ai && unsupported 为空` 的接口（红线不变）：会改数据的、没开放给
+  AI 的、配置不受支持的接口，`api_search` 不列出、`api_call` 明确拒绝。
+- 实现：`src/pi_agent/tools.rs` 的 `PiApis` 窄接口 + `ApiCatalog` 生产实现（复用
+  `ApiStore::load` / `ApiSecrets::load` / `agent::api::call` 与 `apidef::tooling` 的
+  `usable` / `search` / `validate`）；host 侧在 `pi-host/src/bridge.mjs` 注册这两个工具。
+- 证据：每次调用返回的条目按 `http:<id>:<条目标题>` 进 Pi 证据台账（`role=资料`、`fact=true`），
+  进而写进本轮 `sources/`；正文仍由 Pi 自己写，交付检查不做事实核查。
+- 技能提示：`gongwen-draft` / `gongwen-research` 写明「先 api_search 再 api_call，
+  接口返回是资料不是结论，没有匹配接口就明说没查到」。
+- 旧 `http.call` 工具族保留给旧会话回放，不再用于新任务；旧流程退役时一并删除。

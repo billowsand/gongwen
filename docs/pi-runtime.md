@@ -339,6 +339,14 @@ AI 管理 → 技能管理实际提供给 Pi 的标准 SKILL.md，不再编辑�
 内置技能是只读默认，复制为同名用户副本后可修改，也可恢复内置；旧 `skills/`
 数据保留，不自动转换或执行。公共 `gongwen-markdown` 语法包由程序提供，不能被用户技能覆盖。
 
+### 领域工具（2026-11-05 更新）
+
+常规写作任务可用的域工具：`kb_search` / `kb_read`（知识库）、`ms_search` / `ms_read`（稿件库）、
+`vocab_search`（标准词库）、`current_date`、`check_document`、`doc_elements`、
+`style_list` / `style_read`，以及 **`api_search` / `api_call`**（内网只读数据接口：
+先搜接口、再按参数签名调用，返回条目进证据）。`api_search` 只列只读且开放给 AI 的接口，
+`api_call` 调用前按 JSON Schema 校验；会改数据的接口一律拒绝。风格任务不注册这些域工具。
+
 ### 内置技能与参考文件（4D）
 
 内置 **7 个**技能：6 个写作技能——起草 `gongwen-draft`、修改 `gongwen-revise`、仿写

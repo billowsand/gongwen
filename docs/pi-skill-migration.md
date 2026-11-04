@@ -22,7 +22,7 @@
 | `condense` 精简扩写 | `gongwen-revise/references/condense.md` | 精简不删任务、责任单位、时限、数字与依据；先删重复空话；差 15% 再改一次 | 旧 `fit_length` 是程序数字数并驱动二次生成；现在由模型自己数，没有独立算子 |
 | `extract` 要点提炼 | 新主技能 `gongwen-extract` | 选区优先、条数上限、保留时间数字单位、按原文顺序、不加评论、只出清单 | 旧 `plan mode:list` 由程序按行/句拆分；现在由模型提炼，靠清单判据约束 |
 | `fact-check` 事实核查 | `gongwen-review/references/fact-check.md`（技能已退役，只留历史文件） | 逐条核时间/数字/文件，分「有出处 / 矛盾 / 未找到」，只出清单 | 旧 `check.facts` 程序台账与内网数据接口核查未接；本阶段用 `kb_*`/`ms_*` 检索 + `check_document` |
-| `free-task` 自由任务 | 自动路由（不另建技能） | 模型自己决定检索、写作、提问；改了稿交正文，没改稿交清单 | 旧 DSL 的 `finding.add`、`calc.*`、`http.call` 工具族不做（4E 未开工） |
+| `free-task` 自由任务 | 自动路由（不另建技能） | 模型自己决定检索、写作、提问；改了稿交正文，没改稿交清单 | 旧 DSL 的 `finding.add`、`calc.*` 不做；Pi 已用 `api_search` / `api_call` 接只读内网接口（2026-11-05），旧的 `http.call` 工具族只服务旧会话 |
 | `imitate` 仿写 | `gongwen-imitate` + `references/style-analysis.md` | 基准稿只作写法、旧稿事实不沿用、先问清变化、样稿不进证据 | 旧「检索候选稿 → 用户选稿 → 选仿写方式 → 缺口循环 → 核验」的固定流程不做；改为模型自主检索与提问 |
 | `material` 材料成文 | `gongwen-draft/references/material-drafting.md` | 只用材料、事项原样保留、冲突不悄悄二选一、缺事实写待核实、只问方向性问题 | 旧「程序按原文拆要点 → 用户确认 → 成文」的确认清单不做；材料原文本身就是依据 |
 | `normalize` 规范化 | `gongwen-revise/references/normalize.md` | 标点/数字/用语规范、单位人员按标准词库写法、事实锁定 | 旧 `vocab.normalize` 程序自动替换未接；`vocab_search` 只读，写值仍由模型改、由程序闸门查 |
