@@ -20,6 +20,7 @@ jobs:
   windows:
     name: fmt / clippy / test (Windows x64)
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +31,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+          cache-on-failure: true
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -58,11 +60,12 @@ jobs:
 
       - name: Pi runtime manifest end-to-end
         shell: pwsh
-        run: cargo test --locked --release shipped_pi_runtime_manifest -- --ignored
+        run: cargo test --locked shipped_pi_runtime_manifest -- --ignored
 
   macos-arm64:
     name: fmt / clippy / test (macOS arm64)
     runs-on: macos-14
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -73,6 +76,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+          cache-on-failure: true
 
       - name: Stage bundled Pi runtime
         run: bash ./scripts/stage-pi-runtime.sh --platform darwin-arm64 --force
@@ -90,7 +94,7 @@ jobs:
         run: cargo test --locked --all-targets
 
       - name: Pi runtime manifest end-to-end
-        run: cargo test --locked --release shipped_pi_runtime_manifest -- --ignored
+        run: cargo test --locked shipped_pi_runtime_manifest -- --ignored
 
       - name: Pi host tests (bundled Node)
         working-directory: pi-host
@@ -126,6 +130,7 @@ jobs:
   linux-arm64-glibc228:
     name: fmt / clippy / test (Linux ARM64 / GLIBC 2.28)
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
     container:
       image: debian:buster
     defaults:
@@ -203,7 +208,7 @@ jobs:
         run: |
           set -euo pipefail
           export GONGWEN_PI_RUNTIME_DIR="$PWD/runtime/pi"
-          cargo test --locked --release shipped_pi_runtime_manifest -- --ignored
+          cargo test --locked shipped_pi_runtime_manifest -- --ignored
 
   # 按发布方式（Debian buster / GLIBC 2.28 容器 + release profile）构建 Linux
   # ARM64 二进制（发布只出这一个 Linux 架构），交给下面的 ubuntu-2004-launch
@@ -211,6 +216,7 @@ jobs:
   linux-glibc228-release:
     name: Build release binary (Linux ARM64 / GLIBC 2.28)
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
     container:
       image: debian:buster
     defaults:
@@ -272,6 +278,7 @@ jobs:
     name: Launch smoke test (Ubuntu 20.04 / ARM64)
     needs: linux-glibc228-release
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
     container:
       image: ubuntu:20.04
     env:
@@ -358,7 +365,8 @@ jobs:
   # 但要能看见 —— 依赖升级是唯一能修的漏洞类别。
   dependency-audit:
     name: 依赖漏洞扫描（RustSec）
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     # audit-check 把结果写成一条检查记录，需要 checks: write；忽略清单见 .cargo/audit.toml。
     permissions:
       contents: read
@@ -371,6 +379,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+          cache-on-failure: true
 
       - name: Audit dependencies
         uses: rustsec/audit-check@v2

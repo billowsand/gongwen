@@ -40,6 +40,7 @@ jobs:
   build-windows:
     name: Build Windows x64
     runs-on: windows-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +49,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+          cache-on-failure: true
 
       - name: Build release binary
         run: cargo build --release --locked
@@ -109,6 +111,7 @@ jobs:
   build-macos-arm64:
     name: Build macOS arm64
     runs-on: macos-14
+    timeout-minutes: 90
     # 签名 / 公证都可选：secrets 未配置时为空，package-dmg.sh 走 ad-hoc 签名——那种
     # 包只能本机测试，Gatekeeper 会在别的机器上拦。证书导入步骤未内置（runner 是
     # 临时机器，需要先从 secrets 导入 .p12 到临时 keychain），见 packaging/macos/README.md。
@@ -123,6 +126,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+          cache-on-failure: true
 
       - name: Download runtime assets
         run: |
@@ -167,6 +171,7 @@ jobs:
   build-linux-arm64:
     name: Build Linux ARM64 / GLIBC 2.28
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
     container:
       image: debian:buster
     defaults:
@@ -289,6 +294,7 @@ jobs:
     name: Package Linux ARM64
     needs: build-linux-arm64
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -350,7 +356,8 @@ jobs:
   # 依赖名从 pacman 数据库反查（写错一个包名，用户机器上 pacman -U 会直接拒装）。
   build-linux-x86_64-arch:
     name: Build Linux AMD64 / Arch (Omarchy)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     container:
       image: archlinux:base
     defaults:
@@ -379,6 +386,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+          cache-on-failure: true
 
       - name: Build release binary
         run: |
@@ -437,7 +445,8 @@ jobs:
   verify-arch-pkg:
     name: Verify pacman install (Arch / x86_64)
     needs: build-linux-x86_64-arch
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     container:
       image: archlinux:base
     defaults:
@@ -499,6 +508,7 @@ jobs:
     name: Verify deb install / arm64 / ubuntu:20.04
     needs: package-linux-arm64
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
     container:
       image: ubuntu:20.04
     defaults:
@@ -542,7 +552,8 @@ jobs:
     name: Publish GitHub release
     needs:
       [build-windows, build-macos-arm64, package-linux-arm64, verify-deb, build-linux-x86_64-arch, verify-arch-pkg]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 

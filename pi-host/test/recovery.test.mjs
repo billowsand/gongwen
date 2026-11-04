@@ -217,7 +217,10 @@ async function startStub(mode) {
  */
 function startHost(workspace, { script = "src/main.mjs", extra = {}, env = {} } = {}) {
   const init = initMessage(workspace, extra);
-  const args = [path.join(hostDir, script)];
+  // `script` 可能是另一个盘（Windows 上 os.tmpdir() 与仓库不同盘）的绝对路径，
+  // path.join 会把 "C:\..." 拼到仓库目录后面，这里按绝对/相对分开。
+  const scriptPath = path.isAbsolute(script) ? script : path.join(hostDir, script);
+  const args = [scriptPath];
   if (script !== "src/main.mjs") {
     const initPath = path.join(workspace.run, "init-test.json");
     fs.writeFileSync(initPath, JSON.stringify(init));

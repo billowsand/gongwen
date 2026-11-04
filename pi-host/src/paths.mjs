@@ -67,7 +67,9 @@ export function resolveInside(root, cwd, input, { mode = "read", maxFileBytes = 
     return fileError("invalid", "路径含 NUL");
   }
   const rootReal = fs.realpathSync.native(root);
-  const lexical = path.resolve(cwd, input);
+  // cwd 先按最近的真实祖先解析：macOS 的 /var → /private/var、Windows 的
+  // 8.3 短名都会让字面路径与 realpath 不等，直接比较会把合法路径误拒。
+  const lexical = path.resolve(realpathOfNearest(path.resolve(cwd)), input);
   if (!within(rootReal, lexical)) {
     return fileError("permission_denied", `路径越出工作区：${input}`, input);
   }
@@ -237,8 +239,13 @@ export function atomicWrite(target, content) {
  */
 export class WorkspaceEnv extends NodeExecutionEnv {
   constructor({ root, cwd, maxFileBytes = 8 * 1024 * 1024, maxTotalBytes = 64 * 1024 * 1024, maxWorkEntries = 1024 }) {
-    super({ cwd: cwd ?? root });
-    this.root = fs.realpathSync.native(root);
+    // macOS 的临时目录（/var → /private/var）和 Windows 的 8.3 短名会让
+    // realpath(root) 与传入的 cwd 字面路径不一致，路径守卫会把正常工作区
+    // 误判成“越出工作区”。root 与 cwd 都先真实化，再交给守卫比较。
+    const realRoot = fs.realpathSync.native(root);
+    const realCwd = cwd ? realpathOfNearest(path.resolve(cwd)) : realRoot;
+    super({ cwd: realCwd });
+    this.root = realRoot;
     this.maxFileBytes = maxFileBytes;
     this.maxTotalBytes = maxTotalBytes;
     this.maxWorkEntries = maxWorkEntries;
