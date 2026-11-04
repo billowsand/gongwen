@@ -215,6 +215,10 @@ if [ -d "$STAGE/runtime" ]; then
     else
         warn "未包含 Pi 运行时，智能写作将不可用（缺 runtime/pi/manifest.json；先跑 scripts/stage-pi-runtime.sh）"
     fi
+    # 避免 zip 解出的许可证/字体说明等普通文件带执行位：codesign 会把它们当
+    # 嵌套代码要求签名。只保留真正的可执行文件。
+    find "$MACOS_DIR/runtime" -type f -exec chmod a-x {} + 2>/dev/null || true
+    [ -f "$MACOS_DIR/runtime/pi/bin/node" ] && chmod 755 "$MACOS_DIR/runtime/pi/bin/node"
 fi
 for doc in README.md THIRD_PARTY_NOTICES.md LICENSE config.example.json; do
     [ -f "$STAGE/$doc" ] && cp "$STAGE/$doc" "$RESOURCES_DIR/"

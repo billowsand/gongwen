@@ -270,6 +270,13 @@ else
     echo "警告：未包含 Pi 运行时，智能写作将不可用（缺 ${PI_DIR}/manifest.json）" >&2
 fi
 
+# 随包 runtime 里的许可证、字体说明等普通文件从 zip 解出来可能带可执行位；
+# codesign 会把 bundle 内带执行位的文件当成嵌套代码，要求逐个签名并以
+# “code object is not signed at all In subcomponent” 失败。先统一去掉普通文件
+# 的执行位，再恢复真正的可执行文件。
+find "$MACOS_DIR/runtime" -type f -exec chmod a-x {} + 2>/dev/null || true
+[ -f "$MACOS_DIR/runtime/pi/bin/node" ] && chmod 755 "$MACOS_DIR/runtime/pi/bin/node"
+
 # 文档随包进 bundle，DMG 保持纯拖放布局。
 for doc in README.md THIRD_PARTY_NOTICES.md LICENSE; do
     if [ -f "$STAGE/$doc" ]; then
