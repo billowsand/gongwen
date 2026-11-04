@@ -4,6 +4,11 @@
 //! 这里**不**复用旧的 `Board` / `ToolCtx` / 流程引擎：只调用现有的知识库检索、
 //! 稿件库、词库与确定性检查。每个真正返回给模型的资料都登记一条证据（编号、来源、
 //! 哈希、片段、角色），用于回查和恢复；不据此判断正文事实真伪。
+//!
+//! 工具在独立线程执行，界面一停 host 就被回收，但已发出的 HTTP / 检索 / LLM 重排无法
+//! 从中途 abort：这一层只做取消边界（阶段之间尽快收手、迟到结果不写证据、不算成功），
+//! 并用在途槽位（`ToolSlot`）限制同时最多几个慢工具，避免反复停止重开无限叠加资源。
+//! 不要把这里当成「已经强杀请求」——请求本身仍会跑完，只是结果被丢弃。
 
 use crate::agent::api::{ApiEndpoint, ApiSecrets, ApiStore};
 use crate::agent::apidef::tooling;
@@ -14,8 +19,9 @@ use crate::manuscript::ManuscriptFilter;
 use crate::models::{AppConfig, DraftInput, TemplateKind};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// 一次工具调用最多返回多少资料。
 const MAX_SEARCH_RESULTS: usize = 10;
@@ -37,6 +43,18 @@ const MAX_STYLE_CHARS: usize = 8_000;
 /// 风格结果固定带的一句说明：写法不是事实。
 const STYLE_NOTE: &str = "风格档案与范例是写法样稿（style_sample），只给结构与表达；不是本次事项的事实来源，\
 其中的单位、人员、日期、数字与结论不得写进正文；这个结果不登记为事实证据。";
+
+/// 同时在途的域工具上限。界面停止后旧工具可能还在收尾（HTTP 请求本身无法中途 abort），
+/// 反复停止重开不能无限叠加线程、连接与模型额度，这里做资源兜底。
+const MAX_IN_FLIGHT_TOOLS: usize = 4;
+/// 槽位满了最多等多久：等不到就明确回错，而不是让本轮工具无限排队。
+const TOOL_SLOT_WAIT: Duration = Duration::from_secs(10);
+/// 等槽位时多久看一次取消信号；停止后排队线程要尽快退出，不能陪旧任务耗满 10 秒。
+const TOOL_SLOT_POLL: Duration = Duration::from_millis(20);
+/// 工具在途计数：`ToolSlot` 用 CAS 申请、Drop 释放。
+static IN_FLIGHT_TOOLS: AtomicUsize = AtomicUsize::new(0);
+/// 取消时统一回给模型 / 宿主的文案；只说结果不采用，不暗示底层请求已被强杀。
+const CANCELLED_TOOL: &str = "已停止 Pi 智能写作，本次工具结果不采用。";
 
 /// 知识库检索结果的窄接口（生产用现有 RAG，测试可换假库）。
 pub(crate) trait PiKnowledge: Send + Sync {
@@ -426,6 +444,62 @@ pub(crate) struct PiToolContext {
     styles: Arc<dyn PiStyles>,
     evidence: Arc<Mutex<Vec<PiEvidence>>>,
     seq: Arc<AtomicUsize>,
+    /// 界面「停止」信号，`attach_cancel` 只挂一次。工具在独立线程执行，HTTP 请求本身
+    /// 无法中途 abort，这里只按取消边界处理：阶段之间尽快收手，迟到结果不写证据、
+    /// 不算成功；资源叠加由 `ToolSlot` 兜底。
+    cancel: OnceLock<Arc<AtomicBool>>,
+}
+
+/// 一个在途工具槽位。停止后的慢工具要跑完当前请求才会返回，反复停止重开时用槽位
+/// 限制同时最多 `MAX_IN_FLIGHT_TOOLS` 个，避免线程、连接与模型额度无限叠加。
+#[derive(Debug)]
+struct ToolSlot;
+
+impl ToolSlot {
+    /// 申请一个槽位；满了最多等 `TOOL_SLOT_WAIT`，等待期间定期检查取消。
+    fn acquire(ctx: &PiToolContext) -> Result<Self, String> {
+        Self::acquire_within(ctx, TOOL_SLOT_WAIT)
+    }
+
+    /// 带等待上限的申请（测试用零等待验证「满了就明确失败」）。
+    fn acquire_within(ctx: &PiToolContext, wait: Duration) -> Result<Self, String> {
+        let started = Instant::now();
+        loop {
+            // CAS 申请：先看再加会并发越过上限。
+            let mut current = IN_FLIGHT_TOOLS.load(Ordering::Acquire);
+            while current < MAX_IN_FLIGHT_TOOLS {
+                match IN_FLIGHT_TOOLS.compare_exchange_weak(
+                    current,
+                    current + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return Ok(ToolSlot),
+                    Err(updated) => current = updated,
+                }
+            }
+            if wait.is_zero() || started.elapsed() >= wait {
+                return Err(format!(
+                    "上一个已停止的任务仍在收尾（域工具最多同时 {MAX_IN_FLIGHT_TOOLS} 个），\
+                     本次工具未执行；稍后再试或停止本轮。"
+                ));
+            }
+            // 排队期间用户可能又点了停止：先承认取消，别让这一轮的工具继续排队。
+            ctx.check_cancel()?;
+            std::thread::sleep(TOOL_SLOT_POLL);
+        }
+    }
+}
+
+impl Drop for ToolSlot {
+    fn drop(&mut self) {
+        IN_FLIGHT_TOOLS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(test)]
+fn in_flight_tools() -> usize {
+    IN_FLIGHT_TOOLS.load(Ordering::Acquire)
 }
 
 impl PiToolContext {
@@ -505,6 +579,7 @@ impl PiToolContext {
             styles: sources.styles,
             evidence: Arc::new(Mutex::new(Vec::new())),
             seq: Arc::new(AtomicUsize::new(0)),
+            cancel: OnceLock::new(),
         }
     }
 
@@ -513,6 +588,28 @@ impl PiToolContext {
     pub(crate) fn with_apis(mut self, apis: Arc<dyn PiApis>) -> Self {
         self.apis = apis;
         self
+    }
+
+    /// 挂上本轮停止信号。只设置一次：同一上下文只认第一个信号，
+    /// 重复挂说明调用方接错了（覆盖会让已在排队的工具看不到真正的停止）。
+    pub(crate) fn attach_cancel(&self, cancel: Arc<AtomicBool>) {
+        let _ = self.cancel.set(cancel);
+    }
+
+    /// 本轮是否已被停止。
+    fn cancel_requested(&self) -> bool {
+        self.cancel
+            .get()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    }
+
+    /// 取消边界：统一返回可读的停止错误，供工具各阶段边界复检。
+    fn check_cancel(&self) -> Result<(), String> {
+        if self.cancel_requested() {
+            Err(CANCELLED_TOOL.to_string())
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn evidence(&self) -> Vec<PiEvidence> {
@@ -623,10 +720,15 @@ impl PiToolContext {
 
     /// 执行一次工具调用。参数校验失败与业务失败都返回结构化错误文本。
     pub(crate) fn call(&self, name: &str, args: &Value) -> Result<Value, String> {
+        // 入口先看停止：停止后 host 可能还排着旧工具请求，检索 / 模型 / 网络一律不再发起。
+        self.check_cancel()?;
         let args = args
             .as_object()
             .ok_or_else(|| "工具参数必须是 JSON 对象".to_string())?;
-        match name {
+        // 在途槽位是资源兜底：HTTP 请求无法从外部 abort，停掉的旧任务仍可能占着线程、
+        // 连接和模型额度；限流后反复停止重开不会无限叠加。
+        let _slot = ToolSlot::acquire(self)?;
+        let result = match name {
             "kb_search" => self.kb_search(args),
             "kb_read" => self.kb_read(args),
             "ms_search" => self.ms_search(args),
@@ -640,7 +742,11 @@ impl PiToolContext {
             "style_list" => self.style_list(),
             "style_read" => self.style_read(args),
             other => Err(format!("未知工具：{other}")),
-        }
+        };
+        // dispatch 返回后再看一次：慢工具可能在停止之后才返回，即使成功也不能当成
+        // 这一轮的工具结果交回去（迟到结果不采用）。
+        self.check_cancel()?;
+        result
     }
 
     fn kb_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
@@ -649,7 +755,10 @@ impl PiToolContext {
         }
         let query = required_str(args, "query")?;
         let top = usize_arg(args, "top", MAX_SEARCH_RESULTS);
+        // 检索里可能带 embedding 与 LLM 重排，慢在这一步；调用前后各看一眼停止信号。
+        self.check_cancel()?;
         let outcome = self.kb.search(&query, top)?;
+        self.check_cancel()?;
         let warnings = outcome.warnings;
         if outcome.chunks.is_empty() {
             return Ok(json!({
@@ -661,6 +770,8 @@ impl PiToolContext {
         }
         let mut results = Vec::new();
         for chunk in outcome.chunks {
+            // 逐条登记前复检：停止后不往证据台账里写资料。
+            self.check_cancel()?;
             let id = self.record(
                 "kb_search",
                 &chunk.title,
@@ -682,9 +793,12 @@ impl PiToolContext {
 
     fn kb_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
         let doc_id = int_arg(args, "doc_id")?;
+        // 读全文可能要从库 / 索引取大段内容；调用前后各查一次取消。
+        self.check_cancel()?;
         let Some((title, full)) = self.kb.read(doc_id)? else {
             return Err(format!("知识库没有编号为 {doc_id} 的文档"));
         };
+        self.check_cancel()?;
         let offset = optional_offset_arg(args);
         let page = read_page(&full, offset, read_limit_arg(args))?;
         let id = self.record(
@@ -712,9 +826,14 @@ impl PiToolContext {
     fn ms_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
         let query = required_str(args, "query")?;
         let limit = usize_arg(args, "limit", 5);
+        // 稿件库是 SQLite 查询，慢在磁盘/加密库上；调用前后各查一次取消。
+        self.check_cancel()?;
         let rows = self.manuscripts.search(&query, limit)?;
+        self.check_cancel()?;
         let mut results = Vec::new();
         for row in rows {
+            // 逐条登记前复检：停止后不往证据台账里写摘要。
+            self.check_cancel()?;
             // 列表项本身不足以当事实依据：把标题与文号登记为摘要，正文要靠 ms_read。
             let summary = format!(
                 "《{}》{} {} {}",
@@ -737,9 +856,12 @@ impl PiToolContext {
     fn ms_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
         let id = int_arg(args, "id")?;
         let version = args.get("version").and_then(Value::as_i64);
+        // 读稿件全文可能要做版本解析与大段取文；调用前后各查一次取消。
+        self.check_cancel()?;
         let Some(row) = self.manuscripts.read(id, version)? else {
             return Err(format!("稿件库没有编号为 {id} 的稿件"));
         };
+        self.check_cancel()?;
         let full = row.markdown;
         if full.trim().is_empty() {
             return Err(format!("稿件《{}》没有正文", row.title));
@@ -779,7 +901,10 @@ impl PiToolContext {
     fn api_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
         let query = required_str(args, "query")?;
         let limit = usize_arg(args, "limit", MAX_API_RESULTS).clamp(1, MAX_API_RESULTS);
+        // 搜接口要读配置目录；调用前后各查一次取消。
+        self.check_cancel()?;
         let hits = self.apis.search(&query, limit)?;
+        self.check_cancel()?;
         if hits.is_empty() {
             return Ok(json!({
                 "query": query,
@@ -815,7 +940,11 @@ impl PiToolContext {
             Some(Value::Null) | None => Map::new(),
             Some(_) => return Err("参数 args 必须是对象".into()),
         };
+        // 内网 HTTP 请求一旦发出就无法中途 abort，慢在 `apis.call`；调用前后各查一次取消，
+        // 停止后即使请求已完成，也不登记证据、不把结果当成功交回去（由 call 统一兜底）。
+        self.check_cancel()?;
         let called = self.apis.call(&api, &inputs)?;
+        self.check_cancel()?;
         if called.items.is_empty() {
             return Ok(json!({
                 "api": api,
@@ -830,6 +959,8 @@ impl PiToolContext {
         let mut truncated = called.total > shown || total_items > shown;
         let mut results = Vec::new();
         for item in called.items.into_iter().take(MAX_API_ITEMS) {
+            // 逐条登记前复检：停止后不把接口资料写进证据台账。
+            self.check_cancel()?;
             let text_truncated = item.text.chars().count() > MAX_API_ITEM_CHARS;
             truncated |= text_truncated;
             let text: String = item.text.chars().take(MAX_API_ITEM_CHARS).collect();
@@ -857,7 +988,11 @@ impl PiToolContext {
     }
 
     fn vocab_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
-        super::writing_context::search(&self.config.vocabulary, args)
+        // 词库查询在内存里，但同样走取消边界：停止后不再继续回结果。
+        self.check_cancel()?;
+        let value = super::writing_context::search(&self.config.vocabulary, args)?;
+        self.check_cancel()?;
+        Ok(value)
     }
 
     pub(crate) fn writing_context(&self) -> Value {
@@ -876,6 +1011,8 @@ impl PiToolContext {
         if text.trim().is_empty() {
             return Err("没有可检查的正文".into());
         }
+        // 文档检查要跑词表、规则与要素校验，慢在下面这一段；前后各查一次取消。
+        self.check_cancel()?;
         let mut hard = Vec::new();
         let mut soft = Vec::new();
         if let Err(error) = crate::document_reference::ensure_preserved(&self.current, &text) {
@@ -900,6 +1037,7 @@ impl PiToolContext {
         }
         hard.truncate(20);
         soft.truncate(40);
+        self.check_cancel()?;
         Ok(json!({
             "hard": hard,
             "soft": soft,
@@ -909,7 +1047,10 @@ impl PiToolContext {
 
     /// 当前文种可用的风格档案。只读；档案例子与写法都不是本次事项的事实。
     fn style_list(&self) -> Result<Value, String> {
+        // 读风格库要碰磁盘；调用前后各查一次取消。
+        self.check_cancel()?;
         let list = self.styles.list(self.draft.kind)?;
+        self.check_cancel()?;
         let truncated = list.truncated || list.rows.len() > MAX_STYLE_ROWS;
         let results = list
             .rows
@@ -939,7 +1080,11 @@ impl PiToolContext {
     /// 按 id 读一份风格。未知 / 停用 / 不适用明确告知，不静默换成另一份。
     fn style_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
         let id = required_str(args, "id")?;
-        match self.styles.read(&id, self.draft.kind)? {
+        // 读风格档案要碰磁盘；调用前后各查一次取消。
+        self.check_cancel()?;
+        let lookup = self.styles.read(&id, self.draft.kind)?;
+        self.check_cancel()?;
+        match lookup {
             PiStyleLookup::Found { id, name, text } => Ok(json!({
                 "id": style_excerpt(&id, 500),
                 "name": style_excerpt(&name, 100),
@@ -1984,5 +2129,225 @@ mod tests {
         let hits = super::search_apis(&store, "火灾", 5);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "stat.fire");
+    }
+
+    /// 记数的假知识库：证明取消后不再发起检索 / 读全文。
+    struct CountingKb {
+        searches: Arc<AtomicUsize>,
+        reads: Arc<AtomicUsize>,
+        cancel_on_search: Option<Arc<AtomicBool>>,
+    }
+
+    impl PiKnowledge for CountingKb {
+        fn enabled(&self) -> bool {
+            true
+        }
+
+        fn search(&self, _query: &str, _top: usize) -> Result<PiSearchOutcome, String> {
+            self.searches.fetch_add(1, Ordering::AcqRel);
+            if let Some(flag) = &self.cancel_on_search {
+                // 模拟「检索期间用户点了停止」：请求已经发出、无法中途 abort。
+                flag.store(true, Ordering::Relaxed);
+            }
+            Ok(PiSearchOutcome {
+                chunks: vec![PiChunk {
+                    doc_id: 7,
+                    title: "森林防火规定".into(),
+                    section: "第三条".into(),
+                    text: "各单位应于每年十月开展一次检查。".into(),
+                }],
+                warnings: Vec::new(),
+            })
+        }
+
+        fn read(&self, doc_id: i64) -> Result<Option<(String, String)>, String> {
+            self.reads.fetch_add(1, Ordering::AcqRel);
+            Ok((doc_id == 7).then(|| ("森林防火规定".into(), "全文。".into())))
+        }
+    }
+
+    /// 记数的假内网接口：证明取消后不再搜接口、不再发 HTTP。
+    struct CountingApis {
+        searches: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+        cancel_on_call: Option<Arc<AtomicBool>>,
+    }
+
+    impl PiApis for CountingApis {
+        fn search(&self, _query: &str, _limit: usize) -> Result<Vec<PiApiHit>, String> {
+            self.searches.fetch_add(1, Ordering::AcqRel);
+            Ok(vec![PiApiHit {
+                id: "stat.fire".into(),
+                name: "火灾统计".into(),
+                description: "按地区统计森林火灾".into(),
+                signature: "region: 文字（必填）".into(),
+            }])
+        }
+
+        fn call(&self, _api: &str, _args: &Map<String, Value>) -> Result<PiApiCall, String> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            if let Some(flag) = &self.cancel_on_call {
+                flag.store(true, Ordering::Relaxed);
+            }
+            Ok(PiApiCall {
+                name: "火灾统计".into(),
+                total: 1,
+                items: vec![PiApiItem {
+                    title: "统计".into(),
+                    source: "省统计系统".into(),
+                    text: "第1条：全省森林火灾 1 起".into(),
+                }],
+            })
+        }
+    }
+
+    fn counting_context(kb: Arc<dyn PiKnowledge>) -> PiToolContext {
+        PiToolContext::with_all_sources(
+            Arc::new(AppConfig::default()),
+            DraftInput::default(),
+            "# 通知\n\n原文。\n".into(),
+            "改一下。".into(),
+            Vec::new(),
+            PiSources {
+                knowledge: kb,
+                manuscripts: Arc::new(FakeManuscripts),
+                styles: Arc::new(FakeStyles),
+            },
+        )
+    }
+
+    /// 停止后工具入口直接拒绝：参数校验之前就返回，不再发起任何检索 / 网络调用。
+    #[test]
+    fn a_stopped_run_refuses_every_tool_before_touching_sources() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let api_searches = Arc::new(AtomicUsize::new(0));
+        let api_calls = Arc::new(AtomicUsize::new(0));
+        let ctx = counting_context(Arc::new(CountingKb {
+            searches: searches.clone(),
+            reads: reads.clone(),
+            cancel_on_search: None,
+        }))
+        .with_apis(Arc::new(CountingApis {
+            searches: api_searches.clone(),
+            calls: api_calls.clone(),
+            cancel_on_call: None,
+        }));
+        ctx.attach_cancel(Arc::new(AtomicBool::new(true)));
+        for (name, args) in [
+            ("kb_search", json!({"query": "防火检查"})),
+            ("kb_read", json!({"doc_id": 7})),
+            ("ms_search", json!({"query": "防火通知"})),
+            ("ms_read", json!({"id": 3})),
+            ("api_search", json!({"query": "火灾"})),
+            (
+                "api_call",
+                json!({"api": "stat.fire", "args": {"region": "全省"}}),
+            ),
+            ("vocab_search", json!({"query": "应急"})),
+            ("current_date", json!({})),
+            ("check_document", json!({"text": "# 通知\n\n原文。"})),
+            ("doc_elements", json!({})),
+            ("style_list", json!({})),
+            ("style_read", json!({"id": "literal-style"})),
+        ] {
+            let error = ctx.call(name, &args).unwrap_err();
+            assert!(error.contains("停止"), "{name} 应报告已停止：{error}");
+        }
+        assert_eq!(searches.load(Ordering::Acquire), 0, "停止后不得检索知识库");
+        assert_eq!(reads.load(Ordering::Acquire), 0, "停止后不得读知识库全文");
+        assert_eq!(api_searches.load(Ordering::Acquire), 0, "停止后不得搜接口");
+        assert_eq!(api_calls.load(Ordering::Acquire), 0, "停止后不得调接口");
+        assert!(ctx.evidence().is_empty(), "取消的工具调用不得写证据");
+    }
+
+    /// 取消发生在慢工具返回之前：请求已经发出（无法 abort），但结果不登记、不算成功。
+    #[test]
+    fn a_cancel_arriving_during_a_slow_tool_discards_its_result_and_evidence() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let searches = Arc::new(AtomicUsize::new(0));
+        let ctx = counting_context(Arc::new(CountingKb {
+            searches: searches.clone(),
+            reads: Arc::new(AtomicUsize::new(0)),
+            cancel_on_search: Some(cancel.clone()),
+        }));
+        ctx.attach_cancel(cancel);
+        let error = ctx
+            .call("kb_search", &json!({"query": "防火检查"}))
+            .unwrap_err();
+        assert!(error.contains("停止"), "{error}");
+        assert_eq!(
+            searches.load(Ordering::Acquire),
+            1,
+            "检索已经发出，停止信号只能让结果被丢弃，不能假装没调用"
+        );
+        assert!(ctx.evidence().is_empty(), "停止后返回的资料不得写证据");
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ctx = context("x").with_apis(Arc::new(CountingApis {
+            searches: Arc::new(AtomicUsize::new(0)),
+            calls: calls.clone(),
+            cancel_on_call: Some(cancel.clone()),
+        }));
+        ctx.attach_cancel(cancel);
+        let error = ctx
+            .call(
+                "api_call",
+                &json!({"api": "stat.fire", "args": {"region": "全省"}}),
+            )
+            .unwrap_err();
+        assert!(error.contains("停止"), "{error}");
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            1,
+            "HTTP 请求已经发出，只能丢弃结果"
+        );
+        assert!(ctx.evidence().is_empty(), "停止后返回的接口资料不得写证据");
+    }
+
+    /// 挂了取消句柄但没置位：行为与以前一致，连续调用也不会泄漏在途槽位。
+    #[test]
+    fn an_attached_but_unset_cancel_flag_changes_nothing() {
+        let ctx = api_context();
+        let first = Arc::new(AtomicBool::new(false));
+        ctx.attach_cancel(first.clone());
+        // 只设置一次：第二个句柄被忽略，第一个仍是唯一信号。
+        ctx.attach_cancel(Arc::new(AtomicBool::new(true)));
+        for _ in 0..(MAX_IN_FLIGHT_TOOLS + 1) {
+            // 多调一次：槽位若没在 Drop 里归还，这里会等到 10 秒后失败。
+            let value = ctx
+                .call("kb_search", &json!({"query": "防火检查"}))
+                .unwrap();
+            assert_eq!(value["zero_hits"], false);
+        }
+        assert_eq!(ctx.evidence().len(), MAX_IN_FLIGHT_TOOLS + 1);
+        // 第一个句柄置位后才开始拒绝，证明没被第二个句柄覆盖。
+        first.store(true, Ordering::Relaxed);
+        let error = ctx
+            .call("kb_search", &json!({"query": "防火检查"}))
+            .unwrap_err();
+        assert!(error.contains("停止"), "{error}");
+    }
+
+    /// 在途槽位：满了明确失败，Drop 归还；不依赖后台线程的时序。
+    #[test]
+    fn in_flight_slots_are_capped_and_returned_on_drop() {
+        let ctx = context("x");
+        let mut held = Vec::new();
+        for _ in 0..MAX_IN_FLIGHT_TOOLS {
+            held.push(ToolSlot::acquire(&ctx).expect("资源空闲时应能申请到在途槽位"));
+        }
+        assert!(in_flight_tools() >= MAX_IN_FLIGHT_TOOLS);
+        let error = ToolSlot::acquire_within(&ctx, Duration::ZERO).unwrap_err();
+        assert!(
+            error.contains("上一个已停止的任务仍在收尾"),
+            "满了要明确说明是谁占着：{error}"
+        );
+        // 释放一个后应能重新申请到；申请不到说明 Drop 没归还计数。
+        drop(held.pop().expect("至少持有一个槽位"));
+        let again = ToolSlot::acquire(&ctx).expect("释放后应能重新申请槽位");
+        drop(again);
+        assert!(in_flight_tools() <= MAX_IN_FLIGHT_TOOLS);
     }
 }

@@ -6,7 +6,8 @@
 //!
 //! 领域工具、提问与审核清单都走同一条 `callId` 关联的请求 / 结果通道；Rust 在
 //! 后台线程执行工具，协议循环继续收事件、检查取消与超时，检索慢不会把取消卡住。
-//! 停下来的任务再收到的工具结果一律丢弃。
+//! 停下来的任务再收到的工具结果一律丢弃；工具上下文同时拿到本轮的停止信号，慢工具在
+//! 阶段边界尽快收手（HTTP 请求本身无法中途 abort，靠工具层在途槽位限制资源叠加）。
 
 use super::PiRuntime;
 use super::PiWorkspace;
@@ -151,7 +152,6 @@ pub(crate) enum PiEvent {
     Strategy(PiStrategyInfo),
     Candidate {
         path: String,
-        content: String,
     },
     /// 模型在等用户回答。答案由界面通过 [`PiBridge::answer`] 送回。
     Questions(PiQuestionBatch),
@@ -519,6 +519,10 @@ pub(crate) fn run(
     };
     let _bridge_lifetime = BridgeLifetime(&job.bridge);
     let started = Instant::now();
+    // 工具在独立线程执行，慢工具（知识库检索 / LLM 重排、内网 HTTP、稿件库读取、文档检查）
+    // 无法从外部强杀；把界面停止信号交给工具上下文，让它们在阶段边界收手、迟到结果不写
+    // 证据也不当成功返回。反复停止重开的资源叠加由工具层的在途槽位兜底。
+    job.tools.attach_cancel(Arc::clone(&cancel));
     if cancel.load(Ordering::Relaxed) {
         if !job.resume {
             let _ = job
@@ -990,7 +994,8 @@ pub(crate) fn run(
                 if bytes != content.len() || sha256_hex(&content) != sha256.to_ascii_lowercase() {
                     return Err("Pi host 返回的候选稿与哈希不一致".into());
                 }
-                on_event(PiEvent::Candidate { path, content });
+                let _ = content;
+                on_event(PiEvent::Candidate { path });
             }
             HostEvent::ToolRequest {
                 call_id,
@@ -2195,7 +2200,9 @@ rl.on("line", (line) => {{
             eprintln!("跳过：本机没有 Node");
             return;
         }
-        struct SlowKb;
+        struct SlowKb {
+            searches: Arc<AtomicUsize>,
+        }
         impl super::super::tools::PiKnowledge for SlowKb {
             fn enabled(&self) -> bool {
                 true
@@ -2205,6 +2212,7 @@ rl.on("line", (line) => {{
                 _query: &str,
                 _top: usize,
             ) -> Result<super::super::tools::PiSearchOutcome, String> {
+                self.searches.fetch_add(1, Ordering::AcqRel);
                 std::thread::sleep(Duration::from_millis(400));
                 Ok(super::super::tools::PiSearchOutcome {
                     chunks: vec![super::super::tools::PiChunk {
@@ -2222,15 +2230,19 @@ rl.on("line", (line) => {{
         }
         let temp = tempfile::tempdir().unwrap();
         let mut job = job(temp.path(), "tool");
+        let searches = Arc::new(AtomicUsize::new(0));
         job.tools = Arc::new(PiToolContext::with_sources(
             Arc::new(crate::models::AppConfig::default()),
             crate::models::DraftInput::default(),
             "# 当前\n".into(),
             "tool".into(),
             Vec::new(),
-            Arc::new(SlowKb),
+            Arc::new(SlowKb {
+                searches: searches.clone(),
+            }),
             Arc::new(NoMs),
         ));
+        let tools = job.tools.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
         let started = Instant::now();
@@ -2245,6 +2257,13 @@ rl.on("line", (line) => {{
             started.elapsed() < Duration::from_secs(5),
             "检索阻塞不能拖住取消"
         );
+        // 停止信号在工具线程启动前就已置位：该轮不再发起慢检索，也不留下证据。
+        assert_eq!(
+            searches.load(Ordering::Acquire),
+            0,
+            "停止后不应再发起知识库检索"
+        );
+        assert!(tools.evidence().is_empty(), "停止后不应写证据");
     }
 
     #[test]
