@@ -154,6 +154,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport,
         window_builder: defer_window_state_hook(Rc::clone(&deferred_window_state)),
+        // 外壳自己记工作区尺寸；不能把启动密码小窗写成下次工作区尺寸。
+        persist_window: false,
         ..Default::default()
     };
 
@@ -163,14 +165,16 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             // 这时窗口还隐藏着；命令随首帧输出，在首帧画完、窗口显示之后才执行。
             let state = deferred_window_state.get();
-            if state.fullscreen {
+            let locked = matches!(vault::Vault::probe(), vault::Probe::Locked);
+            let app = AppShell::new(cc, startup_imports, instance, state);
+            if !locked && state.fullscreen {
                 cc.egui_ctx
                     .send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-            } else if state.maximized {
+            } else if !locked && state.maximized {
                 cc.egui_ctx
                     .send_viewport_cmd(egui::ViewportCommand::Maximized(true));
             }
-            Ok(Box::new(AppShell::new(cc, startup_imports, instance)))
+            Ok(Box::new(app))
         }),
     );
     if let Err(error) = &result {
@@ -181,9 +185,11 @@ fn main() -> eframe::Result {
 
 /// eframe 从上次会话恢复、但要推迟到首帧之后才应用的窗口状态。
 #[derive(Clone, Copy, Default)]
-struct DeferredWindowState {
-    maximized: bool,
-    fullscreen: bool,
+pub(crate) struct DeferredWindowState {
+    pub(crate) maximized: bool,
+    pub(crate) fullscreen: bool,
+    pub(crate) inner_size: Option<egui::Vec2>,
+    pub(crate) position: Option<egui::Pos2>,
 }
 
 /// eframe 先把窗口建成隐藏的，画完首帧再显示，避免启动时闪出空白窗口；
@@ -191,7 +197,6 @@ struct DeferredWindowState {
 /// 提前亮出来。上次退出时是最大化的话，启动时就会先闪几次还没画内容的空窗口，
 /// 隔一两秒界面才出来。这里把恢复出来的这两个状态摘掉，记下来交给 App 创建时补发。
 /// 恢复的尺寸本来就是最大化时的尺寸，补发时窗口几乎不跳。
-#[cfg(target_os = "windows")]
 fn defer_window_state_hook(
     state: Rc<Cell<DeferredWindowState>>,
 ) -> Option<eframe::WindowBuilderHook> {
@@ -199,15 +204,20 @@ fn defer_window_state_hook(
         state.set(DeferredWindowState {
             maximized: builder.maximized == Some(true),
             fullscreen: builder.fullscreen == Some(true),
+            inner_size: builder.inner_size,
+            position: builder.position,
         });
-        builder.with_maximized(false).with_fullscreen(false)
+        if matches!(vault::Vault::probe(), vault::Probe::Locked) {
+            // 创建原生窗口之前就决定小窗尺寸，避免先亮出完整窗口再缩小。
+            builder
+                .with_maximized(false)
+                .with_fullscreen(false)
+                .with_min_inner_size([340.0, 220.0])
+                .with_inner_size([380.0, 250.0])
+        } else if cfg!(target_os = "windows") {
+            builder.with_maximized(false).with_fullscreen(false)
+        } else {
+            builder
+        }
     }))
-}
-
-/// 其他平台隐藏窗口的最大化不会把窗口亮出来，按 eframe 原样恢复。
-#[cfg(not(target_os = "windows"))]
-fn defer_window_state_hook(
-    _state: Rc<Cell<DeferredWindowState>>,
-) -> Option<eframe::WindowBuilderHook> {
-    None
 }

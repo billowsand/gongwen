@@ -468,6 +468,7 @@ impl GongwenApp {
         ctx: &egui::Context,
         startup_imports: Vec<PathBuf>,
         instance: Option<crate::single_instance::Instance>,
+        forwarded_requests: Option<Receiver<Vec<PathBuf>>>,
         macos_titlebar_metrics: Option<crate::macos_window::NativeTitlebarMetrics>,
     ) -> Self {
         // 配置文件内容坏了就带着默认配置启动，并把留底路径交给首帧的提示窗；
@@ -670,9 +671,11 @@ impl GongwenApp {
             manuscript_import_preview: None,
             pending_imports: VecDeque::new(),
             active_import: None,
-            forwarded_requests: instance
-                .as_ref()
-                .map(|instance| instance.watch(ctx.clone())),
+            forwarded_requests: forwarded_requests.or_else(|| {
+                instance
+                    .as_ref()
+                    .map(|instance| instance.watch(ctx.clone()))
+            }),
             _instance: instance,
             pending_merge: None,
             version_commit: None,
@@ -1058,6 +1061,38 @@ impl GongwenApp {
         }
         self.cancel_pi_tasks();
         self.lock_requested = true;
+    }
+
+    /// 锁定前持久化工作区。即使自动保存关闭，也先保存所有已修改或尚未入库的稿件，
+    /// 再写配置；失败时调用方应保留工作区，不能丢掉用户仍可恢复的内容。
+    pub(crate) fn save_before_lock(&mut self) -> anyhow::Result<()> {
+        if self.any_busy() {
+            anyhow::bail!("仍有任务在运行，请等待任务结束后再锁定");
+        }
+        let previous = self.active_doc;
+        let result = (|| {
+            for index in 0..self.docs.len() {
+                let doc = &self.docs[index];
+                if doc.is_dirty() || (doc.manuscript_id.is_none() && doc.touched()) {
+                    self.active_doc = index;
+                    self.try_save_to_manuscript_library()?;
+                }
+            }
+            self.active_doc = previous.min(self.docs.len().saturating_sub(1));
+            self.remember_session();
+            storage::save(&self.config)
+        })();
+        self.active_doc = previous.min(self.docs.len().saturating_sub(1));
+        result
+    }
+
+    pub(crate) fn take_lifecycle_for_lock(
+        &mut self,
+    ) -> (
+        Option<crate::single_instance::Instance>,
+        Option<Receiver<Vec<PathBuf>>>,
+    ) {
+        (self._instance.take(), self.forwarded_requests.take())
     }
 
     /// 空闲自动锁定：任何键盘 / 鼠标事件都算「人在」。0 分钟 = 不自动锁定，
