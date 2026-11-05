@@ -243,15 +243,18 @@ impl AppShell {
     pub(crate) fn run(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // 无边框窗口（Windows / 传统 Linux）：锁屏也要有一条能拖动、
-        // 能关窗的标题栏。
-        egui::Panel::top("gate_titlebar")
-            .show_separator_line(!theme::smartisan::active())
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::surface())
-                    .inner_margin(egui::Margin::ZERO),
-            )
-            .show(ui, bare_titlebar);
+        // 能关窗的标题栏。只在锁屏期画——工作区自己的标题栏由
+        // update_workspace 画，这里再画一条就成了双标题栏。
+        if matches!(self.phase, ShellPhase::Gate(_)) {
+            egui::Panel::top("gate_titlebar")
+                .show_separator_line(!theme::smartisan::active())
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::surface())
+                        .inner_margin(egui::Margin::ZERO),
+                )
+                .show(ui, bare_titlebar);
+        }
 
         enum After {
             Outcome(GateOutcome),
