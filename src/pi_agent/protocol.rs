@@ -8,7 +8,11 @@ use super::materials::PiMaterialMeta;
 /// 直接拒绝新 init，恢复时也不会拿旧 host 去开原工作区。
 pub(crate) const PROTOCOL_VERSION: u32 = 3;
 /// host 版本；运行记录里存一份，恢复时不一致就拒绝在原工作区接着写。
-pub(crate) const HOST_VERSION: &str = "0.3.5";
+pub(crate) const HOST_VERSION: &str = "0.3.6";
+/// 宿主与 Rust 共同对账的领域工具额度：常规上限与分阶段绝对硬上限。
+pub(crate) const MAX_REGULAR_TOOL_CALLS: usize = 60;
+pub(crate) const MAX_TOTAL_TOOL_CALLS: usize = 84;
+const _: () = assert!(MAX_REGULAR_TOOL_CALLS + 24 == MAX_TOTAL_TOOL_CALLS);
 /// 一条协议行的上限。host 侧同样按 16 MiB 卡住。
 pub(crate) const MAX_HOST_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// 整个进程最多处理多少条消息。
@@ -278,7 +282,7 @@ pub(crate) enum HostEvent {
     },
 }
 
-/// `ask_user` 的原始题目：题面 + 0–4 个选项。校验复用 `clarify::agent_questions`。
+/// `ask_user` 的原始题目：题面 + 0 个或 2–4 个选项。校验走 `ai_services::questions` 共享闸门。
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RawQuestion {
     pub(crate) question: String,

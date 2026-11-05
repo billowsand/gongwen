@@ -39,7 +39,7 @@ export function findHandNumberedHeadings(prose) {
   const numberedHeading = /^#{2,6}\s+(?:附录\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?|[Aa][Pp][Pp][Ee][Nn][Dd][Ii][Xx]\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?|[一二三四五六七八九十百零]+[、.．]|[（(][一二三四五六七八九十百零\d]+[）)]|第[一二三四五六七八九十百零\d]+(?:[章节条]|部分)|\d+(?:\.\d+)+|\d+[、.．]|\d{1,3}\s+)/u;
   return prose.split("\n").filter((line) => numberedHeading.test(line)).slice(0, 12);
 }
-import { budgetLabel, decideStrategy, readBudgetChars, taskEstimate } from "./budget.mjs";
+import { budgetLabel, createToolQuota, decideStrategy, readBudgetChars, taskEstimate } from "./budget.mjs";
 import {
   RECORD_TOOL_NAME,
   buildPlan,
@@ -707,13 +707,8 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     pause: () => timer.pause(),
     resume: () => timer.resume(),
   });
-  const hardToolCap = decision.toolBudget + (decision.mode === "phased" ? 16 : 0);
-  let toolCap = decision.mode === "phased" ? Math.min(24, hardToolCap) : hardToolCap;
-  bridge.setLimit(toolCap);
-  const grantTools = (count) => {
-    toolCap = Math.min(hardToolCap, toolCap + Math.max(0, count));
-    bridge.setLimit(toolCap);
-  };
+  const toolQuota = createToolQuota({ mode: decision.mode, toolBudget: decision.toolBudget, bridge });
+  const grantTools = (count) => toolQuota.grant(count);
   onBridge?.(bridge);
   const candidateScan = makeCandidateScanner({ guard, state, emit, limits: config.limits });
 
@@ -1032,6 +1027,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       registry.persist();
       if (plan.phases.length === 0) throw agentError;
       decision = phased;
+      toolQuota.promoteToPhased();
       phase.phased = true;
       phase.plan = plan;
       emit({

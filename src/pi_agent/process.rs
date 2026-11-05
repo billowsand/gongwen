@@ -16,13 +16,13 @@ use super::materials::PiMaterialMeta;
 use super::protocol::{
     HOST_VERSION, HostEvent, InitCapability, InitLimits, InitMessage, InitModel, InitRecovery,
     InitSelection, InitStrategy, InitTask, InitWorkspace, MAX_CANDIDATE_BYTES, MAX_DELIVERY_BYTES,
-    MAX_EVENTS, MAX_HOST_LINE_BYTES, MAX_MESSAGE_CHARS, PROTOCOL_VERSION, PiReportItem,
-    RawQuestion,
+    MAX_EVENTS, MAX_HOST_LINE_BYTES, MAX_MESSAGE_CHARS, MAX_TOTAL_TOOL_CALLS, PROTOCOL_VERSION,
+    PiReportItem, RawQuestion,
 };
 use super::recovery::{PiReceipt, PiRunLog, PiRunStatus, read_receipt, read_snapshot};
 use super::runtime::hidden_command;
 use super::tools::PiToolContext;
-use crate::agent::clarify::{Question, Reply};
+use crate::ai_services::questions::{QuestionCandidate, validate_agent_questions};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Stdio};
@@ -33,10 +33,7 @@ use std::time::{Duration, Instant};
 
 /// 一条工具请求参数的上限。
 const MAX_TOOL_ARGS_BYTES: usize = 1024 * 1024;
-/// 分阶段写作时 host 会按阶段追加额度，总上限 84（常规 60 + 24）；Rust 侧按同一个
-/// 硬上限判定，避免宿主放开额度后仍被这里杀掉。
-const MAX_TOTAL_TOOL_CALLS: usize = 84;
-/// 一批最多几题（与 `clarify::agent_questions` 一致）。
+/// 一批最多几题（与共享问题协议校验一致）。
 const MAX_QUESTIONS_PER_BATCH: u32 = 3;
 /// 一轮最多几批提问。
 const MAX_QUESTION_BATCHES: u32 = 2;
@@ -1060,9 +1057,12 @@ pub(crate) fn run(
                     return Err("Pi host 还没有报告就绪就出题，已拒绝。".into());
                 }
                 question_batches += 1;
-                let raw: Vec<(String, Vec<String>)> = questions
+                let raw: Vec<QuestionCandidate> = questions
                     .into_iter()
-                    .map(|RawQuestion { question, options }| (question, options))
+                    .map(|RawQuestion { question, options }| QuestionCandidate {
+                        question,
+                        options,
+                    })
                     .collect();
                 let accepted =
                     if batch > MAX_QUESTION_BATCHES || question_batches > MAX_QUESTION_BATCHES {
@@ -1070,22 +1070,19 @@ pub(crate) fn run(
                     } else if raw.len() as u32 > MAX_QUESTIONS_PER_BATCH {
                         Err("一次最多问 3 道".to_string())
                     } else {
-                        crate::agent::clarify::agent_questions(&raw)
+                        validate_agent_questions(&raw)
                     };
                 match accepted {
                     Ok(questions) => {
                         let questions = questions
                             .into_iter()
-                            .map(|question: Question| PiQuestion {
-                                id: question.id,
-                                text: question.text,
-                                options: question
-                                    .choices
-                                    .iter()
-                                    .map(|choice| choice.label.clone())
-                                    .collect(),
-                                custom: question.custom_hint.is_some(),
-                                skippable: question.skippable,
+                            .enumerate()
+                            .map(|(index, question)| PiQuestion {
+                                id: index + 1,
+                                text: question.question,
+                                options: question.options,
+                                custom: true,
+                                skippable: true,
                             })
                             .collect();
                         waiting = Some((call_id.clone(), job.bridge.answered(), Instant::now()));
@@ -1493,27 +1490,6 @@ fn path_text(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// 把已确认的回答交给追问上下文；`Reply` 只为与旧 `clarify` 的题面结构对齐，
-/// 这里不调用 `engine::apply_answers`。
-#[allow(dead_code)]
-fn answer_text(question: &Question, reply: &Reply) -> String {
-    match reply {
-        Reply::Choice(index) => question
-            .choices
-            .get(*index)
-            .map(|choice| choice.label.clone())
-            .unwrap_or_default(),
-        Reply::Custom(text) => text.clone(),
-        Reply::Many(indexes) => indexes
-            .iter()
-            .filter_map(|index| question.choices.get(*index))
-            .map(|choice| choice.label.clone())
-            .collect::<Vec<_>>()
-            .join("、"),
-        Reply::Skip => String::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1569,7 +1545,7 @@ rl.on("line", (line) => {
     if (mode === "forged-report") {
       writeReceipt({ kind: "report", summary: "审完", items: [{ title: "称谓", detail: "第二条", severity: "建议" }] });
     }
-    emit({ type: "ready", hostVersion: "0.3.5", nodeVersion: process.versions.node, model: init.model.modelId });
+    emit({ type: "ready", hostVersion: "__HOST_VERSION__", nodeVersion: process.versions.node, model: init.model.modelId });
     if (init.recovery?.mode === "resume") {
       const dir = init.workspace.delivery;
       const receipt = JSON.parse(fs.readFileSync(path.join(dir, "receipt.json"), "utf8"));
@@ -1715,7 +1691,7 @@ rl.on("line", (line) => {
 
     fn fixture(dir: &Path) -> PathBuf {
         let path = dir.join("host-fixture.mjs");
-        std::fs::write(&path, FIXTURE).unwrap();
+        std::fs::write(&path, FIXTURE.replace("__HOST_VERSION__", HOST_VERSION)).unwrap();
         path
     }
 
@@ -2137,7 +2113,7 @@ rl.on("line", (line) => {{
   const value = JSON.parse(line);
   if (value.type === "init") {{
     init = value;
-  emit({{ type: "ready", hostVersion: "0.3.5", nodeVersion: process.versions.node, model: init.model.modelId }});
+  emit({{ type: "ready", hostVersion: "{HOST_VERSION}", nodeVersion: process.versions.node, model: init.model.modelId }});
     emit({{ type: "tool_request", callId: "c1", name: "kb_search", args: {args} }});
   }}
   if (value.type === "tool_result") {{ setTimeout(() => process.exit(0), 10); }}

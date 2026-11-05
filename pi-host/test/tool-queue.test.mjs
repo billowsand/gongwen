@@ -2,6 +2,7 @@
 // 一次只发一个，收到匹配回复再发下一个。这里不碰模型，只测协议行为。
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 import {
   MAX_QUESTION_BATCHES,
@@ -9,6 +10,8 @@ import {
   MAX_TOOL_CALLS,
   createToolBridge,
 } from "../src/bridge.mjs";
+import { createToolQuota, PHASED_TOOL_LIMIT, REGULAR_TOOL_LIMIT } from "../src/budget.mjs";
+import { HOST_VERSION } from "../src/protocol.mjs";
 
 function makeBridge(options = {}) {
   const events = [];
@@ -281,4 +284,49 @@ test("首批发出的请求仍是同步立即 emit，公开接口保持兼容", 
   assert.equal(bridge.pending(), 1);
   bridge.abortAll(new Error("收尾"));
   pending.catch(() => {});
+});
+
+test("常规额度可追加到分阶段硬上限，追加时不重置已用次数", async () => {
+  const { bridge, events } = makeBridge();
+  const quota = createToolQuota({ mode: "regular", toolBudget: REGULAR_TOOL_LIMIT, bridge });
+  const perform = async () => {
+    const pending = bridge.call("doc_elements", {});
+    const event = events.at(-1);
+    assert.equal(event.type, "tool_request");
+    bridge.handle({ type: "tool_result", callId: event.callId, ok: true, result: {} });
+    await pending;
+  };
+
+  assert.equal(bridge.limit(), REGULAR_TOOL_LIMIT);
+  for (let i = 0; i < REGULAR_TOOL_LIMIT; i += 1) await perform();
+  await assert.rejects(bridge.call("doc_elements", {}), /超过上限（60）/);
+  assert.equal(bridge.used(), 60, "被拒绝的第61次不计入已用额度");
+
+  quota.promoteToPhased();
+  quota.grant(24);
+  assert.equal(bridge.limit(), PHASED_TOOL_LIMIT);
+  assert.equal(bridge.used(), 60, "转分阶段不得重置已用调用数");
+  for (let i = 60; i < PHASED_TOOL_LIMIT; i += 1) await perform();
+  assert.equal(bridge.used(), 84);
+  await assert.rejects(bridge.call("doc_elements", {}), /超过上限（84）/);
+  assert.equal(bridge.pending(), 0, "第85次不进入队列");
+});
+
+test("host and Rust agree on regular and phased hard limits", () => {
+  const rust = fs.readFileSync(new URL("../../src/pi_agent/protocol.rs", import.meta.url), "utf8");
+  const hostProtocol = fs.readFileSync(new URL("../src/protocol.mjs", import.meta.url), "utf8");
+  const packageJson = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const packageLock = JSON.parse(fs.readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+  const runtime = JSON.parse(fs.readFileSync(new URL("../../packaging/pi-runtime.json", import.meta.url), "utf8"));
+  const rustHostVersion = rust.match(/HOST_VERSION: &str = "([^"]+)"/)?.[1];
+  assert.ok(rustHostVersion, "Rust host version constant exists");
+  assert.match(rust, new RegExp(`MAX_REGULAR_TOOL_CALLS: usize = ${REGULAR_TOOL_LIMIT};`));
+  assert.match(rust, new RegExp(`MAX_TOTAL_TOOL_CALLS: usize = ${PHASED_TOOL_LIMIT};`));
+  assert.equal(HOST_VERSION, rustHostVersion);
+  assert.match(hostProtocol, new RegExp(`HOST_VERSION = "${HOST_VERSION}"`));
+  assert.equal(packageJson.version, HOST_VERSION);
+  assert.equal(packageLock.version, HOST_VERSION);
+  assert.equal(packageLock.packages[""].version, HOST_VERSION);
+  assert.equal(runtime.host.version, HOST_VERSION);
+  assert.equal(MAX_TOOL_CALLS, REGULAR_TOOL_LIMIT);
 });

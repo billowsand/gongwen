@@ -11,6 +11,25 @@ export const INSTRUCTION_RESERVE = 5_000;
 const SAFETY_RESERVE = 2_048;
 /** 预算不足以放下这些时明确失败，而不是把输出压到无法完成工作。 */
 const MIN_OUTPUT_RESERVE = 1_024;
+/** Rust host 对账：常规领域工具额度与分阶段可追加的绝对上限。 */
+export const REGULAR_TOOL_LIMIT = 60;
+export const PHASED_TOOL_LIMIT = 84;
+
+/** 领域工具调用额度；常规失败转分阶段时提升封顶，不清空已用次数。 */
+export function createToolQuota({ mode, toolBudget, bridge }) {
+  let hardCap = mode === "phased" ? PHASED_TOOL_LIMIT : toolBudget;
+  let toolCap = mode === "phased" ? Math.min(24, hardCap) : hardCap;
+  bridge.setLimit(toolCap);
+  return {
+    grant(count) {
+      toolCap = Math.min(hardCap, toolCap + Math.max(0, count));
+      bridge.setLimit(toolCap);
+    },
+    promoteToPhased() {
+      hardCap = PHASED_TOOL_LIMIT;
+    },
+  };
+}
 
 export function estimateTokens(text) {
   const source = typeof text === "string" ? text : "";
@@ -108,7 +127,7 @@ export function decideStrategy(config, estimate = taskEstimate(config)) {
       verified: Boolean(verified),
       estimate,
       fits: true,
-      toolBudget: 60,
+      toolBudget: REGULAR_TOOL_LIMIT,
     };
   }
 
@@ -171,7 +190,7 @@ export function decideStrategy(config, estimate = taskEstimate(config)) {
     verified: Boolean(verified),
     estimate,
     fits: true,
-    toolBudget: phased ? 72 : 60,
+    toolBudget: REGULAR_TOOL_LIMIT,
   };
 }
 

@@ -4,6 +4,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 import { outputLimitsForChars } from "./read.mjs";
+import { PHASED_TOOL_LIMIT } from "./budget.mjs";
 
 /** 一轮最多多少次工具调用（与 Rust 上限一致）。 */
 export const MAX_TOOL_CALLS = 60;
@@ -161,13 +162,13 @@ export function createToolBridge({ emit, pause, resume, maxCalls = MAX_TOOL_CALL
 
   const call = (name, args) => {
     if (closed) return Promise.reject(new BridgeError("本轮已取消，不能再调用工具"));
-    calls += 1;
-    if (calls > callLimit) {
+    if (calls >= callLimit) {
       return Promise.reject(new BridgeError(`工具调用次数超过上限（${callLimit}）`));
     }
     if (pending.size >= MAX_PENDING_REQUESTS) {
       return Promise.reject(new BridgeError(`等待中的工具请求过多（${MAX_PENDING_REQUESTS}）`));
     }
+    calls += 1;
     return enqueue("tool_request", { name, args });
   };
 
@@ -227,7 +228,7 @@ export function createToolBridge({ emit, pause, resume, maxCalls = MAX_TOOL_CALL
     limit: () => callLimit,
     /** 上调 / 下调本轮的绝对工具额度。分阶段只按阶段需要加，不无限放宽。 */
     setLimit(value) {
-      if (Number.isInteger(value) && value > 0) callLimit = Math.min(MAX_TOOL_CALLS + 24, value);
+      if (Number.isInteger(value) && value > 0) callLimit = Math.min(PHASED_TOOL_LIMIT, value);
     },
   };
 }
