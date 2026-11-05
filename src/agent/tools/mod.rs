@@ -41,6 +41,7 @@ use super::clarify::Question;
 use super::engine::Event;
 use super::evidence::EvidenceDoc;
 use super::skill::Skill;
+pub(crate) use crate::ai_services::text::parse_number;
 use crate::models::{AppConfig, TemplateKind, VocabularyEntry};
 use serde_json::{Map, Value, json};
 
@@ -512,17 +513,6 @@ pub(crate) fn arg_strings(args: &Map<String, Value>, name: &str) -> Vec<String> 
             .collect(),
         _ => Vec::new(),
     }
-}
-
-/// 「1,234.5」「12.5%」→ 数字（百分号去掉，不除以 100）。
-pub(crate) fn parse_number(text: &str) -> Option<f64> {
-    let cleaned: String = text
-        .trim()
-        .trim_end_matches(['%', '％'])
-        .chars()
-        .filter(|c| *c != ',' && *c != '，')
-        .collect();
-    cleaned.parse().ok()
 }
 
 /// 文种名或内部名 → 文种。

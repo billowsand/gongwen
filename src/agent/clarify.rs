@@ -16,6 +16,9 @@
 //! `apply_gap_replies`：这里是确定性的兜底，界面上先交模型把答案写进所在段落、过闸门。
 
 use super::gaps::{Gap, GapKind, GapStatus, Ledger, find_placeholders};
+use crate::ai_services::questions::{
+    MAX_QUESTION_CHARS, QuestionCandidate, echoes_format, validate_agent_questions,
+};
 use crate::models::{TemplateKind, VocabularyCategory, VocabularyEntry};
 
 /// 选项被选中后做什么。
@@ -106,9 +109,6 @@ pub(crate) enum Reply {
     Custom(String),
     Skip,
 }
-
-/// 问题不超过这么多字，长了多半是模型在解释而不是在出题。
-const MAX_QUESTION_CHARS: usize = 40;
 
 /// 要 JSON 时附在澄清提示词末尾的一句。端点支持 `response_format` 时格式由服务端保证，这句是给
 /// 不支持的端点看的；两种回法 [`parse_model_questions`] 都认。
@@ -213,15 +213,6 @@ pub(crate) fn parse_model_questions(reply: &str, max: usize) -> Vec<(String, Vec
         }
     }
     out
-}
-
-/// 模型把提示词里的格式示例「问题｜选项1｜选项2」原样抄了出来（实测遇到过）。
-fn echoes_format(question: &str, options: &[String]) -> bool {
-    let is_placeholder = |text: &str| {
-        text.strip_prefix("选项")
-            .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit()))
-    };
-    question.trim_end_matches('？') == "问题" || options.iter().any(|o| is_placeholder(o))
 }
 
 /// 要求里写的文种 → 可接受的文种。同一位置上长词优先：「研究报告」不算成「报告」。
@@ -355,26 +346,6 @@ pub(crate) fn model_kind_question(
     })
 }
 
-/// 授权类要素的说法（红线 2）：AI 不写、不给建议，也不就它们出题——这些由起草人在要素区
-/// 填、由签发流程定，不是问一句就能定的。
-const AUTHORIZED_WORDS: [&str; 8] = [
-    "密级",
-    "份号",
-    "签发人",
-    "成文日期",
-    "印发机关",
-    "印发日期",
-    "发文字号",
-    "发文机关",
-];
-
-/// 题目或选项碰到授权类要素没有。「文号」单独看：问引用的《某文件》的文号是核对依据，
-/// 不算；没有书名号时问的就是本文的文号。
-fn touches_authorized(text: &str) -> bool {
-    AUTHORIZED_WORDS.iter().any(|word| text.contains(word))
-        || (text.contains("文号") && !text.contains('《'))
-}
-
 /// 自主步骤一批最多问几题。
 pub(crate) const AGENT_MAX_QUESTIONS: usize = 3;
 
@@ -382,50 +353,18 @@ pub(crate) const AGENT_MAX_QUESTIONS: usize = 3;
 /// 没照抄格式示例；另外允许不给选项，只让人填），碰到授权类要素、问文种的整批打回，
 /// 返回给模型看的原因。
 pub(crate) fn agent_questions(raw: &[(String, Vec<String>)]) -> Result<Vec<Question>, String> {
-    if raw.is_empty() {
-        return Err("没有题目：questions 里至少写一道".into());
-    }
-    if raw.len() > AGENT_MAX_QUESTIONS {
-        return Err(format!(
-            "一次最多问 {AGENT_MAX_QUESTIONS} 道，只问最要紧的、只有用户知道的"
-        ));
-    }
+    let candidates = raw
+        .iter()
+        .map(|(question, options)| QuestionCandidate {
+            question: question.clone(),
+            options: options.clone(),
+        })
+        .collect::<Vec<_>>();
+    let validated = validate_agent_questions(&candidates)?;
     let mut out = Vec::new();
-    for (index, (question, options)) in raw.iter().enumerate() {
-        let question = question.trim().trim_end_matches(['?', '？']).to_string() + "？";
-        let options: Vec<String> = options.iter().map(|o| o.trim().to_string()).collect();
-        let all = std::iter::once(question.as_str())
-            .chain(options.iter().map(String::as_str))
-            .collect::<Vec<_>>()
-            .join(" ");
-        if touches_authorized(&all) {
-            return Err(format!(
-                "「{question}」问的是密级、文号、签发人、成文日期这类授权要素：它们由起草人在要素区填，\
-                 你不能问也不能建议，不要写进稿子"
-            ));
-        }
-        if question.contains("文种") {
-            return Err("文种在要素区定，不在这里问；按当前文种做".into());
-        }
-        let unique = options
-            .iter()
-            .enumerate()
-            .all(|(i, option)| !options[..i].contains(option));
-        if question.chars().count() > MAX_QUESTION_CHARS + 1 {
-            return Err(format!(
-                "「{question}」太长：问题不超过 {MAX_QUESTION_CHARS} 字，解释放到 progress 里"
-            ));
-        }
-        if options.len() == 1
-            || options.len() > 4
-            || options.iter().any(String::is_empty)
-            || !unique
-            || echoes_format(&question, &options)
-        {
-            return Err(format!(
-                "「{question}」的选项不对：要么不给选项（让用户自己填），要么给 2 到 4 个不重复的选项"
-            ));
-        }
+    for (index, candidate) in validated.into_iter().enumerate() {
+        let question = candidate.question;
+        let options = candidate.options;
         out.push(Question {
             id: index + 1,
             choices: options
@@ -1098,6 +1037,35 @@ pub(crate) fn strip_numbering(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_question_validation_adapts_to_legacy_question_shape() {
+        let questions =
+            agent_questions(&[("进度如何?".into(), vec!["按期".into(), "延期".into()])]).unwrap();
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].id, 1);
+        assert_eq!(questions[0].text, "进度如何？");
+        assert_eq!(
+            questions[0]
+                .choices
+                .iter()
+                .map(|choice| choice.label.as_str())
+                .collect::<Vec<_>>(),
+            ["按期", "延期"]
+        );
+        assert_eq!(questions[0].custom_hint.as_deref(), Some("其他，自己写"));
+        assert!(questions[0].skippable);
+        assert_eq!(questions[0].target, Target::Agent);
+        let serialized = serde_json::to_value(&questions[0]).unwrap();
+        assert_eq!(serialized["target"], "Agent");
+        assert_eq!(serialized["choices"][0]["label"], "按期");
+
+        let error = agent_questions(&[("文号是多少".into(), Vec::new())]).unwrap_err();
+        assert!(error.contains("授权要素"));
+        assert!(
+            agent_questions(&[("文种怎么选".into(), vec!["函".into(), "通知".into()])]).is_err()
+        );
+    }
 
     #[test]
     fn model_questions_pass_the_gate_or_are_dropped() {

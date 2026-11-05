@@ -778,7 +778,7 @@ fn input_values(
             }),
             InputKind::Number => match raw {
                 Value::Number(n) => Value::Number(n.clone()),
-                Value::String(text) => crate::agent::tools::parse_number(text)
+                Value::String(text) => crate::ai_services::text::parse_number(text)
                     .and_then(|n| {
                         if n.fract() == 0.0 && n.abs() < 9e15 {
                             Some(Value::from(n as i64))

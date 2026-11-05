@@ -15,6 +15,17 @@ pub(crate) fn short(text: &str, max: usize) -> String {
     text.chars().take(max).collect::<String>() + "…"
 }
 
+/// 「1,234.5」「12.5%」→ 数字（百分号去掉，不除以 100）。
+pub(crate) fn parse_number(text: &str) -> Option<f64> {
+    let cleaned: String = text
+        .trim()
+        .trim_end_matches(['%', '％'])
+        .chars()
+        .filter(|c| *c != ',' && *c != '，')
+        .collect();
+    cleaned.parse().ok()
+}
+
 /// 结构化结果 → 给模型看的文字：字符串原样；列表逐条编号（对象取标题与正文）；对象按「键：值」。
 pub(crate) fn value_to_text(value: &Value) -> String {
     match value {
@@ -101,4 +112,17 @@ fn push_trimmed(line: &str, line_start: usize, range: Range<usize>, out: &mut Ve
     }
     let start = line_start + range.start + lead;
     out.push(start..start + trimmed.len());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_number;
+
+    #[test]
+    fn number_parsing_keeps_legacy_grouping_and_percent_rules() {
+        assert_eq!(parse_number(" 1,234.5% "), Some(1234.5));
+        assert_eq!(parse_number("１２３"), None);
+        assert_eq!(parse_number("1，000％"), Some(1000.0));
+        assert_eq!(parse_number("not a number"), None);
+    }
 }
