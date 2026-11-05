@@ -601,6 +601,51 @@ pub(crate) fn ensure_slot_encrypted() -> Result<()> {
     Ok(())
 }
 
+/// 这个槽位还有没有「需要搬进密文」的明文数据？闸门解锁前先问它：
+/// 没有就直接进工作区，不显示「正在加密」卡片、不起后台线程。
+/// 只做文件头嗅探（十几字节），不打开数据库——解锁路径每次都要问形态，
+/// 大库每次跑完整性扫描太重。
+pub(crate) fn slot_needs_encryption(slot: DataSlot) -> bool {
+    if let Ok(path) = storage::slot_file_for(slot, "manuscripts.db")
+        && path.is_file()
+        && file_head_is_plaintext_db(&path)
+    {
+        return true;
+    }
+    SEALED_FILE_NAMES.iter().any(|name| {
+        storage::slot_file_for(slot, name)
+            .map(|path| path.is_file() && file_head_is_not_sealed(&path))
+            .unwrap_or(false)
+    })
+}
+
+/// 库文件头嗅探：`SQLite format 3` 魔数 = 明文库，需要迁移；文件不存在或
+/// 已是密文 = 不需要。读不出文件头按明文对待（迁移会给出明确的损坏错误）。
+fn file_head_is_plaintext_db(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 16];
+    use std::io::Read as _;
+    let n = file.read(&mut head).unwrap_or(0);
+    if n == 0 {
+        // 空库：开库时带 key 会按密文惰性创建，没有要搬的数据。
+        return false;
+    }
+    n < 16 || head.starts_with(b"SQLite format 3")
+}
+
+/// 小文件嗅探：名单内文件存在、头又不是密封魔数 = 还没密封。
+fn file_head_is_not_sealed(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 4];
+    use std::io::Read as _;
+    let n = file.read(&mut head).unwrap_or(0);
+    n == 0 || !is_sealed_file(&head[..n])
+}
+
 /// 停用的最后一步：把当前槽位的密文数据解回明文（库导出、小文件解封）。
 pub(crate) fn decrypt_slot_files() -> Result<()> {
     migrate_database(&storage::manuscript_db_path()?, Migration::ToPlain)?;
@@ -729,9 +774,9 @@ fn migrate_database(path: &Path, direction: Migration) -> Result<()> {
     Ok(())
 }
 
-/// 源库是否已经是目标形态：带 key 完整性检查通过 = 密文；不带 key 能读 = 明文。
-/// `cipher_integrity_check` 只在发现问题时返回行（每行一条错误描述），
-/// 全部通过是零行——别指望 "ok" 行。
+/// 源库是否已经是目标形态：带 key 能读 sqlite_master = 我们的密文；不带 key 能读 = 明文。
+/// 两种读法都只碰第一页——`cipher_integrity_check` 会扫全库验 HMAC，解锁路径
+/// 每次都要问形态，大库扫不起；第一页的 HMAC 校验已足够判定「是不是这把 key 的库」。
 fn database_matches(path: &Path, encrypted: bool) -> Result<bool> {
     let key = key_dek()?;
     let check_with_key = |active: bool| -> bool {
@@ -741,21 +786,8 @@ fn database_matches(path: &Path, encrypted: bool) -> Result<bool> {
         if apply_key_with(&conn, &key, active).is_err() {
             return false;
         }
-        if !active {
-            return conn
-                .query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
-                .is_ok();
-        }
-        let mut statement = match conn.prepare("PRAGMA cipher_integrity_check") {
-            Ok(statement) => statement,
-            Err(_) => return false,
-        };
-        let checks = match statement.query_map([], |row| row.get::<_, String>(0)) {
-            Ok(checks) => checks,
-            Err(_) => return false,
-        };
-        // 零错误行 = 这把 key 的密文库；任何一行都是 HMAC / 读页失败。
-        checks.flatten().next().is_none()
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+            .is_ok()
     };
     if check_with_key(encrypted) {
         return Ok(true);
@@ -1227,6 +1259,40 @@ mod tests {
         let config = std::fs::read(crate::storage::config_path().unwrap()).unwrap();
         assert!(!is_sealed_file(&config), "config 应回到明文");
         assert_eq!(config, b"{\"output_dir\":\"x\"}");
+        drop(dir);
+        reset();
+    }
+
+    #[test]
+    fn slot_needs_encryption_sniffs_heads_per_slot() {
+        let dir = use_temp_dir();
+        // 什么都没有：不需要。
+        assert!(!slot_needs_encryption(DataSlot::Real));
+        // 明文库 + 明文 config：需要。
+        plain_database();
+        std::fs::write(crate::storage::config_path().unwrap(), b"{}").unwrap();
+        assert!(slot_needs_encryption(DataSlot::Real));
+        // 迁移完成后：不需要。
+        let (_vault, unlocked) = Vault::create("主密码aaaa", None, false).unwrap();
+        set_key_handle(*unlocked.unwrap().dek, false);
+        ensure_slot_encrypted().unwrap();
+        assert!(
+            !slot_needs_encryption(DataSlot::Real),
+            "已迁移的槽位不该再显示「正在加密」"
+        );
+        // 两套密码各自只看自己槽位：真槽已密文，诱饵槽空文件也不需要。
+        assert!(!slot_needs_encryption(DataSlot::Decoy));
+        // 诱饵槽有自己的明文文件时独立判定，不影响真槽。
+        std::fs::write(
+            crate::storage::slot_file_for(DataSlot::Decoy, "config.json").unwrap(),
+            b"{}",
+        )
+        .unwrap();
+        assert!(slot_needs_encryption(DataSlot::Decoy));
+        assert!(
+            !slot_needs_encryption(DataSlot::Real),
+            "诱饵的明文文件不该让真槽显示「正在加密」"
+        );
         drop(dir);
         reset();
     }

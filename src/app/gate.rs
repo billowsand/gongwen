@@ -254,6 +254,15 @@ impl AppShell {
                     Ok(mut vault) => match vault.unlock(&password) {
                         Some(unlocked) => {
                             let disable = crate::vault::disable_pending();
+                            // 没有要搬的明文数据（通常：上次解锁已迁完）就直接
+                            // 进工作区，不再显示「正在加密」卡片——那张卡只在
+                            // 真的有活干时出现。两套密码各自只看自己槽位的文件，
+                            // 交替解锁互不触发对方的数据搬运。
+                            if !disable && !crate::vault::slot_needs_encryption(unlocked.slot) {
+                                crate::vault::set_key_handle(*unlocked.dek, true);
+                                self.enter_workspace(ctx, unlocked.slot, None);
+                                return;
+                            }
                             let (kind, title) = if disable {
                                 (WorkKind::Disable, "正在解密数据并停用密码保护…")
                             } else {

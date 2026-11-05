@@ -244,6 +244,18 @@ AEAD、`data_backup` 适配。**验收**：565 MB 真实库迁移后检索 / 词
   未解锁读到密封文件按「损坏/默认」处理，不崩。
 - **备份快照保持密文**：`data_backup::snapshot_database` 源带 key 开、目标也带
   key 导出——备份包等于自带加密；无句柄（未启用应用锁）时两端明文，与磁盘一致。
+- **解锁快进路径（2026-11-05 修订）**：「正在加密现有数据」卡片只在**真的有活干**
+  时出现——解锁命中后先跑 `vault::slot_needs_encryption(slot)`（纯文件头嗅探：
+  库头 16 字节看 `SQLite format 3` 魔数 + 名单内小文件看 `GWA1` 魔数，不打开
+  数据库），该槽位没有明文数据就直接带 key 进工作区，不起后台线程。此前每次
+  解锁都显示卡片，是因为判定形态走 `cipher_integrity_check` 全库 HMAC 扫描，
+  大库每次解锁都要扫一遍。`database_matches` 也改成了带 key 读 `sqlite_master`
+  （只碰第一页），不再全库扫描。
+- **两套密码交替解锁互不冲突**：解锁搬运一律显式按命中槽位操作——`begin_work`
+  先 `set_current_slot(slot)` 再起线程，库路径与名单文件都走 `slot_file` 映射；
+  两套 DEK 各自只管自己槽位的文件（真的库用真 DEK、诱饵 `alt-` 文件用诱饵
+  DEK），「诱饵槽有明文文件」也不会让真槽显示搬运卡片
+  （`slot_needs_encryption_sniffs_heads_per_slot` 测试钉死）。
 - **测试旁路**：无句柄时 `storage::apply_db_key` 空转，全部既有测试照旧跑明文库；
   句柄在测试里是**线程本地**覆盖（`TEST_KEY_HANDLE`，同 `TEST_CONFIG_DIR` 思路），
   并行测试互不清句柄。
