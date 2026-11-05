@@ -49,7 +49,7 @@
 | 章 | 内容 |
 |---|---|
 | [19 稿件管理](../assets/help/19-manuscripts.md) | 状态机、盖章附件与稿件包迁移 |
-| [20 设置全解](../assets/help/20-settings.md) | 十个分区逐项说明 |
+| [20 设置全解](../assets/help/20-settings.md) | 十三个分区逐项说明 |
 | [21 数据、备份与迁移](../assets/help/21-data.md) | 数据存放路径与备份建议 |
 | [22 送批材料](../assets/help/22-send-package.md) | 呈批件挂随行件、合并 PDF 与归档钉版 |
 | [23 任务助手](../assets/help/23-task-assistant.md) | 三栏任务看板、粘贴填表与待整理建议 |
