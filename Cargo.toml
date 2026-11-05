@@ -120,6 +120,14 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# 启动前的图形能力探测（src/gl_boot/）：探测跑在子进程里，用 Xlib / GLX 建一个
+# 离屏上下文，看这台机器能不能给出 OpenGL。winit 本来就在依赖树里（eframe 带的），
+# 这里只是声明直接引用，用来挂 X11 错误钩子；x11-dl 同样是 winit 带进来的，
+# 动态加载 libX11 / libGL，不新增系统依赖。
+winit = { version = "0.30.13", default-features = false, features = ["x11"] }
+x11-dl = "2.21"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # winit 的窗口图标命令在 macOS 上无效；用 AppKit 同步更新 Dock 图标。
 # NSPasteboard / NSURL 用于把导出成品放进剪贴板（复制文件）。

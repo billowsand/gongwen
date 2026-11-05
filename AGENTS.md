@@ -301,6 +301,23 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   `src/ai_services/persistence.rs`。本机构建 vendored OpenSSL 需便携 Strawberry Perl，
   cargo 命令前 `export PERL="C:/Users/lisiy/perl/perl/bin/perl.exe"`。
 
+- **Linux 图形环境兜底**（麒麟 V10 上一打开就崩：X 服务器回 `GLXBadContextTag`，
+  winit 对任何 X 错误都直接 panic，于是「第一次显示窗口」时崩；panic 毒化了
+  winit 的互斥量，清理阶段二次 panic 变成核心转储）：**已实现，待真机验收**。
+  做法三件事：①建窗口之前在**子进程**里探测图形能力——用的请求跟 eframe/glutin
+  实际发的完全一致（3.3 核心配置 → OpenGL ES 2.0 兜底 → 客户端没有
+  `GLX_ARB_create_context` 时走旧式 `glXCreateNewContext`），确认建不出上下文就
+  改用软件渲染（Mesa 的 llvmpipe）再探一次；②装 winit 的 Xlib 错误钩子，把迟到的
+  扩展类错误（GLX 等，错误码 ≥ 128）接住记进日志，不再让程序崩，核心错误仍交回
+  winit；③启动失败时给中文提示与自救办法，不再只丢一个日志路径。探测结论、GLX
+  错误、降级过程写进配置目录 `logs/gl-boot.log`；探测全程在子进程里，裸 FFI 出错
+  也只是子进程退出。代码在 `src/gl_boot/`（Linux 专有；`x11-dl` 动态加载
+  libX11/libGL，不新增系统依赖；`winit` 与 `x11-dl` 本来就在依赖树里，只声明直接
+  引用）。已知边界：eframe 在 Linux 固定「先 GLX 后 EGL」（`ApiPreference::FallbackEgl`
+  实为 `GlxThenEgl`），老 Mesa 的 GLX 不支持核心配置时只能靠 ES 兜底或软件渲染，
+  强制 EGL 或换渲染后端不在本次范围。改这块前先读 `scripts/smoke-launch-linux.sh`
+  开头那段注释（老 Mesa 的 GLX 路径早就被 CI 标注为不安全）。
+
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 
 > 2026-10-03 按智能体工作台方案修订（`docs/ai-agent-workbench.md` 第二节 D1–D3）。

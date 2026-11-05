@@ -2866,7 +2866,9 @@ dependencies = [
  "url",
  "uuid",
  "windows-sys 0.61.2",
+ "winit",
  "winresource",
+ "x11-dl",
  "zeroize",
  "zip 8.6.0",
 ]

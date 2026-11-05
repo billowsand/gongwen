@@ -32,6 +32,11 @@ mod export;
 mod file_clipboard;
 mod file_limits;
 mod font_cmap;
+// 图形环境兜底（Linux）：探测 GL 能力、必要时降级软件渲染、迟到的 GLX 错误不再崩。
+// 模块里有裸 FFI，按仓库约定在声明处单独放行 unsafe。
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+mod gl_boot;
 mod help;
 mod highlight;
 mod images;
@@ -108,6 +113,12 @@ use std::rc::Rc;
 use app::gate::AppShell;
 
 fn main() -> eframe::Result {
+    // 图形能力探测子进程：只做探测、打印一行结果就退出，主进程照常建窗口。
+    // 放在最前面，免得子进程也去抢单实例锁、建窗口。
+    #[cfg(target_os = "linux")]
+    if let Some(code) = gl_boot::probe_child_entry() {
+        std::process::exit(code);
+    }
     // 最先装：之后读配置、装字体、建窗口任何一步 panic 都要留下日志。
     crash_log::install();
     // 双击 .gwx 时系统把文件路径作为参数传进来。
@@ -159,6 +170,12 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
+    // 建窗口之前先探一次图形环境：麒麟 V10 这类机器上 OpenGL 上下文可能建不起来，
+    // 探测到确实不行就改用软件渲染；同时装上 X11 错误钩子，迟到的 GLX 错误
+    // 不再把程序打成核心转储。
+    #[cfg(target_os = "linux")]
+    gl_boot::prepare();
+
     let result = eframe::run_native(
         version::APP_TITLE,
         options,
@@ -179,6 +196,13 @@ fn main() -> eframe::Result {
     );
     if let Err(error) = &result {
         crash_log::record_startup_error(error);
+        // 图形环境起不来时，把能救命的办法说清楚，别只丢一个日志路径。
+        #[cfg(target_os = "linux")]
+        {
+            let hint = gl_boot::startup_failure_hint();
+            gl_boot::log_line(&format!("启动失败：{error}\n{hint}"));
+            eprintln!("启动失败：{error}\n{hint}");
+        }
     }
     result
 }
