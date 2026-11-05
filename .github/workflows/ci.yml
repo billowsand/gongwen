@@ -54,6 +54,13 @@ jobs:
           Copy-Item ../runtime/pi/host/node_modules ./node_modules -Recurse
           ../runtime/pi/node.exe --test
 
+      - name: Pi writing evaluation judge regression (offline)
+        shell: pwsh
+        run: |
+          ./runtime/pi/node.exe --test scripts/pi-writing-eval.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./runtime/pi/node.exe scripts/pi-writing-eval.mjs --selftest
+
       - name: Offline Pi runtime acceptance
         shell: pwsh
         run: ./runtime/pi/node.exe scripts/pi-offline-acceptance.mjs --runtime ./runtime/pi
@@ -106,6 +113,11 @@ jobs:
 
       - name: Offline Pi runtime acceptance
         run: ./runtime/pi/bin/node scripts/pi-offline-acceptance.mjs --runtime ./runtime/pi
+
+      - name: Pi writing evaluation judge regression (offline)
+        run: |
+          ./runtime/pi/bin/node --test scripts/pi-writing-eval.test.mjs
+          ./runtime/pi/bin/node scripts/pi-writing-eval.mjs --selftest
 
       - name: Build release binary
         run: cargo build --release --locked
