@@ -357,13 +357,15 @@ impl Vault {
                 continue;
             };
             if self.data.slots[index].wrapped.is_empty() {
-                // v1 → v2 升级：现生成 DEK、裹进当前槽，写回失败下次再补。
+                // v1 → v2 升级：现生成 DEK、裹进当前槽并**必须写回成功**才交出句柄。
+                // fail-closed：写回失败仍返回新 DEK 的话，本次会把数据库迁成这把
+                // 临时密钥的密文，而磁盘上包裹仍是空的——下次解锁会换一把新
+                // DEK，数据永久打不开。
                 let dek = random_dek().ok()?;
-                if let Ok(wrapped) = wrap_dek(&wrap_key, &dek) {
-                    self.data.slots[index].wrapped = wrapped;
-                    self.data.v = FORMAT_V;
-                    let _ = self.save();
-                }
+                let wrapped = wrap_dek(&wrap_key, &dek).ok()?;
+                self.data.slots[index].wrapped = wrapped;
+                self.data.v = FORMAT_V;
+                self.save().ok()?;
                 return Some(Unlocked {
                     slot: index_slot(index),
                     dek: Zeroizing::new(dek),
@@ -573,10 +575,10 @@ pub(crate) fn open_bytes(dek: &[u8; DEK_LEN], sealed: &[u8]) -> Result<Vec<u8>> 
         .context("文件解密失败（密钥不符或内容损坏）")
 }
 
-/// 需要 AEAD 保护的配置文件名单（相对配置目录、按当前槽位映射）。
-/// 都在 `slot_file` 入口内；数据库不在这份名单里（走 SQLCipher 迁移）。
-pub(crate) const SEALED_FILE_NAMES: [&str; 3] =
-    ["config.json", ".zip-password", "api-secrets.json"];
+/// 应用锁启用后必须整份密封的文件名单。唯一来源是 [`crate::storage::SEALED_FILE_NAMES`]，
+/// 这里只做转出：解锁迁移、明文嗅探、解封、擦除都必须用同一份，漏一项就是永久明文。
+/// 数据库不在这份名单里（走 SQLCipher 迁移）。
+pub(crate) const SEALED_FILE_NAMES: [&str; 6] = crate::storage::SEALED_FILE_NAMES;
 
 // ── 明文 ⇄ 密文迁移 ─────────────────────────────────────────────────
 
@@ -587,18 +589,81 @@ pub(crate) fn ensure_slot_encrypted() -> Result<()> {
     migrate_database(&storage::manuscript_db_path()?, Migration::ToEncrypted)?;
     for name in SEALED_FILE_NAMES {
         let path = storage::slot_file(name)?;
-        if path.is_file() && !is_sealed_file(&std::fs::read(&path)?) {
-            let plain =
-                std::fs::read(&path).with_context(|| format!("读取 {} 失败", path.display()))?;
-            let sealed = seal_bytes(&key, &plain)?;
-            storage::atomic_write(&path, |file| {
-                use std::io::Write as _;
-                file.write_all(&sealed)?;
-                Ok(())
-            })?;
+        if path.is_file() {
+            seal_plaintext_file(&path, &key)?;
+        }
+    }
+    // 接口定义目录（apis/*.openapi.json）与旧接口迁移兜底文件同样是敏感明文：
+    // 里有内网地址与参数说明。目录不在 SEALED_FILE_NAMES（是动态文件名），
+    // 逐文件密封；启用加密前留下的明文在这里一次迁完。
+    if let Ok(dir) = storage::slot_subdir("apis")
+        && let Ok(entries) = std::fs::read_dir(&dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                seal_plaintext_file(&path, &key)?;
+            }
+        }
+    }
+    // `config.json` 的副本（身份迁移前备份）与旧接口 `apis.json.bak`：都在槽位根下。
+    // 只处理**当前槽位**的条目，绝不能拿当前 DEK 去封另一个槽的文件。
+    if let Ok(dir) = storage::config_dir()
+        && let Ok(entries) = std::fs::read_dir(&dir)
+    {
+        let slot = storage::current_slot();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if storage::slot_relative_name(&name, slot).is_some_and(|name| {
+                name.starts_with("config.json.") || name.ends_with("apis.json.bak")
+            }) {
+                seal_plaintext_file(&entry.path(), &key)?;
+            }
         }
     }
     Ok(())
+}
+
+/// 把一个明文文件原地封成密文；已是密文的跳过。失败时保留明文并报错——调用方
+/// （解锁迁移）会把整个槽位判为未完成，下次解锁重试，不能假装成功。
+fn seal_plaintext_file(path: &Path, key: &[u8; DEK_LEN]) -> Result<()> {
+    let raw = std::fs::read(path).with_context(|| format!("读取 {} 失败", path.display()))?;
+    if is_sealed_file(&raw) {
+        return Ok(());
+    }
+    let sealed = seal_bytes(key, &raw)?;
+    storage::atomic_write(path, |file| {
+        use std::io::Write as _;
+        file.write_all(&sealed)?;
+        Ok(())
+    })
+}
+
+/// 这个槽位在磁盘上是否已有**密文形态**的数据（配置或库）。
+///
+/// 用途：锁文件丢失/损坏、或用户选「暂不设置」时，若磁盘上已有加密数据，
+/// 就绝不能以没有密钥的工作区进入——旧实现会在那种状态下把密封配置当损坏
+/// 改名，再以明文写回默认配置（静默降级），并且看起来「数据全没了」。
+/// 这里只做文件头嗅探，不打开数据库。
+pub(crate) fn slot_has_encrypted_data(slot: DataSlot) -> bool {
+    if let Ok(path) = storage::slot_file_for(slot, "config.json")
+        && std::fs::read(&path).is_ok_and(|bytes| is_sealed_file(&bytes))
+    {
+        return true;
+    }
+    if let Ok(path) = storage::slot_file_for(slot, "manuscripts.db")
+        && std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 0)
+        && !file_head_is_plaintext_db(&path)
+    {
+        return true;
+    }
+    // 密钥类小文件也足以证明「这里有过加密工作区」。
+    SEALED_FILE_NAMES.iter().skip(1).any(|name| {
+        storage::slot_file_for(slot, name)
+            .map(|path| std::fs::read(&path).is_ok_and(|bytes| is_sealed_file(&bytes)))
+            .unwrap_or(false)
+    })
 }
 
 /// 这个槽位还有没有「需要搬进密文」的明文数据？闸门解锁前先问它：
@@ -612,11 +677,39 @@ pub(crate) fn slot_needs_encryption(slot: DataSlot) -> bool {
     {
         return true;
     }
-    SEALED_FILE_NAMES.iter().any(|name| {
+    let sealed_names_pending = SEALED_FILE_NAMES.iter().any(|name| {
         storage::slot_file_for(slot, name)
             .map(|path| path.is_file() && file_head_is_not_sealed(&path))
             .unwrap_or(false)
-    })
+    });
+    if sealed_names_pending {
+        return true;
+    }
+    // 接口定义目录与旧接口/配置副本：文件名是动态的，逐个嗅探文件头。
+    if let Ok(dir) = storage::slot_file_for(slot, "apis")
+        && let Ok(entries) = std::fs::read_dir(&dir)
+        && entries.flatten().any(|entry| {
+            let path = entry.path();
+            path.is_file() && file_head_is_not_sealed(&path)
+        })
+    {
+        return true;
+    }
+    if let Ok(dir) = storage::config_dir()
+        && let Ok(entries) = std::fs::read_dir(&dir)
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if storage::slot_relative_name(&name, slot).is_some_and(|name| {
+                name.starts_with("config.json.") || name.ends_with("apis.json.bak")
+            }) && file_head_is_not_sealed(&entry.path())
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// 库文件头嗅探：`SQLite format 3` 魔数 = 明文库，需要迁移；文件不存在或
@@ -745,6 +838,9 @@ fn migrate_database(path: &Path, direction: Migration) -> Result<()> {
         // 源库形态确认：能列出 sqlite_master 才搬，不然是损坏或形态不符。
         src.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
             .context("原库读不了（已损坏或形态不符）")?;
+        // 尽量把 WAL 里的页并回主库，减少下面清理时残留的明文页；有别的连接时
+        // 这一步会失败，按尽力而为处理，后面仍会覆写删除 sidecar。
+        let _ = src.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
         export_database(&src, &temp, if want_active { Some(&key) } else { None })
             .context("整库迁移导出失败")?;
         Ok(())
@@ -766,9 +862,15 @@ fn migrate_database(path: &Path, direction: Migration) -> Result<()> {
     std::fs::rename(&temp, path).context("换上新库失败")?;
     overwrite_then_delete(&leftover);
     for suffix in ["-wal", "-shm"] {
-        let sidecar = PathBuf::from(format!("{}{suffix}", leftover.display()));
+        // sidecar 跟着**原名**走：rename 只挪了主库文件，`path-wal` / `path-shm`
+        // 还在原处，里面可能残留迁移前的明文页（`leftover-wal` 从不出现）。
+        let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
         if sidecar.exists() {
             overwrite_then_delete(&sidecar);
+        }
+        let old_sidecar = PathBuf::from(format!("{}{suffix}", leftover.display()));
+        if old_sidecar.exists() {
+            overwrite_then_delete(&old_sidecar);
         }
     }
     Ok(())
@@ -844,34 +946,64 @@ fn overwrite_then_delete(path: &Path) {
 /// 锁定后闸门输入一次密码完成解密；若其间重启，靠这个标记文件在下次启动
 /// 重新进入「输密码完成停用」的闸门形态。
 const DISABLE_PENDING_FILE: &str = "vault.pending-disable";
-static DISABLE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 标记明文格式：版本 + 当前真实槽 `wrapped` 指纹。指纹绑住「这一代锁封套」，
+/// 改密后旧标记自动失效，避免把旧请求（或备份里翻出来的旧标记）当新请求重放。
+const DISABLE_MARKER_VERSION: &str = "gongwen-vault-disable-v1";
 
+/// 标记明文：只有拿得到当前 DEK 的调用方（已解锁）才写得出来。
+fn disable_marker_plaintext() -> Result<Vec<u8>> {
+    let vault = Vault::load()?;
+    Ok(format!("{DISABLE_MARKER_VERSION}\n{}", vault.data.slots[0].wrapped).into_bytes())
+}
+
+/// 登记「停用密码保护」：标记用当前 DEK 密封。离线攻击者能写配置目录却拿不到
+/// DEK，伪造不出可用的标记——旧实现只写一个明文文件，谁都能植入它让下次解锁
+/// 自动把全部数据解成明文并删掉锁封套。
 pub(crate) fn request_disable() -> Result<()> {
-    let path = storage::config_dir()?.join(DISABLE_PENDING_FILE);
+    if storage::current_slot() != DataSlot::Real {
+        bail!("诱饵系统里不能停用密码保护");
+    }
+    let handle = key_handle().context("停用申请需要当前数据密钥")?;
+    let plain = disable_marker_plaintext()?;
+    let sealed = seal_bytes(handle.dek(), &plain)?;
+    let path = storage::slot_file(DISABLE_PENDING_FILE)?;
     storage::atomic_write(&path, |file| {
         use std::io::Write as _;
-        file.write_all(b"disable-pending")?;
+        file.write_all(&sealed)?;
         Ok(())
-    })?;
-    DISABLE_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);
-    Ok(())
+    })
 }
 
 pub(crate) fn cancel_disable() {
-    DISABLE_PENDING.store(false, std::sync::atomic::Ordering::Relaxed);
-    if let Ok(path) = storage::config_dir() {
-        let _ = std::fs::remove_file(path.join(DISABLE_PENDING_FILE));
+    if let Ok(path) = storage::slot_file(DISABLE_PENDING_FILE) {
+        let _ = std::fs::remove_file(path);
     }
 }
 
-/// 停用在途（本会话或上个会话标记了、还没完成解密）。
-pub(crate) fn disable_pending() -> bool {
-    if DISABLE_PENDING.load(std::sync::atomic::Ordering::Relaxed) {
-        return true;
-    }
-    storage::config_dir()
-        .map(|dir| dir.join(DISABLE_PENDING_FILE).exists())
+/// 标记文件是否存在。**只给锁屏文案看**，不能当授权依据：文件的真伪要靠
+/// [`disable_pending`] 用解锁后的 DEK 认证。
+pub(crate) fn disable_marker_present() -> bool {
+    storage::slot_file(DISABLE_PENDING_FILE)
+        .map(|path| path.exists())
         .unwrap_or(false)
+}
+
+/// 停用在途：用刚解锁的 DEK 解标记，版本与 `wrapped` 指纹都要对得上。
+/// 旧明文标记一律不认（视为没有请求），解不开也视为没有请求。
+pub(crate) fn disable_pending(dek: &[u8; DEK_LEN]) -> bool {
+    let Ok(path) = storage::slot_file(DISABLE_PENDING_FILE) else {
+        return false;
+    };
+    let Ok(raw) = std::fs::read(&path) else {
+        return false;
+    };
+    if !is_sealed_file(&raw) {
+        return false;
+    }
+    let Ok(plain) = open_bytes(dek, &raw) else {
+        return false;
+    };
+    disable_marker_plaintext().is_ok_and(|expected| plain == expected)
 }
 
 /// 停用完成（或用户取消）后清掉两条标记。
@@ -1293,6 +1425,112 @@ mod tests {
         assert!(
             !slot_needs_encryption(DataSlot::Real),
             "诱饵的明文文件不该让真槽显示「正在加密」"
+        );
+        drop(dir);
+        reset();
+    }
+    /// 停用标记必须用解锁后的 DEK 认证：旧式明文标记（离线可伪造）一律不认。
+    #[test]
+    fn disable_marker_must_be_authenticated() {
+        use std::io::Write as _;
+        let dir = use_temp_dir();
+        let (_vault, unlocked) = Vault::create("真实口令abc", None, false).unwrap();
+        let dek = *unlocked.unwrap().dek;
+        set_key_handle(dek, true);
+        let path = crate::storage::slot_file(DISABLE_PENDING_FILE).unwrap();
+        // 伪造的旧明文标记：内容对、格式旧，必须视为没有请求。
+        crate::storage::atomic_write(&path, |file| {
+            file.write_all(b"disable-pending")?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!disable_pending(&dek), "明文标记不能触发停用");
+        assert!(disable_marker_present(), "文件存在仍要能在锁屏提示");
+
+        // 正常登记一份：只有同一把 DEK 能认证通过。
+        request_disable().unwrap();
+        assert!(disable_pending(&dek));
+        assert!(!disable_pending(&[9u8; DEK_LEN]), "别的密钥解不开标记");
+        cancel_disable();
+        assert!(!disable_pending(&dek));
+        assert!(!disable_marker_present());
+        drop(dir);
+        reset();
+    }
+
+    /// 启用加密时把风格档案、接口定义与旧接口兜底文件一起密封，且幂等。
+    #[test]
+    fn ensure_slot_encrypted_seals_styles_and_api_definitions() {
+        let dir = use_temp_dir();
+        set_key_handle([3u8; DEK_LEN], true);
+        let styles = crate::storage::slot_file("styles.json").unwrap();
+        std::fs::write(&styles, br#"{"styles":[]}"#).unwrap();
+        let apis = crate::storage::slot_subdir("apis").unwrap();
+        std::fs::create_dir_all(&apis).unwrap();
+        let api = apis.join("示例.openapi.json");
+        std::fs::write(&api, br#"{"openapi":"3.0.0"}"#).unwrap();
+        let legacy = crate::storage::config_dir().unwrap().join("apis.json.bak");
+        std::fs::write(&legacy, br#"{"legacy":true}"#).unwrap();
+
+        assert!(slot_needs_encryption(DataSlot::Real));
+        ensure_slot_encrypted().unwrap();
+        for path in [&styles, &api, &legacy] {
+            let raw = std::fs::read(path).unwrap();
+            assert!(is_sealed_file(&raw), "{} 应已密封", path.display());
+        }
+        assert!(!slot_needs_encryption(DataSlot::Real));
+        // 幂等：再跑一次不重复加密、不破坏已封文件。
+        ensure_slot_encrypted().unwrap();
+        assert!(is_sealed_file(&std::fs::read(&styles).unwrap()));
+        drop(dir);
+        reset();
+    }
+
+    /// 磁盘上已有密文数据时，闸门必须能识别出来（锁文件丢失不能直接进工作区）。
+    #[test]
+    fn encrypted_data_detection_covers_config_and_database() {
+        let dir = use_temp_dir();
+        assert!(!slot_has_encrypted_data(DataSlot::Real));
+        let sealed = seal_bytes(&[5u8; DEK_LEN], b"{}").unwrap();
+        std::fs::write(
+            crate::storage::slot_file_for(DataSlot::Real, "config.json").unwrap(),
+            sealed,
+        )
+        .unwrap();
+        assert!(slot_has_encrypted_data(DataSlot::Real));
+        assert!(!slot_has_encrypted_data(DataSlot::Decoy));
+        // 明文库不算加密数据。
+        drop(dir);
+        reset();
+        let dir = use_temp_dir();
+        let path = crate::storage::manuscript_db_path().unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+        assert!(!slot_has_encrypted_data(DataSlot::Real));
+        drop(dir);
+        reset();
+    }
+    /// 迁移真实槽时不能拿真实 DEK 去封诱饵槽的配置副本（反之亦然）。
+    #[test]
+    fn ensure_slot_encrypted_only_touches_current_slot_copies() {
+        let dir = use_temp_dir();
+        set_key_handle([6u8; DEK_LEN], true);
+        let real = crate::storage::config_dir()
+            .unwrap()
+            .join("config.json.身份迁移前备份");
+        let decoy = crate::storage::config_dir()
+            .unwrap()
+            .join("alt-config.json.身份迁移前备份");
+        std::fs::write(&real, b"{}").unwrap();
+        std::fs::write(&decoy, b"{}").unwrap();
+        ensure_slot_encrypted().unwrap();
+        assert!(is_sealed_file(&std::fs::read(&real).unwrap()));
+        assert_eq!(
+            std::fs::read(&decoy).unwrap(),
+            b"{}",
+            "真实槽迁移不能碰诱饵槽的文件"
         );
         drop(dir);
         reset();

@@ -14,12 +14,11 @@ fn store_path(name: &str) -> anyhow::Result<PathBuf> {
     crate::storage::slot_file(name)
 }
 
-/// 应用锁启用后要 AEAD 加密的接口文件（设计文档 4.3 清单）：
-/// 密钥、环境地址、实测记录。其余 JSON（风格档案等）保持明文。
-const SEALED_JSON_NAMES: [&str; 3] = ["api-secrets.json", "api-envs.json", "api-tests.json"];
-
+/// 应用锁启用后要 AEAD 加密的接口/风格文件。
+/// **名单只有一份**：`storage::SEALED_JSON_NAMES`，vault 的迁移/擦除名单也由
+/// `storage::SEALED_FILE_NAMES` 派生（二期曾因名单不一致漏掉 api-envs/api-tests）。
 fn is_sealed_name(name: &str) -> bool {
-    SEALED_JSON_NAMES.contains(&name)
+    crate::storage::SEALED_JSON_NAMES.contains(&name)
 }
 
 pub(crate) fn read_json<T: serde::de::DeserializeOwned + Default>(name: &str) -> anyhow::Result<T> {
@@ -53,10 +52,18 @@ pub(crate) fn write_json<T: Serialize>(name: &str, value: &T) -> anyhow::Result<
     // 原子写 + 仅本人可读写：这里落的是接口密钥与配置，不能写到一半，
     // 也不能让同机的其他用户读到。
     let mut bytes = serde_json::to_vec_pretty(value)?;
-    if is_sealed_name(name)
-        && let Some(handle) = crate::vault::key_handle()
-    {
-        bytes = crate::vault::seal_bytes(handle.dek(), &bytes)?;
+    if is_sealed_name(name) {
+        match crate::vault::key_handle() {
+            Some(handle) => bytes = crate::vault::seal_bytes(handle.dek(), &bytes)?,
+            None => {
+                // 降级防护：磁盘上已是密文、当前却没有密钥句柄时不得写明文覆盖。
+                if path.exists()
+                    && std::fs::read(&path).is_ok_and(|raw| crate::vault::is_sealed_file(&raw))
+                {
+                    anyhow::bail!("{} 已加密但当前未解锁，拒绝以明文覆盖", path.display());
+                }
+            }
+        }
     }
     crate::storage::atomic_write(&path, |file| {
         use std::io::Write as _;

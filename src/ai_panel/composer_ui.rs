@@ -93,20 +93,13 @@ impl DraftPage<'_> {
                         // 材料要的是原文：剪贴板里有 HTML 就用它转出来的 Markdown
                         // （网页、Word 的表格不会散成制表符），没有就照旧用纯文本。
                         let material = crate::rich_paste::material_text(text);
-                        match super::paste::PastedFile::new(&material) {
-                            Ok(file) => {
-                                composer.materials.push(file);
-                                // 逐篇用途跟着材料一起进，旧会话没有这项时回退到默认值。
-                                composer.pi_material_roles.push(composer.pi_material_role);
-                                composer.error = None;
-                                return false;
-                            }
-                            Err(error) => {
-                                composer.error = Some(format!(
-                                    "临时材料创建失败（{error}），已保留在输入框中。"
-                                ));
-                            }
-                        }
+                        composer
+                            .materials
+                            .push(super::paste::PastedFile::new(&material));
+                        // 逐篇用途跟着材料一起进，旧会话没有这项时回退到默认值。
+                        composer.pi_material_roles.push(composer.pi_material_role);
+                        composer.error = None;
+                        return false;
                     }
                     true
                 });
@@ -504,9 +497,8 @@ impl DraftPage<'_> {
                                         material.chars
                                     )))
                                     .on_hover_text(format!(
-                                        "{}\n临时文件：{}\n全文作为材料发送；点 × 取消引用",
-                                        material.material.name,
-                                        material.file.path().display()
+                                        "{}\n全文作为材料发送；点 × 取消引用",
+                                        material.material.name
                                     ))
                                     .clicked()
                                 {

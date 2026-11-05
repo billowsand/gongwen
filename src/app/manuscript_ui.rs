@@ -18,6 +18,7 @@ pub(crate) use dialogs::{
     archive_form, batch_delete_dialog, dialog_notice, large_dialog_size, row_delete_confirm,
 };
 pub(crate) use import::{import_preview_form, pending_merge_form, zip_password_form};
+pub(crate) use sync_io::purge_stale_preview_pdfs;
 
 /// 稿件列表上的操作在遍历表格时不能直接改 `self`，先记下来循环结束后再执行。
 pub(crate) enum ManuscriptAction {

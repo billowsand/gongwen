@@ -310,6 +310,20 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   `src/storage.rs::apply_db_key`（六个开库点调用）、`src/data_backup.rs`、
   `src/ai_services/persistence.rs`。本机构建 vendored OpenSSL 需便携 Strawberry Perl，
   cargo 命令前 `export PERL="C:/Users/lisiy/perl/perl/bin/perl.exe"`。
+  **2026-11-06 第三期细化**：资源全生命周期方案见 `docs/encrypted-resource-lifecycle.md`，
+  覆盖导入/历史引用/稿件包/全量备份恢复/中间文件/Pi；Mermaid 缓存也需保护。
+  首先接入加密模式的单次输出风险确认（`src/app/output_guard.rs`）；资源加密与
+  迁移尚未完成，勿把确认框当作第三期已完成。实施状态与验证记录见该文末节。
+  **2026-11-06 第二轮加固（已实现、待真机验收）**：对阶段 A 与二期加密做三路审计后
+  修复了一批不依赖 B–E 的实现缺陷——明文物出确认补齐 13 个漏网入口（风格档案、标准
+  词库、全量备份、四码词表、自定义技能、输入法词表、校对词表、OpenAPI、稿件包），
+  确认改 fail-closed；密封名单统一并补齐 `api-envs`/`api-tests`/`styles`，接口定义与
+  风格档案落密文；`storage::load` 不再把「密封但无密钥」当损坏改名、无密钥拒写明文，
+  闸门增加「锁文件丢失但磁盘已有加密数据」状态；停用标记改 DEK 密封且只允许真实槽；
+  备份排除停用标记、双槽库只对当前槽做带密钥快照、恢复后强制重解锁；`images/`、
+  `ime/`、`skills/`、`metrics`、Pi 校准改槽位目录，预览副本/份号清单/粘贴临时文件/
+  日志/收件箱/staging 的明文与权限收紧。仍未做的是 B–E（资源内容加密、Mermaid/Pi
+  迁移、打印内存化）与文件 AEAD 的 AAD/格式版本，详见该文末节。
 
 - **Linux 图形环境兜底**（麒麟 V10 上一打开就崩：X 服务器回 `GLXBadContextTag`，
   winit 对任何 X 错误都直接 panic，于是「第一次显示窗口」时崩；panic 毒化了

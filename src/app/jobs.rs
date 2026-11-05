@@ -587,11 +587,14 @@ impl GongwenApp {
                     match result {
                         Ok(report) => {
                             self.status = format!(
-                                "已从 {} 恢复 {} 个文件，请重启应用。",
+                                "已从 {} 恢复 {} 个文件。为避免用旧密钥覆盖恢复的数据，                                 正在退回锁屏，请重新解锁（使用备份时的应用密码）。",
                                 path.display(),
                                 report.restored_files
                             );
                             self.backup_restore_result = Some(report);
+                            // 数据目录已被整体替换：当前句柄与连接全部过期。
+                            crate::vault::clear_key_handle();
+                            self.request_force_relock();
                         }
                         Err(error) => {
                             // 恢复中途失败时数据已按留底目录回滚；连接要重新打开，

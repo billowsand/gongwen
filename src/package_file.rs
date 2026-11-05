@@ -82,11 +82,21 @@ pub fn stage(source: &Path, root: &Path) -> Result<PathBuf> {
         .file_name()
         .with_context(|| format!("{} 没有文件名", source.display()))?;
     let dir = root.join(uuid::Uuid::new_v4().simple().to_string());
-    fs::create_dir_all(&dir).with_context(|| format!("无法创建暂存目录 {}", dir.display()))?;
+    create_private_dir(root).with_context(|| format!("无法创建暂存目录 {}", root.display()))?;
+    create_private_dir(&dir).with_context(|| format!("无法创建暂存目录 {}", dir.display()))?;
     let target = dir.join(name);
     let copied = fs::copy(source, &target);
     match copied {
-        Ok(bytes) if bytes == meta.len() => Ok(target),
+        Ok(bytes) if bytes == meta.len() => {
+            // `fs::copy` 会照搬源文件权限，这里统一收紧到仅当前用户可读写。
+            #[cfg(unix)]
+            if let Err(error) = restrict_to_owner(&target) {
+                let _ = fs::remove_dir_all(&dir);
+                return Err(error)
+                    .with_context(|| format!("无法设置暂存文件权限 {}", target.display()));
+            }
+            Ok(target)
+        }
         Ok(_) => {
             let _ = fs::remove_dir_all(&dir);
             bail!("复制 {} 时文件大小发生变化，请稍后再试", source.display())
@@ -96,6 +106,25 @@ pub fn stage(source: &Path, root: &Path) -> Result<PathBuf> {
             Err(error).with_context(|| format!("无法读取 {}", source.display()))
         }
     }
+}
+
+/// 建暂存目录并收紧到仅当前用户：暂存里有用户的稿件包副本。
+/// Windows 上没有对应的权限位，只建目录。
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Unix 下把文件收紧到仅当前用户可读写。
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 /// 导入用完一个副本后删掉它所在的子目录。只删 `root` 底下的东西，
@@ -215,5 +244,21 @@ mod tests {
         let dir = temp.path().join("目录.gwx");
         fs::create_dir(&dir).unwrap();
         assert!(stage(&dir, &root).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_copy_and_directories_are_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("来函.gwx");
+        fs::write(&source, b"PK-content").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
+        let root = temp.path().join("incoming");
+        let staged = stage(&source, &root).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&root), 0o700);
+        assert_eq!(mode(staged.parent().unwrap()), 0o700);
+        assert_eq!(mode(&staged), 0o600);
     }
 }

@@ -719,8 +719,14 @@ pub(crate) fn write_pdf(
         let outcome =
             self::typst::write_pdf(path, input, markdown, display, fonts, numbering, elements)?;
         if let Some(roster) = copy_roster(input) {
-            // 清单只为方便整理，写失败不影响 PDF。
-            let _ = std::fs::write(path.with_extension("份号清单.txt"), roster);
+            // 清单含份号、主送/抄送/承办单位，和 PDF 同等敏感：原子写 + Unix 0600，
+            // 不能默认 0644 摊在输出目录里。写失败不影响 PDF。
+            let roster_path = path.with_extension("份号清单.txt");
+            let _ = crate::storage::atomic_write(&roster_path, |file| {
+                use std::io::Write as _;
+                file.write_all(roster.as_bytes())?;
+                Ok(())
+            });
         }
         Ok(outcome)
     }

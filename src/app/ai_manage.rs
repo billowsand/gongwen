@@ -636,7 +636,8 @@ impl GongwenApp {
     }
 
     fn latest_pi_calibration_summary(&self) -> String {
-        let Ok(path) = crate::storage::config_dir().map(|dir| dir.join("pi/capability.json"))
+        // 槽位感知：诱饵系统读自己的 `alt-pi`，不会露出真实系统的校准档案。
+        let Ok(path) = crate::storage::slot_subdir("pi").map(|dir| dir.join("capability.json"))
         else {
             return "尚未校准。普通 Pi 写作按实际窗口预算运行。".into();
         };
@@ -777,13 +778,14 @@ impl GongwenApp {
                 if self.pi_calibration_profile_matches_current(&profile) =>
             {
                 let saved = (|| -> anyhow::Result<()> {
-                    let config_dir = crate::storage::config_dir()?;
+                    // 校准档案与证据都落在槽位目录里：诱饵系统不碰真实系统的 `pi/`。
+                    let pi_dir = crate::storage::slot_subdir("pi")?;
                     profile.evidence_digest = crate::pi_agent::capability::save_evidence(
-                        &config_dir.join("pi/calibration-evidence"),
+                        &pi_dir.join("calibration-evidence"),
                         &evidence,
                     )
                     .map_err(anyhow::Error::msg)?;
-                    let path = config_dir.join("pi/capability.json");
+                    let path = pi_dir.join("capability.json");
                     let mut entries = crate::pi_agent::capability::load(&path).unwrap_or_default();
                     entries.retain(|entry| entry.identity != profile.identity);
                     entries.push(profile.clone());

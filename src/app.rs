@@ -40,6 +40,7 @@ mod jobs;
 mod knowledge_local;
 mod lexicon_jobs;
 mod manuscript_ui;
+mod output_guard;
 mod pi_jobs;
 mod pi_skill_manager;
 mod printing;
@@ -193,6 +194,10 @@ pub struct GongwenApp {
     next_print_dialog: u64,
     /// 还没问完结果的系统文件对话框；后台线程开窗，主线程每帧问一次。
     pending_file_dialogs: Vec<file_dialog::PendingFileDialog>,
+    pending_output: Option<output_guard::PendingOutput>,
+    /// 工作区生成的明文 PDF 预览副本：锁屏/退出（Drop）时删除。只在内存里
+    /// 记路径，不落任何"临时文件清单"到磁盘。
+    temp_pdfs: Vec<PathBuf>,
     /// 送批材料面板；None 表示未打开。
     send_package: Option<SendPackagePanel>,
     /// 正在后台进行的送批材料合并导出；同一时间只跑一个。
@@ -427,6 +432,9 @@ pub struct GongwenApp {
     last_activity_secs: f64,
     /// 本帧请求退回锁屏：外壳看到后置位就丢掉整个工作区（连接、内存数据）。
     lock_requested: bool,
+    /// 备份恢复完成后：数据目录已整体替换，当前工作区与密钥句柄全部过期。
+    /// 必须**不保存**直接丢弃工作区、强制重新解锁（保存会把旧密钥写进新目录）。
+    force_relock: bool,
 }
 
 /// 导出面板要显示的那几个数，连同各词源占比。整份码表正文不留在这里——
@@ -540,6 +548,9 @@ impl GongwenApp {
                 .display()
                 .to_string();
         }
+        // 上次崩溃/强杀可能留下 PDF 预览副本；启动时清一次（只删缓存目录里
+        // 自己的 manuscript_*.pdf 命名）。
+        crate::app::manuscript_ui::purge_stale_preview_pdfs();
         // 按配置装：配置里关掉了输入法就不装配引擎，不白读词库和语言模型。
         let ime = crate::ime::Ime::new(session::ime_settings_of(&config.ime));
         let (sender, receiver) = mpsc::channel();
@@ -607,6 +618,8 @@ impl GongwenApp {
             print_dialog: None,
             next_print_dialog: 1,
             pending_file_dialogs: Vec::new(),
+            pending_output: None,
+            temp_pdfs: Vec::new(),
             send_package: None,
             send_package_export: None,
             macos_titlebar_metrics,
@@ -764,6 +777,7 @@ impl GongwenApp {
             vault_locked: crate::vault::Vault::probe() == crate::vault::Probe::Locked,
             last_activity_secs: ctx.input(|input| input.time),
             lock_requested: false,
+            force_relock: false,
         };
         app.restore_session();
         app.seed_samples_once();
@@ -1036,6 +1050,7 @@ impl GongwenApp {
         self.quick_find_window(&ctx);
         // 损坏配置、崩溃日志、备份恢复都是全局提示，不依附任何标签页。
         self.data_safety_windows(&ctx);
+        self.output_risk_window(&ctx);
         // 缩放边框放在最后：它要盖在所有浮窗之上，贴边那几像素归窗口缩放。
         self.window_resize_borders(&ctx);
         // 候选窗浮在所有面板之上；这时编辑框已经画完，光标矩形是本帧最终的那一个。
@@ -1051,6 +1066,17 @@ impl GongwenApp {
     /// 外壳每帧问一次：为真时丢掉整个工作区退回锁屏。
     pub(crate) fn take_lock_requested(&mut self) -> bool {
         std::mem::take(&mut self.lock_requested)
+    }
+
+    /// 备份恢复后的强制重锁：**不保存**工作区，直接丢弃。数据目录已经整体
+    /// 替换过，当前连接与密钥都不再对应磁盘内容，任何保存都会破坏恢复结果。
+    pub(crate) fn take_force_relock(&mut self) -> bool {
+        std::mem::take(&mut self.force_relock)
+    }
+
+    /// 备份恢复成功：要求外壳下一帧直接回锁屏、强制重新解锁。
+    pub(crate) fn request_force_relock(&mut self) {
+        self.force_relock = true;
     }
 
     /// 手动（菜单）或超时（空闲）锁定：停掉在跑的 Pi 任务，外壳下一帧丢弃
@@ -1131,6 +1157,16 @@ impl GongwenApp {
     pub(crate) fn shutdown(&mut self) {
         if self.cancel_pi_tasks() {
             std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+    }
+}
+
+impl Drop for GongwenApp {
+    /// 锁定就是把整个工作区丢掉；这里顺带删掉预览用的明文 PDF 副本。
+    /// 只删本工作区登记过的路径，不扫描目录、不碰用户文件。
+    fn drop(&mut self) {
+        for path in self.temp_pdfs.drain(..) {
+            let _ = std::fs::remove_file(path);
         }
     }
 }

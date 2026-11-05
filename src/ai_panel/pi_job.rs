@@ -288,10 +288,7 @@ impl DraftPage<'_> {
         let mut pasted = Vec::new();
         let mut roles = Vec::new();
         for material in inputs {
-            pasted.push(
-                super::paste::PastedFile::new(&material.text)
-                    .map_err(|error| format!("临时材料创建失败（{error}）"))?,
-            );
+            pasted.push(super::paste::PastedFile::new(&material.text));
             // 当时逐篇选的用途原样跟着走，不降成事实材料。
             roles.push(material.role);
         }
@@ -380,10 +377,7 @@ impl DraftPage<'_> {
         let mut pasted = Vec::new();
         let mut roles = Vec::new();
         for source in &task.sources {
-            pasted.push(
-                super::paste::PastedFile::new(&source.text)
-                    .map_err(|error| format!("临时材料创建失败（{error}）"))?,
-            );
+            pasted.push(super::paste::PastedFile::new(&source.text));
             // 内容 / 风格 / 结构三种素材按原用途搬：不编造、也不降成普通事实材料。
             roles.push(match source.role {
                 crate::agent::writing::SourceRole::Content => MaterialRole::Fact,
@@ -406,10 +400,9 @@ impl DraftPage<'_> {
             if body.is_empty() {
                 continue;
             }
-            pasted.push(
-                super::paste::PastedFile::new(&format!("# {title}\n\n{body}"))
-                    .map_err(|error| format!("临时材料创建失败（{error}）"))?,
-            );
+            pasted.push(super::paste::PastedFile::new(&format!(
+                "# {title}\n\n{body}"
+            )));
             roles.push(role);
         }
         Ok((text, pasted, roles))
@@ -467,10 +460,7 @@ impl DraftPage<'_> {
             refs = request.refs.clone();
             notes = request.notes.clone();
             for material in &request.materials {
-                pasted.push(
-                    super::paste::PastedFile::new(&material.text)
-                        .map_err(|error| format!("临时材料创建失败（{error}）"))?,
-                );
+                pasted.push(super::paste::PastedFile::new(&material.text));
                 // 旧会话没有逐篇用途：一律按事实材料，不继承输入框里残留的角色。
                 roles.push(MaterialRole::Fact);
             }

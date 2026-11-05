@@ -1501,12 +1501,36 @@ impl GongwenApp {
         );
     }
 
-    /// 把面板上已确认的计划交给后台线程，导出到 `path`。
+    /// 先只读面板上的确认计划生成风险确认文案；确认前不取走计划，
+    /// 用户取消或稍后再确认时计划仍留在面板上。
     fn run_send_package_export(&mut self, path: PathBuf) {
+        let operation = {
+            let Some(panel) = self.send_package.as_ref() else {
+                return;
+            };
+            let Some(confirm) = panel.confirm.as_ref() else {
+                return;
+            };
+            // 送批材料含主件正文、随行件与人员信息，加密工作区里合并成普通 PDF 要先确认风险。
+            format!(
+                "导出送批材料（含主件、随行件及目录）：《{}》\n输出位置：{}",
+                confirm.plan.owner_title(),
+                path.display()
+            )
+        };
+        self.request_plaintext_output(operation, move |app| {
+            app.run_confirmed_send_package_export(path)
+        });
+    }
+
+    /// 真正导出时再从面板取确认计划；期间计划被刷新或失效就放弃这次导出。
+    fn run_confirmed_send_package_export(&mut self, path: PathBuf) {
         let Some(panel) = self.send_package.as_mut() else {
+            self.status = "导出计划已失效，请重新发起导出。".into();
             return;
         };
         let Some(confirm) = panel.confirm.take() else {
+            self.status = "导出计划已失效，请重新发起导出。".into();
             return;
         };
         let owner_id = panel.owner_id;

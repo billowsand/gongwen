@@ -245,28 +245,33 @@ impl GongwenApp {
     }
 
     pub(crate) fn export_vocabulary_xlsx(&mut self) {
-        self.request_file(
-            FileDialogSpec::save_file()
-                .filter("Excel", &["xlsx"])
-                .file_name("公文助手标准词库.xlsx"),
-            |app, path| {
-                let Some(path) = path else {
-                    return;
-                };
-                let existing_codes: Vec<String> = app
-                    .config
-                    .vocabulary
-                    .iter()
-                    .filter(|e| e.category == VocabularyCategory::Unit)
-                    .map(|e| e.code.trim().to_string())
-                    .filter(|c| !c.is_empty())
-                    .collect();
-                let result =
-                    vocabulary_xlsx::to_xlsx(&app.config.vocabulary, &path, &existing_codes);
-                match result {
-                    Ok(()) => app.status = format!("词库已导出到 {}。", path.display()),
-                    Err(error) => app.status = format!("词库导出失败：{error}"),
-                }
+        let spec = FileDialogSpec::save_file()
+            .filter("Excel", &["xlsx"])
+            .file_name("公文助手标准词库.xlsx");
+        // 标准词库含姓名、职务、联系电话与个人简介，加密工作区里导出成普通表格要先确认风险。
+        self.request_output_with_warning(
+            "导出标准词库 Excel（含姓名、职务、联系电话、个人简介）",
+            super::output_guard::PII_EXPORT_WARNING,
+            move |app| {
+                app.request_file(spec, |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    let existing_codes: Vec<String> = app
+                        .config
+                        .vocabulary
+                        .iter()
+                        .filter(|e| e.category == VocabularyCategory::Unit)
+                        .map(|e| e.code.trim().to_string())
+                        .filter(|c| !c.is_empty())
+                        .collect();
+                    let result =
+                        vocabulary_xlsx::to_xlsx(&app.config.vocabulary, &path, &existing_codes);
+                    match result {
+                        Ok(()) => app.status = format!("词库已导出到 {}。", path.display()),
+                        Err(error) => app.status = format!("词库导出失败：{error}"),
+                    }
+                });
             },
         );
     }
@@ -2154,5 +2159,78 @@ impl GongwenApp {
         }
         units::normalize(&mut self.config.vocabulary);
         self.vocabulary_dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    /// 测试结束恢复线程级的密钥句柄与配置目录覆盖。
+    struct Reset;
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::vault::clear_key_handle();
+            storage::set_test_config_dir(None);
+        }
+    }
+
+    /// 加密模式下的待测应用：凭据只放在本线程，临时配置目录收测试文件。
+    fn encrypted_app() -> (GongwenApp, tempfile::TempDir, Reset) {
+        let dir = tempfile::tempdir().unwrap();
+        storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        crate::vault::set_key_handle([23; 32], true);
+        (crate::app::management_samples::fixture(), dir, Reset)
+    }
+
+    /// 把待确认的风险框画出来并点「取消」，返回取消后的应用。
+    fn cancel_output_risk(app: GongwenApp) -> GongwenApp {
+        let mut harness = Harness::new_ui_state(
+            |ui, app: &mut GongwenApp| app.output_risk_window(ui.ctx()),
+            app,
+        );
+        harness.run();
+        harness.get_by_label("取消").click();
+        harness.run();
+        harness.into_state()
+    }
+
+    #[test]
+    fn encrypted_vocabulary_export_waits_for_confirmation_and_cancel_writes_nothing() {
+        let (mut app, dir, _reset) = encrypted_app();
+        app.export_vocabulary_xlsx();
+        assert!(
+            app.pending_output.is_some(),
+            "加密模式下导出标准词库应先弹一次性风险确认"
+        );
+        assert!(app.pending_file_dialogs.is_empty(), "确认前不能打开保存框");
+        let app = cancel_output_risk(app);
+        assert!(app.pending_output.is_none());
+        assert!(app.pending_file_dialogs.is_empty(), "取消后不能打开保存框");
+        assert!(
+            !dir.path().join("公文助手标准词库.xlsx").exists(),
+            "取消后不能生成词库文件"
+        );
+    }
+
+    #[test]
+    fn encrypted_ime_word_table_export_waits_for_confirmation_and_cancel_writes_nothing() {
+        let (mut app, dir, _reset) = encrypted_app();
+        app.apply_ime_page_action(crate::ime::PageAction::ExportWordTable { filtered: false });
+        assert!(
+            app.pending_output.is_some(),
+            "加密模式下导出输入法词表应先弹一次性风险确认"
+        );
+        assert!(app.pending_file_dialogs.is_empty(), "确认前不能打开保存框");
+        let app = cancel_output_risk(app);
+        assert!(app.pending_output.is_none());
+        assert!(app.pending_file_dialogs.is_empty(), "取消后不能打开保存框");
+        assert!(
+            !dir.path().join("词表输入法-生效词表.txt").exists(),
+            "取消后不能生成词表文件"
+        );
     }
 }

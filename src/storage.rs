@@ -8,6 +8,28 @@ use std::sync::atomic::{AtomicU8, Ordering};
 const ZIP_PASSWORD_FILE: &str = ".zip-password";
 const MAX_REMEMBERED_PASSWORD_BYTES: u64 = 1024;
 
+/// 应用锁启用后必须整份 AEAD 密封的文件。**这是唯一一份名单**：解锁迁移
+/// （`vault::ensure_slot_encrypted` / `slot_needs_encryption` / `decrypt_slot_files`）、
+/// 擦除（[`wipe_slot_files`]）与读写侧（`ai_services::persistence`）都从这里派生。
+/// 名单漏一项的后果是「启用加密后该文件永久明文」——二期曾漏掉 `api-envs.json`
+/// 与 `api-tests.json`，`styles.json` 里还有样稿原文片段，所以统一放这里。
+pub(crate) const SEALED_FILE_NAMES: [&str; 6] = [
+    "config.json",
+    ZIP_PASSWORD_FILE,
+    "api-secrets.json",
+    "api-envs.json",
+    "api-tests.json",
+    "styles.json",
+];
+
+/// [`SEALED_FILE_NAMES`] 里的 JSON 子集：`ai_services::persistence` 的读写名单。
+pub(crate) const SEALED_JSON_NAMES: [&str; 4] = [
+    "api-secrets.json",
+    "api-envs.json",
+    "api-tests.json",
+    "styles.json",
+];
+
 /// 数据槽位：真实系统与诱饵系统（第二密码进入的空白系统）各有一套独立文件。
 /// 解锁时由闸门设置；默认值是真实槽位，测试与未启用应用锁的环境不受影响。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,24 +83,44 @@ pub fn slot_file(name: &str) -> Result<PathBuf> {
     slot_file_for(current_slot(), name)
 }
 
+/// 把一个配置目录条目名映射到指定槽位的「相对名」：真实槽只认不带 `alt-`
+/// 前缀的文件，诱饵槽只认带前缀的。跨槽的文件绝不能被另一套 DEK 加密或擦除
+/// （否则诱饵迁移会用诱饵密钥把真实槽的 config 副本封掉）。
+pub(crate) fn slot_relative_name(name: &str, slot: DataSlot) -> Option<&str> {
+    match slot {
+        DataSlot::Real => (!name.starts_with(DECOY_PREFIX)).then_some(name),
+        DataSlot::Decoy => name.strip_prefix(DECOY_PREFIX),
+    }
+}
+
 /// 按当前槽位映射配置目录里的子目录（pi、apis 这类整体敏感的目录）。
 pub fn slot_subdir(name: &str) -> Result<PathBuf> {
     slot_file(name)
+}
+
+/// 按指定槽位映射子目录，供不依赖进程状态的调用方（测试、擦除）使用。
+pub fn slot_subdir_for(slot: DataSlot, name: &str) -> Result<PathBuf> {
+    slot_file_for(slot, name)
 }
 
 /// 擦掉一个槽位的全部数据文件（库、配置、密钥文件、运行目录）。
 /// 用于「清除第二密码」「启用时重置诱饵」：旧 DEK 已丢弃的文件本来就
 /// 不可读，物理删除不留残留。目录整棵删掉；删不掉的单个文件尽力而为。
 pub(crate) fn wipe_slot_files(slot: DataSlot) {
-    const FILES: [&str; 6] = [
+    // 单文件和库的 WAL/SHM 一起删；`manuscripts.db` 另有 `-wal/-shm` 后缀。
+    const FILES: [&str; 8] = [
         "manuscripts.db",
         "config.json",
         ".zip-password",
         "api-secrets.json",
         "api-envs.json",
         "api-tests.json",
+        "styles.json",
+        "metrics.json",
     ];
-    const DIRS: [&str; 3] = ["pi", "apis", "images"];
+    // 目录列表必须与真实使用的槽位私有目录一致；`images` 在 B 阶段前仍是
+    // 共享目录（`alt-images` 现在才成为诱饵槽的图片目录，见 `images::image_dir`）。
+    const DIRS: [&str; 6] = ["pi", "apis", "images", "mermaid-cache", "skills", "ime"];
     if let Ok(dir) = config_dir() {
         for name in FILES {
             for suffix in ["", "-wal", "-shm"] {
@@ -91,6 +133,19 @@ pub(crate) fn wipe_slot_files(slot: DataSlot) {
                 )));
             }
         }
+        // 「身份迁移前备份」「损坏配置留底」是 config.json 的副本，同样属于槽位数据，
+        // 不能让它们在清除诱饵时活下来（副本里可能是明文或旧密钥能解的配置）。
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if slot_relative_name(&name, slot)
+                    .is_some_and(|name| name.starts_with("config.json."))
+                {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
         for name in DIRS {
             let path = match slot {
                 DataSlot::Real => dir.join(name),
@@ -101,6 +156,21 @@ pub(crate) fn wipe_slot_files(slot: DataSlot) {
             }
         }
     }
+}
+
+/// 加密模式下暂停配置目录写入的全局开关：锁定流程先置 true，再丢弃工作区，
+/// 这样被丢弃工作区里仍在收尾的线程即使晚到，也不会以「无密钥」状态把
+/// 明文写回配置目录（文档要求先停写、再释放句柄）。迁移/停用任务在
+/// `begin_work` 里重新放行——那时槽位与密钥句柄都已明确。
+static WRITES_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn set_writes_blocked(blocked: bool) {
+    WRITES_BLOCKED.store(blocked, Ordering::SeqCst);
+}
+
+/// 只给「槽位私有且依赖密钥」的写路径用；不拦用户明确选择导出到输出目录的文件。
+pub(crate) fn writes_blocked() -> bool {
+    WRITES_BLOCKED.load(Ordering::SeqCst)
 }
 
 // 测试覆盖的用户目录：只让稿件包同步测试把图片写进临时目录，不影响真实配置目录。
@@ -178,6 +248,17 @@ pub fn load_remembered_zip_password() -> Result<Option<String>> {
     let bytes = if crate::vault::is_sealed_file(&raw) {
         let handle = crate::vault::key_handle().context("ZIP 密码已加密，尚未解锁")?;
         crate::vault::open_bytes(handle.dek(), &raw)?
+    } else if let Some(handle) = crate::vault::key_handle() {
+        // 启用加密前留下的明文密码：读到就顺手封成密文，不能让它长期躺在盘上。
+        // 落盘失败不影响本次读取（下次启动再迁）。
+        if let Ok(sealed) = crate::vault::seal_bytes(handle.dek(), &raw) {
+            let _ = atomic_write(&path, |file| {
+                use std::io::Write;
+                file.write_all(&sealed)?;
+                Ok(())
+            });
+        }
+        raw
     } else {
         raw
     };
@@ -268,8 +349,17 @@ pub(crate) fn atomic_write(
     path: &std::path::Path,
     write: impl FnOnce(&mut fs::File) -> Result<()>,
 ) -> Result<()> {
+    // 锁定已经开始：拒绝一切配置目录写入。被丢弃工作区里晚到的线程不能以
+    // 「无密钥」状态把明文写回加密目录（见 set_writes_blocked 的注释）。
+    if writes_blocked() {
+        anyhow::bail!("正在锁定或切换数据槽位，已拒绝写入 {}", path.display());
+    }
     let parent = path.parent().context("保存路径缺少父目录")?;
     fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    if is_private_dir(parent) {
+        harden_dir(parent);
+    }
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     #[cfg(unix)]
     {
@@ -289,34 +379,83 @@ pub(crate) fn atomic_write(
     Ok(())
 }
 
+/// Unix 下把目录权限收紧到仅本人可读写执行（0700）。配置目录里放着密文、
+/// 明文图片、词表与导出中间文件，同机其他用户不该有列目录的权限。
+/// 失败只忽略：某些文件系统（FAT / 网络盘）不支持权限位，不能因此启动不了。
+#[cfg(unix)]
+pub(crate) fn harden_dir(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+pub(crate) fn harden_dir(_path: &std::path::Path) {}
+
+/// 目标目录是否属于应用自己的私密目录（配置目录 / 缓存目录之内）。
+/// 导出到用户选择的输出目录时不能顺手改人家的目录权限。
+#[cfg(unix)]
+fn is_private_dir(dir: &std::path::Path) -> bool {
+    [config_dir(), cache_dir()]
+        .into_iter()
+        .flatten()
+        .any(|root| dir == root || dir.starts_with(&root))
+}
+
+/// 启动时把配置目录与已知子目录的权限收紧一次（幂等、尽力而为）。
+pub(crate) fn harden_permissions() {
+    let Ok(dir) = config_dir() else {
+        return;
+    };
+    harden_dir(&dir);
+    for name in [
+        "apis",
+        "images",
+        "pi",
+        "mermaid-cache",
+        "skills",
+        "ime",
+        "logs",
+        "help",
+    ] {
+        let path = dir.join(name);
+        if path.is_dir() {
+            harden_dir(&path);
+        }
+    }
+    if let Ok(cache) = cache_dir()
+        && cache.is_dir()
+    {
+        harden_dir(&cache);
+    }
+}
+
 /// 读取配置。第二个返回值是本次被挪走的损坏配置路径：非空表示 `config.json`
 /// 解析失败，调用方已经拿到一份默认配置，应把这件事告诉用户。
 ///
 /// 启用应用锁后 config.json 是 AEAD 密文（`vault::is_sealed_file`）：
-/// 有句柄就解密，没句柄（锁定前的早期探测）按读不到处理、回落默认配置——
-/// 与损坏配置同一待遇，锁屏反正盖着界面。
+/// - 有句柄：解密，失败按「密钥不匹配 / 文件损坏」返回 Err，**绝不改名、
+///   绝不回落到默认配置写回**（否则等于把解密失败当成损坏，再以明文覆盖）；
+/// - 没有句柄：返回 Err，同样不动文件。闸门已经拦住「锁设置丢失却直接进工作区」，
+///   这一层是防御纵深：任何降级路径都不能静默重置配置。
 ///
-/// 解析失败时把原文件原地改名为 `config.json.损坏-YYYYMMDD-HHMMSS`，保留证据，
-/// 也避免下次保存时用默认值静默覆盖用户数据。改名失败同样回落到默认配置，
-/// 只是没有可报告的留底路径。读取文件本身失败（权限、路径是目录等）仍返回 Err，
-/// 那种情况不是「配置内容坏了」，不该拿默认值顶替。
+/// 只有**明文** JSON 解析失败时才把原文件原地改名为
+/// `config.json.损坏-YYYYMMDD-HHMMSS`，保留证据，也避免下次保存时用默认值
+/// 静默覆盖用户数据。改名失败同样回落到默认配置，只是没有可报告的留底路径。
+/// 读取文件本身失败（权限、路径是目录等）仍返回 Err。
 pub fn load() -> Result<(AppConfig, Option<PathBuf>)> {
     let path = config_path()?;
     let mut config = if !path.exists() {
         AppConfig::default()
     } else {
         let raw = fs::read(&path).with_context(|| format!("读取配置失败：{}", path.display()))?;
-        let plain = if crate::vault::is_sealed_file(&raw) {
-            match crate::vault::key_handle() {
-                Some(handle) => crate::vault::open_bytes(handle.dek(), &raw),
-                None => Err(anyhow::anyhow!("配置已加密，尚未解锁")),
-            }
+        let bytes = if crate::vault::is_sealed_file(&raw) {
+            let handle = crate::vault::key_handle().context("配置已加密，尚未解锁")?;
+            crate::vault::open_bytes(handle.dek(), &raw)
+                .context("配置解密失败（密钥不匹配或文件损坏）")?
         } else {
-            Ok(raw)
+            raw
         };
-        match plain.and_then(|bytes| {
-            serde_json::from_slice::<AppConfig>(&bytes).context("配置内容无法解析")
-        }) {
+        match serde_json::from_slice::<AppConfig>(&bytes).context("配置内容无法解析") {
             Ok(config) => config,
             Err(_) => {
                 let backup = corrupted_config_path(&path);
@@ -339,11 +478,37 @@ pub fn load() -> Result<(AppConfig, Option<PathBuf>)> {
         let backup = path.with_extension("json.身份迁移前备份");
         if !backup.exists() {
             fs::copy(&path, &backup)?;
+            // 副本与主配置同等敏感：主配置若是明文，副本也要按「有句柄就密封」
+            // 的规则处理，不能留一份明文 API 密钥备份在磁盘上。
+            seal_file_if_needed(&backup)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&backup, fs::Permissions::from_mode(0o600));
+            }
         }
         // 旧词库可能已有同级重名或悬空关系，保留供界面核对，不能因此启动成空配置。
         write_config(&path, &config).context("保存身份迁移失败")?;
     }
     Ok((config, None))
+}
+
+/// 把一个已存在的文件按「有句柄就密封」的规则处理；已是密文则不动。
+/// 用于 config.json 的副本这类由 [`fs::copy`] 直接复制出来的敏感文件。
+pub(crate) fn seal_file_if_needed(path: &std::path::Path) -> Result<()> {
+    let Some(handle) = crate::vault::key_handle() else {
+        return Ok(());
+    };
+    let raw = fs::read(path).with_context(|| format!("读取 {} 失败", path.display()))?;
+    if crate::vault::is_sealed_file(&raw) {
+        return Ok(());
+    }
+    let sealed = crate::vault::seal_bytes(handle.dek(), &raw)?;
+    atomic_write(path, |file| {
+        use std::io::Write as _;
+        file.write_all(&sealed)?;
+        Ok(())
+    })
 }
 
 /// 损坏配置的留底路径：与原文件同目录，文件名带秒级时间戳；同一秒里再次损坏
@@ -369,7 +534,15 @@ fn write_config(path: &std::path::Path, config: &AppConfig) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(config).context("配置序列化失败")?;
     let bytes = match crate::vault::key_handle() {
         Some(handle) => crate::vault::seal_bytes(handle.dek(), &bytes)?,
-        None => bytes,
+        None => {
+            // 降级防护：磁盘上是密文、当前却没有密钥句柄时，绝不能以明文覆盖。
+            // 那种状态只可能来自「锁设置丢失 / 未解锁」的异常路径，覆盖等于把
+            // 加密配置换成默认明文，是静默降级。
+            if path.exists() && fs::read(path).is_ok_and(|raw| crate::vault::is_sealed_file(&raw)) {
+                anyhow::bail!("配置已加密但当前未解锁，拒绝以明文覆盖");
+            }
+            bytes
+        }
     };
     atomic_write(path, |file| {
         use std::io::Write as _;
@@ -762,5 +935,81 @@ mod tests {
 
         assert_eq!(theme, AppConfig::default().theme);
         assert!(path.exists(), "peek_theme 不能改写或挪走配置文件");
+    }
+    /// 密封配置在「没有密钥句柄」时必须是 Err，不能当损坏文件改名，更不能
+    /// 随后以明文默认配置覆盖（那是一次静默加密降级）。
+    #[test]
+    fn sealed_config_without_key_is_not_renamed_as_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        super::set_test_config_dir(Some(dir.path().to_path_buf()));
+        crate::vault::clear_key_handle();
+        let path = dir.path().join("config.json");
+        let sealed = crate::vault::seal_bytes(&[7u8; 32], b"{\"output_dir\":\"x\"}").unwrap();
+        fs::write(&path, &sealed).unwrap();
+
+        let result = load();
+        super::set_test_config_dir(None);
+
+        assert!(result.is_err(), "密封配置在未解锁时必须报错");
+        assert_eq!(fs::read(&path).unwrap(), sealed, "不得改名或覆盖密文");
+        assert!(
+            fs::read_dir(dir.path())
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().contains("损坏")),
+            "不能把解密失败当成配置文件损坏"
+        );
+        assert!(path.exists());
+    }
+
+    /// 无句柄时拒绝对已密封的配置写明文（降级防护）。
+    #[test]
+    fn plaintext_save_refuses_to_overwrite_a_sealed_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let sealed = crate::vault::seal_bytes(&[9u8; 32], b"{\"output_dir\":\"x\"}").unwrap();
+        fs::write(&path, &sealed).unwrap();
+        crate::vault::clear_key_handle();
+
+        let result = write_config(&path, &AppConfig::default());
+        assert!(result.is_err(), "无密钥时不得把密文配置改写成明文");
+        assert_eq!(fs::read(&path).unwrap(), sealed);
+    }
+    /// 导出目录是用户选的，不属于应用的私密目录：写文件时不能顺手改它的权限。
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_leaves_user_chosen_directory_permissions_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let target = dir.path().join("份号清单.txt");
+        atomic_write(&target, |file| {
+            use std::io::Write as _;
+            file.write_all("清单".as_bytes())?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    /// 槽位前缀只能映射自己那一槽：真实文件不能被诱饵密钥处理，反之亦然。
+    #[test]
+    fn slot_relative_name_never_mixes_slots() {
+        assert_eq!(
+            slot_relative_name("config.json", DataSlot::Real),
+            Some("config.json")
+        );
+        assert_eq!(slot_relative_name("alt-config.json", DataSlot::Real), None);
+        assert_eq!(
+            slot_relative_name("alt-config.json", DataSlot::Decoy),
+            Some("config.json")
+        );
+        assert_eq!(slot_relative_name("config.json", DataSlot::Decoy), None);
     }
 }

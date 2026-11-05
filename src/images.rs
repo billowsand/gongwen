@@ -45,24 +45,74 @@ pub(crate) struct ImportedImage {
     pub markdown: String,
 }
 
-/// 图片资源目录：配置目录/images/。
+/// 图片资源目录：配置目录/images/（**槽位感知**：诱饵系统用 `alt-images/`）。
+///
+/// 诱饵系统必须与真实系统物理隔离：同一台机器上的两份数据不能互相看见。
+/// 目录名映射走 [`storage::slot_subdir`]，与 `wipe_slot_files` 的擦除列表一致。
 pub(crate) fn image_dir() -> Result<PathBuf> {
-    Ok(storage::config_dir()?.join(IMAGE_DIR))
+    image_dir_for(storage::current_slot())
+}
+
+/// 指定槽位的图片目录；不读进程级槽位，供测试与擦除逻辑使用。
+pub(crate) fn image_dir_for(slot: storage::DataSlot) -> Result<PathBuf> {
+    storage::slot_subdir_for(slot, IMAGE_DIR)
 }
 
 /// 把 markdown 中的相对路径解析为绝对路径。
 /// 拒绝绝对路径与 `..` 穿越，防止恶意 markdown 读取任意文件。
 pub(crate) fn resolve(rel: &str) -> Result<PathBuf> {
-    resolve_from(&storage::config_dir()?, rel)
+    resolve_from_base(&storage::config_dir()?, rel)
 }
 
 /// 以给定目录为基准解析相对路径（拒绝绝对路径与 `..` 穿越），供导出/备份复用。
+///
+/// 配置目录是**槽位命名空间**的唯一基准：`images/` 前缀要映射到当前槽位的图片
+/// 目录（真实 `images/`、诱饵 `alt-images/`），正文里的引用仍统一写
+/// `images/xxx.png`，跨槽/跨机器都能读。样张与测试传进来的临时基准目录保持
+/// 原样 join，不参与槽位映射。
 pub(crate) fn resolve_from_base(base: &Path, rel: &str) -> Result<PathBuf> {
-    resolve_from(base, rel)
+    let path = Path::new(rel);
+    validate_relative(path, rel)?;
+    if base == storage::config_dir()? {
+        return app_relative(path);
+    }
+    Ok(base.join(path))
 }
 
+/// 配置目录内的相对引用 → 绝对路径；`images/` 前缀按当前槽位落到 `image_dir()`。
+fn app_relative(path: &Path) -> Result<PathBuf> {
+    let Some(first) = path.components().next() else {
+        anyhow::bail!("非法图片路径：空");
+    };
+    if first.as_os_str() != IMAGE_DIR {
+        return Ok(storage::config_dir()?.join(path));
+    }
+    let rest = path.strip_prefix(IMAGE_DIR).unwrap_or(Path::new(""));
+    let slot_path = image_dir()?.join(rest);
+    // 使用帮助的截图是随包公开资源，不随槽位复制。诱饵槽里没有副本时回落到
+    // 真实槽的共享目录；用户图片不做这个回落，避免跨槽泄露内容。
+    if let Some(name) = rest.file_name().and_then(|name| name.to_str())
+        && name.starts_with("help-")
+        && !slot_path.is_file()
+        && let Ok(shared) = storage::config_dir()
+    {
+        let shared = shared.join(IMAGE_DIR).join(rest);
+        if shared.is_file() {
+            return Ok(shared);
+        }
+    }
+    Ok(slot_path)
+}
+
+/// 外部基准目录的解析：只做路径穿越校验后 join，不参与槽位映射。
+/// 导入 Markdown 时 base 是用户选的外部文件夹，不能把它当成配置目录。
 fn resolve_from(base: &Path, rel: &str) -> Result<PathBuf> {
     let path = Path::new(rel);
+    validate_relative(path, rel)?;
+    Ok(base.join(path))
+}
+
+fn validate_relative(path: &Path, rel: &str) -> Result<()> {
     if path.is_absolute()
         || path.components().any(|c| {
             matches!(
@@ -73,7 +123,7 @@ fn resolve_from(base: &Path, rel: &str) -> Result<PathBuf> {
     {
         bail!("非法图片路径：{rel}");
     }
-    Ok(base.join(rel))
+    Ok(())
 }
 
 /// "插入图片"的文件选择框参数（可多选）。对话框由应用层在后台线程开。
@@ -466,5 +516,22 @@ mod tests {
         assert!(!target.path().join("images/c.png").exists());
         // 非法路径（穿越）被跳过。
         copy_refs_from(base.path(), "![x](../etc/passwd)", target.path()).unwrap();
+    }
+    /// 图片目录按槽位物理隔离：真实槽 `images/`、诱饵槽 `alt-images/`，
+    /// 正文引用仍统一写 `images/...`（跨槽/跨机都能读）。
+    #[test]
+    fn image_dir_is_slot_aware() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        assert_eq!(
+            image_dir_for(crate::storage::DataSlot::Real).unwrap(),
+            dir.path().join("images")
+        );
+        assert_eq!(
+            image_dir_for(crate::storage::DataSlot::Decoy).unwrap(),
+            dir.path().join("alt-images")
+        );
+        assert_eq!(normalize_ref("images/扫描件.png"), "images/扫描件.png");
+        crate::storage::set_test_config_dir(None);
     }
 }

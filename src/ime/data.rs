@@ -1,40 +1,22 @@
 //! 基础词表与个人词表的本机存储。首次载入兼容旧音形表路径。
-use anyhow::Context as _;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 pub(super) fn directory() -> anyhow::Result<PathBuf> {
-    let dir = crate::storage::config_dir()?.join("ime");
+    // 槽位感知：诱饵系统用 `alt-ime`，两套词表互不可见。
+    let dir = crate::storage::slot_subdir("ime")?;
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
 
-/// 同目录临时文件替换，避免失败时把已有词表截断。
+/// 同目录临时文件替换，避免失败时把已有词表截断。写入与替换交给
+/// [`crate::storage::atomic_write`]：同目录暂存 + 刷盘 + 原子改名，Unix 下文件是 0600。
 pub(super) fn save_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let parent = path.parent().context("词表路径没有父目录")?;
-    std::fs::create_dir_all(parent)?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    use std::io::Write as _;
-    file.write_all(bytes)?;
-    file.as_file().sync_all()?;
-    // Windows 上杀毒软件与索引服务会在目标文件刚被替换时短暂占住它，重命名覆盖会
-    // 报「拒绝访问」。重试几百毫秒就过去了，一次抖动不该让用户看到保存失败。
-    let mut pending = file;
-    let mut last: Option<std::io::Error> = None;
-    for attempt in 0..6u32 {
-        match pending.persist(path) {
-            Ok(_) => return Ok(()),
-            Err(error) if error.error.kind() == std::io::ErrorKind::PermissionDenied => {
-                std::thread::sleep(std::time::Duration::from_millis(
-                    u64::from(attempt) * 20 + 10,
-                ));
-                last = Some(error.error);
-                pending = error.file;
-            }
-            Err(error) => return Err(error.error.into()),
-        }
-    }
-    Err(last.expect("循环至少跑过一次").into())
+    crate::storage::atomic_write(path, |file| {
+        use std::io::Write as _;
+        file.write_all(bytes)?;
+        Ok(())
+    })
 }
 pub(super) fn save_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
     save_bytes(path, &serde_json::to_vec_pretty(value)?)

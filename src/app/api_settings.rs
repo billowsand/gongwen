@@ -419,37 +419,53 @@ impl GongwenApp {
                 }
                 if files.len() == 1 {
                     let (name, doc) = files.into_iter().next().expect("刚检查过有一个文件");
-                    self.request_file(
-                        FileDialogSpec::save_file()
-                            .file_name(name)
-                            .filter("OpenAPI（JSON）", &["json"])
-                            .filter("OpenAPI（YAML）", &["yaml", "yml"]),
-                        move |app, path| {
-                            let Some(path) = path else {
-                                return;
-                            };
-                            let written =
-                                write_doc(&path, &doc).map(|()| path.display().to_string());
-                            app.agent_settings.apis.message = Some(match written {
-                                Ok(place) => (true, format!("已导出到 {place}（不含密钥）")),
-                                Err(error) => (false, format!("导出失败：{error:#}")),
+                    let operation = format!("导出数据接口配置：{name}");
+                    let spec = FileDialogSpec::save_file()
+                        .file_name(name)
+                        .filter("OpenAPI（JSON）", &["json"])
+                        .filter("OpenAPI（YAML）", &["yaml", "yml"]);
+                    // 导出的 OpenAPI 文档含内网地址与服务描述，加密工作区里写成普通文件要先确认风险。
+                    self.request_output_with_warning(
+                        operation,
+                        super::output_guard::PLAINTEXT_WARNING,
+                        move |app| {
+                            app.request_file(spec, move |app, path| {
+                                let Some(path) = path else {
+                                    return;
+                                };
+                                let written =
+                                    write_doc(&path, &doc).map(|()| path.display().to_string());
+                                app.agent_settings.apis.message = Some(match written {
+                                    Ok(place) => (true, format!("已导出到 {place}（不含密钥）")),
+                                    Err(error) => (false, format!("导出失败：{error:#}")),
+                                });
                             });
                         },
                     );
                 } else {
-                    self.request_file(FileDialogSpec::pick_folder(), move |app, dir| {
-                        let Some(dir) = dir else {
-                            return;
-                        };
-                        let written = files
-                            .iter()
-                            .try_for_each(|(name, doc)| write_doc(&dir.join(name), doc))
-                            .map(|()| format!("{}（{} 个服务）", dir.display(), files.len()));
-                        app.agent_settings.apis.message = Some(match written {
-                            Ok(place) => (true, format!("已导出到 {place}（不含密钥）")),
-                            Err(error) => (false, format!("导出失败：{error:#}")),
-                        });
-                    });
+                    let operation = format!("导出数据接口配置（{} 个服务）", files.len());
+                    // 同上：一次确认覆盖整批文件。
+                    self.request_output_with_warning(
+                        operation,
+                        super::output_guard::PLAINTEXT_WARNING,
+                        move |app| {
+                            app.request_file(FileDialogSpec::pick_folder(), move |app, dir| {
+                                let Some(dir) = dir else {
+                                    return;
+                                };
+                                let written = files
+                                    .iter()
+                                    .try_for_each(|(name, doc)| write_doc(&dir.join(name), doc))
+                                    .map(|()| {
+                                        format!("{}（{} 个服务）", dir.display(), files.len())
+                                    });
+                                app.agent_settings.apis.message = Some(match written {
+                                    Ok(place) => (true, format!("已导出到 {place}（不含密钥）")),
+                                    Err(error) => (false, format!("导出失败：{error:#}")),
+                                });
+                            });
+                        },
+                    );
                 }
             }
         }

@@ -1,6 +1,8 @@
 //! 大段粘贴作为临时材料；发送时保存全文快照，重跑不依赖临时文件。
-
-use std::io::Write;
+//!
+//! 这里**不落磁盘**：材料全文只存在内存里的 `Material.text`，随会话快照一起
+//! 保存。旧实现把全文写进系统临时目录的 `.txt`，崩溃/强杀后明文残留，且文件
+//! 本身没有任何用途——名字只是给界面和提示词看的标签。
 
 pub(super) const PASTE_CHARS: usize = 2000;
 pub(super) const PASTE_LINES: usize = 30;
@@ -20,31 +22,22 @@ pub(crate) struct Material {
 pub(crate) struct PastedFile {
     pub(crate) material: Material,
     pub(crate) chars: usize,
-    // 持有句柄，取消引用、发送成功或关闭稿件时自动清理。
-    pub(crate) file: tempfile::NamedTempFile,
 }
 
 impl PastedFile {
-    pub(super) fn new(text: &str) -> std::io::Result<Self> {
-        let mut file = tempfile::Builder::new()
-            .prefix("gongwen-paste-")
-            .suffix(".txt")
-            .tempfile()?;
-        file.write_all(text.as_bytes())?;
-        file.flush()?;
-        Ok(Self {
-            chars: text.chars().count(),
+    pub(super) fn new(text: &str) -> Self {
+        let chars = text.chars().count();
+        Self {
+            chars,
             material: Material {
-                name: file
-                    .path()
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
+                // 中性标签：不带正文片段、不带路径，只用于界面与提示词里区分材料。
+                name: format!(
+                    "粘贴材料-{}-{chars}字",
+                    chrono::Local::now().format("%H%M%S")
+                ),
                 text: text.to_owned(),
             },
-            file,
-        })
+        }
     }
 }
 

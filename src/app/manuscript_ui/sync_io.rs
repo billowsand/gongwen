@@ -143,42 +143,50 @@ impl GongwenApp {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
         let default_name = format!("公文稿件-{stamp}.{}", package_file::EXTENSION);
         let password = password.to_string();
-        self.request_file(package_save_spec(&default_name), move |app, path| {
-            let Some(path) = path else {
-                return;
-            };
-            let path = package_file::with_package_extension(path);
-            if let Err(error) = app.save_open_manuscripts_for_zip(None) {
-                app.status = format!("导出前保存当前工作稿失败：{error:#}");
-                return;
-            }
-            let result: anyhow::Result<manuscript_io::ExportSummary> =
-                match app.manuscript_store.as_mut() {
-                    Some(store) => manuscript_io::export_zip(
-                        store,
-                        &filter,
-                        &app.config.vocabulary,
-                        &path,
-                        &password,
-                        include_send_package,
-                    ),
-                    None => Err(anyhow::anyhow!("稿件库不可用")),
-                };
-            match result {
-                Ok(summary) => {
-                    app.status = format!(
-                        "已导出 {} 篇稿件、{} 个 PDF 附件到 {}。",
-                        summary.records,
-                        summary.pdfs,
-                        path.display()
-                    );
-                    app.update_remembered_zip_password(remember.then_some(password));
-                }
-                Err(error) => {
-                    app.status = format!("导出失败：{error:#}");
-                }
-            }
-        });
+        // 稿件包是加密工作区里最大的正文出口：外层虽然 AES-256 加密，解压后
+        // 正文/历史版本/图片/PDF 全是普通文件，必须先明确一次风险。
+        self.request_output_with_warning(
+            "导出稿件包（全部正文、历史版本、图片、PDF 附件与词库）",
+            super::super::output_guard::PACKAGE_ARCHIVE_WARNING,
+            move |app| {
+                app.request_file(package_save_spec(&default_name), move |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    let path = package_file::with_package_extension(path);
+                    if let Err(error) = app.save_open_manuscripts_for_zip(None) {
+                        app.status = format!("导出前保存当前工作稿失败：{error:#}");
+                        return;
+                    }
+                    let result: anyhow::Result<manuscript_io::ExportSummary> =
+                        match app.manuscript_store.as_mut() {
+                            Some(store) => manuscript_io::export_zip(
+                                store,
+                                &filter,
+                                &app.config.vocabulary,
+                                &path,
+                                &password,
+                                include_send_package,
+                            ),
+                            None => Err(anyhow::anyhow!("稿件库不可用")),
+                        };
+                    match result {
+                        Ok(summary) => {
+                            app.status = format!(
+                                "已导出 {} 篇稿件、{} 个 PDF 附件到 {}。",
+                                summary.records,
+                                summary.pdfs,
+                                path.display()
+                            );
+                            app.update_remembered_zip_password(remember.then_some(password));
+                        }
+                        Err(error) => {
+                            app.status = format!("导出失败：{error:#}");
+                        }
+                    }
+                });
+            },
+        );
     }
 
     pub(crate) fn export_selected_manuscripts_zip(&mut self) {
@@ -205,54 +213,80 @@ impl GongwenApp {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
         let default_name = format!("所选公文稿件-{stamp}.{}", package_file::EXTENSION);
         let password = password.to_string();
-        self.request_file(package_save_spec(&default_name), move |app, path| {
-            let Some(path) = path else {
-                return;
-            };
-            let path = package_file::with_package_extension(path);
-            // 随行件也要进包时，它们在起草页里开着的工作稿同样先存一下。
-            if include_send_package
-                && let Some(store) = app.manuscript_store.as_ref()
-                && let Ok(expanded) = store.with_send_package_items(&ids)
-            {
-                ids = expanded;
-            }
-            if let Err(error) = app.save_open_manuscripts_for_zip(Some(&ids)) {
-                app.status = format!("导出前保存所选工作稿失败：{error:#}");
-                return;
-            }
-            let result = match app.manuscript_store.as_mut() {
-                Some(store) => manuscript_io::export_zip_selected(
-                    store,
-                    &ids,
-                    &app.config.vocabulary,
-                    &path,
-                    &password,
-                    false,
-                ),
-                None => Err(anyhow::anyhow!("稿件库不可用")),
-            };
-            match result {
-                Ok(summary) => {
-                    app.status = format!(
-                        "已导出所选 {} 篇稿件、{} 个 PDF 附件到 {}。",
-                        summary.records,
-                        summary.pdfs,
-                        path.display()
-                    );
-                    app.update_remembered_zip_password(remember.then_some(password));
-                }
-                Err(error) => {
-                    app.status = format!("导出所选稿件失败：{error:#}");
-                }
-            }
-        });
+        self.request_output_with_warning(
+            "导出所选稿件包（正文、历史版本、图片、PDF 附件与词库）",
+            super::super::output_guard::PACKAGE_ARCHIVE_WARNING,
+            move |app| {
+                app.request_file(package_save_spec(&default_name), move |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    let path = package_file::with_package_extension(path);
+                    // 随行件也要进包时，它们在起草页里开着的工作稿同样先存一下。
+                    if include_send_package
+                        && let Some(store) = app.manuscript_store.as_ref()
+                        && let Ok(expanded) = store.with_send_package_items(&ids)
+                    {
+                        ids = expanded;
+                    }
+                    if let Err(error) = app.save_open_manuscripts_for_zip(Some(&ids)) {
+                        app.status = format!("导出前保存所选工作稿失败：{error:#}");
+                        return;
+                    }
+                    let result = match app.manuscript_store.as_mut() {
+                        Some(store) => manuscript_io::export_zip_selected(
+                            store,
+                            &ids,
+                            &app.config.vocabulary,
+                            &path,
+                            &password,
+                            false,
+                        ),
+                        None => Err(anyhow::anyhow!("稿件库不可用")),
+                    };
+                    match result {
+                        Ok(summary) => {
+                            app.status = format!(
+                                "已导出所选 {} 篇稿件、{} 个 PDF 附件到 {}。",
+                                summary.records,
+                                summary.pdfs,
+                                path.display()
+                            );
+                            app.update_remembered_zip_password(remember.then_some(password));
+                        }
+                        Err(error) => {
+                            app.status = format!("导出所选稿件失败：{error:#}");
+                        }
+                    }
+                });
+            },
+        );
     }
 
     /// 把勾选的稿件按选项导出为 PDF 集合并打包 zip，后台线程执行避免卡界面。
     /// 盖章件直接取附件；非盖章件编译 TeX 生成，缺引擎或失败时该篇记入汇总。
     /// 保存位置由文件对话框给出（后台线程开），挑完再开导。
     pub(crate) fn perform_export_selected_manuscript_pdfs(
+        &mut self,
+        options: manuscript_io::PdfExportOptions,
+        ids: Vec<i64>,
+        password: &str,
+        remember: bool,
+    ) {
+        if ids.is_empty() {
+            self.status = "请先勾选要导出的稿件。".into();
+            return;
+        }
+        let operation = format!("批量导出 {} 篇稿件的 PDF（独立密码 ZIP）", ids.len());
+        let password = password.to_string();
+        self.request_pdf_archive_output(operation, move |app| {
+            app.perform_export_selected_manuscript_pdfs_confirmed(
+                options, ids, &password, remember,
+            );
+        });
+    }
+
+    fn perform_export_selected_manuscript_pdfs_confirmed(
         &mut self,
         options: manuscript_io::PdfExportOptions,
         ids: Vec<i64>,
@@ -802,6 +836,26 @@ impl GongwenApp {
     }
 
     pub(crate) fn open_pdf_attachment(&mut self, id: i64) {
+        // 附件不存在时不要为一个不会发生的操作弹风险框。
+        let known = self
+            .manuscript_detail
+            .as_ref()
+            .is_some_and(|detail| detail.pdfs.iter().any(|pdf| pdf.id == id));
+        if !known {
+            return;
+        }
+        // 当前查看器需要文件路径。内存读取改造前，不能以“预览”为由静默释放明文。
+        if crate::vault::key_handle().is_some() {
+            self.request_plaintext_output(
+                "预览 PDF 附件：当前查看器会在本机缓存目录生成一份普通 PDF 副本（仅当前用户可读，锁屏/退出时删除）。",
+                move |app| app.open_pdf_attachment_confirmed(id),
+            );
+            return;
+        }
+        self.open_pdf_attachment_confirmed(id);
+    }
+
+    fn open_pdf_attachment_confirmed(&mut self, id: i64) {
         let (path, title) = {
             let detail = self.manuscript_detail.as_ref();
             let Some(detail) = detail else { return };
@@ -809,13 +863,18 @@ impl GongwenApp {
                 return;
             };
             let path = self.temp_pdf_path(detail.id, id);
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(error) = std::fs::write(&path, &pdf.bytes) {
-                self.status = format!("写入临时 PDF 失败：{error}");
+            // 走 atomic_write：Unix 0600、原子替换；并登记到工作区，锁屏/退出时删除，
+            // 不能让预览副本长期留在磁盘上。
+            let bytes = pdf.bytes.clone();
+            if let Err(error) = crate::storage::atomic_write(&path, |file| {
+                use std::io::Write as _;
+                file.write_all(&bytes)?;
+                Ok(())
+            }) {
+                self.status = format!("写入临时 PDF 失败：{error:#}");
                 return;
             }
+            self.temp_pdfs.push(path.clone());
             (path, pdf.file_name.clone())
         };
         self.open_pdf(path, Some(title));
@@ -830,27 +889,52 @@ impl GongwenApp {
         }) else {
             return;
         };
-        self.request_file(
-            FileDialogSpec::save_file()
-                .filter("PDF", &["pdf"])
-                .file_name(file_name),
-            move |app, path| {
-                let Some(path) = path else {
-                    return;
-                };
-                match std::fs::write(&path, &bytes) {
-                    Ok(()) => app.status = format!("已保存附件到 {}。", path.display()),
-                    Err(error) => app.status = format!("保存附件失败：{error}"),
-                }
-            },
-        );
+        self.request_plaintext_output(format!("另存 PDF 附件：{file_name}"), move |app| {
+            app.request_file(
+                FileDialogSpec::save_file()
+                    .filter("PDF", &["pdf"])
+                    .file_name(file_name),
+                move |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    match std::fs::write(&path, &bytes) {
+                        Ok(()) => app.status = format!("已保存附件到 {}。", path.display()),
+                        Err(error) => app.status = format!("保存附件失败：{error}"),
+                    }
+                },
+            );
+        });
     }
 
+    /// 预览副本放本机缓存目录（不是用户可见的输出目录）：锁屏/退出会删，
+    /// 不再产生「已经导出到输出目录」的误解，也不会落到共享盘。
     pub(crate) fn temp_pdf_path(&self, manuscript_id: i64, attachment_id: i64) -> PathBuf {
-        PathBuf::from(&self.config.output_dir)
-            .join("temp")
+        crate::storage::cache_dir()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join("pdf-preview")
             .join(format!("manuscript_{manuscript_id}_{attachment_id}.pdf"))
     }
+}
+
+/// 清掉崩溃/强杀残留的 PDF 预览副本（正常路径由工作区 Drop 删除）。
+/// 只删缓存目录 `pdf-preview/` 下自己的 `manuscript_<id>_<id>.pdf` 命名，
+/// 不碰用户的任何文件。
+pub(crate) fn purge_stale_preview_pdfs() {
+    let Ok(dir) = crate::storage::cache_dir().map(|dir| dir.join("pdf-preview")) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("manuscript_") && name.ends_with(".pdf") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let _ = std::fs::remove_dir(&dir);
 }
 
 /// 拖着稿件包悬停在窗口上时的整窗提示：半透明遮罩 + 居中一句话。

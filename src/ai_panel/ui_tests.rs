@@ -35,7 +35,9 @@ fn paper_sidebar_samples() {
                 .ai_panel
                 .composer
                 .materials
-                .push(PastedFile::new(&"这是验收专用材料，不含用户文稿。\n".repeat(150)).unwrap());
+                .push(PastedFile::new(
+                    &"这是验收专用材料，不含用户文稿。\n".repeat(150),
+                ));
         }
         if conversation {
             harness
@@ -211,9 +213,10 @@ fn has(texts: &[String], needle: &str) -> bool {
     texts.iter().any(|text| text.contains(needle))
 }
 
-/// 真正走 egui 粘贴事件：长文成为材料，短文仍在光标处插入；其它输入框的粘贴不接管。
+/// 真正走 egui 粘贴事件：长文成为材料（只在内存，不落临时文件），短文仍在光标处
+/// 插入；其它输入框的粘贴不接管。
 #[test]
-fn large_paste_becomes_a_file_only_in_the_focused_composer() {
+fn large_paste_becomes_material_only_in_the_focused_composer() {
     let mut harness = Harness::new("原有正文");
     harness.doc.ai_panel.open = true;
     harness.doc.ai_panel.composer.text = "请根据材料整理通知".into();
@@ -224,9 +227,8 @@ fn large_paste_becomes_a_file_only_in_the_focused_composer() {
     let composer = &harness.doc.ai_panel.composer;
     assert_eq!(composer.text, "请根据材料整理通知");
     assert_eq!(composer.materials.len(), 1);
-    let path = composer.materials[0].file.path().to_owned();
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     assert_eq!(composer.materials[0].material.text, text);
+    assert!(!composer.materials[0].material.name.is_empty());
     harness.frame_with(vec![egui::Event::Paste("短材料".into())]);
     assert!(harness.doc.ai_panel.composer.text.contains("短材料"));
     harness.ctx.memory_mut(|memory| {
@@ -235,7 +237,6 @@ fn large_paste_becomes_a_file_only_in_the_focused_composer() {
     harness.frame_with(vec![egui::Event::Paste(text)]);
     assert_eq!(harness.doc.ai_panel.composer.materials.len(), 1);
     harness.doc.ai_panel.composer.materials.clear();
-    assert!(!path.exists(), "移除引用后清理临时文件");
 }
 
 /// 带 HTML 的大段粘贴：材料用转出来的 Markdown，网页 / Word 的表格不会散成制表符。
@@ -261,15 +262,13 @@ fn pasted_material_keeps_html_tables() {
 }
 
 #[test]
-fn pasted_material_survives_serialization_and_file_cleanup() {
+fn pasted_material_survives_serialization_without_temp_files() {
     let mut harness = Harness::new("原有正文");
-    let file = PastedFile::new(&"材料全文🙂\n".repeat(400)).unwrap();
-    let path = file.file.path().to_owned();
+    let file = PastedFile::new(&"材料全文🙂\n".repeat(400));
     let mut request = panel_request(Some(crate::agent::skill::POLISH), "按材料修改");
     request.materials.push(file.material.clone());
     let saved = serde_json::to_value(&request).unwrap();
     drop(file);
-    assert!(!path.exists());
     let restored: TurnRequest = serde_json::from_value(saved.clone()).unwrap();
     assert_eq!(restored, request);
     let time = crate::prompt::TimeContext::now();
@@ -300,7 +299,7 @@ fn composer_bounds_long_text_and_many_materials() {
             .ai_panel
             .composer
             .materials
-            .push(PastedFile::new("材料").unwrap());
+            .push(PastedFile::new("材料"));
     }
     let ctx = harness.ctx.clone();
     for size in [egui::vec2(340.0, 600.0), egui::vec2(640.0, 900.0)] {

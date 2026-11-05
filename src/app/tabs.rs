@@ -338,6 +338,7 @@ impl GongwenApp {
             || self.backup_busy
             || self.docs.iter().any(|doc| doc.busy)
             || self.pdfs.iter().any(PdfSession::busy)
+            || self.manuscript_pdf_export_busy
             || self.send_package_exporting()
     }
 
@@ -396,6 +397,9 @@ impl GongwenApp {
                     version_number,
                 } => self.load_manuscript_version(manuscript_id, version_number),
                 DraftAction::Persist => self.persist(),
+                DraftAction::ConfirmPlaintextOutput { operation, action } => {
+                    self.request_plaintext_output(operation, action);
+                }
 
                 DraftAction::ImportDocument { key } => {
                     let ctx = ctx.clone();
@@ -434,13 +438,15 @@ impl GongwenApp {
                     let spec = super::file_dialog::FileDialogSpec::save_file()
                         .file_name(name)
                         .filter("Markdown", &["md"]);
-                    self.request_file(spec, move |app, path| {
-                        if let Some(path) = path {
-                            app.status = match std::fs::write(&path, text.as_bytes()) {
-                                Ok(()) => format!("写作成果已导出到 {}", path.display()),
-                                Err(error) => format!("导出写作成果失败：{error}"),
-                            };
-                        }
+                    self.request_plaintext_output("导出写作成果 Markdown", move |app| {
+                        app.request_file(spec, move |app, path| {
+                            if let Some(path) = path {
+                                app.status = match std::fs::write(&path, text.as_bytes()) {
+                                    Ok(()) => format!("写作成果已导出到 {}", path.display()),
+                                    Err(error) => format!("导出写作成果失败：{error}"),
+                                };
+                            }
+                        });
                     });
                 }
                 DraftAction::InsertImages { key } => {
@@ -468,15 +474,20 @@ impl GongwenApp {
                         let label = format!("{} 文件", extension.to_ascii_uppercase());
                         spec = spec.filter(label, &[extension]);
                     }
-                    self.request_file(spec, move |app, target| {
-                        let Some(target) = target else {
-                            return;
-                        };
-                        let Some(index) = app.doc_index_of_key(key) else {
-                            return;
-                        };
-                        app.draft_page_at(index).copy_export_to(&source, &target);
-                    });
+                    self.request_plaintext_output(
+                        format!("另存导出成品：{}", source.display()),
+                        move |app| {
+                            app.request_file(spec, move |app, target| {
+                                let Some(target) = target else {
+                                    return;
+                                };
+                                let Some(index) = app.doc_index_of_key(key) else {
+                                    return;
+                                };
+                                app.draft_page_at(index).copy_export_to(&source, &target);
+                            });
+                        },
+                    );
                 }
                 DraftAction::ImportBibliography { key } => {
                     self.request_file(

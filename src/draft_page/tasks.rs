@@ -88,35 +88,89 @@ impl DraftPage<'_> {
     /// 「打印…」：按覆盖策略只导一份 PDF，导完由外壳打开并弹打印对话框。
     /// 走的就是 [`Self::start_export_with`]，不另写一条导出路径。
     pub(crate) fn start_export_for_print(&mut self) {
-        if self.start_export_only(ExportKind::Pdf) {
-            self.doc.request_print_after_export();
-            *self.status = "正在导出 PDF，排好后打开打印对话框…".into();
-        }
+        self.request_export(
+            ExportKind::Pdf.selection(self.config.export.overwrite, self.config.export.receipt),
+            None,
+            true,
+        );
     }
 
     /// 「输出」分区的 PDF / Word / Typst 包图标：只导这一种，导完由外壳打开
     /// （PDF 在应用内、Word 用系统程序、Typst 包在文件管理器里定位）。
     pub(crate) fn start_export_and_open(&mut self, kind: ExportKind) {
-        if self.start_export_only(kind) {
-            self.doc.open_after_export = Some(kind);
-            *self.status = format!("正在导出 {}，导完自动打开…", kind.label());
-        }
-    }
-
-    /// 只导一种格式；返回这一下是否真把导出开起来了。`start_export_with` 会拦
-    /// 「正在忙 / 没有内容」，只看调用后的 `busy` 不够：别的任务本来就在跑时它也是真，
-    /// 调用方的标记会挂到那个任务后面的某次导出上。
-    fn start_export_only(&mut self, kind: ExportKind) -> bool {
-        let was_busy = self.doc.busy;
-        self.start_export_with(
+        self.request_export(
             kind.selection(self.config.export.overwrite, self.config.export.receipt),
+            Some(kind),
+            false,
         );
-        !was_busy && self.doc.busy
     }
 
     /// 按给定格式导出。「输出」分区里的「仅 Word」等入口用它临时只出一种格式，
     /// 不动设置页里勾好的常用格式。
     pub(crate) fn start_export_with(&mut self, selection: ExportSelection) {
+        self.request_export(selection, None, false);
+    }
+
+    fn request_export(
+        &mut self,
+        selection: ExportSelection,
+        open: Option<ExportKind>,
+        print: bool,
+    ) {
+        if self.doc.busy || self.doc.generated_markdown.trim().is_empty() || !selection.any() {
+            // 沿用原入口的错误提示，不为不会启动的任务弹风险框。
+            self.start_confirmed_export(selection, open, print);
+            return;
+        }
+        if crate::vault::key_handle().is_some() {
+            let key = self.doc.key;
+            let mut formats = Vec::new();
+            if selection.pdf {
+                formats.push("PDF");
+            }
+            if selection.docx {
+                formats.push("Word");
+            }
+            if selection.markdown {
+                formats.push("Markdown 源码包");
+            }
+            if selection.typst {
+                formats.push("Typst 源码包");
+            }
+            if selection.receipt {
+                formats.push("随行单据");
+            }
+            let operation = format!(
+                "{}\n格式：{}\n输出目录：{}",
+                if print {
+                    "打印前生成 PDF"
+                } else {
+                    "导出当前稿件"
+                },
+                formats.join("、"),
+                self.config.output_dir,
+            );
+            self.actions.push(DraftAction::ConfirmPlaintextOutput {
+                operation,
+                action: Box::new(move |app| {
+                    if let Some(index) = app.doc_index_of_key(key) {
+                        app.draft_page_at(index)
+                            .start_confirmed_export(selection, open, print);
+                    }
+                }),
+            });
+            return;
+        }
+        self.start_confirmed_export(selection, open, print);
+    }
+
+    /// 仅由统一确认回调或未启用加密的入口调用，不持久化任何“已确认”状态。
+    pub(crate) fn start_confirmed_export(
+        &mut self,
+        selection: ExportSelection,
+        open: Option<ExportKind>,
+        print: bool,
+    ) {
         if self.doc.busy {
             return;
         }
@@ -179,6 +233,13 @@ impl DraftPage<'_> {
         };
         let (key, seq) = self.begin_job();
         *self.status = "正在导出当前审校稿…".into();
+        self.doc.open_after_export = open;
+        if print {
+            self.doc.request_print_after_export();
+            *self.status = "正在导出 PDF，排好后打开打印对话框…".into();
+        } else if let Some(kind) = open {
+            *self.status = format!("正在导出 {}，导完自动打开…", kind.label());
+        }
         self.doc.output_files.clear();
         self.doc.export_error = None;
         let input = self.doc.draft.clone();

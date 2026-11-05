@@ -1099,6 +1099,48 @@ impl DraftPage<'_> {
         formats: RedlineFormats,
         print_preview: bool,
     ) {
+        if self.doc.busy || doc.is_empty() {
+            if doc.is_empty() {
+                *self.status = "当前修订与基准版一致，没有可出的花脸稿。".into();
+            }
+            return;
+        }
+        if crate::vault::key_handle().is_some() {
+            let key = self.doc.key;
+            let location = if print_preview {
+                "应用缓存目录（花脸稿打印预览也会生成普通 PDF）".to_string()
+            } else {
+                self.config.output_dir.clone()
+            };
+            self.actions
+                .push(crate::app::DraftAction::ConfirmPlaintextOutput {
+                    operation: format!("导出花脸稿（含删除和新增的内容）\n输出位置：{location}"),
+                    action: Box::new(move |app| {
+                        if let Some(index) = app.doc_index_of_key(key) {
+                            app.draft_page_at(index).export_redline_confirmed(
+                                doc,
+                                input,
+                                formats,
+                                print_preview,
+                            );
+                        }
+                    }),
+                });
+            return;
+        }
+        self.export_redline_confirmed(doc, input, formats, print_preview);
+    }
+
+    pub(crate) fn export_redline_confirmed(
+        &mut self,
+        doc: redline::RedlineDoc,
+        input: DraftInput,
+        formats: RedlineFormats,
+        print_preview: bool,
+    ) {
+        if self.doc.busy {
+            return;
+        }
         if doc.is_empty() {
             *self.status = "当前修订与基准版一致，没有可出的花脸稿。".into();
             return;

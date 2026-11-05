@@ -559,15 +559,21 @@ impl GongwenApp {
                 return;
             }
             PageAction::ChooseExportFile => {
-                self.request_file(
-                    FileDialogSpec::save_file()
-                        .filter("风格档案", &["json"])
-                        .file_name("风格档案.json"),
-                    |app, path| {
-                        let Some(path) = path else {
-                            return;
-                        };
-                        app.apply_styles_action(PageAction::Export(path));
+                let spec = FileDialogSpec::save_file()
+                    .filter("风格档案", &["json"])
+                    .file_name("风格档案.json");
+                let count = self.styles_page.book.styles.len();
+                // 风格档案含样稿原文片段与稿件标题，加密工作区里写成普通文件要先确认风险。
+                self.request_output_with_warning(
+                    format!("导出 {count} 份风格档案（含样稿原文片段与稿件标题）"),
+                    super::output_guard::PII_EXPORT_WARNING,
+                    move |app| {
+                        app.request_file(spec, |app, path| {
+                            let Some(path) = path else {
+                                return;
+                            };
+                            app.apply_styles_action(PageAction::Export(path));
+                        });
                     },
                 );
                 return;

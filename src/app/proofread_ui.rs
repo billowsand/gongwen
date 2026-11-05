@@ -280,18 +280,23 @@ impl GongwenApp {
     }
 
     fn export_proofread_xlsx(&mut self) {
-        self.request_file(
-            FileDialogSpec::save_file()
-                .filter("Excel", &["xlsx"])
-                .file_name("公文助手校对词表.xlsx"),
-            |app, path| {
-                let Some(path) = path else {
-                    return;
-                };
-                match crate::proofread_xlsx::to_xlsx(&app.config.proofread, &path) {
-                    Ok(()) => app.status = format!("校对词表已导出到 {}。", path.display()),
-                    Err(error) => app.status = format!("导出校对词表失败：{error:#}"),
-                }
+        let spec = FileDialogSpec::save_file()
+            .filter("Excel", &["xlsx"])
+            .file_name("公文助手校对词表.xlsx");
+        // 校对词表含稿件派生的用语与人名单位，加密工作区里导出成普通表格要先确认风险。
+        self.request_output_with_warning(
+            "导出校对词表 Excel（含从稿件派生的用语）",
+            super::output_guard::PII_EXPORT_WARNING,
+            move |app| {
+                app.request_file(spec, |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    match crate::proofread_xlsx::to_xlsx(&app.config.proofread, &path) {
+                        Ok(()) => app.status = format!("校对词表已导出到 {}。", path.display()),
+                        Err(error) => app.status = format!("导出校对词表失败：{error:#}"),
+                    }
+                });
             },
         );
     }

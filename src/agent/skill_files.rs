@@ -45,7 +45,8 @@ flow:
 ";
 
 fn skills_dir() -> anyhow::Result<PathBuf> {
-    Ok(crate::storage::config_dir()?.join("skills"))
+    // 槽位感知：诱饵系统用 `alt-skills`，两套用户技能互不可见。
+    crate::storage::slot_subdir("skills")
 }
 
 /// 技能 id 只能用英文字母、数字、下划线和短横线（它是文件夹名）。

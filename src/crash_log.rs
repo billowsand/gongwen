@@ -16,6 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 日志目录里最多保留这么多份崩溃日志，更旧的在写新日志时删掉。
 const MAX_REPORTS: usize = 20;
+/// 调用栈可能很长，日志只保留够定位问题的开头部分；按字符数（不是字节数）截断，
+/// 否则中文信息会被切在 UTF-8 中间。
+const MAX_DETAIL_CHARS: usize = 2000;
+const TRUNCATION_SUFFIX: &str = "\n…（已截断）";
 /// 写过崩溃日志后留下的标记，内容是最新那份日志的路径；下次启动读到就提示并删掉。
 const UNSEEN_MARKER: &str = ".unseen-crash";
 const REPORT_PREFIX: &str = "crash-";
@@ -89,17 +93,34 @@ fn write_report_in(
     detail: &str,
     now: chrono::DateTime<chrono::Local>,
 ) -> Option<PathBuf> {
-    fs::create_dir_all(dir).ok()?;
+    create_private_dir(dir).ok()?;
     let path = dir.join(format!(
         "{REPORT_PREFIX}{}.log",
         now.format("%Y%m%d-%H%M%S-%3f")
     ));
-    let mut file = fs::File::create(&path).ok()?;
-    file.write_all(render_report(kind, detail, &now).as_bytes())
-        .ok()?;
-    let _ = fs::write(dir.join(UNSEEN_MARKER), path.display().to_string());
+    crate::storage::atomic_write(&path, |file| {
+        file.write_all(render_report(kind, detail, &now).as_bytes())?;
+        Ok(())
+    })
+    .ok()?;
+    let _ = crate::storage::atomic_write(&dir.join(UNSEEN_MARKER), |file| {
+        file.write_all(path.display().to_string().as_bytes())?;
+        Ok(())
+    });
     prune(dir);
     Some(path)
+}
+
+/// 日志目录只给当前用户可读写：日志里有路径、正文片段与系统信息，
+/// 不该让同机其他用户顺手读到。Windows 上没有对应的位，无操作。
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 fn render_report(kind: &str, detail: &str, now: &chrono::DateTime<chrono::Local>) -> String {
@@ -133,7 +154,18 @@ fn render_report(kind: &str, detail: &str, now: &chrono::DateTime<chrono::Local>
             let _ = writeln!(text, "{key}={}", value.to_string_lossy());
         }
     }
-    let _ = writeln!(text, "\n{detail}");
+    let _ = writeln!(text, "\n{}", truncate_detail(detail));
+    text
+}
+
+/// 把详情截到 [`MAX_DETAIL_CHARS`] 个字符以内，超出时以说明结尾。
+fn truncate_detail(detail: &str) -> String {
+    if detail.chars().count() <= MAX_DETAIL_CHARS {
+        return detail.to_owned();
+    }
+    let keep = MAX_DETAIL_CHARS - TRUNCATION_SUFFIX.chars().count();
+    let mut text: String = detail.chars().take(keep).collect();
+    text.push_str(TRUNCATION_SUFFIX);
     text
 }
 
@@ -221,5 +253,30 @@ mod tests {
             names[0].contains("100005"),
             "最旧的 5 份应被删掉：{names:?}"
         );
+    }
+
+    #[test]
+    fn long_detail_is_truncated_by_characters() {
+        // 中文一个字三字节，按字节截断会切坏 UTF-8；这里核对按字符截断且不超过上限。
+        let detail = "汉".repeat(MAX_DETAIL_CHARS + 50);
+        let text = render_report("测试", &detail, &at(9));
+        assert!(text.contains("已截断"));
+        assert_eq!(
+            text.chars().filter(|ch| *ch == '汉').count(),
+            MAX_DETAIL_CHARS - TRUNCATION_SUFFIX.chars().count()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn report_dir_file_and_marker_are_private_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("logs");
+        let path = write_report_in(&dir, "测试", "", at(2)).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&dir.join(UNSEEN_MARKER)), 0o600);
     }
 }

@@ -48,6 +48,11 @@ pub(crate) enum DraftAction {
     },
     /// 把当前版式记进配置并落盘。
     Persist,
+    /// 内容离开加密工作区前，由外壳统一显示风险确认。
+    ConfirmPlaintextOutput {
+        operation: String,
+        action: super::output_guard::OutputAction,
+    },
     /// 导入文档：应用层开文件框，选好后把正文插进这篇稿件。
     ImportDocument { key: DocKey },
     /// 给分阶段写作添加原文快照；系统文件框仍由应用层调度。

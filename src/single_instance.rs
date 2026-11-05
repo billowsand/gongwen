@@ -21,7 +21,6 @@ pub const NEW_WINDOW_FLAG: &str = "--new-window";
 const LOCK_FILE: &str = "instance.lock";
 const INBOX_DIR: &str = "inbox";
 const REQUEST_EXT: &str = "req";
-const PARTIAL_EXT: &str = "tmp";
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 /// 收件目录里放了这么久还没被取走的请求（主实例当时卡死后被强杀之类），
 /// 下次启动时直接丢掉，免得过了很久突然弹出口令框。
@@ -57,9 +56,19 @@ fn start_in(dir: &Path, imports: &[PathBuf]) -> Result<Startup> {
         .write(true)
         .open(dir.join(LOCK_FILE))
         .context("无法打开实例锁文件")?;
+    // 锁文件只给当前用户可读写：里面没有内容，但文件名本身就说明本机在用这个程序。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        lock.set_permissions(fs::Permissions::from_mode(0o600))
+            .context("无法设置实例锁文件权限")?;
+    }
     let inbox = dir.join(INBOX_DIR);
     match lock.try_lock() {
         Ok(()) => {
+            // 转交进程只在需要时才建收件目录；主实例先建出来并把权限收紧，
+            // 免得旧版本留下的宽松目录一直被沿用。建不出来也不影响本进程启动。
+            let _ = create_private_dir(&inbox);
             clear_stale(&inbox, SystemTime::now());
             Ok(Startup::Primary(Instance { _lock: lock, inbox }))
         }
@@ -70,6 +79,18 @@ fn start_in(dir: &Path, imports: &[PathBuf]) -> Result<Startup> {
         }
         Err(fs::TryLockError::Error(error)) => Err(error).context("无法锁定实例锁文件"),
     }
+}
+
+/// 建收件目录并收紧到仅当前用户：请求里是用户要导入的稿件包路径。
+/// Windows 上没有对应的权限位，只建目录。
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 impl Instance {
@@ -96,24 +117,27 @@ impl Instance {
     }
 }
 
-/// 把请求写进收件目录：先写 `.tmp` 再改名，主实例只读完整的 `.req`。
+/// 把请求写进收件目录：先写同目录暂存再改名，主实例只读完整的 `.req`。
 /// 文件名以纳秒时间戳开头，主实例按名字排序就是到达顺序。
+/// 落盘走 [`crate::storage::atomic_write`]：Unix 下 `.req` 是 0600，请求里的路径不外泄。
 fn forward(inbox: &Path, imports: &[PathBuf]) -> Result<()> {
-    fs::create_dir_all(inbox).with_context(|| format!("无法创建 {}", inbox.display()))?;
+    create_private_dir(inbox).with_context(|| format!("无法创建 {}", inbox.display()))?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let stem = format!("{nanos:024}-{}", uuid::Uuid::new_v4().simple());
-    let partial = inbox.join(format!("{stem}.{PARTIAL_EXT}"));
     let body = imports
         .iter()
         .map(|path| path.to_string_lossy())
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(&partial, body).context("无法写入转交请求")?;
-    fs::rename(&partial, inbox.join(format!("{stem}.{REQUEST_EXT}")))
-        .context("无法提交转交请求")?;
+    crate::storage::atomic_write(&inbox.join(format!("{stem}.{REQUEST_EXT}")), |file| {
+        use std::io::Write as _;
+        file.write_all(body.as_bytes())?;
+        Ok(())
+    })
+    .context("无法提交转交请求")?;
     Ok(())
 }
 
@@ -301,5 +325,23 @@ mod tests {
         ));
         let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(request, vec![PathBuf::from("/来函.gwx")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_file_inbox_and_requests_are_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let instance = primary(temp.path());
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&temp.path().join(LOCK_FILE)), 0o600);
+        assert_eq!(mode(&temp.path().join(INBOX_DIR)), 0o700);
+        forward(&instance.inbox, &[PathBuf::from("/来函.gwx")]).unwrap();
+        let request = fs::read_dir(&instance.inbox)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.extension().is_some_and(|ext| ext == REQUEST_EXT))
+            .unwrap();
+        assert_eq!(mode(&request), 0o600);
     }
 }

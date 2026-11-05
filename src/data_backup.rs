@@ -139,17 +139,28 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path) -> Result<()> {
         .prefix(TEMP_PREFIX)
         .tempdir_in(parent)
         .context("无法创建数据库备份临时目录")?;
-    let database = config_dir.join("manuscripts.db");
-    let snapshot = snapshot_dir.path().join("manuscripts.db");
-    if database.is_file() {
-        snapshot_database(&database, &snapshot)?;
-    }
-    // 诱饵系统的库（alt- 前缀）同样要一致快照：它也有自己的 WAL，
-    // 直接拷贝正在变化的文件会缺页（见 docs/security-lock-design.md）。
-    let alt_database = config_dir.join("alt-manuscripts.db");
-    let alt_snapshot = snapshot_dir.path().join("alt-manuscripts.db");
-    if alt_database.is_file() {
-        snapshot_database(&alt_database, &alt_snapshot)?;
+    // 只对**当前槽位**的库做带密钥的一致快照，因为进程里只有当前槽的 DEK。
+    // 另一槽的库若存在，用当前密钥去 open 一定失败（旧实现因此让「有第二密码
+    // 的用户永远做不成备份」）；它此刻没有被任何连接打开，按原始密文文件
+    // 原样收进备份，并在恢复侧要求重新解锁。
+    let current_db = crate::storage::manuscript_db_path().ok();
+    let mut snapshot_names = std::collections::HashSet::new();
+    for name in ["manuscripts.db", "alt-manuscripts.db"] {
+        let source = config_dir.join(name);
+        if !source.is_file() {
+            continue;
+        }
+        // 能安全快照的条件：没有加密句柄（两端都是明文形态），或这就是当前
+        // 槽位的库（句柄与它匹配）。另一槽的密文库用当前密钥打开必然失败，
+        // 旧实现会因此让「有第二密码的用户永远做不成备份」——那种情况按原始
+        // 密文文件收进备份，并在恢复侧强制重新解锁。
+        let snapshot_with_key = crate::vault::key_handle().is_some();
+        let is_current = current_db.as_deref() == Some(source.as_path());
+        if !snapshot_with_key || is_current {
+            let snapshot = snapshot_dir.path().join(name);
+            snapshot_database(&source, &snapshot)?;
+            snapshot_names.insert(name.to_string());
+        }
     }
     let files = collect_files(config_dir)?;
     // 先写同目录临时文件，写完再原子替换目标：导出中途失败不会留下半个 ZIP。
@@ -160,10 +171,9 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path) -> Result<()> {
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
         for rel in &files {
-            let source = if rel == Path::new("manuscripts.db") {
-                snapshot.clone()
-            } else if rel == Path::new("alt-manuscripts.db") {
-                alt_snapshot.clone()
+            let name = rel.to_string_lossy().into_owned();
+            let source = if snapshot_names.contains(&name) {
+                snapshot_dir.path().join(rel)
             } else {
                 config_dir.join(rel)
             };
@@ -407,7 +417,13 @@ fn is_excluded(rel: &Path) -> bool {
         return false;
     };
     name == UNSEEN_CRASH_MARKER
+        // 停用加密的待办标记：带着它恢复，下次解锁会自动把数据解成明文并删锁。
+        || name == "vault.pending-disable"
+        || name.ends_with("-vault.pending-disable")
         || name.contains(CORRUPT_MARK)
+        // config.json 的副本（身份迁移前备份）里可能是明文配置与 API 密钥；
+        // 恢复旧备份时不该把它带回来绕过现有加密。
+        || name.ends_with("身份迁移前备份")
         || name.starts_with(TEMP_PREFIX)
         || name.ends_with(".tmp")
         // 明文⇄密文迁移若被中断可能留下覆写过的旧库残骸，绝不进备份。
@@ -491,8 +507,14 @@ fn restrict_permissions(path: &Path) {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return;
     };
-    if matches!(name, "config.json" | ".zip-password" | "api-secrets.json") {
+    // 恢复包里可能同时有真实槽与诱饵槽的文件；两份都要按同一份敏感名单收紧。
+    let plain_name = name.strip_prefix("alt-").unwrap_or(name);
+    if crate::storage::SEALED_FILE_NAMES.contains(&plain_name) || name.ends_with("身份迁移前备份")
+    {
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    if path.is_dir() {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
     }
 }
 
@@ -771,5 +793,15 @@ mod tests {
             .to_string();
         assert!(error.contains("不能放在配置目录内"), "{error}");
         assert!(!source.path().join("out.zip").exists());
+    }
+    /// 停用标记与配置副本绝不能进备份：带回去恢复会让下次解锁自动解密并删锁。
+    #[test]
+    fn backup_excludes_disable_marker_and_config_copies() {
+        assert!(is_excluded(Path::new("vault.pending-disable")));
+        assert!(is_excluded(Path::new("alt-vault.pending-disable")));
+        assert!(is_excluded(Path::new("config.json.身份迁移前备份")));
+        assert!(is_excluded(Path::new("alt-config.json.身份迁移前备份")));
+        assert!(!is_excluded(Path::new("config.json")));
+        assert!(!is_excluded(Path::new("manuscripts.db")));
     }
 }

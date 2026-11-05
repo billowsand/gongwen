@@ -38,12 +38,21 @@ impl GongwenApp {
                 } else {
                     "词表输入法-生效词表.txt"
                 };
-                self.request_file(
-                    FileDialogSpec::save_file().file_name(file_name),
-                    move |app, path| {
-                        if let Some(path) = path {
-                            app.ime.export_text_to(&path, filtered);
-                        }
+                let spec = FileDialogSpec::save_file().file_name(file_name);
+                // 词表由标准词库与个人词条组成，加密工作区里导出成普通文本要先确认风险。
+                self.request_output_with_warning(
+                    if filtered {
+                        "导出输入法筛选结果词表"
+                    } else {
+                        "导出输入法生效词表"
+                    },
+                    super::output_guard::PLAINTEXT_WARNING,
+                    move |app| {
+                        app.request_file(spec, move |app, path| {
+                            if let Some(path) = path {
+                                app.ime.export_text_to(&path, filtered);
+                            }
+                        });
                     },
                 );
             }
@@ -58,22 +67,32 @@ impl GongwenApp {
                 );
             }
             PageAction::ExportFinalWordTable => {
-                self.request_file(
-                    FileDialogSpec::save_file().file_name("词表输入法-最终词表.txt"),
-                    |app, path| {
-                        if let Some(path) = path {
-                            app.ime.export_final_word_table_to(&path);
-                        }
+                let spec = FileDialogSpec::save_file().file_name("词表输入法-最终词表.txt");
+                // 最终词表含标准词库与全部个人词条，加密工作区里导出成普通文本要先确认风险。
+                self.request_output_with_warning(
+                    "导出输入法最终词表",
+                    super::output_guard::PLAINTEXT_WARNING,
+                    move |app| {
+                        app.request_file(spec, move |app, path| {
+                            if let Some(path) = path {
+                                app.ime.export_final_word_table_to(&path);
+                            }
+                        });
                     },
                 );
             }
             PageAction::ExportPersonalBackup => {
-                self.request_file(
-                    FileDialogSpec::save_file().file_name("词表输入法-个人备份.json"),
-                    |app, path| {
-                        if let Some(path) = path {
-                            app.ime.export_personal_backup_to(&path);
-                        }
+                let spec = FileDialogSpec::save_file().file_name("词表输入法-个人备份.json");
+                // 个人备份含全部个人词条与设置，加密工作区里导出成普通文件要先确认风险。
+                self.request_output_with_warning(
+                    "导出输入法个人备份（词表与设置）",
+                    super::output_guard::PLAINTEXT_WARNING,
+                    move |app| {
+                        app.request_file(spec, move |app, path| {
+                            if let Some(path) = path {
+                                app.ime.export_personal_backup_to(&path);
+                            }
+                        });
                     },
                 );
             }

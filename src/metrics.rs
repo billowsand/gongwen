@@ -148,8 +148,9 @@ impl Metrics {
     }
 }
 
+/// 埋点文件走槽位映射：诱饵系统只写自己的 `alt-metrics.json`，两边采纳率不串。
 fn path() -> anyhow::Result<std::path::PathBuf> {
-    Ok(crate::storage::config_dir()?.join("metrics.json"))
+    crate::storage::slot_file("metrics.json")
 }
 
 /// 读埋点。文件不存在、损坏或读不动都返回空表——埋点是辅助信息，
@@ -170,14 +171,16 @@ pub fn save(metrics: &mut Metrics) {
         return;
     }
     let Ok(path) = path() else { return };
-    let Some(parent) = path.parent() else { return };
-    if std::fs::create_dir_all(parent).is_err() {
-        return;
-    }
     let Ok(text) = serde_json::to_string_pretty(metrics) else {
         return;
     };
-    if std::fs::write(path, text).is_ok() {
+    // 原子写：中途失败不会把已有埋点截成半份；Unix 下文件是 0600。
+    let written = crate::storage::atomic_write(&path, |file| {
+        use std::io::Write as _;
+        file.write_all(text.as_bytes())?;
+        Ok(())
+    });
+    if written.is_ok() {
         metrics.mark_saved();
     }
 }

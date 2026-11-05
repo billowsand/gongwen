@@ -378,3 +378,27 @@ fn never_committed_items_block_export_and_are_pending() {
         "已归档的件不提供提交"
     );
 }
+
+#[test]
+fn encrypted_send_package_waits_for_confirmation_before_starting_or_writing() {
+    let (store, panel) = package();
+    let mut app = super::super::management_samples::fixture();
+    app.manuscript_store = Some(store);
+    app.send_package = Some(panel);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("send-package.pdf");
+    crate::vault::set_key_handle([71; 32], true);
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::vault::clear_key_handle();
+        }
+    }
+    let _reset = Reset;
+    app.run_send_package_export(path.clone());
+    assert!(app.pending_output.is_some());
+    assert!(!app.send_package_exporting());
+    assert!(!path.exists());
+    app.pending_output = None;
+    assert!(!path.exists(), "取消不得生成合并 PDF");
+}

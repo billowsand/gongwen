@@ -224,16 +224,13 @@ pub(crate) fn load_store() -> anyhow::Result<ApiStore> {
     let _guard = IO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = services_dir()?;
     let files = service_files(&dir);
-    let legacy = crate::storage::config_dir()?.join("apis.json");
+    let legacy = crate::storage::slot_file("apis.json")?;
     if files.is_empty() && legacy.exists() {
         return migrate(&legacy);
     }
     let mut store = ApiStore::default();
     for (id, path) in files {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("读取 {} 失败：{e}", path.display()))?;
-        let doc: Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("{} 解析失败：{e}", path.display()))?;
+        let doc = read_service_file(&path)?;
         store.services.push(Service { id, doc });
     }
     store.envs = crate::agent::api::read_json("api-envs.json")?;
@@ -248,6 +245,9 @@ fn migrate(legacy: &Path) -> anyhow::Result<ApiStore> {
     write_store(&store)?;
     let backup = legacy.with_extension("json.bak");
     std::fs::rename(legacy, &backup).map_err(|e| anyhow::anyhow!("旧接口文件改名失败：{e}"))?;
+    // 迁移完成后旧文件只是回滚兜底：启用加密时同样封成密文，不能留一份
+    // 含内网地址的明文 `apis.json.bak` 在配置目录里。
+    let _ = crate::storage::seal_file_if_needed(&backup);
     Ok(store)
 }
 
@@ -258,12 +258,49 @@ pub(crate) fn save_store(store: &mut ApiStore) -> anyhow::Result<()> {
     write_store(store)
 }
 
+/// 读一份服务定义。启用应用锁后它是 AEAD 密文（与 api-envs/api-secrets 同等级：
+/// 里面有内网地址、路径与参数说明）；密文但不在解密状态直接报错，不回退明文。
+fn read_service_file(path: &Path) -> anyhow::Result<Value> {
+    let raw =
+        std::fs::read(path).map_err(|e| anyhow::anyhow!("读取 {} 失败：{e}", path.display()))?;
+    let bytes = if crate::vault::is_sealed_file(&raw) {
+        let handle = crate::vault::key_handle()
+            .ok_or_else(|| anyhow::anyhow!("{} 已加密，尚未解锁", path.display()))?;
+        crate::vault::open_bytes(handle.dek(), &raw)
+            .map_err(|e| anyhow::anyhow!("{} 解密失败：{e}", path.display()))?
+    } else {
+        raw
+    };
+    serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!("{} 解析失败：{e}", path.display()))
+}
+
+/// 写一份服务定义：有句柄就密封，Unix 下 0600、原子替换；没有句柄时拒绝对
+/// 已加密文件写明文（静默降级防护）。
+fn write_service_file(path: &Path, doc: &Value) -> anyhow::Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(doc)?;
+    match crate::vault::key_handle() {
+        Some(handle) => bytes = crate::vault::seal_bytes(handle.dek(), &bytes)?,
+        None => {
+            if path.exists()
+                && std::fs::read(path).is_ok_and(|raw| crate::vault::is_sealed_file(&raw))
+            {
+                anyhow::bail!("{} 已加密但当前未解锁，拒绝以明文覆盖", path.display());
+            }
+        }
+    }
+    crate::storage::atomic_write(path, |file| {
+        use std::io::Write as _;
+        file.write_all(&bytes)?;
+        Ok(())
+    })
+}
+
 fn write_store(store: &ApiStore) -> anyhow::Result<()> {
     let dir = services_dir()?;
     std::fs::create_dir_all(&dir)?;
     for service in &store.services {
         let path = dir.join(format!("{}{SERVICE_SUFFIX}", service.id));
-        std::fs::write(&path, serde_json::to_string_pretty(&service.doc)?)?;
+        write_service_file(&path, &service.doc)?;
     }
     for (id, path) in service_files(&dir) {
         if !store.services.iter().any(|service| service.id == id) {

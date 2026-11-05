@@ -97,6 +97,9 @@ struct GateState {
     veiled: bool,
     /// 损坏锁设置已清除：等用户重启，不再给别的出路。
     cleared: bool,
+    /// 磁盘上有加密数据、但锁文件缺失/为空：没有密钥就绝不进工作区。
+    /// 只给恢复指引，不提供「清除锁设置」这种会丢数据的按钮。
+    lock_lost: bool,
     /// 正在后台跑的数据处理（明文→密文迁移 / 停用解密）：
     /// 期间锁屏只显示进度，完成后才进工作区。
     working: Option<GateWorking>,
@@ -132,6 +135,7 @@ impl GateState {
             show_password: false,
             veiled: false,
             cleared: false,
+            lock_lost: false,
             working: None,
         }
     }
@@ -149,6 +153,22 @@ impl GateState {
             ..Self::first_run()
         }
     }
+
+    /// 锁文件丢失/为空，但磁盘上已有加密数据：拒绝进入，给恢复指引。
+    fn lock_lost() -> Self {
+        Self {
+            mode: GateMode::Broken,
+            lock_lost: true,
+            ..Self::first_run()
+        }
+    }
+}
+
+/// 磁盘上是否已有加密形态的数据（真实槽或诱饵槽）。锁文件丢失时靠它拒绝
+/// 以「没有密钥」的工作区进入，避免把密封配置当损坏文件改名、再写回明文。
+fn encrypted_data_on_disk() -> bool {
+    crate::vault::slot_has_encrypted_data(DataSlot::Real)
+        || crate::vault::slot_has_encrypted_data(DataSlot::Decoy)
 }
 
 /// 锁屏这一次交互要外壳做的事。
@@ -195,6 +215,8 @@ impl AppShell {
         theme::configure_style(&cc.egui_ctx);
         theme::omarchy::start_watcher(&cc.egui_ctx);
         let macos_titlebar_metrics = crate::macos_window::configure_native_titlebar(cc);
+        // 配置目录与已知子目录收紧到仅本人可访问（Unix，尽力而为）。
+        crate::storage::harden_permissions();
 
         let startup = StartupBundle {
             startup_imports: Some(startup_imports),
@@ -229,8 +251,24 @@ impl AppShell {
             unlock_fade_started: None,
         };
         match Vault::probe() {
-            Probe::Absent => shell,
-            Probe::Skipped => shell.boot_direct(&cc.egui_ctx),
+            // 没有锁文件：只有在磁盘上也没有加密数据时才走首次设置；否则绝不能
+            // 以「没有密钥」的工作区进入（那会把密封配置当损坏改名并写回明文）。
+            Probe::Absent => {
+                if encrypted_data_on_disk() {
+                    shell.phase = ShellPhase::Gate(GateState::lock_lost());
+                    shell
+                } else {
+                    shell
+                }
+            }
+            Probe::Skipped => {
+                if encrypted_data_on_disk() {
+                    shell.phase = ShellPhase::Gate(GateState::lock_lost());
+                    shell
+                } else {
+                    shell.boot_direct(&cc.egui_ctx)
+                }
+            }
             Probe::Locked => {
                 shell.compact_gate(&cc.egui_ctx);
                 shell.compact_startup = true;
@@ -266,6 +304,8 @@ impl AppShell {
         ctx.memory_mut(|memory| *memory = egui::Memory::default());
         ctx.data_mut(|data| data.clear());
         storage::set_current_slot(slot);
+        // 进入工作区：槽位与密钥句柄都明确，恢复配置目录写入。
+        storage::set_writes_blocked(false);
         let Some(startup) = self.startup.as_mut() else {
             return;
         };
@@ -290,6 +330,8 @@ impl AppShell {
         let veiled = matches!(&self.phase, ShellPhase::Gate(gate) if gate.veiled);
         crate::vault::set_key_handle(dek, kind == WorkKind::Disable);
         crate::storage::set_current_slot(slot);
+        // 迁移/停用任务要在槽位与密钥都明确之后写盘，放行配置目录写入。
+        crate::storage::set_writes_blocked(false);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = match kind {
@@ -356,7 +398,11 @@ impl AppShell {
                 match Vault::load() {
                     Ok(mut vault) => match vault.unlock(&password) {
                         Some(unlocked) => {
-                            let disable = crate::vault::disable_pending();
+                            // 停用标记必须由「刚解锁的 DEK」认证：伪造的明文标记
+                            // 一律无效。停用只对真实槽生效——用诱饵密码不能执行
+                            // 真实槽的解密与删锁，否则可否认性与数据都保不住。
+                            let disable = unlocked.slot == DataSlot::Real
+                                && crate::vault::disable_pending(&unlocked.dek);
                             // 没有要搬的明文数据（通常：上次解锁已迁完）就直接
                             // 进工作区，不再显示「正在加密」卡片——那张卡只在
                             // 真的有活干时出现。两套密码各自只看自己槽位的文件，
@@ -400,6 +446,11 @@ impl AppShell {
                 }
             }
             GateOutcome::SkipSetup => {
+                // 防御纵深：磁盘上已有加密数据时，「暂不设置」不能成为绕过钥匙的入口。
+                if encrypted_data_on_disk() {
+                    self.phase = ShellPhase::Gate(GateState::lock_lost());
+                    return;
+                }
                 if let Err(error) = Vault::create("", None, true) {
                     // 写跳过标记失败不阻塞进入，下次启动再引导一次。
                     let mut skipped = GateState::first_run();
@@ -438,6 +489,10 @@ impl AppShell {
     /// 退回锁屏：丢掉整个工作区（数据库连接、内存数据随 Drop 释放），
     /// 数据密钥句柄一并清掉——锁定状态内存里不留密钥。
     fn lock_now(&mut self, ctx: &egui::Context) {
+        // 停写在前：被丢弃的工作区里晚到的线程不能以「无密钥」状态把明文写回
+        // 配置目录；槽位复位也在 drop 之前，晚到线程至少拿到真实槽路径。
+        crate::storage::set_writes_blocked(true);
+        storage::set_current_slot(DataSlot::Real);
         let previous = std::mem::replace(&mut self.phase, ShellPhase::Gate(GateState::unlock()));
         if let ShellPhase::Ready(mut app) = previous
             && let Some(startup) = self.startup.as_mut()
@@ -448,7 +503,6 @@ impl AppShell {
         crate::vault::clear_key_handle();
         ctx.memory_mut(|memory| *memory = egui::Memory::default());
         ctx.data_mut(|data| data.clear());
-        storage::set_current_slot(DataSlot::Real);
         if let ShellPhase::Gate(gate) = &mut self.phase {
             gate.veiled = true;
         }
@@ -555,7 +609,11 @@ impl AppShell {
                     });
                 }
                 app.update_workspace(ui, frame);
-                if app.take_lock_requested() {
+                if app.take_force_relock() {
+                    // 备份恢复：目录已整体替换，保存会拿旧密钥覆盖新数据。
+                    paint_lock_veil(&ctx, 1.0);
+                    Some(After::Lock)
+                } else if app.take_lock_requested() {
                     if let Err(error) = app.save_before_lock() {
                         app.status = format!("锁定前保存失败，工作区仍保持打开：{error:#}");
                         None
@@ -998,7 +1056,7 @@ fn unlock_form(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<GateE
     }
     let available = ui.available_rect_before_wrap();
     let width = (available.width() - 48.0).clamp(180.0, 304.0);
-    let height = if crate::vault::disable_pending() {
+    let height = if crate::vault::disable_marker_present() {
         178.0
     } else {
         154.0
@@ -1010,7 +1068,7 @@ fn unlock_form(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<GateE
             .layout(egui::Layout::top_down(egui::Align::Min)),
         |ui| {
             ui.set_width(width);
-            if crate::vault::disable_pending() {
+            if crate::vault::disable_marker_present() {
                 ui.label(
                     egui::RichText::new("输入一次密码以完成解密并停用密码保护")
                         .size(theme::font_sizes::SMALL)
@@ -1257,10 +1315,33 @@ fn gate_card(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
             }
         }
         GateMode::Broken => {
-            if gate.cleared {
+            if gate.lock_lost {
                 ui.label(
-                    egui::RichText::new("锁设置已清除。请重启应用重新设置密码；数据文件没有改动。")
-                        .color(theme::text_soft()),
+                    egui::RichText::new(
+                        "检测到本机已有加密数据，但锁文件不存在（可能被删除、损坏或随目录迁移丢失）。",
+                    )
+                    .color(theme::danger()),
+                );
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new(
+                        "没有原来的应用密码就无法打开这些数据。请不要删除数据文件，也不要重复「暂不设置」。",
+                    )
+                    .color(theme::text_soft()),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(
+                        "恢复办法：从备份里找到同一代的 vault.dat 放回配置目录，或用全量备份恢复本机数据。",
+                    )
+                    .color(theme::text_soft()),
+                );
+            } else if gate.cleared {
+                ui.label(
+                    egui::RichText::new(
+                        "锁设置已清除。若本机原有加密数据，它们将无法再打开；请重启应用，从备份恢复锁文件或数据。",
+                    )
+                    .color(theme::text_soft()),
                 );
             } else {
                 ui.label(
@@ -1271,9 +1352,9 @@ fn gate_card(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
                 );
                 ui.add_space(14.0);
                 if ui
-                    .button("清除锁设置（下次启动重新设置密码）")
+                    .button("清除锁设置（之后无法打开原有加密数据）")
                     .on_hover_text(
-                        "只删除锁文件，不动任何数据；清除后任何人都能进入，直到重新设置密码。",
+                        "只删除锁文件，不删除任何数据文件；但数据密钥随锁文件一起丢失，原有加密数据将永久无法打开。仅在确认没有加密数据、或已从备份恢复时才这样做。",
                     )
                     .clicked()
                 {

@@ -164,28 +164,35 @@ impl GongwenApp {
         if let Some(directory) = output_dir {
             spec = spec.directory(directory);
         }
-        self.request_file(spec, move |app, path| {
-            let Some(path) = path else {
-                return;
-            };
-            if let Err(error) = app.prepare_backup_export() {
-                app.status = format!("备份前保存失败，未导出备份：{error:#}");
-                return;
-            }
-            app.backup_busy = true;
-            app.status = format!("正在打包备份到 {}…", path.display());
-            let tx = app.sender.clone();
-            thread::spawn(move || {
-                let result = data_backup::export_backup(&path)
-                    .map(|()| {
-                        std::fs::metadata(&path)
-                            .map(|metadata| metadata.len())
-                            .unwrap_or(0)
-                    })
-                    .map_err(|error| format!("{error:#}"));
-                let _ = tx.send(WorkerResult::BackupExported { path, result });
-            });
-        });
+        // 备份包含数据库、配置、图片与风格档案等用户数据，加密工作区里写成普通 ZIP 要先确认风险。
+        self.request_output_with_warning(
+            "导出全量备份 ZIP（数据库、配置、图片、风格档案与运行数据）",
+            super::output_guard::BACKUP_WARNING,
+            move |app| {
+                app.request_file(spec, move |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    if let Err(error) = app.prepare_backup_export() {
+                        app.status = format!("备份前保存失败，未导出备份：{error:#}");
+                        return;
+                    }
+                    app.backup_busy = true;
+                    app.status = format!("正在打包备份到 {}…", path.display());
+                    let tx = app.sender.clone();
+                    thread::spawn(move || {
+                        let result = data_backup::export_backup(&path)
+                            .map(|()| {
+                                std::fs::metadata(&path)
+                                    .map(|metadata| metadata.len())
+                                    .unwrap_or(0)
+                            })
+                            .map_err(|error| format!("{error:#}"));
+                        let _ = tx.send(WorkerResult::BackupExported { path, result });
+                    });
+                });
+            },
+        );
     }
 
     /// 选 ZIP 并在后台校验；结果回来后弹二次确认框。

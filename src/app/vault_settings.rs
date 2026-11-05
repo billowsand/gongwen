@@ -142,7 +142,7 @@ impl GongwenApp {
         setting_note(ui, "已启用。启动时要输入密码；菜单里也可以随时手动锁定。");
         ui.add_space(10.0);
 
-        if crate::vault::disable_pending() {
+        if crate::vault::disable_marker_present() {
             setting_note_colored(
                 ui,
                 "已申请停用：锁定后输入一次密码完成解密；重启未完成前可在此取消。",
@@ -321,12 +321,13 @@ impl GongwenApp {
             .with_decoy
             .then(|| page.enable_decoy.clone())
             .filter(|password| !password.is_empty());
-        // 全新 DEK 意味着旧诱饵数据（如果有）从此不可读：先擦掉再立锁。
-        if decoy.is_some() {
-            storage::wipe_slot_files(DataSlot::Decoy);
-        }
         match Vault::create(&real, decoy.as_deref(), false) {
             Ok((_, Some(unlocked))) => {
+                // 全新 DEK 意味着旧诱饵数据从此不可读。**先立锁成功、再擦旧文件**：
+                // 密码不合规或写盘失败时不能先把旧诱饵数据毁掉。
+                if decoy.is_some() {
+                    storage::wipe_slot_files(DataSlot::Decoy);
+                }
                 // 本会话继续按明文开库（磁盘数据还没迁）；配置类文件从下一次
                 // 保存起就密封。数据迁移安排在下次解锁，由闸门完成。
                 crate::vault::set_key_handle(*unlocked.dek, false);
@@ -378,13 +379,13 @@ impl GongwenApp {
             return;
         }
         let password = page.decoy_new.clone();
-        // 第二密码总是配一把全新 DEK——等于重置第二密码系统，
-        // 旧诱饵数据在设置成功前先擦掉（成功后反正也读不了）。
-        storage::wipe_slot_files(DataSlot::Decoy);
+        // 第二密码总是配一把全新 DEK——等于重置第二密码系统。先设置成功再擦
+        // 旧诱饵数据：密码校验失败或写盘失败时不能毁掉原有诱饵系统。
         match Vault::load()
             .and_then(|mut vault| vault.set_password(DataSlot::Decoy, &password, None))
         {
             Ok(_) => {
+                storage::wipe_slot_files(DataSlot::Decoy);
                 let page = &mut self.vault_page;
                 page.decoy_new.clear();
                 page.decoy_new_confirm.clear();
@@ -398,7 +399,7 @@ impl GongwenApp {
         match Vault::load().and_then(|mut vault| vault.clear_decoy()) {
             Ok(()) => {
                 self.vault_page.clear_decoy_confirm = false;
-                self.notice_vault("第二密码已清除，其数据已一并删除。".into());
+                self.notice_vault("第二密码已清除，诱饵系统的数据文件已删除。".into());
             }
             Err(error) => self.fail_vault(format!("{error:#}")),
         }
