@@ -159,7 +159,8 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   迁移）、第二期（接口用例：期望、整组跑一遍留记录、会改数据的接口确认后人工发送）、第三期
   （AI 调用：工具参数带 schema 与调用前校验、接口多时两级访问、「说一句话让 AI 调」与 AI 用例）
   已完成，待真机验收**。**2026-11-05 起 Pi 写作也能调只读接口**：新增领域工具
-  `api_search`（按用途搜只读接口）与 `api_call`（按签名填参、调用前校验、返回进证据），
+  `api_search`（按用途搜只读接口）、`api_call`（按签名填参、调用前校验、返回进证据）与
+  `api_read`（按 `result_id` 列出全部条目、分页读单条全文；结果缓存落盘到运行目录，恢复后可续读），
   只开放 `readonly && ai && 配置受支持` 的接口；旧 `http.call` 仍只服务旧会话。接口存在
   `配置目录/apis/<服务>.openapi.json`，代码在 `src/agent/apidef/`，`ApiEndpoint` 是编译产物、
   存盘时写回（`apidef::absorb`）。方案、各期进度、出入与已知坑见 `docs/api-workbench.md`

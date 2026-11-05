@@ -19,6 +19,8 @@ use crate::manuscript::ManuscriptFilter;
 use crate::models::{AppConfig, DraftInput, TemplateKind};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -34,7 +36,13 @@ const MAX_API_RESULTS: usize = 5;
 /// `api_call` 一次交给模型的条目上限（接口返回可能很多，先给前几条）。
 const MAX_API_ITEMS: usize = 20;
 /// 每个接口条目交给模型的字符上限；证据台账同样截到这里，防超长返回撑爆预算。
+/// 完整内容留在本轮结果缓存里，模型可用 `api_read` 按位置续读。
 const MAX_API_ITEM_CHARS: usize = 2_000;
+/// 本轮接口结果缓存：最多保留几份、总字节上限（内存与落盘各自按同一上限裁剪）。
+const MAX_CACHED_API_RESULTS: usize = 8;
+const MAX_CACHED_API_BYTES: usize = 2 * 1024 * 1024;
+/// 落盘目录名（运行目录下）。恢复时从这里读回，避免重新调用接口。
+const API_CACHE_DIR: &str = "api-results";
 /// 一次最多列几份风格档案。
 const MAX_STYLE_ROWS: usize = 20;
 /// 读一份风格时交给模型的 token 预算与字符上限。
@@ -427,6 +435,172 @@ fn search_apis(store: &ApiStore, query: &str, limit: usize) -> Vec<PiApiHit> {
         .collect()
 }
 
+/// 一份可续读的接口结果：完整条目留在缓存里，模型按 `result_id` 分页读取。
+#[derive(Debug, Clone)]
+struct CachedApiResult {
+    id: String,
+    api: String,
+    name: String,
+    total: usize,
+    items: Vec<PiApiItem>,
+}
+
+impl CachedApiResult {
+    fn bytes(&self) -> usize {
+        self.items
+            .iter()
+            .map(|item| item.title.len() + item.source.len() + item.text.len())
+            .sum()
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "version": 1,
+            "id": self.id,
+            "api": self.api,
+            "name": self.name,
+            "total": self.total,
+            "items": self.items.iter().map(|item| json!({
+                "title": item.title,
+                "source": item.source,
+                "text": item.text,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    fn from_json(value: Value) -> Option<Self> {
+        let items = value.get("items")?.as_array()?;
+        let mut parsed = Vec::new();
+        for item in items {
+            parsed.push(PiApiItem {
+                title: item.get("title")?.as_str()?.to_string(),
+                source: item
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                text: item.get("text")?.as_str()?.to_string(),
+            });
+        }
+        Some(Self {
+            id: value.get("id")?.as_str()?.to_string(),
+            api: value.get("api")?.as_str()?.to_string(),
+            name: value.get("name")?.as_str()?.to_string(),
+            total: value
+                .get("total")
+                .and_then(Value::as_u64)
+                .unwrap_or(parsed.len() as u64) as usize,
+            items: parsed,
+        })
+    }
+}
+
+/// 本轮接口结果缓存：内存有上限；挂了运行目录时同时落盘，恢复后仍能续读。
+#[derive(Default)]
+struct ApiResultCache {
+    dir: Option<PathBuf>,
+    results: VecDeque<CachedApiResult>,
+}
+
+impl ApiResultCache {
+    fn set_dir(&mut self, dir: PathBuf) {
+        self.dir = Some(dir);
+    }
+
+    fn store(&mut self, mut result: CachedApiResult) -> String {
+        if result.items.is_empty() {
+            return String::new();
+        }
+        result.id = format!(
+            "api-{}",
+            &sha256_hex(&serde_json::to_string(&result.json()).unwrap_or_default())[..16]
+        );
+        let id = result.id.clone();
+        if let Some(dir) = &self.dir {
+            // 落盘失败不影响本轮：内存里还能读；恢复时才需要它。
+            let path = dir.join(API_CACHE_DIR);
+            if std::fs::create_dir_all(&path).is_ok() {
+                let file = path.join(format!("{id}.json"));
+                let _ = std::fs::write(
+                    &file,
+                    serde_json::to_vec(&result.json()).unwrap_or_default(),
+                );
+            }
+            prune_api_cache_dir(&path);
+        }
+        self.results.retain(|cached| cached.id != id);
+        self.results.push_back(result);
+        while self.results.len() > MAX_CACHED_API_RESULTS
+            || self.total_bytes() > MAX_CACHED_API_BYTES
+        {
+            if self.results.len() <= 1 {
+                break;
+            }
+            self.results.pop_front();
+        }
+        id
+    }
+
+    fn total_bytes(&self) -> usize {
+        self.results.iter().map(CachedApiResult::bytes).sum()
+    }
+
+    fn load(&mut self, id: &str) -> Option<CachedApiResult> {
+        if !valid_api_result_id(id) {
+            return None;
+        }
+        if let Some(found) = self.results.iter().find(|cached| cached.id == id) {
+            return Some(found.clone());
+        }
+        let dir = self.dir.as_ref()?;
+        let raw = std::fs::read(dir.join(API_CACHE_DIR).join(format!("{id}.json"))).ok()?;
+        let value: Value = serde_json::from_slice(&raw).ok()?;
+        let result = CachedApiResult::from_json(value)?;
+        if result.id != id {
+            return None;
+        }
+        Some(result)
+    }
+}
+
+fn valid_api_result_id(id: &str) -> bool {
+    id.strip_prefix("api-")
+        .is_some_and(|hash| hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// 落盘缓存按文件修改时间裁剪到总字节上限，避免长任务把磁盘撑大。
+fn prune_api_cache_dir(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let meta = entry.metadata().ok()?;
+            meta.is_file().then(|| {
+                (
+                    meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    meta.len(),
+                    entry.path(),
+                )
+            })
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|(_, bytes, _)| bytes).sum();
+    if total <= MAX_CACHED_API_BYTES as u64 {
+        return;
+    }
+    files.sort_by_key(|(modified, _, _)| *modified);
+    for (_, bytes, path) in files {
+        if total <= MAX_CACHED_API_BYTES as u64 {
+            break;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            total = total.saturating_sub(bytes);
+        }
+    }
+}
+
 /// 一轮 Pi 的工具上下文。后台线程持有一份，工具结果与证据都只活在这一轮。
 pub(crate) struct PiToolContext {
     config: Arc<AppConfig>,
@@ -440,6 +614,7 @@ pub(crate) struct PiToolContext {
     form_facts: Vec<String>,
     kb: Arc<dyn PiKnowledge>,
     apis: Arc<dyn PiApis>,
+    api_cache: Mutex<ApiResultCache>,
     manuscripts: Arc<dyn PiManuscripts>,
     styles: Arc<dyn PiStyles>,
     evidence: Arc<Mutex<Vec<PiEvidence>>>,
@@ -575,6 +750,7 @@ impl PiToolContext {
             material_facts,
             kb: sources.knowledge,
             apis: Arc::new(ApiCatalog),
+            api_cache: Mutex::new(ApiResultCache::default()),
             manuscripts: sources.manuscripts,
             styles: sources.styles,
             evidence: Arc::new(Mutex::new(Vec::new())),
@@ -587,6 +763,14 @@ impl PiToolContext {
     #[cfg(test)]
     pub(crate) fn with_apis(mut self, apis: Arc<dyn PiApis>) -> Self {
         self.apis = apis;
+        self
+    }
+
+    /// 给本轮挂上接口结果缓存目录（运行目录）。恢复后仍能按 `result_id` 续读。
+    pub(crate) fn with_api_cache_dir(self, dir: PathBuf) -> Self {
+        if let Ok(mut cache) = self.api_cache.lock() {
+            cache.set_dir(dir);
+        }
         self
     }
 
@@ -650,6 +834,7 @@ impl PiToolContext {
                 | "ms_read"
                 | "api_search"
                 | "api_call"
+                | "api_read"
                 | "vocab_search"
                 | "current_date"
                 | "check_document"
@@ -735,6 +920,7 @@ impl PiToolContext {
             "ms_read" => self.ms_read(args),
             "api_search" => self.api_search(args),
             "api_call" => self.api_call(args),
+            "api_read" => self.api_read(args),
             "vocab_search" => self.vocab_search(args),
             "current_date" => Ok(super::writing_context::date_context()),
             "check_document" => self.check_document(args),
@@ -954,6 +1140,21 @@ impl PiToolContext {
                 "note": "接口调用成功但没有返回条目；换参数再查，或按材料写，不要编数据。",
             }));
         }
+        // 完整条目先留在本轮结果缓存（内存 + 运行目录）：返回给模型的只是前几条 / 截短文本，
+        // 长资料用 api_read 按 result_id 继续读，恢复后也能从运行目录读回。
+        let result_id = {
+            let mut cache = self
+                .api_cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            cache.store(CachedApiResult {
+                id: String::new(),
+                api: api.clone(),
+                name: called.name.clone(),
+                total: called.total,
+                items: called.items.clone(),
+            })
+        };
         let total_items = called.items.len();
         let shown = total_items.min(MAX_API_ITEMS);
         let mut truncated = called.total > shown || total_items > shown;
@@ -976,14 +1177,88 @@ impl PiToolContext {
         Ok(json!({
             "api": api,
             "name": called.name,
+            "result_id": result_id,
             "items": results,
             "total": called.total,
             "truncated": truncated,
             "note": if truncated {
-                "返回条目或正文已截断，不能视为完整结果。请缩小查询条件再查；无法取得全文时说明资料不完整，不要据片段作完整统计或结论。"
+                "返回条目或正文已截断，不能视为完整结果。用 api_read（result_id 填上面的值，item 从 0 开始）读取完整条目与全文；仍不够时再缩小查询条件。无法取得全文时说明资料不完整，不要据片段作完整统计或结论。"
             } else {
-                "返回条目是资料，可据以写正文；不要写返回里没有的字段。"
+                "返回条目是资料，可据以写正文；不要写返回里没有的字段。需要看单条完整原文时用 api_read。"
             },
+        }))
+    }
+
+    /// 续读一次接口调用留下的完整结果：不带 item 列条目；带 item 按字符分页读该条全文。
+    fn api_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        self.check_cancel()?;
+        let result_id = required_str(args, "result_id")?;
+        let cached = {
+            let mut cache = self
+                .api_cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            cache.load(&result_id)
+        }
+        .ok_or_else(|| {
+            "接口结果缓存已失效（可能来自更早的会话或已被清理）：请重新调用接口，或缩小查询条件。"
+                .to_string()
+        })?;
+        let Some(item) = args.get("item").and_then(Value::as_u64) else {
+            let items: Vec<Value> = cached
+                .items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    json!({
+                        "item": index,
+                        "title": item.title,
+                        "source": item.source,
+                        "chars": item.text.chars().count(),
+                    })
+                })
+                .collect();
+            return Ok(json!({
+                "result_id": result_id,
+                "api": cached.api,
+                "name": cached.name,
+                "total": cached.total,
+                "items": items,
+                "note": "带 item 与 offset 读取某条完整原文；条目过多时先按标题挑需要的。",
+            }));
+        };
+        let index = item as usize;
+        let Some(found) = cached.items.get(index) else {
+            return Err(format!(
+                "没有第 {index} 条（这份结果共 {} 条，从 0 开始编号）",
+                cached.items.len()
+            ));
+        };
+        let offset = optional_offset_arg(args);
+        let page = read_page(&found.text, offset, read_limit_arg(args))?;
+        self.check_cancel()?;
+        let evidence = self.record(
+            "api_read",
+            &found.title,
+            "数据接口",
+            "资料",
+            &page.text,
+            true,
+        );
+        Ok(json!({
+            "evidence": evidence,
+            "result_id": result_id,
+            "api": cached.api,
+            "item": index,
+            "title": found.title,
+            "source": found.source,
+            "text": page.text,
+            "offset": page.offset,
+            "total_chars": page.total_chars,
+            "next_offset": page.next_offset,
+            "unread_chars": page.unread_chars,
+            "truncated": page.next_offset.is_some(),
+            "note": READ_PAGE_NOTE,
         }))
     }
 
@@ -2349,5 +2624,110 @@ mod tests {
         let again = ToolSlot::acquire(&ctx).expect("释放后应能重新申请槽位");
         drop(again);
         assert!(in_flight_tools() <= MAX_IN_FLIGHT_TOOLS);
+    }
+
+    /// 长结果：25 条、首条超长；api_call 只给前 20 条并截断，api_read 能列全并读全文。
+    struct ManyApi;
+
+    impl PiApis for ManyApi {
+        fn search(&self, _: &str, _: usize) -> Result<Vec<PiApiHit>, String> {
+            Ok(Vec::new())
+        }
+
+        fn call(&self, api: &str, _: &Map<String, Value>) -> Result<PiApiCall, String> {
+            assert_eq!(api, "many");
+            Ok(PiApiCall {
+                name: "长结果".into(),
+                total: 25,
+                items: (0..25)
+                    .map(|index| PiApiItem {
+                        title: format!("条目{index}"),
+                        source: "统计系统".into(),
+                        text: if index == 0 {
+                            "长".repeat(MAX_API_ITEM_CHARS + 50)
+                        } else {
+                            format!("第{index}条正文")
+                        },
+                    })
+                    .collect(),
+            })
+        }
+    }
+
+    fn many_context(dir: &std::path::Path) -> PiToolContext {
+        context("x")
+            .with_apis(Arc::new(ManyApi))
+            .with_api_cache_dir(dir.to_path_buf())
+    }
+
+    #[test]
+    fn api_call_caches_long_results_and_api_read_pages_the_full_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = many_context(dir.path());
+        let value = ctx.call("api_call", &json!({"api": "many"})).unwrap();
+        assert_eq!(value["items"].as_array().unwrap().len(), 20);
+        assert_eq!(value["truncated"], true);
+        let result_id = value["result_id"].as_str().unwrap().to_string();
+        assert!(result_id.starts_with("api-"), "{result_id}");
+
+        let list = ctx
+            .call("api_read", &json!({"result_id": result_id}))
+            .unwrap();
+        assert_eq!(list["items"].as_array().unwrap().len(), 25);
+        assert_eq!(list["items"][0]["chars"], MAX_API_ITEM_CHARS + 50);
+
+        let full = ctx
+            .call("api_read", &json!({"result_id": result_id, "item": 0}))
+            .unwrap();
+        assert_eq!(full["total_chars"], MAX_API_ITEM_CHARS + 50);
+        assert_eq!(
+            full["text"].as_str().unwrap().chars().count(),
+            MAX_API_ITEM_CHARS + 50
+        );
+        assert!(full["evidence"].as_str().unwrap().starts_with('E'));
+
+        let later = ctx
+            .call(
+                "api_read",
+                &json!({"result_id": result_id, "item": 0, "offset": 2000, "limit_chars": 100}),
+            )
+            .unwrap();
+        assert_eq!(later["offset"], 2000);
+        assert_eq!(
+            later["text"].as_str().unwrap().chars().count(),
+            MAX_API_ITEM_CHARS + 50 - 2000
+        );
+    }
+
+    #[test]
+    fn api_read_recovers_a_cached_result_from_the_run_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = many_context(dir.path());
+        let value = ctx.call("api_call", &json!({"api": "many"})).unwrap();
+        let result_id = value["result_id"].as_str().unwrap().to_string();
+        let recovered = many_context(dir.path());
+        let list = recovered
+            .call("api_read", &json!({"result_id": result_id}))
+            .unwrap();
+        assert_eq!(list["items"].as_array().unwrap().len(), 25);
+        let item = recovered
+            .call("api_read", &json!({"result_id": result_id, "item": 1}))
+            .unwrap();
+        assert_eq!(item["text"], "第1条正文");
+    }
+
+    #[test]
+    fn api_read_rejects_unknown_or_invalid_result_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = many_context(dir.path());
+        assert!(
+            ctx.call("api_read", &json!({"result_id": "api-zzzz"}))
+                .is_err()
+        );
+        assert!(
+            ctx.call("api_read", &json!({"result_id": "../run.json"}))
+                .is_err(),
+            "result_id 不能当路径用"
+        );
     }
 }

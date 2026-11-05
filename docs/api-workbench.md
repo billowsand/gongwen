@@ -591,6 +591,11 @@ DeepSeek-V4-Flash 与 MiniMax-M2.7 全部跑一遍看正确率；把一个参数
   `usable` / `search` / `validate`）；host 侧在 `pi-host/src/bridge.mjs` 注册这两个工具。
 - 证据：每次调用返回的条目按 `http:<id>:<条目标题>` 进 Pi 证据台账（`role=资料`、`fact=true`），
   进而写进本轮 `sources/`；正文仍由 Pi 自己写，交付检查不做事实核查。
+- **长结果续读（2026-11-05 第二轮）**：`api_call` 把完整条目留在本轮结果缓存（内存最多 8 份 /
+  2 MiB），并返回 `result_id`；`api_read` 可列出全部条目、按 `item` + `offset` 分页读单条全文。
+  缓存同时按 `result_id` 落盘到运行目录 `api-results/`，恢复后仍能续读；落盘目录按总字节上限
+  裁掉最旧文件。接口条目多或单条正文超过 2000 字时，工具结果会明确标 `truncated` /
+  `text_truncated`，并提示用 `api_read`，不再把片段伪装成完整结果。
 - 技能提示：`gongwen-draft` / `gongwen-research` 写明「先 api_search 再 api_call，
   接口返回是资料不是结论，没有匹配接口就明说没查到」。
 - 旧 `http.call` 工具族保留给旧会话回放，不再用于新任务；旧流程退役时一并删除。

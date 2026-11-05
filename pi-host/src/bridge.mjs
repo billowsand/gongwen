@@ -44,6 +44,12 @@ export const DOMAIN_TOOLS = [
       description: "接口参数，按 api_search 返回的参数签名填；没有参数就省略",
     })),
   })],
+  ["api_read", "续读一次接口调用留下的完整结果：省略 item 列出全部条目，带 item 按字符分页读该条全文", Type.Object({
+    result_id: Type.String({ description: "api_call 返回的 result_id" }),
+    item: Type.Optional(Type.Number({ description: "条目序号，从 0 开始；省略时列出全部条目" })),
+    offset: Type.Optional(Type.Integer({ minimum: 0, description: "从字符位置继续读取；用上次返回的 next_offset" })),
+    limit_chars: Type.Optional(Type.Integer({ minimum: 1, description: "本次最多读多少字符" })),
+  })],
   ["current_date", "读取本机当前日期、星期、时区及本周下周范围", Type.Object({})],
   ["vocab_search", "查标准单位名称、职能任务、人员职务简介及所属单位", Type.Object({
     query: Type.Optional(Type.String({ description: "名称、编码、职能或人员简介关键词；留空按类别列出" })),
