@@ -910,7 +910,8 @@ fn hex_decode_vec(text: &str) -> Result<Vec<u8>> {
         }
     };
     let mut out = Vec::with_capacity(digits.len() / 2);
-    for pair in digits.chunks_exact(2) {
+    // 长度已确认是偶数，as_chunks 的余数部分必为空。
+    for pair in digits.as_chunks::<2>().0 {
         out.push((value(pair[0])? << 4) | value(pair[1])?);
     }
     Ok(out)
