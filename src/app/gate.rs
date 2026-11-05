@@ -1391,9 +1391,11 @@ mod lifecycle_tests {
     use super::*;
 
     fn isolated(test: impl FnOnce()) {
-        let dir =
-            tempfile::tempdir_in(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp"))
-                .unwrap();
+        // 临时目录放在仓库的 `tmp/` 下（不入库，干净检出的 CI 上不存在），
+        // 用前先建出来；`tempdir_in` 不会自建父目录。
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp");
+        std::fs::create_dir_all(&root).expect("应能建立测试临时目录");
+        let dir = tempfile::tempdir_in(&root).unwrap();
         storage::set_test_config_dir(Some(dir.path().to_path_buf()));
         struct Reset;
         impl Drop for Reset {
