@@ -761,7 +761,7 @@ fn spawn_prepare_with(
             }
             PiEvent::Tool(line) => send(DocJob::PiTool(line)),
             PiEvent::Evidence(line) => send(DocJob::PiTool(line)),
-            PiEvent::Candidate { path, content } => send(DocJob::PiCandidate { path, content }),
+            PiEvent::Candidate { path, .. } => send(DocJob::PiCandidate { path }),
             PiEvent::Questions(batch) => send(DocJob::PiQuestions(batch)),
         })
         .map_err(|error| {

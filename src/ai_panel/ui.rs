@@ -95,8 +95,6 @@ pub(super) enum CardAction {
     ApplyPiPending(u64),
     /// 丢弃保留的 Pi 成品，正文不变。
     DiscardPiPending(u64),
-    /// 看这次 Pi 写入前后的差异（只读，不影响正文）。
-    PiDiff(u64),
 }
 
 impl DraftPage<'_> {
@@ -477,10 +475,6 @@ impl DraftPage<'_> {
             Some(CardAction::UndoPiWrite(turn_id)) => self.undo_pi_write(ui.ctx(), turn_id),
             Some(CardAction::ApplyPiPending(turn_id)) => self.apply_pi_pending(ui.ctx(), turn_id),
             Some(CardAction::DiscardPiPending(turn_id)) => self.discard_pi_pending(turn_id),
-            Some(CardAction::PiDiff(turn_id)) => {
-                self.doc.ai_panel.workspace_view = Some(turn_id);
-                self.doc.ai_panel.workspace_compare = true;
-            }
             Some(CardAction::Answer(id)) => {
                 let state = self
                     .doc
@@ -1017,7 +1011,7 @@ fn turn_card(
     }
 }
 
-/// Pi 成品已写进正文：可选的撤销与差异。
+/// Pi 成品已写进正文：可选的撤销（差异看「AI 写入前」自动版本或版本对照）。
 ///
 /// 写入之后用户又改过正文时不给撤销（整篇盖回去会冲掉这些编辑），并说明可以用
 /// 编辑器自己的 Ctrl+Z 逐次撤回。
@@ -1048,15 +1042,6 @@ fn pi_write_actions(
             };
             if button.clicked() {
                 *action = Some(CardAction::UndoPiWrite(turn.id));
-            }
-            if ui
-                .add(theme::secondary_icon_button(
-                    theme::Icon::Compare,
-                    "查看差异",
-                ))
-                .clicked()
-            {
-                *action = Some(CardAction::PiDiff(turn.id));
             }
         });
     }

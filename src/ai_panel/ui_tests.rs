@@ -3870,7 +3870,7 @@ mod field_card_cases {
         assert!(!text.contains("正文是按它们写的"), "{text}");
     }
 
-    /// Pi 成品直接写入后：卡片是「已写入正文」+ 撤销 / 差异，不再出现「接受提案」。
+    /// Pi 成品直接写入后：卡片是「已写入正文」+ 撤销，不再出现「接受提案」或工作稿入口。
     #[test]
     fn a_written_pi_turn_shows_undo_instead_of_accept() {
         let mut harness = Harness::new("# 通知\n\n改后。\n");
@@ -3895,7 +3895,8 @@ mod field_card_cases {
         let texts = harness.frame_texts();
         assert!(has(&texts, "已写入正文"), "{texts:?}");
         assert!(has(&texts, "撤销本次写入"), "{texts:?}");
-        assert!(has(&texts, "查看差异"), "{texts:?}");
+        assert!(!has(&texts, "查看差异"), "{texts:?}");
+        assert!(!has(&texts, "查看工作稿"), "{texts:?}");
         assert!(!has(&texts, "接受提案"), "{texts:?}");
         // 正文又改过：按钮还在，但不能整篇盖回去（禁用，悬停说明原因）；
         // 即便此时说成「已写入」，也仍然是已写入的回执，不出现接受入口。

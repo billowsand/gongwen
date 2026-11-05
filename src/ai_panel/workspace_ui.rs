@@ -218,9 +218,6 @@ impl DraftPage<'_> {
         {
             return false;
         }
-        if self.workspace_pi_diff_ui(ui, view.id) {
-            return true;
-        }
         let note = self.workspace_readonly_note(view.id);
         ui.weak(note);
         if self.workspace_proposal_compare_ui(ui, &view.state) {
@@ -274,9 +271,6 @@ impl DraftPage<'_> {
                 if !view.provenance.is_empty() {
                     ui.weak(&view.provenance);
                     ui.add_space(4.0);
-                }
-                if self.workspace_pi_diff_ui(ui, view.id) {
-                    return;
                 }
                 let note = self.workspace_readonly_note(view.id);
                 ui.weak(note);
@@ -374,46 +368,6 @@ impl DraftPage<'_> {
             }
             _ => false,
         }
-    }
-
-    /// Pi 直接写入的成品：差异只读，正文已经是成品，没有可采纳的东西。
-    fn workspace_pi_diff_ui(&mut self, ui: &mut egui::Ui, id: u64) -> bool {
-        if !self.doc.ai_panel.workspace_compare {
-            return false;
-        }
-        let Some(write) = self
-            .doc
-            .ai_panel
-            .turns
-            .iter()
-            .find(|turn| turn.id == id)
-            .and_then(|turn| turn.pi_write.clone())
-        else {
-            return false;
-        };
-        let old = ContentSnapshot::new(self.doc.draft.clone(), write.before.clone(), String::new());
-        let new = ContentSnapshot::new(self.doc.draft.clone(), write.after.clone(), String::new());
-        let report = manuscript_diff(&old, &new);
-        let position = self
-            .doc
-            .ai_panel
-            .turns
-            .iter()
-            .position(|turn| turn.id == id)
-            .expect("当前会话的工作稿");
-        let view = &mut self.doc.ai_panel.turns[position].pi_diff.0;
-        manuscript_diff_ui(
-            ui,
-            &report,
-            view,
-            &DiffViewConfig {
-                old_label: "写入前",
-                new_label: "Pi 成品",
-                exclude: None,
-            },
-        );
-        ui.weak("差异只读：成品已经写进正文，撤销在结果卡上。");
-        true
     }
 
     /// 提案的工作稿 ↔ 正文原地对照；对照里挑掉的块，接受时也一并排除。

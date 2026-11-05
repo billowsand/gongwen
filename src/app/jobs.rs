@@ -205,10 +205,9 @@ pub(crate) enum DocJob {
     PiProgress(String),
     /// Pi 本轮的一次工具调用，侧栏「过程」里一行。
     PiTool(String),
-    /// Pi 工作区里最新候选稿；只是预览，不是可接受的提案。
+    /// Pi 工作区里最新候选稿。只报路径进度：Pi 直接写正文，不再做工作稿预览。
     PiCandidate {
         path: String,
-        content: String,
     },
     /// Pi 本轮结束。成功时是一份固定版本或侧栏清单，失败时报原因；
     /// 未提交、超时、取消、崩溃都不会走到成功分支。
@@ -1705,21 +1704,12 @@ impl GongwenApp {
                 self.status = format!("{prefix}{message}");
             }
             DocJob::PiTool(line) => self.docs[index].ai_panel.step(line),
-            DocJob::PiCandidate { path, content } => {
-                // 候选只是 AI 工作稿的预览；能不能接受由 PiDone 的交付检查决定。
-                // 超大候选不要整段塞进侧栏并自动展开：那是界面线程上的同步排版，
-                // 几百 KB 的 Markdown 会让窗口卡住。交付后卡片里仍可查看。
-                if content.len() > 256 * 1024 {
-                    self.docs[index].ai_panel.pi_progress(&format!(
-                        "候选稿较大（{} KiB），运行中不自动展开，交付后可在卡片查看",
-                        content.len() / 1024
-                    ));
-                } else {
-                    self.docs[index].ai_panel.replace_content(content);
-                    self.docs[index]
-                        .ai_panel
-                        .pi_progress(&format!("候选文件已更新：{path}"));
-                }
+            DocJob::PiCandidate { path, .. } => {
+                // Pi 成品直接写正文，不再切到「AI 工作稿」预览候选。这里只报进度；
+                // 交付完成后正文与「AI 写入前」自动版本就是可看的对照。
+                self.docs[index]
+                    .ai_panel
+                    .pi_progress(&format!("候选文件已更新：{path}"));
             }
             DocJob::PiPrepared {
                 turn_id,
@@ -2082,58 +2072,31 @@ mod tests {
         turn
     }
 
-    /// 超大候选不整段塞进侧栏、不自动展开工作稿，只在卡片上写一行说明。
+    /// Pi 候选只报进度：不再切到「AI 工作稿」，正文保持原样等交付。
     #[test]
-    fn a_large_candidate_is_not_auto_expanded() {
+    fn pi_candidate_only_reports_progress_without_opening_a_workspace() {
         let mut app = management_samples::fixture();
         let turn = waiting_pi_turn(&mut app, 7);
         let key = app.docs[0].key;
-        let content = "长".repeat(256 * 1024);
         app.apply_doc_job(
             key,
             7,
             DocJob::PiCandidate {
                 path: "work/candidate.md".into(),
-                content,
             },
         );
         assert!(
             app.docs[0].ai_panel.workspace_view.is_none(),
-            "大候选不能自动展开工作稿"
+            "Pi 候选不能再自动展开工作稿"
         );
-        let phase = &app.docs[0]
-            .ai_panel
-            .turns
-            .iter()
-            .find(|item| item.id == turn)
-            .unwrap()
-            .phase;
-        assert!(phase.contains("候选稿较大"), "{phase}");
-        assert!(phase.contains("不自动展开"), "{phase}");
-    }
-
-    /// 小候选保持原行为：整体换新工作稿并自动展开。
-    #[test]
-    fn a_small_candidate_still_opens_the_workspace_view() {
-        let mut app = management_samples::fixture();
-        let turn = waiting_pi_turn(&mut app, 8);
-        let key = app.docs[0].key;
-        app.apply_doc_job(
-            key,
-            8,
-            DocJob::PiCandidate {
-                path: "work/candidate.md".into(),
-                content: "# 通知\n\n改好了。\n".into(),
-            },
-        );
-        assert_eq!(app.docs[0].ai_panel.workspace_view, Some(turn));
         let item = app.docs[0]
             .ai_panel
             .turns
             .iter()
             .find(|item| item.id == turn)
             .unwrap();
-        assert!(item.is_workspace);
-        assert!(item.content.contains("改好了"));
+        assert!(!item.is_workspace);
+        assert!(item.content.is_empty(), "候选内容不再进侧栏工作稿");
+        assert!(item.phase.contains("候选文件已更新"), "{}", item.phase);
     }
 }

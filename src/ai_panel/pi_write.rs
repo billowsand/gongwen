@@ -74,17 +74,6 @@ pub(crate) struct PiPendingDelivery {
     pub(crate) advisories: Vec<String>,
 }
 
-/// Pi 写入差异的视图状态。`DiffViewState` 没有 `Debug`，而轮次要跟 `Debug`；
-/// 这里只包一层，不碰对照视图本身。
-#[derive(Default)]
-pub(crate) struct PiDiffView(pub(crate) crate::diff_view::DiffViewState);
-
-impl std::fmt::Debug for PiDiffView {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("PiDiffView")
-    }
-}
-
 /// 把成品写进正文。
 ///
 /// 底层文本替换：调用方先用 bind_editor 绑定对应稿件；正文写入统一经 write_document。
@@ -143,14 +132,66 @@ fn write_document(
     }
 }
 
+/// AI 写入正文前自动提交一个版本。
+///
+/// 只处理有版本链的已入库稿件：正文为空不提交；相对最新提交版没有变化也不提交
+/// （没必要多一版）。提交失败返回给人看的原因，调用方据此不写正文。
+fn auto_commit_before_write(
+    doc: &crate::draft_page::DraftSession,
+    store: &mut crate::manuscript::ManuscriptStore,
+) -> Result<Option<String>, String> {
+    if doc.generated_markdown.trim().is_empty() {
+        return Ok(None);
+    }
+    let Some(id) = doc.manuscript_id else {
+        return Ok(None);
+    };
+    let notes = store
+        .notes_of(id)
+        .map_err(|error| format!("读取稿件备注失败：{error:#}"))?
+        .unwrap_or_default();
+    let changed = store
+        .manuscript_version_changed(id, &doc.draft, &doc.generated_markdown, &notes)
+        .map_err(|error| format!("检查稿件版本失败：{error:#}"))?;
+    if !changed {
+        return Ok(None);
+    }
+    store
+        .update(
+            id,
+            &crate::manuscript::ManuscriptUpdate {
+                snapshot: doc.draft.clone(),
+                content_markdown: doc.generated_markdown.clone(),
+                notes: notes.clone(),
+            },
+        )
+        .map_err(|error| format!("保存写入前正文失败：{error:#}"))?;
+    let name = format!("AI 写入前 {}", chrono::Local::now().format("%m-%d %H:%M"));
+    let row = store
+        .commit_manuscript_version(
+            id,
+            &name,
+            "Pi 写入正文前自动提交",
+            &doc.draft,
+            &doc.generated_markdown,
+            &notes,
+        )
+        .map_err(|error| format!("自动提交版本失败：{error:#}"))?;
+    Ok(Some(format!(
+        "已自动提交版本《{}》（v{}）：AI 写入前的内容可从版本历史找回。",
+        row.name, row.version_number
+    )))
+}
+
 /// 把一份已通过交付检查的成品写进正文，返回「哪一轮用到现在」。
 ///
 /// 顺序不能变：先确认撤销记录能落盘（有库稿件必须先写进会话），再标卡片、消费运行回执，
-/// 最后才换正文。落盘失败时就地退回「保留成品」的状态，**正文不动**，不形成无撤销记录的
-/// 替换。回执消费失败不回滚写入（会话已经把这一轮标成「已写入」），但要报出来。
+/// 最后才换正文。写入前若正文非空且稿件已入库，先自动提交一个「AI 写入前」版本。
+/// 落盘失败时就地退回「保留成品」的状态，**正文不动**，不形成无撤销记录的替换。
+/// 回执消费失败不回滚写入（会话已经把这一轮标成「已写入」），但要报出来。
 pub(crate) fn commit(
     doc: &mut crate::draft_page::DraftSession,
-    store: Option<&mut crate::manuscript::ManuscriptStore>,
+    mut store: Option<&mut crate::manuscript::ManuscriptStore>,
     ctx: Option<&eframe::egui::Context>,
     turn_id: u64,
     after: String,
@@ -191,6 +232,25 @@ pub(crate) fn commit(
         park_pending(doc, turn_id, reason);
         return Err(reason.into());
     }
+    // 写入前自动版本：正文非空且已入库时，先把当前内容固化成一个版本，
+    // AI 成品再直接覆盖正文。版本历史负责找回，撤销记录负责精确回退。
+    let auto_version = match store.as_deref_mut() {
+        Some(store) => match auto_commit_before_write(doc, store) {
+            Ok(info) => {
+                if let Some(id) = doc.manuscript_id
+                    && let Ok(Some((json, content, _))) = store.latest_manuscript_content(id)
+                {
+                    doc.set_committed_baseline(Some((json, content)));
+                }
+                info
+            }
+            Err(reason) => {
+                park_pending(doc, turn_id, &reason);
+                return Err(format!("{reason}；未写入正文，成品留在这一轮里。"));
+            }
+        },
+        None => None,
+    };
     let write = PiWrite {
         run_id: run_id.clone(),
         before: doc.generated_markdown.clone(),
@@ -201,6 +261,11 @@ pub(crate) fn commit(
     };
     if !doc.ai_panel.mark_pi_written(turn_id, write) {
         return Err("这一轮已经不在了。".into());
+    }
+    if let Some(info) = auto_version
+        && let Some(turn) = doc.ai_panel.turn_mut(turn_id)
+    {
+        turn.notes.push(info);
     }
     let manuscript_id = doc.manuscript_id;
     if let Some(error) = doc
@@ -331,6 +396,88 @@ mod tests {
             advisories: vec!["日期「2026年10月8日」未在本轮依据中找到".into()],
             undone: false,
         }
+    }
+
+    #[test]
+    fn a_non_empty_saved_document_gets_an_auto_version_before_the_write() {
+        use crate::manuscript::{ManuscriptStore, NewManuscript};
+        use crate::models::ManuscriptStatus;
+        let mut store = ManuscriptStore::open(std::path::Path::new(":memory:")).unwrap();
+        let snapshot = crate::models::DraftInput::default();
+        let id = store
+            .create(
+                &NewManuscript {
+                    snapshot: snapshot.clone(),
+                    content_markdown: "# 通知\n\n原文。\n".into(),
+                    notes: String::new(),
+                    status: ManuscriptStatus::Draft,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        store
+            .commit_manuscript_version(id, "初稿", "", &snapshot, "# 通知\n\n原文。\n", "")
+            .unwrap();
+        let mut doc =
+            crate::draft_page::DraftSession::blank(1, &crate::models::AppConfig::default());
+        doc.manuscript_id = Some(id);
+        doc.draft = snapshot;
+        doc.generated_markdown = "# 通知\n\n运行中改过的一句。\n".into();
+        let info = auto_commit_before_write(&doc, &mut store)
+            .unwrap()
+            .expect("已入库且正文非空时要自动提交版本");
+        assert!(info.contains("AI 写入前"), "{info}");
+        let (_, content, _) = store.latest_manuscript_content(id).unwrap().unwrap();
+        assert_eq!(content, "# 通知\n\n运行中改过的一句。\n");
+    }
+
+    #[test]
+    fn auto_version_is_skipped_for_empty_unsaved_or_unchanged_documents() {
+        use crate::manuscript::{ManuscriptStore, NewManuscript};
+        use crate::models::ManuscriptStatus;
+        let mut store = ManuscriptStore::open(std::path::Path::new(":memory:")).unwrap();
+        let config = crate::models::AppConfig::default();
+        let mut doc = crate::draft_page::DraftSession::blank(1, &config);
+        // 空正文：直接写，不需要版本。
+        assert!(
+            auto_commit_before_write(&doc, &mut store)
+                .unwrap()
+                .is_none(),
+            "空正文不提交版本"
+        );
+        // 未入库：没有版本链，靠撤销记录。
+        doc.generated_markdown = "有内容但还没入库".into();
+        assert!(
+            auto_commit_before_write(&doc, &mut store)
+                .unwrap()
+                .is_none()
+        );
+        // 已入库且与最新版相同：不重复提交。
+        let snapshot = crate::models::DraftInput::default();
+        let id = store
+            .create(
+                &NewManuscript {
+                    snapshot: snapshot.clone(),
+                    content_markdown: "同版正文".into(),
+                    notes: String::new(),
+                    status: ManuscriptStatus::Draft,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        store
+            .commit_manuscript_version(id, "初稿", "", &snapshot, "同版正文", "")
+            .unwrap();
+        doc.manuscript_id = Some(id);
+        doc.draft = snapshot;
+        doc.generated_markdown = "同版正文".into();
+        assert!(
+            auto_commit_before_write(&doc, &mut store)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
