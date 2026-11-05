@@ -53,6 +53,25 @@ struct GateState {
     focused: bool,
     /// 损坏锁设置已清除：等用户重启，不再给别的出路。
     cleared: bool,
+    /// 正在后台跑的数据处理（明文→密文迁移 / 停用解密）：
+    /// 期间锁屏只显示进度，完成后才进工作区。
+    working: Option<GateWorking>,
+}
+
+/// 闸门上的后台任务：数据密钥已在句柄里，线程只做搬运。
+struct GateWorking {
+    title: String,
+    kind: WorkKind,
+    slot: DataSlot,
+    rx: std::sync::mpsc::Receiver<Result<(), String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkKind {
+    /// 解锁 / 启用后的明文→密文迁移。完成后按槽位进加密工作区。
+    Encrypt,
+    /// 停用的最后一步：密文→明文。完成后删锁文件、进明文工作区。
+    Disable,
 }
 
 impl GateState {
@@ -67,6 +86,7 @@ impl GateState {
             error: None,
             focused: false,
             cleared: false,
+            working: None,
         }
     }
 
@@ -164,15 +184,82 @@ impl AppShell {
         self.phase = ShellPhase::Ready(Box::new(app));
     }
 
+    /// 起一个闸门后台任务：数据密钥进句柄，搬运在线程里跑，锁屏显示进度。
+    /// Disable 的句柄立刻按密文开库（磁盘已是密文）；Encrypt 此刻 db_active=false，
+    /// 迁移完成才切 true。
+    fn begin_work(&mut self, kind: WorkKind, slot: DataSlot, dek: [u8; 32], title: &str) {
+        crate::vault::set_key_handle(dek, kind == WorkKind::Disable);
+        crate::storage::set_current_slot(slot);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = match kind {
+                WorkKind::Encrypt => crate::vault::ensure_slot_encrypted(),
+                WorkKind::Disable => crate::vault::decrypt_slot_files(),
+            }
+            .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(result);
+        });
+        let mut gate = GateState::unlock();
+        gate.working = Some(GateWorking {
+            title: title.to_string(),
+            kind,
+            slot,
+            rx,
+        });
+        self.phase = ShellPhase::Gate(gate);
+    }
+
+    /// 后台任务收尾：成功才切工作区；失败回到锁屏并给提示
+    ///（两类迁移都幂等，重输密码会接着收拾残局）。
+    fn finish_work(
+        &mut self,
+        ctx: &egui::Context,
+        kind: WorkKind,
+        slot: DataSlot,
+        result: Result<(), String>,
+    ) {
+        match result {
+            Ok(()) => match kind {
+                WorkKind::Encrypt => {
+                    crate::vault::activate_db_encryption();
+                    self.enter_workspace(ctx, slot, None);
+                }
+                WorkKind::Disable => {
+                    crate::vault::clear_key_handle();
+                    crate::vault::clear_disable_pending();
+                    let notice = match Vault::reset_file()
+                        .and_then(|()| Vault::create("", None, true).map(|_| ()))
+                    {
+                        Ok(()) => "密码保护已停用，数据已解密。".to_string(),
+                        Err(error) => format!("数据已解密，但清理锁设置失败：{error:#}"),
+                    };
+                    self.enter_workspace(ctx, DataSlot::Real, Some(notice));
+                }
+            },
+            Err(message) => {
+                crate::vault::clear_key_handle();
+                let mut gate = GateState::unlock();
+                gate.error = Some(format!("数据处理失败：{message}"));
+                self.phase = ShellPhase::Gate(gate);
+            }
+        }
+    }
+
     /// 处理锁屏提交。所有失败都翻译成统一文案，不区分原因类别。
     fn apply_outcome(&mut self, ctx: &egui::Context, outcome: GateOutcome) {
         let mut gate = GateState::unlock();
         match outcome {
             GateOutcome::Unlock(password) => {
                 match Vault::load() {
-                    Ok(vault) => match vault.unlock(&password) {
-                        Some(slot) => {
-                            self.enter_workspace(ctx, slot, None);
+                    Ok(mut vault) => match vault.unlock(&password) {
+                        Some(unlocked) => {
+                            let disable = crate::vault::disable_pending();
+                            let (kind, title) = if disable {
+                                (WorkKind::Disable, "正在解密数据并停用密码保护…")
+                            } else {
+                                (WorkKind::Encrypt, "正在加密现有数据…")
+                            };
+                            self.begin_work(kind, unlocked.slot, *unlocked.dek, title);
                             return;
                         }
                         None => gate.error = Some("密码不正确".into()),
@@ -185,17 +272,18 @@ impl AppShell {
             }
             GateOutcome::Setup { real, decoy } => {
                 match Vault::create(&real, decoy.as_deref(), false) {
-                    Ok(_) => {
-                        self.enter_workspace(
-                            ctx,
+                    Ok((_, Some(unlocked))) => {
+                        self.begin_work(
+                            WorkKind::Encrypt,
                             DataSlot::Real,
-                            Some("密码保护已启用。忘记密码无法恢复数据，请牢记。".into()),
+                            *unlocked.dek,
+                            "正在加密现有数据…",
                         );
                         return;
                     }
-                    Err(error) => {
+                    Ok((_, None)) | Err(_) => {
                         gate = GateState::first_run();
-                        gate.error = Some(format!("{error:#}"));
+                        gate.error = Some("锁设置保存失败，请重试".into());
                     }
                 }
             }
@@ -232,8 +320,9 @@ impl AppShell {
     }
 
     /// 退回锁屏：丢掉整个工作区（数据库连接、内存数据随 Drop 释放），
-    /// 槽位回中性状态，等下一次输入密码。
+    /// 数据密钥句柄一并清掉——锁定状态内存里不留密钥。
     fn lock_now(&mut self) {
+        crate::vault::clear_key_handle();
         storage::set_current_slot(DataSlot::Real);
         self.phase = ShellPhase::Gate(GateState::unlock());
     }
@@ -258,10 +347,21 @@ impl AppShell {
 
         enum After {
             Outcome(GateOutcome),
+            WorkDone {
+                kind: WorkKind,
+                slot: DataSlot,
+                result: Result<(), String>,
+            },
             Lock,
         }
         let after = match &mut self.phase {
-            ShellPhase::Gate(gate) => gate_ui(ui, gate).map(After::Outcome),
+            ShellPhase::Gate(gate) => match gate_ui(ui, gate) {
+                Some(GateEvent::Submit(outcome)) => Some(After::Outcome(outcome)),
+                Some(GateEvent::WorkDone { kind, slot, result }) => {
+                    Some(After::WorkDone { kind, slot, result })
+                }
+                None => None,
+            },
             ShellPhase::Ready(app) => {
                 app.update_workspace(ui, frame);
                 app.take_lock_requested().then_some(After::Lock)
@@ -270,6 +370,9 @@ impl AppShell {
         match after {
             Some(After::Lock) => self.lock_now(),
             Some(After::Outcome(outcome)) => self.apply_outcome(&ctx, outcome),
+            Some(After::WorkDone { kind, slot, result }) => {
+                self.finish_work(&ctx, kind, slot, result)
+            }
             None => {}
         }
         // 锁屏期间保持后台任务（Omarchy 跟随）能推动重绘。
@@ -550,9 +653,19 @@ const CARD_WIDTH: f32 = 340.0;
 const GATE_CONTROL_HEIGHT: f32 = theme::CONTROL_HEIGHT + 4.0;
 
 /// 画一屏闸门，返回这次交互要外壳做的事。
-fn gate_ui(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
+/// 锁屏这一轮交互产生的事件：用户提交，或后台任务跑完了。
+enum GateEvent {
+    Submit(GateOutcome),
+    WorkDone {
+        kind: WorkKind,
+        slot: DataSlot,
+        result: Result<(), String>,
+    },
+}
+
+fn gate_ui(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateEvent> {
     let available = ui.available_rect_before_wrap();
-    let mut outcome: Option<GateOutcome> = None;
+    let mut event: Option<GateEvent> = None;
     // 用垂直布局把卡片推到视口正中（与状态栏居中模型的手法一致）。
     ui.scope_builder(
         egui::UiBuilder::new()
@@ -567,7 +680,11 @@ fn gate_ui(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
                 .inner_margin(egui::Margin::symmetric(30, 26));
             card.show(ui, |ui| {
                 ui.set_width(CARD_WIDTH);
-                outcome = gate_card(ui, gate);
+                if gate.working.is_some() {
+                    working_card(ui, gate, &mut event);
+                } else {
+                    event = gate_card(ui, gate).map(GateEvent::Submit);
+                }
             });
             ui.add_space(16.0);
             ui.label(
@@ -580,7 +697,38 @@ fn gate_ui(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
             );
         },
     );
-    outcome
+    event
+}
+
+/// 后台数据处理期间的卡片：只显示进度文案，轮询完成事件。
+fn working_card(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<GateEvent>) {
+    let Some(working) = gate.working.as_ref() else {
+        return;
+    };
+    ui.vertical_centered(|ui| {
+        ui.add(theme::Icon::Shield.image_sized(30.0).tint(theme::accent()));
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(&working.title)
+                .size(theme::font_sizes::HEADING)
+                .strong()
+                .color(theme::text()),
+        );
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new("请稍候，不要关闭应用。")
+                .size(theme::font_sizes::SMALL)
+                .color(theme::text_muted()),
+        );
+    });
+    if let Ok(result) = working.rx.try_recv() {
+        let working = gate.working.take().expect("working 刚确认存在");
+        *event = Some(GateEvent::WorkDone {
+            kind: working.kind,
+            slot: working.slot,
+            result,
+        });
+    }
 }
 
 /// 卡片内容：首帧聚焦第一个密码框，Enter 提交，失败文案统一挂在卡片底部。
@@ -615,6 +763,16 @@ fn gate_card(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
 
     match gate.mode {
         GateMode::Unlock => {
+            if crate::vault::disable_pending() {
+                ui.label(
+                    egui::RichText::new(
+                        "已申请停用密码保护：输入一次密码，完成解密后回到无密码状态。",
+                    )
+                    .size(theme::font_sizes::SMALL)
+                    .color(theme::text_soft()),
+                );
+                ui.add_space(8.0);
+            }
             let id = egui::Id::new("gate_password_primary");
             ui.add_sized(
                 [CARD_WIDTH, GATE_CONTROL_HEIGHT],

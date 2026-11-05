@@ -47,17 +47,60 @@ const DECOY_PREFIX: &str = "alt-";
 
 /// 按当前槽位映射配置目录里的文件名。真实槽位用原名；诱饵槽位一律加前缀，
 /// 包括未来新增的未知文件名（规则统一，不逐个点名）。
-pub fn slot_file(name: &str) -> Result<PathBuf> {
-    let name = match current_slot() {
+/// 按指定槽位映射配置目录里的文件名。`slot_file` 用当前槽位，本函数
+/// 让「擦除另一个槽位」这类跨槽位操作不依赖进程状态。
+pub fn slot_file_for(slot: DataSlot, name: &str) -> Result<PathBuf> {
+    let name = match slot {
         DataSlot::Real => name.to_string(),
         DataSlot::Decoy => format!("{DECOY_PREFIX}{name}"),
     };
     Ok(config_dir()?.join(name))
 }
 
+pub fn slot_file(name: &str) -> Result<PathBuf> {
+    slot_file_for(current_slot(), name)
+}
+
 /// 按当前槽位映射配置目录里的子目录（pi、apis 这类整体敏感的目录）。
 pub fn slot_subdir(name: &str) -> Result<PathBuf> {
     slot_file(name)
+}
+
+/// 擦掉一个槽位的全部数据文件（库、配置、密钥文件、运行目录）。
+/// 用于「清除第二密码」「启用时重置诱饵」：旧 DEK 已丢弃的文件本来就
+/// 不可读，物理删除不留残留。目录整棵删掉；删不掉的单个文件尽力而为。
+pub(crate) fn wipe_slot_files(slot: DataSlot) {
+    const FILES: [&str; 6] = [
+        "manuscripts.db",
+        "config.json",
+        ".zip-password",
+        "api-secrets.json",
+        "api-envs.json",
+        "api-tests.json",
+    ];
+    const DIRS: [&str; 3] = ["pi", "apis", "images"];
+    if let Ok(dir) = config_dir() {
+        for name in FILES {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = fs::remove_file(dir.join(format!(
+                    "{}{suffix}",
+                    match slot {
+                        DataSlot::Real => name.to_string(),
+                        DataSlot::Decoy => format!("{DECOY_PREFIX}{name}"),
+                    }
+                )));
+            }
+        }
+        for name in DIRS {
+            let path = match slot {
+                DataSlot::Real => dir.join(name),
+                DataSlot::Decoy => dir.join(format!("{DECOY_PREFIX}{name}")),
+            };
+            if path.is_dir() {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+    }
 }
 
 // 测试覆盖的用户目录：只让稿件包同步测试把图片写进临时目录，不影响真实配置目录。
@@ -127,11 +170,18 @@ pub fn load_remembered_zip_password() -> Result<Option<String>> {
         return Ok(None);
     }
     let metadata = fs::metadata(&path)?;
-    if metadata.len() > MAX_REMEMBERED_PASSWORD_BYTES {
+    if metadata.len() > MAX_REMEMBERED_PASSWORD_BYTES + 64 {
         anyhow::bail!("记住的 ZIP 密码文件异常，已拒绝读取");
     }
-    let password = fs::read_to_string(&path)
-        .with_context(|| format!("读取记住的 ZIP 密码失败：{}", path.display()))?;
+    let raw =
+        fs::read(&path).with_context(|| format!("读取记住的 ZIP 密码失败：{}", path.display()))?;
+    let bytes = if crate::vault::is_sealed_file(&raw) {
+        let handle = crate::vault::key_handle().context("ZIP 密码已加密，尚未解锁")?;
+        crate::vault::open_bytes(handle.dek(), &raw)?
+    } else {
+        raw
+    };
+    let password = String::from_utf8(bytes).context("记住的 ZIP 密码不是有效文本")?;
     Ok((!password.is_empty()).then_some(password))
 }
 
@@ -141,9 +191,13 @@ pub fn save_remembered_zip_password(password: Option<&str>) -> Result<()> {
         if password.len() as u64 > MAX_REMEMBERED_PASSWORD_BYTES {
             anyhow::bail!("ZIP 密码过长，无法记住");
         }
+        let mut bytes = password.as_bytes().to_vec();
+        if let Some(handle) = crate::vault::key_handle() {
+            bytes = crate::vault::seal_bytes(handle.dek(), &bytes)?;
+        }
         atomic_write(&path, |file| {
             use std::io::Write;
-            file.write_all(password.as_bytes())?;
+            file.write_all(&bytes)?;
             Ok(())
         })?;
     } else if path.exists() {
@@ -238,6 +292,10 @@ pub(crate) fn atomic_write(
 /// 读取配置。第二个返回值是本次被挪走的损坏配置路径：非空表示 `config.json`
 /// 解析失败，调用方已经拿到一份默认配置，应把这件事告诉用户。
 ///
+/// 启用应用锁后 config.json 是 AEAD 密文（`vault::is_sealed_file`）：
+/// 有句柄就解密，没句柄（锁定前的早期探测）按读不到处理、回落默认配置——
+/// 与损坏配置同一待遇，锁屏反正盖着界面。
+///
 /// 解析失败时把原文件原地改名为 `config.json.损坏-YYYYMMDD-HHMMSS`，保留证据，
 /// 也避免下次保存时用默认值静默覆盖用户数据。改名失败同样回落到默认配置，
 /// 只是没有可报告的留底路径。读取文件本身失败（权限、路径是目录等）仍返回 Err，
@@ -247,9 +305,18 @@ pub fn load() -> Result<(AppConfig, Option<PathBuf>)> {
     let mut config = if !path.exists() {
         AppConfig::default()
     } else {
-        let raw = fs::read_to_string(&path)
-            .with_context(|| format!("读取配置失败：{}", path.display()))?;
-        match serde_json::from_str(&raw) {
+        let raw = fs::read(&path).with_context(|| format!("读取配置失败：{}", path.display()))?;
+        let plain = if crate::vault::is_sealed_file(&raw) {
+            match crate::vault::key_handle() {
+                Some(handle) => crate::vault::open_bytes(handle.dek(), &raw),
+                None => Err(anyhow::anyhow!("配置已加密，尚未解锁")),
+            }
+        } else {
+            Ok(raw)
+        };
+        match plain.and_then(|bytes| {
+            serde_json::from_slice::<AppConfig>(&bytes).context("配置内容无法解析")
+        }) {
             Ok(config) => config,
             Err(_) => {
                 let backup = corrupted_config_path(&path);
@@ -274,9 +341,7 @@ pub fn load() -> Result<(AppConfig, Option<PathBuf>)> {
             fs::copy(&path, &backup)?;
         }
         // 旧词库可能已有同级重名或悬空关系，保留供界面核对，不能因此启动成空配置。
-        atomic_write(&path, |file| {
-            serde_json::to_writer_pretty(file, &config).context("保存身份迁移失败")
-        })?;
+        write_config(&path, &config).context("保存身份迁移失败")?;
     }
     Ok((config, None))
 }
@@ -298,14 +363,48 @@ fn corrupted_config_path(path: &std::path::Path) -> PathBuf {
     candidate
 }
 
+/// 把配置写成目标形态：有句柄（应用锁启用中）写 AEAD 密文，没有写明文。
+/// 已启用时绝不能把明文写回磁盘——那等于把刚锁好的门又打开。
+fn write_config(path: &std::path::Path, config: &AppConfig) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(config).context("配置序列化失败")?;
+    let bytes = match crate::vault::key_handle() {
+        Some(handle) => crate::vault::seal_bytes(handle.dek(), &bytes)?,
+        None => bytes,
+    };
+    atomic_write(path, |file| {
+        use std::io::Write as _;
+        file.write_all(&bytes)?;
+        Ok(())
+    })
+}
+
 pub fn save(config: &AppConfig) -> Result<()> {
     crate::units::identity::validate(&config.vocabulary).map_err(anyhow::Error::msg)?;
     let path = config_path()?;
-    atomic_write(&path, |file| {
-        serde_json::to_writer_pretty(file, config)?;
-        Ok(())
-    })
-    .context("保存配置失败，上一次有效配置会在替换前保留")
+    write_config(&path, config).context("保存配置失败，上一次有效配置会在替换前保留")
+}
+
+/// 给 SQLite 连接应用当前槽位的数据密钥（SQLCipher PRAGMA key）。
+///
+/// 调用点：每个 `Connection::open` 之后**立即**调用，必须在任何读写之前。
+/// - 无句柄（未启用应用锁、测试）：什么也不做，库保持明文形态；
+/// - 有句柄但 `db_active = false`（设置页刚启用、迁移安排在下次解锁）：
+///   本会话继续按明文开库，与磁盘形态一致；
+/// - 有句柄且 `db_active = true`（解锁迁移完成后）：带 key 开库。
+///
+/// 必须用 `key = 'x'..'` 原始密钥写法：本构建的 `PRAGMA hexkey` 会把解码后的
+/// 字节当口令再走 PBKDF2，与 `ATTACH ... KEY "x'..'"`（迁移导出用）派生出
+/// 不同的密钥；x'..' 两种入口才是同一把原始密钥（见 src/vault.rs::apply_key_with）。
+pub(crate) fn apply_db_key(conn: &rusqlite::Connection) -> Result<()> {
+    let Some(handle) = crate::vault::key_handle() else {
+        return Ok(());
+    };
+    if !handle.db_active() {
+        return Ok(());
+    }
+    conn.pragma_update(None, "key", format!("x'{}'", handle.dek_hex()))
+        .context("数据库密钥应用失败")?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -288,6 +288,19 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   第八节材料库（视图栏「材料」、重新识别只替换未处理建议、识别过的材料出卡片、删除时被引用的
   快照只隐藏，`src/task_ui/materials.rs`）已实现，待真机验收。
 
+- **应用锁与安全存储**（双密码锁屏 + 诱饵空系统 + SQLCipher 全库加密 + 敏感文件
+  AEAD，分三期）：**第一期（锁屏 + 双密码 + 诱饵 `alt-` 前缀 + 闲置自动锁定）与
+  第二期（rusqlite 换 `bundled-sqlcipher-vendored-openssl`、DEK 包裹架构、解锁时
+  `sqlcipher_export` 整库迁移、`config.json` 与密钥类文件 AEAD、停用解密、备份快照
+  保持密文）已完成开发，待真机验收**；第三期（`images/`、`pi/` 运行目录加密、日志
+  清理、使用帮助威胁模型）未开工。方案、分期、与方案的出入和踩坑见
+  `docs/security-lock-design.md`（第八节是一期交接、第九节是二期交接与真机验收清单）；
+  动密钥句柄、迁移、开库路径或密封写路径前先读第九节「二期踩过的坑」。
+  代码在 `src/vault.rs`、`src/app/gate.rs`、`src/app/vault_settings.rs`、
+  `src/storage.rs::apply_db_key`（六个开库点调用）、`src/data_backup.rs`、
+  `src/ai_services/persistence.rs`。本机构建 vendored OpenSSL 需便携 Strawberry Perl，
+  cargo 命令前 `export PERL="C:/Users/lisiy/perl/perl/bin/perl.exe"`。
+
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 
 > 2026-10-03 按智能体工作台方案修订（`docs/ai-agent-workbench.md` 第二节 D1–D3）。

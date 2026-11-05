@@ -330,6 +330,7 @@ impl KnowledgeStore {
         }
         let conn =
             Connection::open(path).with_context(|| format!("无法打开知识库 {}", path.display()))?;
+        crate::storage::apply_db_key(&conn)?;
         // 索引线程可能正持有写事务，读连接要肯等；2 秒对本地库偏短。
         conn.busy_timeout(Duration::from_millis(10_000))?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;

@@ -122,6 +122,7 @@ fn connect(path: &Path) -> Result<Connection> {
     }
     let conn =
         Connection::open(path).with_context(|| format!("打开稿件库失败：{}", path.display()))?;
+    crate::storage::apply_db_key(&conn)?;
     conn.busy_timeout(std::time::Duration::from_secs(2))?;
     conn.execute_batch(
         "PRAGMA foreign_keys=ON;

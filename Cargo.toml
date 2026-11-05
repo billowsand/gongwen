@@ -75,7 +75,12 @@ resvg = "0.46"
 # Linux 文件选择器后端由上面的 crate feature 选择。不能同时把两种后端写在这里，
 # 因为 rfd 在启用 gtk3 时会固定选择 GTK3，而不会在运行时退回 portal。
 rfd = { version = "0.17.2", default-features = false }
-rusqlite = { version = "0.40", features = ["backup", "bundled"] }
+# SQLCipher（bundled + vendored OpenSSL，三平台纯源码构建）：页级透明加密，
+# 检索与索引零改动。见 docs/security-lock-design.md 第四节。
+# SQLCipher 全库加密（应用锁二期）：bundled 编进 libsqlite3-sys，进程内开库带
+# PRAGMA hexkey。SQLCipher 不支持 SQLite 在线备份 API，迁移/备份快照走
+# sqlcipher_export（见 src/vault.rs::export_database），所以不需要 backup 特性。
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
 rust_xlsxwriter = "0.99.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

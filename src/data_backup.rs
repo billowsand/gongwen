@@ -99,13 +99,25 @@ pub(crate) fn export_backup(target_zip: &Path) -> Result<()> {
 
 /// 主库与 WAL 必须由 SQLite 合并成一致快照，不能分别复制正在变化的文件。
 /// 只读打开源库，任何快照错误都中止导出，不能退回原始文件复制。
+/// 源库带数据密钥开（加密库不载 key 读不了）；目标库同样带密钥创建——
+/// 备份包里装的是密文（等于自带加密的备份），无句柄（未启用应用锁）时
+/// 两端都退化为明文，与磁盘形态一致。
 fn snapshot_database(source: &Path, destination: &Path) -> Result<()> {
+    // 只读权限打开源库即可满足「快照绝不写源库」；但 ATTACH 新库要可写
+    // （只读连接会把附库也按只读开，建新快照文件直接打不开）。
     let connection =
-        rusqlite::Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        rusqlite::Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
             .context("无法打开稿件库以生成备份快照")?;
-    connection
-        .backup(rusqlite::MAIN_DB, destination, None)
-        .context("无法生成稿件库的一致备份快照")
+    crate::storage::apply_db_key(&connection)?;
+    // 备份快照与磁盘同形态：句柄已激活（库是密文）则快照也带密钥导出，
+    // 无句柄或本会话还没迁移时两端都明文。SQLCipher 不支持在线备份 API，
+    // 迁移与快照共用 vault::export_database（sqlcipher_export）。
+    let dest_key = crate::vault::key_handle()
+        .filter(|handle| handle.db_active())
+        .map(|handle| *handle.dek());
+    crate::vault::export_database(&connection, destination, dest_key.as_ref())
+        .context("无法生成稿件库的一致备份快照")?;
+    Ok(())
 }
 
 /// [`export_backup`] 的可测试入口：显式指定要打包的目录。
@@ -398,6 +410,8 @@ fn is_excluded(rel: &Path) -> bool {
         || name.contains(CORRUPT_MARK)
         || name.starts_with(TEMP_PREFIX)
         || name.ends_with(".tmp")
+        // 明文⇄密文迁移若被中断可能留下覆写过的旧库残骸，绝不进备份。
+        || name.contains(".迁移-")
 }
 
 /// ZIP 条目名用 `/` 分隔，与平台无关。

@@ -53,6 +53,7 @@ pub struct HistoryEntry {
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path).context("打开任务助手数据库失败")?;
+        crate::storage::apply_db_key(&conn)?;
         conn.busy_timeout(std::time::Duration::from_millis(10_000))
             .context("设置任务数据库等待时间失败")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")

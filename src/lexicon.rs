@@ -315,6 +315,7 @@ impl LexiconStore {
         }
         let conn =
             Connection::open(path).with_context(|| format!("无法打开词表 {}", path.display()))?;
+        crate::storage::apply_db_key(&conn)?;
         // 扫描线程可能正持有写事务，读连接要肯等。
         conn.busy_timeout(Duration::from_millis(10_000))?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;

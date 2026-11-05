@@ -175,6 +175,7 @@ pub fn run_scan_with<F: Fn(usize, usize, String)>(
 fn collect_sources(db_path: &std::path::Path, options: &ScanOptions) -> Result<Vec<Source>> {
     let conn = Connection::open(db_path)
         .with_context(|| format!("无法打开稿件库 {}", db_path.display()))?;
+    crate::storage::apply_db_key(&conn)?;
     conn.busy_timeout(std::time::Duration::from_millis(10_000))?;
     let mut sources = Vec::new();
 

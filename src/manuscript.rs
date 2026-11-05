@@ -368,6 +368,7 @@ impl ManuscriptStore {
         }
         let conn =
             Connection::open(path).with_context(|| format!("无法打开稿件库 {}", path.display()))?;
+        crate::storage::apply_db_key(&conn)?;
         conn.busy_timeout(Duration::from_millis(2000))?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         let mut store = Self { conn };

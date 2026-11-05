@@ -218,3 +218,80 @@ AEAD、`data_backup` 适配。**验收**：565 MB 真实库迁移后检索 / 词
 第二期（SQLCipher）开工前先重读第六节「已知坑」第 1–5 条；第一期代码入口：
 `src/vault.rs`（验证器与锁文件）、`src/app/gate.rs`（外壳与锁屏）、
 `src/app/vault_settings.rs`（设置页分区）、`src/storage.rs`（数据槽）。
+
+## 九、第二期实现进度与交接（2026-11-05）
+
+**第二期已完成开发，全部 2885 个测试通过，待真机验收**（真实库启用→重启→解锁
+自动迁移→检索/词表/知识库正常、改密、设/清第二密码、停用解密、加密库备份）。
+与方案第四节的关键出入：
+
+- **DEK 包裹架构**（取代「密码→密钥→一切」）：密码只用于 Argon2id 派生**包裹
+  密钥**加解密一把随机的 32 字节**数据密钥（DEK）**；DEK 才是 SQLCipher 库密钥
+  与文件 AEAD 密钥。改主密码 = 用新包裹重裹同一把 DEK，数据文件一个不动，
+  杜绝「改密把数据锁死」的自锁风险。`vault.dat` 升 v2（槽内加 `wrapped`，
+  v1 文件解锁命中时**懒升级**——只补命中那个槽，另一把密码的槽等自己解锁再补，
+  不提前作废）。
+- **迁移时机在解锁**：设置页「启用」后本会话仍按明文开库（句柄
+  `db_active = false`），下次解锁时闸门后台线程做整库迁移
+  （`vault::ensure_slot_encrypted`）+ 密封三个敏感文件，完成后才
+  `activate_db_encryption()` 进工作区；卡片显示「请稍候，不要关闭应用」。
+- **停用 = 解密**：设置页「停用」写 `vault.pending-disable` 标记 + 请求锁定；
+  锁屏输一次密码 → 闸门后台把库迁回明文、三个文件解封 → 删锁文件写跳过标记。
+  中途崩溃靠标记文件下次启动重进同一条解密路（`cancel_disable` 可取消）。
+- **配置与小文件 AEAD**：`config.json`、`.zip-password`、`api-secrets.json`
+  整份 `GWA1 ‖ nonce ‖ AES-256-GCM(DEK)`；`ai_services::persistence` 的
+  `api-envs.json` / `api-tests.json` 同样密封；密封在**写路径**发生（句柄在就密），
+  未解锁读到密封文件按「损坏/默认」处理，不崩。
+- **备份快照保持密文**：`data_backup::snapshot_database` 源带 key 开、目标也带
+  key 导出——备份包等于自带加密；无句柄（未启用应用锁）时两端明文，与磁盘一致。
+- **测试旁路**：无句柄时 `storage::apply_db_key` 空转，全部既有测试照旧跑明文库；
+  句柄在测试里是**线程本地**覆盖（`TEST_KEY_HANDLE`，同 `TEST_CONFIG_DIR` 思路），
+  并行测试互不清句柄。
+
+### 二期踩过的坑（改这块代码前必读）
+
+1. **`PRAGMA hexkey` 与 `key = 'x'..'` 在这个构建里不是同一把钥匙**：hexkey 把
+   解码后的 32 字节当**口令**再走一遍 PBKDF2；`x'hex'` 才是原始密钥，且和
+   `ATTACH ... KEY "x'hex'"` 一致。全库统一用 `x'..'`
+   （`vault::apply_key_with`、`storage::apply_db_key`），混用会让迁移出的库
+   日常打不开。
+2. **SQLCipher 不支持 SQLite 在线备份 API**（`sqlite3_backup_init` 直接报错），
+   迁移与备份快照都走 `sqlcipher_export`（`vault::export_database`）：
+   `ATTACH DATABASE 'path' AS export_dest KEY "x'..'"` →
+   `SELECT sqlcipher_export('export_dest')` → `DETACH`。
+3. **ATTACH 的密钥必须是 SQL 文本内联的字面 token**：绑定参数传 `x'..'` 会被
+   当普通口令派生，导出的库用错密钥（静默成功，读时才炸）。
+4. **ATTACH 继承主连接的 openFlags**：主连接不带 `SQLITE_OPEN_CREATE` 时
+   建新附库文件直接 CANTOPEN——导出前先建空文件占位。data_backup 的源连接
+   因此用 `OPEN_READ_WRITE`（不能 READ_ONLY，附库要写）。
+5. **`cipher_integrity_check` 只在发现问题时返回行**（错误描述），全过是
+   **零行**——别等 "ok" 行（`database_matches` 曾因此把好的密文库判成损坏）。
+6. **v1→v2 懒升级是刻意的**：解锁只补命中槽的 `wrapped`，保证另一把密码
+   （第二密码或主密码）不失效；测试断言按这个语义写。
+7. **本机构建链**：bundled-sqlcipher-vendored-openssl 要编 OpenSSL，本机 Git
+   自带 MSYS perl 缺模块、Cygwin perl 被 Configure 拒；用便携 Strawberry Perl
+   （`C:\Users\lisiy\perl`），cargo 命令前
+   `export PERL="C:/Users/lisiy/perl/perl/bin/perl.exe"`。CI 的
+   windows-latest 自带完整 Strawberry，不受影响。
+
+### 二期代码入口
+
+`src/vault.rs`（DEK、封套、迁移、AEAD、停用标记）、`src/storage.rs`
+（`apply_db_key`、`wipe_slot_files`、密封写路径）、`src/app/gate.rs`
+（闸门后台工作 `GateWorking`）、`src/app/vault_settings.rs`（启用/改密/
+停用接线）、六个开库点（`manuscript.rs` / `knowledge.rs` / `lexicon.rs` /
+`lexicon/scan.rs` / `task_assistant/store.rs` / `agent/writing/store.rs`）、
+`src/data_backup.rs`（快照）、`src/ai_services/persistence.rs`（JSON 密封）。
+
+### 真机验收清单（二期）
+
+1. 设置页启用密码保护 → 提示「下次解锁自动加密」→ 锁定 → 解锁：出现「请稍候」
+   卡片，迁移完成进工作区；`manuscripts.db` 头不是 `SQLite format 3`。
+2. 迁移后检索、词表扫描、知识库、任务助手全部正常（SQLCipher 页级透明）。
+3. 重启应用输密码直接进（已是密文，不再迁移）。
+4. 改主密码：立即生效，数据不动；旧密码失效。
+5. 设/换第二密码：旧诱饵数据被擦；第二密码进空白系统；清除后该密码失效。
+6. 停用：锁屏输一次密码 → 回到无密码状态，库回到明文（头可读）。
+7. 数据备份：启用锁后导出的备份包在**未解锁**的机器上打不开库文件；
+   解锁后导入正常。
+8. 大库（565 MB 级）迁移耗时与空间占用（临时文件同目录，需双倍磁盘余量）。

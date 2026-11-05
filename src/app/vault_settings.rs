@@ -129,7 +129,7 @@ impl GongwenApp {
         setting_row(ui, "", None, |ui| {
             if ui
                 .button("启用密码保护")
-                .on_hover_text("启用后启动与闲置超时都要输入密码；忘记密码无法恢复数据。")
+                .on_hover_text("启用后启动与闲置超时都要输入密码；现有数据在下次解锁时自动加密。")
                 .clicked()
             {
                 self.vault_apply_enable();
@@ -141,6 +141,22 @@ impl GongwenApp {
     fn vault_enabled_ui(&mut self, ui: &mut egui::Ui) {
         setting_note(ui, "已启用。启动时要输入密码；菜单里也可以随时手动锁定。");
         ui.add_space(10.0);
+
+        if crate::vault::disable_pending() {
+            setting_note_colored(
+                ui,
+                "已申请停用：锁定后输入一次密码完成解密；重启未完成前可在此取消。",
+                theme::text_soft(),
+            );
+            ui.add_space(4.0);
+            setting_row(ui, "", None, |ui| {
+                if ui.button("取消停用").clicked() {
+                    crate::vault::cancel_disable();
+                    self.notice_vault("已取消停用，密码保护保持启用。".into());
+                }
+            });
+            ui.add_space(10.0);
+        }
 
         setting_row(
             ui,
@@ -220,7 +236,7 @@ impl GongwenApp {
             );
             if ui
                 .button("设置第二密码")
-                .on_hover_text("设置或覆盖；与主密码不能相同。")
+                .on_hover_text("设置或覆盖；与主密码不能相同。会重置第二密码系统的数据。")
                 .clicked()
             {
                 self.vault_apply_set_decoy();
@@ -230,7 +246,7 @@ impl GongwenApp {
             if self.vault_page.clear_decoy_confirm {
                 if ui
                     .button("确认清除")
-                    .on_hover_text("清除后该密码立即失效；数据仍由主密码管理。")
+                    .on_hover_text("清除后该密码立即失效，第二密码系统的数据一并删除。")
                     .clicked()
                 {
                     self.vault_apply_clear_decoy();
@@ -255,7 +271,7 @@ impl GongwenApp {
         setting_row(
             ui,
             "停用密码保护",
-            Some("删除锁文件；数据文件原样保留，任何人都能直接进入。"),
+            Some("锁定后输入一次密码，把数据解密回明文，回到无密码状态。"),
             |ui| {
                 if self.vault_page.disable_confirm {
                     if ui.button("确认停用").clicked() {
@@ -305,17 +321,27 @@ impl GongwenApp {
             .with_decoy
             .then(|| page.enable_decoy.clone())
             .filter(|password| !password.is_empty());
+        // 全新 DEK 意味着旧诱饵数据（如果有）从此不可读：先擦掉再立锁。
+        if decoy.is_some() {
+            storage::wipe_slot_files(DataSlot::Decoy);
+        }
         match Vault::create(&real, decoy.as_deref(), false) {
-            Ok(_) => {
+            Ok((_, Some(unlocked))) => {
+                // 本会话继续按明文开库（磁盘数据还没迁）；配置类文件从下一次
+                // 保存起就密封。数据迁移安排在下次解锁，由闸门完成。
+                crate::vault::set_key_handle(*unlocked.dek, false);
                 self.vault_locked = true;
                 let page = &mut self.vault_page;
                 page.enable_real.clear();
                 page.enable_real_confirm.clear();
                 page.enable_decoy.clear();
                 page.enable_decoy_confirm.clear();
-                page.notice = Some(("密码保护已启用。".into(), true));
+                page.notice = Some((
+                    "密码保护已启用；现有数据将在下次解锁时自动加密。".into(),
+                    true,
+                ));
             }
-            Err(error) => self.fail_vault(format!("{error:#}")),
+            Ok((_, None)) | Err(_) => self.fail_vault("锁设置保存失败，请重试"),
         }
     }
 
@@ -326,8 +352,16 @@ impl GongwenApp {
             return;
         }
         let password = page.change_real.clone();
-        match Vault::load().and_then(|mut vault| vault.set_password(DataSlot::Real, &password)) {
-            Ok(()) => {
+        // 改密只换包裹：把当前 DEK 用新密码裹回去，数据文件一个都不动。
+        let Some(handle) = crate::vault::key_handle() else {
+            self.fail_vault("当前状态无法修改密码，请重启应用后再试");
+            return;
+        };
+        let current_dek = *handle.dek();
+        match Vault::load()
+            .and_then(|mut vault| vault.set_password(DataSlot::Real, &password, Some(&current_dek)))
+        {
+            Ok(_) => {
                 let page = &mut self.vault_page;
                 page.change_real.clear();
                 page.change_real_confirm.clear();
@@ -344,8 +378,13 @@ impl GongwenApp {
             return;
         }
         let password = page.decoy_new.clone();
-        match Vault::load().and_then(|mut vault| vault.set_password(DataSlot::Decoy, &password)) {
-            Ok(()) => {
+        // 第二密码总是配一把全新 DEK——等于重置第二密码系统，
+        // 旧诱饵数据在设置成功前先擦掉（成功后反正也读不了）。
+        storage::wipe_slot_files(DataSlot::Decoy);
+        match Vault::load()
+            .and_then(|mut vault| vault.set_password(DataSlot::Decoy, &password, None))
+        {
+            Ok(_) => {
                 let page = &mut self.vault_page;
                 page.decoy_new.clear();
                 page.decoy_new_confirm.clear();
@@ -359,20 +398,20 @@ impl GongwenApp {
         match Vault::load().and_then(|mut vault| vault.clear_decoy()) {
             Ok(()) => {
                 self.vault_page.clear_decoy_confirm = false;
-                self.notice_vault("第二密码已清除。".into());
+                self.notice_vault("第二密码已清除，其数据已一并删除。".into());
             }
             Err(error) => self.fail_vault(format!("{error:#}")),
         }
     }
 
     fn vault_apply_disable(&mut self) {
-        match Vault::load().and_then(|vault| vault.disable()) {
+        // 停用 = 解密回明文：先标记，再锁定；锁屏输入一次密码完成数据库解密，
+        // 之后删锁文件、写「暂不设置」标记，回到无密码状态。
+        match crate::vault::request_disable() {
             Ok(()) => {
-                self.vault_locked = false;
                 self.vault_page.disable_confirm = false;
-                self.notice_vault("密码保护已停用；重启应用前不会再锁定。".into());
-                // 让「锁定」菜单项与空闲锁定马上消失。
-                let _ = storage::save(&self.config);
+                self.notice_vault("已申请停用：应用即将锁定，输入一次密码完成解密。".into());
+                self.request_lock();
             }
             Err(error) => self.fail_vault(format!("{error:#}")),
         }
