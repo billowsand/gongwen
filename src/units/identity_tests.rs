@@ -300,52 +300,6 @@ fn identity_merge_renames_one_person_and_does_not_merge_same_name_people() {
 }
 
 #[test]
-fn ai_same_name_requires_identity_choice_and_card_keeps_distinct_people() {
-    let entries = fixture();
-    let draft = DraftInput {
-        kind: TemplateKind::OfficialLetter,
-        ..Default::default()
-    };
-    let plan = crate::element_fields::plan(
-        &draft,
-        "主送单位｜已给｜办公室",
-        "请办公室反馈意见",
-        &entries,
-        8,
-    );
-    assert!(
-        !plan
-            .suggestions
-            .iter()
-            .any(|s| s.field == FieldId::Recipient)
-    );
-    let question = plan
-        .questions
-        .iter()
-        .find(|q| q.target == crate::agent::clarify::Target::Field(FieldId::Recipient))
-        .unwrap();
-    let actions: Vec<_> = question
-        .choices
-        .iter()
-        .filter_map(|c| {
-            if let crate::agent::clarify::Action::Fill(key) = &c.action {
-                Some(key)
-            } else {
-                None
-            }
-        })
-        .collect();
-    assert!(actions.contains(&&key(&entries, "A0101")));
-    assert!(actions.contains(&&key(&entries, "B0101")));
-    assert!(
-        question
-            .choices
-            .iter()
-            .any(|c| c.label == "甲市教育局办公室")
-    );
-}
-
-#[test]
 fn same_surname_leaders_are_not_collapsed_to_indistinguishable_titles() {
     let mut entries = fixture();
     let first = person(&entries, "010-1111");

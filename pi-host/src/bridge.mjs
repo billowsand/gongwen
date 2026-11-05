@@ -34,6 +34,22 @@ export const DOMAIN_TOOLS = [
     version: Type.Optional(Type.Number({ description: "历史版本号；省略读当前版本" })),
     offset: Type.Optional(Type.Integer({ minimum: 0, description: "从字符位置继续读取；用上次返回的 next_offset，不是字节或行号" })),
   })],
+  ["api_search", "在内网数据接口里按用途搜索只读接口，返回接口 id、说明与参数签名", Type.Object({
+    query: Type.String({ description: "要找的数据，例如「森林火灾统计」「政策文件」" }),
+    limit: Type.Optional(Type.Number({ description: "最多返回几个，1–5" })),
+  })],
+  ["api_call", "调用一个只读内网数据接口取数据；api 填接口 id，args 只放接口签名里的参数", Type.Object({
+    api: Type.String({ description: "api_search 返回的接口 id" }),
+    args: Type.Optional(Type.Record(Type.String(), Type.Any(), {
+      description: "接口参数，按 api_search 返回的参数签名填；没有参数就省略",
+    })),
+  })],
+  ["api_read", "续读一次接口调用留下的完整结果：省略 item 列出全部条目，带 item 按字符分页读该条全文", Type.Object({
+    result_id: Type.String({ description: "api_call 返回的 result_id" }),
+    item: Type.Optional(Type.Number({ description: "条目序号，从 0 开始；省略时列出全部条目" })),
+    offset: Type.Optional(Type.Integer({ minimum: 0, description: "从字符位置继续读取；用上次返回的 next_offset" })),
+    limit_chars: Type.Optional(Type.Integer({ minimum: 1, description: "本次最多读多少字符" })),
+  })],
   ["current_date", "读取本机当前日期、星期、时区及本周下周范围", Type.Object({})],
   ["vocab_search", "查标准单位名称、职能任务、人员职务简介及所属单位", Type.Object({
     query: Type.Optional(Type.String({ description: "名称、编码、职能或人员简介关键词；留空按类别列出" })),

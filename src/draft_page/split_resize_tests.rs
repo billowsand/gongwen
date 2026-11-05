@@ -791,6 +791,38 @@ impl Harness {
             });
         }
     }
+
+    /// 画一帧完整起草页（`create_ui`），供 AI 写作版面的纸面测试查找纸签与纸张。
+    fn create_ui_frame(&mut self, size: egui::Vec2, events: Vec<egui::Event>) -> egui::FullOutput {
+        self.clock += 1;
+        let ctx = self.ctx.clone();
+        // 不在这里清纹理增量：样张渲染要逐帧 absorb，否则画布拿不到字体图集。
+        // 只出形状的调用方用完自行 `textures_delta.clear()`。
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(self.clock as f64 / 60.0),
+                predicted_dt: 1.0 / 60.0,
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let mut page = DraftPage {
+                    doc: &mut self.doc,
+                    config: &mut self.config,
+                    store: None,
+                    sender: &self.sender,
+                    status: &mut self.status,
+                    version_switch: &mut self.version_switch,
+                    revert_confirm: &mut self.revert_confirm,
+                    actions: &mut self.actions,
+                    export_links: &mut self.export_links,
+                    metrics: &mut self.metrics,
+                };
+                page.create_ui(ui);
+            },
+        )
+    }
 }
 
 fn percentile(values: &mut [f32], p: f32) -> f32 {
@@ -1755,4 +1787,252 @@ fn dragging_neither_rebuilds_the_atlas_nor_relayouts() {
 
     assert_eq!(rebuilds, 0, "拖动期间字号恒定，字体图集不应重建");
     assert_eq!(relayouts, 0, "拖动期间版面缩放应始终冻结，一次都不该重排");
+}
+
+/// 递归收集文字图形，返回 (文本, 屏幕矩形)。用于找纸签与工作稿正文的位置。
+fn shape_texts(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+    match shape {
+        egui::epaint::Shape::Text(text) => out.push((
+            text.galley.text().to_string(),
+            egui::Rect::from_min_size(text.pos, text.galley.size()),
+        )),
+        egui::epaint::Shape::Vec(shapes) => {
+            for shape in shapes {
+                shape_texts(shape, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 递归收集填色矩形，返回 (屏幕矩形, 填充色)。用于区分稿纸与校样纸。
+fn shape_fills(shape: &egui::epaint::Shape, out: &mut Vec<(egui::Rect, egui::Color32)>) {
+    match shape {
+        egui::epaint::Shape::Rect(rect) => out.push((rect.rect, rect.fill)),
+        egui::epaint::Shape::Vec(shapes) => {
+            for shape in shapes {
+                shape_fills(shape, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn texts_of(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+    let mut texts = Vec::new();
+    for clipped in &output.shapes {
+        shape_texts(&clipped.shape, &mut texts);
+    }
+    texts
+}
+
+fn fills_of(output: &egui::FullOutput) -> Vec<(egui::Rect, egui::Color32)> {
+    let mut fills = Vec::new();
+    for clipped in &output.shapes {
+        shape_fills(&clipped.shape, &mut fills);
+    }
+    fills
+}
+
+/// 纸签在屏幕上锚定的脚线：纸签高 26，文字垂直居中，中心 + 13 即纸面上沿。
+fn tab_base(tab: egui::Rect) -> f32 {
+    tab.center().y + 13.0
+}
+
+/// 锤子稿纸的 AI 写作版面只在源码模式（或正看 AI 稿）出现。
+#[test]
+fn only_the_paper_theme_puts_the_work_copy_on_the_same_sheet() {
+    use super::editor::uses_workspace_sheet;
+    assert!(uses_workspace_sheet(true, PreviewMode::Source, true, false));
+    assert!(uses_workspace_sheet(true, PreviewMode::Source, true, true));
+    assert!(
+        uses_workspace_sheet(true, PreviewMode::Rendered, true, true),
+        "版式模式下正看 AI 稿时也要有纸签，才能切回正文"
+    );
+    assert!(
+        !uses_workspace_sheet(true, PreviewMode::Rendered, true, false),
+        "版式模式看正文时纸签不再出现"
+    );
+    assert!(!uses_workspace_sheet(
+        false,
+        PreviewMode::Source,
+        true,
+        true
+    ));
+    assert!(!uses_workspace_sheet(
+        true,
+        PreviewMode::Source,
+        false,
+        true
+    ));
+}
+
+/// 锤子稿纸下 AI 写作：正文与工作稿落在同一张纸上，纸签负责切换，
+/// 工作稿不再铺在木纹上、也不贴窗口左边。样张出到 tmp/。
+#[test]
+#[ignore = "出锤子稿纸 AI 工作稿样张，手动跑"]
+fn smartisan_ai_workspace_sample() {
+    let size = egui::vec2(1200.0, 820.0);
+    let mut harness = Harness::new();
+    harness.doc.generated_markdown =
+        "# 关于开展年度工作总结的通知\n\n各部门：\n\n为全面总结年度工作，现将有关事项通知如下。\n\n## 一、总体要求\n\n请各部门认真总结工作成效。\n"
+            .into();
+    harness.doc.preview_mode = PreviewMode::Source;
+    harness.doc.form_collapsed = true;
+    harness.config.ribbon_collapsed = true;
+    harness.config.show_source_outline = false;
+    harness.config.show_source_minimap = false;
+    harness.config.show_editor_line_numbers = true;
+    harness.config.editor_font_size = 16.0;
+    let id = harness
+        .doc
+        .ai_panel
+        .push_turn("润色".into(), "请润色这篇通知".into(), vec![], None);
+    {
+        let turn = harness.doc.ai_panel.turn_mut(id).expect("刚放进去");
+        turn.is_workspace = true;
+        turn.content = "# 关于开展年度工作总结的通知\n\n各部门：\n\n为全面总结年度工作，梳理重点任务落实情况，现将有关事项通知如下。\n\n## 一、总体要求\n\n请各部门认真总结工作成效。\n".into();
+        turn.state = crate::ai_panel::TurnState::Streaming;
+    }
+    theme::set_current(crate::models::ThemeName::Smartisan);
+    theme::set_current_paper(crate::models::PaperMode::Follow);
+    theme::configure_style(&harness.ctx);
+    harness.ctx.set_pixels_per_point(1.0);
+    let mut canvas = crate::ui_snapshot::Canvas::default();
+
+    // 正文视图：纸签已经出现，工作稿收起，纸面仍是稿纸。
+    let mut body = harness.create_ui_frame(size, Vec::new());
+    canvas.absorb(&mut body.textures_delta);
+    let texts = texts_of(&body);
+    assert!(texts.iter().any(|(text, _)| text == "正文"), "正文纸签");
+    let ai_tab = texts
+        .iter()
+        .find(|(text, _)| text == "AI 工作稿")
+        .map(|(_, rect)| *rect)
+        .expect("工作稿存在时应当出现「AI 工作稿」纸签");
+    let fills = fills_of(&body);
+    assert!(
+        fills
+            .iter()
+            .any(|(rect, fill)| *fill == theme::smartisan::PAPER && rect.width() > size.x * 0.3),
+        "正文视图应铺一整张稿纸"
+    );
+    assert!(
+        !fills
+            .iter()
+            .any(|(rect, fill)| *fill == theme::smartisan::PROOF_PAPER
+                && rect.width() > size.x * 0.3),
+        "正文视图不该出现校样纸"
+    );
+
+    // 点「AI 工作稿」纸签：按下与抬起要跨帧。
+    let at = ai_tab.center();
+    for events in [
+        vec![egui::Event::PointerMoved(at)],
+        vec![egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }],
+        vec![egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    ] {
+        let mut output = harness.create_ui_frame(size, events);
+        canvas.absorb(&mut output.textures_delta);
+    }
+    assert_eq!(
+        harness.doc.ai_panel.workspace_view,
+        Some(id),
+        "点纸签应打开 AI 工作稿"
+    );
+
+    let mut sheet = harness.create_ui_frame(size, Vec::new());
+    canvas.absorb(&mut sheet.textures_delta);
+    let fills = fills_of(&sheet);
+    // 两张纸的版心对齐：同一句正文在两个视图里横向位置只差纸边距。
+    let body_texts = texts_of(&body);
+    let body_line = body_texts
+        .iter()
+        .find(|(text, _)| text.contains("请各部门认真总结工作成效"))
+        .map(|(_, rect)| *rect)
+        .expect("正文视图的正文应画出来");
+    let sheet_texts = texts_of(&sheet);
+    let sheet_line = sheet_texts
+        .iter()
+        .find(|(text, _)| text.contains("请各部门认真总结工作成效"))
+        .map(|(_, rect)| *rect)
+        .expect("工作稿正文应画出来");
+    assert!(
+        (sheet_line.left() - body_line.left()).abs() <= 4.0,
+        "两个视图的文字版心要对齐（正文 {}，工作稿 {}）",
+        body_line.left(),
+        sheet_line.left()
+    );
+    let proof = fills
+        .iter()
+        .find(|(rect, fill)| *fill == theme::smartisan::PROOF_PAPER && rect.width() > size.x * 0.3)
+        .map(|(rect, _)| *rect)
+        .expect("AI 工作稿应铺在一整张校样纸上");
+    assert!(
+        proof.top() <= tab_base(ai_tab) + 2.0,
+        "校样纸上沿要贴住纸签脚线，不能留旧版那道木纹空缝（纸 {proof:?}，签脚 {}）",
+        tab_base(ai_tab)
+    );
+    let texts = texts_of(&sheet);
+    assert!(
+        texts.iter().any(|(text, _)| text == "未合并"),
+        "未进正文的稿要有「未合并」印章"
+    );
+    let line = texts
+        .iter()
+        .find(|(text, _)| text.contains("请各部门认真总结工作成效"))
+        .map(|(_, rect)| *rect)
+        .expect("工作稿正文应画出来");
+    assert!(
+        line.left() > proof.left() + 40.0,
+        "工作稿正文要落在纸内版心，不能贴窗口左边"
+    );
+    // 再走两帧让字体图集与纸面都稳定，然后出样张。
+    for _ in 0..2 {
+        let mut output = harness.create_ui_frame(size, Vec::new());
+        canvas.absorb(&mut output.textures_delta);
+    }
+    for (stem, output) in [
+        ("smartisan-ai-body.png", body),
+        ("smartisan-ai-workspace.png", sheet),
+    ] {
+        canvas.render(
+            &harness.ctx,
+            output,
+            size,
+            theme::canvas(),
+            std::path::Path::new(&format!("tmp/{stem}")),
+        );
+        println!("tmp/{stem}");
+    }
+
+    // 真实写作时右侧「智能写作」侧栏是开着的：再看一眼窄一点的版面。
+    let wide = egui::vec2(1360.0, 820.0);
+    harness.doc.ai_panel.open = true;
+    let mut sidebar = None;
+    for _ in 0..3 {
+        let mut output = harness.create_ui_frame(wide, Vec::new());
+        canvas.absorb(&mut output.textures_delta);
+        sidebar = Some(output);
+    }
+    canvas.render(
+        &harness.ctx,
+        sidebar.expect("至少画一帧"),
+        wide,
+        theme::canvas(),
+        std::path::Path::new("tmp/smartisan-ai-workspace-sidebar.png"),
+    );
+    println!("tmp/smartisan-ai-workspace-sidebar.png");
+    theme::set_current(crate::models::ThemeName::default());
+    theme::set_current_paper(crate::models::PaperMode::default());
 }

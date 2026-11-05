@@ -267,6 +267,23 @@ impl AppConfig {
         Ok(config)
     }
 
+    /// 一次性辅助调用（知识库问答、检索重排、数据接口 AI、任务助手识别）统一用写作模型。
+    ///
+    /// 这些调用不需要多步工具循环，但需要理解与表达；2026-11-05 起不再单独维护「辅助模型」。
+    /// 旧配置只选了文字起草模型时回落到它，避免升级后这些功能直接不可用。
+    pub(crate) fn aux_chat(&self) -> Result<LmStudioConfig, ModelRefError> {
+        // 选了 Pi 就以 Pi 为准：提供商被删 / 停用要如实报错，不能偷偷用旧起草模型。
+        // 只有完全没选 Pi 的旧配置才回落 `draft_model`（兼容升级前的机器）。
+        if !self.pi_model.is_empty() {
+            return self.pi_chat();
+        }
+        self.draft_chat().map_err(|_| {
+            ModelRefError(
+                "还没有选择写作模型：请到「AI 管理 → 模型服务 → 智能写作（Pi）」选择。".into(),
+            )
+        })
+    }
+
     /// Pi 只认独立模型；上下文自动按该服务与模型解析，不继承小模型的手动窗口和输出上限。
     pub(crate) fn pi_chat(&self) -> Result<LmStudioConfig, ModelRefError> {
         if self.pi_model.is_empty() {
@@ -282,7 +299,7 @@ impl AppConfig {
         config.model = self.pi_model.model.trim().to_string();
         config.context_window = 0;
         config.max_tokens = 32_768;
-        // 思考深度只认 Pi 自己的设置，不再隐式继承文字起草。
+        // 思考深度只认 Pi 自己的设置，不再隐式继承旧起草设置。
         // host 自行适配参数格式；保留这里的网关格式供知识库回退调用使用。
         config.reasoning_effort = self.pi_options().reasoning_effort;
         Ok(config)
@@ -311,18 +328,18 @@ impl AppConfig {
         true
     }
 
-    /// 文字复核与智能体辅助步骤的接入配置：配了复核模型（且复核已启用）用它，
-    /// 否则沿用起草模型；温度固定 0，复核要的是可复现，不是发挥。
+    /// 文字复核与旧辅助步骤的接入配置：配了复核模型（且复核已启用）用它，
+    /// 否则沿用写作模型（旧配置回落到旧起草模型）；温度固定 0，复核要的是可复现。
     ///
-    /// `assist` 为 true 时输出上限沿用起草模型的设置——自主步骤里思考型模型的
-    /// 推理也算预算，给小了正文出不来；逐句复核则用按句长现算的小上限。
+    /// 2026-11-05 起「文字复核」是唯一保留的专门小模型；`assist` 只为旧会话回放保留，
+    /// 新流程的一次性辅助调用走 [`Self::aux_chat`]。
     pub(crate) fn revise_chat(&self, assist: bool) -> Result<LmStudioConfig, ModelRefError> {
-        let draft = self.draft_chat()?;
         let revise = &self.revise_model;
         let mut config = if revise.enabled && !revise.model_ref.is_empty() {
             let provider = self.require_provider(&revise.model_ref.provider_id, "文字复核")?;
             LmStudioConfig {
-                session_id: draft.session_id.clone(),
+                // 独立复核只依赖自己的提供商；写作配置失效不能连带禁用复核。
+                session_id: self.lm_studio.session_id.clone(),
                 base_url: provider.base_url.clone(),
                 model: revise.model_ref.model.trim().to_string(),
                 api_key: provider.api_key.clone(),
@@ -336,25 +353,26 @@ impl AppConfig {
             }
         } else if revise.enabled && !revise.model.trim().is_empty() {
             // 旧内联字段（未迁移 / 测试直填）。
-            revise.resolve(&draft)
+            revise.resolve(&self.aux_chat()?)
         } else {
+            let aux = self.aux_chat()?;
             LmStudioConfig {
                 temperature: 0.0,
                 max_tokens: 512,
                 timeout_seconds: revise.timeout_seconds.max(5),
-                // 复用同一个模型时，自动模式继承起草侧的手工窗口。
+                // 复用同一个模型时，自动模式继承写作模型的窗口。
                 context_window: if revise.enabled && revise.context_window > 0 {
                     revise.context_window
                 } else {
-                    draft.context_window
+                    aux.context_window
                 },
-                ..draft
+                ..aux
             }
         };
         if assist {
             config.max_tokens = self.lm_studio.max_tokens;
         } else {
-            // 逐句复核的关闭思考降级重试也不能重新带上起草深度。
+            // 逐句复核的关闭思考降级重试也不能重新带上写作模型的深度。
             config.reasoning_effort = ReasoningEffort::Default;
         }
         Ok(config)
@@ -478,18 +496,15 @@ impl AppConfig {
     }
 
     /// 状态栏上起草模型的显示名：模型（提供商）。
-    pub(crate) fn draft_model_label(&self) -> String {
-        let model = if !self.draft_model.is_empty() {
-            self.draft_model.model.trim().to_string()
-        } else {
-            self.lm_studio.model.trim().to_string()
-        };
+    /// 状态栏显示的写作模型名（带提供商）。没选 Pi 时为空，不回落到旧起草模型。
+    pub(crate) fn pi_model_label(&self) -> String {
+        let model = self.pi_model.model.trim();
         if model.is_empty() {
             return String::new();
         }
-        match self.provider(&self.draft_model.provider_id) {
+        match self.provider(&self.pi_model.provider_id) {
             Some(p) => format!("{model}（{}）", p.name),
-            None => model,
+            None => model.to_string(),
         }
     }
 

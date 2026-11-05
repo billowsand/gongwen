@@ -1,5 +1,9 @@
 //! 公文要素字段登记表：表单与 AI 共用的一份「这个文种要哪些描述类要素、各自从哪
-//! 取值、怎么读写」（`docs/element-fill-design.md` 3.1）。
+//! 取值、怎么读写」（历史方案 `docs/element-fill-design.md`）。
+//!
+//! 「要素抽取」生成链路已于 2026-11-05 退役：动笔前不再调模型核对原文、不再出表单
+//! 要素题、不再发建议卡。这里只保留登记表、统一写值入口，以及旧会话回放要用的建议
+//! 结构与挂起要素题的回答落地。
 //!
 //! 红线 2：授权类要素（密级与保密期限、文号年份与数字、份号、签发人、成文日期、
 //! 版记印发机关与印发日期）不进这张表，本模块没有任何能写它们的代码路径；
@@ -9,8 +13,7 @@
 //! 「人手工选」与「AI 建议采纳后」不会出现两种结果。主送 / 抄送 / 发文三者互斥
 //! （规格 §2.4）、代字带出、承办条目同步都在这里处理。
 
-use crate::agent::clarify::{Action, Choice, Question, Reply, Target};
-use crate::agent::elements;
+use crate::agent::clarify::{Action, Question, Reply, Target};
 use crate::models::{
     DraftInput, JointIssuanceMode, JointResponsibleEntry, TemplateKind, TemplateProfile,
     VocabularyCategory, VocabularyEntry, join_units, joint_responsible_entries, split_units,
@@ -125,13 +128,6 @@ impl FieldId {
             Self::ResponsibleUnit | Self::ContactPerson => kind == TemplateKind::RedHeadApproval,
             Self::CopiesTo | Self::ContactPhone => false,
         }
-    }
-
-    /// 表单空着、原文也没提时动笔前要不要问：必填的要问；公函的联系人表单不强制，
-    /// 但六要素的「何人」本来就要问我方联系人，字段题覆盖「何人」后改由这里问
-    /// （起草人点选，不再手打）。
-    pub(crate) fn asked_when_missing(self, kind: TemplateKind) -> bool {
-        self.required(kind) || (self == Self::ContactPerson && kind == TemplateKind::OfficialLetter)
     }
 
     /// 候选项来源。
@@ -433,12 +429,12 @@ fn exclude_issuing(profile: &mut TemplateProfile, picked: &[String]) {
     }
 }
 
-// ================= 第 2 期：动笔前的「要素抽取」、分类与出题 =================
-// （`docs/element-fill-design.md` 3.2。分工与六要素相同：模型只判断原文写没写、
-// 原样摘出名称；摘录核对、词库解析、分类、出题全是确定性的。）
+// ================= 要素建议（旧会话兼容） =================
+// 「要素抽取」的生成链路已于 2026-11-05 退役：不再调模型核对原文、不再按词库出
+// 表单要素题，新任务只写正文、不生成要素建议。这里只保留旧会话回放要用的数据
+// 结构、写值入口（仍在红线 2 的约束下）与挂起要素题的回答落地。
 
-/// 一条要素建议。不出题直接建议的（原文写明、词库唯一对上）在动笔前这一步就进黑板；
-/// 答完题选定的也进这里。写表单只发生在用户点采纳时（第 3 期建议卡，红线 2）。
+/// 一条要素建议。旧会话侧栏的建议卡仍要显示、采纳与撤销；新流程不再生成。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FieldSuggestion {
     pub(crate) field: FieldId,
@@ -454,63 +450,7 @@ pub(crate) struct FieldSuggestion {
     pub(crate) conflict: bool,
 }
 
-/// 技能里没写「要素抽取」这段提示词时用这一份。
-pub(crate) const PROMPT: &str =
-    "下面是一份{kind}的写作要求。逐项核对表单要素在原文里写没写、写的是谁。
-
-{fields}
-
-每个字段输出一行，字段名照上面清单里的名称写（不要把「主送单位」原样抄成每个字段的答案，
-它只是格式示例），格式严格如下（全角竖线分隔）：
-主送单位｜已给｜原文里写的名称（多值字段有几个摘几个，用顿号分隔）
-主送单位｜未提
-
-只判断原文写没写，拿不准就写「未提」。名称必须摘自原文，不补全、不编造。单位的完整名称
-整个摘（「市数据局信息中心」是一个单位，不要截成「市数据局」）；只有名称后面跟着职务、
-部门尾缀时才截取名称本身（「市应急局办公室负责同志」取「市应急局」，「张三科长」取
-「张三」），截取出来的部分也要是原文里有的。
-
-【原文】
-{source}";
-
-/// 「要素抽取」要核对的字段：当前文种适用、且不是联系电话（电话跟联系人从词库带出，
-/// 不单独抽取也不单独出题）。
-pub(crate) fn prompt_fields(draft: &DraftInput) -> Vec<FieldId> {
-    FieldId::ALL
-        .into_iter()
-        .filter(|field| *field != FieldId::ContactPhone && field.applies(draft))
-        .collect()
-}
-
-/// 提示词里的字段清单几行：「- 主送单位（多值，必填）」。
-pub(crate) fn prompt_fields_text(fields: &[FieldId], kind: TemplateKind) -> String {
-    fields
-        .iter()
-        .map(|field| {
-            let tags = [
-                field.multi().then_some("多值"),
-                field.required(kind).then_some("必填"),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-            if tags.is_empty() {
-                format!("- {}", field.label())
-            } else {
-                format!("- {}（{}）", field.label(), tags.join("，"))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 impl FieldId {
-    fn from_label(text: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|field| text.contains(field.label()))
-    }
-
     /// 候选的词库类别：单位字段只对单位，人员字段只对人员。
     fn category(self) -> VocabularyCategory {
         match self.source() {
@@ -520,11 +460,15 @@ impl FieldId {
     }
 }
 
-/// 「已填要素：主送单位 市数据局；联系人 张三」——拼进六要素检查的原文，
-/// 让「何人」算作已给（表单已填值 + 本批建议值）。
+/// 「已填要素：主送单位 市数据局；联系人 张三」——拼进六要素检查的原文，让「何人」
+/// 算作已给（表单已填值 + 黑板上的旧建议值）。要素抽取退役后不再有新建议，旧会话
+/// 恢复的黑板上可能还带着建议清单，这里照样算进已填。
 pub(crate) fn filled_summary(draft: &DraftInput, suggestions: &[FieldSuggestion]) -> String {
     let mut parts = Vec::new();
-    for field in prompt_fields(draft) {
+    for field in FieldId::ALL
+        .into_iter()
+        .filter(|field| *field != FieldId::ContactPhone && field.applies(draft))
+    {
         let current = field.read(draft);
         let value = if !current.trim().is_empty() {
             crate::units::identity::display_values(&draft.profile.vocabulary_snapshot, &current)
@@ -553,71 +497,6 @@ pub(crate) fn filled_summary(draft: &DraftInput, suggestions: &[FieldSuggestion]
     }
 }
 
-/// 模型对一行的判断：`Some(摘录)` 已给（多值字段顿号分隔），`None` 未提。
-/// 回复里没出现的字段按未提处理。
-fn parse_extraction(reply: &str) -> Vec<(FieldId, Option<Vec<String>>)> {
-    let mut out: Vec<(FieldId, Option<Vec<String>>)> = Vec::new();
-    for line in reply.lines() {
-        let line = crate::agent::clarify::strip_numbering(line.trim());
-        let parts: Vec<&str> = line.split(['｜', '|']).map(str::trim).collect();
-        let (Some(head), Some(status)) = (parts.first(), parts.get(1)) else {
-            continue;
-        };
-        let Some(field) = FieldId::from_label(head) else {
-            continue;
-        };
-        if out.iter().any(|(seen, _)| *seen == field) {
-            continue;
-        }
-        let verdict = if status.contains("未提") {
-            None
-        } else if status.contains("已给") {
-            let rest = parts
-                .get(2..)
-                .map(|rest| rest.join("｜"))
-                .unwrap_or_default();
-            Some(split_units(&rest))
-        } else {
-            continue;
-        };
-        out.push((field, verdict));
-    }
-    out
-}
-
-/// 一条摘要对上词库里的哪些词条（规范名）。名称对词库用 `ai_services::vocabulary::matches`
-/// 同一套规则：规范名、对外名、简称、别名。
-fn resolve<'a>(
-    vocabulary: &'a [VocabularyEntry],
-    field: FieldId,
-    excerpt: &str,
-) -> Vec<&'a VocabularyEntry> {
-    let excerpt = excerpt.trim();
-    if excerpt.is_empty() {
-        return Vec::new();
-    }
-    let candidates: Vec<&VocabularyEntry> = vocabulary
-        .iter()
-        .filter(|entry| {
-            entry.category == field.category()
-                && !entry.canonical.trim().is_empty()
-                && crate::ai_services::vocabulary::matches(entry, excerpt)
-        })
-        .collect();
-    // 名称整个对上的优先：「市数据局」不要因为词库里还有「市数据局办公室」就算对上多个。
-    let exact: Vec<&VocabularyEntry> = candidates
-        .iter()
-        .copied()
-        .filter(|entry| {
-            [&entry.canonical, &entry.external_name, &entry.abbr]
-                .into_iter()
-                .chain(&entry.aliases)
-                .any(|name| name.trim() == excerpt)
-        })
-        .collect();
-    if exact.is_empty() { candidates } else { exact }
-}
-
 /// 多值字段的集合比较：顺序不同、分隔符不同都算一致。建议卡的提醒也用它。
 pub(crate) fn same_value(a: &str, b: &str) -> bool {
     let mut a = split_units(a);
@@ -627,385 +506,8 @@ pub(crate) fn same_value(a: &str, b: &str) -> bool {
     a == b
 }
 
-/// 分类的产出：不出题直接进建议卡的，和要出的题。
-#[derive(Debug, Default)]
-pub(crate) struct FieldPlan {
-    pub(crate) suggestions: Vec<FieldSuggestion>,
-    pub(crate) questions: Vec<Question>,
-}
-
-/// 「人随事走」的过滤单位：联系人看承办单位，呈报领导看落款单位。
-/// 取值顺序：表单值 → 本批建议 → 本批题目里原文对上的推荐项。
-fn filter_units_for(person_field: FieldId, draft: &DraftInput, planned: &FieldPlan) -> Vec<String> {
-    let unit_field = match person_field {
-        FieldId::ContactPerson => FieldId::ResponsibleUnit,
-        FieldId::ReportingLeaders => FieldId::SigningUnit,
-        _ => return Vec::new(),
-    };
-    let current = unit_field.read(draft);
-    if !current.trim().is_empty() {
-        return split_units(&current);
-    }
-    if let Some(suggestion) = planned
-        .suggestions
-        .iter()
-        .find(|s| s.field == unit_field && !s.conflict)
-    {
-        return split_units(&suggestion.value);
-    }
-    planned
-        .questions
-        .iter()
-        .find(|q| q.target == Target::Field(unit_field))
-        .map(|q| {
-            q.choices
-                .iter()
-                .filter(|choice| choice.recommended)
-                .filter_map(|choice| match &choice.action {
-                    Action::Fill(value) => Some(value.clone()),
-                    _ => None,
-                })
-                .take(1)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// 人员候选：按单位过滤（人随事走，最多 3 个）；单位没定的按个人简介匹配。
-/// 联系人严格按承办权限过滤，单位下没有候选也不回落（与表单一致）；呈报领导
-/// 过滤不出时按简介匹配兜底（与表单 `filtered_contacts` 的兜底一致）。单位还没定的
-/// （表单、本批建议、本批推荐项都没有），两类都按简介匹配。
-fn person_choices(
-    field: FieldId,
-    units: &[String],
-    vocabulary: &[VocabularyEntry],
-    source: &str,
-) -> Vec<Choice> {
-    let display = UnitDisplay::new(vocabulary);
-    let mut out: Vec<Choice> = Vec::new();
-    for unit in units {
-        let people = match field {
-            FieldId::ContactPerson => display.responsible_people_of(unit),
-            _ => display.leaders_of(unit),
-        };
-        let role = match field {
-            FieldId::ContactPerson => "的承办联系人",
-            _ => "及其上级的领导",
-        };
-        for (name, _) in people {
-            if out.iter().any(|c| c.action == Action::Fill(name.clone())) {
-                continue;
-            }
-            out.push(Choice {
-                label: crate::units::identity::label(vocabulary, &name),
-                detail: format!(
-                    "标准词库 · {}{role}",
-                    crate::units::identity::label(vocabulary, unit)
-                ),
-                recommended: false,
-                action: Action::Fill(name),
-            });
-        }
-    }
-    // 单位定了：联系人严格按承办权限，不回落；单位还没定：两类都按简介匹配。
-    if out.is_empty() && units.is_empty() {
-        out.extend(crate::agent::clarify::vocabulary_reference_choices(
-            vocabulary,
-            VocabularyCategory::Person,
-            source,
-        ));
-    }
-    out.truncate(3);
-    out
-}
-
-/// 对不上词库的摘录里包含了哪些词库名称（规范名、对外名、简称、别名，至少两个字），
-/// 长的在前，最多 3 个。联系人在承办单位已定时只留有承办权限的人（与表单一致）。
-fn contained_choices(
-    field: FieldId,
-    draft: &DraftInput,
-    planned: &FieldPlan,
-    vocabulary: &[VocabularyEntry],
-    unmatched: &[String],
-) -> Vec<Choice> {
-    let allowed: Option<Vec<String>> = (field == FieldId::ContactPerson)
-        .then(|| filter_units_for(field, draft, planned))
-        .filter(|units| !units.is_empty())
-        .map(|units| {
-            let display = UnitDisplay::new(vocabulary);
-            units
-                .iter()
-                .flat_map(|unit| display.responsible_people_of(unit))
-                .map(|(name, _)| name)
-                .collect()
-        });
-    let mut hits: Vec<(usize, String, String)> = Vec::new();
-    for excerpt in unmatched {
-        for entry in vocabulary
-            .iter()
-            .filter(|entry| entry.category == field.category())
-        {
-            let key = entry.key();
-            let canonical = key.as_str();
-            if canonical.is_empty()
-                || allowed
-                    .as_ref()
-                    .is_some_and(|names| !names.iter().any(|name| name == canonical))
-            {
-                continue;
-            }
-            let longest = [&entry.canonical, &entry.external_name, &entry.abbr]
-                .into_iter()
-                .chain(&entry.aliases)
-                .map(|name| name.trim())
-                .filter(|name| name.chars().count() >= 2 && excerpt.contains(*name))
-                .map(|name| name.chars().count())
-                .max();
-            if let Some(length) = longest
-                && !hits.iter().any(|(_, name, _)| name == canonical)
-            {
-                hits.push((length, canonical.to_string(), excerpt.clone()));
-            }
-        }
-    }
-    hits.sort_by_key(|(length, _, _)| std::cmp::Reverse(*length));
-    hits.into_iter()
-        .take(3)
-        .map(|(_, name, excerpt)| Choice {
-            label: crate::units::identity::label(vocabulary, &name),
-            detail: format!("原文写的「{excerpt}」里含这个名称（标准词库）"),
-            recommended: false,
-            action: Action::Fill(name),
-        })
-        .collect()
-}
-
-/// 一道要素题：选项全部由程序给——原文对上的放前面标推荐，然后是职能 / 简介匹配
-/// （人员随单位过滤），最多再补 3 个。`unmatched` 是词库里对不上的摘录，写进题面。
-fn field_question(
-    field: FieldId,
-    draft: &DraftInput,
-    planned: &FieldPlan,
-    vocabulary: &[VocabularyEntry],
-    source: &str,
-    matched: Vec<String>,
-    unmatched: Vec<String>,
-) -> Question {
-    let mut choices: Vec<Choice> = matched
-        .iter()
-        .map(|name| Choice {
-            label: crate::units::identity::label(vocabulary, name),
-            detail: "材料原文里写的就是它（已对上标准词库）".into(),
-            recommended: true,
-            action: Action::Fill(name.clone()),
-        })
-        .collect();
-    // 对不上词库的摘录（「市应急局办公室」而词库里只有「市应急局」）：摘录里包含的词库名称
-    // 排在职能匹配前面，点一下就行；不标推荐——是不是它要人定。联系人按承办权限过滤。
-    let contained = contained_choices(field, draft, planned, vocabulary, &unmatched);
-    choices.extend(
-        contained
-            .into_iter()
-            .filter(|choice| !choices.iter().any(|seen| seen.action == choice.action))
-            .collect::<Vec<_>>(),
-    );
-    let mut extra: Vec<Choice> = match field.category() {
-        VocabularyCategory::Unit => crate::agent::clarify::vocabulary_reference_choices(
-            vocabulary,
-            VocabularyCategory::Unit,
-            source,
-        ),
-        _ => {
-            let units = filter_units_for(field, draft, planned);
-            person_choices(field, &units, vocabulary, source)
-        }
-    };
-    extra.retain(|choice| !choices.iter().any(|seen| seen.action == choice.action));
-    choices.extend(extra.into_iter().take(3));
-    let mut text = if field.multi() {
-        format!("{}是哪些？（可多选）", field.label())
-    } else if field.category() == VocabularyCategory::Person {
-        format!("{}是哪位？", field.label())
-    } else {
-        format!("{}是哪个单位？", field.label())
-    };
-    if !unmatched.is_empty() {
-        text.push_str(&format!(
-            "（原文写的「{}」词库里没有）",
-            unmatched.join("、")
-        ));
-    }
-    Question {
-        id: 0, // plan 收尾时统一编号
-        text,
-        choices,
-        custom_hint: Some("词库里没有？自己写（只作起草备注，不进表单）".into()),
-        prefill: String::new(),
-        skippable: true,
-        multi: field.multi(),
-        target: Target::Field(field),
-    }
-}
-
-/// 确定性分类（`docs/element-fill-design.md` 3.2 的分类表）：模型的抽取回复 + 表单
-/// 当前值 + 词库 → 建议与题。纯函数，不碰模型。
-///
-/// - 摘录在原文里找不到（`elements::squash` 同一套去标点比较）的按「未提」处理；
-/// - 空 + 原文给了 + 唯一对上 → 建议（不出题）；对上多个或一部分对不上 → 出题，
-///   对上的当推荐项，对不上的在题面说明；
-/// - 空 + 未提 → 必填字段出题（职能 / 简介匹配），非必填不问；
-/// - 已填 + 给了且与表单一致 → 不动；已填 + 不一致且唯一对上 → 「替换」建议，标冲突；
-///   已填的其余情况一律不动。
-/// - 题数超过 `max_questions` 时必填字段优先，同必填按登记顺序。
-pub(crate) fn plan(
-    draft: &DraftInput,
-    reply: &str,
-    source: &str,
-    vocabulary: &[VocabularyEntry],
-    max_questions: usize,
-) -> FieldPlan {
-    // 先处理单位字段再处理人员字段：人员题的「人随事走」过滤要看本批的单位结论。
-    const ORDER: [FieldId; 7] = [
-        FieldId::IssuingUnit,
-        FieldId::Recipient,
-        FieldId::CopiesTo,
-        FieldId::SigningUnit,
-        FieldId::ResponsibleUnit,
-        FieldId::ReportingLeaders,
-        FieldId::ContactPerson,
-    ];
-    let parsed = parse_extraction(reply);
-    let haystack = elements::squash(source);
-    let mut out = FieldPlan::default();
-    for field in ORDER.into_iter().filter(|field| field.applies(draft)) {
-        let current = field.read(draft);
-        let excerpts: Vec<String> = parsed
-            .iter()
-            .find(|(seen, _)| *seen == field)
-            .and_then(|(_, verdict)| verdict.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|excerpt| {
-                let needle = elements::squash(excerpt);
-                !needle.is_empty() && haystack.contains(&needle)
-            })
-            .collect();
-        let resolved: Vec<Vec<String>> = excerpts
-            .iter()
-            .map(|excerpt| {
-                let units = filter_units_for(field, draft, &out);
-                let display = UnitDisplay::new(vocabulary);
-                let allowed: Vec<_> = units
-                    .iter()
-                    .flat_map(|unit| {
-                        if field == FieldId::ContactPerson {
-                            display.responsible_people_of(unit)
-                        } else {
-                            display.leaders_of(unit)
-                        }
-                    })
-                    .map(|(key, _)| key)
-                    .collect();
-                resolve(vocabulary, field, excerpt)
-                    .into_iter()
-                    .filter(|entry| {
-                        field.category() == VocabularyCategory::Unit
-                            || units.is_empty()
-                            || allowed.contains(&entry.key())
-                    })
-                    .map(|entry| entry.key())
-                    .collect()
-            })
-            .collect();
-        let all_unique = !excerpts.is_empty() && resolved.iter().all(|names| names.len() == 1);
-        let matched: Vec<String> = resolved
-            .iter()
-            .flatten()
-            .fold(Vec::new(), |mut names, name| {
-                if !names.contains(name) {
-                    names.push(name.clone());
-                }
-                names
-            });
-        if !current.trim().is_empty() {
-            // 已填：一致不动；不一致且唯一对上才给「替换」建议，标冲突；其余不动。
-            if all_unique {
-                let value = join_units(&matched);
-                if !same_value(&value, &current) {
-                    out.suggestions.push(FieldSuggestion {
-                        display_value: String::new(),
-                        field,
-                        value,
-                        previous: current,
-                        source: format!("材料原文：「{}」", excerpts.join("、")),
-                        conflict: true,
-                    });
-                }
-            }
-            continue;
-        }
-        if excerpts.is_empty() {
-            if field.asked_when_missing(draft.kind) {
-                out.questions.push(field_question(
-                    field,
-                    draft,
-                    &out,
-                    vocabulary,
-                    source,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-            }
-            continue;
-        }
-        if all_unique {
-            out.suggestions.push(FieldSuggestion {
-                display_value: String::new(),
-                field,
-                value: join_units(&matched),
-                previous: current,
-                source: format!("材料原文：「{}」", excerpts.join("、")),
-                conflict: false,
-            });
-            continue;
-        }
-        let unmatched: Vec<String> = excerpts
-            .iter()
-            .zip(&resolved)
-            .filter(|(_, names)| names.is_empty())
-            .map(|(excerpt, _)| excerpt.clone())
-            .collect();
-        out.questions.push(field_question(
-            field, draft, &out, vocabulary, source, matched, unmatched,
-        ));
-    }
-    // 名额：必填字段优先，同必填按登记顺序（sort_by_key 稳定）。
-    out.questions.sort_by_key(|question| match question.target {
-        Target::Field(field) => !field.required(draft.kind),
-        _ => true,
-    });
-    out.questions.truncate(max_questions);
-    // 题号从 1 起；与方向题、六要素题同批时 merge_predraft 还会统一重排。
-    for (index, question) in out.questions.iter_mut().enumerate() {
-        question.id = index + 1;
-    }
-    for suggestion in &mut out.suggestions {
-        suggestion.display_value =
-            crate::units::identity::display_values(vocabulary, &suggestion.value);
-    }
-    out
-}
-
-/// 表单要素题跳过时交给起草的一句话。
-pub(crate) fn skipped_note(field: FieldId) -> String {
-    format!(
-        "{}暂未确定：由起草人之后在要素表单里选，正文不写这一项，也不要留占位或自己编",
-        field.label()
-    )
-}
-
-/// 要素题的回答 → （要素建议，已确认信息）。只读表单快照算「生成时的表单值」，
-/// 绝不回写（红线 2）；建议卡采纳才写表单（第 3 期）。
+/// 旧会话挂起的要素题的回答 → （要素建议，已确认信息）。只读表单快照算「生成时的
+/// 表单值」，绝不回写（红线 2）；建议卡采纳才写表单。
 ///
 /// - 选中（单选 `Choice` / 多选 `Many`）→ 建议清单，出处「起草人从标准词库选定」，
 ///   同时记一句已确认信息交给起草；
@@ -1048,7 +550,10 @@ pub(crate) fn resolve_answers(
                     _ => Vec::new(),
                 };
                 if picked.is_empty() {
-                    notes.push(skipped_note(field));
+                    notes.push(format!(
+                        "{}暂未确定：由起草人之后在要素表单里选，正文不写这一项，也不要留占位或自己编",
+                        field.label()
+                    ));
                 } else {
                     let value = join_units(&picked);
                     let previous = field.read(draft);
@@ -1089,6 +594,7 @@ pub(crate) fn resolve_answers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::clarify::Choice;
     use crate::models::{ResearchMetadata, VocabularyCategory};
 
     /// 两个单位（甲局带两种代字、乙局不带）加两个人员（张三挂在甲局、电话 123）。
@@ -1465,447 +971,53 @@ mod tests {
         assert_eq!(draft.research, before);
     }
 
-    // ================= 第 2 期：要素抽取的解析、分类（plan）与回答落地 =================
+    // ================= 回答落地（旧会话挂起的要素题） =================
 
-    /// 层级词库：市政府（00）下辖市数据局（0001，带数据职能）、市应急局（0002，带应急职能）；
-    /// 张三挂在市数据局、王五挂在市应急局、赵六挂在市政府（领导）。
-    fn plan_vocabulary() -> Vec<VocabularyEntry> {
-        let unit = |name: &str, code: &str, parent: &str, duties: &str| VocabularyEntry {
-            canonical: name.into(),
-            code: code.into(),
-            parent: parent.into(),
-            duties: duties.into(),
-            ..Default::default()
-        };
-        let person = |name: &str, unit: &str, position: &str, profile: &str| VocabularyEntry {
-            canonical: name.into(),
-            category: VocabularyCategory::Person,
-            unit: unit.into(),
-            position: position.into(),
-            profile: profile.into(),
-            ..Default::default()
-        };
-        vec![
-            unit("市政府", "00", "", "综合协调"),
-            unit(
-                "市数据局",
-                "0001",
-                "00",
-                "负责公共数据归集、共享与开放，统筹数据资源平台建设",
-            ),
-            unit(
-                "市应急局",
-                "0002",
-                "00",
-                "负责安全生产综合监督管理和应急救援",
-            ),
-            person("张三", "0001", "科员", "数据平台项目建设"),
-            person("王五", "0002", "科长", "应急救援演练"),
-            person("赵六", "00", "副市长", "分管数据与应急"),
-        ]
-    }
-
-    /// 原文里写明市数据局：主送唯一对上（建议）、承办单位对上多个（出题）。
-    const PLAN_SOURCE: &str =
-        "关于共建平台的函\n给市数据局发函，商请共建公共数据研究平台，请数据局牵头推进。";
-
-    fn question_of(planned: &FieldPlan, field: FieldId) -> Option<&Question> {
-        planned
-            .questions
-            .iter()
-            .find(|q| q.target == Target::Field(field))
-    }
-
-    fn suggestion_of(planned: &FieldPlan, field: FieldId) -> Option<&FieldSuggestion> {
-        planned.suggestions.iter().find(|s| s.field == field)
-    }
-
-    /// 名称整个对上的优先：词库里还有「市数据局信息中心」，原文写「市数据局」仍算唯一对上。
-    #[test]
-    fn exact_names_win_over_longer_names_that_contain_them() {
-        let mut vocabulary = plan_vocabulary();
-        vocabulary.push(VocabularyEntry {
-            canonical: "市数据局信息中心".into(),
-            code: "000101".into(),
-            parent: "0001".into(),
-            ..Default::default()
-        });
-        let draft = draft_of(TemplateKind::OfficialLetter);
-        let planned = plan(
-            &draft,
-            "主送单位｜已给｜市数据局",
-            PLAN_SOURCE,
-            &vocabulary,
-            4,
-        );
-        assert_eq!(
-            suggestion_of(&planned, FieldId::Recipient).map(|s| s.value.as_str()),
-            Some("市数据局")
-        );
-        assert!(question_of(&planned, FieldId::Recipient).is_none());
-    }
-
-    /// 对不上词库的摘录里含词库名称：排在职能匹配前面当候选，不标推荐；联系人在承办单位
-    /// 已定时只留有承办权限的人。
-    #[test]
-    fn unmatched_excerpts_offer_the_vocabulary_names_they_contain() {
-        let vocabulary = plan_vocabulary();
-        let draft = draft_of(TemplateKind::OfficialLetter);
-        let source = "请市应急局办公室牵头，联系人张三科长。";
-        let planned = plan(
-            &draft,
-            "主送单位｜已给｜市应急局办公室
-联系人｜已给｜张三科长",
-            source,
-            &vocabulary,
-            4,
-        );
-        let recipient = question_of(&planned, FieldId::Recipient).expect("对不上要出题");
-        assert_eq!(recipient.choices[0].label, "市应急局");
-        assert!(!recipient.choices[0].recommended);
-        assert!(recipient.choices[0].detail.contains("市应急局办公室"));
-        let contact = question_of(&planned, FieldId::ContactPerson).expect("对不上要出题");
-        assert_eq!(contact.choices[0].label, "张三");
-
-        // 承办单位定为市应急局：张三（市数据局的人）没有承办权限，不当候选。
-        let mut draft = draft_of(TemplateKind::OfficialLetter);
-        draft.profile.responsible_unit = "市应急局".into();
-        let planned = plan(&draft, "联系人｜已给｜张三科长", source, &vocabulary, 4);
-        let contact = question_of(&planned, FieldId::ContactPerson).expect("对不上要出题");
-        assert!(
-            contact.choices.iter().all(|c| c.label != "张三"),
-            "{:?}",
-            contact.choices.iter().map(|c| &c.label).collect::<Vec<_>>()
-        );
-    }
-
-    /// 公函的联系人表单不强制，但空着也要问（「何人」包括我方联系人）；承办单位没定时
-    /// 按个人简介给候选，不是一个选项都没有。
-    #[test]
-    fn letters_ask_the_contact_and_match_profiles_when_no_unit_is_known() {
-        let vocabulary = plan_vocabulary();
-        let draft = draft_of(TemplateKind::OfficialLetter);
-        let planned = plan(
-            &draft,
-            "联系人｜未提",
-            "商请共建数据平台项目建设。",
-            &vocabulary,
-            4,
-        );
-        let question = question_of(&planned, FieldId::ContactPerson).expect("公函联系人要问");
-        let labels: Vec<_> = question.choices.iter().map(|c| c.label.as_str()).collect();
-        assert!(
-            labels.iter().any(|label| label.starts_with("张三")),
-            "{labels:?}"
-        );
-        // 白头件没有联系人字段，红头呈批件本来就必填：只有公函是这条规则新增的。
-        assert!(FieldId::ContactPerson.asked_when_missing(TemplateKind::OfficialLetter));
-        assert!(!FieldId::ContactPerson.required(TemplateKind::OfficialLetter));
-        assert!(!FieldId::CopiesTo.asked_when_missing(TemplateKind::OfficialLetter));
-    }
-
-    /// 分类表第 1 行：空 + 给了 + 唯一对上 → 建议（不出题），出处写材料原文。
-    #[test]
-    fn plan_suggests_when_excerpt_resolves_uniquely() {
-        let vocabulary = plan_vocabulary();
-        let draft = draft_of(TemplateKind::OfficialLetter);
-        let reply = "主送单位｜已给｜市数据局\n抄送单位｜未提";
-        let planned = plan(&draft, reply, PLAN_SOURCE, &vocabulary, 4);
-        let suggestion = suggestion_of(&planned, FieldId::Recipient).expect("主送要进建议");
-        assert_eq!(suggestion.value, "市数据局");
-        assert!(!suggestion.conflict);
-        assert!(suggestion.previous.is_empty());
-        assert!(
-            suggestion.source.contains("材料原文"),
-            "{}",
-            suggestion.source
-        );
-        assert!(
-            question_of(&planned, FieldId::Recipient).is_none(),
-            "唯一对上不出题"
-        );
-    }
-
-    /// 分类表第 2 行：空 + 给了 + 对上多个 → 出题，对上的几个当选项、标推荐。
-    #[test]
-    fn plan_asks_with_matched_candidates_when_excerpt_is_ambiguous() {
-        let vocabulary = plan_vocabulary();
-        let draft = draft_of(TemplateKind::OfficialLetter);
-        // 「数据局」同时上市数据局与（假设的）省数据局：加进词库让它对上两个。
-        let mut vocabulary = vocabulary;
-        vocabulary.push(VocabularyEntry {
-            canonical: "省数据局".into(),
-            code: "02".into(),
-            ..Default::default()
-        });
-        let reply = "主送单位｜已给｜数据局";
-        let planned = plan(&draft, reply, PLAN_SOURCE, &vocabulary, 4);
-        let question = question_of(&planned, FieldId::Recipient).expect("对上多个要出题");
-        assert!(question.multi, "主送是多选题");
-        assert!(suggestion_of(&planned, FieldId::Recipient).is_none());
-        let recommended: Vec<_> = question
-            .choices
-            .iter()
-            .filter(|c| c.recommended)
-            .map(|c| c.label.as_str())
-            .collect();
-        assert_eq!(recommended, ["市数据局", "省数据局"]);
-    }
-
-    /// 分类表第 3 行：空 + 给了 + 一个都对不上 → 出题，题面说明原文写的词库里没有。
-    #[test]
-    fn plan_asks_and_names_the_unknown_excerpt() {
-        let vocabulary = plan_vocabulary();
-        let draft = draft_of(TemplateKind::OfficialLetter);
-        let source = "给市数据局发函，抄送市档案馆。";
-        let reply = "抄送单位｜已给｜市档案馆";
-        let planned = plan(&draft, reply, source, &vocabulary, 4);
-        let question = question_of(&planned, FieldId::CopiesTo).expect("对不上也要出题");
-        assert!(question.text.contains("市档案馆"), "{}", question.text);
-        assert!(question.text.contains("词库里没有"), "{}", question.text);
-        assert!(
-            question.choices.iter().all(|c| !c.recommended),
-            "对不上的不能标推荐"
-        );
-    }
-
-    /// 分类表第 4 行：空 + 未提 → 必填字段出题（选项按职能匹配），非必填不问。
-    #[test]
-    fn plan_asks_required_fields_with_duty_candidates_only() {
-        let vocabulary = plan_vocabulary();
-        let draft = draft_of(TemplateKind::OfficialLetter);
-        let reply = "主送单位｜未提\n抄送单位｜未提";
-        let planned = plan(&draft, reply, PLAN_SOURCE, &vocabulary, 4);
-        let question = question_of(&planned, FieldId::Recipient).expect("主送必填要问");
-        assert!(
-            question.choices.iter().any(|c| c.label == "市数据局"),
-            "职能对得上的进选项：{:?}",
-            question.choices
-        );
-        assert!(
-            question_of(&planned, FieldId::CopiesTo).is_none(),
-            "抄送非必填不问"
-        );
-        assert!(planned.suggestions.is_empty());
-    }
-
-    /// 分类表第 5、7 行：已填 + 给了且一致 → 不动；已填 + 未提 → 不动。
-    #[test]
-    fn plan_leaves_consistent_filled_fields_alone() {
-        let vocabulary = plan_vocabulary();
-        let mut draft = draft_of(TemplateKind::OfficialLetter);
-        draft.profile.recipient = "市数据局".into();
-        // 顺序不同也算一致。
-        draft.profile.copies_to = "市应急局、市数据局".into();
-        let source = "给市数据局发函，抄送市数据局、市应急局。";
-        let reply = "主送单位｜已给｜市数据局\n抄送单位｜已给｜市数据局、市应急局";
-        let planned = plan(&draft, reply, source, &vocabulary, 4);
-        assert!(planned.suggestions.is_empty(), "{:?}", planned.suggestions);
-        assert!(question_of(&planned, FieldId::Recipient).is_none());
-        assert!(question_of(&planned, FieldId::CopiesTo).is_none());
-        // 已填 + 未提 → 不动。
-        let reply = "主送单位｜未提";
-        let planned = plan(&draft, reply, source, &vocabulary, 4);
-        assert!(planned.suggestions.is_empty());
-        assert!(question_of(&planned, FieldId::Recipient).is_none());
-    }
-
-    /// 分类表第 6 行：已填 + 给了，不一致且唯一对上 → 「替换」建议，标冲突，记下表单原值。
-    #[test]
-    fn plan_marks_conflicting_replacement_for_filled_field() {
-        let vocabulary = plan_vocabulary();
-        let mut draft = draft_of(TemplateKind::OfficialLetter);
-        draft.profile.recipient = "市应急局".into();
-        let reply = "主送单位｜已给｜市数据局";
-        let planned = plan(&draft, reply, PLAN_SOURCE, &vocabulary, 4);
-        let suggestion = suggestion_of(&planned, FieldId::Recipient).expect("要出替换建议");
-        assert!(suggestion.conflict);
-        assert_eq!(suggestion.previous, "市应急局");
-        assert_eq!(suggestion.value, "市数据局");
-        assert!(
-            question_of(&planned, FieldId::Recipient).is_none(),
-            "已填的不出题"
-        );
-        // 不一致但对上多个：不动（不猜）。
-        let mut vocabulary = plan_vocabulary();
-        vocabulary.push(VocabularyEntry {
-            canonical: "省数据局".into(),
-            code: "02".into(),
-            ..Default::default()
-        });
-        let reply = "主送单位｜已给｜数据局";
-        let planned = plan(&draft, reply, PLAN_SOURCE, &vocabulary, 4);
-        assert!(planned.suggestions.is_empty());
-        assert!(
-            question_of(&planned, FieldId::Recipient).is_none(),
-            "已填的不出题"
-        );
-    }
-
-    /// 摘录在原文里找不到（去标点比较）的按「未提」处理：必填字段照问，不给建议。
-    #[test]
-    fn plan_treats_unverifiable_excerpts_as_missing() {
-        let vocabulary = plan_vocabulary();
-        let draft = draft_of(TemplateKind::OfficialLetter);
-        // 原文里没有「市数据局」：模型说给了不算数。
-        let reply = "主送单位｜已给｜市数据局";
-        let planned = plan(
-            &draft,
-            reply,
-            "给有关部门发函，商请共建平台。",
-            &vocabulary,
-            4,
-        );
-        assert!(suggestion_of(&planned, FieldId::Recipient).is_none());
-        assert!(question_of(&planned, FieldId::Recipient).is_some());
-    }
-
-    /// 多值字段：每条摘录都唯一对上才出建议，值按顿号合并。
-    #[test]
-    fn plan_suggests_multi_value_when_every_excerpt_is_unique() {
-        let vocabulary = plan_vocabulary();
-        let draft = draft_of(TemplateKind::OfficialLetter);
-        let source = "给市数据局发函，会同市应急局共建平台。";
-        let reply = "主送单位｜已给｜市数据局、市应急局";
-        let planned = plan(&draft, reply, source, &vocabulary, 4);
-        let suggestion = suggestion_of(&planned, FieldId::Recipient).expect("多值建议");
-        assert_eq!(suggestion.value, "市数据局、市应急局");
-        // 一条对上、一条对不上：出题，对上的标推荐、对不上的写进题面。
-        let source = "给市数据局发函，会同市档案馆共建平台。";
-        let reply = "主送单位｜已给｜市数据局、市档案馆";
-        let planned = plan(&draft, reply, source, &vocabulary, 4);
-        let question = question_of(&planned, FieldId::Recipient).expect("部分对不上要出题");
-        assert_eq!(
-            question
-                .choices
+    /// 造一道旧会话的要素题：选项都按「选中」处理。
+    fn field_question(field: FieldId, labels: &[&str], multi: bool) -> Question {
+        Question {
+            id: 1,
+            text: format!("{}是哪个？", field.label()),
+            choices: labels
                 .iter()
-                .filter(|c| c.recommended)
-                .map(|c| c.label.as_str())
-                .collect::<Vec<_>>(),
-            ["市数据局"]
-        );
-        assert!(question.text.contains("市档案馆"), "{}", question.text);
-    }
-
-    /// 人员随单位：联系人题只列承办单位的人（表单值），别单位的人不出现。
-    #[test]
-    fn contact_question_is_filtered_by_the_responsible_unit() {
-        let vocabulary = plan_vocabulary();
-        let mut draft = draft_of(TemplateKind::RedHeadApproval);
-        // 红头呈批件：承办条目第一条的单位是市数据局。
-        apply_field(
-            &mut draft,
-            FieldId::ResponsibleUnit,
-            "市数据局",
-            &vocabulary,
-        );
-        let reply = "联系人｜未提";
-        let planned = plan(&draft, reply, "拟开展数据平台项目。", &vocabulary, 6);
-        let question = question_of(&planned, FieldId::ContactPerson).expect("联系人必填要问");
-        let labels: Vec<_> = question.choices.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(labels, ["张三"], "只列承办单位的人：{labels:?}");
-        // 呈报领导题只列落款单位及其上级的人（落款单位没填 → 按简介匹配）。
-        let leaders = question_of(&planned, FieldId::ReportingLeaders).expect("呈报领导必填要问");
-        assert!(!leaders.choices.is_empty());
-    }
-
-    /// 呈报领导按落款单位过滤：落款填了市数据局，候选是市数据局与市政府的人。
-    #[test]
-    fn leader_question_is_filtered_by_the_signing_unit() {
-        let vocabulary = plan_vocabulary();
-        let mut draft = draft_of(TemplateKind::WhitePaper);
-        draft.profile.signing_unit = "市数据局".into();
-        let reply = "呈报领导｜未提";
-        let planned = plan(&draft, reply, "拟开展数据平台项目。", &vocabulary, 6);
-        let question = question_of(&planned, FieldId::ReportingLeaders).expect("呈报领导必填要问");
-        let labels: Vec<_> = question.choices.iter().map(|c| c.label.as_str()).collect();
-        assert!(labels.contains(&"张三"), "{labels:?}");
-        assert!(labels.contains(&"赵六"), "上级单位的领导也要在：{labels:?}");
-        assert!(!labels.contains(&"王五"), "别单位的不在：{labels:?}");
-        assert!(question.multi, "呈报领导是多选题");
-    }
-
-    /// 名额分配：字段题超出上限时必填字段优先。
-    #[test]
-    fn plan_prioritizes_required_questions_within_the_cap() {
-        let mut vocabulary = plan_vocabulary();
-        vocabulary.push(VocabularyEntry {
-            canonical: "省数据局".into(),
-            code: "02".into(),
-            ..Default::default()
-        });
-        let draft = draft_of(TemplateKind::OfficialLetter);
-        // 发文单位已填（未提 → 不动，不占名额）；主送（必填）未提，承办单位（公函里
-        // 非必填）给了但对上多个：只问 1 题时是主送。
-        let mut draft = draft;
-        draft.profile.issuing_unit = "市数据局".into();
-        let reply = "主送单位｜未提\n承办单位｜已给｜数据局";
-        let planned = plan(&draft, reply, PLAN_SOURCE, &vocabulary, 1);
-        assert_eq!(planned.questions.len(), 1);
-        assert_eq!(
-            planned.questions[0].target,
-            Target::Field(FieldId::Recipient)
-        );
-        assert_eq!(planned.questions[0].id, 1);
-    }
-
-    /// 红线 2：plan 产出的题与建议一个授权类要素都不沾（出题与建议由登记表驱动，
-    /// 登记表本身不含授权类——这个测试锁的是题面、选项与建议值）。
-    #[test]
-    fn plan_never_produces_authorized_elements() {
-        let vocabulary = plan_vocabulary();
-        let draft = draft_of(TemplateKind::RedHeadApproval);
-        // 全空 + 全未提：能出多少题出多少。
-        let reply = "发文单位｜未提\n呈报领导｜未提\n落款单位｜未提\n承办单位｜未提\n联系人｜未提";
-        let planned = plan(&draft, reply, "拟开展数据平台项目。", &vocabulary, 9);
-        assert!(!planned.questions.is_empty());
-        for word in ["密级", "文号", "份号", "签发", "成文日期", "印发"] {
-            for question in &planned.questions {
-                assert!(
-                    matches!(question.target, Target::Field(_)),
-                    "要素题只能是 Target::Field"
-                );
-                assert!(!question.text.contains(word), "{}", question.text);
-                for choice in &question.choices {
-                    assert!(!choice.label.contains(word), "{}", choice.label);
-                }
-            }
-            for suggestion in &planned.suggestions {
-                assert!(!suggestion.value.contains(word));
-            }
+                .map(|label| Choice {
+                    label: (*label).to_string(),
+                    detail: String::new(),
+                    recommended: false,
+                    action: Action::Fill((*label).to_string()),
+                })
+                .collect(),
+            custom_hint: None,
+            prefill: String::new(),
+            skippable: true,
+            multi,
+            target: Target::Field(field),
         }
+    }
+
+    /// 要素题跳过时写给起草的那句话（与 `resolve_answers` 的格式一致）。
+    fn skip_note(field: FieldId) -> String {
+        format!(
+            "{}暂未确定：由起草人之后在要素表单里选，正文不写这一项，也不要留占位或自己编",
+            field.label()
+        )
     }
 
     /// 回答落地：选中进建议清单（出处「起草人从标准词库选定」）并记已确认信息。
     #[test]
     fn resolve_answers_turns_picks_into_suggestions_and_notes() {
-        let vocabulary = plan_vocabulary();
         let draft = draft_of(TemplateKind::OfficialLetter);
-        let reply = "主送单位｜已给｜数据局";
-        let mut vocabulary = vocabulary;
-        vocabulary.push(VocabularyEntry {
-            canonical: "省数据局".into(),
-            code: "02".into(),
-            ..Default::default()
-        });
-        let planned = plan(&draft, reply, PLAN_SOURCE, &vocabulary, 4);
-        let question = question_of(&planned, FieldId::Recipient).unwrap();
-        let picked = question
-            .choices
-            .iter()
-            .position(|c| c.label == "省数据局")
-            .unwrap();
+        let question = field_question(FieldId::Recipient, &["市数据局", "省数据局"], true);
         let (suggestions, notes) = resolve_answers(
             &draft,
-            &planned.questions,
-            &[(question.id, Reply::Choice(picked))],
+            std::slice::from_ref(&question),
+            &[(1, Reply::Choice(1))],
         );
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].field, FieldId::Recipient);
         assert_eq!(suggestions[0].value, "省数据局");
         assert_eq!(suggestions[0].source, "起草人从标准词库选定");
         assert!(!suggestions[0].conflict);
-        // 同批没答的必填题（发文单位）按跳过记了待核实，这里只看主送这句。
         assert!(
             notes
                 .iter()
@@ -1917,27 +1029,11 @@ mod tests {
     /// 多选题：勾几个合几个；一个都没勾按跳过处理。
     #[test]
     fn resolve_answers_merges_multi_picks_and_treats_none_as_skip() {
-        let vocabulary = plan_vocabulary();
         let draft = draft_of(TemplateKind::OfficialLetter);
-        let mut vocabulary = vocabulary;
-        vocabulary.push(VocabularyEntry {
-            canonical: "省数据局".into(),
-            code: "02".into(),
-            ..Default::default()
-        });
-        let planned = plan(
-            &draft,
-            "主送单位｜已给｜数据局",
-            PLAN_SOURCE,
-            &vocabulary,
-            4,
-        );
-        let question = question_of(&planned, FieldId::Recipient).unwrap();
-        let (suggestions, notes) = resolve_answers(
-            &draft,
-            &planned.questions,
-            &[(question.id, Reply::Many(vec![0, 1]))],
-        );
+        let question = field_question(FieldId::Recipient, &["市数据局", "省数据局"], true);
+        let questions = std::slice::from_ref(&question);
+        let (suggestions, notes) =
+            resolve_answers(&draft, questions, &[(1, Reply::Many(vec![0, 1]))]);
         assert_eq!(suggestions[0].value, "市数据局、省数据局");
         assert!(
             notes
@@ -1945,33 +1041,25 @@ mod tests {
                 .any(|note| note == "主送单位：市数据局、省数据局（起草人从标准词库选定）"),
             "{notes:?}"
         );
-        // 一个都没勾：按跳过处理，留待核实占位（同批发文单位题没答，默认也是跳过）。
-        let (suggestions, notes) = resolve_answers(
-            &draft,
-            &planned.questions,
-            &[(question.id, Reply::Many(vec![]))],
-        );
+        // 一个都没勾：按跳过处理，记「之后在表单里填」。
+        let (suggestions, notes) = resolve_answers(&draft, questions, &[(1, Reply::Many(vec![]))]);
         assert!(suggestions.is_empty());
         assert!(
             notes
                 .iter()
-                .any(|note| *note == skipped_note(FieldId::Recipient)),
+                .any(|note| *note == skip_note(FieldId::Recipient)),
             "{notes:?}"
         );
     }
 
-    /// 自己写：只记已确认信息，不进建议清单（词库外的值不进表单）；跳过留待核实占位。
+    /// 自己写：只记已确认信息，不进建议清单（词库外的值不进表单）；跳过记「之后在表单里填」。
     #[test]
     fn resolve_answers_custom_is_a_note_only_and_skip_leaves_a_placeholder() {
-        let vocabulary = plan_vocabulary();
         let draft = draft_of(TemplateKind::OfficialLetter);
-        let planned = plan(&draft, "主送单位｜未提", PLAN_SOURCE, &vocabulary, 4);
-        let question = question_of(&planned, FieldId::Recipient).unwrap();
-        let (suggestions, notes) = resolve_answers(
-            &draft,
-            &planned.questions,
-            &[(question.id, Reply::Custom("市档案馆".into()))],
-        );
+        let question = field_question(FieldId::Recipient, &["市数据局"], true);
+        let questions = std::slice::from_ref(&question);
+        let (suggestions, notes) =
+            resolve_answers(&draft, questions, &[(1, Reply::Custom("市档案馆".into()))]);
         assert!(suggestions.is_empty());
         assert!(
             notes
@@ -1979,13 +1067,12 @@ mod tests {
                 .any(|note| note == "主送单位：市档案馆（起草人确认，词库外的值不进表单）"),
             "{notes:?}"
         );
-        let (suggestions, notes) =
-            resolve_answers(&draft, &planned.questions, &[(question.id, Reply::Skip)]);
+        let (suggestions, notes) = resolve_answers(&draft, questions, &[(1, Reply::Skip)]);
         assert!(suggestions.is_empty());
         assert!(
             notes
                 .iter()
-                .any(|note| *note == skipped_note(FieldId::Recipient)),
+                .any(|note| *note == skip_note(FieldId::Recipient)),
             "{notes:?}"
         );
     }
@@ -1994,36 +1081,35 @@ mod tests {
     /// 生成时的表单值记进 previous。
     #[test]
     fn resolve_answers_marks_conflict_when_the_form_changed_while_answering() {
-        let vocabulary = plan_vocabulary();
         let mut draft = draft_of(TemplateKind::OfficialLetter);
-        let planned = plan(&draft, "主送单位｜未提", PLAN_SOURCE, &vocabulary, 4);
-        let question = question_of(&planned, FieldId::Recipient).unwrap();
-        let picked = question
-            .choices
-            .iter()
-            .position(|c| c.label == "市数据局")
-            .unwrap();
+        let question = field_question(FieldId::Recipient, &["市数据局"], true);
         // 出题后用户在表单里填了市应急局。
         draft.profile.recipient = "市应急局".into();
         let (suggestions, _) = resolve_answers(
             &draft,
-            &planned.questions,
-            &[(question.id, Reply::Choice(picked))],
+            std::slice::from_ref(&question),
+            &[(1, Reply::Choice(0))],
         );
         assert!(suggestions[0].conflict);
         assert_eq!(suggestions[0].previous, "市应急局");
     }
 
-    /// 「已填要素」汇总：表单已填值 + 本批建议值（冲突建议不算），拼进六要素检查原文。
+    /// 「已填要素」汇总：表单已填值 + 旧会话带回来的建议值（冲突建议不算），
+    /// 拼进六要素检查原文。
     #[test]
     fn filled_summary_lists_form_values_and_suggestions() {
-        let vocabulary = plan_vocabulary();
         let mut draft = draft_of(TemplateKind::OfficialLetter);
         draft.profile.issuing_unit = "市政府".into();
         draft.profile.responsible_unit = "市数据局".into();
-        let reply = "主送单位｜已给｜市数据局";
-        let planned = plan(&draft, reply, PLAN_SOURCE, &vocabulary, 4);
-        let summary = filled_summary(&draft, &planned.suggestions);
+        let suggestions = [FieldSuggestion {
+            field: FieldId::Recipient,
+            display_value: "市数据局".into(),
+            value: "市数据局".into(),
+            previous: String::new(),
+            source: "材料原文：「市数据局」".into(),
+            conflict: false,
+        }];
+        let summary = filled_summary(&draft, &suggestions);
         assert_eq!(
             summary, "已填要素：发文单位 市政府；主送单位 市数据局；承办单位 市数据局",
             "{summary}"
@@ -2040,362 +1126,5 @@ mod tests {
         assert!(!question.multi, "旧会话读回按单选");
         let board: crate::agent::board::Board = serde_json::from_str("{}").unwrap();
         assert!(board.field_suggestions.is_empty());
-    }
-}
-
-// ================= 第 4 期：联机实测 =================
-
-/// 用真实模型跑「要素抽取」：读 `GONGWEN_LIVE_LLM_URL` / `GONGWEN_LIVE_LLM_MODEL` /
-/// `GONGWEN_LIVE_LLM_KEY`，没设就打印跳过。两个内网同款模型各跑一遍（换 MODEL 环境变量）。
-///
-/// 断言只放确定性的部分：授权类要素不出现（建议与题目的字段都在 `prompt_fields` 里）、
-/// 建议的摘录都能在原文里找到、建议值与题目选项都在标准词库里。模型认得准不准只打印、
-/// 统计（样本表里的期望逐条对），不断言——改提示词的依据看交接文档里的结果表。
-#[cfg(test)]
-mod live_tests {
-    use super::*;
-    use crate::ai_services::backend::{LmBackend, ModelBackend, ModelRole};
-
-    /// 一个样本期望模型走到哪一步。
-    enum Expect {
-        /// 直接建议成这个词库规范名。
-        Suggest(&'static str),
-        /// 「替换」建议（表单已填且不一致）。
-        Conflict(&'static str),
-        /// 出题。
-        Ask,
-        /// 不动（不出建议也不出题）。
-        Silent,
-    }
-
-    struct Sample {
-        name: &'static str,
-        kind: TemplateKind,
-        /// 表单已填的字段（字段、值）。
-        filled: &'static [(FieldId, &'static str)],
-        /// 给模型的原文（标题提示 + 要求）。
-        source: &'static str,
-        /// 用复函技能自带的「要素抽取」节，否则用内置的一份。
-        reply_letter: bool,
-        expect: &'static [(FieldId, Expect)],
-    }
-
-    /// 测试词库：含同名前缀的单位（市数据局 / 市数据局信息中心）与带别名的人员（王建国
-    /// 别名王局长）。市财政局当「本单位」。
-    fn live_vocabulary() -> Vec<VocabularyEntry> {
-        let unit = |name: &str, code: &str, duties: &str| VocabularyEntry {
-            canonical: name.into(),
-            code: code.into(),
-            duties: duties.into(),
-            ..VocabularyEntry::default()
-        };
-        let person = |name: &str, unit: &str, phone: &str, position: &str, aliases: &[&str]| {
-            VocabularyEntry {
-                canonical: name.into(),
-                category: VocabularyCategory::Person,
-                unit: unit.into(),
-                phone: phone.into(),
-                position: position.into(),
-                aliases: aliases.iter().map(|a| (*a).into()).collect(),
-                ..VocabularyEntry::default()
-            }
-        };
-        vec![
-            unit("市财政局", "09", "负责财政收支管理与预算执行"),
-            unit(
-                "市数据局",
-                "00",
-                "负责公共数据归集、共享与开放，统筹数据资源平台建设",
-            ),
-            unit("市数据局信息中心", "08", "承担公共数据平台的运行维护"),
-            unit("市应急局", "01", "负责安全生产综合监督管理和应急救援"),
-            unit("市林业局", "02", "负责林业生态建设与森林防火"),
-            person("张三", "00", "12345678", "数据资源科科长", &[]),
-            person("李四", "01", "", "办公室副主任", &[]),
-            person("王建国", "09", "", "局长", &["王局长"]),
-        ]
-    }
-
-    fn samples() -> Vec<Sample> {
-        vec![
-            Sample {
-                name: "公函：主送写明，发文单位与联系人没提",
-                kind: TemplateKind::OfficialLetter,
-                filled: &[],
-                source: "给市数据局发函，商请共建公共数据研究平台。根据市政府会议要求，请于10月底前书面函复。",
-                reply_letter: false,
-                expect: &[
-                    (FieldId::Recipient, Expect::Suggest("市数据局")),
-                    (FieldId::IssuingUnit, Expect::Ask),
-                    (FieldId::ContactPerson, Expect::Ask),
-                    (FieldId::CopiesTo, Expect::Silent),
-                ],
-            },
-            Sample {
-                name: "公函：原文写的是同名前缀里的长名（市数据局信息中心）",
-                kind: TemplateKind::OfficialLetter,
-                filled: &[],
-                source: "给市数据局信息中心发函，商请公共数据平台运维保障事宜，请于10月底前书面函复。",
-                reply_letter: false,
-                expect: &[
-                    (FieldId::Recipient, Expect::Suggest("市数据局信息中心")),
-                    (FieldId::IssuingUnit, Expect::Ask),
-                ],
-            },
-            Sample {
-                name: "公函：原文写的单位词库里没有（市大数据中心）",
-                kind: TemplateKind::OfficialLetter,
-                filled: &[],
-                source: "给市大数据中心发函，商请共建公共数据研究平台，请于10月底前书面函复。",
-                reply_letter: false,
-                expect: &[
-                    (FieldId::Recipient, Expect::Ask),
-                    (FieldId::IssuingUnit, Expect::Ask),
-                ],
-            },
-            Sample {
-                name: "公函：表单已填市应急局，材料写的是市数据局",
-                kind: TemplateKind::OfficialLetter,
-                filled: &[(FieldId::Recipient, "市应急局")],
-                source: "给市数据局发函，商请共建公共数据研究平台，请于10月底前书面函复。",
-                reply_letter: false,
-                expect: &[
-                    (FieldId::Recipient, Expect::Conflict("市数据局")),
-                    (FieldId::IssuingUnit, Expect::Ask),
-                ],
-            },
-            Sample {
-                name: "电话通知：主送写明",
-                kind: TemplateKind::PhoneNotice,
-                filled: &[],
-                source: "请市应急局办公室负责同志于10月15日上午9时到我局三楼会议室，参加森林防火工作会议。",
-                reply_letter: false,
-                expect: &[
-                    (FieldId::Recipient, Expect::Suggest("市应急局")),
-                    (FieldId::IssuingUnit, Expect::Ask),
-                ],
-            },
-            Sample {
-                name: "白头件：呈报领导按别名对上，落款没提",
-                kind: TemplateKind::WhitePaper,
-                filled: &[],
-                source: "关于公共数据平台建设进展的汇报。呈报王局长审定。",
-                reply_letter: false,
-                expect: &[
-                    (FieldId::ReportingLeaders, Expect::Suggest("王建国")),
-                    (FieldId::SigningUnit, Expect::Ask),
-                ],
-            },
-            Sample {
-                name: "红头呈批件：承办单位、联系人、呈报领导都写明",
-                kind: TemplateKind::RedHeadApproval,
-                filled: &[],
-                source: "关于启动公共数据平台二期项目的请示。承办单位：市数据局。联系人：张三。呈报王局长审定。",
-                reply_letter: false,
-                expect: &[
-                    (FieldId::ResponsibleUnit, Expect::Suggest("市数据局")),
-                    (FieldId::ContactPerson, Expect::Suggest("张三")),
-                    (FieldId::ReportingLeaders, Expect::Suggest("王建国")),
-                    (FieldId::SigningUnit, Expect::Ask),
-                ],
-            },
-            Sample {
-                name: "复函：主送是来函的发文机关（此致后的署名）",
-                kind: TemplateKind::OfficialLetter,
-                filled: &[],
-                source: "市财政局：\n\n现将我局公共数据归集情况函告如下，请于10月底前函复。\n\n此致\n\n市数据局\n\n答复要求：同意第一项，第二项暂缓。",
-                reply_letter: true,
-                // 复函技能的提示词写明：来函抬头（通常是本单位）是本复函的发文单位。
-                expect: &[
-                    (FieldId::Recipient, Expect::Suggest("市数据局")),
-                    (FieldId::IssuingUnit, Expect::Suggest("市财政局")),
-                ],
-            },
-        ]
-    }
-
-    #[test]
-    #[ignore = "需要真实模型：设置 GONGWEN_LIVE_LLM_URL / MODEL / KEY 后运行"]
-    fn live_field_extraction_samples() {
-        let env = |key: &str| std::env::var(key).unwrap_or_default();
-        if env("GONGWEN_LIVE_LLM_URL").is_empty() {
-            eprintln!(
-                "未设置 GONGWEN_LIVE_LLM_URL / GONGWEN_LIVE_LLM_MODEL / GONGWEN_LIVE_LLM_KEY，跳过"
-            );
-            return;
-        }
-        let mut config = crate::models::AppConfig::default();
-        config.lm_studio.base_url = env("GONGWEN_LIVE_LLM_URL");
-        config.lm_studio.model = env("GONGWEN_LIVE_LLM_MODEL");
-        config.lm_studio.api_key = env("GONGWEN_LIVE_LLM_KEY");
-        config.lm_studio.timeout_seconds = 300;
-        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let model = LmBackend::new(&config, cancel);
-        let vocabulary = live_vocabulary();
-        let reply_letter_template = crate::agent::skill::builtin(crate::agent::skill::REPLY_LETTER)
-            .and_then(|skill| skill.section("要素抽取").map(str::to_string))
-            .expect("内置复函技能要有「要素抽取」节");
-
-        let mut hits = 0;
-        let mut total = 0;
-        for sample in samples() {
-            let mut draft = DraftInput {
-                kind: sample.kind,
-                ..DraftInput::default()
-            };
-            for (field, value) in sample.filled {
-                apply_field(&mut draft, *field, value, &vocabulary);
-            }
-            let fields = prompt_fields(&draft);
-            let template = if sample.reply_letter {
-                reply_letter_template.as_str()
-            } else {
-                PROMPT
-            };
-            let prompt = template
-                .replace("{kind}", sample.kind.label())
-                .replace("{fields}", &prompt_fields_text(&fields, sample.kind))
-                .replace("{source}", sample.source);
-            let reply = model
-                .complete(ModelRole::Draft, "", &prompt, &mut |_| {})
-                .expect("模型要答")
-                .content;
-            let planned = plan(&draft, &reply, sample.source, &vocabulary, 4);
-
-            // —— 确定性断言（不依赖模型答得准不准）——
-            // 授权类要素不出现：建议与题目的字段都在适用清单里（清单本身全是描述类）。
-            for suggestion in &planned.suggestions {
-                assert!(fields.contains(&suggestion.field), "{}", sample.name);
-                // 建议值在标准词库里（多值顿号分隔，逐个查规范名）。
-                for name in split_units(&suggestion.value) {
-                    assert!(
-                        vocabulary.iter().any(|entry| entry.canonical == name),
-                        "建议值不在词库：{name}（{}）",
-                        sample.name
-                    );
-                }
-                // 摘录在原文里找得到（与 plan 同一套去标点比较）。
-                let excerpt = suggestion
-                    .source
-                    .trim_start_matches("材料原文：")
-                    .trim_matches(['「', '」']);
-                for piece in split_units(excerpt) {
-                    assert!(
-                        elements::squash(sample.source).contains(&elements::squash(&piece)),
-                        "摘录不在原文：{piece}（{}）",
-                        sample.name
-                    );
-                }
-            }
-            for question in &planned.questions {
-                let Target::Field(field) = question.target else {
-                    panic!("要素抽取只出字段题（{}）", sample.name);
-                };
-                assert!(fields.contains(&field), "{}", sample.name);
-                // 题目选项也全部来自标准词库。
-                for choice in &question.choices {
-                    let Action::Fill(value) = &choice.action else {
-                        continue;
-                    };
-                    assert!(
-                        vocabulary.iter().any(|entry| entry.canonical == *value),
-                        "选项不在词库：{value}（{}）",
-                        sample.name
-                    );
-                }
-            }
-
-            // —— 准不准只打印、统计 ——
-            eprintln!("== {} ==", sample.name);
-            eprintln!("模型回复：{}", reply.replace('\n', " ⏎ "));
-            for suggestion in &planned.suggestions {
-                eprintln!(
-                    "  建议：{} = {}{}{}（{}）",
-                    suggestion.field.label(),
-                    suggestion.value,
-                    if suggestion.previous.is_empty() {
-                        String::new()
-                    } else {
-                        format!("（表单已填 {}）", suggestion.previous)
-                    },
-                    if suggestion.conflict {
-                        "［冲突］"
-                    } else {
-                        ""
-                    },
-                    suggestion.source
-                );
-            }
-            for question in &planned.questions {
-                eprintln!(
-                    "  出题：{} 选项 {:?}",
-                    question.text,
-                    question
-                        .choices
-                        .iter()
-                        .map(|c| c.label.as_str())
-                        .collect::<Vec<_>>()
-                );
-            }
-            for (field, expect) in sample.expect {
-                total += 1;
-                let suggestion = planned.suggestions.iter().find(|s| s.field == *field);
-                let asked = planned
-                    .questions
-                    .iter()
-                    .any(|q| q.target == Target::Field(*field));
-                let (hit, actual) = match expect {
-                    Expect::Suggest(value) => (
-                        suggestion.is_some_and(|s| !s.conflict && s.value == *value),
-                        suggestion.map_or("没建议".into(), |s| format!("建议 {}", s.value)),
-                    ),
-                    Expect::Conflict(value) => (
-                        suggestion.is_some_and(|s| s.conflict && s.value == *value),
-                        suggestion.map_or("没建议".into(), |s| {
-                            format!(
-                                "建议 {}{}",
-                                s.value,
-                                if s.conflict { "（冲突）" } else { "" }
-                            )
-                        }),
-                    ),
-                    Expect::Ask => (
-                        asked,
-                        if asked {
-                            "出题".into()
-                        } else {
-                            "没出题".into()
-                        },
-                    ),
-                    Expect::Silent => (
-                        suggestion.is_none() && !asked,
-                        format!(
-                            "{}{}",
-                            if suggestion.is_some() {
-                                "有建议"
-                            } else {
-                                ""
-                            },
-                            if asked { "有题" } else { "" }
-                        ),
-                    ),
-                };
-                hits += usize::from(hit);
-                eprintln!(
-                    "  {} {}：期望 {:?}，实际 {}——{}",
-                    if hit { "对" } else { "错" },
-                    field.label(),
-                    match expect {
-                        Expect::Suggest(v) => format!("建议 {v}"),
-                        Expect::Conflict(v) => format!("替换建议 {v}"),
-                        Expect::Ask => "出题".into(),
-                        Expect::Silent => "不动".into(),
-                    },
-                    actual,
-                    if hit { "符合" } else { "偏差" }
-                );
-            }
-        }
-        eprintln!("—— 期望命中 {hits}/{total} ——");
     }
 }

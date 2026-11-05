@@ -144,14 +144,19 @@ pub(crate) fn prune_workspaces(
                 Ok(record) if record.status == super::recovery::PiRunStatus::Accepted => {}
                 // 有记录但不是「已接受」：这是接着写的依据，不删。
                 Ok(_) => continue,
-                // 读不出记录：视为孤儿，额外要求足够老，避免删掉正在写的目录。
-                Err(_) if age >= ORPHAN_MIN_AGE => {}
-                Err(_) => continue,
+                // 只有确认 run.json 不存在才算孤儿。损坏、权限错误等不等于没有记录，
+                // 里面仍可能有尚未取回的成品，不能自动删除。
+                Err(_) => match std::fs::symlink_metadata(run_dir.join("run.json")) {
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound
+                            && age >= ORPHAN_MIN_AGE => {}
+                    _ => continue,
+                },
             }
             // 占用检查放在最后：它会在没有锁文件时创建一个，只对真准备删的目录做。
-            if run_is_active(&run_dir) {
+            let Some(_cleanup_owner) = lock_for_cleanup(&run_dir) else {
                 continue;
-            }
+            };
             let bytes = dir_bytes(&run_dir);
             if std::fs::remove_dir_all(&run_dir).is_ok() {
                 pruned += 1;
@@ -162,14 +167,14 @@ pub(crate) fn prune_workspaces(
     Ok((pruned, freed))
 }
 
-/// 运行目录是否正被占用。
+/// 取得清理所有权，直到删除完成才释放，防止检查与删除之间另一窗口开始运行。
 ///
 /// Rust 在准备、等 host、写终态的整个运行期间都持着 `rust-owner.lock` 的
-/// `try_lock`；拿不到锁就跳过该目录。锁文件不存在时创建它再立即释放（视为空闲），
+/// `try_lock`；拿不到锁就跳过该目录。锁文件不存在时创建它，
 /// 这样崩溃残留的空锁文件与从未开跑的目录都不影响清理。
 ///
 /// 不用 `host-owner.sqlite` 判断：host 退出后它留在目录里是常态。
-fn run_is_active(run_dir: &Path) -> bool {
+fn lock_for_cleanup(run_dir: &Path) -> Option<std::fs::File> {
     let Ok(lock) = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -177,9 +182,10 @@ fn run_is_active(run_dir: &Path) -> bool {
         .open(run_dir.join("rust-owner.lock"))
     else {
         // 打不开锁文件（权限、路径异常）时拿不准，保守跳过。
-        return true;
+        return None;
     };
-    lock.try_lock().is_err()
+    lock.try_lock().ok()?;
+    Some(lock)
 }
 
 /// 目录下文件总字节数（不跟随符号链接）。只用于回报释放空间，达到扫描上限即停。
@@ -540,7 +546,38 @@ mod tests {
         drop(held_lock);
     }
 
-    /// 孤儿目录（run.json 读不出）额外要求超过 1 小时，刚建的不动。
+    #[test]
+    fn pruning_preserves_old_corrupt_records_and_removes_only_real_orphans() {
+        let (_config, _reset) = isolated_config_dir();
+        let doc = crate::storage::config_dir()
+            .unwrap()
+            .join("pi/workspaces/doc-3");
+        let corrupt = doc.join("run-corrupt");
+        let orphan = doc.join("run-orphan");
+        std::fs::create_dir_all(&corrupt).unwrap();
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(corrupt.join("run.json"), "{bad json").unwrap();
+        std::fs::write(corrupt.join("final.md"), "尚未取回的成品").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600);
+        for dir in [&corrupt, &orphan] {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options
+                    .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS：打开目录。
+                    .access_mode(0x0100); // FILE_WRITE_ATTRIBUTES：只修改目录时间。
+            }
+            options.open(dir).unwrap().set_modified(old).unwrap();
+        }
+        let (count, _) = prune_workspaces(0, std::time::Duration::ZERO).unwrap();
+        assert_eq!(count, 1);
+        assert!(corrupt.join("final.md").exists());
+        assert!(!orphan.exists());
+    }
+
+    /// 孤儿目录（run.json 不存在）额外要求超过 1 小时，刚建的不动。
     #[test]
     fn a_fresh_orphan_directory_is_not_pruned() {
         let (_config, _reset) = isolated_config_dir();

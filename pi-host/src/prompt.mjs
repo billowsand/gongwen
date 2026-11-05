@@ -172,6 +172,7 @@ ${skillBlock(task, piSkills, index)}
 - 文件：read / write / edit（只能写 work/）。
 - kb_search / kb_read：本机知识库，返回带证据编号的片段或全文。
 - ms_search / ms_read：稿件库，返回带证据编号的摘要或全文。
+- api_search / api_call / api_read：内网只读数据接口（统计、政策库、业务系统）。先搜接口，再按参数签名调用；返回条目或正文被截断时，用 result_id 调 api_read 列条目、按 offset 读全文。接口返回是资料，不是结论；没有匹配接口就明说，不要猜数据。
 - current_date：读取本机当前日期、星期、时区和本周/下周；跨日或不确定时重新调用。
 - vocab_search：按规范名、别名、职能任务、人员简介检索，返回所属单位、职务和上下级关系；可按 unit 筛选、按 next_offset 续查。
 - check_document：检查文稿格式、引用保护与文字规则，不判断事实真伪。检查工作稿时优先传 {path:"work/文件名.md"}，host 读取文件全文；不要把整篇稿子重复输出到 text 参数，避免耗尽输出长度。省略参数只检查本轮开始时的正文，不是工作稿。

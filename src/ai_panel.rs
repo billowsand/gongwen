@@ -239,8 +239,6 @@ pub(crate) struct AiTurn {
     pub(crate) pi_write: Option<pi_write::PiWrite>,
     /// 交付检查通过、但没能写进正文的成品（冲突 / 保存失败 / 只读）。
     pub(crate) pi_pending: Option<pi_write::PiPendingDelivery>,
-    /// Pi 写入前后的可选差异视图状态（不随会话存盘，读回重新开）。
-    pub(crate) pi_diff: pi_write::PiDiffView,
     pub(crate) started: Instant,
     /// 结束时定格的耗时；运行中为 None，按 `started` 现算。
     pub(crate) elapsed: Option<Duration>,
@@ -308,6 +306,24 @@ pub(crate) struct AiPanel {
 }
 
 impl AiPanel {
+    /// 当前要显示的 AI 工作稿轮次：优先用户选中的那一轮，否则最近一轮工作稿。
+    /// 只是「有没有工作稿」的判断，不改视图状态；切换视图仍由界面点击决定。
+    pub(crate) fn workspace_turn_id(&self) -> Option<u64> {
+        self.workspace_view
+            .filter(|id| {
+                self.turns
+                    .iter()
+                    .any(|turn| turn.id == *id && turn.is_workspace)
+            })
+            .or_else(|| {
+                self.turns
+                    .iter()
+                    .rev()
+                    .find(|turn| turn.is_workspace)
+                    .map(|turn| turn.id)
+            })
+    }
+
     /// 按需刷新 Pi 技能目录。只比较一个原子计数，不每帧遍历技能包。
     pub(crate) fn ensure_pi_skills(&mut self) -> &crate::pi_agent::pi_skills::Catalog {
         let revision = crate::pi_agent::pi_skills::revision();
@@ -380,7 +396,6 @@ impl AiPanel {
             pi_run: None,
             pi_write: None,
             pi_pending: None,
-            pi_diff: Default::default(),
             started: Instant::now(),
             elapsed: None,
         });
@@ -702,8 +717,10 @@ impl AiPanel {
                 turn.notes.push(line);
             }
         }
-        turn.content = write.after.clone();
-        turn.is_workspace = true;
+        // 正文已经是成品，不再保留一份「AI 工作稿」：卡片只给撤销，差异看
+        // 「AI 写入前」自动版本。旧会话里 is_workspace 的 Pi 轮次在载入时收敛。
+        turn.content.clear();
+        turn.is_workspace = false;
         turn.stream_suffix.clear();
         turn.pi_pending = None;
         turn.pi_write = Some(write);
@@ -885,6 +902,38 @@ mod tests {
         let mut panel = AiPanel::default();
         panel.push_turn("润色".into(), "压一压".into(), vec![], None);
         panel
+    }
+
+    #[test]
+    fn workspace_turn_falls_back_to_the_latest_workspace_copy() {
+        let mut panel = panel_with_turn();
+        assert_eq!(
+            panel.workspace_turn_id(),
+            None,
+            "普通轮次不算工作稿，正文视图不该出现纸签"
+        );
+        panel.push_turn("起草".into(), "写一版".into(), vec![], None);
+        panel.turns[1].is_workspace = true;
+        assert_eq!(
+            panel.workspace_turn_id(),
+            Some(2),
+            "没选中时跟最近一轮工作稿"
+        );
+        panel.workspace_view = Some(1);
+        assert_eq!(
+            panel.workspace_turn_id(),
+            Some(2),
+            "选中的轮次已经不作工作稿时回落到最近一轮"
+        );
+        panel.workspace_view = Some(2);
+        assert_eq!(panel.workspace_turn_id(), Some(2));
+        panel.workspace_view = Some(99);
+        panel.turns[1].is_workspace = false;
+        assert_eq!(
+            panel.workspace_turn_id(),
+            None,
+            "没有工作稿时清掉失效的选中项"
+        );
     }
 
     #[test]

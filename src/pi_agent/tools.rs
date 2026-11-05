@@ -4,7 +4,14 @@
 //! 这里**不**复用旧的 `Board` / `ToolCtx` / 流程引擎：只调用现有的知识库检索、
 //! 稿件库、词库与确定性检查。每个真正返回给模型的资料都登记一条证据（编号、来源、
 //! 哈希、片段、角色），用于回查和恢复；不据此判断正文事实真伪。
+//!
+//! 工具在独立线程执行，界面一停 host 就被回收，但已发出的 HTTP / 检索 / LLM 重排无法
+//! 从中途 abort：这一层只做取消边界（阶段之间尽快收手、迟到结果不写证据、不算成功），
+//! 并用在途槽位（`ToolSlot`）限制同时最多几个慢工具，避免反复停止重开无限叠加资源。
+//! 不要把这里当成「已经强杀请求」——请求本身仍会跑完，只是结果被丢弃。
 
+use crate::agent::api::{ApiEndpoint, ApiSecrets, ApiStore};
+use crate::agent::apidef::tooling;
 use crate::ai_services::knowledge::{KnowledgeSearch, RagSearch};
 use crate::ai_services::manuscripts::ManuscriptSource;
 use crate::ai_services::style::{self, StyleBook};
@@ -12,8 +19,11 @@ use crate::manuscript::ManuscriptFilter;
 use crate::models::{AppConfig, DraftInput, TemplateKind};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// 一次工具调用最多返回多少资料。
 const MAX_SEARCH_RESULTS: usize = 10;
@@ -21,6 +31,18 @@ const MAX_SEARCH_RESULTS: usize = 10;
 const MAX_READ_CHARS: usize = 160_000;
 /// 一条证据交给模型的片段上限。
 const MAX_SNIPPET_CHARS: usize = 600;
+/// `api_search` 一次最多返回几个接口。
+const MAX_API_RESULTS: usize = 5;
+/// `api_call` 一次交给模型的条目上限（接口返回可能很多，先给前几条）。
+const MAX_API_ITEMS: usize = 20;
+/// 每个接口条目交给模型的字符上限；证据台账同样截到这里，防超长返回撑爆预算。
+/// 完整内容留在本轮结果缓存里，模型可用 `api_read` 按位置续读。
+const MAX_API_ITEM_CHARS: usize = 2_000;
+/// 本轮接口结果缓存：最多保留几份、总字节上限（内存与落盘各自按同一上限裁剪）。
+const MAX_CACHED_API_RESULTS: usize = 8;
+const MAX_CACHED_API_BYTES: usize = 2 * 1024 * 1024;
+/// 落盘目录名（运行目录下）。恢复时从这里读回，避免重新调用接口。
+const API_CACHE_DIR: &str = "api-results";
 /// 一次最多列几份风格档案。
 const MAX_STYLE_ROWS: usize = 20;
 /// 读一份风格时交给模型的 token 预算与字符上限。
@@ -29,6 +51,18 @@ const MAX_STYLE_CHARS: usize = 8_000;
 /// 风格结果固定带的一句说明：写法不是事实。
 const STYLE_NOTE: &str = "风格档案与范例是写法样稿（style_sample），只给结构与表达；不是本次事项的事实来源，\
 其中的单位、人员、日期、数字与结论不得写进正文；这个结果不登记为事实证据。";
+
+/// 同时在途的域工具上限。界面停止后旧工具可能还在收尾（HTTP 请求本身无法中途 abort），
+/// 反复停止重开不能无限叠加线程、连接与模型额度，这里做资源兜底。
+const MAX_IN_FLIGHT_TOOLS: usize = 4;
+/// 槽位满了最多等多久：等不到就明确回错，而不是让本轮工具无限排队。
+const TOOL_SLOT_WAIT: Duration = Duration::from_secs(10);
+/// 等槽位时多久看一次取消信号；停止后排队线程要尽快退出，不能陪旧任务耗满 10 秒。
+const TOOL_SLOT_POLL: Duration = Duration::from_millis(20);
+/// 工具在途计数：`ToolSlot` 用 CAS 申请、Drop 释放。
+static IN_FLIGHT_TOOLS: AtomicUsize = AtomicUsize::new(0);
+/// 取消时统一回给模型 / 宿主的文案；只说结果不采用，不暗示底层请求已被强杀。
+const CANCELLED_TOOL: &str = "已停止 Pi 智能写作，本次工具结果不采用。";
 
 /// 知识库检索结果的窄接口（生产用现有 RAG，测试可换假库）。
 pub(crate) trait PiKnowledge: Send + Sync {
@@ -97,7 +131,7 @@ pub(crate) struct PiSources {
     pub(crate) styles: Arc<dyn PiStyles>,
 }
 
-/// 生产实现：只读 `styles.json`，不调辅助模型、不保存、不记使用次数。
+/// 生产实现：只读 `styles.json`，不调其它模型、不保存、不记使用次数。
 struct StyleArchives;
 
 impl PiStyles for StyleArchives {
@@ -291,6 +325,282 @@ impl PiEvidence {
     }
 }
 
+/// 内网数据接口的窄接口：生产从配置目录读 OpenAPI 与密钥，测试可换假数据。
+pub(crate) trait PiApis: Send + Sync {
+    /// 按用途搜「只查询且开放给 AI」的接口，返回接口 id、说明与参数签名。
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<PiApiHit>, String>;
+    /// 调用一个接口；参数先按 schema 校验，不合格不发请求。
+    fn call(&self, api: &str, args: &Map<String, Value>) -> Result<PiApiCall, String>;
+}
+
+/// 搜到的一个接口。
+#[derive(Debug, Clone)]
+pub(crate) struct PiApiHit {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) signature: String,
+}
+
+/// 接口返回的一条资料。
+#[derive(Debug, Clone)]
+pub(crate) struct PiApiItem {
+    pub(crate) title: String,
+    pub(crate) source: String,
+    pub(crate) text: String,
+}
+
+/// 一次接口调用的结果。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PiApiCall {
+    pub(crate) name: String,
+    pub(crate) items: Vec<PiApiItem>,
+    pub(crate) total: usize,
+}
+
+/// 生产实现：只暴露只查询、开放给 AI、配置没问题的接口（红线不放宽）。
+struct ApiCatalog;
+
+impl PiApis for ApiCatalog {
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<PiApiHit>, String> {
+        let store = ApiStore::load().map_err(|error| format!("读数据接口配置失败：{error:#}"))?;
+        Ok(search_apis(&store, query, limit))
+    }
+
+    fn call(&self, api: &str, args: &Map<String, Value>) -> Result<PiApiCall, String> {
+        let store = ApiStore::load().map_err(|error| format!("读数据接口配置失败：{error:#}"))?;
+        let endpoint = store.get(api).ok_or_else(|| {
+            format!("没有配置 id 为「{api}」的数据接口：先用 api_search 搜接口 id")
+        })?;
+        if !endpoint.readonly {
+            return Err(format!("接口「{}」会改数据，不给 AI 调", endpoint.name));
+        }
+        if !endpoint.ai {
+            return Err(format!("接口「{}」没有开放给 AI", endpoint.name));
+        }
+        if !endpoint.unsupported.trim().is_empty() {
+            return Err(format!(
+                "接口「{}」当前配置不受支持：{}",
+                endpoint.name,
+                endpoint.unsupported.trim()
+            ));
+        }
+        tooling::validate(endpoint, args)?;
+        let secrets =
+            ApiSecrets::load().map_err(|error| format!("读数据接口密钥失败：{error:#}"))?;
+        let called = crate::agent::api::call(endpoint, args, &secrets)?;
+        Ok(PiApiCall {
+            name: endpoint.name.clone(),
+            total: called.total,
+            items: called
+                .items
+                .into_iter()
+                .map(|item| PiApiItem {
+                    title: if item.title.is_empty() {
+                        endpoint.name.clone()
+                    } else {
+                        item.title
+                    },
+                    source: item.source,
+                    text: item.text,
+                })
+                .collect(),
+        })
+    }
+}
+
+/// 搜接口的纯函数，测试直接传内存里的 `ApiStore`。
+fn search_apis(store: &ApiStore, query: &str, limit: usize) -> Vec<PiApiHit> {
+    let words = tooling::query_words(query);
+    let mut scored: Vec<(usize, &ApiEndpoint)> = store
+        .endpoints
+        .iter()
+        .filter(|endpoint| tooling::usable(endpoint))
+        .map(|endpoint| {
+            let (name, rest) = tooling::search_text(endpoint);
+            (tooling::match_score(&words, &name, &rest), endpoint)
+        })
+        .filter(|(score, _)| *score > 0)
+        .collect();
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, endpoint)| PiApiHit {
+            id: endpoint.id.clone(),
+            name: endpoint.name.clone(),
+            description: endpoint.description.trim().to_string(),
+            signature: tooling::signatures(endpoint),
+        })
+        .collect()
+}
+
+/// 一份可续读的接口结果：完整条目留在缓存里，模型按 `result_id` 分页读取。
+#[derive(Debug, Clone)]
+struct CachedApiResult {
+    id: String,
+    api: String,
+    name: String,
+    total: usize,
+    items: Vec<PiApiItem>,
+}
+
+impl CachedApiResult {
+    fn bytes(&self) -> usize {
+        self.items
+            .iter()
+            .map(|item| item.title.len() + item.source.len() + item.text.len())
+            .sum()
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "version": 1,
+            "id": self.id,
+            "api": self.api,
+            "name": self.name,
+            "total": self.total,
+            "items": self.items.iter().map(|item| json!({
+                "title": item.title,
+                "source": item.source,
+                "text": item.text,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    fn from_json(value: Value) -> Option<Self> {
+        let items = value.get("items")?.as_array()?;
+        let mut parsed = Vec::new();
+        for item in items {
+            parsed.push(PiApiItem {
+                title: item.get("title")?.as_str()?.to_string(),
+                source: item
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                text: item.get("text")?.as_str()?.to_string(),
+            });
+        }
+        Some(Self {
+            id: value.get("id")?.as_str()?.to_string(),
+            api: value.get("api")?.as_str()?.to_string(),
+            name: value.get("name")?.as_str()?.to_string(),
+            total: value
+                .get("total")
+                .and_then(Value::as_u64)
+                .unwrap_or(parsed.len() as u64) as usize,
+            items: parsed,
+        })
+    }
+}
+
+/// 本轮接口结果缓存：内存有上限；挂了运行目录时同时落盘，恢复后仍能续读。
+#[derive(Default)]
+struct ApiResultCache {
+    dir: Option<PathBuf>,
+    results: VecDeque<CachedApiResult>,
+}
+
+impl ApiResultCache {
+    fn set_dir(&mut self, dir: PathBuf) {
+        self.dir = Some(dir);
+    }
+
+    fn store(&mut self, mut result: CachedApiResult) -> String {
+        if result.items.is_empty() {
+            return String::new();
+        }
+        result.id = format!(
+            "api-{}",
+            &sha256_hex(&serde_json::to_string(&result.json()).unwrap_or_default())[..16]
+        );
+        let id = result.id.clone();
+        if let Some(dir) = &self.dir {
+            // 落盘失败不影响本轮：内存里还能读；恢复时才需要它。
+            let path = dir.join(API_CACHE_DIR);
+            if std::fs::create_dir_all(&path).is_ok() {
+                let file = path.join(format!("{id}.json"));
+                let _ = std::fs::write(
+                    &file,
+                    serde_json::to_vec(&result.json()).unwrap_or_default(),
+                );
+            }
+            prune_api_cache_dir(&path);
+        }
+        self.results.retain(|cached| cached.id != id);
+        self.results.push_back(result);
+        while self.results.len() > MAX_CACHED_API_RESULTS
+            || self.total_bytes() > MAX_CACHED_API_BYTES
+        {
+            if self.results.len() <= 1 {
+                break;
+            }
+            self.results.pop_front();
+        }
+        id
+    }
+
+    fn total_bytes(&self) -> usize {
+        self.results.iter().map(CachedApiResult::bytes).sum()
+    }
+
+    fn load(&mut self, id: &str) -> Option<CachedApiResult> {
+        if !valid_api_result_id(id) {
+            return None;
+        }
+        if let Some(found) = self.results.iter().find(|cached| cached.id == id) {
+            return Some(found.clone());
+        }
+        let dir = self.dir.as_ref()?;
+        let raw = std::fs::read(dir.join(API_CACHE_DIR).join(format!("{id}.json"))).ok()?;
+        let value: Value = serde_json::from_slice(&raw).ok()?;
+        let result = CachedApiResult::from_json(value)?;
+        if result.id != id {
+            return None;
+        }
+        Some(result)
+    }
+}
+
+fn valid_api_result_id(id: &str) -> bool {
+    id.strip_prefix("api-")
+        .is_some_and(|hash| hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// 落盘缓存按文件修改时间裁剪到总字节上限，避免长任务把磁盘撑大。
+fn prune_api_cache_dir(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let meta = entry.metadata().ok()?;
+            meta.is_file().then(|| {
+                (
+                    meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    meta.len(),
+                    entry.path(),
+                )
+            })
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|(_, bytes, _)| bytes).sum();
+    if total <= MAX_CACHED_API_BYTES as u64 {
+        return;
+    }
+    files.sort_by_key(|(modified, _, _)| *modified);
+    for (_, bytes, path) in files {
+        if total <= MAX_CACHED_API_BYTES as u64 {
+            break;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            total = total.saturating_sub(bytes);
+        }
+    }
+}
+
 /// 一轮 Pi 的工具上下文。后台线程持有一份，工具结果与证据都只活在这一轮。
 pub(crate) struct PiToolContext {
     config: Arc<AppConfig>,
@@ -303,10 +613,68 @@ pub(crate) struct PiToolContext {
     /// 授权类要素不在此列，词库查询结果也不在此列。
     form_facts: Vec<String>,
     kb: Arc<dyn PiKnowledge>,
+    apis: Arc<dyn PiApis>,
+    api_cache: Mutex<ApiResultCache>,
     manuscripts: Arc<dyn PiManuscripts>,
     styles: Arc<dyn PiStyles>,
     evidence: Arc<Mutex<Vec<PiEvidence>>>,
     seq: Arc<AtomicUsize>,
+    /// 界面「停止」信号，`attach_cancel` 只挂一次。工具在独立线程执行，HTTP 请求本身
+    /// 无法中途 abort，这里只按取消边界处理：阶段之间尽快收手，迟到结果不写证据、
+    /// 不算成功；资源叠加由 `ToolSlot` 兜底。
+    cancel: OnceLock<Arc<AtomicBool>>,
+}
+
+/// 一个在途工具槽位。停止后的慢工具要跑完当前请求才会返回，反复停止重开时用槽位
+/// 限制同时最多 `MAX_IN_FLIGHT_TOOLS` 个，避免线程、连接与模型额度无限叠加。
+#[derive(Debug)]
+struct ToolSlot;
+
+impl ToolSlot {
+    /// 申请一个槽位；满了最多等 `TOOL_SLOT_WAIT`，等待期间定期检查取消。
+    fn acquire(ctx: &PiToolContext) -> Result<Self, String> {
+        Self::acquire_within(ctx, TOOL_SLOT_WAIT)
+    }
+
+    /// 带等待上限的申请（测试用零等待验证「满了就明确失败」）。
+    fn acquire_within(ctx: &PiToolContext, wait: Duration) -> Result<Self, String> {
+        let started = Instant::now();
+        loop {
+            // CAS 申请：先看再加会并发越过上限。
+            let mut current = IN_FLIGHT_TOOLS.load(Ordering::Acquire);
+            while current < MAX_IN_FLIGHT_TOOLS {
+                match IN_FLIGHT_TOOLS.compare_exchange_weak(
+                    current,
+                    current + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return Ok(ToolSlot),
+                    Err(updated) => current = updated,
+                }
+            }
+            if wait.is_zero() || started.elapsed() >= wait {
+                return Err(format!(
+                    "上一个已停止的任务仍在收尾（域工具最多同时 {MAX_IN_FLIGHT_TOOLS} 个），\
+                     本次工具未执行；稍后再试或停止本轮。"
+                ));
+            }
+            // 排队期间用户可能又点了停止：先承认取消，别让这一轮的工具继续排队。
+            ctx.check_cancel()?;
+            std::thread::sleep(TOOL_SLOT_POLL);
+        }
+    }
+}
+
+impl Drop for ToolSlot {
+    fn drop(&mut self) {
+        IN_FLIGHT_TOOLS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(test)]
+fn in_flight_tools() -> usize {
+    IN_FLIGHT_TOOLS.load(Ordering::Acquire)
 }
 
 impl PiToolContext {
@@ -318,22 +686,16 @@ impl PiToolContext {
         request: String,
         material_facts: Vec<String>,
     ) -> Self {
-        let kb: Arc<dyn PiKnowledge> = match config.assist_chat() {
+        // 检索里的对话模型只用于 `rerank.mode=Llm` 的 LLM 重排，统一用写作模型：
+        // 不再隐式借用「辅助模型」或文字复核的小模型（2026-11-05 模型通道收敛）。
+        let kb: Arc<dyn PiKnowledge> = match config.pi_chat() {
             Ok(chat) => Arc::new(RagSearch {
                 enabled: config.rag.enabled,
                 rag: config.resolved_rag(),
                 chat,
                 kind_filter: None,
             }),
-            Err(_) => match config.pi_chat() {
-                Ok(chat) => Arc::new(RagSearch {
-                    enabled: config.rag.enabled,
-                    rag: config.resolved_rag(),
-                    chat,
-                    kind_filter: None,
-                }),
-                Err(_) => Arc::new(DisabledKnowledge),
-            },
+            Err(_) => Arc::new(DisabledKnowledge),
         };
         Self::with_sources(
             config,
@@ -387,10 +749,50 @@ impl PiToolContext {
             request,
             material_facts,
             kb: sources.knowledge,
+            apis: Arc::new(ApiCatalog),
+            api_cache: Mutex::new(ApiResultCache::default()),
             manuscripts: sources.manuscripts,
             styles: sources.styles,
             evidence: Arc::new(Mutex::new(Vec::new())),
             seq: Arc::new(AtomicUsize::new(0)),
+            cancel: OnceLock::new(),
+        }
+    }
+
+    /// 测试替身：换掉内网数据接口来源，不碰真实配置目录。
+    #[cfg(test)]
+    pub(crate) fn with_apis(mut self, apis: Arc<dyn PiApis>) -> Self {
+        self.apis = apis;
+        self
+    }
+
+    /// 给本轮挂上接口结果缓存目录（运行目录）。恢复后仍能按 `result_id` 续读。
+    pub(crate) fn with_api_cache_dir(self, dir: PathBuf) -> Self {
+        if let Ok(mut cache) = self.api_cache.lock() {
+            cache.set_dir(dir);
+        }
+        self
+    }
+
+    /// 挂上本轮停止信号。只设置一次：同一上下文只认第一个信号，
+    /// 重复挂说明调用方接错了（覆盖会让已在排队的工具看不到真正的停止）。
+    pub(crate) fn attach_cancel(&self, cancel: Arc<AtomicBool>) {
+        let _ = self.cancel.set(cancel);
+    }
+
+    /// 本轮是否已被停止。
+    fn cancel_requested(&self) -> bool {
+        self.cancel
+            .get()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    }
+
+    /// 取消边界：统一返回可读的停止错误，供工具各阶段边界复检。
+    fn check_cancel(&self) -> Result<(), String> {
+        if self.cancel_requested() {
+            Err(CANCELLED_TOOL.to_string())
+        } else {
+            Ok(())
         }
     }
 
@@ -430,6 +832,9 @@ impl PiToolContext {
                 | "kb_read"
                 | "ms_search"
                 | "ms_read"
+                | "api_search"
+                | "api_call"
+                | "api_read"
                 | "vocab_search"
                 | "current_date"
                 | "check_document"
@@ -500,14 +905,22 @@ impl PiToolContext {
 
     /// 执行一次工具调用。参数校验失败与业务失败都返回结构化错误文本。
     pub(crate) fn call(&self, name: &str, args: &Value) -> Result<Value, String> {
+        // 入口先看停止：停止后 host 可能还排着旧工具请求，检索 / 模型 / 网络一律不再发起。
+        self.check_cancel()?;
         let args = args
             .as_object()
             .ok_or_else(|| "工具参数必须是 JSON 对象".to_string())?;
-        match name {
+        // 在途槽位是资源兜底：HTTP 请求无法从外部 abort，停掉的旧任务仍可能占着线程、
+        // 连接和模型额度；限流后反复停止重开不会无限叠加。
+        let _slot = ToolSlot::acquire(self)?;
+        let result = match name {
             "kb_search" => self.kb_search(args),
             "kb_read" => self.kb_read(args),
             "ms_search" => self.ms_search(args),
             "ms_read" => self.ms_read(args),
+            "api_search" => self.api_search(args),
+            "api_call" => self.api_call(args),
+            "api_read" => self.api_read(args),
             "vocab_search" => self.vocab_search(args),
             "current_date" => Ok(super::writing_context::date_context()),
             "check_document" => self.check_document(args),
@@ -515,7 +928,11 @@ impl PiToolContext {
             "style_list" => self.style_list(),
             "style_read" => self.style_read(args),
             other => Err(format!("未知工具：{other}")),
-        }
+        };
+        // dispatch 返回后再看一次：慢工具可能在停止之后才返回，即使成功也不能当成
+        // 这一轮的工具结果交回去（迟到结果不采用）。
+        self.check_cancel()?;
+        result
     }
 
     fn kb_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
@@ -524,7 +941,10 @@ impl PiToolContext {
         }
         let query = required_str(args, "query")?;
         let top = usize_arg(args, "top", MAX_SEARCH_RESULTS);
+        // 检索里可能带 embedding 与 LLM 重排，慢在这一步；调用前后各看一眼停止信号。
+        self.check_cancel()?;
         let outcome = self.kb.search(&query, top)?;
+        self.check_cancel()?;
         let warnings = outcome.warnings;
         if outcome.chunks.is_empty() {
             return Ok(json!({
@@ -536,6 +956,8 @@ impl PiToolContext {
         }
         let mut results = Vec::new();
         for chunk in outcome.chunks {
+            // 逐条登记前复检：停止后不往证据台账里写资料。
+            self.check_cancel()?;
             let id = self.record(
                 "kb_search",
                 &chunk.title,
@@ -557,9 +979,12 @@ impl PiToolContext {
 
     fn kb_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
         let doc_id = int_arg(args, "doc_id")?;
+        // 读全文可能要从库 / 索引取大段内容；调用前后各查一次取消。
+        self.check_cancel()?;
         let Some((title, full)) = self.kb.read(doc_id)? else {
             return Err(format!("知识库没有编号为 {doc_id} 的文档"));
         };
+        self.check_cancel()?;
         let offset = optional_offset_arg(args);
         let page = read_page(&full, offset, read_limit_arg(args))?;
         let id = self.record(
@@ -587,9 +1012,14 @@ impl PiToolContext {
     fn ms_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
         let query = required_str(args, "query")?;
         let limit = usize_arg(args, "limit", 5);
+        // 稿件库是 SQLite 查询，慢在磁盘/加密库上；调用前后各查一次取消。
+        self.check_cancel()?;
         let rows = self.manuscripts.search(&query, limit)?;
+        self.check_cancel()?;
         let mut results = Vec::new();
         for row in rows {
+            // 逐条登记前复检：停止后不往证据台账里写摘要。
+            self.check_cancel()?;
             // 列表项本身不足以当事实依据：把标题与文号登记为摘要，正文要靠 ms_read。
             let summary = format!(
                 "《{}》{} {} {}",
@@ -612,9 +1042,12 @@ impl PiToolContext {
     fn ms_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
         let id = int_arg(args, "id")?;
         let version = args.get("version").and_then(Value::as_i64);
+        // 读稿件全文可能要做版本解析与大段取文；调用前后各查一次取消。
+        self.check_cancel()?;
         let Some(row) = self.manuscripts.read(id, version)? else {
             return Err(format!("稿件库没有编号为 {id} 的稿件"));
         };
+        self.check_cancel()?;
         let full = row.markdown;
         if full.trim().is_empty() {
             return Err(format!("稿件《{}》没有正文", row.title));
@@ -650,8 +1083,191 @@ impl PiToolContext {
         }))
     }
 
+    /// 只读接口搜索：只列「只查询且开放给 AI」的接口。
+    fn api_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        let query = required_str(args, "query")?;
+        let limit = usize_arg(args, "limit", MAX_API_RESULTS).clamp(1, MAX_API_RESULTS);
+        // 搜接口要读配置目录；调用前后各查一次取消。
+        self.check_cancel()?;
+        let hits = self.apis.search(&query, limit)?;
+        self.check_cancel()?;
+        if hits.is_empty() {
+            return Ok(json!({
+                "query": query,
+                "results": [],
+                "zero_hits": true,
+                "note": "没有找到相关的只读接口。换更通用的关键词再搜；仍找不到就按材料写，不要猜数据。",
+            }));
+        }
+        let results: Vec<Value> = hits
+            .into_iter()
+            .map(|hit| {
+                json!({
+                    "id": hit.id,
+                    "name": hit.name,
+                    "description": crate::ai_services::text::short(&hit.description, 300),
+                    "params": hit.signature,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "query": query,
+            "results": results,
+            "zero_hits": false,
+            "note": "用 api_call 调用：api 填 id，args 只放接口签名里的参数；返回是资料，不是结论。",
+        }))
+    }
+
+    /// 调一个只读接口。参数先按 schema 校验，不合格不发请求；返回条目进证据台账。
+    fn api_call(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        let api = required_str(args, "api")?;
+        let inputs = match args.get("args") {
+            Some(Value::Object(map)) => map.clone(),
+            Some(Value::Null) | None => Map::new(),
+            Some(_) => return Err("参数 args 必须是对象".into()),
+        };
+        // 内网 HTTP 请求一旦发出就无法中途 abort，慢在 `apis.call`；调用前后各查一次取消，
+        // 停止后即使请求已完成，也不登记证据、不把结果当成功交回去（由 call 统一兜底）。
+        self.check_cancel()?;
+        let called = self.apis.call(&api, &inputs)?;
+        self.check_cancel()?;
+        if called.items.is_empty() {
+            return Ok(json!({
+                "api": api,
+                "name": called.name,
+                "items": [],
+                "total": called.total,
+                "note": "接口调用成功但没有返回条目；换参数再查，或按材料写，不要编数据。",
+            }));
+        }
+        // 完整条目先留在本轮结果缓存（内存 + 运行目录）：返回给模型的只是前几条 / 截短文本，
+        // 长资料用 api_read 按 result_id 继续读，恢复后也能从运行目录读回。
+        let result_id = {
+            let mut cache = self
+                .api_cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            cache.store(CachedApiResult {
+                id: String::new(),
+                api: api.clone(),
+                name: called.name.clone(),
+                total: called.total,
+                items: called.items.clone(),
+            })
+        };
+        let total_items = called.items.len();
+        let shown = total_items.min(MAX_API_ITEMS);
+        let mut truncated = called.total > shown || total_items > shown;
+        let mut results = Vec::new();
+        for item in called.items.into_iter().take(MAX_API_ITEMS) {
+            // 逐条登记前复检：停止后不把接口资料写进证据台账。
+            self.check_cancel()?;
+            let text_truncated = item.text.chars().count() > MAX_API_ITEM_CHARS;
+            truncated |= text_truncated;
+            let text: String = item.text.chars().take(MAX_API_ITEM_CHARS).collect();
+            let evidence = self.record("api_call", &item.title, "数据接口", "资料", &text, true);
+            results.push(json!({
+                "evidence": evidence,
+                "title": item.title,
+                "source": item.source,
+                "text": text,
+                "text_truncated": text_truncated,
+            }));
+        }
+        Ok(json!({
+            "api": api,
+            "name": called.name,
+            "result_id": result_id,
+            "items": results,
+            "total": called.total,
+            "truncated": truncated,
+            "note": if truncated {
+                "返回条目或正文已截断，不能视为完整结果。用 api_read（result_id 填上面的值，item 从 0 开始）读取完整条目与全文；仍不够时再缩小查询条件。无法取得全文时说明资料不完整，不要据片段作完整统计或结论。"
+            } else {
+                "返回条目是资料，可据以写正文；不要写返回里没有的字段。需要看单条完整原文时用 api_read。"
+            },
+        }))
+    }
+
+    /// 续读一次接口调用留下的完整结果：不带 item 列条目；带 item 按字符分页读该条全文。
+    fn api_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        self.check_cancel()?;
+        let result_id = required_str(args, "result_id")?;
+        let cached = {
+            let mut cache = self
+                .api_cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            cache.load(&result_id)
+        }
+        .ok_or_else(|| {
+            "接口结果缓存已失效（可能来自更早的会话或已被清理）：请重新调用接口，或缩小查询条件。"
+                .to_string()
+        })?;
+        let Some(item) = args.get("item").and_then(Value::as_u64) else {
+            let items: Vec<Value> = cached
+                .items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    json!({
+                        "item": index,
+                        "title": item.title,
+                        "source": item.source,
+                        "chars": item.text.chars().count(),
+                    })
+                })
+                .collect();
+            return Ok(json!({
+                "result_id": result_id,
+                "api": cached.api,
+                "name": cached.name,
+                "total": cached.total,
+                "items": items,
+                "note": "带 item 与 offset 读取某条完整原文；条目过多时先按标题挑需要的。",
+            }));
+        };
+        let index = item as usize;
+        let Some(found) = cached.items.get(index) else {
+            return Err(format!(
+                "没有第 {index} 条（这份结果共 {} 条，从 0 开始编号）",
+                cached.items.len()
+            ));
+        };
+        let offset = optional_offset_arg(args);
+        let page = read_page(&found.text, offset, read_limit_arg(args))?;
+        self.check_cancel()?;
+        let evidence = self.record(
+            "api_read",
+            &found.title,
+            "数据接口",
+            "资料",
+            &page.text,
+            true,
+        );
+        Ok(json!({
+            "evidence": evidence,
+            "result_id": result_id,
+            "api": cached.api,
+            "item": index,
+            "title": found.title,
+            "source": found.source,
+            "text": page.text,
+            "offset": page.offset,
+            "total_chars": page.total_chars,
+            "next_offset": page.next_offset,
+            "unread_chars": page.unread_chars,
+            "truncated": page.next_offset.is_some(),
+            "note": READ_PAGE_NOTE,
+        }))
+    }
+
     fn vocab_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
-        super::writing_context::search(&self.config.vocabulary, args)
+        // 词库查询在内存里，但同样走取消边界：停止后不再继续回结果。
+        self.check_cancel()?;
+        let value = super::writing_context::search(&self.config.vocabulary, args)?;
+        self.check_cancel()?;
+        Ok(value)
     }
 
     pub(crate) fn writing_context(&self) -> Value {
@@ -670,6 +1286,8 @@ impl PiToolContext {
         if text.trim().is_empty() {
             return Err("没有可检查的正文".into());
         }
+        // 文档检查要跑词表、规则与要素校验，慢在下面这一段；前后各查一次取消。
+        self.check_cancel()?;
         let mut hard = Vec::new();
         let mut soft = Vec::new();
         if let Err(error) = crate::document_reference::ensure_preserved(&self.current, &text) {
@@ -694,6 +1312,7 @@ impl PiToolContext {
         }
         hard.truncate(20);
         soft.truncate(40);
+        self.check_cancel()?;
         Ok(json!({
             "hard": hard,
             "soft": soft,
@@ -703,7 +1322,10 @@ impl PiToolContext {
 
     /// 当前文种可用的风格档案。只读；档案例子与写法都不是本次事项的事实。
     fn style_list(&self) -> Result<Value, String> {
+        // 读风格库要碰磁盘；调用前后各查一次取消。
+        self.check_cancel()?;
         let list = self.styles.list(self.draft.kind)?;
+        self.check_cancel()?;
         let truncated = list.truncated || list.rows.len() > MAX_STYLE_ROWS;
         let results = list
             .rows
@@ -733,7 +1355,11 @@ impl PiToolContext {
     /// 按 id 读一份风格。未知 / 停用 / 不适用明确告知，不静默换成另一份。
     fn style_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
         let id = required_str(args, "id")?;
-        match self.styles.read(&id, self.draft.kind)? {
+        // 读风格档案要碰磁盘；调用前后各查一次取消。
+        self.check_cancel()?;
+        let lookup = self.styles.read(&id, self.draft.kind)?;
+        self.check_cancel()?;
+        match lookup {
             PiStyleLookup::Found { id, name, text } => Ok(json!({
                 "id": style_excerpt(&id, 500),
                 "name": style_excerpt(&name, 100),
@@ -1585,6 +2211,523 @@ mod tests {
         assert!(
             ctx.fact_sources().is_empty(),
             "词库证明规范名称存在，不证明该单位参与本次事项"
+        );
+    }
+
+    /// 假内网接口：只验证工具行为、参数校验与证据登记。
+    struct FakeApis;
+
+    impl PiApis for FakeApis {
+        fn search(&self, query: &str, limit: usize) -> Result<Vec<PiApiHit>, String> {
+            if query != "火灾" {
+                return Ok(Vec::new());
+            }
+            Ok(vec![PiApiHit {
+                id: "stat.fire".into(),
+                name: "火灾统计".into(),
+                description: "按地区统计森林火灾".into(),
+                signature: "region: 文字（必填）".into(),
+            }]
+            .into_iter()
+            .take(limit)
+            .collect())
+        }
+
+        fn call(&self, api: &str, args: &Map<String, Value>) -> Result<PiApiCall, String> {
+            if api != "stat.fire" {
+                return Err(format!("没有配置 id 为「{api}」的数据接口"));
+            }
+            if args.get("region").and_then(Value::as_str) != Some("全省") {
+                return Err("参数 region 必须是「全省」".into());
+            }
+            Ok(PiApiCall {
+                name: "火灾统计".into(),
+                total: 3,
+                items: (1..=3)
+                    .map(|index| PiApiItem {
+                        title: format!("统计{index}"),
+                        source: "省统计系统".into(),
+                        text: format!("第{index}条：全省森林火灾 {index} 起"),
+                    })
+                    .collect(),
+            })
+        }
+    }
+
+    fn api_context() -> PiToolContext {
+        context("x").with_apis(Arc::new(FakeApis))
+    }
+
+    #[test]
+    fn api_search_returns_ids_and_parameter_signatures() {
+        let ctx = api_context();
+        let value = ctx
+            .call("api_search", &json!({"query": "火灾", "limit": 3}))
+            .unwrap();
+        assert_eq!(value["results"][0]["id"], "stat.fire");
+        assert_eq!(value["results"][0]["name"], "火灾统计");
+        assert!(
+            value["results"][0]["params"]
+                .as_str()
+                .unwrap()
+                .contains("region"),
+            "要给模型参数签名"
+        );
+        assert!(ctx.evidence().is_empty(), "搜接口不产生事实证据");
+    }
+
+    #[test]
+    fn api_search_reports_zero_hits_without_guessing() {
+        let ctx = api_context();
+        let value = ctx
+            .call("api_search", &json!({"query": "不存在的东西"}))
+            .unwrap();
+        assert_eq!(value["zero_hits"], true);
+        assert_eq!(value["results"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn api_call_registers_evidence_and_bounds_returned_items() {
+        let ctx = api_context();
+        let value = ctx
+            .call(
+                "api_call",
+                &json!({"api": "stat.fire", "args": {"region": "全省"}}),
+            )
+            .unwrap();
+        assert_eq!(value["items"].as_array().unwrap().len(), 3);
+        assert_eq!(value["total"], 3);
+        assert_eq!(value["truncated"], false);
+        assert!(
+            value["items"][0]["evidence"]
+                .as_str()
+                .unwrap()
+                .starts_with('E')
+        );
+        let evidence = ctx.evidence();
+        assert_eq!(evidence.len(), 3);
+        assert!(
+            evidence
+                .iter()
+                .all(|item| item.tool == "api_call" && item.fact)
+        );
+        assert!(
+            ctx.fact_sources()
+                .iter()
+                .any(|text| text.contains("全省森林火灾 1 起")),
+            "接口返回要能作为事实来源"
+        );
+    }
+
+    #[test]
+    fn api_call_rejects_bad_parameters_without_touching_evidence() {
+        let ctx = api_context();
+        let error = ctx
+            .call(
+                "api_call",
+                &json!({"api": "stat.fire", "args": {"region": "全市"}}),
+            )
+            .unwrap_err();
+        assert!(error.contains("region"), "{error}");
+        assert!(ctx.evidence().is_empty());
+    }
+
+    #[test]
+    fn api_call_marks_a_single_long_item_as_incomplete() {
+        struct LongApi;
+        impl PiApis for LongApi {
+            fn search(&self, _: &str, _: usize) -> Result<Vec<PiApiHit>, String> {
+                Ok(Vec::new())
+            }
+            fn call(&self, _: &str, _: &Map<String, Value>) -> Result<PiApiCall, String> {
+                Ok(PiApiCall {
+                    name: "长资料".into(),
+                    total: 1,
+                    items: vec![PiApiItem {
+                        title: "统计说明".into(),
+                        source: "统计系统".into(),
+                        text: "中".repeat(MAX_API_ITEM_CHARS + 1),
+                    }],
+                })
+            }
+        }
+        let ctx = context("x").with_apis(Arc::new(LongApi));
+        let result = ctx.call("api_call", &json!({"api": "long"})).unwrap();
+        assert_eq!(result["truncated"], true);
+        assert_eq!(result["items"][0]["text_truncated"], true);
+        assert!(result["note"].as_str().unwrap().contains("不完整"));
+        assert_eq!(
+            result["items"][0]["text"].as_str().unwrap().chars().count(),
+            MAX_API_ITEM_CHARS
+        );
+        assert_eq!(ctx.evidence()[0].text.chars().count(), MAX_API_ITEM_CHARS);
+    }
+
+    #[test]
+    fn api_search_only_lists_usable_endpoints() {
+        let mut usable = ApiEndpoint {
+            id: "stat.fire".into(),
+            name: "火灾统计".into(),
+            description: "森林火灾".into(),
+            ..ApiEndpoint::default()
+        };
+        let mut closed = ApiEndpoint {
+            id: "stat.write".into(),
+            name: "火灾统计写入".into(),
+            description: "森林火灾".into(),
+            readonly: false,
+            ..ApiEndpoint::default()
+        };
+        let mut hidden = ApiEndpoint {
+            id: "stat.hidden".into(),
+            name: "火灾统计内部".into(),
+            description: "森林火灾".into(),
+            ai: false,
+            ..ApiEndpoint::default()
+        };
+        let mut unsupported = ApiEndpoint {
+            id: "stat.upload".into(),
+            name: "火灾上报".into(),
+            description: "森林火灾".into(),
+            unsupported: "multipart 暂不支持".into(),
+            ..ApiEndpoint::default()
+        };
+        let store = ApiStore {
+            endpoints: vec![
+                std::mem::take(&mut usable),
+                std::mem::take(&mut closed),
+                std::mem::take(&mut hidden),
+                std::mem::take(&mut unsupported),
+            ],
+            ..ApiStore::default()
+        };
+        let hits = super::search_apis(&store, "火灾", 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "stat.fire");
+    }
+
+    /// 记数的假知识库：证明取消后不再发起检索 / 读全文。
+    struct CountingKb {
+        searches: Arc<AtomicUsize>,
+        reads: Arc<AtomicUsize>,
+        cancel_on_search: Option<Arc<AtomicBool>>,
+    }
+
+    impl PiKnowledge for CountingKb {
+        fn enabled(&self) -> bool {
+            true
+        }
+
+        fn search(&self, _query: &str, _top: usize) -> Result<PiSearchOutcome, String> {
+            self.searches.fetch_add(1, Ordering::AcqRel);
+            if let Some(flag) = &self.cancel_on_search {
+                // 模拟「检索期间用户点了停止」：请求已经发出、无法中途 abort。
+                flag.store(true, Ordering::Relaxed);
+            }
+            Ok(PiSearchOutcome {
+                chunks: vec![PiChunk {
+                    doc_id: 7,
+                    title: "森林防火规定".into(),
+                    section: "第三条".into(),
+                    text: "各单位应于每年十月开展一次检查。".into(),
+                }],
+                warnings: Vec::new(),
+            })
+        }
+
+        fn read(&self, doc_id: i64) -> Result<Option<(String, String)>, String> {
+            self.reads.fetch_add(1, Ordering::AcqRel);
+            Ok((doc_id == 7).then(|| ("森林防火规定".into(), "全文。".into())))
+        }
+    }
+
+    /// 记数的假内网接口：证明取消后不再搜接口、不再发 HTTP。
+    struct CountingApis {
+        searches: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+        cancel_on_call: Option<Arc<AtomicBool>>,
+    }
+
+    impl PiApis for CountingApis {
+        fn search(&self, _query: &str, _limit: usize) -> Result<Vec<PiApiHit>, String> {
+            self.searches.fetch_add(1, Ordering::AcqRel);
+            Ok(vec![PiApiHit {
+                id: "stat.fire".into(),
+                name: "火灾统计".into(),
+                description: "按地区统计森林火灾".into(),
+                signature: "region: 文字（必填）".into(),
+            }])
+        }
+
+        fn call(&self, _api: &str, _args: &Map<String, Value>) -> Result<PiApiCall, String> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            if let Some(flag) = &self.cancel_on_call {
+                flag.store(true, Ordering::Relaxed);
+            }
+            Ok(PiApiCall {
+                name: "火灾统计".into(),
+                total: 1,
+                items: vec![PiApiItem {
+                    title: "统计".into(),
+                    source: "省统计系统".into(),
+                    text: "第1条：全省森林火灾 1 起".into(),
+                }],
+            })
+        }
+    }
+
+    fn counting_context(kb: Arc<dyn PiKnowledge>) -> PiToolContext {
+        PiToolContext::with_all_sources(
+            Arc::new(AppConfig::default()),
+            DraftInput::default(),
+            "# 通知\n\n原文。\n".into(),
+            "改一下。".into(),
+            Vec::new(),
+            PiSources {
+                knowledge: kb,
+                manuscripts: Arc::new(FakeManuscripts),
+                styles: Arc::new(FakeStyles),
+            },
+        )
+    }
+
+    /// 停止后工具入口直接拒绝：参数校验之前就返回，不再发起任何检索 / 网络调用。
+    #[test]
+    fn a_stopped_run_refuses_every_tool_before_touching_sources() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let api_searches = Arc::new(AtomicUsize::new(0));
+        let api_calls = Arc::new(AtomicUsize::new(0));
+        let ctx = counting_context(Arc::new(CountingKb {
+            searches: searches.clone(),
+            reads: reads.clone(),
+            cancel_on_search: None,
+        }))
+        .with_apis(Arc::new(CountingApis {
+            searches: api_searches.clone(),
+            calls: api_calls.clone(),
+            cancel_on_call: None,
+        }));
+        ctx.attach_cancel(Arc::new(AtomicBool::new(true)));
+        for (name, args) in [
+            ("kb_search", json!({"query": "防火检查"})),
+            ("kb_read", json!({"doc_id": 7})),
+            ("ms_search", json!({"query": "防火通知"})),
+            ("ms_read", json!({"id": 3})),
+            ("api_search", json!({"query": "火灾"})),
+            (
+                "api_call",
+                json!({"api": "stat.fire", "args": {"region": "全省"}}),
+            ),
+            ("vocab_search", json!({"query": "应急"})),
+            ("current_date", json!({})),
+            ("check_document", json!({"text": "# 通知\n\n原文。"})),
+            ("doc_elements", json!({})),
+            ("style_list", json!({})),
+            ("style_read", json!({"id": "literal-style"})),
+        ] {
+            let error = ctx.call(name, &args).unwrap_err();
+            assert!(error.contains("停止"), "{name} 应报告已停止：{error}");
+        }
+        assert_eq!(searches.load(Ordering::Acquire), 0, "停止后不得检索知识库");
+        assert_eq!(reads.load(Ordering::Acquire), 0, "停止后不得读知识库全文");
+        assert_eq!(api_searches.load(Ordering::Acquire), 0, "停止后不得搜接口");
+        assert_eq!(api_calls.load(Ordering::Acquire), 0, "停止后不得调接口");
+        assert!(ctx.evidence().is_empty(), "取消的工具调用不得写证据");
+    }
+
+    /// 取消发生在慢工具返回之前：请求已经发出（无法 abort），但结果不登记、不算成功。
+    #[test]
+    fn a_cancel_arriving_during_a_slow_tool_discards_its_result_and_evidence() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let searches = Arc::new(AtomicUsize::new(0));
+        let ctx = counting_context(Arc::new(CountingKb {
+            searches: searches.clone(),
+            reads: Arc::new(AtomicUsize::new(0)),
+            cancel_on_search: Some(cancel.clone()),
+        }));
+        ctx.attach_cancel(cancel);
+        let error = ctx
+            .call("kb_search", &json!({"query": "防火检查"}))
+            .unwrap_err();
+        assert!(error.contains("停止"), "{error}");
+        assert_eq!(
+            searches.load(Ordering::Acquire),
+            1,
+            "检索已经发出，停止信号只能让结果被丢弃，不能假装没调用"
+        );
+        assert!(ctx.evidence().is_empty(), "停止后返回的资料不得写证据");
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ctx = context("x").with_apis(Arc::new(CountingApis {
+            searches: Arc::new(AtomicUsize::new(0)),
+            calls: calls.clone(),
+            cancel_on_call: Some(cancel.clone()),
+        }));
+        ctx.attach_cancel(cancel);
+        let error = ctx
+            .call(
+                "api_call",
+                &json!({"api": "stat.fire", "args": {"region": "全省"}}),
+            )
+            .unwrap_err();
+        assert!(error.contains("停止"), "{error}");
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            1,
+            "HTTP 请求已经发出，只能丢弃结果"
+        );
+        assert!(ctx.evidence().is_empty(), "停止后返回的接口资料不得写证据");
+    }
+
+    /// 挂了取消句柄但没置位：行为与以前一致，连续调用也不会泄漏在途槽位。
+    #[test]
+    fn an_attached_but_unset_cancel_flag_changes_nothing() {
+        let ctx = api_context();
+        let first = Arc::new(AtomicBool::new(false));
+        ctx.attach_cancel(first.clone());
+        // 只设置一次：第二个句柄被忽略，第一个仍是唯一信号。
+        ctx.attach_cancel(Arc::new(AtomicBool::new(true)));
+        for _ in 0..(MAX_IN_FLIGHT_TOOLS + 1) {
+            // 多调一次：槽位若没在 Drop 里归还，这里会等到 10 秒后失败。
+            let value = ctx
+                .call("kb_search", &json!({"query": "防火检查"}))
+                .unwrap();
+            assert_eq!(value["zero_hits"], false);
+        }
+        assert_eq!(ctx.evidence().len(), MAX_IN_FLIGHT_TOOLS + 1);
+        // 第一个句柄置位后才开始拒绝，证明没被第二个句柄覆盖。
+        first.store(true, Ordering::Relaxed);
+        let error = ctx
+            .call("kb_search", &json!({"query": "防火检查"}))
+            .unwrap_err();
+        assert!(error.contains("停止"), "{error}");
+    }
+
+    /// 在途槽位：满了明确失败，Drop 归还；不依赖后台线程的时序。
+    #[test]
+    fn in_flight_slots_are_capped_and_returned_on_drop() {
+        let ctx = context("x");
+        let mut held = Vec::new();
+        for _ in 0..MAX_IN_FLIGHT_TOOLS {
+            held.push(ToolSlot::acquire(&ctx).expect("资源空闲时应能申请到在途槽位"));
+        }
+        assert!(in_flight_tools() >= MAX_IN_FLIGHT_TOOLS);
+        let error = ToolSlot::acquire_within(&ctx, Duration::ZERO).unwrap_err();
+        assert!(
+            error.contains("上一个已停止的任务仍在收尾"),
+            "满了要明确说明是谁占着：{error}"
+        );
+        // 释放一个后应能重新申请到；申请不到说明 Drop 没归还计数。
+        drop(held.pop().expect("至少持有一个槽位"));
+        let again = ToolSlot::acquire(&ctx).expect("释放后应能重新申请槽位");
+        drop(again);
+        assert!(in_flight_tools() <= MAX_IN_FLIGHT_TOOLS);
+    }
+
+    /// 长结果：25 条、首条超长；api_call 只给前 20 条并截断，api_read 能列全并读全文。
+    struct ManyApi;
+
+    impl PiApis for ManyApi {
+        fn search(&self, _: &str, _: usize) -> Result<Vec<PiApiHit>, String> {
+            Ok(Vec::new())
+        }
+
+        fn call(&self, api: &str, _: &Map<String, Value>) -> Result<PiApiCall, String> {
+            assert_eq!(api, "many");
+            Ok(PiApiCall {
+                name: "长结果".into(),
+                total: 25,
+                items: (0..25)
+                    .map(|index| PiApiItem {
+                        title: format!("条目{index}"),
+                        source: "统计系统".into(),
+                        text: if index == 0 {
+                            "长".repeat(MAX_API_ITEM_CHARS + 50)
+                        } else {
+                            format!("第{index}条正文")
+                        },
+                    })
+                    .collect(),
+            })
+        }
+    }
+
+    fn many_context(dir: &std::path::Path) -> PiToolContext {
+        context("x")
+            .with_apis(Arc::new(ManyApi))
+            .with_api_cache_dir(dir.to_path_buf())
+    }
+
+    #[test]
+    fn api_call_caches_long_results_and_api_read_pages_the_full_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = many_context(dir.path());
+        let value = ctx.call("api_call", &json!({"api": "many"})).unwrap();
+        assert_eq!(value["items"].as_array().unwrap().len(), 20);
+        assert_eq!(value["truncated"], true);
+        let result_id = value["result_id"].as_str().unwrap().to_string();
+        assert!(result_id.starts_with("api-"), "{result_id}");
+
+        let list = ctx
+            .call("api_read", &json!({"result_id": result_id}))
+            .unwrap();
+        assert_eq!(list["items"].as_array().unwrap().len(), 25);
+        assert_eq!(list["items"][0]["chars"], MAX_API_ITEM_CHARS + 50);
+
+        let full = ctx
+            .call("api_read", &json!({"result_id": result_id, "item": 0}))
+            .unwrap();
+        assert_eq!(full["total_chars"], MAX_API_ITEM_CHARS + 50);
+        assert_eq!(
+            full["text"].as_str().unwrap().chars().count(),
+            MAX_API_ITEM_CHARS + 50
+        );
+        assert!(full["evidence"].as_str().unwrap().starts_with('E'));
+
+        let later = ctx
+            .call(
+                "api_read",
+                &json!({"result_id": result_id, "item": 0, "offset": 2000, "limit_chars": 100}),
+            )
+            .unwrap();
+        assert_eq!(later["offset"], 2000);
+        assert_eq!(
+            later["text"].as_str().unwrap().chars().count(),
+            MAX_API_ITEM_CHARS + 50 - 2000
+        );
+    }
+
+    #[test]
+    fn api_read_recovers_a_cached_result_from_the_run_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = many_context(dir.path());
+        let value = ctx.call("api_call", &json!({"api": "many"})).unwrap();
+        let result_id = value["result_id"].as_str().unwrap().to_string();
+        let recovered = many_context(dir.path());
+        let list = recovered
+            .call("api_read", &json!({"result_id": result_id}))
+            .unwrap();
+        assert_eq!(list["items"].as_array().unwrap().len(), 25);
+        let item = recovered
+            .call("api_read", &json!({"result_id": result_id, "item": 1}))
+            .unwrap();
+        assert_eq!(item["text"], "第1条正文");
+    }
+
+    #[test]
+    fn api_read_rejects_unknown_or_invalid_result_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = many_context(dir.path());
+        assert!(
+            ctx.call("api_read", &json!({"result_id": "api-zzzz"}))
+                .is_err()
+        );
+        assert!(
+            ctx.call("api_read", &json!({"result_id": "../run.json"}))
+                .is_err(),
+            "result_id 不能当路径用"
         );
     }
 }

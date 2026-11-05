@@ -246,9 +246,13 @@ impl GongwenApp {
                     self.status = format!("{prefix}{reason}");
                     return;
                 }
-                if conflict {
-                    let reason = "运行期间正文改过，未自动覆盖：AI 成品留在这一轮里，\
-                                  可点「取回 AI 成品」（写入后可撤销），或按当前正文重做。"
+                // 已入库稿件：正文虽在运行期间改过，但写入前会自动提交一个版本，
+                // 直接覆盖也能从版本历史找回，不再把成品停在待取回。
+                // 未入库稿件没有版本链，仍保留成品让用户决定。
+                if conflict && doc.manuscript_id.is_none() {
+                    let reason = "运行期间正文改过，且这篇稿件还没入库、没有版本可回退：\
+                                  AI 成品留在这一轮里，可点「取回 AI 成品」（写入后可撤销），\
+                                  或按当前正文重做。"
                         .to_string();
                     doc.ai_panel
                         .park_pi_delivery(turn_id, pending, true, reason.clone());

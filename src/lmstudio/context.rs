@@ -371,7 +371,7 @@ impl std::fmt::Display for ContextOverflow {
 impl std::error::Error for ContextOverflow {}
 
 impl ContextOverflow {
-    /// 错误里写出实际调用的模型，避免把辅助模型的窗口误认为起草模型的窗口。
+    /// 错误里写出实际调用的模型，避免把写作模型的窗口误认为旧起草模型的窗口。
     pub(super) fn with_model(mut self, model: &str) -> Self {
         self.message = format!("模型「{}」：{}", model.trim(), self.message);
         self

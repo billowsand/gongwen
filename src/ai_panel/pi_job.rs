@@ -761,7 +761,7 @@ fn spawn_prepare_with(
             }
             PiEvent::Tool(line) => send(DocJob::PiTool(line)),
             PiEvent::Evidence(line) => send(DocJob::PiTool(line)),
-            PiEvent::Candidate { path, content } => send(DocJob::PiCandidate { path, content }),
+            PiEvent::Candidate { path, .. } => send(DocJob::PiCandidate { path }),
             PiEvent::Questions(batch) => send(DocJob::PiQuestions(batch)),
         })
         .map_err(|error| {
@@ -950,17 +950,20 @@ fn prepare_start(
     .with_capability(capability.clone());
     record.user_request = raw_request;
     let log = Arc::new(PiRunLog::open(&workspace, record)?);
-    let tools = Arc::new(PiToolContext::new(
-        config,
-        draft,
-        before.clone(),
-        prompt.clone(),
-        materials
-            .iter()
-            .filter(|material| material.role.is_fact_source())
-            .map(|material| material.text.clone())
-            .collect(),
-    ));
+    let tools = Arc::new(
+        PiToolContext::new(
+            config,
+            draft,
+            before.clone(),
+            prompt.clone(),
+            materials
+                .iter()
+                .filter(|material| material.role.is_fact_source())
+                .map(|material| material.text.clone())
+                .collect(),
+        )
+        .with_api_cache_dir(workspace.run.clone()),
+    );
     Ok(PiLaunch {
         runtime,
         workspace,
@@ -1086,13 +1089,16 @@ fn prepare_resume(
         .with_capability(capability.clone());
         new_record.user_request = record.user_request.clone();
         let log = Arc::new(PiRunLog::open(&workspace, new_record)?);
-        let tools = Arc::new(PiToolContext::new(
-            config,
-            draft,
-            before.clone(),
-            record.request.clone(),
-            material_facts,
-        ));
+        let tools = Arc::new(
+            PiToolContext::new(
+                config,
+                draft,
+                before.clone(),
+                record.request.clone(),
+                material_facts,
+            )
+            .with_api_cache_dir(workspace.run.clone()),
+        );
         // 上一轮用户确认过的回答仍是事实（纯答案值，不含模型题面假设）。
         tools.confirm_answers(&record.answers);
         return Ok(PiLaunch {
@@ -1169,13 +1175,16 @@ fn prepare_resume(
         .chain(restored.iter().flat_map(|text| split_sources(text)))
         .collect();
     let materials = record.materials.clone();
-    let tools = Arc::new(PiToolContext::new(
-        config,
-        draft,
-        before.clone(),
-        record.request.clone(),
-        material_facts,
-    ));
+    let tools = Arc::new(
+        PiToolContext::new(
+            config,
+            draft,
+            before.clone(),
+            record.request.clone(),
+            material_facts,
+        )
+        .with_api_cache_dir(old_workspace.run.clone()),
+    );
     // 已确认回答只重灌纯答案值；「问题：回答」的显示字符串可能含模型题面假设。
     tools.confirm_answers(&record.answers);
     let log = Arc::new(PiRunLog::open_existing(&old_workspace, record.clone())?);

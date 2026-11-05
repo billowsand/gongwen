@@ -369,7 +369,7 @@ impl DraftPage<'_> {
             let kb = RagSearch {
                 enabled: use_rag,
                 rag: config.resolved_rag(),
-                chat: config.draft_chat().unwrap_or_default(),
+                chat: config.aux_chat().unwrap_or_default(),
                 kind_filter,
             };
             let mut batch = Batch::default();
@@ -551,7 +551,7 @@ impl DraftPage<'_> {
             }
         }
         let window =
-            crate::lmstudio::context::peek_window(&self.config.draft_chat().unwrap_or_default())
+            crate::lmstudio::context::peek_window(&self.config.aux_chat().unwrap_or_default())
                 .tokens;
         let plan = history::plan(&self.doc.ai_panel, window, false);
         let board = Board {
@@ -637,7 +637,7 @@ impl DraftPage<'_> {
             return;
         }
         let window =
-            crate::lmstudio::context::peek_window(&self.config.draft_chat().unwrap_or_default())
+            crate::lmstudio::context::peek_window(&self.config.aux_chat().unwrap_or_default())
                 .tokens;
         let Some(compaction) = history::plan(&self.doc.ai_panel, window, true).compact else {
             *self.status = format!(

@@ -4,7 +4,7 @@
 //! 1. **试调**：配置齐了、改过或没试过的接口用样例值试一次，程序给结论（[`diagnose`]）；
 //! 2. **问人**：只有人知道的一次问完——密钥（粘贴，值不给模型看）、服务器地址、样例值、
 //!    判断不了的「只查询吗」、连不上时接没接内网、文档没写的鉴权带法；
-//! 3. **交模型**：路径、方法、参数、请求体、返回映射这类要对照资料改的，交起草模型用工具
+//! 3. **交模型**：路径、方法、参数、请求体、返回映射这类要对照资料改的，交写作模型用工具
 //!    查资料、改配置、再试（[`fix`]），改动由程序逐项核对；
 //! 4. 都调通、都有结论，或者一轮下来毫无进展，就停。
 //!
@@ -733,7 +733,7 @@ impl<'a> Run<'a> {
         let Some(model) = self.model else {
             let item = &mut self.items[index];
             let why = item.verdict.as_ref().map_or(String::new(), Verdict::label);
-            item.state = State::Stuck(format!("{why}（没配起草模型，要按提示手动改配置）"));
+            item.state = State::Stuck(format!("{why}（没配写作模型，要按提示手动改配置）"));
             desk.emit(Event::Item(index, Box::new(item.clone())));
             return false;
         };

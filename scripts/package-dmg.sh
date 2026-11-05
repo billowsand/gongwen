@@ -250,7 +250,7 @@ fi
 # 主可执行文件并尝试签整个 bundle，随包字体 / 许可证资源会被当成嵌套代码，
 # 报 “code object is not signed at all In subcomponent”。
 # 注意：node 不能在这里签——它随后还要按 manifest 校验 SHA-256；签名会改写文件，
-# 校验就过不去。node 的签名放在 verify_pi_runtime 之后、复制进 .app 之前。
+# 校验就过不去。随包 node 保留官方 Developer ID 签名（见下方 PI_DIR 段）。
 if [ -z "${GONGWEN_MACOS_SIGN_IDENTITY:-}" ]; then
     codesign --force --sign - "$STAGE/gongwen-assistant"
     codesign --verify --strict "$STAGE/gongwen-assistant"
@@ -268,14 +268,16 @@ chmod 755 "$MACOS_DIR/gongwen-assistant"
 
 # Pi 运行时显式再落一次：校验 manifest / 哈希 / 可执行位后再复制并 chmod，
 # 避免某些复制方式丢可执行位，运行期才以 EACCES 暴露。
+#
+# 这里**不要**重签 node。Node 官方包自带 Developer ID 签名（hardened runtime + JIT
+# 权限，codesign --verify 通过），重签只会改写文件；而随包 manifest.json 记录的是官方
+# 二进制的体积与 SHA-256，应用启动时 src/pi_agent/runtime.rs 的 verify_bundled 会按
+# manifest 逐项比哈希，文件一变就报「随包 Pi 运行时文件校验失败（bin/node）。请重装。」
+# 智能写作整条链随即不可用。需要 Developer ID 签名时在下面 .app 签名段处理 node，
+# 并在签完后回写 manifest。
 PI_DIR="$STAGE/runtime/pi"
 if [ -f "$PI_DIR/manifest.json" ]; then
     verify_pi_runtime "$PI_DIR"
-    # 校验通过后再签 node（签名会改写文件，必须在哈希校验之后）。
-    if [ -z "${GONGWEN_MACOS_SIGN_IDENTITY:-}" ]; then
-        codesign --force --sign - "$PI_DIR/bin/node"
-        codesign --verify --strict "$PI_DIR/bin/node"
-    fi
     rm -rf "$MACOS_DIR/runtime/pi"
     cp -a "$PI_DIR" "$MACOS_DIR/runtime/pi"
     chmod 755 "$MACOS_DIR/runtime/pi/bin/node"
@@ -292,6 +294,17 @@ fi
 # 的执行位，再恢复真正的可执行文件。
 find "$MACOS_DIR/runtime" -type f -exec chmod a-x {} + 2>/dev/null || true
 [ -f "$MACOS_DIR/runtime/pi/bin/node" ] && chmod 755 "$MACOS_DIR/runtime/pi/bin/node"
+
+# 应用依赖的许可证由本仓库维护，外部 runtime 清单还没列它；Windows 的
+# scripts/package-portable.ps1 与 Linux 的 scripts/stage-linux-portable.sh 都显式补拷，
+# macOS 这里照做——THIRD_PARTY_NOTICES.md 承诺它在 runtime/licenses/NUCLEO-MPL-2.0.txt。
+NUCLEO_LICENSE="$PROJECT_ROOT/runtime/licenses/NUCLEO-MPL-2.0.txt"
+if [ -f "$NUCLEO_LICENSE" ]; then
+    mkdir -p "$MACOS_DIR/runtime/licenses"
+    install -m 644 "$NUCLEO_LICENSE" "$MACOS_DIR/runtime/licenses/"
+else
+    echo "警告：缺少 runtime/licenses/NUCLEO-MPL-2.0.txt，随包许可证不完整" >&2
+fi
 
 # 文档随包进 bundle，DMG 保持纯拖放布局。
 for doc in README.md THIRD_PARTY_NOTICES.md LICENSE; do
@@ -380,20 +393,42 @@ xattr -cr "$APP_BUNDLE" 2>/dev/null || true
 
 if [ -n "$SIGN_IDENTITY" ]; then
     [ -f "$ENTITLEMENTS" ] || die "缺少 entitlements：$ENTITLEMENTS"
-    # 先签 bundle 内的 Node（V8 JIT 权限必须挂在 node 自己身上），再签整个 .app。
-    # 不用 --deep：--deep 不会给嵌套可执行文件单独带 entitlements，也不该用来签
-    # node_modules 之类的资源。
-    echo "==> codesign（Developer ID + hardened runtime）：$SIGN_IDENTITY"
-    codesign --force --options runtime --timestamp \
-        --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" \
-        "$MACOS_DIR/runtime/pi/bin/node"
+    PI_NODE="$MACOS_DIR/runtime/pi/bin/node"
+    if [ -f "$PI_NODE" ]; then
+        # 先签 bundle 内的 Node（V8 JIT 权限必须挂在 node 自己身上），再签整个 .app。
+        # 不用 --deep：--deep 不会给嵌套可执行文件单独带 entitlements，也不该用来签
+        # node_modules 之类的资源。
+        echo "==> codesign（Developer ID + hardened runtime）：$SIGN_IDENTITY"
+        codesign --force --options runtime --timestamp \
+            --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$PI_NODE"
+        codesign --verify --strict "$PI_NODE"
+        # 签名改写了 node，必须把新的体积与 SHA-256 回写进随包 manifest：应用启动时
+        # src/pi_agent/runtime.rs 的 verify_bundled 按 manifest 逐项比哈希，不更新就报
+        # 「随包 Pi 运行时文件校验失败（bin/node）。请重装。」智能写作即不可用。
+        # ad-hoc 路径不重签 node（用官方 Developer ID 签名），因此不需要这一步。
+        "$PI_NODE" -e '
+const fs = require("fs");
+const crypto = require("crypto");
+const dir = process.argv[1];
+const bytes = fs.readFileSync(dir + "/bin/node");
+const manifestPath = dir + "/manifest.json";
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+const entry = (manifest.files || []).find((file) => file.path === "bin/node");
+if (!entry) throw new Error("manifest 缺 bin/node");
+entry.bytes = bytes.length;
+entry.sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+' "$MACOS_DIR/runtime/pi" || die "签名后回写 Pi 运行时 manifest 失败"
+        verify_pi_runtime "$MACOS_DIR/runtime/pi"
+    else
+        echo "警告：没有随包 Pi 运行时，跳过 node 签名与 manifest 回写" >&2
+    fi
     codesign --force --options runtime --timestamp \
         --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" \
         "$APP_BUNDLE"
     # 不要 --deep：随包 runtime 里有些资产（如许可证 txt）带可执行位，
     # --deep 会把它们当嵌套代码要求签名并以 “In subcomponent” 失败。
     codesign --verify --strict --verbose=2 "$APP_BUNDLE"
-    codesign --verify --strict "$MACOS_DIR/runtime/pi/bin/node"
 else
     if [ -n "$NOTARY_PROFILE" ]; then
         die "配置了 GONGWEN_MACOS_NOTARY_PROFILE 但没有 GONGWEN_MACOS_SIGN_IDENTITY；公证必须有 Developer ID 签名"
@@ -444,7 +479,9 @@ if [ -n "$NOTARY_PROFILE" ]; then
         { echo "error: staple 后校验失败：$DMG_PATH" >&2; exit 1; }
 fi
 
+# 校验文件里只写文件名（与 scripts/package-arch-pkg.sh 一致）：写绝对路径的话，
+# 别人下载 .dmg 与 .sha256 后 `shasum -a 256 -c` 会因为路径对不上而失败。
 shasum -a 256 "$DMG_PATH" |
-    awk '{ printf "%s  %s\n", $1, $2 }' >"$DMG_PATH.sha256"
+    awk -v name="$(basename "$DMG_PATH")" '{ printf "%s  %s\n", $1, name }' >"$DMG_PATH.sha256"
 
 echo "Created: $DMG_PATH"

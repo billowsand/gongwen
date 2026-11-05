@@ -456,7 +456,7 @@ impl ApisPage {
     }
 }
 
-/// 后台让起草模型按接口说明编样例。
+/// 后台让写作模型按接口说明编样例。
 fn start_generating(detail: &mut Detail, endpoint: &ApiEndpoint, config: &AppConfig) {
     let (tx, rx) = std::sync::mpsc::channel();
     let endpoint = endpoint.clone();

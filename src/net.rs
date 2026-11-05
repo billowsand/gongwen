@@ -141,6 +141,14 @@ pub fn client(target: &str, timeout_seconds: u64) -> Result<Client> {
     build(&current_proxy(), target, timeout_seconds)
 }
 
+/// 数据接口只能访问用户配置的地址，不能把自定义鉴权头或请求体转发到重定向目标。
+pub(crate) fn api_client(target: &str, timeout_seconds: u64) -> Result<Client> {
+    let builder = Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds.max(5)))
+        .redirect(reqwest::redirect::Policy::none());
+    build_with(&current_proxy(), target, builder)
+}
+
 /// 流式请求的连接超时。连不上就该立刻报，不必等生成上限。
 const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 

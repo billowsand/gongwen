@@ -554,7 +554,10 @@ fn minimap_blocks(
 impl DraftPage<'_> {
     /// 源码模式自己的两列导航；不会改变预览或对照模式的布局。
     /// 返回卡片不透明的部分（扣掉外边距与圆角），外层木纹不必画在它下面。
-    pub(crate) fn source_editor_ui(&mut self, ui: &mut egui::Ui) -> egui::Rect {
+    ///
+    /// `top_gap` 是纸张外框离内容区上沿的桌面缝：平时与左右一样是 `PANE_GAP`，
+    /// 纸签长在纸上沿时传 0，纸面直接顶着纸签脚线，不再留那道空缝。
+    pub(crate) fn source_editor_ui(&mut self, ui: &mut egui::Ui, top_gap: i8) -> egui::Rect {
         self.doc.source_outline.refresh(
             &self.doc.generated_markdown,
             &self.config.numbering,
@@ -584,7 +587,13 @@ impl DraftPage<'_> {
                 .fill(theme::smartisan::PAPER)
                 .stroke(egui::Stroke::NONE)
                 .shadow(theme::paper_shadow(24))
-                .inner_margin(egui::Margin::ZERO);
+                .inner_margin(egui::Margin::ZERO)
+                .outer_margin(egui::Margin {
+                    left: theme::PANE_GAP,
+                    right: theme::PANE_GAP,
+                    top: top_gap,
+                    bottom: theme::PANE_GAP,
+                });
         }
         let panel = egui::CentralPanel::default().frame(card).show(ui, |ui| {
             if show_outline {

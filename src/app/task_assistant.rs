@@ -51,7 +51,7 @@ impl super::GongwenApp {
             if self.task_store.is_none() {
                 bail!("任务数据库不可用");
             }
-            let mut cfg = self.config.assist_chat()?;
+            let mut cfg = self.config.aux_chat()?;
             cfg.temperature = 0.0;
             cfg.max_tokens = cfg.max_tokens.clamp(1024, 4096);
             Ok(cfg)
@@ -249,7 +249,7 @@ impl super::GongwenApp {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("任务数据库不可用"))?;
             let tasks = store.list(false)?;
-            let mut cfg = self.config.assist_chat()?;
+            let mut cfg = self.config.aux_chat()?;
             cfg.temperature = 0.0;
             cfg.max_tokens = cfg.max_tokens.clamp(1024, 8192);
             Ok((tasks, cfg, crate::storage::manuscript_db_path()?))

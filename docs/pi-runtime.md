@@ -280,6 +280,11 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 - 每次写入保留精确的修改前后文本与运行标识（`ai_panel::pi_write::PiWrite`，随会话存盘）：
   卡片上有「撤销本次写入」，并经 `replace_with_undo` 记一个撤销点。编辑器状态按稿件
   隔离；后台标签写入后切回来，也能一次 Ctrl+Z 撤回该稿件的 Pi 写入。
+- **写入前自动版本（2026-11-05）**：正文非空且稿件已入库时，写正文前先自动提交一个
+  「AI 写入前 MM-DD HH:MM」版本（`commit_manuscript_version`），AI 成品再直接覆盖正文；
+  版本历史 / 版本对照负责找回与看差异。正文为空、未入库或与最新提交版相同则不提交；
+  自动版本失败就不写正文，成品留在轮次里。Pi 不再生成「AI 工作稿」预览：候选只报进度，
+  写完后也不保留工作稿副本，旧会话里 Pi 轮次的工作稿状态在载入时收敛。
 - 写入前先确认修改前基线在盘上：工作区的 `input/current.md` 在交付时重新核对（
   `pi_agent::recovery::check_baseline_snapshot`），有库稿件还要先把撤销记录写进会话；
   任一失败就不换正文，成品留在轮次里可显式取回。
@@ -338,6 +343,15 @@ AI 管理 → 技能管理实际提供给 Pi 的标准 SKILL.md，不再编辑�
 用户技能位于配置目录 `pi/skills/<name>/`，停用清单为 `pi/skills-disabled.json`。
 内置技能是只读默认，复制为同名用户副本后可修改，也可恢复内置；旧 `skills/`
 数据保留，不自动转换或执行。公共 `gongwen-markdown` 语法包由程序提供，不能被用户技能覆盖。
+
+### 领域工具（2026-11-05 更新）
+
+常规写作任务可用的域工具：`kb_search` / `kb_read`（知识库）、`ms_search` / `ms_read`（稿件库）、
+`vocab_search`（标准词库）、`current_date`、`check_document`、`doc_elements`、
+`style_list` / `style_read`，以及 **`api_search` / `api_call` / `api_read`**（内网只读数据接口：
+先搜接口、再按参数签名调用，返回条目进证据；长结果用 `api_read` 按 `result_id` 续读，
+缓存会落盘到运行目录，恢复后仍可读）。`api_search` 只列只读且开放给 AI 的接口，
+`api_call` 调用前按 JSON Schema 校验；会改数据的接口一律拒绝。风格任务不注册这些域工具。
 
 ### 内置技能与参考文件（4D）
 
@@ -406,7 +420,7 @@ Pi 增加两个只读领域工具：`style_list`（按当前文种列出启用�
 ## 风格学习的独立文件交付（host 0.3.5）
 
 设置页通过同一 `PiJob` / `run` / Durable Harness 执行 `gongwen-style-learn`，任务文种标识为“风格档案”。
-风格任务只注册文件、阶段登记及 `submit_style`，不注册正文提交、表单、知识库或辅助模型工具。
+风格任务只注册文件、阶段登记及 `submit_style`，不注册正文提交、表单、知识库或写作模型工具。
 程序提供的样稿角色为 `style_sample`，候选范例和统计保存在只读 `input/style-guide.json`。
 
 `submit_style` 校验64 KiB内的JSON、字段上限、候选范例编号和路径，再使用现有不可变文件回执。

@@ -360,7 +360,7 @@ impl SavedTurn {
         let decision = run
             .as_ref()
             .map_or(self.decision, |run| run.suspension.decision.clone());
-        let turn = AiTurn {
+        let mut turn = AiTurn {
             usage_job_seq: None,
             provenance: self.provenance,
             usage: self.usage,
@@ -391,10 +391,15 @@ impl SavedTurn {
             pi_run: self.pi_run,
             pi_write: self.pi_write,
             pi_pending: self.pi_pending,
-            pi_diff: Default::default(),
             started: Instant::now(),
             elapsed: Some(Duration::from_millis(self.elapsed_ms)),
         };
+        // 旧会话里 Pi 写入后曾保留一份「AI 工作稿」；现在正文就是成品，
+        // 读回时收敛掉，避免再冒出「正文 / AI 工作稿」纸签。
+        if turn.pi_write.is_some() {
+            turn.is_workspace = false;
+            turn.content.clear();
+        }
         (turn, proposal)
     }
 }

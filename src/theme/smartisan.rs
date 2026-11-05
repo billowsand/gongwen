@@ -11,6 +11,11 @@ pub const OUTLINE_PAPER: Color32 = Color32::from_rgb(242, 235, 221);
 pub const MINIMAP_PAPER: Color32 = Color32::from_rgb(248, 242, 230);
 /// 纸签短标记采用低饱和赭色，不改变全局正文与按钮的墨色。
 pub const INDEX_MARK: Color32 = Color32::from_rgb(182, 139, 79);
+/// AI 工作稿的校样纸：同一张桌子上比正式稿纸更暖、更灰一档，
+/// 用来区分「未合并的稿」与要落正式正文的稿纸，纸的材质不变。
+pub const PROOF_PAPER: Color32 = Color32::from_rgb(244, 236, 222);
+/// 「未合并」小印章的墨色：低饱和赭，压在校样纸右上角。
+pub const PROOF_STAMP: Color32 = Color32::from_rgba_unmultiplied_const(178, 140, 82, 150);
 
 pub(super) const fn palette() -> Theme {
     let mut theme = Theme::claude();
@@ -110,7 +115,7 @@ pub fn tab_background(painter: &egui::Painter, slot: egui::layers::ShapeIdx, rec
 mod tabs;
 #[cfg(test)]
 pub use tabs::document_tab;
-pub use tabs::{document_tab_to, ribbon_shape, rounded_gradient};
+pub use tabs::{document_tab_to, ribbon_shape, rounded_gradient, sheet_tab};
 
 pub fn chrome(painter: &egui::Painter, rect: Rect) {
     if !active() {
@@ -235,9 +240,53 @@ pub fn bevel(painter: &egui::Painter, rect: Rect, pressed: bool, dark: bool) {
 pub fn manuscript(
     painter: &egui::Painter,
     slot: egui::layers::ShapeIdx,
+    rect: Rect,
+    output: &egui::text_edit::TextEditOutput,
+    numbered: bool,
+) {
+    paint_manuscript(painter, slot, rect, output, numbered, &MANUSCRIPT_INK);
+}
+
+/// AI 工作稿的校样纸横线：比正式稿纸淡一档，左边是一条赭色书脊线。
+pub fn proof_manuscript(
+    painter: &egui::Painter,
+    slot: egui::layers::ShapeIdx,
+    rect: Rect,
+    output: &egui::text_edit::TextEditOutput,
+    numbered: bool,
+) {
+    paint_manuscript(painter, slot, rect, output, numbered, &PROOF_INK);
+}
+
+/// 一种纸面上的稿纸笔画取色（横线、行号槽或书脊线、纤维）。
+struct ManuscriptInk {
+    rule: Color32,
+    gutter_fill: Color32,
+    gutter_line: Color32,
+    fiber: Color32,
+}
+
+const MANUSCRIPT_INK: ManuscriptInk = ManuscriptInk {
+    rule: Color32::from_rgb(237, 227, 214),
+    gutter_fill: Color32::from_rgba_unmultiplied_const(209, 195, 171, 15),
+    gutter_line: Color32::from_rgb(223, 204, 188),
+    fiber: Color32::from_black_alpha(5),
+};
+
+const PROOF_INK: ManuscriptInk = ManuscriptInk {
+    rule: Color32::from_rgb(232, 220, 202),
+    gutter_fill: Color32::from_rgba_unmultiplied_const(198, 164, 120, 10),
+    gutter_line: Color32::from_rgb(198, 164, 120),
+    fiber: Color32::from_black_alpha(4),
+};
+
+fn paint_manuscript(
+    painter: &egui::Painter,
+    slot: egui::layers::ShapeIdx,
     mut rect: Rect,
     output: &egui::text_edit::TextEditOutput,
     numbered: bool,
+    ink: &ManuscriptInk,
 ) {
     if !manuscript_active() {
         return;
@@ -246,18 +295,18 @@ pub fn manuscript(
     let mut shapes = Vec::new();
     let clip = painter.clip_rect();
     let margin_x = output.galley_pos.x - if numbered { 8.0 } else { 12.0 };
-    let line = Stroke::new(0.6, Color32::from_rgb(237, 227, 214));
+    let line = Stroke::new(0.6, ink.rule);
     shapes.push(egui::Shape::rect_filled(
         Rect::from_min_max(rect.min, egui::pos2(margin_x, rect.bottom())),
         0,
-        Color32::from_rgba_unmultiplied(209, 195, 171, 15),
+        ink.gutter_fill,
     ));
     shapes.push(egui::Shape::line_segment(
         [
             egui::pos2(margin_x, rect.top()),
             egui::pos2(margin_x, rect.bottom()),
         ],
-        Stroke::new(0.7, Color32::from_rgb(223, 204, 188)),
+        Stroke::new(0.7, ink.gutter_line),
     ));
     let mut last_y = output.galley_pos.y;
     let mut step = 24.0;
@@ -290,7 +339,7 @@ pub fn manuscript(
                 egui::pos2(x, y),
                 egui::pos2((x + 14.0).min(rect.right()), y),
             ],
-            Stroke::new(0.5, Color32::from_black_alpha(5)),
+            Stroke::new(0.5, ink.fiber),
         ));
         y += 5.0;
     }
