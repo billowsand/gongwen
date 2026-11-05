@@ -409,6 +409,15 @@ impl AppConfig {
         )
     }
 
+    /// 一次性写作模型的备用解析：选了 Pi 就没有旧起草备用语义；旧配置未选 Pi 时，
+    /// 仍可沿用 `draft_backup_model` 兼容旧调用。
+    pub(crate) fn aux_backup_chat(&self) -> Result<Option<LmStudioConfig>, ModelRefError> {
+        if !self.pi_model.is_empty() {
+            return Ok(None);
+        }
+        self.draft_backup_chat()
+    }
+
     pub(crate) fn revise_backup_chat(
         &self,
         assist: bool,

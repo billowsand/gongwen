@@ -128,7 +128,7 @@ pub(crate) struct LmBackend {
 impl LmBackend {
     pub(crate) fn new(config: &AppConfig, cancel: Arc<AtomicBool>) -> Self {
         Self {
-            draft_backup: config.draft_backup_chat(),
+            draft_backup: config.aux_backup_chat(),
             assist_backup: config.assist_backup_chat(),
             notices: Mutex::new(Vec::new()),
             usage: Mutex::new(UsageTotals::default()),
@@ -509,6 +509,7 @@ impl ModelBackend for LmBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{ModelRef, ProviderConfig};
 
     fn backend_for(url: &str, backup: Option<&str>) -> LmBackend {
         let mut config = AppConfig::default();
@@ -523,6 +524,85 @@ mod tests {
             ..config.lm_studio.clone()
         }));
         backend
+    }
+
+    fn provider(id: &str, url: &str) -> ProviderConfig {
+        ProviderConfig {
+            id: id.into(),
+            base_url: url.into(),
+            ..ProviderConfig::default()
+        }
+    }
+
+    #[test]
+    fn auxiliary_backup_uses_pi_semantics_and_preserves_legacy_fallback_only_without_pi() {
+        let mut config = AppConfig {
+            providers: vec![
+                provider("pi", "http://127.0.0.1:1/v1"),
+                provider("old", "http://127.0.0.1:2/v1"),
+            ],
+            pi_model: ModelRef {
+                provider_id: "pi".into(),
+                model: "pi-writing".into(),
+            },
+            draft_backup_model: ModelRef {
+                provider_id: "old".into(),
+                model: "old-backup".into(),
+            },
+            ..Default::default()
+        };
+        assert!(
+            config.aux_backup_chat().unwrap().is_none(),
+            "Pi 不继承旧起草备用"
+        );
+
+        config.draft_backup_model.provider_id = "missing".into();
+        assert!(
+            config.aux_backup_chat().unwrap().is_none(),
+            "Pi 配置不受失效旧备用影响"
+        );
+
+        config.pi_model = ModelRef::default();
+        config.draft_backup_model = ModelRef {
+            provider_id: "old".into(),
+            model: "old-backup".into(),
+        };
+        let legacy = config.aux_backup_chat().unwrap().unwrap();
+        assert_eq!(legacy.model, "old-backup");
+        assert_eq!(legacy.base_url, "http://127.0.0.1:2/v1");
+        config.draft_backup_model.provider_id = "missing".into();
+        assert!(
+            config.aux_backup_chat().is_err(),
+            "无 Pi 的旧配置保留备用解析错误"
+        );
+    }
+
+    #[test]
+    fn failed_pi_primary_does_not_contact_the_old_draft_backup() {
+        let primary = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let primary_url = format!("http://{}/v1", primary.local_addr().unwrap());
+        drop(primary);
+        let standby = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        standby.set_nonblocking(true).unwrap();
+        let standby_url = format!("http://{}/v1", standby.local_addr().unwrap());
+        let mut config = AppConfig::default();
+        config.lm_studio.context_window = 32_000;
+        config.providers = vec![provider("pi", &primary_url), provider("old", &standby_url)];
+        config.pi_model = ModelRef {
+            provider_id: "pi".into(),
+            model: "pi-writing".into(),
+        };
+        config.draft_backup_model = ModelRef {
+            provider_id: "old".into(),
+            model: "old-backup".into(),
+        };
+        let backend = LmBackend::new(&config, Arc::new(AtomicBool::new(false)));
+        assert!(
+            backend
+                .complete(ModelRole::Draft, "system", "user", &mut |_| {})
+                .is_err()
+        );
+        assert!(standby.accept().is_err(), "旧起草备用服务不应收到 Pi 任务");
     }
 
     fn answer(text: &str) -> String {
