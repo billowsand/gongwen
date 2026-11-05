@@ -212,7 +212,7 @@ revise_chat() 第一行就是 draft_chat()?（config.rs:314）
 | P2 | 数据接口只读工具进 Pi（api_search / api_call + 授权 + 证据 + 技能指引） | 已完成 |
 | P3 | 收尾：文档、全量回归、旧引擎退役边界说明 | 已完成 |
 
-旧引擎整体删除（原 P4）依赖 5E 退役门槛，不在本次范围；旧会话继续只读兼容。
+旧引擎整体删除（原 P4）依赖 5E 退役门槛，不在本次范围。旧写作页保留只读查看/导出/复制；旧侧栏检查点在过渡期仍可“接着跑/从这里重跑”，不能概括为全部旧会话只读。当前进度见 [Pi 现状索引](pi-current-status.md)。
 
 
 ## 九、实施记录（2026-11-05）
@@ -234,7 +234,7 @@ revise_chat() 第一行就是 draft_chat()?（config.rs:314）
 （一次性调用改 `aux_chat`）、`src/element_fields.rs`（保留登记表、写值、旧会话回答落地）。
 
 **后续（不在本次范围）**：
-1. 旧 `agent` 引擎整体退役仍按 5E 门槛执行；旧会话继续只读兼容，`draft_model` / 备用模型字段保留。
+1. 旧 `agent` 引擎整体退役仍按 5E 门槛执行；旧写作页只读，旧侧栏检查点仍可恢复执行，`draft_model` / 备用模型字段保留。2026-11-05 退役审查发现新接口 AI 调用的备用分支仍引用旧起草备用，后续收尾与实际验证见 [收尾记录](pi-implementation/retirement-fixes-2026-11-05.md)。
 2. Pi host 源码已改，发布前需按 `docs/pi-runtime.md` 重建随包 `runtime/pi` 并跑
    `shipped_pi_runtime_manifest` 验收。
 3. 真实内网接口的 `api_search` / `api_call` 联调（接口数量、参数 schema、证据可用性）待真机验证。

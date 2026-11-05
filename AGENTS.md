@@ -97,6 +97,16 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 
 ## 进行中的工作
 
+- **智能体改造现状与退役收尾（2026-11-05）**：权威进度入口见 `docs/pi-current-status.md`，
+  全面审查见 `docs/ai-agent-retirement-audit-2026-11-05.md`，本轮修复与实际验证见
+  `docs/pi-implementation/retirement-fixes-2026-11-05.md`。新任务已统一 Pi；旧写作页只读，
+  旧侧栏检查点在 5D/5E 门槛通过前仍可恢复执行。不要把历史报告中的待办当作当前需求，
+  也不要整目录删除仍含 API 共享服务的 `src/agent/`。旧 DSL 第 5 期、goto/loop/子图与
+  固定决策流程不再继续实现，新任务使用 Pi 阶段/预算/提问。
+  本轮额度/备用模型/共享依赖已修复，孤立旧管理器已清理；host 0.3.6、协议 3，
+  Windows 运行时已重建并验收。Rust 2896 通过/89 忽略、Node 121 通过/1 跳过；
+  真实模型与目标机门槛仍未通过，不据此删除旧历史执行链。
+
 - **版本变更与花脸稿改造**（Zed 式 diff + 花脸稿预览，分五期）：方案见
   `docs/version-diff-redesign.md`，进度、与方案的出入、下一步和已知坑见
   `docs/version-diff-handoff.md`。接手这项工作前先读这两份；每完成一期更新交接说明。

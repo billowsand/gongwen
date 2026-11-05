@@ -18,15 +18,19 @@
 
 ## 案例
 
+当前 `cases.json` 为 11 例，历史政策核查例已移除。
+
 | 名称 | 考什么 |
 | --- | --- |
 | `draft-from-material` | 按会议纪要起草通知，保留材料里的时间、数字与单位 |
 | `condense-selection` | 只改选区、按字数精简，任务 / 责任单位 / 时限不丢，选区外逐字不变 |
 | `reply-unknown-stance` | 复函：主送认来函落款、逐项答复、用户没给意见的事项不替用户表态 |
 | `material-conflict` | 两份材料时限冲突：两个值都留下并标待核实，不悄悄二选一 |
-| `policy-source-missing` | 政策依据核对：知识库没有原文时必须说「未找到原文」，不得说已核实 |
 | `extract-only` | 只提炼要点：走 `finish_report`，不改正文 |
 | `research-sources` | 研究报告：关键判断有出处、不编文献（没有文献库时不写 `[@key]`） |
+| `date-and-person` | 按任务日期理解相对时间，同名人员按所属单位区分，不编造事项发生日 |
+| `whole-document-large` | 整篇材料的任务、责任与期限保持；不冒充 20 万汉字压力测试 |
+| `style-learning` | 独立风格 JSON 交付，合法字段、候选范例与回执验证，不写正文 |
 | `style-apply` | 按风格档案写法成文，风格/样稿里的单位、日期、数字不得搬进正文 |
 | `phased-multi-source` | 强制分阶段：两份事实材料逐块提炼、提纲、逐节、合稿，最后只交一份完整成品；宿主核对 `progress.json` 登记与引文 |
 
@@ -34,7 +38,7 @@
 
 `cases.json` 里每个案例的 `expect` 分三类：
 
-- `delivery`：`document`（必须 `submit_document`）、`report`（必须 `finish_report`）。
+- `delivery`：`document`（必须 `submit_document`）、`report`（必须 `finish_report`）、`style`（必须 `submit_style`，独立 JSON）。
 - `strategy`：可选 `"phased"`。带这个字段的案例会向 host 传显式分阶段倾向，并额外核对
   `strategy` 事件、`progress.json` 里的材料 / 提纲 / 章节 / 合稿登记；不能只看最终提交。
 - 技术判据（脚本自动、对所有案例）：进程正常退出、`completed` 事件、回执与哈希、
