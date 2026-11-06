@@ -552,6 +552,11 @@ jobs:
     name: Publish GitHub release
     needs:
       [build-windows, build-macos-arm64, package-linux-arm64, verify-deb, build-linux-x86_64-arch, verify-arch-pkg]
+    # macOS arm64 的托管 runner 常年紧张：拿不到 runner 时该作业会被直接取消
+    # （"The job was not acquired by Runner of type hosted"）。磁盘映像是可选资产，
+    # 不让它挡住发布——核心三件套（Windows 安装程序、deb、pacman 包）缺任何一个
+    # 才中止，并在日志里点名缺了什么。
+    if: always() && !cancelled()
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -568,6 +573,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          cd release-assets
+          missing=0
+          for pattern in 'gongwen-assistant-*-win-x64-setup.exe' \
+                         'gongwen-assistant_*_arm64.deb' \
+                         'gongwen-assistant-*-x86_64.pkg.tar.zst'; do
+            if ! compgen -G "$pattern" > /dev/null; then
+              echo "::error::缺少必需资产：$pattern"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          if ! compgen -G 'gongwen-assistant-*-macos-arm64.dmg' > /dev/null; then
+            echo "::warning::macOS 磁盘映像没构建成功（托管 runner 紧张），本次发布不含该资产"
+          fi
           # 版本更新说明随源码一起提交，发布时直接取用。
           # --generate-notes 产出的正文只有一行 changelog 链接，等于什么都没写，
           # 只在缺说明文件时兜底，并且会在工作流里留一条告警。
@@ -579,7 +600,6 @@ jobs:
             echo "::warning::缺少 docs/release-notes/${GITHUB_REF_NAME}.md，本次回退到自动生成的说明"
             create_args=(--title "$title" --generate-notes)
           fi
-          cd release-assets
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" ./* --repo "$GITHUB_REPOSITORY" --clobber
             # 重跑时把标题和说明一并刷新，免得留着上一次的占位正文。

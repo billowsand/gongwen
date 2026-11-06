@@ -642,23 +642,33 @@ mod tests {
             })
             .shapes
         };
-        // 首帧交给后台解码，等解码完再排。
+        let metrics = Metrics::research(1000.0, Some(1.0));
+        let expected = metrics.content * 0.8;
+        // 首帧交给后台解码，等解码完再排。解码没好之前那几帧按公文的排法先占着：
+        // 图被画成整版心宽（见 `figure_block` 里的 else 分支），不是定宽档。
+        // 所以这里只认定宽档的那一帧，别把占位矩形当成结果。
         let mut figure = None;
-        for _ in 0..20 {
+        let mut last_seen = None;
+        for _ in 0..60 {
             let shapes = frame();
-            figure = flatten(&shapes).into_iter().find_map(|shape| match shape {
+            let candidate = flatten(&shapes).into_iter().find_map(|shape| match shape {
                 // `Image::paint_at` 画成带纹理笔刷的矩形。
                 egui::epaint::Shape::Rect(rect) if rect.brush.is_some() => Some(rect.rect),
                 _ => None,
             });
-            if figure.is_some() {
-                break;
+            if let Some(rect) = candidate {
+                last_seen = Some(rect);
+                if (rect.width() - expected).abs() < 1.0 {
+                    figure = Some(rect);
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let _ = std::fs::remove_file(&path);
-        let figure = figure.expect("图片应在几帧内解码画出");
-        let metrics = Metrics::research(1000.0, Some(1.0));
+        let figure = figure.unwrap_or_else(|| {
+            panic!("图片应在几帧内解码画出并按 0.8 档定宽：{last_seen:?}，版心 {}", metrics.content)
+        });
         assert!(
             (figure.width() - metrics.content * 0.8).abs() < 1.0,
             "方图应占版心宽 0.8：{figure:?}，版心 {}",
