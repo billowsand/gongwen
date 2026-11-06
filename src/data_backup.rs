@@ -1848,10 +1848,12 @@ mod tests {
         ] {
             write(dir.path(), rel, b"x");
         }
+        // 相对路径里的分隔符随平台：Windows 上遍历出来的是 `logs\xxx.log`，
+        // 统一成 `/` 再比对，否则这个用例只在类 Unix 平台成立。
         let seen: Vec<String> = collect_validation_files(dir.path())
             .unwrap()
             .into_iter()
-            .map(|rel| rel.to_string_lossy().into_owned())
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
             .collect();
         for rel in [
             "logs/crash-20260101-000000.log",
