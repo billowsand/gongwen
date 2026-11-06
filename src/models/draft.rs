@@ -348,6 +348,16 @@ pub struct ExportSelection {
     pub receipt: bool,
     /// 旧配置兼容字段；导出现在始终覆盖同名文件。
     pub overwrite: bool,
+    /// 导出 PDF 时叠加印制追溯码，默认关闭；与收文单位无关。
+    pub print_trace: PrintTraceConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrintTraceConfig {
+    pub enabled: bool,
+    /// 本机登记的印制单位，不从主送、抄送或发文单位推断。
+    pub unit: String,
 }
 
 /// 打印对话框记住的选择。
@@ -384,6 +394,7 @@ impl Default for ExportSelection {
             typst: false,
             receipt: false,
             overwrite: true,
+            print_trace: PrintTraceConfig::default(),
         }
     }
 }

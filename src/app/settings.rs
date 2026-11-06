@@ -1806,6 +1806,7 @@ impl GongwenApp {
         )
         .on_hover_text("不勾选则只出稿，什么时候导出完全由你决定");
         ui.label("同一稿件使用固定目录，同名文件直接替换");
+        self.print_trace_settings_ui(ui);
     }
 
     /// 加密传输单（《传发任务单》）的默认填写内容。

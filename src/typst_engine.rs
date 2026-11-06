@@ -469,6 +469,34 @@ pub fn compile(job: &TypstJob, set: &FontSet) -> Result<TypstOutcome> {
     })
 }
 
+/// 使用固定模板与内存资源编译独立透明印制标识。
+pub(crate) fn compile_print_trace(unit: &str, code: &str, svg: Vec<u8>) -> Result<Vec<u8>> {
+    let set = font_set(&FontConfig::default())?;
+    let data = serde_json::json!({
+        "unit": unit.trim(), "code": code, "font": set.families.page_number,
+    })
+    .to_string();
+    let files = HashMap::from([("/trace.svg".into(), svg)]);
+    let mut world = GongwenWorld::with_template(
+        &set,
+        data,
+        Path::new("."),
+        Template::Official,
+        &files,
+        false,
+    );
+    world.main_source = Source::new(
+        world.main,
+        include_str!("../assets/typst/print-trace.typ").into(),
+    );
+    let (document, _) = layout(&world)?;
+    if document.pages().len() != 1 {
+        bail!("印制追溯标识必须只有一页");
+    }
+    typst_pdf::pdf(&document, &typst_pdf::PdfOptions::default())
+        .map_err(|errors| anyhow::anyhow!("印制追溯标识导出失败：{errors:?}"))
+}
+
 /// 使用导出时的完整排版结果数物理页；不生成 PDF，也不写输出文件。
 pub(crate) fn page_count(job: &TypstJob, set: &FontSet) -> Result<usize> {
     let world = GongwenWorld::with_template(

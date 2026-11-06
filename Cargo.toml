@@ -102,6 +102,7 @@ uuid = { version = "1.24", features = ["v4"] }
 zip = "8.6"
 # 锁屏与密钥派生的缓冲清零（argon2 已带，这里直接引用其 trait）。
 zeroize = "1"
+datamatrix = "0.3.3"
 
 [target.'cfg(windows)'.dependencies]
 # 应用内打印走原生 GDI：不依赖任何第三方 PDF 软件注册 print 谓词。

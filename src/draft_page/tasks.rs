@@ -81,11 +81,13 @@ fn render_export_to(
     target: &Path,
 ) -> anyhow::Result<crate::app::widgets::ExportOutcome> {
     let temp = tempfile::tempdir()?;
+    let mut selection = kind.selection(true, false);
+    selection.print_trace = config.export.print_trace.clone();
     let mut outcome = export_and_compile(
         temp.path(),
         input,
         markdown,
-        &kind.selection(true, false),
+        &selection,
         &config.vocabulary,
         &config.fonts,
         &config.numbering,
@@ -149,10 +151,11 @@ impl DraftPage<'_> {
 
     fn request_export(
         &mut self,
-        selection: ExportSelection,
+        mut selection: ExportSelection,
         open: Option<ExportKind>,
         print: bool,
     ) {
+        selection.print_trace = self.config.export.print_trace.clone();
         if self.doc.busy || self.doc.generated_markdown.trim().is_empty() || !selection.any() {
             // 沿用原入口的错误提示，不为不会启动的任务弹风险框。
             self.start_confirmed_export(selection, open, print);

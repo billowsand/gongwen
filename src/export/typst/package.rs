@@ -594,6 +594,7 @@ mod tests {
     fn export_artifacts_names_the_package_and_keeps_warnings() {
         let temp = tempfile::tempdir().unwrap();
         let selection = crate::models::ExportSelection {
+            print_trace: Default::default(),
             markdown: false,
             docx: false,
             pdf: false,
@@ -641,6 +642,7 @@ mod tests {
         let fonts = crate::models::FontConfig::default();
         let numbering = NumberingConfig::default();
         let mut selection = crate::models::ExportSelection {
+            print_trace: Default::default(),
             markdown: true,
             docx: false,
             pdf: false,

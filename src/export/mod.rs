@@ -9,6 +9,7 @@ pub(crate) mod caption;
 mod docx;
 pub(crate) mod element_display;
 pub(crate) mod minutes;
+pub(crate) mod print_trace;
 pub(crate) mod research;
 mod research_theme;
 pub(crate) mod table;
@@ -435,6 +436,9 @@ pub(crate) fn export_artifacts(
     // 一个稿件一个固定目录；历史 overwrite 配置不再改变导出行为。
     let export_stem = document_stem_prefix(input, &title);
     let receipt = selection.receipt && input.kind == TemplateKind::OfficialLetter;
+    if selection.pdf || receipt {
+        selection.print_trace.validate()?;
+    }
     let file_stem = export_file_stem(input, &title, version_name, "")?;
     fs::create_dir_all(output_dir)
         .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
@@ -559,6 +563,12 @@ pub(crate) fn export_artifacts(
             &mut compile_error,
         );
         sheet_outputs = sheets;
+    }
+    if selection.print_trace.enabled && (selection.pdf || receipt) {
+        print_trace::stamp_outputs(&files, &selection.print_trace, input, markdown)?;
+        if let Some(main) = typst.as_mut().filter(|main| !main.pdf.is_empty()) {
+            main.pdf = fs::read(document_dir.join(format!("{file_stem}.pdf")))?;
+        }
     }
     if !files.is_empty() {
         naming::record_outputs(
@@ -1899,6 +1909,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let input = DraftInput::default();
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: true,
             docx: false,
             pdf: false,
@@ -1942,6 +1953,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let input = DraftInput::default();
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: true,
             docx: false,
             pdf: false,
@@ -1977,6 +1989,7 @@ mod tests {
         input.research.institution = "测试单位".into();
         input.research.bibliography_content = "@book{demo, title={示例}}".into();
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: true,
             docx: false,
             pdf: false,
@@ -2016,6 +2029,7 @@ mod tests {
         let input = DraftInput::default();
         let markdown = "# 关于开展测试工作的函\n\n正文。\n";
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: true,
             docx: false,
             pdf: false,
@@ -2136,6 +2150,7 @@ mod tests {
         input.profile.department_code = "某办函".into();
         input.date = "2026年11月6日".into();
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: true,
             docx: true,
             pdf: false,
@@ -2192,6 +2207,7 @@ mod tests {
             ..Default::default()
         };
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: true,
             docx: true,
             pdf: false,
@@ -2238,6 +2254,7 @@ mod tests {
         };
         let markdown = format!("# {title}\n\n正文保留。\n");
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: true,
             docx: true,
             pdf: false,
@@ -2300,6 +2317,7 @@ mod tests {
         };
         input.profile.department_code = "机关代字".repeat(20);
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: false,
             docx: true,
             pdf: false,
@@ -2511,6 +2529,7 @@ mod tests {
         // 默认关闭：不生成签收单。
         assert!(!ExportSelection::default().receipt);
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: false,
             docx: true,
             pdf: false,
@@ -2536,6 +2555,7 @@ mod tests {
 
         // 只勾签收单（没有主格式）不算要导出。
         let only_receipt = ExportSelection {
+            print_trace: Default::default(),
             markdown: false,
             docx: false,
             pdf: false,
@@ -2555,6 +2575,7 @@ mod tests {
             ..Default::default()
         };
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: false,
             docx: true,
             pdf: false,
@@ -2592,6 +2613,7 @@ mod tests {
         input.profile.issuing_unit = "某某市民政局".into();
         input.profile.recipient = "甲单位".into();
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: false,
             docx: false,
             pdf: true,
@@ -2631,6 +2653,7 @@ mod tests {
         input.profile.recipient = "甲单位、乙单位".into();
         input.profile.copies_to = "丙单位".into();
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: false,
             docx: false,
             pdf: true,
@@ -2697,6 +2720,7 @@ mod tests {
         input.profile.issuing_unit = "某某市民政局".into();
         input.profile.recipient = "甲单位、乙单位".into();
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: false,
             docx: false,
             pdf: true,
@@ -2753,6 +2777,7 @@ mod tests {
         input.profile.issuing_unit = "某某市民政局".into();
         input.profile.recipient = "甲单位".into();
         let selection = ExportSelection {
+            print_trace: Default::default(),
             markdown: false,
             docx: true,
             pdf: false,

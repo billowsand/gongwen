@@ -133,6 +133,7 @@ impl ExportKind {
     /// 不含签收单（包里只有公文模板与数据），所以不继承。
     pub(crate) fn selection(self, overwrite: bool, receipt: bool) -> ExportSelection {
         ExportSelection {
+            print_trace: Default::default(),
             markdown: false,
             docx: self == Self::Word,
             pdf: self == Self::Pdf,

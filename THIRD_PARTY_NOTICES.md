@@ -257,3 +257,8 @@ Python 或全局 Pi：
 
 组装脚本只从官方地址下载（或使用构建机缓存），先校验固定 SHA-256 再解包；不把 npm 缓存、
 测试工作区、密钥或开发工具打进安装包。项目整体仍按 GPL-3.0-or-later 分发。
+## datamatrix
+
+印制追溯码使用 `datamatrix` 0.3.3（MIT OR Apache-2.0）生成标准长方形 Data Matrix ECC 200；运行时完全离线。
+
+- 项目：<https://github.com/jannschu/datamatrix-rs>

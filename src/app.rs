@@ -43,6 +43,7 @@ mod manuscript_ui;
 pub(crate) mod output_guard;
 mod pi_jobs;
 mod pi_skill_manager;
+mod print_trace_settings;
 mod printing;
 mod proofread_ui;
 mod provider_settings;

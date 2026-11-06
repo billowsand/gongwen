@@ -22,6 +22,7 @@ pub(crate) mod ai_checkpoints;
 pub(crate) mod ai_sessions;
 pub(crate) mod candidates;
 pub(crate) mod merge;
+pub(crate) mod print_trace;
 pub(crate) mod registry;
 mod search;
 pub(crate) mod send_package;
@@ -420,6 +421,7 @@ impl ManuscriptStore {
         sync::migrate(&mut self.conn)?;
         // 送批材料：同样幂等建表，不单开档位。
         send_package::ensure_schema(&self.conn)?;
+        print_trace::ensure_schema(&self.conn)?;
         Ok(())
     }
 

@@ -32,6 +32,7 @@ pub(crate) use draft::LeaderReading;
 pub(crate) use draft::ManuscriptStatus;
 pub(crate) use draft::PhoneRecordMetadata;
 pub(crate) use draft::PrintConfig;
+pub(crate) use draft::PrintTraceConfig;
 pub(crate) use draft::PrinterPrefs;
 pub(crate) use draft::ResearchMetadata;
 pub(crate) use draft::ResearchPalette;

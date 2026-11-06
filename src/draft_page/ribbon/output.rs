@@ -74,6 +74,7 @@ impl DraftPage<'_> {
             .clicked()
         {
             self.start_export_with(ExportSelection {
+                print_trace: Default::default(),
                 markdown: true,
                 docx: false,
                 pdf: false,
