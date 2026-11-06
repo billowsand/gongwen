@@ -2221,7 +2221,7 @@ mod tests {
         ))
         .write_to(&mut cursor, image::ImageFormat::Png)
         .unwrap();
-        std::fs::write(&img_path, cursor.into_inner()).unwrap();
+        crate::images::write_image_file(&img_path, &cursor.into_inner()).unwrap();
         let src = format!("images/{name}");
         let metrics = Metrics::new(1000.0, Some(1.0));
         let raw = egui::RawInput {
@@ -2248,7 +2248,7 @@ mod tests {
         });
         // 后台线程解码需要时间与后续帧推进；等解码完成后重查。
         std::thread::sleep(std::time::Duration::from_millis(500));
-        let uri = format!("bytes://{src}");
+        let uri = format!("bytes://{src}@{}", crate::images::stamp(&src));
         let mut result = ctx.try_load_texture(
             &uri,
             egui::TextureOptions::default(),
@@ -2294,7 +2294,7 @@ mod tests {
         ))
         .write_to(&mut cursor, image::ImageFormat::Png)
         .unwrap();
-        std::fs::write(&img_path, cursor.into_inner()).unwrap();
+        crate::images::write_image_file(&img_path, &cursor.into_inner()).unwrap();
         let src = format!("images/{name}");
         let markdown = format!("# 关于测试的函\n\n正文。\n\n![示意图]({src})\n\n特此函告。");
         let input = draft(TemplateKind::OfficialLetter);
@@ -2322,7 +2322,7 @@ mod tests {
             });
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
-        let uri = format!("bytes://{src}");
+        let uri = format!("bytes://{src}@{}", crate::images::stamp(&src));
         let result = ctx.try_load_texture(
             &uri,
             egui::TextureOptions::default(),
@@ -2362,11 +2362,11 @@ mod tests {
         ))
         .write_to(&mut cursor, image::ImageFormat::Png)
         .unwrap();
-        std::fs::write(&img_path, cursor.into_inner()).unwrap();
+        crate::images::write_image_file(&img_path, &cursor.into_inner()).unwrap();
         let src = format!("images/{name}");
         let markdown = format!("# 关于测试的函\n\n正文。\n\n![示意图]({src})\n\n特此函告。");
         let input = draft(TemplateKind::OfficialLetter);
-        let uri = format!("bytes://{src}");
+        let uri = format!("bytes://{src}@{}", crate::images::stamp(&src));
         let mut states = Vec::new();
         for frame in 0..4 {
             let full = crate::test_support::run_ui(

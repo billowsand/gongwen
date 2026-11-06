@@ -255,18 +255,15 @@ impl ResearchSourceBundle {
             {
                 continue;
             }
-            let Ok(source) = crate::images::resolve_from_base(base_dir, &path) else {
-                continue;
-            };
-            if !source.is_file() {
+            // 插图可能已在稿件库的资源表里（逻辑引用 `images/<uuid>`），存在性与
+            // 字节都走图片资源层；外部基准目录与旧文件回退磁盘。缺图跳过，
+            // 读失败（解密失败、超过上限）中止。
+            if !crate::images::exists_from_base(base_dir, &path) {
                 continue;
             }
-            let bytes = crate::images::read_managed_file_limited(
-                &source,
-                crate::file_limits::MAX_IMAGE_BYTES
-                    .min((crate::file_limits::MAX_RESEARCH_RESOURCE_BYTES - resource_bytes) as u64),
-                "研究报告插图",
-            )?;
+            let limit = crate::file_limits::MAX_IMAGE_BYTES
+                .min((crate::file_limits::MAX_RESEARCH_RESOURCE_BYTES - resource_bytes) as u64);
+            let bytes = crate::images::read_limited_from_base(base_dir, &path, limit)?;
             resource_bytes += bytes.len();
             resources.insert(path.to_string(), bytes);
         }

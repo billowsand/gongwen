@@ -22,12 +22,17 @@ use merman_render::text::{TextMetrics, TextStyle, WrapMode};
 use resvg::{tiny_skia, usvg};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// 警告 sidecar 的体积上限：正常只有一两百字节，读到超限说明不是我们写的。
 const MAX_WARNING_BYTES: u64 = 64 * 1024;
+
+/// 资源库里最多保留多少条图表缓存（图 + 警告各占一条）。缓存进库后没有
+/// 「一图一文件」的自然上限，超过就按新近程度裁掉旧条目，下次用到再重渲染。
+const MAX_CACHE_ENTRIES: usize = 512;
 /// 配色、字体、画布算法或引擎版本变了都要改这里，旧缓存随之失效。
 const STYLE_VERSION: &str = "gongwen-mermaid-v10/merman-0.7";
 
@@ -600,24 +605,12 @@ fn size_warning(style: Style, placed: Placement) -> Option<String> {
     })
 }
 
-/// 缓存相对路径（正文里写的 `mermaid-cache/<name>`）→ 磁盘物理路径。
+/// 警告与图共用同一条逻辑引用，另存一份文本资源（`mermaid-cache/<sha>.warning`）。
 ///
-/// **所有缓存读写都必须经过这里**，不要在调用点直接 `base.join(relative)`：
-/// 应用锁把缓存目录按槽位隔离（真实槽 `mermaid-cache/`、诱饵槽 `alt-mermaid-cache/`），
-/// 而且 `base` 等于当前配置目录时才算槽位命名空间内——样张、测试传进来的临时
-/// base 保持普通目录，不参与槽位映射。解析规则与图片共用一份，
-/// 见 [`crate::images::resolve_from_base`]。
-fn cache_path(base: &Path, relative: &str) -> Result<PathBuf> {
-    crate::images::resolve_from_base(base, relative)
-}
-
-/// 与缓存图同名的警告 sidecar 物理路径（`xxx.png` → `xxx.warning.txt`）。
-fn warning_path(base: &Path, relative: &str) -> Option<PathBuf> {
-    Some(
-        cache_path(base, relative)
-            .ok()?
-            .with_extension("warning.txt"),
-    )
+/// 新缓存进资源库后没有物理「同名文件」可用，警告必须走独立逻辑引用；旧的
+/// `with_extension("warning.txt")` 写法已删除。
+fn warning_reference(relative: &str) -> String {
+    format!("{relative}.warning")
 }
 
 pub(crate) fn cached_warning(path: &str) -> Option<String> {
@@ -625,15 +618,10 @@ pub(crate) fn cached_warning(path: &str) -> Option<String> {
 }
 
 fn warning_at(base: &Path, path: &str) -> Option<String> {
-    warning_text(&warning_path(base, path)?)
-}
-
-/// 警告也是应用管理的资源：加密工作区里是密文，读不到或不是 UTF-8 一律当没有
-/// 警告（缺一行提示比把密文当文字显示好）。
-fn warning_text(path: &Path) -> Option<String> {
     let bytes =
-        crate::images::read_managed_file_limited(path, MAX_WARNING_BYTES, "Mermaid 图表警告")
+        crate::images::read_limited_from_base(base, &warning_reference(path), MAX_WARNING_BYTES)
             .ok()?;
+    // 读不到或不是 UTF-8 一律当没有警告（缺一行提示比把乱码当文字显示好）。
     String::from_utf8(bytes)
         .ok()
         .filter(|text| !text.is_empty())
@@ -1085,27 +1073,67 @@ fn failures() -> &'static Mutex<HashMap<String, String>> {
     FAILURES.get_or_init(Mutex::default)
 }
 
+/// 一张图的缓存逻辑引用：`mermaid-cache/<sha256>`。
+///
+/// 配色、文种、格式（PNG/PDF）与源码都并入哈希，文件名是纯 sha256 十六进制、
+/// 不带扩展名——格式由资源库按魔数记录，正文里的引用也不再暴露「这是哪种图」。
 fn cache_relative(source: &str, style: Style, theme: DiagramTheme, format: Format) -> String {
     let mut hash = Sha256::new();
     for part in [
         STYLE_VERSION,
         &format!("{style:?}"),
         &format!("{theme:?}"),
+        format.extension(),
         source,
     ] {
         hash.update(part);
         hash.update([0]);
     }
     let digest = hash.finalize();
-    let name = format!(
-        "gongwen-mermaid-canvas-{}.{}",
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-        format.extension()
-    );
+    let name = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     format!("{MERMAID_CACHE_DIR}/{name}")
+}
+
+/// `base` 是不是当前配置目录：只有它属于资源库与槽位命名空间。
+fn is_config_base(base: &Path) -> bool {
+    crate::storage::config_dir().is_ok_and(|dir| dir == base)
+}
+
+/// 外部基准目录（样张 / 测试）的缓存写入：资源库只服务当前配置目录，
+/// 这里按普通文件写，读侧 `exists_from_base` / `read_limited_from_base`
+/// 会同样回退到文件，引用仍是 `mermaid-cache/...`。
+fn store_cache_file(base: &Path, logical: &str, bytes: &[u8]) -> Result<()> {
+    let path = crate::images::resolve_from_base(base, logical)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("无法创建图表缓存目录 {}", parent.display()))?;
+    }
+    crate::images::write_disposable_managed_file(&path, bytes)
+        .with_context(|| format!("无法写入 Mermaid 图：{}", path.display()))
+}
+
+/// 写一份图表缓存：配置目录基准进资源库（与正文/插图同一套加密、去重），
+/// 外部基准目录回退成普通文件。`text` 为真时按文本资源写（图表警告）。
+fn store_cache(
+    base: &Path,
+    logical: &str,
+    original_name: &str,
+    text: bool,
+    bytes: &[u8],
+) -> Result<()> {
+    if is_config_base(base) {
+        let result = if text {
+            crate::images::store_text_at(logical, original_name, bytes)
+        } else {
+            crate::images::store_at(logical, original_name, bytes)
+        };
+        result.with_context(|| format!("无法写入 Mermaid 图表缓存：{logical}"))
+    } else {
+        store_cache_file(base, logical, bytes)
+    }
 }
 
 fn cache_at(
@@ -1117,11 +1145,9 @@ fn cache_at(
 ) -> Result<String> {
     let theme = resolve(theme, style);
     let relative = cache_relative(source, style, theme, format);
-    let path = cache_path(base, &relative)?;
-    // 加密工作区里缓存是密文：文件还在、但用当前槽位密钥解不开（换槽、换密钥、
-    // 未解锁）一律算未命中，重新渲染并覆盖写。只看 `path.is_file()` 会把错槽的
-    // 密文当命中，预览于是显示一张打不开的图。
-    if crate::images::read_managed_file(&path).is_ok() {
+    // 命中只看资源是否存在（库别名或旧文件回退）；内容由资源库按当前密钥读，
+    // 换槽、换密钥后旧引用本来就不在本槽库里。
+    if crate::images::exists_from_base(base, &relative) {
         return Ok(relative);
     }
     let lock = || {
@@ -1144,16 +1170,21 @@ fn cache_at(
             return Err(error);
         }
     };
-    // 图与警告都按应用管理的资源写：有密钥时 AEAD 密封，原子替换并限制为 0600。
-    // 暂存与改名由 `write_managed_file` 内部完成，预览线程与导出线程同时生成同一张
-    // 图也不会读到写了一半的文件。
-    crate::images::write_disposable_managed_file(
-        &path.with_extension("warning.txt"),
+    // 警告先写、图后写：命中判定看的是图，图写到一半失败时不会留下「有图无警告」
+    // 的假命中（资源库写入本身是原子的）。
+    store_cache(
+        base,
+        &warning_reference(&relative),
+        "图表警告",
+        true,
         warning.unwrap_or_default().as_bytes(),
-    )
-    .with_context(|| format!("无法写入 Mermaid 图警告：{}", path.display()))?;
-    crate::images::write_disposable_managed_file(&path, &bytes)
-        .with_context(|| format!("无法写入 Mermaid 图：{}", path.display()))?;
+    )?;
+    store_cache(base, &relative, "图表", false, &bytes)?;
+    // 只对配置目录（资源库）生效；外部基准目录是普通文件，由调用方自己管理。
+    if is_config_base(base) {
+        let prefix = format!("{MERMAID_CACHE_DIR}/");
+        let _ = crate::resources::prune_aliases(&prefix, MAX_CACHE_ENTRIES);
+    }
     Ok(relative)
 }
 
@@ -1299,7 +1330,6 @@ fn materialize_using(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     /// 用实际 Markdown 测试稿批量验证图例，输出逐图结果和样图供人工复核。
     #[test]
@@ -1632,7 +1662,7 @@ mod tests {
                 format,
             )
             .unwrap();
-            assert!(dir.path().join(&path).is_file());
+            assert!(crate::images::exists_from_base(dir.path(), &path));
             assert!(warning_at(dir.path(), &path).is_some());
         }
     }
@@ -1658,10 +1688,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            &fs::read(dir.path().join(png)).unwrap()[..8],
+            &crate::images::read_from_base(dir.path(), &png).unwrap()[..8],
             b"\x89PNG\r\n\x1a\n"
         );
-        assert!(fs::read(dir.path().join(pdf)).unwrap().starts_with(b"%PDF"));
+        assert!(
+            crate::images::read_from_base(dir.path(), &pdf)
+                .unwrap()
+                .starts_with(b"%PDF")
+        );
     }
 
     /// 每种图都能渲出 PNG 与 PDF。
@@ -1678,7 +1712,7 @@ mod tests {
                     format,
                 )
                 .unwrap_or_else(|error| panic!("{kind} {format:?} 渲染失败：{error:#}"));
-                let bytes = fs::read(dir.path().join(path)).unwrap();
+                let bytes = crate::images::read_from_base(dir.path(), &path).unwrap();
                 match format {
                     Format::Png => assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n"),
                     Format::Pdf => assert!(bytes.starts_with(b"%PDF")),
@@ -1866,12 +1900,25 @@ mod tests {
                 format,
             )
             .unwrap();
-            let path = dir.path().join(relative);
-            let size = mdx::figure_size::probe(&path, None).unwrap();
-            assert_eq!(
-                mdx::figure_size::width_fraction_for_path(size, Path::new("figures/photo.png")),
-                mdx::figure_size::width_fraction(size),
-            );
+            let path = dir.path().join(&relative);
+            // 缓存文件名是纯 sha256、没有扩展名：格式只能按内容判断。
+            let bytes = crate::images::read_from_base(dir.path(), &relative).unwrap();
+            match format {
+                Format::Png => {
+                    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+                    let size = mdx::figure_size::probe(&path, None).unwrap();
+                    assert_eq!(
+                        mdx::figure_size::width_fraction_for_path(
+                            size,
+                            Path::new("figures/photo.png")
+                        ),
+                        mdx::figure_size::width_fraction(size),
+                    );
+                    // 宽图按分档也是满版心。
+                    assert_eq!(mdx::figure_size::width_fraction_for_path(size, &path), 1.0);
+                }
+                Format::Pdf => assert!(bytes.starts_with(b"%PDF")),
+            }
             if let Some(preview) = std::env::var_os("GONGWEN_MERMAID_PREVIEW") {
                 let preview = std::path::PathBuf::from(preview);
                 fs::create_dir_all(&preview).unwrap();
@@ -1881,7 +1928,6 @@ mod tests {
                 )
                 .unwrap();
             }
-            assert_eq!(mdx::figure_size::width_fraction_for_path(size, &path), 1.0);
         }
     }
 
@@ -1898,7 +1944,8 @@ mod tests {
         )
         .unwrap();
         assert!(rendered.contains("![办理流程](mermaid-cache/"));
-        assert!(rendered.contains(".pdf){#fig:flow}"));
+        // 缓存引用是纯 sha256、不带扩展名，格式由资源库记录。
+        assert!(rendered.contains("){#fig:flow}"));
         assert!(rendered.contains("前文。\n\n"));
         assert!(rendered.ends_with("\n后文。\n"));
         assert!(!rendered.contains("```mermaid"));
@@ -1911,7 +1958,7 @@ mod tests {
         )
         .unwrap();
         assert!(official.contains("![办理流程](mermaid-cache/"));
-        assert!(official.contains(".png)\n"));
+        assert!(official.contains(")\n"));
     }
 
     #[test]
@@ -1945,7 +1992,15 @@ mod tests {
             .iter()
             .find(|b| b["k"] == "figure")
             .expect("图表应排成插图");
-        assert_eq!(figure["width"], 1.0, "图表宽度必须保持满版心");
+        // 缓存引用没有扩展名，但 mdx 现在按文件头认出 PDF 并取页面尺寸；Mermaid
+        // 画布按逻辑目录 `mermaid-cache/` 判满宽（见 mdx figure_size），结果仍与
+        // 旧版一致：满版心。
+        assert_eq!(
+            figure["width"].as_f64(),
+            Some(1.0),
+            "Mermaid 画布应满版心：{}",
+            figure["width"]
+        );
         assert_eq!(figure["number"], "1");
         assert_eq!(figure["label"], "fig:flow");
 
@@ -1971,8 +2026,9 @@ mod tests {
         assert!(xml.contains("cx=\"5616000\""), "图表宽度必须保持 156 mm");
     }
 
-    /// 启用应用锁后 Mermaid 缓存与警告 sidecar 都是 AEAD 密文：密钥在场时能读回；
-    /// 失钥时读不到（不得当明文），也不允许用明文覆盖已有密文。
+    /// 资源库不可用时 Mermaid 缓存回退成槽位目录里的密文文件：密钥在场时图与
+    /// 警告都能读回；失钥后都读不到。命中判定新口径只看资源是否存在（库别名或
+    /// 回退文件），失钥不会把旧密文重新渲染覆盖。
     ///
     /// 测试只覆盖本线程的配置目录与密钥句柄，**不改全局 `set_current_slot`**——
     /// 那是进程级状态，并行测试会互相踩。
@@ -1998,24 +2054,23 @@ mod tests {
             let physical = slot.join(name);
             anyhow::ensure!(
                 physical.is_file(),
-                "缓存没有写到当前槽位的缓存目录：{}",
+                "缓存没有回退到当前槽位的缓存目录：{}",
                 physical.display()
             );
-            let raw = fs::read(&physical)?;
             anyhow::ensure!(
-                crate::vault::is_sealed_file(&raw),
-                "加密工作区里缓存图必须是密文"
+                crate::vault::is_sealed_file(&fs::read(&physical)?),
+                "没有资源库时加密工作区的缓存必须是密文"
             );
-            let plain = crate::images::read_managed_file(&physical)?;
+            let plain = crate::images::read_from_base(dir.path(), &relative)?;
             anyhow::ensure!(plain.starts_with(b"\x89PNG"), "密钥在场时应读回原图");
 
-            let warning = physical.with_extension("warning.txt");
+            // 警告是独立逻辑引用 `<relative>.warning`，读到的是解密后的文本。
+            let warning = slot.join(format!("{name}.warning"));
             anyhow::ensure!(warning.is_file(), "警告 sidecar 没有跟图一起写");
             anyhow::ensure!(
                 crate::vault::is_sealed_file(&fs::read(&warning)?),
                 "警告 sidecar 也必须是密文"
             );
-            // 换一条真实警告，确认读取走的也是解密路径。
             crate::images::write_managed_file(&warning, "图表过大".as_bytes())?;
             anyhow::ensure!(
                 warning_at(dir.path(), &relative).as_deref() == Some("图表过大"),
@@ -2024,12 +2079,17 @@ mod tests {
 
             crate::vault::clear_key_handle();
             anyhow::ensure!(
-                crate::images::read_managed_file(&physical).is_err(),
-                "失钥后不能把密文当缓存命中"
+                crate::images::read_from_base(dir.path(), &relative).is_err(),
+                "失钥后不能把密文当明文读"
             );
             anyhow::ensure!(
                 warning_at(dir.path(), &relative).is_none(),
                 "失钥后读不到警告"
+            );
+            // 命中判定只看资源存在，失钥时不会重新渲染覆盖已有密文。
+            anyhow::ensure!(
+                crate::images::exists_from_base(dir.path(), &relative),
+                "回退文件存在即算命中"
             );
             anyhow::ensure!(
                 cache_at(
@@ -2039,26 +2099,13 @@ mod tests {
                     DiagramTheme::Ink,
                     Format::Png
                 )
-                .is_err(),
-                "失钥时不得以明文覆盖已有密文"
+                .is_ok(),
+                "命中时不再重新渲染"
             );
             anyhow::ensure!(
                 crate::vault::is_sealed_file(&fs::read(&physical)?),
-                "失败的写入不能把密文改成明文"
+                "命中路径不能把密文改成明文"
             );
-
-            // 换一把密钥（错密钥）：旧密文解不开，应视为未命中、重新渲染并以新密钥覆盖。
-            crate::vault::set_key_handle([18u8; 32], true);
-            let rerendered = cache_at(
-                dir.path(),
-                SAMPLE,
-                Style::Official,
-                DiagramTheme::Ink,
-                Format::Png,
-            )?;
-            anyhow::ensure!(rerendered == relative, "同一张图的相对路径应稳定");
-            let plain = crate::images::read_managed_file(&physical)?;
-            anyhow::ensure!(plain.starts_with(b"\x89PNG"), "换密钥后应能读回新渲染的图");
             Ok(())
         })();
         crate::vault::clear_key_handle();
@@ -2066,7 +2113,7 @@ mod tests {
         outcome.unwrap();
     }
 
-    /// 样张 / 测试的临时 base 不参与槽位映射：仍按普通目录写，不碰配置目录。
+    /// 样张 / 测试的临时 base 不参与资源库与槽位映射：仍按普通目录写，不碰配置目录。
     #[test]
     fn temporary_base_bypasses_slot_mapping() {
         let config = tempfile::tempdir().unwrap();
@@ -2090,9 +2137,14 @@ mod tests {
                 "没有密钥时临时 base 里应是明文"
             );
             anyhow::ensure!(raw.starts_with(b"\x89PNG"), "缓存应是 PNG");
+            // 引用仍是逻辑引用，读侧按同一 base 回退文件。
             anyhow::ensure!(
-                physical.with_extension("warning.txt").is_file(),
-                "警告 sidecar 应写到临时 base"
+                crate::images::read_from_base(base.path(), &relative)? == raw,
+                "逻辑引用应能读回同一份字节"
+            );
+            anyhow::ensure!(
+                base.path().join(format!("{relative}.warning")).is_file(),
+                "警告按独立逻辑引用写到临时 base"
             );
             anyhow::ensure!(
                 warning_at(base.path(), &relative).is_none(),

@@ -344,11 +344,12 @@ impl GongwenWorld {
         }
     }
 
-    /// 相对导出目录解析插图路径；拒绝 `..` 与绝对路径（与 `images::resolve` 同口径）。
+    /// 相对导出目录解析非资源文件路径；拒绝 `..` 与绝对路径（与 `images::resolve` 同口径）。
     ///
     /// 走 [`crate::images::resolve_from_base`]：`images/` 与 `mermaid-cache/` 前缀要
     /// 按当前槽位落到 `alt-images/` / `alt-mermaid-cache/`；样张与测试的临时基准
-    /// 目录仍按普通 join，不参与槽位映射。
+    /// 目录仍按普通 join，不参与槽位映射。资源本身由 [`Self::file`] 交给
+    /// [`crate::images::read_from_base`]，这里只服务模板/数据之外的普通文件。
     fn resolve(&self, id: FileId) -> FileResult<PathBuf> {
         if !self.allow_filesystem {
             return Err(FileError::AccessDenied);
@@ -356,6 +357,18 @@ impl GongwenWorld {
         let rel = id.get().vpath().get_without_slash();
         crate::images::resolve_from_base(&self.base_dir, rel).map_err(|_| FileError::AccessDenied)
     }
+}
+
+/// 逻辑引用是不是应用管理的图片/图表资源：`images/`（图片、PDF 插图）与
+/// `mermaid-cache/`（图表缓存）。这两类都可能在资源库里，必须走图片资源层读取；
+/// 其它文件（模板数据、测试夹具里的普通文件）仍按基准目录读盘。
+fn is_image_resource(rel: &str) -> bool {
+    [crate::images::IMAGE_DIR, crate::storage::MERMAID_CACHE_DIR]
+        .iter()
+        .any(|dir| {
+            rel.strip_prefix(dir)
+                .is_some_and(|rest| rest.starts_with('/'))
+        })
 }
 
 impl World for GongwenWorld {
@@ -390,17 +403,29 @@ impl World for GongwenWorld {
         if let Some(bytes) = self.files.get(&id) {
             return Ok(bytes.clone());
         }
+        // 内存快照模式（研究报告）只认显式提供的资源，缺资源直接失败，
+        // 不能因为磁盘上恰好有同名文件就回落读取。
+        if !self.allow_filesystem {
+            return Err(FileError::AccessDenied);
+        }
+        let rel = id.get().vpath().get_without_slash();
+        // 插图与图表缓存走图片资源层：新数据在稿件库的资源表里（逻辑引用
+        // `images/<uuid>`、`mermaid-cache/…`），旧文件、帮助截图与外部基准目录
+        // 自动回退到磁盘读取，解密也在这一层完成。
+        if is_image_resource(rel) {
+            return crate::images::read_from_base(&self.base_dir, rel)
+                .map(Bytes::new)
+                .map_err(|error| {
+                    FileError::from_io(
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{error:#}")),
+                        Path::new(rel),
+                    )
+                });
+        }
         let path = self.resolve(id)?;
-        // 图片/图表资源在启用应用锁后是 AEAD 密文：这里透明解密后再交给 Typst。
-        // 解密失败按文件读取失败处理（排版报错，不能把密文当图片画出来）。
-        crate::images::read_managed_file(&path)
+        std::fs::read(&path)
             .map(Bytes::new)
-            .map_err(|error| {
-                FileError::from_io(
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()),
-                    &path,
-                )
-            })
+            .map_err(|error| FileError::from_io(error, &path))
     }
 
     fn font(&self, index: usize) -> Option<Font> {
@@ -685,12 +710,14 @@ fn proof_report(document: &PagedDocument) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// 磁盘上的图片资源在加密工作区里是密文：World 读取时要透明解密。
+    /// 旧磁盘图片（迁移前的文件写法）在加密工作区里是密文：World 读取 `images/`
+    /// 资源时经图片资源层透明解密；库里有对象时同一入口直接读库。
     #[test]
-    fn world_decrypts_sealed_image_resources() {
+    fn world_reads_image_resources_through_the_image_layer() {
         let dir = tempfile::tempdir().unwrap();
         crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
-        let path = dir.path().join("figure.png");
+        let path = dir.path().join("images").join("legacy-figure.png");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         crate::vault::set_key_handle([8u8; 32], true);
         crate::images::write_managed_file(&path, b"png-bytes").unwrap();
         let world = GongwenWorld::with_template(
@@ -701,11 +728,30 @@ mod tests {
             &HashMap::new(),
             true,
         );
-        let bytes = world.file(file_id("figure.png")).unwrap();
+        let id = file_id("/images/legacy-figure.png");
+        let bytes = world.file(id).unwrap();
         assert_eq!(bytes.as_slice(), b"png-bytes");
         crate::vault::clear_key_handle();
-        assert!(world.file(file_id("figure.png")).is_err(), "失钥后不能读");
+        assert!(world.file(id).is_err(), "失钥后不能读");
         crate::storage::set_test_config_dir(None);
+    }
+
+    /// 非资源文件仍从基准目录读盘：模板数据之外的文件（测试夹具、旧导出目录里的
+    /// 普通文件）不经过图片资源层。
+    #[test]
+    fn non_resource_files_still_read_from_the_base_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("plain.bin"), b"plain-bytes").unwrap();
+        let world = GongwenWorld::with_template(
+            &empty_font_set_for_test(),
+            "{}".into(),
+            dir.path(),
+            Template::Official,
+            &HashMap::new(),
+            true,
+        );
+        let bytes = world.file(file_id("/plain.bin")).unwrap();
+        assert_eq!(bytes.as_slice(), b"plain-bytes");
     }
 
     #[test]

@@ -123,10 +123,10 @@ SQL、B-tree 索引、LIKE、FTS5 全文检索、ORDER BY 全部跑在内存明�
 | `config.json` | 整份 AEAD 加密（含词库：单位 / 人名 / 电话），原子写 |
 | `api-secrets.json`、`api-envs.json`、`api-tests.json`、`.zip-password` | AEAD 加密（`.zip-password` 现状明文存 ZIP 密码，必须纳入） |
 | `apis/`（OpenAPI 定义，一般不含密） | 建议一并加密，省事且口径统一 |
-| `images/`（正文内嵌图） | 逐文件 AEAD（头 + 密文），扩展名不变、文件名哈希化或保持原样需斟酌（见 6.2） |
+| `images/`（正文内嵌图、PDF 插图） | **2026-11-07 第九轮改为 BLOB 进 `manuscripts.db` 资源对象表**（`resource_objects`/`resource_aliases`），磁盘上不再有一图一文件；`images/` 目录只留随包帮助截图与迁移中的旧文件 |
 | `pi/`（运行目录，含 sources 材料） | 整目录纳入；目录内小文件多，建议整目录打成一个加密容器文件或逐文件 AEAD |
 | `help/`（随包帮助，不敏感） | 不加密 |
-| `mermaid-cache/`（可重建缓存） | 不加密，顺手挪去 `cache_dir()`（src/storage.rs:35），别留在配置目录 |
+| `mermaid-cache/`（可重建缓存） | **2026-11-07 第九轮改为资源库对象**（逻辑引用 `mermaid-cache/<sha256>`，警告单独存文本对象）；旧文件在迁移时清掉 |
 | `logs/`、`metrics.json` | 低敏感；先清理内容（确保不抄正文片段），不加密 |
 | 导出成品（PDF / DOCX / 备份包 / `.gwx`） | 不加密：用户主动存到自选输出目录，须保持可用；`.gwx` 本就另有 ZIP 密码 |
 

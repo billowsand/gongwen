@@ -53,7 +53,9 @@ fn drop_missing_images(doc: &mut Doc, base_dir: &Path) -> Vec<String> {
     let mut missing = Vec::new();
     let mut keep = |block: &Block| match block {
         Block::Image { src, .. } => {
-            let ok = crate::images::resolve_from_base(base_dir, src).is_ok_and(|p| p.is_file());
+            // 图片可能已进稿件库的资源表（逻辑引用 `images/<uuid>`），存在性
+            // 判断必须走资源层；外部基准目录与旧文件仍回退到磁盘读取。
+            let ok = crate::images::exists_from_base(base_dir, src);
             if !ok {
                 missing.push(src.clone());
             }

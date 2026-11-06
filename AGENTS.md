@@ -368,6 +368,21 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   90 忽略**，Node host **119 通过 / 1 跳过**。仍待：依赖库 JSONL 损坏硬失败、
   长会话压缩、绝对路径+符号链接、Windows 打印真机、三平台真机验收。
 
+  **2026-11-07 第九轮（图片/PDF 插图/图表缓存并入 SQLCipher 主库，已实现、待真机验收）**：
+  用户要求磁盘上不能看出「这是什么图」（原文件名、扩展名、导入时间）。此前 B 阶段
+  是「一图一文件 + GWA2」，内容加密但文件名元数据裸露。本轮新增 `src/resources.rs`
+  的 `resource_objects`/`resource_aliases`（明文 SHA-256 去重的 BLOB + 逻辑引用），
+  图片、PDF 插图与 Mermaid 缓存全部改为 BLOB 进 `manuscripts.db`；新引用
+  `images/<uuid>`、`mermaid-cache/<sha256>`（无原名/无扩展名/无时间），格式按魔数判断；
+  旧图片在工作区入口解密迁移进库、`wal_checkpoint(FULL)` 后覆写删除，别名保证旧正文、
+  历史版本与旧稿件包里的 `images/<原名>` 引用继续有效；稿件包导入在
+  `begin_sync_import` 事务内写资源表、不再生成 `images/` 文件（清单新增可选
+  `original_name`，旧包按路径末段兜底），旧 schema 1/2/3 包照常导入；预览/导出/
+  DOCX/Typst/研究报告全部改走 `images::read` 资源层；孤儿清理改为扫活稿 + 全部历史
+  版本并回收无引用对象。`cargo test --locked --all-targets` 为 **3026 通过 / 0 失败 /
+  92 忽略**（含新增资源库/迁移/旧包兼容用例），clippy 零警告。仍待真机验收：
+  GUI 导入大图/多图、旧 `.gwx` 包实际往返、SQLCipher 库膨胀与导出耗时。
+
 - **Linux 图形环境兜底**（麒麟 V10 上一打开就崩：X 服务器回 `GLXBadContextTag`，
   winit 对任何 X 错误都直接 panic，于是「第一次显示窗口」时崩；panic 毒化了
   winit 的互斥量，清理阶段二次 panic 变成核心转储）：**已实现，待真机验收**。

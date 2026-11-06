@@ -278,17 +278,14 @@ fn write_markdown_archive(
     zip.write_all(document.as_bytes())?;
 
     // 图片按 markdown 里写的相对路径入包（通常是 `images/xxx.png`），解压后
-    // 引用不用改就能用。引用缺失时跳过，与从前复制到导出目录的行为一致：
-    // 少一张图不该让整次导出失败。
+    // 引用不用改就能用。图片可能已在稿件库的资源表里，存在性与字节都走图片
+    // 资源层；引用缺失时跳过，与从前复制到导出目录的行为一致：少一张图不该让
+    // 整次导出失败。
     for src in crate::images::image_refs(&document) {
-        let Ok(source) = crate::images::resolve(&src) else {
-            continue;
-        };
-        if !source.is_file() {
+        if !crate::images::exists(&src) {
             continue;
         }
-        let bytes = crate::images::read_managed_file(&source)
-            .with_context(|| format!("无法读取图片 {}", source.display()))?;
+        let bytes = crate::images::read(&src).with_context(|| format!("无法读取图片 {src}"))?;
         zip.start_file(crate::images::normalize_ref(&src), options)?;
         zip.write_all(&bytes)?;
     }

@@ -172,11 +172,13 @@ pub(crate) fn official_captions<B: BlockRef>(blocks: &[B]) -> OfficialCaptions {
     captions
 }
 
-/// 插图路径是不是 PDF（可带 `#page=…` 之类的页码锚）。
+/// 插图路径是不是 PDF 附件（可带 `#page=…` 之类的页码锚）。
+///
+/// 新数据的逻辑引用是 `images/<uuid>`，没有扩展名，只能按资源库里的媒体类型
+/// 判断；旧文件与外部基准目录仍按扩展名回退。页码锚不是文件名的一部分，先剥掉。
 pub(crate) fn is_pdf_source(src: &str) -> bool {
-    let name = src.rsplit('/').next().unwrap_or(src);
-    let name = name.split('#').next().unwrap_or(name);
-    name.to_ascii_lowercase().ends_with(".pdf")
+    let path = src.split('#').next().unwrap_or(src);
+    crate::images::is_pdf(path)
 }
 
 impl OfficialCaptions {
@@ -264,6 +266,16 @@ mod tests {
                 &(3, "戊图".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn pdf_sources_are_recognized_with_page_anchors() {
+        // 旧文件（迁移前/外部样张目录）按扩展名回退；页码锚先剥掉再判断。
+        assert!(is_pdf_source("images/scan.pdf"));
+        assert!(is_pdf_source("images/scan.PDF"));
+        assert!(is_pdf_source("images/scan.pdf#page=3"));
+        assert!(!is_pdf_source("images/photo.png"));
+        assert!(!is_pdf_source("images/photo.png#page=1"));
     }
 
     #[test]

@@ -105,8 +105,13 @@ pub struct ManifestRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestAsset {
+    /// 逻辑引用（`images/<uuid>` 或旧包的 `images/<原文件名>`），正文里原样使用。
     pub path: String,
     pub sha256: String,
+    /// 资源在库里记录的原文件名，导入时写回资源库，导出 DOCX/附件说明仍给人类看的名字。
+    /// 旧版程序导出的包没有这个字段，导入时按 `path` 末段兜底。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<String>,
 }
 
 /// zip 内相对路径 + 文件字节。
@@ -501,8 +506,10 @@ pub(crate) fn compile_snapshot_pdf(
 }
 
 /// 新格式必须完整携带活稿和历史版本引用的资源，缺一张图就拒绝导出。
+///
+/// 资源已进 SQLCipher 资源库（旧数据回退磁盘文件），这里按逻辑引用取明文字节；
+/// manifest 里的 `path` 仍是正文使用的逻辑引用，不随物理位置变化。
 fn collect_sync_images(records: &[ManifestRecord]) -> Result<(Vec<ManifestAsset>, Vec<Blob>)> {
-    let base = crate::storage::config_dir()?;
     let mut paths = std::collections::BTreeSet::new();
     for record in records {
         for markdown in std::iter::once(&record.content_markdown).chain(
@@ -521,16 +528,16 @@ fn collect_sync_images(records: &[ManifestRecord]) -> Result<(Vec<ManifestAsset>
     let mut assets = Vec::new();
     let mut blobs = Vec::new();
     for path in paths {
-        let source = crate::images::resolve_from_base(&base, &path)?;
-        // 稿件包里的资源必须是明文：这里把本机密文解密后再算哈希、入包。
-        let bytes = crate::images::read_managed_file(&source)
-            .with_context(|| format!("稿件图片缺失：{}", source.display()))?;
+        // 稿件包里的资源必须是明文：资源库/旧文件都在这里读完并解密。
+        let bytes = crate::images::read(&path).with_context(|| format!("稿件图片缺失：{path}"))?;
         if bytes.len() as u64 > MAX_PDF_BYTES {
             bail!("稿件图片过大：{path}");
         }
         assets.push(ManifestAsset {
             path: path.clone(),
             sha256: bytes_hash(&bytes),
+            // 新引用是随机 ID，原文件名只存在资源库里，随包带走才能还原展示名。
+            original_name: Some(crate::images::display_name(&path)),
         });
         blobs.push((path, bytes));
     }
@@ -646,10 +653,7 @@ fn collect_image_entries(base: &Path, records: &[ManifestRecord]) -> Vec<(String
             let Some(file_name) = src.rsplit('/').next() else {
                 continue;
             };
-            let Ok(source) = crate::images::resolve_from_base(base, &src) else {
-                continue;
-            };
-            let Ok(bytes) = crate::images::read_managed_file(&source) else {
+            let Ok(bytes) = crate::images::read_from_base(base, &src) else {
                 continue;
             };
             out.push((format!("images/{}", sanitize_entry_name(file_name)), bytes));
@@ -1242,7 +1246,8 @@ mod tests {
         let mut source = mem_store();
         crate::storage::set_test_config_dir(Some(dir.path().join("resources")));
         let image_path = crate::images::image_dir().unwrap().join("legacy.png");
-        crate::images::write_image_file(&image_path, b"legacy-image-bytes").unwrap();
+        const LEGACY_PNG: &[u8] = b"\x89PNG\r\n\x1a\nlegacy-image-bytes";
+        crate::images::write_image_file(&image_path, LEGACY_PNG).unwrap();
         let id = source
             .create(
                 &NewManuscript {
@@ -1292,6 +1297,13 @@ mod tests {
                                 }
                             }
                         }
+                        // 本轮升级前导出的新格式包没有 `original_name`：清单里的
+                        // 资源路径就是正文引用，导入要按路径末段兜底原名。
+                        if schema == 3 && extension == "zip" {
+                            for asset in value["assets"].as_array_mut().unwrap() {
+                                asset.as_object_mut().unwrap().remove("original_name");
+                            }
+                        }
                         bytes = serde_json::to_vec(&value).unwrap();
                     }
                     writer.start_file(name, encrypted_options("1234")).unwrap();
@@ -1310,7 +1322,8 @@ mod tests {
                     sample_vocabulary().len()
                 );
                 // 使用生产的身份判定与事务导入通路，验证不是只能读到预览。
-                std::fs::remove_file(&image_path).unwrap();
+                // 导入不再重建 images/ 文件，后续循环里已经没有可删的副本。
+                let _ = std::fs::remove_file(&image_path);
                 let mut target = mem_store();
                 let previews = sync::inspect(&mut target, &manifest).unwrap();
                 let hash = bytes_hash(&serde_json::to_vec(&manifest).unwrap());
@@ -1325,10 +1338,15 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(result.pdfs_added, 2);
+                // 旧包的图片条目现在是资源库里的一条逻辑引用，不再往 images/ 写文件。
                 assert_eq!(
-                    crate::images::read_managed_file(&image_path).unwrap(),
-                    b"legacy-image-bytes"
+                    target
+                        .resource_bytes("images/legacy.png")
+                        .unwrap()
+                        .as_deref(),
+                    Some(LEGACY_PNG)
                 );
+                assert!(!image_path.exists(), "导入不应重新生成 images/ 下的旧文件");
                 let rows = target.list(&Default::default()).unwrap();
                 assert_eq!(rows.len(), 1);
                 let imported = target.get(rows[0].id).unwrap().unwrap();

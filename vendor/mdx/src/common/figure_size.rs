@@ -90,13 +90,22 @@ pub fn width_fraction(source: FigureSource) -> f64 {
 }
 
 /// 公文助手生成的 Mermaid 画布已按版心与纸面字号排好，不能再次按面积缩放。
-/// 专用文件名前缀随图片复制到 figures/ 后仍保留；普通图片沿用原有分档。
+///
+/// 两种识别方式：
+/// - 旧缓存文件名前缀 `gongwen-mermaid-canvas-`（图片复制到 figures/ 后仍保留）；
+/// - 新缓存引用以逻辑目录 `mermaid-cache/` 开头（文件名是纯内容哈希、没有扩展名，
+///   见 `src/mermaid.rs` 的资源库化改造）。
+/// 普通图片沿用原有分档。
 pub fn width_fraction_for_path(source: FigureSource, path: &Path) -> f64 {
-    if path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| stem.starts_with("gongwen-mermaid-canvas-"))
-    {
+    let logical = path.to_string_lossy().replace('\\', "/");
+    // 研究报告导出会把资源放在 `gongwen-memory-<uuid>/mermaid-cache/…` 下，
+    // 所以按「有没有一段目录叫 mermaid-cache」判断，不只看开头。
+    let is_canvas = logical.split('/').any(|part| part == "mermaid-cache")
+        || path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.starts_with("gongwen-mermaid-canvas-"));
+    if is_canvas {
         1.0
     } else {
         width_fraction(source)
@@ -106,12 +115,10 @@ pub fn width_fraction_for_path(source: FigureSource, path: &Path) -> f64 {
 /// 读一张本地插图的原始尺寸：PDF 取 `page` 页（从 1 起）的页面尺寸，其余按
 /// 位图读文件头。读不出来返回 `None`，调用方退回原先的排法。
 pub fn probe(path: &Path, page: Option<u32>) -> Option<FigureSource> {
-    let is_pdf = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
-    if is_pdf {
-        let bytes = crate::memory_files::read(path).ok()?;
+    // 按文件头识别格式：扩展名可能写错（PNG 存成 .jpg），而资源库化之后的
+    // 图片/PDF 引用根本没有扩展名（`images/<uuid>`、`mermaid-cache/<hash>`）。
+    let bytes = crate::memory_files::read(path).ok()?;
+    if bytes.starts_with(b"%PDF-") {
         let pdf = hayro_syntax::Pdf::new(bytes).ok()?;
         let index = page.unwrap_or(1).checked_sub(1)? as usize;
         let (width, height) = pdf.pages().get(index)?.render_dimensions();
@@ -120,8 +127,6 @@ pub fn probe(path: &Path, page: Option<u32>) -> Option<FigureSource> {
             height: f64::from(height),
         });
     }
-    // 按文件头识别格式：扩展名可能写错（PNG 存成 .jpg）。
-    let bytes = crate::memory_files::read(path).ok()?;
     let (width_px, height_px) = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?

@@ -209,18 +209,18 @@ fn prepare_official(
     let mut resources = Vec::new();
     let mut seen = HashSet::new();
     for src in crate::images::image_refs(&rendered) {
-        let Ok(source) = crate::images::resolve_from_base(base_dir, &src) else {
-            continue;
-        };
-        if !source.is_file() {
+        // 插图可能已在稿件库的资源表里（`images/<uuid>`）：存在性与字节都走
+        // 图片资源层；外部基准目录（样张、测试、导出到别处）仍回退文件读取。
+        if !crate::images::exists_from_base(base_dir, &src) {
             continue;
         }
         let name = crate::images::normalize_ref(&src);
         if !seen.insert(name.clone()) {
             continue;
         }
-        let bytes = crate::images::read_managed_file(&source)
-            .with_context(|| format!("无法读取图片 {}", source.display()))?;
+        let bytes = crate::images::read_from_base(base_dir, &src)
+            .with_context(|| format!("无法读取图片 {src}"))?;
+        // 包内条目名沿用正文里的逻辑引用，解压后不用改 Markdown。
         resources.push((name, bytes));
     }
     let warnings = missing

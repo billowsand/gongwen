@@ -376,6 +376,38 @@ impl ManuscriptStore {
         Ok(store)
     }
 
+    /// 资源对象：把一份内容写到逻辑引用下。调用方若已开 SAVEPOINT/事务，
+    /// 对象与别名会跟着一起提交或回滚（稿件包导入走这条路）。
+    pub(crate) fn put_resource(
+        &self,
+        logical: &str,
+        original_name: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        crate::resources::put_with(&self.conn, logical, original_name, None, bytes)
+    }
+
+    /// 资源对象：这条逻辑引用当前指向的内容校验值（没有别名返回 `None`）。
+    pub(crate) fn resource_sha256(&self, logical: &str) -> Result<Option<String>> {
+        Ok(crate::resources::meta_with(&self.conn, logical)?.map(|meta| meta.sha256))
+    }
+
+    /// 资源对象：读取逻辑引用指向的内容（测试断言用）。
+    #[cfg(test)]
+    pub(crate) fn resource_bytes(&self, logical: &str) -> Result<Option<Vec<u8>>> {
+        crate::resources::get_with(&self.conn, logical)
+    }
+
+    /// 资源对象：删除一条逻辑引用；对象本身由孤儿回收处理。
+    pub(crate) fn remove_resource_alias(&self, logical: &str) -> Result<()> {
+        crate::resources::remove_alias_with(&self.conn, logical)
+    }
+
+    /// 资源对象：回收没有引用指向的对象，返回删除的对象数。
+    pub(crate) fn gc_resources(&self) -> Result<usize> {
+        crate::resources::gc_objects_with(&self.conn)
+    }
+
     fn migrate(&mut self) -> Result<()> {
         let version: i64 = self
             .conn
@@ -422,6 +454,8 @@ impl ManuscriptStore {
         // 送批材料：同样幂等建表，不单开档位。
         send_package::ensure_schema(&self.conn)?;
         print_trace::ensure_schema(&self.conn)?;
+        // 资源对象（图片/PDF 插图/图表缓存）与稿件同库；幂等建表，不单开档位。
+        crate::resources::ensure_schema(&self.conn)?;
         Ok(())
     }
 
@@ -635,9 +669,10 @@ impl ManuscriptStore {
     }
 
     /// 清理孤儿图片：删除稿件后，其 markdown 引用的图片若不再被任何剩余稿件
-    /// 引用，则删除对应文件。引用比较前统一规范化（分隔符、`./` 前缀），避免
-    /// 手写别名被误判为不同引用而误删；共享引用与库外引用（未保存草稿或手写
-    /// 引用）无法感知，一律保留。清理尽力而为，失败不阻断稿件删除。
+    /// （含全部历史版本）引用，则删除资源别名，并回收没有引用指向的对象。
+    /// 引用比较前统一规范化（分隔符、`./` 前缀），避免手写别名被误判为不同而
+    /// 漏删；共享引用与库外引用（未保存草稿或手写引用）无法感知，一律保留。
+    /// 清理尽力而为，失败不阻断稿件删除。
     fn purge_orphan_images(&mut self, deleted_contents: &[String]) {
         let deleted_refs: HashSet<String> = deleted_contents
             .iter()
@@ -648,28 +683,35 @@ impl ManuscriptStore {
             return;
         }
         // 只扫正文，不解码快照：任何一份快照读不出来都不该让孤儿图片清理整个作废。
+        // 历史版本也一起扫：删一篇稿件不该让别的稿件的旧版本丢图。
         let mut remaining_refs = HashSet::new();
-        let Ok(mut stmt) = self
-            .conn
-            .prepare("SELECT content_markdown FROM manuscripts")
-        else {
-            return;
-        };
-        let Ok(contents) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
-            return;
-        };
-        for content in contents.flatten() {
-            remaining_refs.extend(
-                crate::images::image_refs(&content)
-                    .into_iter()
-                    .map(|src| crate::images::normalize_ref(&src)),
-            );
+        for sql in [
+            "SELECT content_markdown FROM manuscripts",
+            "SELECT content_markdown FROM manuscript_versions",
+        ] {
+            let Ok(mut stmt) = self.conn.prepare(sql) else {
+                continue;
+            };
+            let Ok(contents) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
+                continue;
+            };
+            for content in contents.flatten() {
+                remaining_refs.extend(
+                    crate::images::image_refs(&content)
+                        .into_iter()
+                        .map(|src| crate::images::normalize_ref(&src)),
+                );
+            }
         }
         for src in deleted_refs.difference(&remaining_refs) {
+            // 新数据：删资源库别名，对象由后面的孤儿回收处理。
+            let _ = self.remove_resource_alias(src);
+            // 还没迁移的旧文件（迁移前就删稿件的场景）。
             if let Ok(path) = crate::images::resolve(src) {
                 let _ = fs::remove_file(path);
             }
         }
+        let _ = self.gc_resources();
     }
 
     /// 完整读取（含 PDF 附件）。

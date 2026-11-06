@@ -1520,7 +1520,7 @@ fn apply_key_with(conn: &rusqlite::Connection, key: &[u8; DEK_LEN], active: bool
 
 /// 覆写一遍再删：明文库文件直接 delete 会被恢复工具捞回来。
 /// 尽力而为——覆写失败仍删除，只是不保证抗恢复。
-fn overwrite_then_delete(path: &Path) {
+pub(crate) fn overwrite_then_delete(path: &Path) {
     if let Ok(metadata) = std::fs::metadata(path)
         && let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(path)
     {

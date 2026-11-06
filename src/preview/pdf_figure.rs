@@ -5,9 +5,10 @@
 //! 一直只画一张占位卡片——排得合不合适只能等编译完再看。
 //!
 //! 光栅化走的是应用里已有的 `hayro`（PDF 阅读页用的同一套）。要紧的是别让它挡
-//! 住画面：解析和渲染都放后台线程，主线程该画什么画什么，渲完再敲醒界面。同一
-//! 个文件只渲一次，纹理按「路径 + 修改时间」缓存在 egui 的 `Context` 里，缩放
-//! 时由 GPU 采样，不重渲染。
+//! 住画面：取字节、解析和渲染都放后台线程，主线程该画什么画什么，渲完再敲醒界面。
+//! 同一个对象只渲一次，纹理按「逻辑引用 + 内容指纹」缓存在 egui 的 `Context` 里，
+//! 缩放时由 GPU 采样，不重渲染。字节从哪来由调用方给一个加载闭包决定：预览走
+//! 资源库（`images::read`），测试和外部基准目录可以自己给夹具。
 
 use eframe::egui;
 use hayro::{
@@ -15,7 +16,6 @@ use hayro::{
     hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf},
     vello_cpu::color::palette::css::WHITE,
 };
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// 光栅化宽度。预览放到最大倍率，版心也就 950 逻辑像素宽，渲到 1200 已经够
@@ -36,7 +36,7 @@ enum Thumb {
 
 /// 一张 PDF 插图此刻的状态。
 pub(crate) enum PdfPage {
-    /// 后台还在渲染，这一帧先画占位卡片。
+    /// 后台还在读取/渲染，这一帧先画占位卡片。
     Rendering,
     Ready(egui::TextureHandle),
     Failed(String),
@@ -44,18 +44,23 @@ pub(crate) enum PdfPage {
 
 /// 取这份 PDF 第一页的纹理；没有就地渲染，只登记一次后台任务。
 ///
-/// `src` 是 Markdown 里的相对路径，连同文件修改时间一起做缓存键：换了图片文件
-/// 就是另一张纹理，不必手动清缓存。
-pub(crate) fn page(ctx: &egui::Context, src: &str, path: &Path) -> PdfPage {
-    let modified = std::fs::metadata(path)
-        .and_then(|meta| meta.modified())
-        .ok();
-    let id = egui::Id::new(("gw_pdf_figure", src, modified));
+/// `src` 是 Markdown 里的逻辑引用，`stamp` 是资源内容指纹（库里是内容 SHA
+/// 前缀，旧文件是修改时间）：同一个路径换了对象就是另一张纹理，不必手动清缓存。
+///
+/// `load` 只在缓存未命中时被后台线程调用一次，负责把字节读出来（资源库优先，
+/// 旧文件回退由 `images::read` 处理）；缓存命中时闭包直接丢弃。
+pub(crate) fn page(
+    ctx: &egui::Context,
+    src: &str,
+    stamp: u64,
+    load: impl FnOnce() -> Result<Arc<Vec<u8>>, String> + Send + 'static,
+) -> PdfPage {
+    let id = egui::Id::new(("gw_pdf_figure", src, stamp));
 
     match ctx.data(|data| data.get_temp::<Thumb>(id)) {
         None => {
             let slot: Slot = Arc::new(Mutex::new(None));
-            spawn(path.to_path_buf(), slot.clone(), ctx.clone());
+            spawn(load, slot.clone(), ctx.clone());
             ctx.data_mut(|data| data.insert_temp(id, Thumb::Rendering(slot)));
             PdfPage::Rendering
         }
@@ -68,7 +73,7 @@ pub(crate) fn page(ctx: &egui::Context, src: &str, path: &Path) -> PdfPage {
                 None => PdfPage::Rendering,
                 Some(Ok(image)) => {
                     let texture = ctx.load_texture(
-                        format!("gw_pdf_figure/{src}"),
+                        format!("gw_pdf_figure/{src}@{stamp}"),
                         image,
                         egui::TextureOptions::LINEAR,
                     );
@@ -86,9 +91,14 @@ pub(crate) fn page(ctx: &egui::Context, src: &str, path: &Path) -> PdfPage {
     }
 }
 
-fn spawn(path: PathBuf, slot: Slot, ctx: egui::Context) {
+fn spawn(
+    load: impl FnOnce() -> Result<Arc<Vec<u8>>, String> + Send + 'static,
+    slot: Slot,
+    ctx: egui::Context,
+) {
     std::thread::spawn(move || {
-        let result = rasterize(&path);
+        // 读字节（库里可能还要解密）与光栅化都留在后台线程。
+        let result = load().and_then(|bytes| rasterize(&bytes));
         if let Ok(mut done) = slot.lock() {
             *done = Some(result);
         }
@@ -97,11 +107,9 @@ fn spawn(path: PathBuf, slot: Slot, ctx: egui::Context) {
     });
 }
 
-fn rasterize(path: &Path) -> Result<egui::ColorImage, String> {
-    // 启用应用锁后 PDF 插图是 AEAD 密文，这里解密后再光栅化。
-    let bytes =
-        crate::images::read_managed_file(path).map_err(|error| format!("无法读取：{error:#}"))?;
-    let pdf = Pdf::new(bytes).map_err(|error| format!("PDF 文件结构无法解析：{error:?}"))?;
+fn rasterize(bytes: &[u8]) -> Result<egui::ColorImage, String> {
+    let pdf =
+        Pdf::new(bytes.to_vec()).map_err(|error| format!("PDF 文件结构无法解析：{error:?}"))?;
     let pages = pdf.pages();
     let Some(page) = pages.first() else {
         return Err("PDF 中没有可显示的页面".into());
@@ -137,6 +145,7 @@ fn rasterize(path: &Path) -> Result<egui::ColorImage, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// 一页最小 PDF，避免测试依赖系统 PDF 程序或原生动态库。
     fn minimal_pdf() -> Vec<u8> {
@@ -170,13 +179,17 @@ mod tests {
         bytes
     }
 
+    /// 加载闭包：返回夹具字节，并记一次调用。
+    fn fixture_load(calls: Arc<AtomicUsize>) -> impl FnOnce() -> Result<Arc<Vec<u8>>, String> {
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(minimal_pdf()))
+        }
+    }
+
     #[test]
     fn the_first_page_is_rasterized_at_the_target_width() {
-        let dir = tempfile::tempdir().expect("临时目录");
-        let path = dir.path().join("图.pdf");
-        std::fs::write(&path, minimal_pdf()).unwrap();
-
-        let image = rasterize(&path).expect("最小 PDF 应能光栅化");
+        let image = rasterize(&minimal_pdf()).expect("最小 PDF 应能光栅化");
 
         assert_eq!(image.width(), RENDER_WIDTH as usize);
         // 200×300 的页面，高宽比要保住。
@@ -187,19 +200,21 @@ mod tests {
     #[test]
     fn the_texture_shows_up_after_the_background_render_not_during_the_first_frame() {
         let ctx = egui::Context::default();
-        let dir = tempfile::tempdir().expect("临时目录");
-        let path = dir.path().join("图.pdf");
-        std::fs::write(&path, minimal_pdf()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stamp = 7;
 
         assert!(
-            matches!(page(&ctx, "images/图.pdf", &path), PdfPage::Rendering),
-            "首帧不该就地光栅化"
+            matches!(
+                page(&ctx, "images/图.pdf", stamp, fixture_load(calls.clone())),
+                PdfPage::Rendering
+            ),
+            "首帧不该就地读取或光栅化"
         );
 
         let texture = (0..200)
             .find_map(|_| {
                 std::thread::sleep(std::time::Duration::from_millis(10));
-                match page(&ctx, "images/图.pdf", &path) {
+                match page(&ctx, "images/图.pdf", stamp, fixture_load(calls.clone())) {
                     PdfPage::Ready(texture) => Some(texture),
                     PdfPage::Failed(error) => panic!("光栅化失败：{error}"),
                     PdfPage::Rendering => None,
@@ -211,22 +226,45 @@ mod tests {
             texture.size(),
             [RENDER_WIDTH as usize, RENDER_WIDTH as usize * 3 / 2]
         );
-        // 第二次要命中缓存，不再重渲。
+        // 第二次要命中缓存，不再重渲，也不再调用加载闭包。
         assert!(matches!(
-            page(&ctx, "images/图.pdf", &path),
+            page(&ctx, "images/图.pdf", stamp, fixture_load(calls.clone())),
             PdfPage::Ready(_)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "同一个对象只加载一次");
+        // 同一路径换了对象（stamp 变了）要重新渲染。
+        assert!(matches!(
+            page(
+                &ctx,
+                "images/图.pdf",
+                stamp + 1,
+                fixture_load(calls.clone())
+            ),
+            PdfPage::Rendering
         ));
     }
 
     #[test]
     fn a_broken_file_reports_instead_of_panicking() {
-        let dir = tempfile::tempdir().expect("临时目录");
-        let path = dir.path().join("坏.pdf");
-        std::fs::write(&path, b"not a pdf at all").unwrap();
-
-        let error = rasterize(&path).expect_err("坏文件应当报错");
-
+        let error = rasterize(b"not a pdf at all").expect_err("坏文件应当报错");
         assert!(error.contains("PDF"), "{error}");
-        assert!(rasterize(&dir.path().join("不存在.pdf")).is_err());
+
+        // 加载闭包失败也要变成 Failed，而不是 panic 或永远渲染中。
+        let ctx = egui::Context::default();
+        assert!(matches!(
+            page(&ctx, "images/坏.pdf", 1, || Err(
+                "无法读取：文件缺失".into()
+            )),
+            PdfPage::Rendering
+        ));
+        let failed = (0..200).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            match page(&ctx, "images/坏.pdf", 1, || Err("无法读取".into())) {
+                PdfPage::Failed(error) => Some(error),
+                PdfPage::Ready(_) => panic!("坏文件不应渲染成功"),
+                PdfPage::Rendering => None,
+            }
+        });
+        assert_eq!(failed.as_deref(), Some("无法读取：文件缺失"));
     }
 }

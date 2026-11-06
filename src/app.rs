@@ -553,6 +553,23 @@ impl GongwenApp {
         // 上次崩溃/强杀可能留下 PDF 预览副本；启动时清一次（只删缓存目录里
         // 自己的 manuscript_*.pdf 命名）。
         crate::app::manuscript_ui::purge_plaintext_caches();
+        // 资源对象库：图片、PDF 插图与图表缓存统一写进 SQLCipher 主库，旧的文件
+        // 图片在解锁后并入库并安全删除（可重建的图表缓存直接清掉）。库打不开时
+        // 退回旧的文件读写，图片仍可用，但文件名元数据不会隐藏——状态栏如实报告。
+        let resource_note = match crate::resources::init() {
+            Ok(()) => match crate::images::migrate_legacy_files() {
+                Ok(report) if report.migrated > 0 => {
+                    Some(format!("已把 {} 张图片并入加密库。", report.migrated))
+                }
+                Ok(report) if !report.skipped.is_empty() => Some(format!(
+                    "{} 个图片文件没能并入资源库，仍按文件保留。",
+                    report.skipped.len()
+                )),
+                Ok(_) => None,
+                Err(error) => Some(format!("旧图片并入资源库失败：{error:#}")),
+            },
+            Err(error) => Some(format!("资源库打开失败，图片暂按文件存储：{error:#}")),
+        };
         // 按配置装：配置里关掉了输入法就不装配引擎，不白读词库和语言模型。
         let ime = crate::ime::Ime::new(session::ime_settings_of(&config.ime));
         let (sender, receiver) = mpsc::channel();
@@ -783,6 +800,13 @@ impl GongwenApp {
             enable_encrypt_requested: false,
         };
         app.restore_session();
+        if let Some(note) = resource_note {
+            if app.status.starts_with("就绪") {
+                app.status = note;
+            } else {
+                app.status = format!("{}；{note}", app.status);
+            }
+        }
         app.seed_samples_once();
         // 词表里的词同步给应用内输入法（静默：失败只写状态栏）。
         app.sync_lexicon_to_ime(false);

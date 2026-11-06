@@ -396,6 +396,20 @@ mod tests {
     use crate::models::DraftInput;
 
     #[test]
+    fn old_packages_without_original_name_fall_back_to_the_path_tail() {
+        let mut asset = super::super::ManifestAsset {
+            path: "images/20260101_扫描件.png".into(),
+            sha256: "a".repeat(64),
+            original_name: None,
+        };
+        assert_eq!(super::image_original_name(&asset), "20260101_扫描件.png");
+        asset.original_name = Some("扫描件.png".into());
+        assert_eq!(super::image_original_name(&asset), "扫描件.png");
+        asset.original_name = Some(String::new());
+        assert_eq!(super::image_original_name(&asset), "20260101_扫描件.png");
+    }
+
+    #[test]
     fn merge_base_is_shared_ancestor_not_latest_number() {
         let draft = DraftInput::default();
         let root = SyncRevision::new(
@@ -487,7 +501,8 @@ fn link_aliases(store: &ManuscriptStore, id: i64, record: &ManifestRecord) -> Re
     Ok(())
 }
 
-type Blob = (String, Vec<u8>);
+/// 包里的一张图片：逻辑引用、原文件名（旧包按路径末段兜底）与明文字节。
+type ImageBlob = (String, String, Vec<u8>);
 
 /// 校验预览后重新读取的同一份清单和所有资源，再整体写入。
 pub fn import_with_actions(
@@ -548,16 +563,17 @@ pub fn import_with_actions(
         }
         pdfs.push(record_pdfs);
     }
-    // 资源名冲突必须在写入前发现，绝不覆盖本机可能被其他稿件引用的文件。
-    let image_dir = crate::images::image_dir()?;
-    for (path, bytes) in &images {
-        let dest = crate::images::resolve_from_base(&crate::storage::config_dir()?, path)?;
-        if dest.exists() && crate::images::read_managed_file(&dest)? != *bytes {
+    // 资源名冲突必须在写入前发现：同一个逻辑引用在本机库里已指向不同内容时，
+    // 说明两边对这张图各有版本，静默覆盖会改变其他稿件的插图，必须先处理。
+    for (path, _name, bytes) in &images {
+        let sha = super::bytes_hash(bytes);
+        if let Some(existing) = store.resource_sha256(path)?
+            && existing != sha
+        {
             bail!("图片同名但内容不同，请先处理资源冲突：{path}");
         }
     }
     store.begin_sync_import()?;
-    let mut created_files = Vec::new();
     let result = (|| -> Result<SyncImportSummary> {
         let mut summary = SyncImportSummary::default();
         // 送批材料清单等整包稿件都落库后再写：随行件可能排在主件后面才导入。
@@ -780,32 +796,23 @@ pub fn import_with_actions(
         for (id, package) in &packages {
             store.replace_send_package(*id, package)?;
         }
-        std::fs::create_dir_all(&image_dir)?;
-        for (path, bytes) in &images {
-            let dest = crate::images::resolve_from_base(&crate::storage::config_dir()?, path)?;
-            if !dest.exists() {
-                // 目标机启用加密时按目标槽位密钥重新加密；未启用时写明文。
-                crate::images::write_image_file(&dest, bytes)?;
-                created_files.push(dest);
+        // 图片与正文、版本同一个事务：导入提交/回滚时资源别名一起生效/撤销，
+        // 不再往 images/ 目录写文件。内容相同的别名已在库里，跳过重复写入。
+        for (path, original_name, bytes) in &images {
+            let sha = super::bytes_hash(bytes);
+            if store.resource_sha256(path)?.as_deref() != Some(sha.as_str()) {
+                store.put_resource(path, original_name, bytes)?;
             }
         }
         Ok(summary)
     })();
     match result {
         Ok(summary) => {
-            if let Err(error) = store.commit_sync_import() {
-                for path in created_files {
-                    let _ = std::fs::remove_file(path);
-                }
-                return Err(error);
-            }
+            store.commit_sync_import()?;
             Ok(summary)
         }
         Err(error) => {
             let _ = store.rollback_sync_import();
-            for path in created_files {
-                let _ = std::fs::remove_file(path);
-            }
             Err(error)
         }
     }
@@ -915,7 +922,7 @@ fn read_images(
     manifest: &Manifest,
     password: &str,
     actions: &[ImportAction],
-) -> Result<Vec<Blob>> {
+) -> Result<Vec<ImageBlob>> {
     let mut out = Vec::new();
     // 全部图片的解压总量上限：单张有上限还不够，成百上千张照样能吃光内存。
     let mut total: u64 = 0;
@@ -952,7 +959,7 @@ fn read_images(
                 "包里的图片合计超过 {} MB",
                 super::MAX_IMAGES_TOTAL_BYTES / 1024 / 1024
             );
-            out.push((asset.path.clone(), bytes));
+            out.push((asset.path.clone(), image_original_name(asset), bytes));
         }
     } else {
         let names = archive
@@ -971,10 +978,24 @@ fn read_images(
                 "包里的图片合计超过 {} MB",
                 super::MAX_IMAGES_TOTAL_BYTES / 1024 / 1024
             );
-            out.push((path.clone(), bytes));
+            // 旧包（schema 1）asset 路径就是 `images/<原文件名>`，末段即原名。
+            out.push((
+                path.clone(),
+                path.rsplit('/').next().unwrap_or("图片").to_string(),
+                bytes,
+            ));
         }
     }
     Ok(out)
+}
+
+/// 导入时写回资源库的原文件名：新包带 `original_name`，旧包按逻辑引用末段兜底。
+fn image_original_name(asset: &super::ManifestAsset) -> String {
+    asset
+        .original_name
+        .clone()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| asset.path.rsplit('/').next().unwrap_or("图片").to_string())
 }
 
 fn safe_image_path(path: &str) -> bool {
@@ -1647,7 +1668,9 @@ mod round_trip_tests {
     }
 
     #[test]
-    fn image_conflicts_never_overwrite_local_files() {
+    fn image_conflicts_never_overwrite_stored_resources() {
+        const A: &[u8] = b"\x89PNG\r\n\x1a\npng-by-a";
+        const B: &[u8] = b"\x89PNG\r\n\x1a\npng-by-b-different";
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
         let image_dir = config.join("images");
@@ -1655,30 +1678,42 @@ mod round_trip_tests {
         // 与真实用户目录隔离；本测试内部两个场景顺序执行，避免并发争抢覆盖。
         let _guard = ConfigGuard::set(config.clone());
         let pic = image_dir.join("pic.png");
-        std::fs::write(&pic, b"png-by-a").unwrap();
+        std::fs::write(&pic, A).unwrap();
 
         let mut a = ManuscriptStore::open(&dir.path().join("a.db")).unwrap();
         let id_a = create(&mut a, "![图](images/pic.png)\n内容。\n", "带图稿");
         let zip = dir.path().join("with-image.zip");
         export(&mut a, id_a, &zip);
+        // 新包的清单随包带走原文件名：新引用是随机 ID，名字只存在资源库里。
+        let manifest = super::super::read_manifest(&zip, PASSWORD).unwrap();
+        assert_eq!(manifest.assets.len(), 1);
+        assert_eq!(manifest.assets[0].path, "images/pic.png");
+        assert_eq!(manifest.assets[0].original_name.as_deref(), Some("pic.png"));
 
-        // 同路径不同内容：拒绝导入，且不得留下任何部分写入。
-        std::fs::write(&pic, b"png-by-b-different").unwrap();
+        // 本机库里同一逻辑引用已指向别的内容：拒绝导入，且不留下部分写入。
         let mut b = ManuscriptStore::open(&dir.path().join("b.db")).unwrap();
+        b.put_resource("images/pic.png", "pic.png", B).unwrap();
         let err = import(&mut b, &zip, vec![ImportAction::New]).unwrap_err();
         assert!(
             format!("{err:#}").contains("图片同名"),
             "unexpected: {err:#}"
         );
         assert!(b.list(&Default::default()).unwrap().is_empty());
-        assert_eq!(std::fs::read(&pic).unwrap(), b"png-by-b-different");
+        assert_eq!(
+            b.resource_bytes("images/pic.png").unwrap().as_deref(),
+            Some(B)
+        );
 
-        // 同路径同内容：正常导入，本机文件不被触碰。
-        std::fs::write(&pic, b"png-by-a").unwrap();
+        // 同内容：正常导入，资源进库；本机文件不被触碰，也不再写 images/。
+        b.remove_resource_alias("images/pic.png").unwrap();
         let summary = import(&mut b, &zip, vec![ImportAction::New]).unwrap();
         assert_eq!(summary.created, 1);
-        assert_eq!(std::fs::read(&pic).unwrap(), b"png-by-a");
+        assert_eq!(std::fs::read(&pic).unwrap(), A);
         let id_b = b.list(&Default::default()).unwrap()[0].id;
+        assert_eq!(
+            b.resource_bytes("images/pic.png").unwrap().as_deref(),
+            Some(A)
+        );
         // 合并后的带图稿件能重新导出并往返识别为同一版本。
         let round = dir.path().join("round.zip");
         export(&mut b, id_b, &round);

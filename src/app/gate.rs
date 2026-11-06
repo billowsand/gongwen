@@ -379,6 +379,7 @@ impl AppShell {
         let veiled = matches!(&self.phase, ShellPhase::Gate(gate) if gate.veiled);
         // 先切槽位，再用**显式槽位**创建句柄：句柄绑定的槽位必须与磁盘路径一致，
         // 不能依赖「先设句柄、后切槽位」的调用顺序（诱饵密码会拿到 Real 句柄）。
+        crate::resources::close();
         crate::storage::set_current_slot(slot);
         crate::vault::set_key_handle_for_slot(dek, kind == WorkKind::Disable, slot);
         // 迁移/停用任务要在槽位与密钥都明确之后写盘，放行配置目录写入。
@@ -620,6 +621,8 @@ impl AppShell {
         // 停写在前：被丢弃的工作区里晚到的线程不能以「无密钥」状态把明文写回
         // 配置目录；槽位复位也在 drop 之前，晚到线程至少拿到真实槽路径。
         crate::storage::set_writes_blocked(true);
+        // 资源库连接随工作区一起释放：换槽、重锁与备份换入之后都必须重新打开。
+        crate::resources::close();
         storage::set_current_slot(DataSlot::Real);
         let previous = std::mem::replace(&mut self.phase, ShellPhase::Gate(GateState::unlock()));
         if let ShellPhase::Ready(mut app) = previous

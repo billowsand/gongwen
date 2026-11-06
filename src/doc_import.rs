@@ -1172,22 +1172,32 @@ mod tests {
 
         let config = tempfile::tempdir().expect("临时配置目录");
         crate::storage::set_test_config_dir(Some(config.path().to_path_buf()));
+        // 图片现在进 SQLCipher 主库的资源表；测试用临时库扮演稿件库。
+        crate::resources::init_at(&config.path().join("manuscripts.db")).expect("打开资源库");
         let imported = to_draft_markdown(&path, true);
-        crate::storage::set_test_config_dir(None);
         let imported = imported.expect("导入");
-
         let refs = crate::images::image_refs(&imported.markdown);
         assert_eq!(refs.len(), 3, "{}", imported.markdown);
-        for (index, src) in refs.iter().enumerate() {
-            let suffix = format!("_现场照片_图{}.png", index + 1);
-            assert!(src.ends_with(&suffix), "{src}");
+        // 新引用是随机 ID：既没有原文件名，也没有扩展名；图片目录里不再生成文件。
+        for src in &refs {
+            assert!(src.starts_with("images/"), "{src}");
+            assert!(!src.contains("现场照片"), "{src}");
+            assert!(!src.contains(".png"), "{src}");
         }
-        let stored = |src: &str| std::fs::read(config.path().join(src)).expect("图片已入库");
+        let stored = |src: &str| crate::images::read(src).expect("图片已入库");
         assert_eq!(stored(&refs[0]), png, "PNG 按原字节入库");
         for src in &refs[1..] {
             let converted = image::load_from_memory(&stored(src)).expect("转出的是位图");
             assert!(converted.width() > 500, "矢量图要放大：{src}");
         }
+        // 原文件名只存在加密库里，导出时仍能给出人类可读的名字。
+        assert!(
+            crate::images::display_name(&refs[1]).contains("现场照片"),
+            "{}",
+            crate::images::display_name(&refs[1])
+        );
+        crate::resources::close();
+        crate::storage::set_test_config_dir(None);
         assert_eq!(
             imported.markdown,
             format!(

@@ -592,3 +592,41 @@ PDF 集合也改为 `.7z`。原始名称保留在加密头内，不需要套包�
 应用按签名识别旧 ZIP，清单和资源读写仍在内存完成；旧包不因新密码规则失效。
 全量备份/源码/Typst ZIP 不变，仍沿用各自风险确认。外层文件名和总大小不在头部保护范围内。
 详见 `gwx-package-design.md` 文末。
+
+### 2026-11-07 第九轮：图片 / PDF 插图 / 图表缓存并入 SQLCipher 主库
+
+用户要求：磁盘上不能再出现「这是什么图」——文件名、扩展名、导入时间都不能看出来。
+此前 B 阶段是「一图一文件 + GWA2 整文件 AEAD」，内容是密的，但 `images/20260809_121500_关于XX的请示_图1.png`
+这样的文件名、扩展名与时间戳仍然留在目录列表里，与要求不符。
+
+**结论：新增资源对象表，图片改为 BLOB 进 `manuscripts.db`（SQLCipher），不再一图一文件。**
+
+- 新模块 `src/resources.rs`：`resource_objects`（按明文 SHA-256 去重的 BLOB、媒体类型、
+  原文件名、明文长度）与 `resource_aliases`（正文逻辑引用 → 对象、原文件名）。
+  幂等建表，不占 `user_version` 档位，与知识库/词表/任务助手各自的 `ensure_*_schema` 并行。
+  读取先查别名，没有别名再回退磁盘文件（帮助截图、迁移未完成、外部基准目录）。
+- `src/images.rs` 改成资源层门面：新导入写 `images/<uuid>`（无原名、无扩展名、无时间），
+  格式按内容魔数判断（PNG/JPEG/GIF/BMP/WebP/PDF），显示名与 DOCX「【附件】原文件名」
+  取自库里的 `original_name`；`read/exists/meta/display_name/is_pdf/stamp` 供预览、导出、
+  稿件包、Typst World 共用。`images/` 目录只保留随包帮助截图与迁移中的旧文件。
+- Mermaid 缓存同样进库：引用 `mermaid-cache/<sha256>`（格式并入哈希，无扩展名），
+  警告单独存为 `mermaid-cache/<sha256>.warning` 文本资源；旧缓存是可重建的，迁移时直接清掉；
+  资源库里最多保留 512 条图表缓存，超出按新近程度裁剪并回收对象，避免主库无限增长。
+  研究报告的 Mermaid 仍按 `mermaid-cache/` 逻辑目录识别为满宽画布（`vendor/mdx` 的
+  `figure_size` 同时认旧文件名前缀与逻辑目录，并按字节头探测 PDF 尺寸）。
+- 旧数据迁移（`images::migrate_legacy_files`，进入工作区时执行）：旧图片解密 → 插对象 +
+  别名 `images/<原文件名>` → `PRAGMA wal_checkpoint(FULL)` 确认落盘 → 覆写删除原文件。
+  幂等、可中断重入；认不出格式或同名不同内容的文件保留并报告，不误删。别名表保证
+  旧正文、旧版本快照、旧稿件包里的 `images/<原文件名>` 引用继续有效，**不改任何历史版本正文**。
+- 稿件包：导出时插图从资源层取字节、manifest 仍按逻辑引用记录；新包清单的 asset 增加
+  `original_name`（旧包没有该项时按路径末段兜底）。导入时图片在 `begin_sync_import`
+  的 SAVEPOINT 内写入资源表，与正文/版本同一事务提交或回滚，**不再往 images/ 写文件**。
+  旧格式包（schema 1/2/3、asset 路径 `images/<原文件名>`）照常导入。
+- 删除稿件：孤儿清理改为扫活稿 + 全部历史版本的引用，删别名并回收无引用对象。
+
+**验证**：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`
+通过；`cargo test --locked --all-targets` 为 **3027 通过 / 0 失败 / 92 忽略**。
+新增测试覆盖资源表去重/别名/孤儿回收、缓存裁剪、导入不落文件、旧文件迁移幂等与安全删除、
+迁移后旧引用可读、旧包（无 `original_name`）按路径末段兜底、Mermaid 缓存入库、
+预览/导出/稿件包读库。仍待真机验收：GUI 导入大图/多图、旧 `.gwx` 包实际往返、
+SQLCipher 库膨胀与导出耗时。

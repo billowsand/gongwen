@@ -496,13 +496,14 @@ pub(crate) fn red_record_paragraph(
 
 /// 图片段落：位图嵌入为 Word 图片（宽度不超过版心 `max_width_twips`，等比缩放，
 /// 小图保持原尺寸）；PDF 输出附件说明段落——docx-rs 无法把 PDF 作为图片嵌入。
+///
+/// 新数据的引用是 `images/<uuid>`，既没有扩展名也没有原文件名：字节、格式与
+/// 展示用文件名都从图片资源层取（库里存原名），DOCX 里仍显示
+/// 「【附件】扫描件.pdf」，不能把随机 ID 印给用户看。
 pub(crate) fn image_paragraph(alt: &str, src: &str, max_width_twips: usize) -> Option<Paragraph> {
-    let path = images::resolve(src).ok()?;
-    let bytes = images::read_managed_file(&path).ok()?;
-    let file_name = src.rsplit('/').next().unwrap_or(src).to_string();
-    let is_pdf = path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
+    let bytes = images::read(src).ok()?;
+    let file_name = images::display_name(src);
+    let is_pdf = images::is_pdf(src);
     image_paragraph_from_bytes(alt, &file_name, is_pdf, &bytes, max_width_twips)
 }
 

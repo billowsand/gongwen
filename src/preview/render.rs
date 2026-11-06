@@ -1057,7 +1057,9 @@ pub(crate) fn content_block(
 }
 
 /// 图片块：位图按原始尺寸画、最宽到版心宽，加载失败显示占位卡片；PDF 取第一页
-/// 光栅化后按版心宽度画（见 `preview::pdf_figure`）。外层已由 clickable 包装。
+/// 光栅化后按版心宽度画（见 `preview::pdf_figure`）。图片与 PDF 都从资源库读
+/// （`images::read`，旧数据回退文件），层里只拿逻辑引用，不看磁盘路径与扩展名。
+/// 外层已由 clickable 包装。
 pub(crate) fn image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str) {
     figure_block(ui, metrics, alt, src, false);
 }
@@ -1096,18 +1098,13 @@ pub(crate) fn diagram_image_block(
 
 /// `research` 为真时按 `figure_size` 定宽居中，否则是公文的排法。
 fn figure_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str, research: bool) {
-    let file_name = src.rsplit('/').next().unwrap_or(src).to_string();
-    let path = match images::resolve(src) {
-        Ok(path) => path,
-        Err(error) => return image_placeholder(ui, metrics, alt, &file_name, &error.to_string()),
-    };
-    let is_pdf = path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
-    if is_pdf {
-        return pdf_block(ui, metrics, alt, src, &path, &file_name, research);
+    // 导出与版面用的是资源库里的原名；新引用 `images/<uuid>` 本身没有语义。
+    let file_name = images::display_name(src);
+    // 格式按库里的 MIME（旧文件按扩展名回退）判断，不再看路径后缀。
+    if images::is_pdf(src) {
+        return pdf_block(ui, metrics, alt, src, &file_name, research);
     }
-    let bytes = match images::read_managed_file(&path) {
+    let bytes = match images::read(src) {
         Ok(bytes) => bytes,
         Err(error) => {
             return image_placeholder(
@@ -1120,8 +1117,8 @@ fn figure_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str, rese
         }
     };
     // 每张图片一个固定 uri，egui 的 ImageCache 按 uri 缓存解码结果，避免每帧重读重解码。
-    // src 形如 `images/xxx.png`，直接用其做 uri 后缀保证唯一。
-    let uri = format!("bytes://{src}");
+    // 后缀带上资源内容指纹：同一个路径换了对象（比如重导入）就换 uri，不会继续用旧纹理。
+    let uri = format!("bytes://{src}@{}", images::stamp(src));
     // 用 fit_to_original_size 按纹理尺寸布局，再受 max_size 限制（宽=版心、高不设限）。
     // 不能用默认的 Fraction 适配：滚动区里 available_size.y 是无穷大，会把图片高度
     // 撑成无穷大，矩形超出可视区域而不绘制。
@@ -1167,17 +1164,23 @@ fn centered_figure(
 }
 
 /// PDF 插图：第一页占满版心宽，与导出的 `\includegraphics[width=\textwidth]`
-/// 一致。首帧还在后台渲染，先画占位卡片顶上。
+/// 一致。首帧还在后台读取/渲染，先画占位卡片顶上。
 fn pdf_block(
     ui: &mut egui::Ui,
     metrics: &Metrics,
     alt: &str,
     src: &str,
-    path: &std::path::Path,
     file_name: &str,
     research: bool,
 ) {
-    match pdf_figure::page(ui.ctx(), src, path) {
+    let stamp = images::stamp(src);
+    // 缓存键带内容指纹；未命中时后台线程才读字节（资源库优先，旧数据回退文件），
+    // 主线程不碰 IO，也不把路径传进光栅化。
+    let logical = src.to_string();
+    match pdf_figure::page(ui.ctx(), src, stamp, move || {
+        let bytes = images::read(&logical).map_err(|error| format!("无法读取：{error:#}"))?;
+        Ok(std::sync::Arc::new(bytes))
+    }) {
         pdf_figure::PdfPage::Ready(texture) if research => {
             // 预览只光栅化第一页，纹理的宽高比就是页面的宽高比；PDF 是矢量图，
             // 不受分辨率上限约束。
