@@ -1094,6 +1094,10 @@ fn copy_capped(
 /// 用户资源目录：B 阶段起 `images/`、`mermaid-cache/` 里的图片与 Mermaid 图会落成
 /// AEAD 密文，恢复后仍是密文，同样只该给当前用户读写。真实槽与诱饵槽各一套名字
 /// （`crash_log` 那类槽位映射的目录一律带 `alt-` 前缀）。
+///
+/// 只有 Unix 侧的权限收紧用得上这份名单；Windows 没有 POSIX 权限位，留着会变成
+/// 死代码被 clippy 判失败。
+#[cfg(unix)]
 const PRIVATE_RESOURCE_DIRS: [&str; 12] = [
     "images",
     "alt-images",

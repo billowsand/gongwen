@@ -1,0 +1,16 @@
+name: probe macos runners
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-latest, macos-14, macos-13]
+    steps:
+      - run: echo probe-ok
