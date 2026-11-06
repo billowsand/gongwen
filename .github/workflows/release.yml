@@ -96,9 +96,14 @@ jobs:
           $staging = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full"
           ./scripts/package-installer.ps1 -Version $version -SourceDir $staging -OutputDir $env:GITHUB_WORKSPACE -Force
           $asset = "gongwen-assistant-$version-win-x64-setup.exe"
-          Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
-            "$($_.Hash.ToLowerInvariant())  $asset"
-          } | Set-Content "${asset}.sha256" -Encoding utf8
+          # 校验文件要写成 LF 行尾：Set-Content 在 Windows 上固定写 CRLF，
+          # 文件名后面会带上一个 \r，Linux/macOS 上的 sha256sum -c 会因此
+          # 报「找不到文件」。这里直接写字节，不经过 PowerShell 的换行转换。
+          $hash = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText(
+            "${asset}.sha256",
+            "$hash  $asset`n",
+            [System.Text.UTF8Encoding]::new($false))
 
       - name: Upload Windows release assets
         uses: actions/upload-artifact@v4
