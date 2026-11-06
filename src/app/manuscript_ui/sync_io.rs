@@ -836,48 +836,16 @@ impl GongwenApp {
     }
 
     pub(crate) fn open_pdf_attachment(&mut self, id: i64) {
-        // 附件不存在时不要为一个不会发生的操作弹风险框。
-        let known = self
-            .manuscript_detail
-            .as_ref()
-            .is_some_and(|detail| detail.pdfs.iter().any(|pdf| pdf.id == id));
-        if !known {
+        let Some((title, bytes)) = self.manuscript_detail.as_ref().and_then(|detail| {
+            detail
+                .pdfs
+                .iter()
+                .find(|pdf| pdf.id == id)
+                .map(|pdf| (pdf.file_name.clone(), pdf.bytes.clone()))
+        }) else {
             return;
-        }
-        // 当前查看器需要文件路径。内存读取改造前，不能以“预览”为由静默释放明文。
-        if crate::vault::key_handle().is_some() {
-            self.request_plaintext_output(
-                "预览 PDF 附件：当前查看器会在本机缓存目录生成一份普通 PDF 副本（仅当前用户可读，锁屏/退出时删除）。",
-                move |app| app.open_pdf_attachment_confirmed(id),
-            );
-            return;
-        }
-        self.open_pdf_attachment_confirmed(id);
-    }
-
-    fn open_pdf_attachment_confirmed(&mut self, id: i64) {
-        let (path, title) = {
-            let detail = self.manuscript_detail.as_ref();
-            let Some(detail) = detail else { return };
-            let Some(pdf) = detail.pdfs.iter().find(|p| p.id == id) else {
-                return;
-            };
-            let path = self.temp_pdf_path(detail.id, id);
-            // 走 atomic_write：Unix 0600、原子替换；并登记到工作区，锁屏/退出时删除，
-            // 不能让预览副本长期留在磁盘上。
-            let bytes = pdf.bytes.clone();
-            if let Err(error) = crate::storage::atomic_write(&path, |file| {
-                use std::io::Write as _;
-                file.write_all(&bytes)?;
-                Ok(())
-            }) {
-                self.status = format!("写入临时 PDF 失败：{error:#}");
-                return;
-            }
-            self.temp_pdfs.push(path.clone());
-            (path, pdf.file_name.clone())
         };
-        self.open_pdf(path, Some(title));
+        self.open_pdf_memory(id, title, bytes);
     }
 
     pub(crate) fn save_pdf_attachment(&mut self, id: i64) {
@@ -906,18 +874,9 @@ impl GongwenApp {
             );
         });
     }
-
-    /// 预览副本放本机缓存目录（不是用户可见的输出目录）：锁屏/退出会删，
-    /// 不再产生「已经导出到输出目录」的误解，也不会落到共享盘。
-    pub(crate) fn temp_pdf_path(&self, manuscript_id: i64, attachment_id: i64) -> PathBuf {
-        crate::storage::cache_dir()
-            .unwrap_or_else(|_| std::env::temp_dir())
-            .join("pdf-preview")
-            .join(format!("manuscript_{manuscript_id}_{attachment_id}.pdf"))
-    }
 }
 
-/// 清掉崩溃/强杀残留的 PDF 预览副本（正常路径由工作区 Drop 删除）。
+/// 清掉旧版崩溃/强杀残留的 PDF 预览副本；新版内存预览不再生成这些文件。
 /// 只删缓存目录 `pdf-preview/` 下自己的 `manuscript_<id>_<id>.pdf` 命名，
 /// 不碰用户的任何文件。
 pub(crate) fn purge_stale_preview_pdfs() {

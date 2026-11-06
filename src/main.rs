@@ -67,6 +67,7 @@ mod pi_agent;
 mod portable_runtime;
 mod preview;
 // 打印：Win32 那一半是 FFI，在 `print` 内部的 `win` 模块声明处单独放行 unsafe。
+mod pdf_image;
 mod print;
 mod prompt;
 mod proofread;

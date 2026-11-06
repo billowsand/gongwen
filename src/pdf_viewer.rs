@@ -29,6 +29,8 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
+mod memory;
+
 pub(crate) type PdfKey = u64;
 
 const MIN_ZOOM: f32 = 0.25;
@@ -86,6 +88,12 @@ pub(crate) enum PdfAction {
     Reveal(PathBuf),
     /// 打开打印对话框。份号不同的多份成品必须由导出阶段生成，不能靠打印机份数。
     Print(crate::print::PrintRequest),
+    /// 内存附件离开应用前须由外壳确认并选择输出位置。
+    ReleaseMemory {
+        bytes: Arc<Vec<u8>>,
+        request: Box<crate::print::PrintRequest>,
+        print: bool,
+    },
 }
 
 /// 浏览方式。
@@ -225,6 +233,7 @@ impl Drop for RenderHandle {
 pub(crate) struct PdfSession {
     pub(crate) key: PdfKey,
     path: PathBuf,
+    memory: Option<Arc<Vec<u8>>>,
     title: String,
     /// 结果通道，交给渲染线程用。
     results: Sender<WorkerResult>,
@@ -289,6 +298,7 @@ impl PdfSession {
         Self {
             key,
             path,
+            memory: None,
             title: title
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or(fallback),
@@ -386,7 +396,7 @@ impl PdfSession {
             return None;
         }
         self.print_when_ready = false;
-        Some(PdfAction::Print(self.print_request()))
+        Some(self.print_action())
     }
 
     /// 交给外壳的打印请求：当前页、总页数、打印提示与对应标签。
@@ -444,6 +454,9 @@ impl PdfSession {
     }
 
     pub(crate) fn tab_hover(&self) -> String {
+        if self.is_memory() {
+            return format!("PDF 附件：{}（内存预览，未生成文件）", self.title);
+        }
         format!("PDF：{}", self.path.display())
     }
 
@@ -539,9 +552,10 @@ impl PdfSession {
         self.renderer = Some(RenderHandle(Arc::clone(&queue)));
         let key = self.key;
         let path = self.path.clone();
+        let memory = self.memory.clone();
         let results = self.results.clone();
         let ctx = ctx.clone();
-        thread::spawn(move || worker(key, path, queue, results, ctx));
+        thread::spawn(move || worker(key, path, memory, queue, results, ctx));
     }
 
     fn page_count(&self) -> usize {
@@ -699,17 +713,25 @@ impl PdfSession {
                 && crate::modal::takes_keys(ui)
                 && ui.input_mut(|input| input.consume_shortcut(&PRINT_SHORTCUT));
             if print_button.clicked() || shortcut {
-                actions.push(PdfAction::Print(self.print_request()));
+                actions.push(self.print_action());
             }
 
             if ui
-                .add(theme::icon_text_button(theme::Icon::Open, "系统打开"))
+                .add(theme::icon_text_button(theme::Icon::Open, if self.is_memory() { "另存并系统打开" } else { "系统打开" }))
                 .on_hover_text("遇到复杂或加密 PDF 时使用系统程序打开")
                 .clicked()
             {
-                actions.push(PdfAction::OpenExternal(self.path.clone()));
+                if let Some(bytes) = &self.memory {
+                    actions.push(PdfAction::ReleaseMemory {
+                        bytes: Arc::clone(bytes),
+                        request: Box::new(self.print_request()),
+                        print: false,
+                    });
+                } else {
+                    actions.push(PdfAction::OpenExternal(self.path.clone()));
+                }
             }
-            if theme::icon_button(ui, theme::Icon::Reveal, "在文件管理器中定位").clicked()
+            if !self.is_memory() && theme::icon_button(ui, theme::Icon::Reveal, "在文件管理器中定位").clicked()
             {
                 actions.push(PdfAction::Reveal(self.path.clone()));
             }
@@ -1458,6 +1480,7 @@ fn render_threads() -> usize {
 fn worker(
     key: PdfKey,
     path: PathBuf,
+    memory: Option<Arc<Vec<u8>>>,
     queue: Arc<RenderQueue>,
     results: Sender<WorkerResult>,
     ctx: egui::Context,
@@ -1469,8 +1492,11 @@ fn worker(
         delivered
     };
 
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => Arc::new(bytes),
+    let bytes = match memory
+        .map(Ok)
+        .unwrap_or_else(|| std::fs::read(&path).map(Arc::new))
+    {
+        Ok(bytes) => bytes,
         Err(error) => {
             send(PdfMessage::Failed(format!(
                 "无法读取 {}：{error}",
@@ -1606,12 +1632,12 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let queue = Arc::new(RenderQueue::default());
         let handle = RenderHandle(Arc::clone(&queue));
-        thread::spawn(move || worker(1, path, queue, tx, egui::Context::default()));
+        thread::spawn(move || worker(1, path, None, queue, tx, egui::Context::default()));
         (handle, rx)
     }
 
     /// 生成一页最小 PDF，避免单元测试依赖系统 PDF 程序或原生动态库。
-    fn minimal_pdf() -> Vec<u8> {
+    pub(super) fn minimal_pdf() -> Vec<u8> {
         let mut bytes = b"%PDF-1.4\n".to_vec();
         let mut offsets = vec![0usize];
         let objects: [&[u8]; 5] = [
@@ -1644,7 +1670,10 @@ mod tests {
     }
 
     /// 收干渲染线程的消息，直到拿到想要的那条或超时。
-    fn drain(rx: &Receiver<WorkerResult>, mut take: impl FnMut(PdfMessage) -> bool) -> bool {
+    pub(super) fn drain(
+        rx: &Receiver<WorkerResult>,
+        mut take: impl FnMut(PdfMessage) -> bool,
+    ) -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             match rx.recv_timeout(std::time::Duration::from_millis(200)) {

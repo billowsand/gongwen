@@ -7,6 +7,10 @@ use walkdir::WalkDir;
 
 /// 校验输入路径并区分单文件/目录
 pub fn classify(input: &Path) -> Result<InputKind> {
+    if crate::memory_files::active() {
+        anyhow::ensure!(crate::memory_files::is_file(input), "内存输入不存在");
+        return Ok(InputKind::File);
+    }
     if !input.exists() {
         anyhow::bail!("找不到输入路径 '{}'", input.display());
     }
@@ -45,8 +49,8 @@ pub fn collect_raw(input: &Path) -> Result<String> {
 /// 后续文件的 BOM 会残留在首行，导致 `## 标题` 实际变成 `\u{feff}## 标题`，
 /// 从而被解析器误判为普通段落。因此必须在合并前逐文件处理。
 fn read_markdown(path: &Path) -> Result<String> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("读取文件 {} 失败", path.display()))?;
+    let content = crate::memory_files::read_to_string(path)
+        .with_context(|| format!("读取文件 {} 失败", path.display()))?;
     Ok(content
         .strip_prefix('\u{feff}')
         .unwrap_or(&content)

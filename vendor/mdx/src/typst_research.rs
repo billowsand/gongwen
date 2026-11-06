@@ -305,7 +305,7 @@ pub fn build_with_body_normalizer(
     input: &Path,
     normalize: impl FnOnce(&str) -> String,
 ) -> Result<Doc> {
-    let content = std::fs::read_to_string(input)
+    let content = crate::memory_files::read_to_string(input)
         .with_context(|| format!("读取文件 {} 失败", input.display()))?;
     let content = content.trim_start_matches('\u{feff}');
     let base_dir = input.parent().unwrap_or(Path::new("."));
@@ -868,7 +868,7 @@ impl Builder {
                 std::path::Component::Normal(_) | std::path::Component::CurDir
             )
         });
-        if escapes || !self.base_dir.join(relative).is_file() {
+        if escapes || !crate::memory_files::is_file(&self.base_dir.join(relative)) {
             self.warnings.push(format!("插图文件不存在，已略过：{url}"));
             return None;
         }

@@ -6,6 +6,7 @@ pub mod cover;
 mod docx_official;
 mod docx_research;
 mod input;
+pub mod memory_files;
 mod parser;
 
 /// 研究报告的 Typst 排版数据（公文助手的 Typst 引擎用）。

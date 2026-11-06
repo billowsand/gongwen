@@ -17,7 +17,7 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
 ```text
 公文：     Markdown ─ export::parse ─ export::typst ─ JSON ─┐
 签收单：   Markdown ─ export::typst::receipt ─ JSON ─────────┤
-研究报告： Markdown ─ export::research（frontmatter、插图、文献装进临时目录）    ├─ typst_engine ─ PDF
+研究报告： Markdown ─ export::research（frontmatter、插图、文献的内存快照）    ├─ typst_engine ─ PDF
                     ─ mdx::typst_research ─ research_redline ─ math ─ JSON ─┘
 ```
 
@@ -108,6 +108,15 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
   默认涉密信息加密 / 公开信息明文 / 公开信息密文三项），公函表单里选，不选按密级自动带。
 
 ### 研究报告
+
+- 2026-11-06 安全输入改造：`ResearchSourceBundle` 只保存内存快照，不创建临时目录。
+  `mdx::memory_files::MemoryFiles::run` 为同步转换提供线程隔离的只读输入；作用域内
+  缺资源不回落磁盘，嵌套/异常恢复先前作用域。Typst 作业同时设置
+  `allow_filesystem = false`，插图、文献与公式从 `files` 传入，缺资源直接报错。
+  研究报告 Mermaid 直接渲染到快照，不写 `mermaid-cache/`；Word 中 PDF 插图由
+  `src/pdf_image.rs` 在进程内转 PNG，不调用 Poppler、不写转换临时图。
+  一次转换的原始资源合计上限 512 MiB，PDF 插图单页限制 2400 万像素及 8192 边长。
+  导出 Typst 包直接从快照写条目；解压后的独立包仍可显式允许文件系统读取。
 
 - PDF 的普通段落与列表先由 `src/export/typst/research_body.rs` 复用预览的
   `parse_markdown_located_with_numbering` 规范，再交给 mdx：无空行的正文换行合成一段，

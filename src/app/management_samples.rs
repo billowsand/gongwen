@@ -42,7 +42,6 @@ pub(super) fn fixture() -> GongwenApp {
         next_print_dialog: 1,
         pending_file_dialogs: Vec::new(),
         pending_output: None,
-        temp_pdfs: Vec::new(),
         send_package: None,
         send_package_export: None,
         macos_titlebar_metrics: None,

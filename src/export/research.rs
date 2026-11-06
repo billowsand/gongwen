@@ -1,12 +1,15 @@
-//! 研究报告导出：frontmatter、插图与参考文献装进临时目录，交给固定版本 mdx：
+//! 研究报告导出：frontmatter、插图与参考文献组织为内存输入，交给固定版本 mdx：
 //! Word 由 mdx 的 research 转换器生成，PDF 由 mdx 整理排版数据、`export::typst::research`
 //! 排版。两者的普通段落与列表都先过预览解析器（`typst::research_body::normalize`）。
 
 use crate::export::parse::{MarkdownBlock, TableSpan, table_span_at};
-use crate::models::{DraftInput, NumberingConfig, ResearchMetadata};
+use crate::models::{DraftInput, NumberingConfig};
 use anyhow::{Context, Result};
+use std::collections::HashMap;
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// 生成包含封面元数据的完整 Markdown。正文始终与元数据分开维护，避免模型或正文
 /// 编辑器改写密级、编号、单位和日期。
@@ -170,10 +173,13 @@ pub(crate) fn write_docx(
     )?;
     // 普通段落与列表先过预览解析器，与 PDF 同一套规则（段内列表、独立列表
     // 及其缩进子项、软换行），见 `typst::research_body::normalize`。
-    mdx::convert_research_docx_with_body_normalizer(&source.markdown, path, |body| {
-        super::typst::research_body::normalize(body, numbering)
-    })
-    .with_context(|| format!("研究报告 Word 转换失败：{}", path.display()))?;
+    source
+        .with_mdx(|| {
+            mdx::convert_research_docx_with_body_normalizer(&source.markdown, path, |body| {
+                super::typst::research_body::normalize(body, numbering)
+            })
+        })
+        .with_context(|| format!("研究报告 Word 转换失败：{}", path.display()))?;
     if input.research.template == crate::models::ResearchTemplate::Terminal {
         super::research_theme::style_docx(path)?;
     }
@@ -196,17 +202,33 @@ pub(crate) fn markdown_source(
     )
 }
 
-/// 交给 mdx 的源码目录：带 frontmatter 的 Markdown、插图与参考文献，放在一个临时
-/// 目录里，随值一起删掉。
+/// 一次同步转换的内存快照：虚拟路径只用于解析相对引用，从不创建目录。
 pub(crate) struct ResearchSourceBundle {
-    root: tempfile::TempDir,
+    root: PathBuf,
     pub(crate) markdown: PathBuf,
+    source: mdx::memory_files::MemoryFiles,
+    pub(crate) resources: HashMap<String, Arc<Vec<u8>>>,
 }
 
 impl ResearchSourceBundle {
-    /// 插图、文献的解析基准（临时目录本身）。
     pub(crate) fn root(&self) -> &Path {
-        self.root.path()
+        &self.root
+    }
+
+    pub(crate) fn with_mdx<T>(&self, convert: impl FnOnce() -> T) -> T {
+        self.source.run(convert)
+    }
+
+    pub(crate) fn files(
+        &self,
+        mut generated: HashMap<String, Vec<u8>>,
+    ) -> HashMap<String, Vec<u8>> {
+        for (path, bytes) in &self.resources {
+            generated
+                .entry(path.clone())
+                .or_insert_with(|| bytes.as_ref().clone());
+        }
+        generated
     }
 
     pub(crate) fn create(
@@ -216,38 +238,74 @@ impl ResearchSourceBundle {
         format: crate::mermaid::Format,
         base_dir: &Path,
     ) -> Result<Self> {
-        let root = tempfile::Builder::new()
-            .prefix("gongwen-research-")
-            .tempdir()
-            .context("无法创建研究报告临时目录")?;
-        let rendered =
-            crate::mermaid::materialize(markdown, crate::mermaid::Style::Research, format)?;
-        crate::images::copy_refs_from(base_dir, &rendered, root.path())?;
-        let bibliography = copy_bibliography(&input.research, root.path())?;
+        let root = PathBuf::from(format!("gongwen-memory-{}", uuid::Uuid::new_v4()));
+        let (rendered, mut resources) =
+            crate::mermaid::materialize_memory(markdown, crate::mermaid::Style::Research, format)?;
+        let mut resource_bytes: usize = resources.values().map(Vec::len).sum();
+        for reference in crate::images::image_refs(&rendered) {
+            // PDF 页码片段不是文件名，交给 mdx 校验，资源按原始路径提供。
+            let path = crate::images::normalize_ref(
+                reference
+                    .split_once("#page=")
+                    .map_or(reference.as_str(), |(path, _)| path),
+            );
+            if resources.contains_key(&path)
+                || path.starts_with("http://")
+                || path.starts_with("https://")
+            {
+                continue;
+            }
+            let Ok(source) = crate::images::resolve_from_base(base_dir, &path) else {
+                continue;
+            };
+            if !source.is_file() {
+                continue;
+            }
+            let bytes = crate::file_limits::read_bytes(
+                &source,
+                crate::file_limits::MAX_IMAGE_BYTES
+                    .min((crate::file_limits::MAX_RESEARCH_RESOURCE_BYTES - resource_bytes) as u64),
+                "研究报告插图",
+            )?;
+            resource_bytes += bytes.len();
+            resources.insert(path.to_string(), bytes);
+        }
+        let has_bibliography = !input.research.bibliography_content.trim().is_empty();
+        if has_bibliography {
+            resources.insert(
+                "references.bib".into(),
+                input.research.bibliography_content.as_bytes().to_vec(),
+            );
+        }
+        let total: usize = resources.values().map(Vec::len).sum();
+        anyhow::ensure!(
+            total <= crate::file_limits::MAX_RESEARCH_RESOURCE_BYTES,
+            "研究报告资源总量超过 512 MiB，请拆分报告或缩小插图"
+        );
+        let resources: HashMap<String, Arc<Vec<u8>>> = resources
+            .into_iter()
+            .map(|(path, bytes)| (path, Arc::new(bytes)))
+            .collect();
         let document = markdown_with_frontmatter(
             input,
             &rendered,
-            bibliography.as_deref().map(|_| "references.bib"),
+            has_bibliography.then_some("references.bib"),
             numbering,
         );
-        let path = root.path().join("research.md");
-        fs::write(&path, document)
-            .with_context(|| format!("无法写入研究报告临时文件：{}", path.display()))?;
+        let path = root.join("research.md");
+        let mut files: HashMap<PathBuf, Arc<Vec<u8>>> = resources
+            .iter()
+            .map(|(path, bytes)| (root.join(path), bytes.clone()))
+            .collect();
+        files.insert(path.clone(), Arc::new(document.into_bytes()));
+        let source = mdx::memory_files::MemoryFiles::new(files, crate::pdf_image::png);
         Ok(Self {
             root,
             markdown: path,
+            source,
+            resources,
         })
     }
-}
-
-fn copy_bibliography(meta: &ResearchMetadata, target_dir: &Path) -> Result<Option<PathBuf>> {
-    if meta.bibliography_content.trim().is_empty() {
-        return Ok(None);
-    }
-    let destination = target_dir.join("references.bib");
-    fs::write(&destination, &meta.bibliography_content)
-        .with_context(|| format!("无法写入研究报告参考文献：{}", destination.display()))?;
-    Ok(Some(destination))
 }
 
 fn one_line(value: &str) -> String {
@@ -263,6 +321,127 @@ fn one_line(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::models::TemplateKind;
+
+    #[test]
+    fn memory_source_contains_images_bibliography_and_diagrams_without_staging_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("inputs");
+        fs::create_dir_all(base.join("images")).unwrap();
+        image::RgbImage::new(24, 12)
+            .save(base.join("images/figure.png"))
+            .unwrap();
+        let mut input = research_input();
+        input.research.bibliography_content =
+            "@article{example,title={标题},author={Author},year={2026}}".into();
+        let markdown = "# 报告\n\n## 正文\n\n引用[@example]。\n\n![图片](.\\images\\figure.png)\n\n```mermaid\nflowchart TB\n A --> B\n```\n";
+        let bundle = ResearchSourceBundle::create(
+            &input,
+            markdown,
+            &NumberingConfig::default(),
+            crate::mermaid::Format::Png,
+            &base,
+        )
+        .unwrap();
+        assert!(!bundle.root().exists());
+        assert!(!bundle.markdown.exists());
+        assert!(bundle.resources.contains_key("images/figure.png"));
+        assert!(bundle.resources.contains_key("references.bib"));
+        assert!(
+            bundle
+                .resources
+                .keys()
+                .any(|path| path.starts_with("mermaid-cache/"))
+        );
+        assert!(!base.join("mermaid-cache").exists());
+        let data = bundle
+            .with_mdx(|| mdx::typst_research::build(&bundle.markdown))
+            .unwrap();
+        assert!(data.bibliography);
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(json.contains("images/figure.png"));
+        let output = dir.path().join("report.docx");
+        bundle
+            .with_mdx(|| {
+                mdx::convert_research_docx_with_body_normalizer(
+                    &bundle.markdown,
+                    &output,
+                    str::to_owned,
+                )
+            })
+            .unwrap();
+        let mut zip = zip::ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
+        assert!(
+            zip.file_names()
+                .any(|name| name.starts_with("word/media/") && !name.ends_with('/'))
+        );
+        assert!(zip.by_name("word/document.xml").is_ok());
+        assert!(!bundle.root().exists());
+        assert_eq!(fs::read_dir(&base).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn memory_source_never_falls_back_to_disk_and_restores_scope_after_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.md");
+        fs::write(&path, "# 磁盘报告\n\n正文。\n").unwrap();
+        let memory = |title: &str| {
+            mdx::memory_files::MemoryFiles::new(
+                HashMap::from([(
+                    path.clone(),
+                    Arc::new(format!("# {title}\n\n正文。\n").into_bytes()),
+                )]),
+                crate::pdf_image::png,
+            )
+        };
+        let outer = memory("外层");
+        let inner = memory("内层");
+        outer.run(|| {
+            let title =
+                || serde_json::to_string(&mdx::typst_research::build(&path).unwrap()).unwrap();
+            assert!(title().contains("外层"));
+            inner.run(|| assert!(title().contains("内层")));
+            assert!(title().contains("外层"));
+            let missing = dir.path().join("exists-on-disk.md");
+            fs::write(&missing, "# 不可越界读取\n\n正文。\n").unwrap();
+            assert!(mdx::typst_research::build(&missing).is_err());
+        });
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            outer.run(|| panic!("scope test"))
+        }));
+        let disk = serde_json::to_string(&mdx::typst_research::build(&path).unwrap()).unwrap();
+        assert!(disk.contains("磁盘报告"));
+    }
+
+    #[test]
+    fn parallel_memory_conversions_do_not_share_sources() {
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = ["甲报告", "乙报告"]
+            .into_iter()
+            .map(|title| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let path = PathBuf::from("same-virtual-name/report.md");
+                    let files = mdx::memory_files::MemoryFiles::new(
+                        HashMap::from([(
+                            path.clone(),
+                            Arc::new(format!("# {title}\n\n正文。\n").into_bytes()),
+                        )]),
+                        crate::pdf_image::png,
+                    );
+                    files.run(|| {
+                        barrier.wait();
+                        let json =
+                            serde_json::to_string(&mdx::typst_research::build(&path).unwrap())
+                                .unwrap();
+                        assert!(json.contains(title));
+                    });
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
 
     #[test]
     fn frontmatter_is_generated_from_locked_metadata() {
@@ -633,7 +812,9 @@ mod tests {
             dir.path(),
         )
         .expect("源码目录");
-        let doc = mdx::typst_research::build(&source.markdown).expect("研究报告应转换成功");
+        let doc = source
+            .with_mdx(|| mdx::typst_research::build(&source.markdown))
+            .expect("研究报告应转换成功");
         serde_json::to_value(&doc).unwrap()
     }
 

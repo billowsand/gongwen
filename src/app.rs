@@ -195,9 +195,6 @@ pub struct GongwenApp {
     /// 还没问完结果的系统文件对话框；后台线程开窗，主线程每帧问一次。
     pending_file_dialogs: Vec<file_dialog::PendingFileDialog>,
     pending_output: Option<output_guard::PendingOutput>,
-    /// 工作区生成的明文 PDF 预览副本：锁屏/退出（Drop）时删除。只在内存里
-    /// 记路径，不落任何"临时文件清单"到磁盘。
-    temp_pdfs: Vec<PathBuf>,
     /// 送批材料面板；None 表示未打开。
     send_package: Option<SendPackagePanel>,
     /// 正在后台进行的送批材料合并导出；同一时间只跑一个。
@@ -619,7 +616,6 @@ impl GongwenApp {
             next_print_dialog: 1,
             pending_file_dialogs: Vec::new(),
             pending_output: None,
-            temp_pdfs: Vec::new(),
             send_package: None,
             send_package_export: None,
             macos_titlebar_metrics,
@@ -1157,16 +1153,6 @@ impl GongwenApp {
     pub(crate) fn shutdown(&mut self) {
         if self.cancel_pi_tasks() {
             std::thread::sleep(std::time::Duration::from_millis(1500));
-        }
-    }
-}
-
-impl Drop for GongwenApp {
-    /// 锁定就是把整个工作区丢掉；这里顺带删掉预览用的明文 PDF 副本。
-    /// 只删本工作区登记过的路径，不扫描目录、不碰用户文件。
-    fn drop(&mut self) {
-        for path in self.temp_pdfs.drain(..) {
-            let _ = std::fs::remove_file(path);
         }
     }
 }

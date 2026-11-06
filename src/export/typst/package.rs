@@ -237,7 +237,7 @@ fn prepare_official(
     })
 }
 
-/// 研究报告：临时目录里已经有插图与参考文献，整份收进包；公式 SVG 只在内存里。
+/// 研究报告：将内存快照的插图、参考文献及公式 SVG 直接写入成品包。
 fn prepare_research(
     input: &DraftInput,
     markdown: &str,
@@ -251,20 +251,22 @@ fn prepare_research(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    let (data, files, warnings) = super::research::document_with_fonts(
-        &bundle.markdown,
-        input,
-        numbering,
-        markdown,
-        portable_research_fonts(),
-    )?;
+    let (data, files, warnings) = bundle.with_mdx(|| {
+        super::research::document_with_fonts(
+            &bundle.markdown,
+            input,
+            numbering,
+            markdown,
+            portable_research_fonts(),
+        )
+    })?;
     let mut resources = Vec::new();
-    collect_directory(
-        bundle.root(),
-        bundle.root(),
-        &bundle.markdown,
-        &mut resources,
-    )?;
+    resources.extend(
+        bundle
+            .resources
+            .iter()
+            .map(|(path, bytes)| (path.clone(), bytes.as_ref().clone())),
+    );
     for (virtual_path, bytes) in files {
         resources.push((virtual_path.trim_start_matches('/').to_string(), bytes));
     }
@@ -275,42 +277,6 @@ fn prepare_research(
         resources,
         warnings,
     })
-}
-
-/// 递归收临时目录里的文件，跳过交给 mdx 的源 Markdown（编译只需要模板与资源）。
-fn collect_directory(
-    root: &Path,
-    dir: &Path,
-    skip: &Path,
-    out: &mut Vec<(String, Vec<u8>)>,
-) -> Result<()> {
-    for entry in
-        fs::read_dir(dir).with_context(|| format!("无法读取研究报告资源目录 {}", dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path == skip {
-            continue;
-        }
-        if path.is_dir() {
-            collect_directory(root, &path, skip, out)?;
-            continue;
-        }
-        if !path.is_file() {
-            continue;
-        }
-        let relative = path
-            .strip_prefix(root)
-            .with_context(|| format!("无法计算资源相对路径：{}", path.display()))?;
-        let name = relative
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
-        let bytes = fs::read(&path).with_context(|| format!("无法读取资源 {}", path.display()))?;
-        out.push((name, bytes));
-    }
-    Ok(())
 }
 
 /// 包内说明：编译命令、字体清单、与 App 内 PDF 的差异。
@@ -613,6 +579,7 @@ mod tests {
             &TypstJob {
                 data,
                 base_dir: extracted.path(),
+                allow_filesystem: true,
                 template: Template::Research,
                 files: Default::default(),
             },

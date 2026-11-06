@@ -195,7 +195,11 @@ impl GongwenApp {
         title: Option<String>,
         hints: crate::print::PrintHints,
     ) {
-        if let Some(index) = self.pdfs.iter().position(|pdf| pdf.path() == path) {
+        if let Some(index) = self
+            .pdfs
+            .iter()
+            .position(|pdf| !pdf.is_memory() && pdf.path() == path)
+        {
             // 不带提示的再次打开（如送批材料面板里「打开文件」）不能把已知的提示抹掉。
             if hints != crate::print::PrintHints::default() {
                 self.pdfs[index].set_print_hints(hints);
@@ -218,13 +222,45 @@ impl GongwenApp {
         self.activate_tab(self.tabs.len() - 1);
     }
 
+    /// 稿件附件直接从 SQLCipher 解密后的字节预览，不写临时文件。
+    pub(crate) fn open_pdf_memory(&mut self, id: i64, title: String, bytes: Vec<u8>) {
+        let identity = PathBuf::from(format!("attachment-{id}"));
+        if let Some(pdf) = self
+            .pdfs
+            .iter()
+            .find(|pdf| pdf.is_memory() && pdf.path() == identity)
+            && let Some(tab) = self
+                .tabs
+                .iter()
+                .position(|tab| *tab == TabRef::Pdf(pdf.key))
+        {
+            self.activate_tab(tab);
+            return;
+        }
+        let key = self.next_pdf_key;
+        self.next_pdf_key += 1;
+        self.pdfs.push(PdfSession::from_memory(
+            key,
+            identity,
+            title,
+            bytes,
+            self.sender.clone(),
+        ));
+        self.tabs.push(TabRef::Pdf(key));
+        self.activate_tab(self.tabs.len() - 1);
+    }
+
     /// 导出后直接打印：打开 PDF（带上打印提示），等它打开完自动弹一次打印对话框。
     ///
     /// 同一路径已经开着时先关掉旧标签再重开：「覆盖同名」策略下刚导出的文件就写在
     /// 原处，旧标签里是上一版的页面与页数，切过去会预览旧内容、按旧页数校验页码。
     pub(crate) fn open_pdf_for_printing(&mut self, path: PathBuf, hints: crate::print::PrintHints) {
         self.reopen_exported_pdf(path.clone(), hints);
-        if let Some(pdf) = self.pdfs.iter_mut().find(|pdf| pdf.path() == path) {
+        if let Some(pdf) = self
+            .pdfs
+            .iter_mut()
+            .find(|pdf| !pdf.is_memory() && pdf.path() == path)
+        {
             pdf.request_print_when_ready();
         }
     }
@@ -234,7 +270,7 @@ impl GongwenApp {
     pub(crate) fn reopen_exported_pdf(&mut self, path: PathBuf, hints: crate::print::PrintHints) {
         if let Some(tab) = self.tabs.iter().position(|item| {
             matches!(item, TabRef::Pdf(key)
-                if self.pdfs.iter().any(|pdf| pdf.key == *key && pdf.path() == path))
+                if self.pdfs.iter().any(|pdf| pdf.key == *key && !pdf.is_memory() && pdf.path() == path))
         }) {
             self.close_tab(tab);
         }
@@ -265,6 +301,60 @@ impl GongwenApp {
                     Err(error) => self.status = format!("定位 PDF 失败：{error}"),
                 },
                 PdfViewerAction::Print(request) => self.open_print_dialog(request, ctx),
+                PdfViewerAction::ReleaseMemory {
+                    bytes,
+                    mut request,
+                    print,
+                } => {
+                    let ctx = ctx.clone();
+                    let name = crate::export::safe_filename(&request.title);
+                    let name = if name.to_ascii_lowercase().ends_with(".pdf") {
+                        name
+                    } else {
+                        format!("{name}.pdf")
+                    };
+                    self.request_plaintext_output(
+                        format!(
+                            "{} PDF 附件：{}。请选择普通 PDF 的保存位置。",
+                            if print {
+                                "另存并打印"
+                            } else {
+                                "另存并系统打开"
+                            },
+                            request.title
+                        ),
+                        move |app| {
+                            app.request_file(
+                                super::file_dialog::FileDialogSpec::save_file()
+                                    .filter("PDF", &["pdf"])
+                                    .file_name(name),
+                                move |app, path| {
+                                    let Some(path) = path else { return };
+                                    let result = crate::storage::atomic_write(&path, |file| {
+                                        use std::io::Write as _;
+                                        file.write_all(&bytes)?;
+                                        Ok(())
+                                    });
+                                    if let Err(error) = result {
+                                        app.status = format!("保存 PDF 附件失败：{error:#}");
+                                        return;
+                                    }
+                                    if print {
+                                        request.path = path;
+                                        app.open_print_dialog(*request, &ctx);
+                                    } else {
+                                        app.status = match open_in_os(&path) {
+                                            Ok(()) => "已保存 PDF 附件并用系统程序打开。".into(),
+                                            Err(error) => {
+                                                format!("PDF 已保存，但系统打开失败：{error}")
+                                            }
+                                        };
+                                    }
+                                },
+                            );
+                        },
+                    );
+                }
             }
         }
     }

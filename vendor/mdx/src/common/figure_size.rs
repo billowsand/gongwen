@@ -7,7 +7,6 @@
 //! TeX（`tex_research_emitter`）、DOCX（`docx_research`）与 gongwen 的研究
 //! 报告预览三处共用 [`width_fraction`]，同一张图在三处一样大。公文不走这里。
 
-use std::fs;
 use std::path::Path;
 
 /// 版心宽：`md2tex.cls` 的 `\geometry{width=156mm}`，DOCX 左右边距 28 / 26 mm。
@@ -112,7 +111,7 @@ pub fn probe(path: &Path, page: Option<u32>) -> Option<FigureSource> {
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
     if is_pdf {
-        let bytes = fs::read(path).ok()?;
+        let bytes = crate::memory_files::read(path).ok()?;
         let pdf = hayro_syntax::Pdf::new(bytes).ok()?;
         let index = page.unwrap_or(1).checked_sub(1)? as usize;
         let (width, height) = pdf.pages().get(index)?.render_dimensions();
@@ -122,8 +121,8 @@ pub fn probe(path: &Path, page: Option<u32>) -> Option<FigureSource> {
         });
     }
     // 按文件头识别格式：扩展名可能写错（PNG 存成 .jpg）。
-    let (width_px, height_px) = image::ImageReader::open(path)
-        .ok()?
+    let bytes = crate::memory_files::read(path).ok()?;
+    let (width_px, height_px) = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?
         .into_dimensions()

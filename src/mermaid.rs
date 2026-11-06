@@ -1055,14 +1055,7 @@ fn failures() -> &'static Mutex<HashMap<String, String>> {
     FAILURES.get_or_init(Mutex::default)
 }
 
-fn cache_at(
-    base: &Path,
-    source: &str,
-    style: Style,
-    theme: DiagramTheme,
-    format: Format,
-) -> Result<String> {
-    let theme = resolve(theme, style);
+fn cache_relative(source: &str, style: Style, theme: DiagramTheme, format: Format) -> String {
     let mut hash = Sha256::new();
     for part in [
         STYLE_VERSION,
@@ -1082,7 +1075,18 @@ fn cache_at(
             .collect::<String>(),
         format.extension()
     );
-    let relative = format!("{CACHE_DIR}/{name}");
+    format!("{CACHE_DIR}/{name}")
+}
+
+fn cache_at(
+    base: &Path,
+    source: &str,
+    style: Style,
+    theme: DiagramTheme,
+    format: Format,
+) -> Result<String> {
+    let theme = resolve(theme, style);
+    let relative = cache_relative(source, style, theme, format);
     let path = base.join(&relative);
     if path.is_file() {
         return Ok(relative);
@@ -1172,6 +1176,46 @@ fn materialize_at(
     theme: DiagramTheme,
     format: Format,
 ) -> Result<String> {
+    materialize_using(markdown, style, |source| {
+        let path = cache_at(base, source, style, theme, format)?;
+        let warning = warning_at(base, &path);
+        Ok((path, warning))
+    })
+}
+
+/// 研究报告的转换输入只保留在内存，图表不经过用户缓存目录。
+pub(crate) fn materialize_memory(
+    markdown: &str,
+    style: Style,
+    format: Format,
+) -> Result<(String, HashMap<String, Vec<u8>>)> {
+    let mut files = HashMap::new();
+    let mut total = 0usize;
+    let mut warnings: HashMap<String, Option<String>> = HashMap::new();
+    let theme = resolve(current_theme(), style);
+    let rendered = materialize_using(markdown, style, |source| {
+        let path = cache_relative(source, style, theme, format);
+        if let Some(warning) = warnings.get(&path) {
+            return Ok((path, warning.clone()));
+        }
+        let (bytes, warning) = render(source, style, theme, format)?;
+        total = total.checked_add(bytes.len()).context("图表资源总量溢出")?;
+        anyhow::ensure!(
+            total <= crate::file_limits::MAX_RESEARCH_RESOURCE_BYTES,
+            "研究报告图表资源总量超过 512 MiB"
+        );
+        files.insert(path.clone(), bytes);
+        warnings.insert(path.clone(), warning.clone());
+        Ok((path, warning))
+    })?;
+    Ok((rendered, files))
+}
+
+fn materialize_using(
+    markdown: &str,
+    style: Style,
+    mut diagram: impl FnMut(&str) -> Result<(String, Option<String>)>,
+) -> Result<String> {
     if !markdown.lines().any(is_open) {
         return Ok(markdown.to_string());
     }
@@ -1202,9 +1246,9 @@ fn materialize_at(
         if label.is_some() {
             index += 1;
         }
-        let path = cache_at(base, &source, style, theme, format)
+        let (path, warning) = diagram(&source)
             .with_context(|| format!("第 {} 行的 Mermaid 图渲染失败", start + 1))?;
-        if let Some(warning) = warning_at(base, &path) {
+        if let Some(warning) = warning {
             out.push_str(&format!("\n图表警告：{warning}\n\n"));
         }
         match style {

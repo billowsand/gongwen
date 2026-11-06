@@ -50,7 +50,8 @@ fn decode(url: &str, base_dir: &Path) -> Result<(Pic, figure_size::FigureSource)
     let bytes = if pdf {
         rasterize_pdf_page(&path, pdf_page.unwrap_or(1))?
     } else {
-        fs::read(&path).with_context(|| format!("读取图片 {} 失败", path.display()))?
+        crate::memory_files::read(&path)
+            .with_context(|| format!("读取图片 {} 失败", path.display()))?
     };
     let image = image::load_from_memory(&bytes)
         .with_context(|| format!("无法识别图片格式 {}", path.display()))?;
@@ -104,6 +105,9 @@ fn is_pdf(path: &Path) -> bool {
 /// 使用 Poppler 把指定 PDF 页面栅格化为 PNG。优先 pdftocairo，缺失或失败时
 /// 回退到 pdftoppm；命令参数独立传递，路径中的空格不会被 shell 重新解释。
 fn rasterize_pdf_page(path: &Path, page: u32) -> Result<Vec<u8>> {
+    if let Some(result) = crate::memory_files::rasterize_pdf(path, page) {
+        return result;
+    }
     if !path.is_file() {
         anyhow::bail!("读取 PDF 图片 {} 失败：文件不存在", path.display());
     }

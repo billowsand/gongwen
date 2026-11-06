@@ -41,10 +41,10 @@ pub fn validate(blocks: &[Block], declared: Option<&str>, base_dir: &Path) -> Re
     };
 
     let source = base_dir.join(declared);
-    if !source.is_file() {
+    if !crate::memory_files::is_file(&source) {
         anyhow::bail!("Bib 文件不存在或不是普通文件: {}", source.display());
     }
-    let content = fs::read_to_string(&source)
+    let content = crate::memory_files::read_to_string(&source)
         .with_context(|| format!("读取 Bib 文件 {} 失败", source.display()))?;
     let bibliography = Bibliography::parse(&content)
         .map_err(|e| anyhow::anyhow!("Bib 文件 {} 格式错误: {}", source.display(), e))?;

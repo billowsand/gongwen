@@ -24,7 +24,7 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
 
 ## 与上游的差异
 
-只做了减法，一行逻辑都没改：
+基础裁剪如下；后续功能补丁见下节，更新上游时须保留：
 
 - 删掉两个可执行目标（`src/main.rs` 的 `mdx` 命令行、`src/bin/mdx-gui.rs`）
   及其专属依赖 `clap`、`eframe`、`rfd`。公文助手只用库入口 `mdx::convert`，
@@ -39,6 +39,14 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
   中英文计数使用；剔除链接地址、引用键和锚点，公式只提取文字说明，不改变排版。
 
 ### 待同步回上游的改动
+
+2026-11-06：新增 `memory_files::MemoryFiles` 同步输入作用域。宿主提供全部 Markdown、
+文献与图片字节及 PDF 光栅化函数；`input`、`typst_research`、`citation`、`docx_image`、
+`figure_size` 在作用域内只读取这些字节，缺项直接失败，不回落文件系统。
+作用域按线程隔离，嵌套或 panic 后恢复先前输入；使用 Arc 共享资源，不为输入另建目录。
+旧文件输入 API 在作用域外保持原行为。公文助手始终用内存输入调用研究报告转换，
+PDF 图片经宿主 hayro 在进程内转 PNG，不再走此库旧文件 API 的 Poppler 临时图路径。
+相关回归测试位于宿主 `export::research`、`pdf_viewer` 与 `typst_engine`。
 
 研究报告封面重设计先在这里落地，尚未提交到上游，下次同步前须先把这些改动
 合进 mdx，否则整目录替换会把它们冲掉：

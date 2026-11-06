@@ -543,6 +543,7 @@ fn typst_samples_compact_pagination() {
             let job = TypstJob {
                 data,
                 base_dir: &dir,
+                allow_filesystem: true,
                 template: if kind == TemplateKind::ResearchReport {
                     Template::Research
                 } else {
@@ -661,6 +662,7 @@ fn typst_samples_research_list_numbering() {
             let set = crate::typst_engine::font_set(&crate::models::FontConfig::default()).unwrap();
             let text = crate::typst_engine::text_fonts_for_test(
                 &crate::typst_engine::TypstJob {
+                    allow_filesystem: true,
                     data: plain_data,
                     base_dir: &base,
                     template: crate::typst_engine::Template::Research,

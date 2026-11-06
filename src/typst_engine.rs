@@ -74,6 +74,8 @@ pub struct TypstJob<'a> {
     pub data: String,
     /// 插图等相对路径的解析基准（导出目录）。
     pub base_dir: &'a Path,
+    /// 内存快照转换时必须关闭，缺资源直接失败，不能读同名磁盘文件。
+    pub allow_filesystem: bool,
     pub template: Template,
     /// 只在内存里的文件（虚拟绝对路径 → 内容），如研究报告的公式 SVG。
     pub files: HashMap<String, Vec<u8>>,
@@ -86,6 +88,7 @@ impl<'a> TypstJob<'a> {
             data,
             base_dir,
             template: Template::Official,
+            allow_filesystem: true,
             files: HashMap::new(),
         }
     }
@@ -96,6 +99,7 @@ impl<'a> TypstJob<'a> {
             data,
             base_dir,
             template: Template::Receipt,
+            allow_filesystem: true,
             files: HashMap::new(),
         }
     }
@@ -106,6 +110,7 @@ impl<'a> TypstJob<'a> {
             data,
             base_dir,
             template: Template::Transmit,
+            allow_filesystem: true,
             files: HashMap::new(),
         }
     }
@@ -288,6 +293,7 @@ struct GongwenWorld {
     data_id: FileId,
     data: Bytes,
     base_dir: PathBuf,
+    allow_filesystem: bool,
     template: Template,
     files: HashMap<FileId, Bytes>,
 }
@@ -300,7 +306,14 @@ fn file_id(path: &str) -> FileId {
 impl GongwenWorld {
     #[cfg(test)]
     fn new(set: &FontSet, data: String, base_dir: &Path) -> Self {
-        Self::with_template(set, data, base_dir, Template::Official, &HashMap::new())
+        Self::with_template(
+            set,
+            data,
+            base_dir,
+            Template::Official,
+            &HashMap::new(),
+            true,
+        )
     }
 
     fn with_template(
@@ -309,6 +322,7 @@ impl GongwenWorld {
         base_dir: &Path,
         template: Template,
         files: &HashMap<String, Vec<u8>>,
+        allow_filesystem: bool,
     ) -> Self {
         let main = file_id(template.main_path());
         let data_id = file_id(DATA_PATH);
@@ -321,6 +335,7 @@ impl GongwenWorld {
             data_id,
             data: Bytes::new(data.into_bytes()),
             base_dir: base_dir.to_path_buf(),
+            allow_filesystem,
             template,
             files: files
                 .iter()
@@ -331,6 +346,9 @@ impl GongwenWorld {
 
     /// 相对导出目录解析插图路径；拒绝 `..` 与绝对路径（与 `images::resolve` 同口径）。
     fn resolve(&self, id: FileId) -> FileResult<PathBuf> {
+        if !self.allow_filesystem {
+            return Err(FileError::AccessDenied);
+        }
         let rel = id.get().vpath().get_without_slash();
         let rel_path = Path::new(rel);
         if rel_path.components().any(|c| {
@@ -423,6 +441,7 @@ pub fn compile(job: &TypstJob, set: &FontSet) -> Result<TypstOutcome> {
         job.base_dir,
         job.template,
         &job.files,
+        job.allow_filesystem,
     );
     let (document, warnings) = layout(&world)?;
     let proof = proof_report(&document);
@@ -456,6 +475,7 @@ pub(crate) fn page_count(job: &TypstJob, set: &FontSet) -> Result<usize> {
         job.base_dir,
         job.template,
         &job.files,
+        job.allow_filesystem,
     );
     Ok(layout(&world)?.0.pages().len())
 }
@@ -636,6 +656,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn memory_world_rejects_disk_fallback_but_serves_supplied_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("secret.txt"), b"disk secret").unwrap();
+        let files = HashMap::from([("image.txt".into(), b"memory resource".to_vec())]);
+        let world = GongwenWorld::with_template(
+            &empty_font_set_for_test(),
+            "{}".into(),
+            dir.path(),
+            Template::Research,
+            &files,
+            false,
+        );
+        assert!(world.file(file_id("secret.txt")).is_err());
+        assert!(world.source(file_id("secret.txt")).is_err());
+        assert_eq!(
+            world.file(file_id("image.txt")).unwrap().as_slice(),
+            b"memory resource"
+        );
+    }
+
+    #[test]
     fn rejects_paths_escaping_the_export_dir() {
         let set = FontSet {
             fonts: Vec::new(),
@@ -697,6 +738,7 @@ pub(crate) fn text_fonts_for_test(job: &TypstJob, set: &FontSet) -> Result<Vec<T
         job.base_dir,
         job.template,
         &job.files,
+        job.allow_filesystem,
     );
     let (document, _) = layout(&world)?;
     let mut out = Vec::new();

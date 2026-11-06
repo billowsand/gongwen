@@ -9,7 +9,7 @@ pub(crate) const PLAINTEXT_WARNING: &str = "当前工作区已启用加密。此
 pub(crate) const PDF_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的 ZIP 由独立的 ZIP 密码保护，但解压后的 PDF 是普通文件，不受应用密码和本地加密保护。PDF 可能包含正文、图片、附件及人员等敏感信息；解压、复制、同步或发送后，可能导致信息泄露。请妥善保管 ZIP 密码并确认接收范围。";
 pub(crate) const PACKAGE_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的是稿件包（外层由独立的 ZIP 密码保护），但解压后的 Markdown 正文、历史版本、图片、PDF 附件与随行件全部是普通文件，不再受应用密码和本地加密保护。稿件包还可能包含人员、单位、文号等敏感信息；复制、同步、发送或由其他软件打开后，可能导致信息泄露。请妥善保管 ZIP 密码并确认接收范围。";
 pub(crate) const PII_EXPORT_WARNING: &str = "当前工作区已启用加密。此次导出的表格或词表是普通文件，可能包含人员姓名、职务、联系电话、个人简介、单位名称等敏感信息，以及从稿件派生出的正文用语；复制、同步、发送或由其他软件打开后，可能导致信息泄露。请确认导出范围与接收对象。";
-pub(crate) const BACKUP_WARNING: &str = "当前工作区已启用加密。备份包里的数据库与配置是密文，但图片、风格档案、Pi 运行目录等内容目前仍是普通文件，包本身也不受应用密码保护。请把备份放在可信位置；恢复时需要使用备份当时的应用密码，恢复后请重新解锁。";
+pub(crate) const BACKUP_WARNING: &str = "当前工作区已启用加密。备份包里的数据库与配置是密文，但图片、图表缓存、Pi 运行目录等内容目前仍是普通文件，包本身也不受应用密码保护。请把备份放在可信位置；恢复时需要使用备份当时的应用密码，恢复后请重新解锁。";
 
 pub(crate) type OutputAction = Box<dyn FnOnce(&mut GongwenApp)>;
 
@@ -121,6 +121,50 @@ impl GongwenApp {
 mod tests {
     use super::*;
     use crate::draft_page::ExportKind;
+
+    #[test]
+    fn memory_attachment_preview_needs_no_output_but_print_release_is_guarded() {
+        let mut h = Harness::new(true);
+        let store = h.app.manuscript_store.as_mut().unwrap();
+        let id = store
+            .create(&crate::manuscript::NewManuscript::default(), None)
+            .unwrap();
+        store
+            .add_pdf(id, "附件.pdf", b"PDF bytes stay in memory")
+            .unwrap();
+        let record = store.get(id).unwrap().unwrap();
+        let pdf_id = record.pdfs[0].id;
+        h.app.manuscript_detail = Some(record);
+        h.app.open_pdf_attachment(pdf_id);
+        assert!(h.app.pending_output.is_none());
+        assert!(h.app.pdfs[0].is_memory());
+        assert!(!h.dir.path().join("output").exists());
+        h.app.open_pdf_attachment(pdf_id);
+        assert_eq!(h.app.pdfs.len(), 1, "同一附件重复打开只切换标签");
+        let key = h.app.pdfs[0].key;
+        h.app.apply_pdf_actions(
+            vec![crate::pdf_viewer::PdfAction::ReleaseMemory {
+                bytes: std::sync::Arc::new(b"PDF bytes stay in memory".to_vec()),
+                request: Box::new(crate::print::PrintRequest {
+                    path: std::path::PathBuf::new(),
+                    title: "附件.pdf".into(),
+                    page_count: 1,
+                    current_page: 0,
+                    hints: Default::default(),
+                    pdf_key: Some(key),
+                }),
+                print: true,
+            }],
+            &h.ctx,
+        );
+        assert!(h.app.pending_output.is_some());
+        assert!(h.app.pending_file_dialogs.is_empty());
+        assert!(h.app.print_dialog.is_none());
+        h.click("取消");
+        assert!(h.app.pending_file_dialogs.is_empty());
+        assert!(h.app.print_dialog.is_none());
+        assert!(!h.dir.path().join("output").exists());
+    }
 
     struct Harness {
         app: GongwenApp,

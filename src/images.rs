@@ -92,16 +92,27 @@ fn app_relative(path: &Path) -> Result<PathBuf> {
     // 使用帮助的截图是随包公开资源，不随槽位复制。诱饵槽里没有副本时回落到
     // 真实槽的共享目录；用户图片不做这个回落，避免跨槽泄露内容。
     if let Some(name) = rest.file_name().and_then(|name| name.to_str())
-        && name.starts_with("help-")
         && !slot_path.is_file()
         && let Ok(shared) = storage::config_dir()
     {
         let shared = shared.join(IMAGE_DIR).join(rest);
-        if shared.is_file() {
+        // 名称相同不能证明内容公开：用户或旧版程序可能覆盖过这张图。
+        // 只有与随包公开字节完全一致的副本才可跨槽使用。
+        if public_help_copy(&shared, name) {
             return Ok(shared);
         }
     }
     Ok(slot_path)
+}
+
+fn public_help_copy(path: &Path, name: &str) -> bool {
+    crate::help::content::IMAGES
+        .iter()
+        .find(|(public, _)| *public == name)
+        .is_some_and(|(_, bytes)| {
+            crate::file_limits::read_bytes(path, bytes.len() as u64, "帮助截图")
+                .is_ok_and(|actual| actual == *bytes)
+        })
 }
 
 /// 外部基准目录的解析：只做路径穿越校验后 join，不参与槽位映射。
@@ -373,6 +384,7 @@ pub(crate) fn image_refs(markdown: &str) -> Vec<String> {
     out
 }
 
+#[cfg(test)]
 pub(crate) fn copy_refs_from(base: &Path, markdown: &str, target_dir: &Path) -> Result<()> {
     for src in image_refs(markdown) {
         let source = match resolve_from(base, &src) {
@@ -398,6 +410,18 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write as _;
+
+    #[test]
+    fn shared_help_fallback_checks_both_the_bundled_name_and_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let (name, bytes) = crate::help::content::IMAGES[0];
+        let path = dir.path().join(name);
+        fs::write(&path, bytes).unwrap();
+        assert!(public_help_copy(&path, name));
+        assert!(!public_help_copy(&path, "help-private.png"));
+        fs::write(&path, b"sensitive user image").unwrap();
+        assert!(!public_help_copy(&path, name));
+    }
 
     fn write_tmp(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
         let path = dir.join(name);

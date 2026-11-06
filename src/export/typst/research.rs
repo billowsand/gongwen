@@ -155,14 +155,16 @@ pub(crate) fn write_pdf_with_base(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    let (data, files, warnings) = document(&bundle.markdown, input, numbering, markdown)?;
+    let (data, files, warnings) =
+        bundle.with_mdx(|| document(&bundle.markdown, input, numbering, markdown))?;
     let set = typst_engine::font_set(&crate::models::FontConfig::default())?;
     let mut outcome = typst_engine::compile(
         &TypstJob {
             data,
             base_dir: bundle.root(),
+            allow_filesystem: false,
             template: Template::Research,
-            files,
+            files: bundle.files(files),
         },
         &set,
     )?;
@@ -212,14 +214,16 @@ fn page_count_with_base(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    let (data, files, _) = document(&bundle.markdown, input, numbering, markdown)?;
+    let (data, files, _) =
+        bundle.with_mdx(|| document(&bundle.markdown, input, numbering, markdown))?;
     let set = typst_engine::font_set(&crate::models::FontConfig::default())?;
     typst_engine::page_count(
         &TypstJob {
             data,
             base_dir: bundle.root(),
+            allow_filesystem: false,
             template: Template::Research,
-            files,
+            files: bundle.files(files),
         },
         &set,
     )
@@ -240,7 +244,9 @@ pub(crate) fn document_json(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    Ok(document(&bundle.markdown, input, numbering, markdown)?.0)
+    Ok(bundle
+        .with_mdx(|| document(&bundle.markdown, input, numbering, markdown))?
+        .0)
 }
 
 #[cfg(test)]
@@ -353,20 +359,24 @@ mod tests {
             base.path(),
         )
         .unwrap();
-        let (data, files, _) = document(
-            &bundle.markdown,
-            &input,
-            &NumberingConfig::default(),
-            markdown,
-        )
-        .unwrap();
+        let (data, files, _) = bundle
+            .with_mdx(|| {
+                document(
+                    &bundle.markdown,
+                    &input,
+                    &NumberingConfig::default(),
+                    markdown,
+                )
+            })
+            .unwrap();
         let set = typst_engine::font_set(&crate::models::FontConfig::default()).unwrap();
         let items = typst_engine::text_fonts_for_test(
             &TypstJob {
                 data,
                 base_dir: bundle.root(),
+                allow_filesystem: false,
                 template: Template::Research,
-                files,
+                files: bundle.files(files),
             },
             &set,
         )
@@ -472,20 +482,24 @@ mod tests {
             base.path(),
         )
         .unwrap();
-        let (data, files, _) = document(
-            &bundle.markdown,
-            &input,
-            &NumberingConfig::default(),
-            markdown,
-        )
-        .unwrap();
+        let (data, files, _) = bundle
+            .with_mdx(|| {
+                document(
+                    &bundle.markdown,
+                    &input,
+                    &NumberingConfig::default(),
+                    markdown,
+                )
+            })
+            .unwrap();
         let set = typst_engine::font_set(&crate::models::FontConfig::default()).unwrap();
         let items = typst_engine::text_fonts_for_test(
             &TypstJob {
                 data,
                 base_dir: bundle.root(),
+                allow_filesystem: false,
                 template: Template::Research,
-                files,
+                files: bundle.files(files),
             },
             &set,
         )
