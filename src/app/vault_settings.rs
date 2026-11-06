@@ -79,7 +79,7 @@ impl GongwenApp {
         setting_row(
             ui,
             "主密码",
-            Some("至少 4 个字符；忘记密码无法恢复数据。"),
+            Some(crate::password_policy::LOCK_HINT),
             |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.vault_page.enable_real)
@@ -306,7 +306,30 @@ impl GongwenApp {
         self.vault_page.notice = Some((error.to_string(), false));
     }
 
+    /// 刚在设置页启用了密码保护：立即把磁盘上的明文数据迁成密文。
+    ///
+    /// 迁移要换掉稿件库文件（SQLCipher 重新导出），工作区里的连接必须先关掉，
+    /// 所以这条请求由**外壳**执行（见 `AppShell::run`）：先存盘 → 丢弃工作区 →
+    /// 后台迁移 → 重建工作区。推迟到下次解锁等于让磁盘上的正文多敞开一段时间，
+    /// 与「拷走配置目录就能翻看正文」的威胁模型直接冲突。
     fn vault_apply_enable(&mut self) {
+        self.vault_apply_enable_inner();
+    }
+
+    /// 测试用入口：填好主/第二密码后走“启用密码保护”。
+    #[cfg(test)]
+    pub(crate) fn vault_enable_with_for_test(&mut self, real: &str, decoy: Option<&str>) {
+        self.vault_page.enable_real = real.to_string();
+        self.vault_page.enable_real_confirm = real.to_string();
+        self.vault_page.with_decoy = decoy.is_some();
+        if let Some(decoy) = decoy {
+            self.vault_page.enable_decoy = decoy.to_string();
+            self.vault_page.enable_decoy_confirm = decoy.to_string();
+        }
+        self.vault_apply_enable_inner();
+    }
+
+    fn vault_apply_enable_inner(&mut self) {
         let page = &mut self.vault_page;
         if page.enable_real != page.enable_real_confirm {
             page.notice = Some(("两次输入的主密码不一致。".into(), false));
@@ -314,6 +337,17 @@ impl GongwenApp {
         }
         if page.with_decoy && page.enable_decoy != page.enable_decoy_confirm {
             page.notice = Some(("两次输入的第二密码不一致。".into(), false));
+            return;
+        }
+        // 密码强度先在本地校验一遍，给出具体是哪一条不满足。
+        if let Err(error) = crate::password_policy::validate_lock(&page.enable_real) {
+            self.fail_vault(format!("主密码不合要求：{error}"));
+            return;
+        }
+        if page.with_decoy
+            && let Err(error) = crate::password_policy::validate_lock(&page.enable_decoy)
+        {
+            self.fail_vault(format!("第二密码不合要求：{error}"));
             return;
         }
         let real = page.enable_real.clone();
@@ -337,12 +371,12 @@ impl GongwenApp {
                 page.enable_real_confirm.clear();
                 page.enable_decoy.clear();
                 page.enable_decoy_confirm.clear();
-                page.notice = Some((
-                    "密码保护已启用；现有数据将在下次解锁时自动加密。".into(),
-                    true,
-                ));
+                page.notice = Some(("密码保护已启用；正在把现有数据加密到磁盘。".into(), true));
+                // 立刻加密，不等下次解锁。
+                self.request_enable_encrypt();
             }
-            Ok((_, None)) | Err(_) => self.fail_vault("锁设置保存失败，请重试"),
+            Ok((_, None)) => self.fail_vault("锁设置保存失败，请重试"),
+            Err(error) => self.fail_vault(format!("{error:#}")),
         }
     }
 
@@ -350,6 +384,11 @@ impl GongwenApp {
         let page = &mut self.vault_page;
         if page.change_real != page.change_real_confirm {
             page.notice = Some(("两次输入的主密码不一致。".into(), false));
+            return;
+        }
+        // 新密码按同一套强度规则校验（改密不能成为绕过强度要求的口子）。
+        if let Err(error) = crate::password_policy::validate_lock(&page.change_real) {
+            self.fail_vault(format!("新主密码不合要求：{error}"));
             return;
         }
         let password = page.change_real.clone();
@@ -376,6 +415,11 @@ impl GongwenApp {
         let page = &mut self.vault_page;
         if page.decoy_new != page.decoy_new_confirm {
             page.notice = Some(("两次输入的第二密码不一致。".into(), false));
+            return;
+        }
+        // 第二密码同样按强度规则校验：它也是一把真钥匙，弱密码等于白设。
+        if let Err(error) = crate::password_policy::validate_lock(&page.decoy_new) {
+            self.fail_vault(format!("第二密码不合要求：{error}"));
             return;
         }
         let password = page.decoy_new.clone();

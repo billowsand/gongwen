@@ -342,7 +342,7 @@ mod tests {
     fn locked_early_startup_omits_sensitive_detail_instead_of_plaintext_fallback() {
         let root = tempfile::tempdir().unwrap();
         crate::storage::set_test_config_dir(Some(root.path().to_path_buf()));
-        let _ = crate::vault::Vault::create("主密码aaaa", None, false).unwrap();
+        let _ = crate::vault::Vault::create("Test#Real2026Lock", None, false).unwrap();
         crate::vault::clear_key_handle();
         let dir = log_dir().unwrap();
         let path = write_report_in(&dir, "启动失败", "机密错误与 /private/path", at(4)).unwrap();

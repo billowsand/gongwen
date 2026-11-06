@@ -13,6 +13,7 @@
 //!   这是与方案文档「密码 → 密钥 → 一切」的唯一出入，换来的是改密零成本、
 //!   且绝不可能出现「新密码解不开旧库」的自锁。
 
+use crate::password_policy;
 use crate::storage::{self, DataSlot};
 use aes_gcm::Aes256Gcm;
 use aes_gcm::aead::{Aead, KeyInit};
@@ -47,9 +48,6 @@ const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 /// AEAD 认证标签长度（AES-256-GCM 固定 16 字节）。
 const TAG_LEN: usize = 16;
-/// 密码最短长度（按 UTF-8 字节计）。
-const MIN_PASSWORD_LEN: usize = 4;
-const MAX_PASSWORD_LEN: usize = 256;
 
 /// Argon2id 参数：64 MiB / 3 遍 / 4 线程，台式机约半秒一次。
 /// 只在解锁与改密时跑，不在每帧路径上；参数写死，改参数等于换格式。
@@ -237,15 +235,14 @@ pub(crate) struct Unlocked {
     pub(crate) dek: Zeroizing<[u8; DEK_LEN]>,
 }
 
+/// 校验密码强度。规则与稿件包导出密码共用一套判据（`crate::password_policy`），
+/// 但应用锁更严一档：长度必须**大于 10 个字符**（按字符数，不是字节数），
+/// 且覆盖大写/小写/数字/符号/中文中的至少三类；常见口令、连续序列、
+/// 连续重复字符一律拒绝。
+///
+/// 「暂不设置」（`skipped`）不写任何密码，因此不走这条校验。
 fn check_password(password: &str) -> Result<()> {
-    let len = password.len();
-    if len < MIN_PASSWORD_LEN {
-        bail!("密码至少 {MIN_PASSWORD_LEN} 个字符");
-    }
-    if len > MAX_PASSWORD_LEN {
-        bail!("密码过长（最多 {MAX_PASSWORD_LEN} 个字符）");
-    }
-    Ok(())
+    password_policy::validate_lock(password)
 }
 
 /// 已加载的锁。所有改写都整文件原子替换，写一半不会留下「读得到但不完整」。
@@ -1665,6 +1662,13 @@ mod tests {
         dir
     }
 
+    /// 测试用的合规密码：长度大于 10 且覆盖三类字符（应用锁的强度规则）。
+    const REAL_PW: &str = "Test#Real2026Lock";
+    const OLD_REAL_PW: &str = "Test#Old2026Lock";
+    const NEW_REAL_PW: &str = "Test#New2026Lock";
+    const DECOY_PW: &str = "Test#Decoy2026Cloud";
+    const NEW_DECOY_PW: &str = "Test#NewDecoy2026Cloud";
+
     fn reset() {
         crate::storage::set_test_config_dir(None);
         clear_key_handle();
@@ -1699,7 +1703,7 @@ mod tests {
         assert_eq!(Vault::probe(), Probe::Absent);
         Vault::create("", None, true).unwrap();
         assert_eq!(Vault::probe(), Probe::Skipped);
-        Vault::create("主密码", None, false).unwrap();
+        Vault::create(REAL_PW, None, false).unwrap();
         assert_eq!(Vault::probe(), Probe::Locked);
         drop(dir);
         reset();
@@ -1708,13 +1712,12 @@ mod tests {
     #[test]
     fn real_and_decoy_passwords_open_their_own_slots() {
         let dir = use_temp_dir();
-        let (mut vault, unlocked) =
-            Vault::create("真实口令abc", Some("诱饵口令xyz"), false).unwrap();
+        let (mut vault, unlocked) = Vault::create(REAL_PW, Some(DECOY_PW), false).unwrap();
         let real_dek = *unlocked.unwrap().dek;
-        let unlocked = vault.unlock("真实口令abc").unwrap();
+        let unlocked = vault.unlock(REAL_PW).unwrap();
         assert_eq!(unlocked.slot, DataSlot::Real);
         assert_eq!(*unlocked.dek, real_dek, "主密码派生的 DEK 必须稳定");
-        assert_eq!(vault.unlock("诱饵口令xyz").unwrap().slot, DataSlot::Decoy);
+        assert_eq!(vault.unlock(DECOY_PW).unwrap().slot, DataSlot::Decoy);
         assert!(vault.unlock("不对").is_none());
         drop(dir);
         reset();
@@ -1725,8 +1728,8 @@ mod tests {
         // 没有第二密码的锁：错的主密码、对的哑槽密码（不存在）、随机串——
         // 解锁结果一律是 None，UI 只能给出统一文案。
         let dir = use_temp_dir();
-        let (mut vault, _) = Vault::create("只有主密码", None, false).unwrap();
-        assert!(vault.unlock("只有主密码").is_some());
+        let (mut vault, _) = Vault::create(REAL_PW, None, false).unwrap();
+        assert!(vault.unlock(REAL_PW).is_some());
         assert!(vault.unlock("任意猜测").is_none());
         drop(dir);
         reset();
@@ -1735,13 +1738,13 @@ mod tests {
     #[test]
     fn seal_shapes_are_constant_whether_or_not_decoy_is_set() {
         let a = use_temp_dir();
-        Vault::create("主密码aaaa", None, false).unwrap();
+        Vault::create(REAL_PW, None, false).unwrap();
         let without = std::fs::read_to_string(Vault::path().unwrap()).unwrap();
         reset();
         drop(a);
 
         let b = use_temp_dir();
-        Vault::create("主密码aaaa", Some("第二密码bbbb"), false).unwrap();
+        Vault::create(REAL_PW, Some(DECOY_PW), false).unwrap();
         let with = std::fs::read_to_string(Vault::path().unwrap()).unwrap();
         reset();
         drop(b);
@@ -1763,18 +1766,15 @@ mod tests {
     #[test]
     fn dummy_seal_slot_survives_clear_and_readd() {
         let dir = use_temp_dir();
-        let (mut vault, _) = Vault::create("主密码aaaa", Some("第二密码bbbb"), false).unwrap();
-        assert_eq!(vault.unlock("第二密码bbbb").unwrap().slot, DataSlot::Decoy);
+        let (mut vault, _) = Vault::create(REAL_PW, Some(DECOY_PW), false).unwrap();
+        assert_eq!(vault.unlock(DECOY_PW).unwrap().slot, DataSlot::Decoy);
         vault.clear_decoy().unwrap();
-        assert!(
-            vault.unlock("第二密码bbbb").is_none(),
-            "清除后旧第二密码失效"
-        );
-        assert!(vault.unlock("主密码aaaa").is_some());
+        assert!(vault.unlock(DECOY_PW).is_none(), "清除后旧第二密码失效");
+        assert!(vault.unlock(REAL_PW).is_some());
         vault
-            .set_password(DataSlot::Decoy, "新第二密码cc", None)
+            .set_password(DataSlot::Decoy, NEW_DECOY_PW, None)
             .unwrap();
-        assert!(vault.unlock("新第二密码cc").is_some());
+        assert!(vault.unlock(NEW_DECOY_PW).is_some());
         drop(dir);
         reset();
     }
@@ -1782,12 +1782,8 @@ mod tests {
     #[test]
     fn decoy_password_cannot_equal_real_password() {
         let dir = use_temp_dir();
-        let (mut vault, _) = Vault::create("同一个密码", None, false).unwrap();
-        assert!(
-            vault
-                .set_password(DataSlot::Decoy, "同一个密码", None)
-                .is_err()
-        );
+        let (mut vault, _) = Vault::create(REAL_PW, None, false).unwrap();
+        assert!(vault.set_password(DataSlot::Decoy, REAL_PW, None).is_err());
         drop(dir);
         reset();
     }
@@ -1795,8 +1791,11 @@ mod tests {
     #[test]
     fn create_rejects_same_password_pair_and_short_passwords() {
         let dir = use_temp_dir();
-        assert!(Vault::create("主密码aaaa", Some("主密码aaaa"), false).is_err());
+        assert!(Vault::create(REAL_PW, Some(REAL_PW), false).is_err());
         assert!(Vault::create("短", None, false).is_err());
+        // 太短、只有一类字符、常见口令一律拒收。
+        assert!(Vault::create("Ab1!efgh", None, false).is_err());
+        assert!(Vault::create("abcdefghijk", None, false).is_err());
         drop(dir);
         reset();
     }
@@ -1804,14 +1803,14 @@ mod tests {
     #[test]
     fn changing_real_password_keeps_the_same_dek() {
         let dir = use_temp_dir();
-        let (mut vault, unlocked) = Vault::create("旧主密码aa", None, false).unwrap();
+        let (mut vault, unlocked) = Vault::create(OLD_REAL_PW, None, false).unwrap();
         let old_dek = *unlocked.unwrap().dek;
         let rewrapped = vault
-            .set_password(DataSlot::Real, "新主密码bb", Some(&old_dek))
+            .set_password(DataSlot::Real, NEW_REAL_PW, Some(&old_dek))
             .unwrap();
         assert_eq!(*rewrapped.dek, old_dek, "改密只换包裹，DEK 不动");
-        assert!(vault.unlock("旧主密码aa").is_none());
-        assert_eq!(*vault.unlock("新主密码bb").unwrap().dek, old_dek);
+        assert!(vault.unlock(OLD_REAL_PW).is_none());
+        assert_eq!(*vault.unlock(NEW_REAL_PW).unwrap().dek, old_dek);
         drop(dir);
         reset();
     }
@@ -1819,7 +1818,7 @@ mod tests {
     #[test]
     fn reset_file_removes_the_vault_and_keeps_data_files() {
         let dir = use_temp_dir();
-        Vault::create("主密码aaaa", None, false).unwrap();
+        Vault::create(REAL_PW, None, false).unwrap();
         std::fs::write(
             crate::storage::manuscript_db_path().unwrap(),
             b"fake db bytes",
@@ -1838,7 +1837,7 @@ mod tests {
     #[test]
     fn corrupted_vault_file_reports_broken_and_never_unlocks() {
         let dir = use_temp_dir();
-        Vault::create("主密码aaaa", None, false).unwrap();
+        Vault::create(REAL_PW, None, false).unwrap();
         std::fs::write(Vault::path().unwrap(), b"{ not json").unwrap();
         let probe = Vault::probe();
         assert!(matches!(probe, Probe::Broken(_)));
@@ -1853,7 +1852,7 @@ mod tests {
     fn legacy_v1_vault_upgrades_in_place_on_unlock() {
         let dir = use_temp_dir();
         // 手写一份 v1 锁文件（第一期格式：槽里只有 salt + seal，没有 wrapped 字段）。
-        let (real_slot, _) = SlotSeal::sealed("主密码aaaa", None).unwrap();
+        let (real_slot, _) = SlotSeal::sealed(REAL_PW, None).unwrap();
         let legacy_slot = SlotSeal {
             wrapped: String::new(),
             ..real_slot
@@ -1875,7 +1874,7 @@ mod tests {
         assert_eq!(Vault::probe(), Probe::Locked, "v1 不算损坏");
 
         let mut vault = Vault::load().expect("v1 锁文件应能加载");
-        let unlocked = vault.unlock("主密码aaaa").expect("v1 主密码应能解锁");
+        let unlocked = vault.unlock(REAL_PW).expect("v1 主密码应能解锁");
         assert_eq!(unlocked.slot, DataSlot::Real);
         assert_eq!(Vault::probe(), Probe::Locked);
         // 解锁后文件应已升级成 v2：只有命中那个槽补上 wrapped（懒升级——
@@ -1894,7 +1893,7 @@ mod tests {
         );
         // 升级后的文件用同一把密码还能再解锁（DEK 已持久化，不重生成）。
         let mut again = Vault::load().unwrap();
-        let second = again.unlock("主密码aaaa").expect("v2 升级后仍应能解锁");
+        let second = again.unlock(REAL_PW).expect("v2 升级后仍应能解锁");
         assert_eq!(second.dek, unlocked.dek, "升级补写的 DEK 必须稳定");
         drop(dir);
         reset();
@@ -2099,7 +2098,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_vault, unlocked) = Vault::create("主密码aaaa", None, false).unwrap();
+        let (_vault, unlocked) = Vault::create(REAL_PW, None, false).unwrap();
         let dek = *unlocked.unwrap().dek;
         set_key_handle(dek, false);
         ensure_slot_encrypted().unwrap();
@@ -2145,7 +2144,7 @@ mod tests {
             b"{\"output_dir\":\"x\"}",
         )
         .unwrap();
-        let (_vault, unlocked) = Vault::create("主密码aaaa", None, false).unwrap();
+        let (_vault, unlocked) = Vault::create(REAL_PW, None, false).unwrap();
         set_key_handle(*unlocked.unwrap().dek, false);
         ensure_slot_encrypted().unwrap();
         activate_db_encryption();
@@ -2175,7 +2174,7 @@ mod tests {
         std::fs::write(crate::storage::config_path().unwrap(), b"{}").unwrap();
         assert!(slot_needs_encryption(DataSlot::Real));
         // 迁移完成后：不需要。
-        let (_vault, unlocked) = Vault::create("主密码aaaa", None, false).unwrap();
+        let (_vault, unlocked) = Vault::create(REAL_PW, None, false).unwrap();
         set_key_handle(*unlocked.unwrap().dek, false);
         ensure_slot_encrypted().unwrap();
         assert!(
@@ -2203,7 +2202,7 @@ mod tests {
     fn disable_marker_must_be_authenticated() {
         use std::io::Write as _;
         let dir = use_temp_dir();
-        let (_vault, unlocked) = Vault::create("真实口令abc", None, false).unwrap();
+        let (_vault, unlocked) = Vault::create(REAL_PW, None, false).unwrap();
         let dek = *unlocked.unwrap().dek;
         set_key_handle(dek, true);
         let path = crate::storage::slot_file(DISABLE_PENDING_FILE).unwrap();

@@ -111,6 +111,7 @@ pub(super) fn fixture() -> GongwenApp {
         last_activity_secs: 0.0,
         lock_requested: false,
         force_relock: false,
+        enable_encrypt_requested: false,
         vault_page: Default::default(),
         forwarded_requests: None,
         pending_merge: None,

@@ -433,6 +433,9 @@ pub struct GongwenApp {
     /// 备份恢复完成后：数据目录已整体替换，当前工作区与密钥句柄全部过期。
     /// 必须**不保存**直接丢弃工作区、强制重新解锁（保存会把旧密钥写进新目录）。
     force_relock: bool,
+    /// 刚在设置页启用了密码保护：外壳要立刻丢弃工作区并把磁盘上的明文数据
+    /// 迁成密文。不等下次解锁——否则这段窗口里磁盘上仍是明文。
+    enable_encrypt_requested: bool,
 }
 
 /// 导出面板要显示的那几个数，连同各词源占比。整份码表正文不留在这里——
@@ -775,6 +778,7 @@ impl GongwenApp {
             last_activity_secs: ctx.input(|input| input.time),
             lock_requested: false,
             force_relock: false,
+            enable_encrypt_requested: false,
         };
         app.restore_session();
         app.seed_samples_once();
@@ -1074,6 +1078,20 @@ impl GongwenApp {
     /// 备份恢复成功：要求外壳下一帧直接回锁屏、强制重新解锁。
     pub(crate) fn request_force_relock(&mut self) {
         self.force_relock = true;
+    }
+
+    /// 刚启用密码保护：要求外壳**立刻**把磁盘上的明文数据迁成密文。
+    ///
+    /// 迁移要换掉稿件库文件，工作区里的连接必须先关掉，所以这条请求走
+    /// 「先存盘 → 丢弃工作区 → 后台迁移 → 重建工作区」这条路，与首次
+    /// 启用时的闸门迁移同一条。推迟到下次解锁等于让磁盘上的正文多敞一段时间。
+    pub(crate) fn request_enable_encrypt(&mut self) {
+        self.enable_encrypt_requested = true;
+    }
+
+    /// 外壳每帧问一次：为真时丢掉整个工作区并把数据迁成密文。
+    pub(crate) fn take_enable_encrypt_requested(&mut self) -> bool {
+        std::mem::take(&mut self.enable_encrypt_requested)
     }
 
     /// 手动（菜单）或超时（空闲）锁定：停掉在跑的 Pi 任务，外壳下一帧丢弃

@@ -308,9 +308,7 @@ pub(crate) fn zip_password_form(
                 ),
             );
         });
-        ui.weak(
-            "至少 10 位，并包含大写字母、小写字母、数字、符号或中文中的至少三类；不能使用常见口令、连续或重复字符。",
-        );
+        ui.weak(crate::password_policy::EXPORT_HINT);
     }
     ui.horizontal(|ui| {
         ui.checkbox(&mut dialog.remember, "记住密码")

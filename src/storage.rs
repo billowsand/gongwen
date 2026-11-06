@@ -164,19 +164,40 @@ pub(crate) fn wipe_slot_files(slot: DataSlot) {
     }
 }
 
-/// 加密模式下暂停配置目录写入的全局开关：锁定流程先置 true，再丢弃工作区，
+/// 加密模式下暂停配置目录写入的开关：锁定流程先置 true，再丢弃工作区，
 /// 这样被丢弃工作区里仍在收尾的线程即使晚到，也不会以「无密钥」状态把
 /// 明文写回配置目录（文档要求先停写、再释放句柄）。迁移/停用任务在
 /// `begin_work` 里重新放行——那时槽位与密钥句柄都已明确。
+///
+/// 生产构建里它是**进程级**的：要挡住的正是被丢弃工作区里那些跑在别的线程上、
+/// 收尾晚到的写操作，必须让所有线程都看见。
+///
+/// 测试构建里改成**线程局部**：测试并行跑，一个测试走锁定流程（置 true）
+/// 会让同时在跑的别的测试存盘失败——与 [`TEST_CONFIG_DIR`] 同样的坑，
+/// 按同样的办法处理（见那里注释）。生产语义不受影响。
+#[cfg(not(test))]
 static WRITES_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(test)]
+thread_local! {
+    static WRITES_BLOCKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub(crate) fn set_writes_blocked(blocked: bool) {
-    WRITES_BLOCKED.store(blocked, Ordering::SeqCst);
+    #[cfg(not(test))]
+    WRITES_BLOCKED.store(blocked, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(test)]
+    WRITES_BLOCKED.with(|flag| flag.set(blocked));
 }
 
 /// 只给「槽位私有且依赖密钥」的写路径用；不拦用户明确选择导出到输出目录的文件。
 pub(crate) fn writes_blocked() -> bool {
-    WRITES_BLOCKED.load(Ordering::SeqCst)
+    #[cfg(not(test))]
+    {
+        WRITES_BLOCKED.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    #[cfg(test)]
+    WRITES_BLOCKED.with(|flag| flag.get())
 }
 
 // 测试覆盖的用户目录：只让稿件包同步测试把图片写进临时目录，不影响真实配置目录。
@@ -189,8 +210,19 @@ thread_local! {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 pub fn set_test_config_dir(dir: Option<std::path::PathBuf>) {
     TEST_CONFIG_DIR.with(|cell| *cell.borrow_mut() = dir);
+}
+
+/// 测试用：把父线程解析出的配置目录**带到另一个线程**。
+///
+/// [`set_test_config_dir`] 写的是线程局部量，后台线程（如加密迁移的搬运线程）
+/// 看不到，会退回**真实**配置目录——测试里那就等于去动用户的真实数据。
+/// 搬运线程启动时调一次本函数（传入父线程拿到的目录），把目录带过去。
+#[cfg(test)]
+pub fn set_test_config_dir_in_current_thread(dir: std::path::PathBuf) {
+    TEST_CONFIG_DIR.with(|cell| *cell.borrow_mut() = Some(dir));
 }
 
 pub fn config_dir() -> Result<PathBuf> {

@@ -1372,7 +1372,8 @@ mod tests {
         drop(alt);
 
         let (_vault, unlocked) =
-            crate::vault::Vault::create("主密码aaaa", Some("第二密码bbbb"), false).unwrap();
+            crate::vault::Vault::create("Test#Real2026Lock", Some("Test#Decoy2026Cloud"), false)
+                .unwrap();
         let unlocked = unlocked.unwrap();
         crate::vault::set_key_handle(*unlocked.dek, false);
         crate::vault::ensure_slot_encrypted().unwrap();

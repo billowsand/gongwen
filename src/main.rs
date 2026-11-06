@@ -61,6 +61,7 @@ mod models;
 mod net;
 mod orphan_probe;
 mod package_file;
+mod password_policy;
 mod pdf_text;
 mod pdf_viewer;
 mod pi_agent;

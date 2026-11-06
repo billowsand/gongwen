@@ -41,68 +41,11 @@ const MAX_IMAGE_BYTES: u64 = crate::file_limits::MAX_IMAGE_BYTES;
 const MAX_IMAGES_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MANIFEST_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
-/// 导出密码规则：不少于 10 个字符，且至少覆盖三类字符；同时拒绝常见口令、
+/// 导出密码规则：与应用锁共用同一套判据（`crate::password_policy`）——
+/// 不少于 10 个字符，且至少覆盖三类字符；同时拒绝常见口令、
 /// 连续字符和长重复字符。导入不调用此校验，以兼容外部工具生成的历史弱密码包。
 pub fn validate_export_password(password: &str) -> Result<()> {
-    if password.trim() != password {
-        bail!("密码首尾不能包含空格");
-    }
-    let chars = password.chars().collect::<Vec<_>>();
-    if chars.len() < 10 {
-        bail!("密码至少需要 10 个字符");
-    }
-    if chars.len() > 128 {
-        bail!("密码不能超过 128 个字符");
-    }
-
-    let categories = [
-        chars.iter().any(|ch| ch.is_ascii_lowercase()),
-        chars.iter().any(|ch| ch.is_ascii_uppercase()),
-        chars.iter().any(|ch| ch.is_numeric()),
-        chars.iter().any(|ch| !ch.is_alphanumeric()),
-        chars.iter().any(|ch| ch.is_alphabetic() && !ch.is_ascii()),
-    ]
-    .into_iter()
-    .filter(|present| *present)
-    .count();
-    if categories < 3 {
-        bail!("密码需包含大写字母、小写字母、数字、符号或中文中的至少三类");
-    }
-
-    let lower = password.to_lowercase();
-    const COMMON: &[&str] = &[
-        "password",
-        "qwerty",
-        "admin",
-        "letmein",
-        "iloveyou",
-        "123456",
-        "111111",
-        "abcdef",
-        "公文助手",
-    ];
-    if COMMON.iter().any(|word| lower.contains(word)) {
-        bail!("密码包含常见口令或简单序列，请换一个更复杂的密码");
-    }
-    if has_ascii_sequence(&lower) {
-        bail!("密码不能包含 4 位及以上连续字母或数字");
-    }
-    if chars
-        .windows(4)
-        .any(|window| window.iter().all(|ch| *ch == window[0]))
-    {
-        bail!("密码不能包含 4 个及以上连续相同字符");
-    }
-    Ok(())
-}
-
-fn has_ascii_sequence(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.windows(4).any(|window| {
-        window.iter().all(u8::is_ascii_alphanumeric)
-            && (window.windows(2).all(|pair| pair[1] == pair[0] + 1)
-                || window.windows(2).all(|pair| pair[0] == pair[1] + 1))
-    })
+    crate::password_policy::validate_export(password)
 }
 
 fn encrypted_options(password: &str) -> zip::write::FileOptions<'_, ()> {

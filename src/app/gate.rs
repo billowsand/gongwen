@@ -384,7 +384,17 @@ impl AppShell {
         // 迁移/停用任务要在槽位与密钥都明确之后写盘，放行配置目录写入。
         crate::storage::set_writes_blocked(false);
         let (tx, rx) = std::sync::mpsc::channel();
+        // 搬运线程要看到同一份配置目录与同一把密钥。生产构建里这两样都是
+        // 进程级的，外层那次设置就够；测试构建里它们是线程局部的（并行测试
+        // 互不干扰），后台线程看不到——所以显式带过去，两种构建都成立。
+        #[cfg(test)]
+        let worker_config_dir = crate::storage::config_dir().ok();
         std::thread::spawn(move || {
+            #[cfg(test)]
+            if let Some(dir) = worker_config_dir {
+                crate::storage::set_test_config_dir_in_current_thread(dir);
+            }
+            crate::vault::set_key_handle_for_slot(dek, kind == WorkKind::Disable, slot);
             let result = match kind {
                 WorkKind::Encrypt => crate::vault::ensure_slot_encrypted(),
                 WorkKind::Disable => crate::vault::decrypt_slot_files(),
@@ -416,7 +426,11 @@ impl AppShell {
             Ok(()) => match kind {
                 WorkKind::Encrypt => {
                     crate::vault::activate_db_encryption();
-                    self.enter_workspace(ctx, slot, None);
+                    self.enter_workspace(
+                        ctx,
+                        slot,
+                        Some("密码保护已启用；现有数据已加密到磁盘。".into()),
+                    );
                 }
                 WorkKind::Disable => {
                     // 先确认当前槽位真的没有密文残留，再删锁封套。少解一类文件
@@ -512,9 +526,15 @@ impl AppShell {
                         );
                         return;
                     }
-                    Ok((_, None)) | Err(_) => {
+                    Ok((_, None)) => {
                         gate = GateState::first_run();
                         gate.error = Some("锁设置保存失败，请重试".into());
+                    }
+                    // 密码不合要求时把**具体原因**告诉用户（哪一条不满足），
+                    // 否则用户只会看到一句“保存失败”，不知道该改哪里。
+                    Err(error) => {
+                        gate = GateState::first_run();
+                        gate.error = Some(format!("{error:#}"));
                     }
                 }
             }
@@ -557,6 +577,41 @@ impl AppShell {
             self.compact_startup = false;
         }
         self.phase = ShellPhase::Gate(gate);
+    }
+
+    /// 测试用入口：模拟外壳下一帧接到“启用后立刻加密”的请求。
+    #[cfg(test)]
+    fn process_enable_encrypt_for_test(&mut self, ctx: &egui::Context) {
+        let ShellPhase::Ready(app) = &mut self.phase else {
+            return;
+        };
+        assert!(
+            app.take_enable_encrypt_requested(),
+            "启用密码后应发出立刻加密的请求"
+        );
+        app.save_before_lock().expect("启用前应能存盘");
+        self.begin_enable_encrypt(ctx);
+    }
+
+    /// 刚在设置页启用了密码保护：把磁盘上的明文数据**立即**迁成密文。
+    ///
+    /// 顺序要紧：迁移要**换掉** manuscripts.db 文件（sqlcipher 重新导出），
+    /// 工作区里的旧连接必须先关掉，否则它们会继续往已被替换的旧文件里写。
+    /// 所以先丢掉工作区（与锁屏同一套丢弃逻辑），再由后台线程迁移，
+    /// 最后重建工作区（此时库已是密文，`activate_db_encryption` 生效）。
+    ///
+    /// 不等“下次解锁”：从启用到下次解锁之间，磁盘上的正文一直是明文，
+    /// 与「拷走配置目录就能翻看正文」的威胁模型直接冲突。
+    fn begin_enable_encrypt(&mut self, ctx: &egui::Context) {
+        let Some(handle) = crate::vault::key_handle() else {
+            // 没有密钥句柄（异常态）：退回锁屏，用户重新解锁后再走迁移。
+            self.lock_now(ctx);
+            return;
+        };
+        let dek = *handle.dek();
+        let slot = handle.slot();
+        self.lock_now(ctx);
+        self.begin_work(WorkKind::Encrypt, slot, dek, "正在把现有数据加密到磁盘…");
     }
 
     /// 退回锁屏：丢掉整个工作区（数据库连接、内存数据随 Drop 释放），
@@ -666,6 +721,8 @@ impl AppShell {
                 result: Result<(), String>,
             },
             Lock,
+            /// 刚启用密码保护：丢弃工作区并把磁盘上的明文数据迁成密文。
+            EnableEncrypt,
         }
         let after = match &mut self.phase {
             ShellPhase::Gate(gate) => match gate_ui(ui, gate) {
@@ -691,6 +748,29 @@ impl AppShell {
                     // 恢复后还需要按新磁盘重新 probe（可能变成无锁/跳过/损坏）。
                     paint_lock_veil(&ctx, 1.0);
                     Some(After::RestoreLock)
+                } else if app.take_enable_encrypt_requested() {
+                    // 启用密码保护：先把工作区存盘并丢弃，再把明文迁成密文。
+                    match app.save_before_lock() {
+                        Ok(()) => {
+                            paint_lock_veil(&ctx, 1.0);
+                            Some(After::EnableEncrypt)
+                        }
+                        Err(error) => {
+                            // 还有任务在跑就下帧再试（存盘要在任务结束后做）；
+                            // 真失败（写不动）不重试，免得每帧刷一次状态栏。
+                            // 两种情况下磁盘上的数据都还没加密，下次解锁时闸门
+                            // 会补上迁移（见 apply_outcome 的 slot_needs_encryption）。
+                            if app.any_busy() {
+                                app.request_enable_encrypt();
+                                app.status = "正在等待任务结束后加密现有数据…".into();
+                            } else {
+                                app.status = format!(
+                                    "启用密码保护前保存失败，现有数据尚未加密（下次解锁时会自动补上）：{error:#}"
+                                );
+                            }
+                            None
+                        }
+                    }
                 } else if app.take_lock_requested() {
                     if let Err(error) = app.save_before_lock() {
                         app.status = format!("锁定前保存失败，工作区仍保持打开：{error:#}");
@@ -712,6 +792,7 @@ impl AppShell {
                 self.lock_now(&ctx);
                 self.gate_after_restore(&ctx);
             }
+            Some(After::EnableEncrypt) => self.begin_enable_encrypt(&ctx),
             Some(After::Outcome(outcome)) => self.apply_outcome(&ctx, outcome),
             Some(After::WorkDone { kind, slot, result }) => {
                 self.finish_work(&ctx, kind, slot, result)
@@ -1343,11 +1424,17 @@ fn gate_card(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
                 .size(theme::font_sizes::SMALL)
                 .color(theme::text_soft()),
             );
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(crate::password_policy::LOCK_HINT)
+                    .size(theme::font_sizes::SMALL)
+                    .color(theme::text_muted()),
+            );
             ui.add_space(12.0);
             password_field(
                 ui,
                 "gate_password_primary",
-                "设置密码（至少 4 个字符）",
+                "设置密码（长度大于 10 个字符）",
                 &mut gate.password,
             );
             ui.add_space(8.0);
@@ -1620,7 +1707,7 @@ mod lifecycle_tests {
     #[test]
     fn wrong_password_keeps_runtime_veil_and_clears_password() {
         isolated(|| {
-            Vault::create("valid-password", None, false).unwrap();
+            Vault::create("Test#Valid2026Lock", None, false).unwrap();
             let mut gate = GateState::unlock();
             gate.veiled = true;
             let mut shell = AppShell::gate(gate, None);
@@ -1634,6 +1721,64 @@ mod lifecycle_tests {
             assert!(gate.veiled);
             assert!(gate.password.is_empty());
             assert_eq!(gate.error.as_deref(), Some("密码不正确"));
+        });
+    }
+
+    /// 启用密码保护后，磁盘上的稿件库必须**当场**变成密文：
+    /// 推迟到下次解锁等于让正文在磁盘上多敞开一段时间。
+    #[test]
+    fn enabling_password_encrypts_the_database_right_away() {
+        isolated(|| {
+            // 先造一份明文库与明文配置，模拟“还没启用锁”的状态。
+            let db = storage::manuscript_db_path().unwrap();
+            {
+                let conn = rusqlite::Connection::open(&db).unwrap();
+                conn.execute_batch("CREATE TABLE t(body TEXT);").unwrap();
+                conn.execute("INSERT INTO t(body) VALUES ('机密正文')", [])
+                    .unwrap();
+            }
+            assert!(
+                !crate::vault::slot_has_encrypted_data(DataSlot::Real),
+                "前置条件：此时磁盘上还没有密文"
+            );
+
+            // 走设置页的“启用密码保护”。
+            let mut app = crate::app::management_samples::fixture();
+            app.vault_enable_with_for_test("Test#Enable2026Lock", None);
+
+            // 外壳下一帧接到请求 → 丢弃工作区 → 后台迁移 → 重建工作区。
+            let ctx = egui::Context::default();
+            let mut shell = AppShell::gate(GateState::unlock(), None);
+            shell.phase = ShellPhase::Ready(Box::new(app));
+            shell.process_enable_encrypt_for_test(&ctx);
+
+            // 迁移在后台线程里跑，等它完成。
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                if let ShellPhase::Gate(gate) = &shell.phase
+                    && let Some(working) = &gate.working
+                    && let Ok(result) = working.rx.try_recv()
+                {
+                    result.expect("加密迁移应当成功");
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "加密迁移应在超时前完成"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+
+            // 磁盘上的库已经是密文：不再能当明文 SQLite 打开。
+            let head = std::fs::read(&db).unwrap();
+            assert!(
+                !head.starts_with(b"SQLite format 3"),
+                "启用密码后稿件库不该再是明文 SQLite"
+            );
+            assert!(
+                crate::vault::slot_has_encrypted_data(DataSlot::Real),
+                "启用密码后磁盘上应能检出密文数据"
+            );
         });
     }
 
