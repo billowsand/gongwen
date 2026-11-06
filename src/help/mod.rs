@@ -441,6 +441,11 @@ mod tests {
     /// 每张 Mermaid 图都要排得出来，且字号不被缩到下限以下。
     #[test]
     fn 示意图都能排出来() {
+        // 图表缓存写在配置目录里，而启用应用锁后那目录里的图是密文：开发机上
+        // 若真的开过锁，测试会撞上「目标已加密但当前未解锁」而失败。这里把配置
+        // 目录换成临时目录，测试只用自己的缓存，不碰也不依赖开发机的真实数据。
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
         let blocks = crate::export::parse_markdown_located_report(
             content::markdown(),
             &NumberingConfig::default(),

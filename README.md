@@ -273,7 +273,7 @@ AI 的形态是**右侧 AI 侧栏**：起草页点「智能写作」就开一格
 ## 项目结构与开发
 
 ```text
-src/                应用代码（约 31.8 万行 Rust，2999 项自动化测试）
+src/                应用代码（约 31.9 万行 Rust，3004 项自动化测试）
 assets/             图标与界面资源
 examples/           示例公文
 skills/             gongwen-markdown 技能包（Agent Skill，随安装包分发）
