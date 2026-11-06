@@ -15,7 +15,7 @@ import { AgentError, runAgentJob } from "./agent.mjs";
 import { acquireOwner } from "./owner.mjs";
 import { receiptEvents } from "./delivery.mjs";
 import path from "node:path";
-import { ProtectedFiles } from "./encrypted-files.mjs";
+import { ProtectedFiles, cleanStaleTemps } from "./encrypted-files.mjs";
 
 // 先捕获真正的 stdout，再把其他写 stdout 的代码改道 stderr；协议只用 capturedWrite。
 const capturedWrite = process.stdout.write.bind(process.stdout);
@@ -109,6 +109,17 @@ async function main() {
     writeError(error?.message ?? "占用 Pi 工作区失败");
     finish(1, undefined);
     return;
+  }
+
+  // host 启动（已持锁，不会和别的 host 抢写）：清掉上一进程被打断时留下的
+  // 原子写临时文件。半截密文会让 JsonlStorage.recover 的 listDir 整目录失败，
+  // 也会让 work/ 的配额扫描失败；删不掉时 runAgentJob 里的同名跳过仍然兜底。
+  try {
+    for (const dir of [config.workspace.root, config.workspace.state, config.workspace.delivery]) {
+      if (typeof dir === "string" && dir !== "") cleanStaleTemps(dir);
+    }
+  } catch (error) {
+    writeError(`清理崩溃残留临时文件失败：${error?.message ?? error}`);
   }
 
   let cancel;

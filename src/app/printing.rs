@@ -13,12 +13,27 @@ use std::sync::atomic::AtomicBool;
 
 impl GongwenApp {
     /// 打开打印对话框，同时在后台列打印机、逐台查状态。已开着的对话框换成新的。
+    ///
+    /// 加密工作区**不禁止打印**，但打印会把明文 PDF 交给系统打印队列与打印机，
+    /// 队列/纸件不在应用锁的保护范围内：先弹一次风险确认，确认后照常打开。
     pub(crate) fn open_print_dialog(&mut self, request: PrintRequest, ctx: &egui::Context) {
         if crate::vault::key_handle().is_some() {
-            self.print_dialog = None;
-            self.status = "加密工作区不允许直接打印。请显式导出 PDF 并确认明文输出风险，再由系统 PDF 阅读器打印。".into();
+            let ctx = ctx.clone();
+            self.request_print_output(format!("打印 PDF：{}", request.title), move |app| {
+                app.open_print_dialog_confirmed(request, &ctx)
+            });
             return;
         }
+        self.open_print_dialog_confirmed(request, ctx);
+    }
+
+    /// 风险已经确认过（例如「打印…」先导出 PDF 时才确认过、或内存附件
+    /// 「另存并打印」刚确认过）时直接打开，不重复弹框。
+    pub(crate) fn open_print_dialog_confirmed(
+        &mut self,
+        request: PrintRequest,
+        ctx: &egui::Context,
+    ) {
         let id = self.next_print_dialog;
         self.next_print_dialog += 1;
         let path = request.path.clone();

@@ -10,11 +10,85 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { ExecutionError, FileError, err, ok } from "@earendil-works/pi-durable/env";
 import {
   EncryptionError,
+  GWA1_MAGIC,
+  GWA2_MAGIC,
   SEALED_FILE_OVERHEAD,
   openResource,
   resourceIdentity,
   sealGwa2,
 } from "./encryption.mjs";
+
+/** 加密文件追加后的明文总量上限：超过就停机报错，不允许无限整份重写。 */
+export const MAX_ENCRYPTED_APPEND_BYTES = 64 * 1024 * 1024;
+/** 未显式给上限时的单文件明文读取上限，防止一次读进任意大的文件把进程撑爆。 */
+export const DEFAULT_READ_MAX_BYTES = 256 * 1024 * 1024;
+
+/**
+ * 原子写临时文件名：`.<pid>-<uuid>.tmp`。只认自己写出来的精确形态，
+ * 避免误删模型或用户恰好同名的文件。
+ */
+const ATOMIC_TEMP_PATTERN = /^\.\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
+
+export function isAtomicTempName(name) {
+  return typeof name === "string" && ATOMIC_TEMP_PATTERN.test(name);
+}
+
+/**
+ * 清理目录下崩溃残留的原子写临时文件（递归、限深、限条目，尽力而为）。
+ * 同一轮工作区同时只有一个 host，所以启动时还存在的临时文件一定是上一进程
+ * 被打断留下的；这些半截密文会让 `listDir`/配额扫描解密失败。
+ */
+export function cleanStaleTemps(root, { maxEntries = 50_000, maxDepth = 12 } = {}) {
+  if (typeof root !== "string" || !path.isAbsolute(root)) return 0;
+  let removed = 0;
+  let visited = 0;
+  const pending = [{ dir: root, depth: 0 }];
+  while (pending.length > 0) {
+    const { dir, depth } = pending.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (++visited > maxEntries) return removed;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (depth < maxDepth) pending.push({ dir: full, depth: depth + 1 });
+        continue;
+      }
+      if (!entry.isFile() || !isAtomicTempName(entry.name)) continue;
+      try {
+        fs.unlinkSync(full);
+        removed += 1;
+      } catch {
+        // 清理是尽力而为：删不掉（权限/占用）就留给下一次。
+      }
+    }
+  }
+  return removed;
+}
+
+/** rename 之后尽力让父目录的目录项也落盘；Windows 不支持目录 fsync，忽略失败。 */
+function fsyncDirectory(dir) {
+  if (process.platform === "win32") return;
+  let fd;
+  try {
+    fd = fs.openSync(dir, "r");
+    fs.fsyncSync(fd);
+  } catch {
+    // 部分平台/文件系统不支持对目录 fsync；原子替换本身仍然成立。
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // 关闭失败不影响写入结果。
+      }
+    }
+  }
+}
 
 /** 同目录临时文件 + fsync + rename；传入这里的必须已经是最终物理字节。 */
 export function atomicWrite(target, content) {
@@ -37,6 +111,8 @@ export function atomicWrite(target, content) {
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (attempt + 1));
       }
     }
+    // rename 只保证内存视图原子；掉电后目录项可能还没落盘，紧随其后的提交会「回退」。
+    fsyncDirectory(path.dirname(target));
   } catch (error) {
     if (fd !== undefined) {
       try {
@@ -70,7 +146,6 @@ function tooLarge(maxBytes) {
 
 /** 用打开后的 fd 有界读取，物理预算只比明文预算多固定封套开销。 */
 function readPhysical(target, maxBytes) {
-  if (maxBytes === undefined) return fs.readFileSync(target);
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new TypeError("maxBytes 必须是非负安全整数");
   const physicalLimit = maxBytes + SEALED_FILE_OVERHEAD;
   const fd = fs.openSync(target, "r");
@@ -97,14 +172,48 @@ function readPhysical(target, maxBytes) {
   }
 }
 
+/** 只读前 4 字节魔数，不整份解密。 */
+function fileHead(target) {
+  const fd = fs.openSync(target, "r");
+  try {
+    const head = Buffer.alloc(4);
+    const count = fs.readSync(fd, head, 0, 4, 0);
+    return head.subarray(0, count);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** 密封文件的明文长度 = 物理长度 - 固定封套；封套本身不完整按损坏处理。 */
+function sealedPlaintextSize(stat, head) {
+  if (!head.equals(GWA1_MAGIC) && !head.equals(GWA2_MAGIC)) return stat.size;
+  if (stat.size < SEALED_FILE_OVERHEAD) {
+    throw new EncryptionError("加密文件长度不符（封套不完整）", "encryption_corrupt");
+  }
+  return stat.size - SEALED_FILE_OVERHEAD;
+}
+
 function infoFromStat(target, stat, size = stat.size) {
   const kind = stat.isFile() ? "file" : stat.isDirectory() ? "directory" : stat.isSymbolicLink() ? "symlink" : undefined;
   if (!kind) throw Object.assign(new Error("不支持的文件类型"), { code: "EINVAL" });
   return { name: path.basename(target), path: target, kind, size, mtimeMs: stat.mtimeMs };
 }
 
+/** Windows 的 realpath 可能返回 `\\?\` 长路径前缀：去掉它，避免两边口径不同。 */
+function stripLongPathPrefix(target) {
+  if (typeof target !== "string") return target;
+  if (target.startsWith("\\\\?\\UNC\\")) return `\\\\${target.slice(8)}`;
+  if (target.startsWith("\\\\?\\")) return target.slice(4);
+  return target;
+}
+
 export class ProtectedFiles {
-  constructor(encryption = undefined) {
+  constructor(encryption = undefined, { maxAppendBytes = MAX_ENCRYPTED_APPEND_BYTES, maxReadBytes = DEFAULT_READ_MAX_BYTES } = {}) {
+    for (const [name, value] of [["maxAppendBytes", maxAppendBytes], ["maxReadBytes", maxReadBytes]]) {
+      if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${name} 必须是非负安全整数`);
+    }
+    this.maxAppendBytes = maxAppendBytes;
+    this.maxReadBytes = maxReadBytes;
     this.encryption = encryption;
     if (!encryption) return;
     if (typeof encryption.keyHex !== "string" || !/^[0-9a-fA-F]{64}$/.test(encryption.keyHex)) {
@@ -118,7 +227,16 @@ export class ProtectedFiles {
     }
     this.key = Buffer.from(encryption.keyHex, "hex");
     this.slot = encryption.slot;
-    this.configRoot = path.resolve(encryption.configRoot);
+    this.configRoot = path.resolve(stripLongPathPrefix(encryption.configRoot));
+    // 配置目录可能经符号链接/junction 访问：记下 realpath 口径，身份计算两种都认，
+    // 否则 Node 的守卫把路径 realpath 过后 AAD 会和 Rust 写的对不上。
+    let real = this.configRoot;
+    try {
+      real = stripLongPathPrefix(fs.realpathSync.native(this.configRoot));
+    } catch {
+      // 配置根还不存在（首次启动）时没有 realpath，用字面路径即可。
+    }
+    this.realConfigRoot = real;
   }
 
   get encrypted() {
@@ -127,22 +245,34 @@ export class ProtectedFiles {
 
   identity(target) {
     if (!this.encrypted) return undefined;
-    return resourceIdentity(target, { slot: this.slot, configRoot: this.configRoot });
+    return resourceIdentity(stripLongPathPrefix(target), {
+      slot: this.slot,
+      configRoot: this.configRoot,
+      realConfigRoot: this.realConfigRoot,
+    });
   }
 
   assertPath(target) {
     this.identity(target);
   }
 
+  /** 本次读取的明文上限：显式值优先，未给时用实例默认上限（防 OOM）。 */
+  #readLimit(maxBytes) {
+    if (maxBytes === undefined) return this.maxReadBytes;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new TypeError("maxBytes 必须是非负安全整数");
+    return maxBytes;
+  }
+
   readBytes(target, maxBytes = undefined) {
     const identity = this.identity(target);
-    const raw = readPhysical(target, maxBytes);
+    const limit = this.#readLimit(maxBytes);
+    const raw = readPhysical(target, limit);
     if (!identity) {
-      if (maxBytes !== undefined && raw.length > maxBytes) throw tooLarge(maxBytes);
+      if (raw.length > limit) throw tooLarge(limit);
       return raw;
     }
     const plain = openResource(this.key, identity.slot, identity.logicalId, raw);
-    if (maxBytes !== undefined && plain.length > maxBytes) throw tooLarge(maxBytes);
+    if (plain.length > limit) throw tooLarge(limit);
     return plain;
   }
 
@@ -170,6 +300,16 @@ export class ProtectedFiles {
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
       previous = Buffer.alloc(0);
+    }
+    const total = previous.length + addition.length;
+    // 加密追加是「解密旧内容 → 内存拼接 → 整份原子重写」，不设上限会随着会话
+    // 变长把单次提交拖到秒级、内存峰值不可控；超限必须明确报错而不是硬扛。
+    if (total > this.maxAppendBytes) {
+      const error = new Error(
+        `加密文件追加后超过上限（${total} / ${this.maxAppendBytes} 字节）：${target}；会话或文件过大，请清理旧会话或新建文件`,
+      );
+      error.code = "EFBIG";
+      throw error;
     }
     this.atomicWrite(target, Buffer.concat([previous, addition]));
   }
@@ -214,12 +354,23 @@ export class ProtectedFiles {
   info(target) {
     this.assertPath(target);
     const stat = fs.lstatSync(target);
-    return infoFromStat(target, stat, stat.isFile() ? this.readBytes(target).length : stat.size);
+    if (!stat.isFile()) return infoFromStat(target, stat, stat.size);
+    // 崩溃残留的临时文件可能是半截密文：只为取大小，别去解密，也别让上层列举失败。
+    if (isAtomicTempName(path.basename(target))) return infoFromStat(target, stat, stat.size);
+    // 密封文件按「物理长度 - 固定封套」回推明文长度，不整份解密；
+    // 明文模式直接看 stat，连读文件头都省掉。
+    const size = this.encrypted ? sealedPlaintextSize(stat, fileHead(target)) : stat.size;
+    return infoFromStat(target, stat, size);
   }
 
   listDir(target) {
     this.assertPath(target);
-    return fs.readdirSync(target, { withFileTypes: true }).map((entry) => this.info(path.join(target, entry.name)));
+    return fs
+      .readdirSync(target, { withFileTypes: true })
+      // 残留临时文件不是资源：跳过，否则 JsonlStorage.recover 会在 listDir 阶段
+      // 因半截密文解密失败而整目录失败。
+      .filter((entry) => !isAtomicTempName(entry.name))
+      .map((entry) => this.info(path.join(target, entry.name)));
   }
 }
 

@@ -147,6 +147,86 @@ pub fn export_files(
     Ok(files)
 }
 
+/// 花脸稿打印预览在缓存目录下的根目录名。
+const REDLINE_PREVIEW_ROOT: &str = "redline-preview";
+
+/// 花脸稿打印预览目录：缓存目录 + 按数据槽位分开（`real` / `decoy`）。
+///
+/// 预览件是正文明文，不能放配置目录（会随同步包 / 备份带走），也不能放共享的
+/// 系统临时目录；按槽位分目录是为了让真实系统与诱饵系统互相看不到对方的花脸稿。
+/// 锁定与启动时整个根目录由 [`purge_redline_previews`] 清掉。
+pub(crate) fn redline_preview_dir() -> Result<PathBuf> {
+    let root = crate::storage::cache_dir()?.join(REDLINE_PREVIEW_ROOT);
+    Ok(root.join(preview_slot_name(crate::storage::current_slot())))
+}
+
+/// 槽位 → 预览子目录名。
+fn preview_slot_name(slot: crate::storage::DataSlot) -> &'static str {
+    match slot {
+        crate::storage::DataSlot::Real => "real",
+        crate::storage::DataSlot::Decoy => "decoy",
+    }
+}
+
+/// 清掉本次应用管理的全部花脸稿打印预览（两个槽位一起清，含《份号清单.txt》）。
+///
+/// 预览 PDF 是没有加密的正文，锁定、退出、启动时都该清干净。只删缓存目录下这个
+/// 固定根目录，不碰缓存里的其他东西；失败只忽略，不该影响锁定流程。
+pub(crate) fn purge_redline_previews() {
+    let Ok(cache) = crate::storage::cache_dir() else {
+        return;
+    };
+    purge_redline_previews_in(&cache.join(REDLINE_PREVIEW_ROOT));
+}
+
+/// [`purge_redline_previews`] 的可测试入口：显式指定预览根目录。
+fn purge_redline_previews_in(root: &Path) {
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// 花脸稿打印预览：与定稿同一条 Typst 排版链，但只出 PDF（附带《份号清单.txt》），
+/// 两样都经 [`crate::storage::atomic_write`] 落盘（Unix 0600、原子替换）。
+///
+/// 不调 [`export::write_pdf_for_kind`]：那是给用户选定的导出目录用的，PDF 走普通
+/// `fs::write`（默认 0644）。预览件留在缓存目录里只给内置查看器看，权限与清理都
+/// 要更严，所以这里直接用 `export::compile_pdf` 排进内存再原子写。
+pub(crate) fn export_preview_pdf(
+    output_dir: &Path,
+    input: &DraftInput,
+    doc: &RedlineDoc,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+) -> Result<PathBuf> {
+    let markdown = &doc.markdown;
+    let title = export::strip_redline(&export::document_title(input, markdown));
+    let stem = format!("{}-花脸稿", export::safe_filename(&title));
+    let dir = output_dir.join(&stem);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("无法创建花脸稿预览目录：{}", dir.display()))?;
+    let path = dir.join(format!("{stem}.pdf"));
+    let outcome = export::compile_pdf(input, markdown, display, fonts, numbering, &doc.elements)
+        .context("花脸稿 PDF 排版失败")?;
+    write_private(&path, &outcome.pdf)?;
+    if !input.kind.is_research()
+        && let Some(roster) = export::copy_roster(input)
+    {
+        // 清单含份号与收件单位，和 PDF 同等敏感；写失败不影响预览。
+        let _ = write_private(&path.with_extension("份号清单.txt"), roster.as_bytes());
+    }
+    Ok(path)
+}
+
+/// 预览文件一律原子写（Unix 0600）：预览目录在缓存里，不能默认 0644 摊着。
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    crate::storage::atomic_write(path, |file| {
+        use std::io::Write as _;
+        file.write_all(bytes)?;
+        Ok(())
+    })
+    .with_context(|| format!("无法写入花脸稿打印预览：{}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +251,44 @@ mod tests {
         let doc = build(text, text);
         assert!(doc.is_empty());
         assert_eq!(doc.markdown, text);
+    }
+
+    /// 打印预览件：原子写（Unix 0600）、按槽位分目录，清理由
+    /// [`purge_redline_previews`] 负责（两个槽位的目录一起清，含《份号清单.txt》）。
+    #[test]
+    fn redline_previews_are_private_and_purged() {
+        // 真实槽与诱饵槽各一个子目录名，互不混放。
+        assert_ne!(
+            preview_slot_name(crate::storage::DataSlot::Real),
+            preview_slot_name(crate::storage::DataSlot::Decoy)
+        );
+
+        let root = tempfile::tempdir().expect("临时目录");
+        let preview_root = root.path().join(REDLINE_PREVIEW_ROOT);
+        let real = preview_root.join("real").join("关于××的请示-花脸稿");
+        std::fs::create_dir_all(&real).expect("建预览目录");
+        let pdf = real.join("关于××的请示-花脸稿.pdf");
+        write_private(&pdf, b"%PDF-1.7\n").expect("写预览 PDF");
+        let roster = real.join("关于××的请示-花脸稿.份号清单.txt");
+        write_private(&roster, "份号：1".as_bytes()).expect("写份号清单");
+        // 诱饵槽的预览也要一起清掉，锁定后不能留下另一套系统的明文。
+        let decoy = preview_root.join("decoy").join("x-花脸稿");
+        std::fs::create_dir_all(&decoy).expect("建诱饵预览目录");
+        std::fs::write(decoy.join("x-花脸稿.pdf"), b"%PDF-1.7\n").expect("写诱饵副本");
+
+        assert!(pdf.is_file() && roster.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&pdf), 0o600, "预览 PDF 只给自己读写");
+            assert_eq!(mode(&roster), 0o600, "份号清单只给自己读写");
+        }
+
+        purge_redline_previews_in(&preview_root);
+        assert!(!preview_root.exists(), "清完整个预览根目录都不该在");
+        // 幂等：目录本来就不在也不报错。
+        purge_redline_previews_in(&preview_root);
     }
 
     #[test]

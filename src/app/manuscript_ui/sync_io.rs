@@ -899,6 +899,16 @@ pub(crate) fn purge_stale_preview_pdfs() {
     let _ = purge_staged_print_files();
 }
 
+/// 清理所有「应用自己管理的明文缓存」：旧版 PDF 预览副本、打印送打副本。
+/// 启动期（解锁前）与锁定/退出都调用一次，不需要密钥；只删应用自己的
+/// 缓存子目录，不碰用户文件。
+pub(crate) fn purge_plaintext_caches() {
+    purge_stale_preview_pdfs();
+    let _ = purge_staged_print_files();
+    // 花脸稿打印预览（含《份号清单.txt》）。
+    crate::redline::purge_redline_previews();
+}
+
 /// 清掉崩溃残留的送打副本（`缓存目录/print/<uuid>.pdf`）。只删这个目录里的
 /// `*.pdf`，不碰用户文件。
 fn purge_staged_print_files() -> std::io::Result<()> {

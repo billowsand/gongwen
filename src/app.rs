@@ -40,7 +40,7 @@ mod jobs;
 mod knowledge_local;
 mod lexicon_jobs;
 mod manuscript_ui;
-mod output_guard;
+pub(crate) mod output_guard;
 mod pi_jobs;
 mod pi_skill_manager;
 mod printing;
@@ -547,7 +547,7 @@ impl GongwenApp {
         }
         // 上次崩溃/强杀可能留下 PDF 预览副本；启动时清一次（只删缓存目录里
         // 自己的 manuscript_*.pdf 命名）。
-        crate::app::manuscript_ui::purge_stale_preview_pdfs();
+        crate::app::manuscript_ui::purge_plaintext_caches();
         // 按配置装：配置里关掉了输入法就不装配引擎，不白读词库和语言模型。
         let ime = crate::ime::Ime::new(session::ime_settings_of(&config.ime));
         let (sender, receiver) = mpsc::channel();

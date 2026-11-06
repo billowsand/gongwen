@@ -444,3 +444,26 @@ Pi 增加两个只读领域工具：`style_list`（按当前文种列出启用�
 模型只生成风格内容，程序填身份、来源、统计和范例原文；结果进入设置页编辑器，只有用户保存才更新风格库。
 上传样稿留在工作区；档案里的 `learning_workspace` 是本机相对引用，用于重新学习上传样稿，读取前校验材料哈希。
 详情见 `pi-implementation/style-learning-v1.md`。
+
+## host 稳定性加固（2026-11-06 第七轮，host 0.4.0 / 协议 4）
+
+加密工作区把 host 的运行目录、Durable JSONL 与交付回执都改成 GWA2 密文后，本轮补了一轮
+崩溃/并发/长会话稳定性修复（协议与 host 版本号不变，随包 `runtime/pi` 需按新源码重建）：
+
+- **崩溃残留**：`.<pid>-<uuid>.tmp` 在 SIGKILL/断电后残留会让 Durable 恢复的目录列举
+  整目录失败、`work/` 里也会让模型写失败。host 启动与每轮开始会递归清理该模式的普通
+  文件（限深度/条目），目录列举与配额扫描跳过它们；`info()` 对 GWA1/GWA2 文件按
+  `stat.size - 36` 算明文长度，不再为列目录整份解密。
+- **上限**：加密追加单文件明文上限 64 MiB（超限报 `EFBIG` 并提示清理旧会话，旧内容
+  保持完整），读取默认上限 256 MiB；原子写 rename 后尽力 fsync 父目录（Unix）。
+- **占用锁自愈**：`host-owner.lock` 是 SQLite 锁载体。若它被旧版本迁移误封成 GWA2 或
+  损坏，host 只对已知锁名做一次受控自愈（删除后重建）；`SQLITE_BUSY` 仍按「另一个窗口
+  在用」处理，绝不删锁。
+- **会话完整性**：`progress.json` 有记录而 `pi/session/main.jsonl` 缺失/0 字节时，
+  「接着写」明确报 `resume_session_missing`，不再静默当空会话重跑；Rust 侧同样在恢复
+  前校验主文件，并把「Running 但没有活动宿主」的轮次纠正为 Interrupted。
+- **路径口径**：资源 AAD 的逻辑路径在 Rust 侧按 realpath 规范化，host 同时接受字面与
+  realpath 两种根（配置目录含符号链接/junction、大小写差异时仍能读懂同一批密文）。
+- **已知边界**：pinned `pi-durable` 1.4.0 对「marker 引用的 sidecar 记录缺失」仍会
+  硬失败；JSONL 长会话暂无压缩（现靠 64 MiB 上限明确报错）；Windows 绝对路径 +
+  符号链接的 `resolveInside` 语义未改。

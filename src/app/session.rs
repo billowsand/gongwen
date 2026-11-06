@@ -51,6 +51,8 @@ pub(crate) enum DraftAction {
     /// 内容离开加密工作区前，由外壳统一显示风险确认。
     ConfirmPlaintextOutput {
         operation: String,
+        /// 与本次操作匹配的风险文案（打印前导出用合并文案，普通导出用默认明文文案）。
+        warning: &'static str,
         action: super::output_guard::OutputAction,
     },
     /// 导入文档：应用层开文件框，选好后把正文插进这篇稿件。

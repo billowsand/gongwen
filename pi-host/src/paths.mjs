@@ -8,7 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ExecutionError, FileError, err, ok } from "@earendil-works/pi-durable/env";
-import { ProtectedFileSystem, plaintextFiles } from "./encrypted-files.mjs";
+import { ProtectedFileSystem, isAtomicTempName, plaintextFiles } from "./encrypted-files.mjs";
 
 export { atomicWrite } from "./encrypted-files.mjs";
 
@@ -240,6 +240,8 @@ export class WorkspaceEnv extends ProtectedFileSystem {
     let entries = 0;
     while (pending.length) {
       for (const entry of fs.readdirSync(pending.pop(), { withFileTypes: true })) {
+        // 崩溃残留的原子写临时文件可能解不开；它不是模型成果，跳过不参与配额。
+        if (isAtomicTempName(entry.name)) continue;
         if (++entries > this.maxWorkEntries) throw new Error("工作区文件和目录数量超过上限");
         const full = path.join(entry.parentPath ?? entry.path, entry.name);
         if (entry.isDirectory()) pending.push(full);

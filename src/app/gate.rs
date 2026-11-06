@@ -217,6 +217,9 @@ impl AppShell {
         let macos_titlebar_metrics = crate::macos_window::configure_native_titlebar(cc);
         // 配置目录与已知子目录收紧到仅本人可访问（Unix，尽力而为）。
         crate::storage::harden_permissions();
+        // 解锁前先清一次应用自己的明文缓存（旧预览、打印副本、花脸稿预览）：
+        // 崩溃/强杀留下的明文不该等下次解锁才消失。
+        crate::app::manuscript_ui::purge_plaintext_caches();
 
         let startup = StartupBundle {
             startup_imports: Some(startup_imports),
@@ -281,9 +284,41 @@ impl AppShell {
 
     /// 未启用（或用户选过跳过）：直接进工作区，等价于旧行为。
     fn boot_direct(mut self, ctx: &egui::Context) -> Self {
+        self.boot_direct_mut(ctx);
+        self
+    }
+
+    fn boot_direct_mut(&mut self, ctx: &egui::Context) {
         self.restore_workspace_window(ctx);
         self.enter_workspace(ctx, DataSlot::Real, None);
-        self
+    }
+
+    /// 备份恢复把整个配置目录换掉之后：先按新磁盘重新 probe，再决定闸门形态。
+    /// 固定回「输密码」在恢复到无锁备份时会永远提示密码不正确。
+    fn gate_after_restore(&mut self, ctx: &egui::Context) {
+        match Vault::probe() {
+            Probe::Locked => {
+                self.phase = ShellPhase::Gate(GateState::unlock());
+            }
+            Probe::Broken(_) => {
+                self.phase = ShellPhase::Gate(GateState::broken());
+            }
+            Probe::Skipped => {
+                if encrypted_data_on_disk() {
+                    self.phase = ShellPhase::Gate(GateState::lock_lost());
+                } else {
+                    self.boot_direct_mut(ctx);
+                }
+            }
+            Probe::Absent => {
+                if encrypted_data_on_disk() {
+                    self.phase = ShellPhase::Gate(GateState::lock_lost());
+                } else {
+                    // 恢复的是从未启用锁的备份：直接进工作区。
+                    self.boot_direct_mut(ctx);
+                }
+            }
+        }
     }
 
     fn gate(gate: GateState, startup: Option<StartupBundle>) -> Self {
@@ -306,6 +341,9 @@ impl AppShell {
         storage::set_current_slot(slot);
         // 进入工作区：槽位与密钥句柄都明确，恢复配置目录写入。
         storage::set_writes_blocked(false);
+        // 上次崩溃/锁屏时没能落终态的 Pi 轮次仍停在 Running：在持有密钥、
+        // 尚未开始新任务的窗口里纠正一次（尽力而为，失败不阻断进入工作区）。
+        let reconciled = crate::pi_agent::recovery::reconcile_interrupted_runs();
         let Some(startup) = self.startup.as_mut() else {
             return;
         };
@@ -313,6 +351,17 @@ impl AppShell {
         let mut app = GongwenApp::new_unlocked(ctx, imports, instance, requests, titlebar_metrics);
         if let Some(notice) = notice {
             app.status = notice;
+        }
+        match reconciled {
+            Ok(count) if count > 0 => {
+                app.status =
+                    format!("已把 {count} 个中断的智能写作轮次标记为已中断，可重新接着写。");
+            }
+            Err(error) => {
+                // 不阻断进入工作区，但要让人知道纠正失败，避免记录一直停在 Running。
+                app.status = format!("纠正中断的智能写作轮次失败：{error}");
+            }
+            _ => {}
         }
         self.phase = ShellPhase::Ready(Box::new(app));
         ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("gate_password_primary")));
@@ -328,8 +377,10 @@ impl AppShell {
     /// 迁移完成才切 true。
     fn begin_work(&mut self, kind: WorkKind, slot: DataSlot, dek: [u8; 32], title: &str) {
         let veiled = matches!(&self.phase, ShellPhase::Gate(gate) if gate.veiled);
-        crate::vault::set_key_handle(dek, kind == WorkKind::Disable);
+        // 先切槽位，再用**显式槽位**创建句柄：句柄绑定的槽位必须与磁盘路径一致，
+        // 不能依赖「先设句柄、后切槽位」的调用顺序（诱饵密码会拿到 Real 句柄）。
         crate::storage::set_current_slot(slot);
+        crate::vault::set_key_handle_for_slot(dek, kind == WorkKind::Disable, slot);
         // 迁移/停用任务要在槽位与密钥都明确之后写盘，放行配置目录写入。
         crate::storage::set_writes_blocked(false);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -368,6 +419,21 @@ impl AppShell {
                     self.enter_workspace(ctx, slot, None);
                 }
                 WorkKind::Disable => {
+                    // 先确认当前槽位真的没有密文残留，再删锁封套。少解一类文件
+                    // （apis/配置副本等）时，这里必须失败并保留封套，不能让数据
+                    // 变成「没有 DEK 的密文」。
+                    if crate::vault::slot_has_encrypted_data(slot) {
+                        crate::vault::clear_key_handle();
+                        crate::storage::set_writes_blocked(true);
+                        let mut gate = GateState::unlock();
+                        gate.veiled = !self.compact_startup;
+                        gate.error = Some(
+                            "停用未完成：仍有加密数据没有解开，已保留密码保护设置。请重试或从备份恢复。"
+                                .into(),
+                        );
+                        self.phase = ShellPhase::Gate(gate);
+                        return;
+                    }
                     crate::vault::clear_key_handle();
                     crate::vault::clear_disable_pending();
                     let notice = match Vault::reset_file()
@@ -380,6 +446,9 @@ impl AppShell {
                 }
             },
             Err(message) => {
+                // 迁移/停用失败后仍是锁定态：先停写再清密钥，避免晚到线程在
+                // 「无密钥」状态把明文写回配置目录。
+                crate::storage::set_writes_blocked(true);
                 crate::vault::clear_key_handle();
                 let mut gate = GateState::unlock();
                 gate.veiled = !self.compact_startup;
@@ -408,7 +477,11 @@ impl AppShell {
                             // 真的有活干时出现。两套密码各自只看自己槽位的文件，
                             // 交替解锁互不触发对方的数据搬运。
                             if !disable && !crate::vault::slot_needs_encryption(unlocked.slot) {
-                                crate::vault::set_key_handle(*unlocked.dek, true);
+                                crate::vault::set_key_handle_for_slot(
+                                    *unlocked.dek,
+                                    true,
+                                    unlocked.slot,
+                                );
                                 self.enter_workspace(ctx, unlocked.slot, None);
                                 return;
                             }
@@ -503,6 +576,8 @@ impl AppShell {
         crate::vault::clear_key_handle();
         ctx.memory_mut(|memory| *memory = egui::Memory::default());
         ctx.data_mut(|data| data.clear());
+        // 锁定即丢弃工作区：顺手清掉应用自己的明文缓存与花脸稿预览副本。
+        crate::app::manuscript_ui::purge_plaintext_caches();
         if let ShellPhase::Gate(gate) = &mut self.phase {
             gate.veiled = true;
         }
@@ -583,6 +658,8 @@ impl AppShell {
 
         enum After {
             Outcome(GateOutcome),
+            /// 备份恢复后：目录已整体替换，必须先重新读磁盘再决定闸门形态。
+            RestoreLock,
             WorkDone {
                 kind: WorkKind,
                 slot: DataSlot,
@@ -610,9 +687,10 @@ impl AppShell {
                 }
                 app.update_workspace(ui, frame);
                 if app.take_force_relock() {
-                    // 备份恢复：目录已整体替换，保存会拿旧密钥覆盖新数据。
+                    // 备份恢复：目录已整体替换，保存会拿旧密钥覆盖新数据；
+                    // 恢复后还需要按新磁盘重新 probe（可能变成无锁/跳过/损坏）。
                     paint_lock_veil(&ctx, 1.0);
-                    Some(After::Lock)
+                    Some(After::RestoreLock)
                 } else if app.take_lock_requested() {
                     if let Err(error) = app.save_before_lock() {
                         app.status = format!("锁定前保存失败，工作区仍保持打开：{error:#}");
@@ -630,6 +708,10 @@ impl AppShell {
         };
         match after {
             Some(After::Lock) => self.lock_now(&ctx),
+            Some(After::RestoreLock) => {
+                self.lock_now(&ctx);
+                self.gate_after_restore(&ctx);
+            }
             Some(After::Outcome(outcome)) => self.apply_outcome(&ctx, outcome),
             Some(After::WorkDone { kind, slot, result }) => {
                 self.finish_work(&ctx, kind, slot, result)

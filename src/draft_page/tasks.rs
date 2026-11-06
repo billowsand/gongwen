@@ -88,10 +88,6 @@ impl DraftPage<'_> {
     /// 「打印…」：按覆盖策略只导一份 PDF，导完由外壳打开并弹打印对话框。
     /// 走的就是 [`Self::start_export_with`]，不另写一条导出路径。
     pub(crate) fn start_export_for_print(&mut self) {
-        if crate::vault::key_handle().is_some() {
-            *self.status = "加密工作区不允许直接打印。请通过「PDF」显式导出并确认风险后，再由系统 PDF 阅读器打印。".into();
-            return;
-        }
         self.request_export(
             ExportKind::Pdf.selection(self.config.export.overwrite, self.config.export.receipt),
             None,
@@ -154,8 +150,16 @@ impl DraftPage<'_> {
                 formats.join("、"),
                 self.config.output_dir,
             );
+            // 「打印…」会先导出普通 PDF 再交给打印队列：确认框必须同时说明
+            // 文件落盘与队列/纸件两重风险，不能只提示前者。
+            let warning = if print {
+                super::super::app::output_guard::PRINT_EXPORT_WARNING
+            } else {
+                super::super::app::output_guard::PLAINTEXT_WARNING
+            };
             self.actions.push(DraftAction::ConfirmPlaintextOutput {
                 operation,
+                warning,
                 action: Box::new(move |app| {
                     if let Some(index) = app.doc_index_of_key(key) {
                         app.draft_page_at(index)

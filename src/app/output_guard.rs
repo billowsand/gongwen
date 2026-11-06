@@ -7,6 +7,8 @@ use eframe::egui;
 
 pub(crate) const PLAINTEXT_WARNING: &str = "当前工作区已启用加密。此次导出的 PDF、Word、源码文件及随附的《份号清单.txt》（含份号与主送/抄送单位）将以普通文件保存，不再受应用密码和本地加密保护。文件可能包含正文、图片、附件及人员等敏感信息；复制、同步、发送或由其他软件打开时，可能导致信息泄露。请确认保存位置和接收范围。";
 pub(crate) const PDF_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的 ZIP 由独立的 ZIP 密码保护，但解压后的 PDF 是普通文件，不受应用密码和本地加密保护。PDF 可能包含正文、图片、附件及人员等敏感信息；解压、复制、同步或发送后，可能导致信息泄露。请妥善保管 ZIP 密码并确认接收范围。";
+pub(crate) const PRINT_EXPORT_WARNING: &str = "当前工作区已启用加密。此次会先把普通 PDF 导出到磁盘，再交给系统打印队列和打印机：PDF 文件、队列副本、打印机缓存与纸件都不受应用密码和本地加密保护，可能包含正文、图片、附件及人员等敏感信息。请确认保存位置、接收范围与纸件/队列记录的处置方式。";
+pub(crate) const PRINT_WARNING: &str = "当前工作区已启用加密。打印会把明文 PDF 交给系统打印队列和打印机：队列可能自行保存副本，打印机缓存、纸件与后续处置都可能留下敏感信息，这些都不受应用密码和本地加密保护。请确认接收范围与纸件/队列记录的处置方式。";
 pub(crate) const PACKAGE_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的是稿件包（外层由独立的 ZIP 密码保护），但解压后的 Markdown 正文、历史版本、图片、PDF 附件与随行件全部是普通文件，不再受应用密码和本地加密保护。稿件包还可能包含人员、单位、文号等敏感信息；复制、同步、发送或由其他软件打开后，可能导致信息泄露。请妥善保管 ZIP 密码并确认接收范围。";
 pub(crate) const PII_EXPORT_WARNING: &str = "当前工作区已启用加密。此次导出的表格或词表是普通文件，可能包含人员姓名、职务、联系电话、个人简介、单位名称等敏感信息，以及从稿件派生出的正文用语；复制、同步、发送或由其他软件打开后，可能导致信息泄露。请确认导出范围与接收对象。";
 pub(crate) const BACKUP_WARNING: &str = "当前工作区已启用加密。备份包里的数据库、配置、图片、Pi 运行数据、个人词表与自定义技能均保持密文，但 ZIP 容器本身不受应用密码保护，文件名、大小和修改时间仍可见。请把备份放在可信位置；恢复时需要使用备份当时的应用密码，恢复后请重新解锁。";
@@ -35,6 +37,15 @@ impl GongwenApp {
         action: impl FnOnce(&mut Self) + 'static,
     ) {
         self.request_sensitive_output(operation.into(), PDF_ARCHIVE_WARNING, Box::new(action));
+    }
+
+    /// 打印前的风险确认：加密工作区允许打印，但必须明确「队列/纸件不在保护范围内」。
+    pub(crate) fn request_print_output(
+        &mut self,
+        operation: impl Into<String>,
+        action: impl FnOnce(&mut Self) + 'static,
+    ) {
+        self.request_sensitive_output(operation.into(), PRINT_WARNING, Box::new(action));
     }
 
     /// 自定义文案的输出确认：风格档案、词库/PII 表格、全量备份这类
@@ -123,7 +134,7 @@ mod tests {
     use crate::draft_page::ExportKind;
 
     #[test]
-    fn memory_attachment_preview_needs_no_output_and_direct_print_is_refused() {
+    fn memory_attachment_preview_needs_no_output_and_print_asks_once() {
         let mut h = Harness::new(true);
         let store = h.app.manuscript_store.as_mut().unwrap();
         let id = store
@@ -157,11 +168,17 @@ mod tests {
             }],
             &h.ctx,
         );
-        assert!(h.app.pending_output.is_none());
-        assert!(h.app.status.contains("不允许直接打印"));
+        // 加密工作区允许打印，但先弹一次「队列/纸件不在保护范围内」的风险确认；
+        // 确认前既不开保存框也不打开打印对话框。
+        let pending = h.app.pending_output.as_ref().expect("打印前应确认风险");
+        assert_eq!(pending.warning, PRINT_WARNING);
         assert!(h.app.print_dialog.is_none());
         assert!(h.app.pending_file_dialogs.is_empty());
+        assert!(!h.dir.path().join("output").exists());
+        h.click("取消");
+        assert!(h.app.pending_output.is_none());
         assert!(h.app.print_dialog.is_none());
+        assert!(h.app.pending_file_dialogs.is_empty());
         assert!(!h.dir.path().join("output").exists());
     }
 
@@ -300,6 +317,31 @@ mod tests {
         assert!(h.app.status.contains("未解锁"));
     }
 
+    /// 加密工作区允许打印：先确认风险，确认后照常打开打印对话框（不硬拦）。
+    #[test]
+    fn encrypted_print_warns_and_then_opens_the_dialog() {
+        let mut h = Harness::new(true);
+        let request = crate::print::PrintRequest {
+            path: h.dir.path().join("尚未导出.pdf"),
+            title: "关于测试的请示".into(),
+            page_count: 1,
+            current_page: 0,
+            hints: Default::default(),
+            pdf_key: None,
+        };
+        h.app.open_print_dialog(request, &h.ctx);
+        let pending = h.app.pending_output.as_ref().expect("打印前应确认风险");
+        assert_eq!(pending.warning, PRINT_WARNING);
+        assert!(pending.operation.contains("关于测试的请示"));
+        assert!(h.app.print_dialog.is_none());
+        h.click("确认风险并继续");
+        assert!(h.app.pending_output.is_none());
+        assert!(
+            h.app.print_dialog.is_some(),
+            "确认风险后应照常打开打印对话框"
+        );
+    }
+
     #[test]
     fn ordinary_output_does_not_require_confirmation() {
         let mut h = Harness::new(false);
@@ -335,12 +377,16 @@ mod tests {
             assert!(h.app.pending_output.is_some());
             h.click("取消");
         }
+        // 「打印…」先走一次导出确认（含打印意图）；取消后不导出、不打印，
+        // 打开/打印意图也不能提前挂到别的任务上。
         h.app.draft_page().start_export_for_print();
         h.app.apply_draft_actions(&h.ctx);
-        assert!(h.app.pending_output.is_none());
-        assert!(h.app.status.contains("不允许直接打印"));
+        assert!(h.app.pending_output.is_some());
         assert!(!h.app.docs[0].print_after_export);
         assert!(!h.app.docs[0].busy);
+        h.click("取消");
+        assert!(h.app.pending_output.is_none());
+        assert!(!h.app.docs[0].print_after_export);
         assert!(!h.dir.path().join("output").exists());
     }
 

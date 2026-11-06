@@ -51,8 +51,13 @@ const MAX_SCAN_ENTRIES: usize = 200_000;
 /// 没有可读 `run.json` 的孤儿运行目录，额外要老过这个时长才删。
 const ORPHAN_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
-/// 工作区占用：（全部文件字节数, `run-*` 运行目录数）。只统计，不修改任何文件。
+/// 工作区占用：（全部文件字节数, `run-*` 运行目录数）。
+///
+/// 顺带做一次状态纠正：记录仍是 Running、本机已经没有活动宿主（锁屏/退出时终态
+/// 没写成功）的轮次改写为 Interrupted，用户列历史轮次时看到的是「被停止」而不是
+/// 「没有收尾」。纠正写盘失败返回错误，不吞成「统计成功」。
 pub(crate) fn workspace_usage() -> Result<(u64, usize), String> {
+    super::recovery::reconcile_interrupted_runs()?;
     let base = base_dir()?;
     let mut bytes = 0u64;
     let mut runs = 0usize;
@@ -88,11 +93,15 @@ pub(crate) fn workspace_usage() -> Result<(u64, usize), String> {
 /// 孤儿目录额外要求超过 1 小时。Rust 正持着 `rust-owner.lock` 的目录不删，
 /// Running / Interrupted / Failed / Parked / Delivered 也不删——它们是「接着写」的依据。
 ///
+/// 清理前同样先纠正「Running 但没有活动宿主」的旧状态；纠正失败直接返回错误，
+/// 不在状态不明时继续删目录。
+///
 /// 返回（删除的运行目录数, 释放的字节数）。
 pub(crate) fn prune_workspaces(
     keep_per_doc: usize,
     min_age: std::time::Duration,
 ) -> Result<(usize, u64), String> {
+    super::recovery::reconcile_interrupted_runs()?;
     let base = base_dir()?;
     let now = std::time::SystemTime::now();
     let mut pruned = 0usize;
@@ -611,6 +620,28 @@ mod tests {
         let (bytes, runs) = workspace_usage().unwrap();
         assert_eq!(runs, 2);
         assert!(bytes >= 14, "应统计到文件字节：{bytes}");
+    }
+
+    /// 「列出历史轮次 / 占用」入口顺带纠正：Running 且本机没有活动宿主 → Interrupted。
+    #[test]
+    fn listing_workspace_usage_corrects_stale_running_runs() {
+        let (_config, _reset) = isolated_config_dir();
+        let doc = crate::storage::config_dir()
+            .unwrap()
+            .join("pi/workspaces/doc-1");
+        std::fs::create_dir_all(&doc).unwrap();
+        let run = fake_run(
+            &doc,
+            "run-20260101-000000-aaaaaaaa",
+            super::super::recovery::PiRunStatus::Running,
+        );
+        workspace_usage().unwrap();
+        let record = super::super::recovery::PiRunRecord::read_from(&run).unwrap();
+        assert_eq!(
+            record.status,
+            super::super::recovery::PiRunStatus::Interrupted
+        );
+        assert!(record.message.contains("中断"), "{}", record.message);
     }
 
     #[test]

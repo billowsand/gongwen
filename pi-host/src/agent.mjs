@@ -24,7 +24,7 @@ import {
 import { JsonlStorage } from "@earendil-works/pi-durable/storage/jsonl";
 import { createEditTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import { WorkspaceGuard, WorkspaceEnv } from "./paths.mjs";
-import { ProtectedFileSystem, ProtectedFiles } from "./encrypted-files.mjs";
+import { ProtectedFileSystem, ProtectedFiles, cleanStaleTemps } from "./encrypted-files.mjs";
 import { createDomainTools, createToolBridge, BridgeError } from "./bridge.mjs";
 import {
   DeliveryError,
@@ -583,12 +583,75 @@ function toAgentError(error) {
   return error;
 }
 
+/** progress.json 的读取上限；与 ProgressRegistry 的默认上限一致。 */
+const PROGRESS_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * 清掉上一进程崩溃残留的原子写临时文件。
+ *
+ * 同一轮工作区同时只有一个 host（`host-owner.lock`），所以启动时还存在的
+ * `.<pid>-<uuid>.tmp` 一定是被打断的那一次写的半截密文。它会让
+ * `JsonlStorage.recover` 的 `listDir` 整目录解密失败、也会让 work/ 的配额扫描
+ * 失败；启动时清一次，删不掉也不阻塞（调用方仍会跳过这类名字）。
+ */
+export function cleanRunTemps(workspace) {
+  let removed = 0;
+  for (const dir of [workspace?.root, workspace?.state, workspace?.delivery]) {
+    if (typeof dir !== "string" || dir === "") continue;
+    removed += cleanStaleTemps(dir);
+  }
+  return removed;
+}
+
+/**
+ * 恢复时的会话健全性检查：阶段进度还在、durable 会话却丢了，说明上次的
+ * `pi/session/main.jsonl` 被截断/删除。这时静默重跑会重复模型与工具调用，
+ * 必须明确拒绝并让用户选「从头写」。
+ *
+ * 没有 progress 记录（或进度文件读不出）时保持旧行为：允许继续，
+ * 由 Durable 自己新建空会话。
+ */
+export function assertResumeSession(config, files) {
+  const progressPath = path.join(config.workspace.delivery, "progress.json");
+  let progressed = false;
+  try {
+    const info = files.info(progressPath);
+    if (info.kind === "file" && info.size > 0) {
+      const raw = JSON.parse(files.readText(progressPath, PROGRESS_MAX_BYTES));
+      progressed = Array.isArray(raw?.records) && raw.records.length > 0;
+    }
+  } catch {
+    // 进度文件不存在/读不出：按「没有进度」处理，与改造前一致。
+    progressed = false;
+  }
+  if (!progressed) return;
+  const mainPath = path.join(config.workspace.state, "main.jsonl");
+  let bytes = 0;
+  try {
+    const info = files.info(mainPath);
+    bytes = info.kind === "file" ? info.size : 0;
+  } catch {
+    bytes = 0;
+  }
+  if (bytes > 0) return;
+  throw new AgentError(
+    "这一轮的阶段进度还在，但 Durable 会话（pi/session/main.jsonl）已丢失或为空，不能接着写。请点「从头写」重新开始。",
+    "resume_session_missing",
+  );
+}
+
 /**
  * 跑一轮。返回 `{ snapshot }`（提交了）、`{ report }`（只交清单）或 `{ snapshot: undefined }`
  * （模型结束但都没交）。`onCancel` 交给 main 注册取消；取消只结束本轮，不假装完成。
  */
 export async function runAgentJob({ config, models, model, emit, onCancel, onBridge, files }) {
   files ??= new ProtectedFiles(config.workspace.encryption);
+  // host 启动第一步：清掉上一进程被打断时留下的原子写临时文件。
+  try {
+    cleanRunTemps(config.workspace);
+  } catch {
+    // 清理是尽力而为，失败不阻塞本轮。
+  }
   const controller = withCancel(BACKGROUND_CONTEXT);
   onCancel?.(() => controller.cancel(new AgentError("已取消", "cancelled")));
 
@@ -606,6 +669,8 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       emit({ type: "progress", message: "找到上次已落盘的交付回执，直接交回同一份成品。" });
       return { receipt };
     }
+    // 没有回执：进度在但会话没了，不能静默重跑。
+    assertResumeSession(config, files);
   }
 
   config.currentBytes = readCurrentBytes(config, files);

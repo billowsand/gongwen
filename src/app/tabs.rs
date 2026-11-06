@@ -261,7 +261,7 @@ impl GongwenApp {
             .iter_mut()
             .find(|pdf| !pdf.is_memory() && pdf.path() == path)
         {
-            pdf.request_print_when_ready();
+            pdf.request_print_when_ready_confirmed();
         }
     }
 
@@ -301,15 +301,14 @@ impl GongwenApp {
                     Err(error) => self.status = format!("定位 PDF 失败：{error}"),
                 },
                 PdfViewerAction::Print(request) => self.open_print_dialog(request, ctx),
+                PdfViewerAction::PrintConfirmed(request) => {
+                    self.open_print_dialog_confirmed(request, ctx)
+                }
                 PdfViewerAction::ReleaseMemory {
                     bytes,
                     mut request,
                     print,
                 } => {
-                    if print && crate::vault::key_handle().is_some() {
-                        self.status = "加密工作区不允许直接打印；请改用「另存并系统打开」，显式导出 PDF 后自行打印。".into();
-                        continue;
-                    }
                     let ctx = ctx.clone();
                     let name = crate::export::safe_filename(&request.title);
                     let name = if name.to_ascii_lowercase().ends_with(".pdf") {
@@ -317,7 +316,7 @@ impl GongwenApp {
                     } else {
                         format!("{name}.pdf")
                     };
-                    self.request_plaintext_output(
+                    self.request_output_with_warning(
                         format!(
                             "{} PDF 附件：{}。请选择普通 PDF 的保存位置。",
                             if print {
@@ -327,6 +326,11 @@ impl GongwenApp {
                             },
                             request.title
                         ),
+                        if print {
+                            super::output_guard::PRINT_WARNING
+                        } else {
+                            super::output_guard::PLAINTEXT_WARNING
+                        },
                         move |app| {
                             app.request_file(
                                 super::file_dialog::FileDialogSpec::save_file()
@@ -345,7 +349,8 @@ impl GongwenApp {
                                     }
                                     if print {
                                         request.path = path;
-                                        app.open_print_dialog(*request, &ctx);
+                                        // 保存+打印风险已经在上面确认过，不再重复弹框。
+                                        app.open_print_dialog_confirmed(*request, &ctx);
                                     } else {
                                         app.status = match open_in_os(&path) {
                                             Ok(()) => "已保存 PDF 附件并用系统程序打开。".into(),
@@ -491,8 +496,12 @@ impl GongwenApp {
                     version_number,
                 } => self.load_manuscript_version(manuscript_id, version_number),
                 DraftAction::Persist => self.persist(),
-                DraftAction::ConfirmPlaintextOutput { operation, action } => {
-                    self.request_plaintext_output(operation, action);
+                DraftAction::ConfirmPlaintextOutput {
+                    operation,
+                    warning,
+                    action,
+                } => {
+                    self.request_output_with_warning(operation, warning, action);
                 }
 
                 DraftAction::ImportDocument { key } => {

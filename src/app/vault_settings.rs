@@ -330,7 +330,7 @@ impl GongwenApp {
                 }
                 // 本会话继续按明文开库（磁盘数据还没迁）；配置类文件从下一次
                 // 保存起就密封。数据迁移安排在下次解锁，由闸门完成。
-                crate::vault::set_key_handle(*unlocked.dek, false);
+                crate::vault::set_key_handle_for_slot(*unlocked.dek, false, DataSlot::Real);
                 self.vault_locked = true;
                 let page = &mut self.vault_page;
                 page.enable_real.clear();

@@ -1060,8 +1060,9 @@ impl DraftPage<'_> {
     /// 导出花脸稿：基准版 → 当前修订，删掉的画红色删除线、新增的套蓝框。
     ///
     /// 与定稿导出一样放后台线程——PDF 要真编译一遍，同步做会把界面卡住几秒。
-    /// `print_preview` 为 true 时只出 PDF、写进临时目录，编完在内置查看器里打开，
-    /// 不在导出目录里留文件（方案需求结论第 20 条「打印预览」）。
+    /// `print_preview` 为 true 时只出 PDF、写进缓存目录里按槽位隔离的预览目录
+    /// （原子写，Unix 0600），编完在内置查看器里打开，不在导出目录里留文件
+    /// （方案需求结论第 20 条「打印预览」）。
     fn export_redline(&mut self, formats: RedlineFormats, print_preview: bool) {
         let state = &self.doc.draft_diff;
         let Some(view) = &state.redline else {
@@ -1115,6 +1116,7 @@ impl DraftPage<'_> {
             self.actions
                 .push(crate::app::DraftAction::ConfirmPlaintextOutput {
                     operation: format!("导出花脸稿（含删除和新增的内容）\n输出位置：{location}"),
+                    warning: crate::app::output_guard::PLAINTEXT_WARNING,
                     action: Box::new(move |app| {
                         if let Some(index) = app.doc_index_of_key(key) {
                             app.draft_page_at(index).export_redline_confirmed(
@@ -1145,13 +1147,13 @@ impl DraftPage<'_> {
             *self.status = "当前修订与基准版一致，没有可出的花脸稿。".into();
             return;
         }
-        // 打印预览放在本用户的缓存目录：共享的系统临时目录里用固定目录名，
-        // 同机的其他用户可以抢先建好它或放个软链接。
+        // 打印预览放本用户的缓存目录，并按数据槽位分目录：预览件是正文明文，
+        // 不能进配置目录（会随备份 / 同步带走），也不能让诱饵系统与真实系统混放。
         let output_dir = if print_preview {
-            match crate::storage::cache_dir() {
-                Ok(dir) => dir.join("redline-preview"),
+            match redline::redline_preview_dir() {
+                Ok(dir) => dir,
                 Err(error) => {
-                    *self.status = format!("无法确定缓存目录，花脸稿打印预览没有生成：{error:#}");
+                    *self.status = format!("无法确定缓存目录，花脸稿打印预览没有生成：{error}");
                     return;
                 }
             }
@@ -1172,15 +1174,22 @@ impl DraftPage<'_> {
             let display = UnitDisplay::new(&vocabulary);
             // 与定稿导出同样先落实字体：本机字体文件不在了就退回内置字体。
             let (fonts, _warnings) = crate::system_fonts::resolve(&fonts);
-            let result = redline::export_files(
-                &output_dir,
-                &input,
-                &doc,
-                formats,
-                &display,
-                &fonts,
-                &numbering,
-            )
+            let result = if print_preview {
+                // 预览件只出 PDF，走原子写（0600）的预览入口；普通导出仍走
+                // `export_files`（用户选定的输出目录）。
+                redline::export_preview_pdf(&output_dir, &input, &doc, &display, &fonts, &numbering)
+                    .map(|path| vec![path])
+            } else {
+                redline::export_files(
+                    &output_dir,
+                    &input,
+                    &doc,
+                    formats,
+                    &display,
+                    &fonts,
+                    &numbering,
+                )
+            }
             .map_err(|error| format!("{error:#}"));
             let job = if print_preview {
                 DocJob::RedlinePrintPreview(result)

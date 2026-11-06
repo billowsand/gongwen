@@ -22,6 +22,11 @@ use windows_sys::Win32::Storage::Xps::{AbortDoc, DOCINFOW, EndDoc, EndPage, Star
 /// 超出部分交给 GDI 拉伸，文字边沿由打印机插值。
 const MAX_PRINT_DPI: i32 = 300;
 
+/// 交给 Win32 spooler 的固定文档名。原来传的是公文标题，会留在打印队列、
+/// 「正在打印」窗口与打印机面板上；加密工作区放行打印后，这条路径同样要遮掉。
+/// 文档名只由本模块决定，`Document::print` 不再接受调用方传入的标题。
+pub(super) const NEUTRAL_DOCUMENT_NAME: &str = "公文助手打印任务";
+
 /// 打印机设备上下文，用完必须 DeleteDC 归还。
 pub(super) struct DcGuard(pub(super) HDC);
 impl Drop for DcGuard {
@@ -113,11 +118,11 @@ impl Document {
     }
 
     /// 按 `sequence`（页码从 1 起，可重复）逐页出纸。整个过程是一个打印任务，
-    /// 中途失败就作废。
+    /// 中途失败就作废。任务名固定为 [`NEUTRAL_DOCUMENT_NAME`]：公文标题不交给
+    /// spooler，打印队列、打印机面板里都看不到。
     pub(super) fn print(
         &self,
         dc: &DcGuard,
-        title: &str,
         sequence: impl Iterator<Item = u32>,
         total: u32,
         force_fit: bool,
@@ -127,7 +132,10 @@ impl Document {
         let raster_dpi = device.dpi_x.clamp(96, MAX_PRINT_DPI);
         let paper_landscape = device.paper_w > device.paper_h;
 
-        let doc_name: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        let doc_name: Vec<u16> = NEUTRAL_DOCUMENT_NAME
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let info = DOCINFOW {
             cbSize: i32::try_from(size_of::<DOCINFOW>()).unwrap_or(i32::MAX),
             lpszDocName: doc_name.as_ptr(),

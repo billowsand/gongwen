@@ -36,6 +36,13 @@ pub(crate) const MAX_RECEIPT_BYTES: u64 = 2 * 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 /// 恢复时读回的事实来源总量上限（所有单项相加）。
 pub(crate) const MAX_SOURCES_BYTES: u64 = 8 * 1024 * 1024;
+/// Durable JSONL 会话的主文件（相对 `pi/session/`）。旧版只有 `session.sqlite`，
+/// 已经不能当 JSONL 会话续跑。
+const DURABLE_SESSION_FILE: &str = "main.jsonl";
+/// 旧版 Durable 会话库；只作密封归档，不参与恢复。
+const LEGACY_SESSION_FILE: &str = "session.sqlite";
+/// 一次状态纠正扫描最多看多少个运行目录；异常大的目录不能把界面卡住。
+const MAX_RECONCILE_RUNS: usize = 4096;
 /// 单条事实来源（材料全文 / 一次工具返回全文）的上限。材料单份 ≤512 KiB，
 /// 整篇知识库读取 ≤160K 字符（中文约 480 KiB），2 MiB 足够覆盖且能挡住异常大项。
 const MAX_SOURCE_ITEM_BYTES: u64 = 2 * 1024 * 1024;
@@ -509,12 +516,11 @@ pub(crate) fn check_workspace_files(
             }
         }
     }
-    let legacy_state = workspace.run.join("pi/session.sqlite");
-    if !workspace.state.is_dir() && !legacy_state.is_file() {
-        return Err(
-            "这一轮的 Durable 会话已经不在了，不能接着写；可以点「从头写」重新开始。".into(),
-        );
-    }
+    // 先纠正「记录还停在 Running、本机其实已经没有活动宿主」的旧状态，再核对会话：
+    // 这一条路径是「接着写」的恢复入口，状态纠正失败要如实返回，不能带着一条
+    // 无法解释的 Running 记录继续。
+    reconcile_run_record(&workspace.run)?;
+    check_durable_session(workspace, record)?;
     for relative in [
         "input/request.md",
         "skills/pi-skills",
@@ -545,6 +551,108 @@ pub(crate) fn check_workspace_files(
     }
     verify_skill_snapshot(workspace)?;
     Ok(())
+}
+
+/// Durable 会话完整性。
+///
+/// 运行记录里已经有证据 / 来源 / 交付回执 / 已确认回答时，说明这一轮**确实跑过 host**，
+/// 那么 `pi/session/main.jsonl` 必须还在且不是空文件。会话丢了却当成「没有会话、
+/// 从空会话接着跑」，会把已登记的阶段成果与工具调用历史一起丢掉；宁可拒绝恢复、
+/// 让用户显式「从头写」。旧版 `session.sqlite` 只作密封归档，不能当 JSONL 续跑。
+fn check_durable_session(workspace: &PiWorkspace, record: &PiRunRecord) -> Result<(), String> {
+    let main = workspace.state.join(DURABLE_SESSION_FILE);
+    if session_main_present(&main)? {
+        return Ok(());
+    }
+    // 旧协议 / 旧 host 的交付回执重放（docs/encrypted-resource-lifecycle.md 第六轮
+    // 保留的兼容路径）：host 只读回执与成品快照就交回同一份结果，不打开 Durable
+    // 会话，因此会话缺失不拦。除此之外一律要求 JSONL 会话在。
+    if is_receipt_only_replay(record) {
+        return Ok(());
+    }
+    let legacy = workspace.run.join("pi").join(LEGACY_SESSION_FILE);
+    if legacy.is_file() {
+        return Err(
+            "这一轮只有旧版 SQLite 会话（pi/session.sqlite），当前版本改用 JSONL 会话，\
+             不能接着写；可以点「从头写」重新开始。"
+                .into(),
+        );
+    }
+    if record_has_session_evidence(record) {
+        return Err(
+            "这一轮的 Durable 会话文件（pi/session/main.jsonl）缺失或为空，不能接着写；\
+             可以点「从头写」重新开始。"
+                .into(),
+        );
+    }
+    // 记录里没有任何会话痕迹（例如开跑前就取消了）：host 还来不及写会话，
+    // 接着写会开一份新的 JSONL 会话，语义上不丢东西。
+    Ok(())
+}
+
+/// 旧协议 / 旧 host 的「现成交付回执重放」：只交回已落盘的成品，不开 Durable 会话。
+fn is_receipt_only_replay(record: &PiRunRecord) -> bool {
+    record.protocol != PROTOCOL_VERSION
+        && record.receipt.is_some()
+        && (record.status == PiRunStatus::Delivered || record.delivery_rejected)
+}
+
+/// `pi/session/main.jsonl` 是否存在且有内容。
+///
+/// 加密工作区里的会话文件是 GWA1/GWA2 封套，物理字节永远大于明文：只看「长度 > 0」
+/// 会把一封空明文也当成有内容，所以按封套头把固定开销算进去。文件存在但读不出
+/// 文件头（权限、I/O 错误）一样按不可用处理，并把原因写进错误串。
+fn session_main_present(path: &Path) -> Result<bool, String> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "读不到这一轮的 Durable 会话文件（{}）：{error}",
+                path.display()
+            ));
+        }
+    };
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+    let mut head = [0u8; 4];
+    let read = {
+        use std::io::Read as _;
+        std::fs::File::open(path)
+            .and_then(|mut file| file.read(&mut head))
+            .map_err(|error| {
+                format!(
+                    "读不到这一轮的 Durable 会话文件（{}）：{error}",
+                    path.display()
+                )
+            })?
+    };
+    // 空文件、比封套头还短的文件都算「没有会话」。
+    if read < head.len() {
+        return Ok(false);
+    }
+    let minimum = if crate::vault::is_sealed_file(&head) {
+        crate::vault::SEALED_FILE_OVERHEAD as u64
+    } else {
+        0
+    };
+    Ok(metadata.len() > minimum)
+}
+
+/// 运行记录里是否留下了「这一轮确实跑过 host」的痕迹。状态码本身不算：
+/// 开跑前取消也会写 Interrupted，那时会话还没建。
+fn record_has_session_evidence(record: &PiRunRecord) -> bool {
+    !record.evidence.is_empty()
+        || record.sources.is_some()
+        || record.receipt.is_some()
+        || !record.confirmed.is_empty()
+        || !record.answers.is_empty()
+        || record.delivery_rejected
+        || matches!(
+            record.status,
+            PiRunStatus::Delivered | PiRunStatus::Parked | PiRunStatus::Failed
+        )
 }
 
 /// 恢复前按 `input/skills.json` 回验技能快照内容。文件名存在不等于内容还是原来那一份：
@@ -1146,12 +1254,25 @@ impl PiRunLog {
 
     /// 写终态。写盘失败向调用方返回原因：失败现场要能在错误串里说出来，
     /// 不能悄悄停在 Running。
+    ///
+    /// 内存里的记录**先**更新成终态再写盘：即使锁屏/退出时磁盘写入失败，
+    /// 本进程后续回写与界面提示拿到的也仍是终态；盘上残留的 Running 由
+    /// [`reconcile_interrupted_runs`] 在下次解锁/列历史轮次时纠正。
     pub(crate) fn finished(&self, status: PiRunStatus, message: &str) -> Result<(), String> {
         let message: String = message.chars().take(2_000).collect();
-        self.try_update(|record| {
-            record.status = status;
-            record.message = message;
-        })
+        let next = {
+            let mut record = self
+                .record
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let mut next = record.clone();
+            next.status = status;
+            next.message = message;
+            next.updated_at = chrono::Local::now().to_rfc3339();
+            *record = next.clone();
+            next
+        };
+        next.write(&self.workspace)
     }
 
     pub(crate) fn delivered(
@@ -1204,6 +1325,145 @@ pub(crate) fn run_status(run: &PiRunRef) -> Option<PiRunStatus> {
     let dir = root.parent()?;
     let record = PiRunRecord::read_from(dir).ok()?;
     (record.run_id == run.run_id).then_some(record.status)
+}
+
+/// 把「记录仍是 Running、本机却已经没有活动宿主」的轮次改写成 Interrupted。
+///
+/// 终态写盘失败（例如锁屏/退出时磁盘错误）会让记录永远停在 Running；
+/// 解锁后列出历史轮次、清理工作区或恢复某一轮时先调这里，把状态纠正回来，
+/// 用户看到的是「上次运行被停止」而不是「上次运行没有收尾」。返回改写的轮次数。
+///
+/// 只在持有密钥句柄、能写配置目录时调用；任何一条纠正写盘失败都返回 Err，
+/// 不把失败吞成「已经修好了」。
+pub(crate) fn reconcile_interrupted_runs() -> Result<usize, String> {
+    // 本进程正在准备或运行 Pi 时不做批量纠正：记录刚写成 Running、Rust 还没拿到
+    // 运行所有权锁的短窗口里把它改成中断，只会让界面闪一下错误状态。另一个进程里
+    // 正在跑的轮次由 rust-owner.lock 拦住（见 [`reconcile_run_record`]）。
+    if super::process::writing_active() {
+        return Ok(0);
+    }
+    let base = super::workspace::base_dir()?;
+    let mut scanned = 0usize;
+    let mut fixed = 0u32;
+    let mut first_error: Option<String> = None;
+    let docs = std::fs::read_dir(&base)
+        .map_err(|error| format!("读不了 Pi 工作区目录（{}）：{error}", base.display()))?;
+    for doc in docs.flatten() {
+        if scanned >= MAX_RECONCILE_RUNS {
+            break;
+        }
+        let Ok(file_type) = doc.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() || !doc.file_name().to_string_lossy().starts_with("doc-") {
+            continue;
+        }
+        let Ok(runs) = std::fs::read_dir(doc.path()) else {
+            continue;
+        };
+        for run in runs.flatten() {
+            if scanned >= MAX_RECONCILE_RUNS {
+                break;
+            }
+            let name = run.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("run-") {
+                continue;
+            }
+            let Ok(file_type) = run.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            scanned += 1;
+            match reconcile_run_record(&run.path()) {
+                Ok(true) => fixed = fixed.saturating_add(1),
+                Ok(false) => {}
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(format!(
+            "有轮次的中断状态纠正失败（已纠正 {fixed} 轮）：{error}"
+        ));
+    }
+    Ok(fixed as usize)
+}
+
+/// 纠正一个运行目录：记录是 Running 且没有活动宿主时改写为 Interrupted。
+///
+/// `Ok(true)` 表示改写了；`Ok(false)` 表示不需要改、正在跑或拿不准（锁/记录读不出来）。
+/// 改写失败返回 Err；判断是否需要改写时读不出的目录一律跳过，避免把损坏记录猜成中断。
+pub(crate) fn reconcile_run_record(run_dir: &Path) -> Result<bool, String> {
+    let record = match PiRunRecord::read_from(run_dir) {
+        Ok(record) => record,
+        Err(_) => return Ok(false),
+    };
+    if record.status != PiRunStatus::Running {
+        return Ok(false);
+    }
+    // 先拿 Rust 侧运行所有权：拿不到说明本机（或另一个窗口）正在跑这一轮。
+    // 拿不准（锁文件打不开）时也不改，避免把正在运行的记录写成中断。
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(run_dir.join("rust-owner.lock"))
+    else {
+        return Ok(false);
+    };
+    if lock.try_lock().is_err() {
+        return Ok(false);
+    }
+    if host_owner_is_live(run_dir) {
+        return Ok(false);
+    }
+    let mut updated = record;
+    updated.status = PiRunStatus::Interrupted;
+    updated.message =
+        "上次运行在本机进程收尾前就结束了，已标记为中断；可以「接着写」或「从头写」。".into();
+    updated.updated_at = chrono::Local::now().to_rfc3339();
+    // 失败不能吞：调用方（列历史轮次 / 清理 / 恢复入口）要如实提示。
+    updated.write_to_dir(run_dir)?;
+    drop(lock);
+    Ok(true)
+}
+
+/// Node host 是否仍持有 `host-owner.lock` 的 SQLite 排他锁。
+///
+/// host 在整轮运行期间用 `BEGIN EXCLUSIVE` 占着这个库；Rust 崩溃而 host 还活着的
+/// 极端情况下，只看 `rust-owner.lock` 会误判。打不开或读不准（不是 SQLite、权限
+/// 错误等）时保守当成「仍有 host」，宁可不纠正，也不把正在跑的轮次写成中断。
+fn host_owner_is_live(run_dir: &Path) -> bool {
+    let path = run_dir.join("host-owner.lock");
+    if !path.is_file() {
+        return false;
+    }
+    let Ok(connection) =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+    else {
+        return true;
+    };
+    // 不等待：锁被占时立刻返回 BUSY，界面线程不能卡住。
+    let _ = connection.busy_timeout(std::time::Duration::ZERO);
+    match connection.execute_batch("BEGIN EXCLUSIVE") {
+        Ok(()) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            false
+        }
+        Err(error) => match error.sqlite_error_code() {
+            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => true,
+            // 不是数据库：host 的锁文件被密封迁移或其他工具碰过，那个 host 已经不可能
+            // 还持有有效锁，按「没有活动 host」处理。
+            Some(rusqlite::ErrorCode::NotADatabase) => false,
+            _ => true,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -1532,11 +1792,123 @@ mod tests {
         assert!(error.contains("快照"), "{error}");
         std::fs::write(workspace.root.join("input/current.md"), "正式正文").unwrap();
         check_workspace_files(&workspace, &record).unwrap();
+        // 没有会话痕迹（开跑前就取消之类）时，会话目录缺失不拦恢复。
         std::fs::remove_dir_all(&workspace.state).unwrap();
-        let error = check_workspace_files(&workspace, &record).unwrap_err();
-        assert!(error.contains("Durable"), "{error}");
-        std::fs::write(workspace.run.join("pi/session.sqlite"), b"legacy sqlite").unwrap();
         check_workspace_files(&workspace, &record).unwrap();
+        // 旧版只有 session.sqlite：不能当 JSONL 会话续跑。
+        std::fs::write(workspace.run.join("pi/session.sqlite"), b"legacy sqlite").unwrap();
+        let error = check_workspace_files(&workspace, &record).unwrap_err();
+        assert!(error.contains("SQLite"), "{error}");
+        assert!(error.contains("从头写"), "{error}");
+        // 有真正的 JSONL 会话时，旧 sqlite 只作归档，不影响恢复。
+        std::fs::create_dir_all(&workspace.state).unwrap();
+        std::fs::write(workspace.state.join("main.jsonl"), b"{\"seq\":1}\n").unwrap();
+        check_workspace_files(&workspace, &record).unwrap();
+    }
+
+    /// 记录里已经有证据 / 来源 / 回执，说明这一轮确实跑过 host：会话主文件
+    /// 缺失或为 0 字节时必须拒绝恢复，不能静默当成空会话接着跑。
+    #[test]
+    fn a_session_with_evidence_requires_a_non_empty_jsonl_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = workspace(dir.path());
+        let mut record = record(&workspace);
+        record.evidence.push("工具返回了检索结果".into());
+        record.write(&workspace).unwrap();
+        let error = check_workspace_files(&workspace, &record).unwrap_err();
+        assert!(error.contains("main.jsonl"), "{error}");
+        assert!(error.contains("从头写"), "{error}");
+
+        // 有文件但被清零，同样不能续跑。
+        std::fs::write(workspace.state.join("main.jsonl"), b"").unwrap();
+        let error = check_workspace_files(&workspace, &record).unwrap_err();
+        assert!(error.contains("缺失或为空"), "{error}");
+
+        // 交付回执同样算「已有会话」的证据。
+        std::fs::remove_file(workspace.state.join("main.jsonl")).unwrap();
+        record.receipt = Some(PiReceiptSummary {
+            kind: "document".into(),
+            path: "work/final.md".into(),
+            sha256: sha256_hex("成品"),
+            bytes: 6,
+            summary: "旧成品".into(),
+            call_id: "call-1".into(),
+        });
+        record.write(&workspace).unwrap();
+        let error = check_workspace_files(&workspace, &record).unwrap_err();
+        assert!(error.contains("main.jsonl"), "{error}");
+
+        // 会话文件有内容就能通过。
+        std::fs::write(workspace.state.join("main.jsonl"), b"{\"seq\":1}\n").unwrap();
+        check_workspace_files(&workspace, &record).unwrap();
+    }
+
+    /// 旧协议只允许「启动前已有同类交付回执」的现成回放：回放不开 Durable 会话，
+    /// 会话缺失不拦；没有回执的旧协议轮次仍然不能恢复。
+    #[test]
+    fn a_legacy_receipt_replay_does_not_need_a_jsonl_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = workspace(dir.path());
+        let mut record = record(&workspace);
+        record.protocol = PROTOCOL_VERSION - 1;
+        record.host_version = "0.3.6".into();
+        record.status = PiRunStatus::Delivered;
+        record.receipt = Some(PiReceiptSummary {
+            kind: "document".into(),
+            path: "work/final.md".into(),
+            sha256: sha256_hex("成品"),
+            bytes: 6,
+            summary: "旧成品".into(),
+            call_id: "call-1".into(),
+        });
+        record.write(&workspace).unwrap();
+        std::fs::remove_dir_all(&workspace.state).unwrap();
+        record
+            .check_resume(&workspace.label, "run-1", "正式正文")
+            .unwrap();
+        check_workspace_files(&workspace, &record).unwrap();
+
+        // 回执没了：旧协议轮次不能续跑，会话缺失也要报可读错误。
+        record.receipt = None;
+        record.write(&workspace).unwrap();
+        let error = record
+            .check_resume(&workspace.label, "run-1", "正式正文")
+            .unwrap_err();
+        assert!(error.contains("协议"), "{error}");
+        let error = check_workspace_files(&workspace, &record).unwrap_err();
+        assert!(error.contains("main.jsonl"), "{error}");
+    }
+
+    /// 没有会话痕迹（例如开跑前就取消）不把「空会话」当错误；host 还来不及写。
+    #[test]
+    fn a_run_without_session_evidence_may_start_a_fresh_jsonl_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = workspace(dir.path());
+        let mut record = record(&workspace);
+        record.status = PiRunStatus::Interrupted;
+        record.write(&workspace).unwrap();
+        std::fs::remove_dir_all(&workspace.state).unwrap();
+        check_workspace_files(&workspace, &record).unwrap();
+    }
+
+    /// 锁屏/退出时终态写盘失败：内存里仍要保留终态，调用方拿到可读错误。
+    #[test]
+    fn a_failed_terminal_write_keeps_the_in_memory_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = workspace(dir.path());
+        let log = PiRunLog::open(&workspace, record(&workspace)).unwrap();
+        // 把 run.json 换成目录，让原子写失败（模拟磁盘/权限异常）。
+        std::fs::remove_file(workspace.run.join("run.json")).unwrap();
+        std::fs::create_dir(workspace.run.join("run.json")).unwrap();
+        let error = log
+            .finished(PiRunStatus::Interrupted, "用户停止")
+            .unwrap_err();
+        assert!(!error.is_empty(), "写盘失败必须向调用方报错");
+        assert_eq!(
+            log.snapshot().status,
+            PiRunStatus::Interrupted,
+            "内存里的终态不能被写盘失败撤回"
+        );
     }
 
     #[test]
@@ -1616,6 +1988,152 @@ mod tests {
             read_sources(&workspace.run, &"0".repeat(64))
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// 状态纠正测试用的临时配置目录；测试结束恢复，避免影响并行测试。
+    struct ReconcileConfigReset;
+    impl Drop for ReconcileConfigReset {
+        fn drop(&mut self) {
+            crate::storage::set_test_config_dir(None);
+        }
+    }
+
+    fn reconcile_config_dir() -> (tempfile::TempDir, ReconcileConfigReset) {
+        let config = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(config.path().to_path_buf()));
+        (config, ReconcileConfigReset)
+    }
+
+    /// 在配置目录的 Pi 工作区里造一个可被纠正扫描发现的运行目录。
+    fn run_under(doc_dir: &Path, name: &str, status: PiRunStatus) -> PathBuf {
+        std::fs::create_dir_all(doc_dir).unwrap();
+        let run = doc_dir.join(name);
+        let root = run.join("workspace");
+        std::fs::create_dir_all(root.join("input/materials")).unwrap();
+        std::fs::create_dir_all(root.join("skills/pi-skills")).unwrap();
+        std::fs::create_dir_all(root.join("skills/gongwen-markdown")).unwrap();
+        std::fs::create_dir_all(run.join("pi/session")).unwrap();
+        std::fs::write(root.join("input/current.md"), "正式正文").unwrap();
+        std::fs::write(root.join("input/request.md"), "要求：改短").unwrap();
+        std::fs::write(root.join("input/materials/index.json"), "[]").unwrap();
+        std::fs::write(run.join("pi/session/main.jsonl"), b"{\"seq\":1}\n").unwrap();
+        let workspace = PiWorkspace {
+            root,
+            state: run.join("pi/session"),
+            run: run.clone(),
+            label: format!(
+                "pi/workspaces/{}/{}",
+                doc_dir.file_name().unwrap_or_default().to_string_lossy(),
+                name
+            ),
+        };
+        let mut record = record(&workspace);
+        record.status = status;
+        record.write(&workspace).unwrap();
+        run
+    }
+
+    /// Running 但没有活动宿主：列历史轮次/清理时纠正为 Interrupted，消息可读。
+    #[test]
+    fn stale_running_records_are_marked_interrupted_when_no_host_is_alive() {
+        let (_config, _reset) = reconcile_config_dir();
+        let base = crate::pi_agent::base_dir().unwrap();
+        let run = run_under(&base.join("doc-1"), "run-1", PiRunStatus::Running);
+        let delivered = run_under(&base.join("doc-2"), "run-2", PiRunStatus::Delivered);
+
+        assert_eq!(reconcile_interrupted_runs().unwrap(), 1);
+        let record = PiRunRecord::read_from(&run).unwrap();
+        assert_eq!(record.status, PiRunStatus::Interrupted);
+        assert!(
+            record.message.contains("中断") && record.message.contains("接着写"),
+            "纠正后的说明要能指导用户：{}",
+            record.message
+        );
+        // 已经收尾的轮次不动。
+        assert_eq!(
+            PiRunRecord::read_from(&delivered).unwrap().status,
+            PiRunStatus::Delivered
+        );
+        assert_eq!(reconcile_interrupted_runs().unwrap(), 0, "幂等");
+    }
+
+    /// 加密工作区里运行记录是 GWA2：纠正要按当前槽位密钥重新密封，能读回。
+    #[test]
+    fn reconcile_rewrites_gwa2_records_while_unlocked() {
+        let (_config, _reset) = reconcile_config_dir();
+        crate::vault::set_key_handle([27; 32], true);
+        struct KeyReset;
+        impl Drop for KeyReset {
+            fn drop(&mut self) {
+                crate::vault::clear_key_handle();
+            }
+        }
+        let _key = KeyReset;
+        let base = crate::pi_agent::base_dir().unwrap();
+        let run = run_under(&base.join("doc-1"), "run-1", PiRunStatus::Running);
+        assert!(
+            std::fs::read(run.join("run.json"))
+                .unwrap()
+                .starts_with(b"GWA2"),
+            "测试前提：记录应为密文"
+        );
+        assert_eq!(reconcile_interrupted_runs().unwrap(), 1);
+        let record = PiRunRecord::read_from(&run).unwrap();
+        assert_eq!(record.status, PiRunStatus::Interrupted);
+        assert!(
+            std::fs::read(run.join("run.json"))
+                .unwrap()
+                .starts_with(b"GWA2"),
+            "纠正后的记录仍须是密文"
+        );
+    }
+
+    /// Rust 侧还持着运行所有权锁（另一窗口/本进程正在跑）时不改状态。
+    #[test]
+    fn a_run_owned_by_a_live_rust_worker_is_not_marked_interrupted() {
+        let (_config, _reset) = reconcile_config_dir();
+        let base = crate::pi_agent::base_dir().unwrap();
+        let run = run_under(&base.join("doc-1"), "run-1", PiRunStatus::Running);
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(run.join("rust-owner.lock"))
+            .unwrap();
+        lock.try_lock().expect("测试进程先拿到运行所有权锁");
+        assert_eq!(reconcile_interrupted_runs().unwrap(), 0);
+        assert_eq!(
+            PiRunRecord::read_from(&run).unwrap().status,
+            PiRunStatus::Running
+        );
+        drop(lock);
+        assert_eq!(reconcile_interrupted_runs().unwrap(), 1);
+        assert_eq!(
+            PiRunRecord::read_from(&run).unwrap().status,
+            PiRunStatus::Interrupted
+        );
+    }
+
+    /// host 仍持有 SQLite 排他锁（Rust 崩溃但 host 还活着）时不改状态。
+    #[test]
+    fn a_run_whose_host_still_holds_the_lock_is_left_running() {
+        let (_config, _reset) = reconcile_config_dir();
+        let base = crate::pi_agent::base_dir().unwrap();
+        let run = run_under(&base.join("doc-1"), "run-1", PiRunStatus::Running);
+        let held = rusqlite::Connection::open(run.join("host-owner.lock")).unwrap();
+        held.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert_eq!(reconcile_interrupted_runs().unwrap(), 0);
+        assert_eq!(
+            PiRunRecord::read_from(&run).unwrap().status,
+            PiRunStatus::Running
+        );
+        held.execute_batch("ROLLBACK").unwrap();
+        drop(held);
+        assert_eq!(reconcile_interrupted_runs().unwrap(), 1);
+        assert_eq!(
+            PiRunRecord::read_from(&run).unwrap().status,
+            PiRunStatus::Interrupted
         );
     }
 }

@@ -463,9 +463,10 @@ pub(crate) struct KeyHandle {
 }
 
 impl KeyHandle {
-    /// SQLCipher `PRAGMA hexkey` 用的 hex 串（不带引号）。
-    pub(crate) fn dek_hex(&self) -> String {
-        hex_encode(&self.dek[..])
+    /// SQLCipher `PRAGMA hexkey` 用的 hex 串（不带引号）。用 `Zeroizing` 包住，
+    /// 临时副本在进程内尽量短命；不要把它写日志、错误串或持久文件。
+    pub(crate) fn dek_hex(&self) -> Zeroizing<String> {
+        Zeroizing::new(hex_encode(&self.dek[..]))
     }
 
     pub(crate) fn db_active(&self) -> bool {
@@ -510,6 +511,8 @@ pub(crate) fn key_handle() -> Option<KeyHandle> {
         .and_then(|guard| guard.as_ref().map(clone_handle))
 }
 
+/// 仅测试用：按进程当前槽位创建句柄。生产路径一律用 [`set_key_handle_for_slot`]。
+#[cfg(test)]
 pub(crate) fn set_key_handle(dek: [u8; DEK_LEN], db_active: bool) {
     let handle = Some(KeyHandle {
         dek: Zeroizing::new(dek),
@@ -524,15 +527,20 @@ pub(crate) fn set_key_handle(dek: [u8; DEK_LEN], db_active: bool) {
     }
 }
 
-#[cfg(test)]
-fn set_slot_key_handle(dek: [u8; DEK_LEN], db_active: bool, slot: DataSlot) {
-    TEST_KEY_HANDLE.with(|cell| {
-        *cell.borrow_mut() = Some(KeyHandle {
-            dek: Zeroizing::new(dek),
-            db_active,
-            slot,
-        })
+/// 显式绑定槽位的句柄创建：生产路径一律用它，避免「先设句柄、后切槽位」时
+/// 句柄记错槽位（诱饵密码解锁会拿到 Real 句柄，所有 alt-* 资源全部读写失败）。
+pub(crate) fn set_key_handle_for_slot(dek: [u8; DEK_LEN], db_active: bool, slot: DataSlot) {
+    let handle = Some(KeyHandle {
+        dek: Zeroizing::new(dek),
+        db_active,
+        slot,
     });
+    #[cfg(test)]
+    TEST_KEY_HANDLE.with(|cell| *cell.borrow_mut() = handle);
+    #[cfg(not(test))]
+    if let Ok(mut guard) = KEY_HANDLE.write() {
+        *guard = handle;
+    }
 }
 
 /// 迁移完成后把句柄切到「按密文开库」。
@@ -646,11 +654,31 @@ fn resource_aad(slot: DataSlot, kind: &str, logical_id: &str) -> Result<Vec<u8>>
     Ok(format!("gongwen-resource-v2\0{slot}\0{kind}\0{logical_id}").into_bytes())
 }
 
+/// 对可能尚未创建的文件也做 realpath：已存在就 canonicalize；不存在就递归
+/// 规范化父目录再拼回文件名。配置目录本身不存在时退回词法路径（首次启动）。
+fn canonicalize_allow_missing(path: &Path) -> Result<PathBuf> {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return Ok(canonical);
+    }
+    let Some(parent) = path.parent() else {
+        return Ok(path.to_path_buf());
+    };
+    let Some(name) = path.file_name() else {
+        return Ok(path.to_path_buf());
+    };
+    let parent = canonicalize_allow_missing(parent)?;
+    Ok(parent.join(name))
+}
+
 /// 从配置目录内的物理路径推出稳定逻辑 ID。真实与诱饵槽有相同逻辑 ID，
 /// 但 AAD 的槽位不同；备份/恢复换目录不会改变 ID。
 pub(crate) fn resource_identity(path: &Path) -> Result<(DataSlot, String)> {
-    let root = storage::config_dir()?;
-    let relative = path
+    // 逻辑 ID 必须对「同一个物理文件」稳定：配置目录可能经符号链接/junction 访问，
+    // 文件也可能是新文件（父目录存在、自身还没创建）。统一按 realpath 规范化
+    // 后再相对配置目录，Node host 侧也按同样口径算 AAD，跨进程才不会失配。
+    let root = canonicalize_allow_missing(&storage::config_dir()?)?;
+    let absolute = canonicalize_allow_missing(path)?;
+    let relative = absolute
         .strip_prefix(&root)
         .with_context(|| format!("资源不在配置目录内：{}", path.display()))?;
     let mut parts = relative
@@ -702,8 +730,43 @@ pub(crate) fn open_path_bytes(
 /// 应用管理文件统一写入口：有句柄写 GWA2；无句柄只允许普通工作区。
 /// 目标存在但读不出时同样拒绝，避免把「权限错误」误判成可以明文覆盖。
 pub(crate) fn write_path(path: &Path, kind: &str, plain: &[u8]) -> Result<()> {
+    write_path_impl(path, kind, plain, true)
+}
+
+/// 可丢弃缓存（Mermaid 图/警告等）的写入：同样密封，但允许覆盖「当前密钥解不开」
+/// 的旧密文——缓存命中判定会把它当未命中重新渲染，错误密钥下的旧缓存必须能替换。
+pub(crate) fn write_path_replacing(path: &Path, kind: &str, plain: &[u8]) -> Result<()> {
+    write_path_impl(path, kind, plain, false)
+}
+
+fn write_path_impl(
+    path: &Path,
+    kind: &str,
+    plain: &[u8],
+    verify_existing_ciphertext: bool,
+) -> Result<()> {
     let bytes = match key_handle() {
-        Some(handle) => seal_path_bytes(&handle, path, kind, plain)?,
+        Some(handle) => {
+            // 目标已存在且是密文时，先用当前密钥试解一次：解不开说明是另一代次 /
+            // 另一槽 / 已损坏的密文，覆盖会毁掉唯一副本（配置解密失败后回落默认
+            // 配置再保存就会走到这里）。大文件跳过这项检查，避免每次写都整份解密。
+            if verify_existing_ciphertext
+                && path.is_file()
+                && std::fs::metadata(path).is_ok_and(|meta| meta.len() <= 1024 * 1024)
+            {
+                let raw = std::fs::read(path)
+                    .with_context(|| format!("无法确认 {} 是否可解密", path.display()))?;
+                if is_sealed_file(&raw) {
+                    open_path_bytes(&handle, path, kind, &raw).with_context(|| {
+                        format!(
+                            "{} 已加密但当前密钥无法解开，拒绝覆盖（请先从备份恢复或确认锁设置）",
+                            path.display()
+                        )
+                    })?;
+                }
+            }
+            seal_path_bytes(&handle, path, kind, plain)?
+        }
         None => {
             if path.exists() {
                 let raw = std::fs::read(path)
@@ -812,6 +875,17 @@ pub(crate) fn ensure_slot_encrypted() -> Result<()> {
     Ok(())
 }
 
+/// `pi/` 等私有目录里不参与资源加密的瞬时文件：Node host 的 SQLite 占用锁
+/// （`host-owner.lock` 与它的 -wal/-shm）、Rust 的 `rust-owner.lock`、原子写
+/// 残留的 `*.tmp`。它们不含业务数据；一旦被当成资源封成 GWA2，host 下次用
+/// SQLite 打开锁文件会报「file is not a database」，恢复/续写直接失败。
+pub(crate) fn is_transient_private_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.contains(".lock") || name.ends_with(".tmp")
+}
+
 /// 不跟随链接地遍历应用私有目录。任何目录/条目/元数据错误都 fail-closed；
 /// 文件数设硬上限，避免损坏目录让解锁迁移无限扫描。
 fn for_each_regular_file(root: &Path, visit: impl Fn(&Path) -> Result<()>) -> Result<()> {
@@ -836,7 +910,7 @@ fn for_each_regular_file(root: &Path, visit: impl Fn(&Path) -> Result<()>) -> Re
             }
             if meta.is_dir() {
                 pending.push(path);
-            } else if meta.is_file() {
+            } else if meta.is_file() && !is_transient_private_file(&path) {
                 visit(&path)?;
             }
         }
@@ -862,10 +936,10 @@ fn seal_resource_dirs(key: &[u8; DEK_LEN]) -> Result<()> {
         for entry in entries {
             let entry = entry.with_context(|| format!("读取 {} 目录条目失败", dir.display()))?;
             let path = entry.path();
-            let meta = entry
-                .metadata()
+            // 不跟随符号链接：否则会把链接目标读进加密库、再把链接替换成普通文件。
+            let meta = std::fs::symlink_metadata(&path)
                 .with_context(|| format!("读取 {} 元数据失败", path.display()))?;
-            if !meta.is_file() {
+            if meta.file_type().is_symlink() || !meta.is_file() {
                 continue;
             }
             if skip_public && crate::images::is_public_help_file(&path) {
@@ -888,10 +962,9 @@ fn unseal_resource_dirs() -> Result<()> {
         for entry in entries {
             let entry = entry.with_context(|| format!("读取 {} 目录条目失败", dir.display()))?;
             let path = entry.path();
-            let meta = entry
-                .metadata()
+            let meta = std::fs::symlink_metadata(&path)
                 .with_context(|| format!("读取 {} 元数据失败", path.display()))?;
-            if !meta.is_file() {
+            if meta.file_type().is_symlink() || !meta.is_file() {
                 continue;
             }
             let raw =
@@ -960,6 +1033,21 @@ pub(crate) fn resource_kind_for_path(path: &Path) -> Result<&'static str> {
         "logs" => "log",
         "apis" => "api",
         _ => "config",
+    })
+}
+
+/// 把一个已密封文件解回明文（停用加密用）。已是明文则不动。
+fn unseal_plaintext_file(handle: &KeyHandle, path: &Path) -> Result<()> {
+    let raw = std::fs::read(path).with_context(|| format!("读取 {} 失败", path.display()))?;
+    if !is_sealed_file(&raw) {
+        return Ok(());
+    }
+    let kind = resource_kind_for_path(path)?;
+    let plain = open_path_bytes(handle, path, kind, &raw)?;
+    storage::atomic_write(path, |file| {
+        use std::io::Write as _;
+        file.write_all(&plain)?;
+        Ok(())
     })
 }
 
@@ -1045,32 +1133,39 @@ fn directory_has_encrypted_data(path: PathBuf) -> bool {
 /// 改名，再以明文写回默认配置（静默降级），并且看起来「数据全没了」。
 /// 这里只做文件头嗅探，不打开数据库。
 pub(crate) fn slot_has_encrypted_data(slot: DataSlot) -> bool {
+    // 先看「明确的密文证据」：密封的配置/密钥文件、密封的动态目录（apis/pi/ime/
+    // skills/logs 与图片/图表缓存）。
+    let sealed_names = SEALED_FILE_NAMES
+        .iter()
+        .skip(1)
+        .any(|name| storage::slot_file_for(slot, name).is_ok_and(|path| sealed_header_at(&path)));
+    let sealed_dirs = ["apis", "pi", "ime", "skills", "logs"]
+        .into_iter()
+        .any(|name| storage::slot_subdir_for(slot, name).is_ok_and(directory_has_encrypted_data));
+    let sealed_resources = resource_dirs().into_iter().any(|(name, _)| {
+        storage::slot_subdir_for(slot, &name).is_ok_and(directory_has_encrypted_data)
+    });
+    let vault_file_exists = storage::config_dir()
+        .map(|dir| dir.join(VAULT_FILE).exists())
+        .unwrap_or(false);
+    if sealed_names || sealed_dirs || sealed_resources {
+        return true;
+    }
     if storage::slot_file_for(slot, "config.json").is_ok_and(|path| sealed_header_at(&path)) {
         return true;
     }
-    if let Ok(path) = storage::slot_file_for(slot, "manuscripts.db")
+    // 库文件「读不出明文头」本身不足以证明是加密库：普通模式下坏块/第三方工具
+    // 改过的库也会命中，导致启动进入「锁文件丢失」死局。只有同时存在锁文件时，
+    // 才把非明文库算作加密数据；库证据单独出现时按损坏处理，仍走普通启动并
+    // 如实报「稿件库打开失败」。
+    if vault_file_exists
+        && let Ok(path) = storage::slot_file_for(slot, "manuscripts.db")
         && std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 0)
         && !file_head_is_plaintext_db(&path)
     {
         return true;
     }
-    // 密钥类小文件也足以证明「这里有过加密工作区」。
-    if SEALED_FILE_NAMES
-        .iter()
-        .skip(1)
-        .any(|name| storage::slot_file_for(slot, name).is_ok_and(|path| sealed_header_at(&path)))
-    {
-        return true;
-    }
-    if ["apis", "pi", "ime", "skills", "logs"]
-        .into_iter()
-        .any(|name| storage::slot_subdir_for(slot, name).is_ok_and(directory_has_encrypted_data))
-    {
-        return true;
-    }
-    resource_dirs().into_iter().any(|(name, _)| {
-        storage::slot_subdir_for(slot, &name).is_ok_and(directory_has_encrypted_data)
-    })
+    false
 }
 
 /// 这个槽位还有没有「需要搬进密文」的明文数据？闸门解锁前先问它：
@@ -1172,7 +1267,10 @@ fn tree_needs_migration(root: &Path) -> bool {
             }
             if meta.is_dir() {
                 pending.push(path);
-            } else if meta.is_file() && file_head_is_not_sealed(&path) {
+            } else if meta.is_file()
+                && !is_transient_private_file(&path)
+                && file_head_is_not_sealed(&path)
+            {
                 return true;
             }
         }
@@ -1222,34 +1320,47 @@ pub(crate) fn decrypt_slot_files() -> Result<()> {
     migrate_database(&storage::manuscript_db_path()?, Migration::ToPlain)?;
     unseal_resource_dirs()?;
     let handle = key_handle().context("停用加密需要当前槽位密钥")?;
+    // 与 ensure_slot_encrypted 的覆盖面必须对称：pi/ime/skills/logs、
+    // apis/*.openapi.json、根目录的 config.json 副本与 apis.json.bak。
+    // 少解一类，停用后就会留下「没有 DEK 的密文」并在下次启动进入锁丢失死局。
     for name in ["pi", "ime", "skills", "logs"] {
         let dir = storage::slot_subdir(name)?;
-        for_each_regular_file(&dir, |path| {
-            let raw = std::fs::read(path)?;
-            if !is_sealed_file(&raw) {
-                return Ok(());
+        for_each_regular_file(&dir, |path| unseal_plaintext_file(&handle, path))?;
+    }
+    if let Ok(dir) = storage::slot_subdir("apis")
+        && let Some(entries) = read_dir_if_exists(&dir)?
+    {
+        for entry in entries {
+            let entry = entry.context("读取接口定义目录条目失败")?;
+            let path = entry.path();
+            if entry
+                .metadata()
+                .with_context(|| format!("读取 {} 元数据失败", path.display()))?
+                .is_file()
+            {
+                unseal_plaintext_file(&handle, &path)?;
             }
-            let plain = open_path_bytes(&handle, path, resource_kind_for_path(path)?, &raw)?;
-            storage::atomic_write(path, |file| {
-                use std::io::Write as _;
-                file.write_all(&plain)?;
-                Ok(())
-            })
-        })?;
+        }
+    }
+    if let Ok(dir) = storage::config_dir()
+        && let Some(entries) = read_dir_if_exists(&dir)?
+    {
+        let slot = storage::current_slot();
+        for entry in entries {
+            let entry = entry.context("读取配置目录条目失败")?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if storage::slot_relative_name(&name, slot).is_some_and(|name| {
+                name.starts_with("config.json.") || name.ends_with("apis.json.bak")
+            }) {
+                unseal_plaintext_file(&handle, &entry.path())?;
+            }
+        }
     }
     for name in SEALED_FILE_NAMES {
         let path = storage::slot_file(name)?;
         if path.is_file() {
-            let raw =
-                std::fs::read(&path).with_context(|| format!("读取 {} 失败", path.display()))?;
-            if is_sealed_file(&raw) {
-                let plain = open_path_bytes(&handle, &path, resource_kind_for_path(&path)?, &raw)?;
-                storage::atomic_write(&path, |file| {
-                    use std::io::Write as _;
-                    file.write_all(&plain)?;
-                    Ok(())
-                })?;
-            }
+            unseal_plaintext_file(&handle, &path)?;
         }
     }
     Ok(())
@@ -1843,10 +1954,102 @@ mod tests {
         // 不改进程级当前槽位：路径本身决定逻辑槽，测试句柄显式绑定诱饵槽，
         // 避免并行测试里的全局槽位切换干扰其他迁移用例。
         assert!(seal_path_bytes(&handle, &decoy, "pi", plain).is_err());
-        set_slot_key_handle([8; DEK_LEN], true, DataSlot::Decoy);
+        set_key_handle_for_slot([8; DEK_LEN], true, DataSlot::Decoy);
         write_path(&decoy, "pi", plain).unwrap();
         assert_eq!(read_path(&decoy, "pi", 1024).unwrap(), plain);
         drop(dir);
+        reset();
+    }
+
+    /// KeyHandle 的槽位必须由调用方显式给出：即使全局 current_slot 还是 Real，
+    /// 诱饵槽句柄也能正常读写 alt-* 资源；反过来用 Real 句柄写 alt 路径必须被拒。
+    #[test]
+    fn explicit_slot_handle_is_independent_of_global_slot() {
+        let dir = use_temp_dir();
+        // 默认全局槽位是 Real；这里显式给诱饵槽句柄。
+        set_key_handle_for_slot([3; DEK_LEN], true, DataSlot::Decoy);
+        let alt = dir.path().join("alt-pi/workspaces/doc-1/run-1/record.json");
+        write_path(&alt, "pi", "诱饵内容".as_bytes()).unwrap();
+        assert!(std::fs::read(&alt).unwrap().starts_with(RESOURCE_MAGIC));
+        assert_eq!(read_path(&alt, "pi", 1024).unwrap(), "诱饵内容".as_bytes());
+        // 同一句柄写真实槽路径必须拒绝（不能拿另一槽密钥封真槽文件）。
+        let real = dir.path().join("pi/workspaces/doc-1/run-1/record.json");
+        assert!(write_path(&real, "pi", "真实内容".as_bytes()).is_err());
+        drop(dir);
+        reset();
+    }
+
+    /// 停用加密必须与启用覆盖面对称：apis 定义与根目录配置副本也要解回明文，
+    /// 否则会留下「没有 DEK 的密文」，下次启动进锁丢失死局。
+    #[test]
+    fn disable_decrypts_apis_and_root_copies() {
+        let dir = use_temp_dir();
+        set_key_handle([5; DEK_LEN], true);
+        let api = crate::storage::slot_subdir("apis").unwrap();
+        std::fs::create_dir_all(&api).unwrap();
+        let api_file = api.join("服务.openapi.json");
+        write_path(&api_file, "api", br#"{"openapi":"3.0.0"}"#).unwrap();
+        let copy = crate::storage::config_dir()
+            .unwrap()
+            .join("config.json.损坏-20260101-000000");
+        write_path(&copy, "config", b"{}").unwrap();
+        assert!(is_sealed_file(&std::fs::read(&api_file).unwrap()));
+        assert!(is_sealed_file(&std::fs::read(&copy).unwrap()));
+        assert!(slot_has_encrypted_data(DataSlot::Real));
+
+        decrypt_slot_files().unwrap();
+        assert_eq!(std::fs::read(&api_file).unwrap(), br#"{"openapi":"3.0.0"}"#);
+        assert_eq!(std::fs::read(&copy).unwrap(), b"{}");
+        assert!(
+            !slot_has_encrypted_data(DataSlot::Real),
+            "解封后不应再有密文证据"
+        );
+        drop(dir);
+        reset();
+    }
+
+    /// 迁移与探测跳过资源目录里的符号链接，不能把链接目标读进来再替换链接。
+    #[cfg(unix)]
+    #[test]
+    fn resource_migration_skips_symlinks() {
+        let dir = use_temp_dir();
+        set_key_handle([11; DEK_LEN], true);
+        let images = crate::images::image_dir().unwrap();
+        std::fs::create_dir_all(&images).unwrap();
+        let outside = dir.path().join("outside.png");
+        std::fs::write(&outside, b"secret-outside").unwrap();
+        let link = images.join("链接.png");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        ensure_slot_encrypted().unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&outside).unwrap(), b"secret-outside");
+        drop(dir);
+        reset();
+    }
+
+    /// 逻辑资源 ID 对同一物理文件稳定：配置目录经符号链接访问时，AAD 仍与
+    /// 真实路径一致（Node host 也按 realpath 口径计算）。
+    #[cfg(unix)]
+    #[test]
+    fn resource_identity_is_stable_across_symlinked_config_dir() {
+        let real = tempfile::tempdir().unwrap();
+        let link_parent = tempfile::tempdir().unwrap();
+        let link = link_parent.path().join("config-link");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        crate::storage::set_test_config_dir(Some(link.clone()));
+        set_key_handle([12; DEK_LEN], true);
+        let via_link = link.join("pi/workspaces/doc-1/run-1/run.json");
+        write_path(&via_link, "pi", b"hello").unwrap();
+        assert_eq!(read_path(&via_link, "pi", 1024).unwrap(), b"hello");
+        // 用真实路径读同一份密文也必须能解开（AAD 相同）。
+        let via_real = real.path().join("pi/workspaces/doc-1/run-1/run.json");
+        assert_eq!(read_path(&via_real, "pi", 1024).unwrap(), b"hello");
+        crate::storage::set_test_config_dir(None);
         reset();
     }
 

@@ -521,12 +521,15 @@ pub(crate) fn run(
     // 证据也不当成功返回。反复停止重开的资源叠加由工具层的在途槽位兜底。
     job.tools.attach_cancel(Arc::clone(&cancel));
     if cancel.load(Ordering::Relaxed) {
-        if !job.resume {
-            let _ = job
+        let mut message = "已停止 Pi 智能写作，未交付任何提案。".to_string();
+        if !job.resume
+            && let Err(error) = job
                 .record
-                .finished(PiRunStatus::Interrupted, "用户在开跑前就停止了这一轮。");
+                .finished(PiRunStatus::Interrupted, "用户在开跑前就停止了这一轮。")
+        {
+            message.push_str(&format!("（未能把这一轮标记为中断：{error}）"));
         }
-        return Err("已停止 Pi 智能写作，未交付任何提案。".into());
+        return Err(message);
     }
     if job.model.model_id.trim().is_empty() {
         return Err("还没有选择智能写作模型：请到「AI 管理 → 模型服务」选择。".into());
@@ -552,7 +555,18 @@ pub(crate) fn run(
     // 生产同样用最小环境：不继承用户的 NODE_OPTIONS / NODE_PATH / LD_LIBRARY_PATH
     // 或模型凭据；只放运行必需项和从应用代理设置派生的代理变量。
     command.env_clear();
-    for (key, value) in host_environment(&job.proxy_env) {
+    // 宿主的临时目录指到本轮运行目录里：系统临时目录不在应用管理范围内，
+    // Node 或依赖将来任何临时写入都会成为加密工作区外的明文。建不出来时退回继承。
+    let host_tmp = job.workspace.run.join("tmp");
+    let host_tmp = std::fs::create_dir_all(&host_tmp).ok().map(|()| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&host_tmp, std::fs::Permissions::from_mode(0o700));
+        }
+        host_tmp
+    });
+    for (key, value) in host_environment(&job.proxy_env, host_tmp.as_deref()) {
         command.env(key, value);
     }
     let child = command.spawn().map_err(|error| {
@@ -664,7 +678,7 @@ pub(crate) fn run(
             let config_root = crate::storage::config_dir()
                 .map_err(|error| format!("读不到 Pi 加密配置目录：{error:#}"))?;
             Some(InitEncryption {
-                key_hex: handle.dek_hex(),
+                key_hex: handle.dek_hex().to_string(),
                 slot: match handle.slot() {
                     crate::storage::DataSlot::Real => "real",
                     crate::storage::DataSlot::Decoy => "decoy",
@@ -792,15 +806,17 @@ pub(crate) fn run(
             && sent.elapsed() > HEARTBEAT_DEAD
         {
             let _ = control_tx.try_send("{\"type\":\"cancel\"}\n".into());
-            if ready || !job.resume {
-                let _ = job
-                    .record
-                    .finished(PiRunStatus::Failed, "Pi host 心跳超时，已停止本轮。");
-            }
-            return Err(
+            let mut message =
                 "Pi host 超过 60 秒没有响应（可能卡死），已停止本轮；工作区保留，可「接着写」。"
-                    .into(),
-            );
+                    .to_string();
+            if (ready || !job.resume)
+                && let Err(error) = job
+                    .record
+                    .finished(PiRunStatus::Failed, "Pi host 心跳超时，已停止本轮。")
+            {
+                message.push_str(&format!("（未能把这一轮标记为失败：{error}）"));
+            }
+            return Err(message);
         }
         // 人在看题时不计执行超时；回答之后接着按剩余时间算。
         if let Some((_, answered, since)) = &waiting {
@@ -1307,13 +1323,15 @@ pub(crate) fn run(
                 }));
             }
             HostEvent::Cancelled { message, .. } => {
-                let message = if message.trim().is_empty() {
+                let mut message = if message.trim().is_empty() {
                     "已停止 Pi 智能写作，未交付任何提案。".to_string()
                 } else {
                     short(&scrub(&message, &job.model.api_key))
                 };
-                if ready || !job.resume {
-                    let _ = job.record.finished(PiRunStatus::Interrupted, &message);
+                if (ready || !job.resume)
+                    && let Err(error) = job.record.finished(PiRunStatus::Interrupted, &message)
+                {
+                    message.push_str(&format!("（未能把这一轮标记为中断：{error}）"));
                 }
                 return Err(message);
             }
@@ -1321,21 +1339,20 @@ pub(crate) fn run(
                 let code = code.unwrap_or_else(|| "host_error".into());
                 let message = scrub(&short(&message), &job.model.api_key);
                 let parked = code == "task_parked";
-                if ready || !job.resume {
-                    let _ = job.record.finished(
+                let mut failure = format!("Pi host 失败（{code}）：{message}");
+                if (ready || !job.resume)
+                    && let Err(error) = job.record.finished(
                         if parked {
                             PiRunStatus::Parked
                         } else {
                             PiRunStatus::Failed
                         },
                         &message,
-                    );
+                    )
+                {
+                    failure.push_str(&format!("（未能把这一轮标记为失败：{error}）"));
                 }
-                return Err(host_failure(
-                    format!("Pi host 失败（{code}）：{message}"),
-                    &stderr_lines,
-                    &job.model.api_key,
-                ));
+                return Err(host_failure(failure, &stderr_lines, &job.model.api_key));
             }
             HostEvent::Pong { .. } => {}
         }
@@ -1378,16 +1395,20 @@ fn skip_line(reader: &mut impl BufRead) -> bool {
 
 /// 交给 host 的最小环境：只保留运行必需项，再叠加应用代理设置派生的变量。
 /// 不继承 `NODE_OPTIONS` / `NODE_PATH` / `LD_LIBRARY_PATH` 或任何模型凭据。
-fn host_environment(proxy: &[(String, String)]) -> Vec<(String, String)> {
+///
+/// `temp_dir` 是本轮运行目录下的 `tmp/`：拿到时把 `TEMP` / `TMP` / `TMPDIR`
+/// 全部指过去，宿主的临时文件留在应用管理的目录里；没拿到（目录建不出来）才
+/// 退回继承用户环境里的临时目录。
+fn host_environment(
+    proxy: &[(String, String)],
+    temp_dir: Option<&std::path::Path>,
+) -> Vec<(String, String)> {
     const KEEP: &[&str] = &[
         "PATH",
         "Path",
         "SystemRoot",
         "SYSTEMROOT",
         "windir",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
         "HOME",
         "USERPROFILE",
         "HOMEDRIVE",
@@ -1406,6 +1427,21 @@ fn host_environment(proxy: &[(String, String)]) -> Vec<(String, String)> {
     for key in KEEP {
         if let Some(value) = std::env::var_os(key) {
             environment.push(((*key).to_string(), value.to_string_lossy().into_owned()));
+        }
+    }
+    match temp_dir {
+        Some(dir) => {
+            let dir = dir.to_string_lossy().into_owned();
+            for key in ["TEMP", "TMP", "TMPDIR"] {
+                environment.push((key.to_string(), dir.clone()));
+            }
+        }
+        None => {
+            for key in ["TEMP", "TMP", "TMPDIR"] {
+                if let Some(value) = std::env::var_os(key) {
+                    environment.push((key.to_string(), value.to_string_lossy().into_owned()));
+                }
+            }
         }
     }
     environment.extend(proxy.iter().cloned());
@@ -1519,6 +1555,38 @@ mod tests {
         assert!(lock_run(dir.path()).is_err());
         drop(guard);
         assert!(lock_run(dir.path()).is_ok());
+    }
+
+    /// 宿主的临时目录被固定到本轮运行目录：将来任何临时写入都留在应用管理范围内。
+    #[test]
+    fn host_temp_directories_point_into_the_run_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected = dir.path().to_string_lossy().into_owned();
+        let environment = host_environment(&[], Some(dir.path()));
+        for key in ["TEMP", "TMP", "TMPDIR"] {
+            let value = environment
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone());
+            assert_eq!(value.as_deref(), Some(expected.as_str()), "{key}");
+        }
+        // 代理变量仍然原样叠加。
+        let environment = host_environment(
+            &[("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".into())],
+            Some(dir.path()),
+        );
+        assert!(
+            environment
+                .iter()
+                .any(|(name, value)| name == "HTTPS_PROXY" && value == "http://127.0.0.1:7890")
+        );
+        // 拿不到目录时退回继承：不额外塞一个不存在的路径。
+        let environment = host_environment(&[], None);
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, value)| name == "TMPDIR" && value == expected.as_str())
+        );
     }
     use std::path::{Path, PathBuf};
 

@@ -199,6 +199,18 @@ pub(crate) fn is_public_help_file(path: &Path) -> bool {
         .is_some_and(|name| public_help_copy(path, name))
 }
 
+/// 可丢弃缓存（Mermaid 图与警告 sidecar）的写入：同样密封，但允许覆盖「当前密钥
+/// 解不开」的旧密文——缓存命中判定会把它当未命中重新渲染，错误密钥下的旧缓存必须
+/// 能被替换掉；用户资源仍走 [`write_managed_file`] 的严格覆盖保护。
+pub(crate) fn write_disposable_managed_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let kind = if crate::vault::key_handle().is_some() {
+        crate::vault::resource_kind_for_path(path)?
+    } else {
+        "image"
+    };
+    crate::vault::write_path_replacing(path, kind, bytes)
+}
+
 /// 把一份资源按当前槽位/密钥写入图片目录；供迁移与同步导入共用。
 pub(crate) fn write_image_file(path: &Path, bytes: &[u8]) -> Result<()> {
     write_managed_file(path, bytes)

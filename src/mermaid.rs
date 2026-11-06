@@ -1147,12 +1147,12 @@ fn cache_at(
     // 图与警告都按应用管理的资源写：有密钥时 AEAD 密封，原子替换并限制为 0600。
     // 暂存与改名由 `write_managed_file` 内部完成，预览线程与导出线程同时生成同一张
     // 图也不会读到写了一半的文件。
-    crate::images::write_managed_file(
+    crate::images::write_disposable_managed_file(
         &path.with_extension("warning.txt"),
         warning.unwrap_or_default().as_bytes(),
     )
     .with_context(|| format!("无法写入 Mermaid 图警告：{}", path.display()))?;
-    crate::images::write_managed_file(&path, &bytes)
+    crate::images::write_disposable_managed_file(&path, &bytes)
         .with_context(|| format!("无法写入 Mermaid 图：{}", path.display()))?;
     Ok(relative)
 }

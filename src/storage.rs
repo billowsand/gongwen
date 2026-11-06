@@ -457,8 +457,32 @@ pub fn load() -> Result<(AppConfig, Option<PathBuf>)> {
         let sealed_input = crate::vault::is_sealed_file(&raw);
         let bytes = if sealed_input {
             let handle = crate::vault::key_handle().context("配置已加密，尚未解锁")?;
-            crate::vault::open_path_bytes(&handle, &path, "config", &raw)
-                .context("配置解密失败（密钥不匹配或文件损坏）")?
+            match crate::vault::open_path_bytes(&handle, &path, "config", &raw) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    // 密文解不开（另一代 DEK / 另一槽 / 损坏）：绝不能先回落默认配置
+                    // 再让后续保存把唯一密文覆盖掉。把原密文原样留底（路径变了 AAD
+                    // 就不再成立，但字节仍可用于人工恢复到原文件名），再返回错误。
+                    let backup = unreadable_config_path(&path);
+                    let kept = atomic_write(&backup, |file| {
+                        use std::io::Write as _;
+                        file.write_all(&raw)?;
+                        Ok(())
+                    })
+                    .is_ok();
+                    if kept {
+                        let _ = fs::remove_file(&path);
+                    }
+                    anyhow::bail!(
+                        "配置解密失败（密钥不匹配或文件损坏）：{error:#}{}",
+                        if kept {
+                            format!("；原密文已留底到 {}", backup.display())
+                        } else {
+                            "；原密文保留在原处，本次不会覆盖".into()
+                        }
+                    );
+                }
+            }
         } else {
             raw
         };
@@ -530,6 +554,23 @@ fn corrupted_config_path(path: &std::path::Path) -> PathBuf {
     candidate
 }
 
+/// 解密失败的配置留底路径：与损坏留底分开命名，避免被「明文损坏」的处理逻辑
+/// 当成 JSON 再解析一遍。
+fn unreadable_config_path(path: &std::path::Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.json".into());
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let mut candidate = path.with_file_name(format!("{name}.无法解密-{stamp}"));
+    let mut index = 2;
+    while candidate.exists() {
+        candidate = path.with_file_name(format!("{name}.无法解密-{stamp}-{index}"));
+        index += 1;
+    }
+    candidate
+}
+
 /// 把配置写成目标形态：有句柄（应用锁启用中）写 AEAD 密文，没有写明文。
 /// 已启用时绝不能把明文写回磁盘——那等于把刚锁好的门又打开。
 fn write_config(path: &std::path::Path, config: &AppConfig) -> Result<()> {
@@ -561,7 +602,7 @@ pub(crate) fn apply_db_key(conn: &rusqlite::Connection) -> Result<()> {
     if !handle.db_active() {
         return Ok(());
     }
-    conn.pragma_update(None, "key", format!("x'{}'", handle.dek_hex()))
+    conn.pragma_update(None, "key", format!("x'{}'", handle.dek_hex().as_str()))
         .context("数据库密钥应用失败")?;
     Ok(())
 }
@@ -946,6 +987,33 @@ mod tests {
             "不能把解密失败当成配置文件损坏"
         );
         assert!(path.exists());
+    }
+
+    /// 配置密文解不开时：返回错误、把原始密文另存留底，绝不让后续保存
+    /// 把唯一副本覆盖成默认配置。
+    #[test]
+    fn undecryptable_config_is_set_aside_before_default_save() {
+        let dir = tempfile::tempdir().unwrap();
+        super::set_test_config_dir(Some(dir.path().to_path_buf()));
+        crate::vault::clear_key_handle();
+        let path = dir.path().join("config.json");
+        let sealed = crate::vault::seal_bytes(&[21u8; 32], b"{\"output_dir\":\"x\"}").unwrap();
+        fs::write(&path, &sealed).unwrap();
+        crate::vault::set_key_handle([22u8; 32], true);
+
+        let result = load();
+        crate::vault::clear_key_handle();
+        super::set_test_config_dir(None);
+
+        assert!(result.is_err(), "错误密钥解不开时应报错");
+        assert!(!path.exists(), "原路径应让出来给新配置");
+        let kept = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.to_string_lossy().contains("无法解密"))
+            .expect("应留下无法解密的副本");
+        assert_eq!(fs::read(kept).unwrap(), sealed, "留底必须是原始密文字节");
     }
 
     /// 无句柄时拒绝对已密封的配置写明文（降级防护）。

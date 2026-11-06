@@ -45,11 +45,28 @@ function outsideRoot(relative) {
   return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
 }
 
+/** 相对某个根的逻辑组件；不在根内或含非法组件时返回 undefined。 */
+function relativeParts(root, absolute) {
+  const relative = path.relative(root, absolute);
+  if (relative === "" || outsideRoot(relative)) return undefined;
+  const parts = relative.split(path.sep);
+  if (parts.some((part) => part === "" || part === "." || part === "..")) return undefined;
+  return parts;
+}
+
 /**
  * 物理路径 → 槽位与稳定逻辑 ID。real 不得使用 alt- 首段，decoy 必须使用；
  * 首段的 alt- 只表示物理隔离，不进入逻辑 ID。
+ *
+ * 同一份配置目录可能以两种写法出现：配置根/目标的字面路径，以及
+ * `realpath` 之后的路径（配置目录含符号链接、junction，或 macOS 把
+ * `/var` 归一成 `/private/var`、大小写被系统归一）。Rust 侧用字面路径算
+ * 逻辑 ID，Node 的工作区守卫会先把路径 realpath 一遍，因此这里按「字面根优先、
+ * realpath 根兜底」两种口径各算一次，取第一个落在根内的结果；两种口径算出的
+ * logicalId 必须逐字节相同（相对路径、alt- 首段剥离、正斜杠），否则解密会失败。
+ * 越界与 `..` 仍然 fail-closed。
  */
-export function resourceIdentity(target, { slot, configRoot }) {
+export function resourceIdentity(target, { slot, configRoot, realConfigRoot } = {}) {
   if (typeof target !== "string" || !path.isAbsolute(target) || target.includes("\u0000")) {
     throw new EncryptionError("资源路径必须是绝对路径且不含 NUL", "encryption_path");
   }
@@ -59,28 +76,34 @@ export function resourceIdentity(target, { slot, configRoot }) {
   if (typeof configRoot !== "string" || !path.isAbsolute(configRoot)) {
     throw new EncryptionError("encryption.configRoot 必须是绝对路径", "encryption_path");
   }
-  const root = path.resolve(configRoot);
-  const absolute = path.resolve(target);
-  const relative = path.relative(root, absolute);
-  if (relative === "" || outsideRoot(relative)) {
-    throw new EncryptionError("资源路径必须位于 configRoot 内且不能是配置根本身", "encryption_path");
-  }
-  const parts = relative.split(path.sep);
-  if (parts.some((part) => part === "" || part === "." || part === "..")) {
-    throw new EncryptionError("资源逻辑路径含非法组件", "encryption_path");
-  }
-  const decoy = parts[0].startsWith("alt-");
-  if ((slot === "real" && decoy) || (slot === "decoy" && !decoy)) {
-    throw new EncryptionError("资源路径的 alt- 前缀与当前槽位不一致", "encryption_slot_path");
+  if (realConfigRoot !== undefined && (typeof realConfigRoot !== "string" || !path.isAbsolute(realConfigRoot))) {
+    throw new EncryptionError("encryption.realConfigRoot 必须是绝对路径", "encryption_path");
   }
   if (slot !== "real" && slot !== "decoy") {
     throw new EncryptionError("资源槽位只支持 real / decoy", "encryption_slot");
   }
-  if (decoy) {
-    parts[0] = parts[0].slice(4);
-    if (parts[0] === "") throw new EncryptionError("alt- 后必须有逻辑目录名", "encryption_path");
+  const absolute = path.resolve(target);
+  const roots = [path.resolve(configRoot)];
+  if (realConfigRoot !== undefined) {
+    const resolved = path.resolve(realConfigRoot);
+    if (!roots.includes(resolved)) roots.push(resolved);
   }
-  return { slot, logicalId: parts.join("/") };
+  for (const root of roots) {
+    const parts = relativeParts(root, absolute);
+    if (parts === undefined) continue;
+    // 第一个命中的口径即最终口径：字面口径命中时不再看 realpath 口径，
+    // 保证「Rust 用哪个路径写，Node 就用哪个路径算」。
+    const decoy = parts[0].startsWith("alt-");
+    if ((slot === "real" && decoy) || (slot === "decoy" && !decoy)) {
+      throw new EncryptionError("资源路径的 alt- 前缀与当前槽位不一致", "encryption_slot_path");
+    }
+    if (decoy) {
+      parts[0] = parts[0].slice(4);
+      if (parts[0] === "") throw new EncryptionError("alt- 后必须有逻辑目录名", "encryption_path");
+    }
+    return { slot, logicalId: parts.join("/") };
+  }
+  throw new EncryptionError("资源路径必须位于 configRoot 内且不能是配置根本身", "encryption_path");
 }
 
 /** 生成 GWA2；nonce 可显式传入仅用于确定性测试，生产始终随机。 */
