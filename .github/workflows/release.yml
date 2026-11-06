@@ -603,9 +603,11 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" ./* --repo "$GITHUB_REPOSITORY" --clobber
             # 重跑时把标题和说明一并刷新，免得留着上一次的占位正文。
+            # --draft=false 不能省：删掉 tag 重打同一个版本号时，GitHub 会把上一
+            # 个 release 转成未挂 tag 的草稿，不改回来它就既不正式、也点不开下载。
             if [ -f "$notes" ]; then
               gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-                --title "$title" --notes-file "$notes"
+                --title "$title" --notes-file "$notes" --draft=false
             fi
           else
             gh release create "$GITHUB_REF_NAME" ./* --repo "$GITHUB_REPOSITORY" "${create_args[@]}"
