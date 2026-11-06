@@ -667,7 +667,10 @@ mod tests {
         }
         let _ = std::fs::remove_file(&path);
         let figure = figure.unwrap_or_else(|| {
-            panic!("图片应在几帧内解码画出并按 0.8 档定宽：{last_seen:?}，版心 {}", metrics.content)
+            panic!(
+                "图片应在几帧内解码画出并按 0.8 档定宽：{last_seen:?}，版心 {}",
+                metrics.content
+            )
         });
         assert!(
             (figure.width() - metrics.content * 0.8).abs() < 1.0,
