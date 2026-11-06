@@ -261,7 +261,7 @@ impl ResearchSourceBundle {
             if !source.is_file() {
                 continue;
             }
-            let bytes = crate::file_limits::read_bytes(
+            let bytes = crate::images::read_managed_file_limited(
                 &source,
                 crate::file_limits::MAX_IMAGE_BYTES
                     .min((crate::file_limits::MAX_RESEARCH_RESOURCE_BYTES - resource_bytes) as u64),

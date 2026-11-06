@@ -12,7 +12,7 @@
 //! 字体解析一次后进程内缓存（按文件路径），反复导出不再重读上百兆字体。
 
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::{Context, Result, bail};
@@ -345,21 +345,16 @@ impl GongwenWorld {
     }
 
     /// 相对导出目录解析插图路径；拒绝 `..` 与绝对路径（与 `images::resolve` 同口径）。
+    ///
+    /// 走 [`crate::images::resolve_from_base`]：`images/` 与 `mermaid-cache/` 前缀要
+    /// 按当前槽位落到 `alt-images/` / `alt-mermaid-cache/`；样张与测试的临时基准
+    /// 目录仍按普通 join，不参与槽位映射。
     fn resolve(&self, id: FileId) -> FileResult<PathBuf> {
         if !self.allow_filesystem {
             return Err(FileError::AccessDenied);
         }
         let rel = id.get().vpath().get_without_slash();
-        let rel_path = Path::new(rel);
-        if rel_path.components().any(|c| {
-            matches!(
-                c,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        }) {
-            return Err(FileError::AccessDenied);
-        }
-        Ok(self.base_dir.join(rel_path))
+        crate::images::resolve_from_base(&self.base_dir, rel).map_err(|_| FileError::AccessDenied)
     }
 }
 
@@ -396,9 +391,16 @@ impl World for GongwenWorld {
             return Ok(bytes.clone());
         }
         let path = self.resolve(id)?;
-        std::fs::read(&path)
+        // 图片/图表资源在启用应用锁后是 AEAD 密文：这里透明解密后再交给 Typst。
+        // 解密失败按文件读取失败处理（排版报错，不能把密文当图片画出来）。
+        crate::images::read_managed_file(&path)
             .map(Bytes::new)
-            .map_err(|e| FileError::from_io(e, &path))
+            .map_err(|error| {
+                FileError::from_io(
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()),
+                    &path,
+                )
+            })
     }
 
     fn font(&self, index: usize) -> Option<Font> {
@@ -654,6 +656,27 @@ fn proof_report(document: &PagedDocument) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 磁盘上的图片资源在加密工作区里是密文：World 读取时要透明解密。
+    #[test]
+    fn world_decrypts_sealed_image_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("figure.png");
+        crate::vault::set_key_handle([8u8; 32], true);
+        crate::images::write_managed_file(&path, b"png-bytes").unwrap();
+        let world = GongwenWorld::with_template(
+            &empty_font_set_for_test(),
+            "{}".into(),
+            dir.path(),
+            Template::Official,
+            &HashMap::new(),
+            true,
+        );
+        let bytes = world.file(file_id("figure.png")).unwrap();
+        assert_eq!(bytes.as_slice(), b"png-bytes");
+        crate::vault::clear_key_handle();
+        assert!(world.file(file_id("figure.png")).is_err(), "失钥后不能读");
+    }
 
     #[test]
     fn memory_world_rejects_disk_fallback_but_serves_supplied_resources() {

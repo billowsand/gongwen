@@ -22,6 +22,10 @@ pub(crate) const SEALED_FILE_NAMES: [&str; 6] = [
     "styles.json",
 ];
 
+/// GUI Mermaid 缓存目录名（相对配置目录）。目录内的图与警告 sidecar 都是用户正文
+/// 派生物，按槽位隔离并随资源一起加密。
+pub(crate) const MERMAID_CACHE_DIR: &str = "mermaid-cache";
+
 /// [`SEALED_FILE_NAMES`] 里的 JSON 子集：`ai_services::persistence` 的读写名单。
 pub(crate) const SEALED_JSON_NAMES: [&str; 4] = [
     "api-secrets.json",
@@ -407,6 +411,7 @@ pub(crate) fn harden_permissions() {
         return;
     };
     harden_dir(&dir);
+    // 槽位目录两套都要收紧：诱饵槽的 `alt-*` 目录同样含用户内容。
     for name in [
         "apis",
         "images",
@@ -415,12 +420,19 @@ pub(crate) fn harden_permissions() {
         "skills",
         "ime",
         "logs",
-        "help",
     ] {
-        let path = dir.join(name);
-        if path.is_dir() {
-            harden_dir(&path);
+        for slot in [DataSlot::Real, DataSlot::Decoy] {
+            if let Ok(path) = slot_subdir_for(slot, name)
+                && path.is_dir()
+            {
+                harden_dir(&path);
+            }
         }
+    }
+    // 帮助目录不区分槽位，只在真实配置目录下。
+    let help = dir.join("help");
+    if help.is_dir() {
+        harden_dir(&help);
     }
     if let Ok(cache) = cache_dir()
         && cache.is_dir()

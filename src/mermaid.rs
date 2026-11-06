@@ -11,6 +11,7 @@
 //! 线宽、字体、底色一致。桑基图、雷达图经实测版式不成熟，暂不支持，check 会给出提示。
 
 use crate::models::DiagramTheme;
+use crate::storage::MERMAID_CACHE_DIR;
 use anyhow::{Context, Result, anyhow, bail};
 use mdx::figure_size;
 use merman::render::{
@@ -21,12 +22,12 @@ use merman_render::text::{TextMetrics, TextStyle, WrapMode};
 use resvg::{tiny_skia, usvg};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-const CACHE_DIR: &str = "mermaid-cache";
+/// 警告 sidecar 的体积上限：正常只有一两百字节，读到超限说明不是我们写的。
+const MAX_WARNING_BYTES: u64 = 64 * 1024;
 /// 配色、字体、画布算法或引擎版本变了都要改这里，旧缓存随之失效。
 const STYLE_VERSION: &str = "gongwen-mermaid-v10/merman-0.7";
 
@@ -599,12 +600,41 @@ fn size_warning(style: Style, placed: Placement) -> Option<String> {
     })
 }
 
+/// 缓存相对路径（正文里写的 `mermaid-cache/<name>`）→ 磁盘物理路径。
+///
+/// **所有缓存读写都必须经过这里**，不要在调用点直接 `base.join(relative)`：
+/// 应用锁把缓存目录按槽位隔离（真实槽 `mermaid-cache/`、诱饵槽 `alt-mermaid-cache/`），
+/// 而且 `base` 等于当前配置目录时才算槽位命名空间内——样张、测试传进来的临时
+/// base 保持普通目录，不参与槽位映射。解析规则与图片共用一份，
+/// 见 [`crate::images::resolve_from_base`]。
+fn cache_path(base: &Path, relative: &str) -> Result<PathBuf> {
+    crate::images::resolve_from_base(base, relative)
+}
+
+/// 与缓存图同名的警告 sidecar 物理路径（`xxx.png` → `xxx.warning.txt`）。
+fn warning_path(base: &Path, relative: &str) -> Option<PathBuf> {
+    Some(
+        cache_path(base, relative)
+            .ok()?
+            .with_extension("warning.txt"),
+    )
+}
+
 pub(crate) fn cached_warning(path: &str) -> Option<String> {
     warning_at(&crate::storage::config_dir().ok()?, path)
 }
 
 fn warning_at(base: &Path, path: &str) -> Option<String> {
-    fs::read_to_string(base.join(path).with_extension("warning.txt"))
+    warning_text(&warning_path(base, path)?)
+}
+
+/// 警告也是应用管理的资源：加密工作区里是密文，读不到或不是 UTF-8 一律当没有
+/// 警告（缺一行提示比把密文当文字显示好）。
+fn warning_text(path: &Path) -> Option<String> {
+    let bytes =
+        crate::images::read_managed_file_limited(path, MAX_WARNING_BYTES, "Mermaid 图表警告")
+            .ok()?;
+    String::from_utf8(bytes)
         .ok()
         .filter(|text| !text.is_empty())
 }
@@ -1075,7 +1105,7 @@ fn cache_relative(source: &str, style: Style, theme: DiagramTheme, format: Forma
             .collect::<String>(),
         format.extension()
     );
-    format!("{CACHE_DIR}/{name}")
+    format!("{MERMAID_CACHE_DIR}/{name}")
 }
 
 fn cache_at(
@@ -1087,8 +1117,11 @@ fn cache_at(
 ) -> Result<String> {
     let theme = resolve(theme, style);
     let relative = cache_relative(source, style, theme, format);
-    let path = base.join(&relative);
-    if path.is_file() {
+    let path = cache_path(base, &relative)?;
+    // 加密工作区里缓存是密文：文件还在、但用当前槽位密钥解不开（换槽、换密钥、
+    // 未解锁）一律算未命中，重新渲染并覆盖写。只看 `path.is_file()` 会把错槽的
+    // 密文当命中，预览于是显示一张打不开的图。
+    if crate::images::read_managed_file(&path).is_ok() {
         return Ok(relative);
     }
     let lock = || {
@@ -1111,22 +1144,16 @@ fn cache_at(
             return Err(error);
         }
     };
-    fs::create_dir_all(path.parent().expect("缓存文件有父目录"))?;
-    fs::write(
-        path.with_extension("warning.txt"),
-        warning.unwrap_or_default(),
-    )?;
-    // 先写临时文件再改名：预览线程与导出线程可能同时生成同一张图，另一方不能
-    // 读到写了一半的文件。
-    let partial = path.with_extension(format!("{}.part", std::process::id()));
-    fs::write(&partial, bytes)
-        .with_context(|| format!("无法写入 Mermaid 图：{}", partial.display()))?;
-    if fs::rename(&partial, &path).is_err() {
-        let _ = fs::remove_file(&partial);
-        if !path.is_file() {
-            bail!("无法写入 Mermaid 图：{}", path.display());
-        }
-    }
+    // 图与警告都按应用管理的资源写：有密钥时 AEAD 密封，原子替换并限制为 0600。
+    // 暂存与改名由 `write_managed_file` 内部完成，预览线程与导出线程同时生成同一张
+    // 图也不会读到写了一半的文件。
+    crate::images::write_managed_file(
+        &path.with_extension("warning.txt"),
+        warning.unwrap_or_default().as_bytes(),
+    )
+    .with_context(|| format!("无法写入 Mermaid 图警告：{}", path.display()))?;
+    crate::images::write_managed_file(&path, &bytes)
+        .with_context(|| format!("无法写入 Mermaid 图：{}", path.display()))?;
     Ok(relative)
 }
 
@@ -1272,6 +1299,7 @@ fn materialize_using(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     /// 用实际 Markdown 测试稿批量验证图例，输出逐图结果和样图供人工复核。
     #[test]
@@ -1941,5 +1969,142 @@ mod tests {
         std::io::Read::read_to_string(&mut archive.by_name("word/document.xml").unwrap(), &mut xml)
             .unwrap();
         assert!(xml.contains("cx=\"5616000\""), "图表宽度必须保持 156 mm");
+    }
+
+    /// 启用应用锁后 Mermaid 缓存与警告 sidecar 都是 AEAD 密文：密钥在场时能读回；
+    /// 失钥时读不到（不得当明文），也不允许用明文覆盖已有密文。
+    ///
+    /// 测试只覆盖本线程的配置目录与密钥句柄，**不改全局 `set_current_slot`**——
+    /// 那是进程级状态，并行测试会互相踩。
+    #[test]
+    fn sealed_cache_and_warning_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        crate::vault::set_key_handle([17u8; 32], true);
+        let outcome = (|| -> Result<()> {
+            let relative = cache_at(
+                dir.path(),
+                SAMPLE,
+                Style::Official,
+                DiagramTheme::Ink,
+                Format::Png,
+            )?;
+            anyhow::ensure!(
+                relative.starts_with("mermaid-cache/"),
+                "返回给正文的相对路径仍是 mermaid-cache/ 前缀：{relative}"
+            );
+            let name = relative.trim_start_matches("mermaid-cache/");
+            let slot = crate::storage::slot_subdir(crate::storage::MERMAID_CACHE_DIR)?;
+            let physical = slot.join(name);
+            anyhow::ensure!(
+                physical.is_file(),
+                "缓存没有写到当前槽位的缓存目录：{}",
+                physical.display()
+            );
+            let raw = fs::read(&physical)?;
+            anyhow::ensure!(
+                crate::vault::is_sealed_file(&raw),
+                "加密工作区里缓存图必须是密文"
+            );
+            let plain = crate::images::read_managed_file(&physical)?;
+            anyhow::ensure!(plain.starts_with(b"\x89PNG"), "密钥在场时应读回原图");
+
+            let warning = physical.with_extension("warning.txt");
+            anyhow::ensure!(warning.is_file(), "警告 sidecar 没有跟图一起写");
+            anyhow::ensure!(
+                crate::vault::is_sealed_file(&fs::read(&warning)?),
+                "警告 sidecar 也必须是密文"
+            );
+            // 换一条真实警告，确认读取走的也是解密路径。
+            crate::images::write_managed_file(&warning, "图表过大".as_bytes())?;
+            anyhow::ensure!(
+                warning_at(dir.path(), &relative).as_deref() == Some("图表过大"),
+                "警告应能解密读回"
+            );
+
+            crate::vault::clear_key_handle();
+            anyhow::ensure!(
+                crate::images::read_managed_file(&physical).is_err(),
+                "失钥后不能把密文当缓存命中"
+            );
+            anyhow::ensure!(
+                warning_at(dir.path(), &relative).is_none(),
+                "失钥后读不到警告"
+            );
+            anyhow::ensure!(
+                cache_at(
+                    dir.path(),
+                    SAMPLE,
+                    Style::Official,
+                    DiagramTheme::Ink,
+                    Format::Png
+                )
+                .is_err(),
+                "失钥时不得以明文覆盖已有密文"
+            );
+            anyhow::ensure!(
+                crate::vault::is_sealed_file(&fs::read(&physical)?),
+                "失败的写入不能把密文改成明文"
+            );
+
+            // 换一把密钥（错密钥）：旧密文解不开，应视为未命中、重新渲染并以新密钥覆盖。
+            crate::vault::set_key_handle([18u8; 32], true);
+            let rerendered = cache_at(
+                dir.path(),
+                SAMPLE,
+                Style::Official,
+                DiagramTheme::Ink,
+                Format::Png,
+            )?;
+            anyhow::ensure!(rerendered == relative, "同一张图的相对路径应稳定");
+            let plain = crate::images::read_managed_file(&physical)?;
+            anyhow::ensure!(plain.starts_with(b"\x89PNG"), "换密钥后应能读回新渲染的图");
+            Ok(())
+        })();
+        crate::vault::clear_key_handle();
+        crate::storage::set_test_config_dir(None);
+        outcome.unwrap();
+    }
+
+    /// 样张 / 测试的临时 base 不参与槽位映射：仍按普通目录写，不碰配置目录。
+    #[test]
+    fn temporary_base_bypasses_slot_mapping() {
+        let config = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(config.path().to_path_buf()));
+        crate::vault::clear_key_handle();
+        let outcome = (|| -> Result<()> {
+            let relative = cache_at(
+                base.path(),
+                SAMPLE,
+                Style::Official,
+                DiagramTheme::Ink,
+                Format::Png,
+            )?;
+            anyhow::ensure!(relative.starts_with("mermaid-cache/"), "{relative}");
+            let physical = base.path().join(&relative);
+            anyhow::ensure!(physical.is_file(), "临时 base 里应有缓存文件");
+            let raw = fs::read(&physical)?;
+            anyhow::ensure!(
+                !crate::vault::is_sealed_file(&raw),
+                "没有密钥时临时 base 里应是明文"
+            );
+            anyhow::ensure!(raw.starts_with(b"\x89PNG"), "缓存应是 PNG");
+            anyhow::ensure!(
+                physical.with_extension("warning.txt").is_file(),
+                "警告 sidecar 应写到临时 base"
+            );
+            anyhow::ensure!(
+                warning_at(base.path(), &relative).is_none(),
+                "没有警告时不应读出内容"
+            );
+            anyhow::ensure!(
+                !crate::storage::slot_subdir(crate::storage::MERMAID_CACHE_DIR)?.exists(),
+                "临时 base 不得写到配置目录的槽位目录"
+            );
+            Ok(())
+        })();
+        crate::storage::set_test_config_dir(None);
+        outcome.unwrap();
     }
 }

@@ -568,7 +568,8 @@ fn collect_sync_images(records: &[ManifestRecord]) -> Result<(Vec<ManifestAsset>
     let mut blobs = Vec::new();
     for path in paths {
         let source = crate::images::resolve_from_base(&base, &path)?;
-        let bytes = std::fs::read(&source)
+        // 稿件包里的资源必须是明文：这里把本机密文解密后再算哈希、入包。
+        let bytes = crate::images::read_managed_file(&source)
             .with_context(|| format!("稿件图片缺失：{}", source.display()))?;
         if bytes.len() as u64 > MAX_PDF_BYTES {
             bail!("稿件图片过大：{path}");
@@ -694,7 +695,7 @@ fn collect_image_entries(base: &Path, records: &[ManifestRecord]) -> Vec<(String
             let Ok(source) = crate::images::resolve_from_base(base, &src) else {
                 continue;
             };
-            let Ok(bytes) = std::fs::read(&source) else {
+            let Ok(bytes) = crate::images::read_managed_file(&source) else {
                 continue;
             };
             out.push((format!("images/{}", sanitize_entry_name(file_name)), bytes));
@@ -931,11 +932,11 @@ fn restore_images(archive: &mut ZipArchive<File>, target: &Path, password: &str)
         );
         let dest = target.join(&safe);
         // 目标已存在且内容一致时跳过，避免无谓写入；内容不同则按恢复语义覆盖。
-        if std::fs::read(&dest).ok().as_deref() == Some(bytes.as_slice()) {
+        if crate::images::read_managed_file(&dest).ok().as_deref() == Some(bytes.as_slice()) {
             count += 1;
             continue;
         }
-        std::fs::write(&dest, &bytes)
+        crate::images::write_image_file(&dest, &bytes)
             .with_context(|| format!("无法恢复图片 {}", dest.display()))?;
         count += 1;
     }

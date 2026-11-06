@@ -8,7 +8,6 @@
 //! 拿到包的人在装有常见中文字体的机器上完成。
 
 use std::collections::HashSet;
-use std::fs;
 use std::io::Write as _;
 use std::path::Path;
 
@@ -220,8 +219,8 @@ fn prepare_official(
         if !seen.insert(name.clone()) {
             continue;
         }
-        let bytes =
-            fs::read(&source).with_context(|| format!("无法读取图片 {}", source.display()))?;
+        let bytes = crate::images::read_managed_file(&source)
+            .with_context(|| format!("无法读取图片 {}", source.display()))?;
         resources.push((name, bytes));
     }
     let warnings = missing
@@ -375,6 +374,7 @@ fn readme(template_name: &str, research: bool, resources: Option<&[(String, Vec<
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::Read as _;
 
     use super::*;

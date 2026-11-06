@@ -10,6 +10,10 @@
 //!   本机排查有用，恢复后反而可能让程序误报「上次异常退出」。
 //! - **文件名净化**：恢复时任何含 `..`、绝对路径、盘符或控制字符的条目都会
 //!   被拒绝，整个恢复在动当前目录之前就中止，防 ZipSlip。
+//! - **解压上限**：条目总数、单条尺寸、整包解压总量都有硬上限（见
+//!   [`MAX_BACKUP_ENTRIES`] 等常量）。`inspect_backup` 校验与 `restore_backup`
+//!   解压两条路径都会卡；超限的包在动当前数据之前就被拒，或解压中途出错后
+//!   走既有回滚把留底目录改回来。
 //! - **原子性边界**：先把当前配置目录整体改名为同级留底目录，再解压新数据；
 //!   解压中途失败会删掉半成品并尝试把留底目录改回来。改名失败则直接中止，
 //!   当前数据保持原样。留底目录本身就是用户的最后一道恢复手段。
@@ -17,11 +21,14 @@
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read as _, Write};
 use std::path::{Path, PathBuf};
 
 /// 崩溃日志目录，只在当前机器上有意义。
 const LOG_DIR: &str = "logs";
+/// 诱饵槽位的崩溃日志目录（`crash_log::log_dir` 按槽位映射成 `alt-logs`），
+/// 与真实槽一样只在本机有意义，不进备份。
+const DECOY_LOG_DIR: &str = "alt-logs";
 /// 上次崩溃的提示标记，恢复后不该再提示一次。
 const UNSEEN_CRASH_MARKER: &str = ".unseen-crash";
 /// 损坏配置留底文件的标记（`config.json.损坏-时间戳`）。
@@ -30,6 +37,21 @@ const CORRUPT_MARK: &str = ".损坏-";
 const RESTORE_BACKUP_PREFIX: &str = "GongwenAssistant-恢复前备份-";
 /// 导出时使用的临时文件前缀，卡在导出目录里也不会被下次备份收进去。
 const TEMP_PREFIX: &str = ".gongwen-backup-";
+
+/// 解压上限：条目总数。
+///
+/// 备份的用途是把配置目录原样带走，正常体量是几十 MB 到一两 GB。下面三项按
+/// 「够用且挡得住 ZIP 炸弹」取保守值，任何一项超限都拒绝整个恢复，绝不只跳
+/// 过超限条目后继续——被构造过的包没有「差不多能用」的说法。
+const MAX_BACKUP_ENTRIES: usize = 50_000;
+/// 解压上限：单个条目（一个库文件、一张插图都远小于它）。
+const MAX_BACKUP_ENTRY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// 解压上限：整包所有条目解压后的总字节。
+///
+/// 本来想取「8 GiB 与可用磁盘空间较小者」，但不引入新依赖就只能做平台相关的
+/// 可用空间查询（各平台接口不同、也不一定可靠）。固定 8 GiB 已经足够保守：
+/// 真把磁盘写满时解压自己会报写入失败，恢复照样走回滚。
+const MAX_BACKUP_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// 备份里的一类顶层内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,17 +229,65 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 一边遍历条目一边记 ZIP 炸弹的账。`inspect_backup` 与 `extract_all` 两条
+/// 路径共用同一套口径：前者在动当前数据之前拒绝，后者防「校验后文件被换掉」
+/// 与伪造头部的尺寸。
+#[derive(Default)]
+struct ZipBudget {
+    entries: usize,
+    total_bytes: u64,
+}
+
+impl ZipBudget {
+    /// 记一个条目；`size` 是 ZIP 里声明的解压后尺寸。
+    ///
+    /// 声明的尺寸不可信（可以伪造），因此解压时还会按实际读出的字节再卡一次
+    /// 单条上限（见 [`copy_capped`]）。
+    fn account(&mut self, name: &str, size: u64) -> Result<()> {
+        self.entries += 1;
+        if self.entries > MAX_BACKUP_ENTRIES {
+            bail!(
+                "备份条目太多（超过上限 {MAX_BACKUP_ENTRIES} 个），可能是构造出来的压缩包，已拒绝恢复"
+            );
+        }
+        if size > MAX_BACKUP_ENTRY_BYTES {
+            bail!(
+                "备份条目 {name} 解压后声明为 {}，超过单条 {} 上限，已拒绝恢复",
+                format_bytes(size),
+                format_bytes(MAX_BACKUP_ENTRY_BYTES)
+            );
+        }
+        self.total_bytes = self.total_bytes.saturating_add(size);
+        if self.total_bytes > MAX_BACKUP_TOTAL_BYTES {
+            bail!(
+                "备份解压后总量超过 {} 上限，可能是构造出来的压缩包，已拒绝恢复",
+                format_bytes(MAX_BACKUP_TOTAL_BYTES)
+            );
+        }
+        Ok(())
+    }
+}
+
 /// 校验 ZIP 结构并给出条目概要。至少含 `config.json` 或 `manuscripts.db` 之一
-/// 才算公文助手备份；条目名不安全时直接拒绝。
+/// 才算公文助手备份；条目名不安全、条目数或解压尺寸超过上限时直接拒绝。
 pub(crate) fn inspect_backup(zip_path: &Path) -> Result<BackupInfo> {
     let mut archive = open_archive(zip_path)?;
+    // 先按条目数一眼挡掉：几万个条目的炸弹包不必逐个解析。
+    if archive.len() > MAX_BACKUP_ENTRIES {
+        bail!(
+            "备份条目太多（{} 个，超过上限 {MAX_BACKUP_ENTRIES} 个），可能是构造出来的压缩包，已拒绝恢复",
+            archive.len()
+        );
+    }
     let mut info = BackupInfo::default();
     let mut groups: BTreeMap<String, BackupGroup> = BTreeMap::new();
+    let mut budget = ZipBudget::default();
     for index in 0..archive.len() {
         let entry = archive
             .by_index(index)
             .with_context(|| format!("无法读取备份条目 #{index}"))?;
         let rel = safe_relative_path(entry.name())?;
+        budget.account(entry.name(), entry.size())?;
         info.entry_count += 1;
         if entry.is_dir() {
             continue;
@@ -406,10 +476,9 @@ fn is_excluded(rel: &Path) -> bool {
         return true;
     }
     if rel.components().next().is_some_and(|first| {
-        first
-            .as_os_str()
-            .to_string_lossy()
-            .eq_ignore_ascii_case(LOG_DIR)
+        let name = first.as_os_str().to_string_lossy();
+        // 真实槽与诱饵槽的崩溃日志目录都排除（见 `crash_log::log_dir`）。
+        name.eq_ignore_ascii_case(LOG_DIR) || name.eq_ignore_ascii_case(DECOY_LOG_DIR)
     }) {
         return true;
     }
@@ -472,25 +541,42 @@ fn safe_relative_path(name: &str) -> Result<PathBuf> {
 
 fn extract_all(archive: &mut zip::ZipArchive<fs::File>, target: &Path) -> Result<usize> {
     let mut files = 0;
+    let mut budget = ZipBudget::default();
+    let mut extracted_bytes: u64 = 0;
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
             .with_context(|| format!("无法读取备份条目 #{index}"))?;
-        let rel = safe_relative_path(entry.name())?;
+        let name = entry.name().to_string();
+        let rel = safe_relative_path(&name)?;
+        // 与 inspect 同一套上限：校验与解压是两次独立打开文件，不能假设它们
+        // 看到的是同一个包；伪造头部的小尺寸也在这里被真正解压时再挡一次。
+        budget.account(&name, entry.size())?;
         let dest = target.join(&rel);
         if entry.is_dir() {
             fs::create_dir_all(&dest)
                 .with_context(|| format!("无法创建目录：{}", dest.display()))?;
+            #[cfg(unix)]
+            restrict_permissions(&dest);
             continue;
         }
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("无法创建目录：{}", parent.display()))?;
+            // 恢复出来的资源目录（images 等）与配置目录本身都只给当前用户。
+            #[cfg(unix)]
+            restrict_permissions(parent);
         }
         let mut file = fs::File::create(&dest)
             .with_context(|| format!("无法写入恢复文件：{}", dest.display()))?;
-        std::io::copy(&mut entry, &mut file)
-            .with_context(|| format!("写入恢复文件失败：{}", dest.display()))?;
+        let written = copy_capped(&mut entry, &mut file, &dest)?;
+        extracted_bytes = extracted_bytes.saturating_add(written);
+        if extracted_bytes > MAX_BACKUP_TOTAL_BYTES {
+            bail!(
+                "备份实际解压后总量超过 {} 上限，可能是构造出来的压缩包，已拒绝恢复",
+                format_bytes(MAX_BACKUP_TOTAL_BYTES)
+            );
+        }
         let _ = file.sync_all();
         #[cfg(unix)]
         restrict_permissions(&dest);
@@ -499,8 +585,36 @@ fn extract_all(archive: &mut zip::ZipArchive<fs::File>, target: &Path) -> Result
     Ok(files)
 }
 
-/// 配置与密钥文件恢复后仍只给当前用户读写。ZIP 里的权限位不跨平台可信，
-/// 这里按文件名重新收紧，和 [`crate::storage::save`] 的口径一致。
+/// 解压单个条目，边写边卡单条上限。
+///
+/// ZIP 头里声明的解压尺寸可以伪造（声明很小、deflate 流实际解出很大），所以
+/// 不看声明值，按实际写出的字节数判断：最多读 `上限 + 1` 字节，超过就报错。
+fn copy_capped(
+    entry: &mut zip::read::ZipFile<'_, fs::File>,
+    file: &mut fs::File,
+    dest: &Path,
+) -> Result<u64> {
+    let mut limited = entry.take(MAX_BACKUP_ENTRY_BYTES.saturating_add(1));
+    let written = std::io::copy(&mut limited, file)
+        .with_context(|| format!("写入恢复文件失败：{}", dest.display()))?;
+    if written > MAX_BACKUP_ENTRY_BYTES {
+        bail!(
+            "备份条目实际解压后超过单条 {} 上限，可能是构造出来的压缩包，已拒绝恢复",
+            format_bytes(MAX_BACKUP_ENTRY_BYTES)
+        );
+    }
+    Ok(written)
+}
+
+/// 用户资源目录：B 阶段起 `images/`、`mermaid-cache/` 里的图片与 Mermaid 图会落成
+/// AEAD 密文，恢复后仍是密文，同样只该给当前用户读写。真实槽与诱饵槽各一套名字
+/// （`crash_log` 那类槽位映射的目录一律带 `alt-` 前缀）。
+const PRIVATE_RESOURCE_DIRS: [&str; 4] =
+    ["images", "alt-images", "mermaid-cache", "alt-mermaid-cache"];
+
+/// 配置与密钥文件、以及用户资源目录里的文件恢复后仍只给当前用户读写。ZIP 里的
+/// 权限位不跨平台可信，这里按文件名 / 所在目录重新收紧，和 [`crate::storage::save`]
+/// 的口径一致。目录一律 0700。
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -509,7 +623,16 @@ fn restrict_permissions(path: &Path) {
     };
     // 恢复包里可能同时有真实槽与诱饵槽的文件；两份都要按同一份敏感名单收紧。
     let plain_name = name.strip_prefix("alt-").unwrap_or(name);
-    if crate::storage::SEALED_FILE_NAMES.contains(&plain_name) || name.ends_with("身份迁移前备份")
+    // 资源目录按「路径里任一段是它」判断：文件本身叫什么都算（`images/图.png`）。
+    let in_resource_dir = path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|part| PRIVATE_RESOURCE_DIRS.contains(&part))
+    });
+    if crate::storage::SEALED_FILE_NAMES.contains(&plain_name)
+        || name.ends_with("身份迁移前备份")
+        || in_resource_dir
     {
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
     }
@@ -803,5 +926,185 @@ mod tests {
         assert!(is_excluded(Path::new("alt-config.json.身份迁移前备份")));
         assert!(!is_excluded(Path::new("config.json")));
         assert!(!is_excluded(Path::new("manuscripts.db")));
+    }
+
+    /// 两个槽位的崩溃日志目录都不进备份（诱饵槽是 `alt-logs/`）。
+    #[test]
+    fn both_slots_crash_log_dirs_are_excluded() {
+        assert!(is_excluded(Path::new("logs/crash-20260101-000000.log")));
+        assert!(is_excluded(Path::new("alt-logs/crash-20260101-000000.log")));
+        assert!(!is_excluded(Path::new("images/a.png")));
+    }
+
+    /// 手工拼一个 ZIP：条目用 stored，头部声明的**解压尺寸**由调用方填，可以
+    /// 随意写大（真实数据只有几个字节），用来模拟「声明尺寸像炸弹」的备份包。
+    fn write_zip_with_declared_sizes(path: &Path, entries: &[(&str, &[u8], u32)]) {
+        fn u16(bytes: &mut Vec<u8>, value: u16) {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        fn u32(bytes: &mut Vec<u8>, value: u32) {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let mut body = Vec::new();
+        let mut central = Vec::new();
+        for (name, data, declared) in entries {
+            let name = name.as_bytes();
+            let offset = body.len() as u32;
+            // 本地文件头。
+            u32(&mut body, 0x0403_4b50);
+            u16(&mut body, 20); // 解压所需版本
+            u16(&mut body, 0); // 标志
+            u16(&mut body, 0); // 压缩方法：stored
+            u16(&mut body, 0); // 时间
+            u16(&mut body, 0); // 日期
+            u32(&mut body, 0); // CRC（不读数据就不校验）
+            u32(&mut body, data.len() as u32);
+            u32(&mut body, *declared);
+            u16(&mut body, name.len() as u16);
+            u16(&mut body, 0); // 扩展字段
+            body.extend_from_slice(name);
+            body.extend_from_slice(data);
+
+            // 中央目录记录。
+            u32(&mut central, 0x0201_4b50);
+            u16(&mut central, 20); // 制作版本
+            u16(&mut central, 20); // 解压所需版本
+            u16(&mut central, 0); // 标志
+            u16(&mut central, 0); // 压缩方法
+            u16(&mut central, 0); // 时间
+            u16(&mut central, 0); // 日期
+            u32(&mut central, 0); // CRC
+            u32(&mut central, data.len() as u32);
+            u32(&mut central, *declared);
+            u16(&mut central, name.len() as u16);
+            u16(&mut central, 0); // 扩展字段
+            u16(&mut central, 0); // 注释
+            u16(&mut central, 0); // 起始磁盘
+            u16(&mut central, 0); // 内部属性
+            u32(&mut central, 0); // 外部属性
+            u32(&mut central, offset);
+            central.extend_from_slice(name);
+        }
+        let mut zip = body;
+        let cd_offset = zip.len() as u32;
+        zip.extend_from_slice(&central);
+        u32(&mut zip, 0x0605_4b50); // 中央目录结束记录
+        u16(&mut zip, 0); // 磁盘号
+        u16(&mut zip, 0); // 中央目录所在磁盘
+        u16(&mut zip, entries.len() as u16);
+        u16(&mut zip, entries.len() as u16);
+        u32(&mut zip, central.len() as u32);
+        u32(&mut zip, cd_offset);
+        u16(&mut zip, 0); // 注释长度
+        fs::write(path, zip).unwrap();
+    }
+
+    /// 声明尺寸超单条上限 / 整包总量上限时，校验与恢复都拒绝，且不动当前数据。
+    #[test]
+    fn declared_bomb_sizes_are_rejected_before_touching_current_data() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // 单条 3 GiB，超过 2 GiB 的单条上限。
+        let single = dir.path().join("single.zip");
+        write_zip_with_declared_sizes(&single, &[("config.json", b"{}", 3 * 1024 * 1024 * 1024)]);
+        let error = inspect_backup(&single).unwrap_err().to_string();
+        assert!(
+            error.contains("单条") && error.contains("上限"),
+            "应说清是单条上限：{error}"
+        );
+
+        // 每条 2 GiB 不超单条上限，但 5 条合计 10 GiB，超过 8 GiB 的整包上限。
+        let total = dir.path().join("total.zip");
+        write_zip_with_declared_sizes(
+            &total,
+            &[
+                ("config.json", b"{}", 2 * 1024 * 1024 * 1024),
+                ("manuscripts.db", b"", 2 * 1024 * 1024 * 1024),
+                ("images/a.png", b"", 2 * 1024 * 1024 * 1024),
+                ("images/b.png", b"", 2 * 1024 * 1024 * 1024),
+                ("images/c.png", b"", 2 * 1024 * 1024 * 1024),
+            ],
+        );
+        let error = inspect_backup(&total).unwrap_err().to_string();
+        assert!(
+            error.contains("总量") && error.contains("上限"),
+            "应说清是整包总量上限：{error}"
+        );
+
+        // 超限包绝不能改动当前配置目录，也不留「恢复前备份」目录。
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config");
+        write(&target, "keep.txt", b"keep");
+        for zip_path in [&single, &total] {
+            assert!(restore_backup(zip_path, &target).is_err());
+            assert_eq!(read(&target, "keep.txt"), b"keep", "超限包不能改动当前数据");
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        }
+    }
+
+    /// 条目数上限：计数与报错文案由 [`ZipBudget`] 负责（`inspect_backup` 先用
+    /// `archive.len()` 一眼挡掉，解压侧再用同一套账兜底）。
+    #[test]
+    fn too_many_entries_are_rejected() {
+        let mut budget = ZipBudget::default();
+        for _ in 0..MAX_BACKUP_ENTRIES {
+            budget.account("条目", 0).unwrap();
+        }
+        let error = budget.account("条目", 0).unwrap_err().to_string();
+        assert!(
+            error.contains("条目太多") && error.contains("上限"),
+            "{error}"
+        );
+    }
+
+    /// 用户资源目录（images / mermaid-cache，含诱饵槽的 alt- 前缀）恢复后
+    /// 文件 0600、目录 0700：B 阶段起它们也是密文资源。
+    #[cfg(unix)]
+    #[test]
+    fn restored_resource_files_and_dirs_are_private_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("resources.zip");
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            for (name, bytes) in [
+                ("config.json", b"{}".as_slice()),
+                ("images/图.png", b"png".as_slice()),
+                ("alt-images/图.png", b"png".as_slice()),
+                ("mermaid-cache/图.svg", b"svg".as_slice()),
+                ("alt-mermaid-cache/图.svg", b"svg".as_slice()),
+            ] {
+                writer
+                    .start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(bytes).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        let target = dir.path().join("config");
+        restore_backup(&zip_path, &target).unwrap();
+        let mode = |path: PathBuf| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        for rel in [
+            "images/图.png",
+            "alt-images/图.png",
+            "mermaid-cache/图.svg",
+            "alt-mermaid-cache/图.svg",
+        ] {
+            assert_eq!(mode(target.join(rel)), 0o600, "{rel} 应只有本人可读写");
+        }
+        for rel in ["images", "alt-images", "mermaid-cache", "alt-mermaid-cache"] {
+            assert_eq!(mode(target.join(rel)), 0o700, "{rel}/ 应只有本人可读写");
+        }
+
+        // 直接调用权限函数也覆盖真实槽与诱饵槽两套名字。
+        let loose = target.join("images").join("再存一张.png");
+        fs::write(&loose, b"png").unwrap();
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o644)).unwrap();
+        restrict_permissions(&loose);
+        assert_eq!(mode(loose), 0o600);
     }
 }

@@ -303,7 +303,9 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   第二期（rusqlite 换 `bundled-sqlcipher-vendored-openssl`、DEK 包裹架构、解锁时
   `sqlcipher_export` 整库迁移、`config.json` 与密钥类文件 AEAD、停用解密、备份快照
   保持密文）已完成开发，待真机验收**；第三期（`images/`、`pi/` 运行目录加密、日志
-  清理、使用帮助威胁模型）未开工。方案、分期、与方案的出入和踩坑见
+  清理、使用帮助威胁模型）**进行中**：图片、PDF 插图与 Mermaid 缓存已随 B 阶段落盘
+  加密（迁移、预览/导出/稿件包读取与停用解密均已接通），Pi 运行目录与最终威胁模型
+  仍未完成。方案、分期、与方案的出入和踩坑见
   `docs/security-lock-design.md`（第八节是一期交接、第九节是二期交接与真机验收清单）；
   动密钥句柄、迁移、开库路径或密封写路径前先读第九节「二期踩过的坑」。
   代码在 `src/vault.rs`、`src/app/gate.rs`、`src/app/vault_settings.rs`、
@@ -326,8 +328,12 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   闸门增加「锁文件丢失但磁盘已有加密数据」状态；停用标记改 DEK 密封且只允许真实槽；
   备份排除停用标记、双槽库只对当前槽做带密钥快照、恢复后强制重解锁；`images/`、
   `ime/`、`skills/`、`metrics`、Pi 校准改槽位目录，预览副本/份号清单/粘贴临时文件/
-  日志/收件箱/staging 的明文与权限收紧。仍未做的是 B–E（资源内容加密、Mermaid/Pi
-  迁移、打印内存化）与文件 AEAD 的 AAD/格式版本，详见该文末节。
+  日志/收件箱/staging 的明文与权限收紧。
+  **2026-11-06 第四轮（B 阶段资源加密，已实现、待真机验收）**：图片、PDF 插图与
+  Mermaid 缓存整文件 AEAD，写入/读取/迁移/停用解密/稿件包与同步包往返全部接通；
+  图表缓存同时按槽位隔离。剩下 Pi 运行目录与会话加密（E）、打印内存化、备份恢复
+  状态机（D）与文件 AEAD 的 AAD/格式版本，详见 `docs/encrypted-resource-lifecycle.md`
+  末节。
 
 - **Linux 图形环境兜底**（麒麟 V10 上一打开就崩：X 服务器回 `GLXBadContextTag`，
   winit 对任何 X 错误都直接 panic，于是「第一次显示窗口」时崩；panic 毒化了

@@ -102,6 +102,7 @@ pub(crate) fn draft() -> DraftInput {
 /// 把截图写进用户配置目录的 `images/`。已有同样内容的文件就不动；升级后截图换了，
 /// 按字节比对会覆盖成新的。
 pub(crate) fn install_images() -> Result<()> {
+    // 帮助截图是随包公开内容：始终写明文，不参与资源加密迁移，也不做槽位复制。
     let dir = crate::images::image_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("无法创建图片目录 {}", dir.display()))?;
     for (name, bytes) in IMAGES {

@@ -1107,10 +1107,16 @@ fn figure_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str, rese
     if is_pdf {
         return pdf_block(ui, metrics, alt, src, &path, &file_name, research);
     }
-    let bytes = match std::fs::read(&path) {
+    let bytes = match images::read_managed_file(&path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            return image_placeholder(ui, metrics, alt, &file_name, &format!("无法读取：{error}"));
+            return image_placeholder(
+                ui,
+                metrics,
+                alt,
+                &file_name,
+                &format!("无法读取：{error:#}"),
+            );
         }
     };
     // 每张图片一个固定 uri，egui 的 ImageCache 按 uri 缓存解码结果，避免每帧重读重解码。

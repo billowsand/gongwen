@@ -880,6 +880,7 @@ impl GongwenApp {
 /// 只删缓存目录 `pdf-preview/` 下自己的 `manuscript_<id>_<id>.pdf` 命名，
 /// 不碰用户的任何文件。
 pub(crate) fn purge_stale_preview_pdfs() {
+    // 旧版 PDF 预览副本。
     let Ok(dir) = crate::storage::cache_dir().map(|dir| dir.join("pdf-preview")) else {
         return;
     };
@@ -894,6 +895,28 @@ pub(crate) fn purge_stale_preview_pdfs() {
         }
     }
     let _ = std::fs::remove_dir(&dir);
+    // 打印用的中性副本在正常路径由 RAII 删除；崩溃/强杀后可能残留一份明文 PDF。
+    let _ = purge_staged_print_files();
+}
+
+/// 清掉崩溃残留的送打副本（`缓存目录/print/<uuid>.pdf`）。只删这个目录里的
+/// `*.pdf`，不碰用户文件。
+fn purge_staged_print_files() -> std::io::Result<()> {
+    let Ok(dir) = crate::storage::cache_dir().map(|dir| dir.join("print")) else {
+        return Ok(());
+    };
+    let entries = std::fs::read_dir(&dir)?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    let _ = std::fs::remove_dir(&dir);
+    Ok(())
 }
 
 /// 拖着稿件包悬停在窗口上时的整窗提示：半透明遮罩 + 居中一句话。

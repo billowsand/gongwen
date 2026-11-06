@@ -129,6 +129,10 @@
 - `src/agent/api.rs`：接口密钥 `api-secrets.json` 改成原子写（`storage::atomic_write`），
   Unix 下权限 0600——写一半的密钥文件比写失败更难查。
 - `src/storage.rs`：`atomic_write` 提升为 `pub(crate)` 供复用。
+- `src/images.rs`：应用管理的资源文件（图片、PDF 插图、Mermaid 缓存）统一走
+  `read_managed_file` / `write_managed_file`：启用应用锁时整文件 AEAD、原子写 0600，
+  读取时透明解密；目标已是密文而当前没有密钥时拒绝明文覆盖。外部导入原件不进这条
+  通路——它们不受应用管理，也不该被本机密钥「解成明文」。
 - 临时目录不用可预测的名字：单篇 PDF 编译（`src/manuscript_io.rs`）改用
   `tempfile::Builder` 随机、独占创建、仅本用户可访问，析构即删；花脸稿打印预览
   （`src/draft_page/version_diff.rs`）原来是系统临时目录下的固定目录名，改放本用户

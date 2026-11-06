@@ -286,8 +286,8 @@ fn write_markdown_archive(
         if !source.is_file() {
             continue;
         }
-        let bytes =
-            fs::read(&source).with_context(|| format!("无法读取图片 {}", source.display()))?;
+        let bytes = crate::images::read_managed_file(&source)
+            .with_context(|| format!("无法读取图片 {}", source.display()))?;
         zip.start_file(crate::images::normalize_ref(&src), options)?;
         zip.write_all(&bytes)?;
     }

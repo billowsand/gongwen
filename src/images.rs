@@ -84,6 +84,14 @@ fn app_relative(path: &Path) -> Result<PathBuf> {
     let Some(first) = path.components().next() else {
         anyhow::bail!("非法图片路径：空");
     };
+    if first.as_os_str() == storage::MERMAID_CACHE_DIR {
+        // Mermaid 缓存同样是用户正文派生物：按槽位落目录，缺图失败的判定交给
+        // 读取方（加密文件解不开时缓存会重新渲染）。
+        let rest = path
+            .strip_prefix(storage::MERMAID_CACHE_DIR)
+            .unwrap_or(Path::new(""));
+        return Ok(storage::slot_subdir(storage::MERMAID_CACHE_DIR)?.join(rest));
+    }
     if first.as_os_str() != IMAGE_DIR {
         return Ok(storage::config_dir()?.join(path));
     }
@@ -113,6 +121,71 @@ fn public_help_copy(path: &Path, name: &str) -> bool {
             crate::file_limits::read_bytes(path, bytes.len() as u64, "帮助截图")
                 .is_ok_and(|actual| actual == *bytes)
         })
+}
+
+/// 读取应用管理的资源文件（图片、PDF 插图、Mermaid 缓存与警告）。
+///
+/// 启用应用锁后这些文件是整份 AEAD 密文（与 config.json 同一个 `GWA1` 封套）：
+/// 有句柄就解密；**没有句柄时按读不到处理**，绝不把密文当图片渲染。外部导入来源
+/// （用户自己选的文件夹）不经过这里——那是不受应用管理的原件。
+pub(crate) fn read_managed_file(path: &Path) -> Result<Vec<u8>> {
+    read_managed_file_limited(path, crate::file_limits::MAX_IMAGE_BYTES, "资源文件")
+}
+
+/// 带体积上限的 [`read_managed_file`]：先按上限读原始字节，再解密。
+pub(crate) fn read_managed_file_limited(
+    path: &Path,
+    max_bytes: u64,
+    what: &str,
+) -> Result<Vec<u8>> {
+    let raw = crate::file_limits::read_bytes(path, max_bytes, what)
+        .with_context(|| format!("无法读取{} {}", what, path.display()))?;
+    if !crate::vault::is_sealed_file(&raw) {
+        return Ok(raw);
+    }
+    let handle = crate::vault::key_handle()
+        .with_context(|| format!("{} 已加密，尚未解锁：{}", what, path.display()))?;
+    crate::vault::open_bytes(handle.dek(), &raw).with_context(|| {
+        format!(
+            "{} 解密失败（密钥不匹配或文件损坏）：{}",
+            what,
+            path.display()
+        )
+    })
+}
+
+/// 写入应用管理的资源文件：有句柄时密封，原子写 + Unix 0600。没有句柄时写明文
+/// （未启用应用锁的系统）；若目标已是密文则拒绝写明文，避免静默降级。
+pub(crate) fn write_managed_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let bytes = match crate::vault::key_handle() {
+        Some(handle) => crate::vault::seal_bytes(handle.dek(), bytes)?,
+        None => {
+            if path.is_file()
+                && std::fs::read(path).is_ok_and(|raw| crate::vault::is_sealed_file(&raw))
+            {
+                anyhow::bail!("{} 已加密但当前未解锁，拒绝以明文覆盖", path.display());
+            }
+            bytes.to_vec()
+        }
+    };
+    storage::atomic_write(path, |file| {
+        use std::io::Write as _;
+        file.write_all(&bytes)?;
+        Ok(())
+    })
+}
+
+/// 随包公开的帮助截图（名称与字节都与内置资源一致）：属于公开内容，不做槽位复制，
+/// 也不参与图片加密迁移；诱饵槽可安全回落到真实槽的共享副本。
+pub(crate) fn is_public_help_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| public_help_copy(path, name))
+}
+
+/// 把一份资源按当前槽位/密钥写入图片目录；供迁移与同步导入共用。
+pub(crate) fn write_image_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_managed_file(path, bytes)
 }
 
 /// 外部基准目录的解析：只做路径穿越校验后 join，不参与槽位映射。
@@ -231,7 +304,7 @@ fn store(
     let mut stored_name = format!("{stamp}_{sanitized}");
     let mut dest = dir.join(&stored_name);
     let mut suffix = 2usize;
-    while dest.exists() && fs::read(&dest).ok().as_deref() != Some(bytes) {
+    while dest.exists() && read_managed_file(&dest).ok().as_deref() != Some(bytes) {
         let source = Path::new(&sanitized);
         let stem = source
             .file_stem()
@@ -246,7 +319,8 @@ fn store(
         suffix += 1;
     }
     if !dest.exists() {
-        fs::write(&dest, bytes).with_context(|| format!("无法写入图片文件 {}", dest.display()))?;
+        write_managed_file(&dest, bytes)
+            .with_context(|| format!("无法写入图片文件 {}", dest.display()))?;
         created.push(dest);
     }
     Ok(format!("{IMAGE_DIR}/{stored_name}"))
@@ -543,6 +617,34 @@ mod tests {
     }
     /// 图片目录按槽位物理隔离：真实槽 `images/`、诱饵槽 `alt-images/`，
     /// 正文引用仍统一写 `images/...`（跨槽/跨机都能读）。
+    /// 启用应用锁后资源文件整份 AEAD：写密文、读回明文；失去密钥读不到，
+    /// 也不能以明文覆盖已有密文（静默降级防护）。
+    #[test]
+    fn managed_resources_are_sealed_and_read_with_the_current_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("扫描件.pdf");
+        crate::vault::clear_key_handle();
+        write_managed_file(&path, b"%PDF-plain").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"%PDF-plain");
+        assert_eq!(read_managed_file(&path).unwrap(), b"%PDF-plain");
+
+        crate::vault::set_key_handle([4u8; 32], true);
+        write_managed_file(&path, b"%PDF-secret").unwrap();
+        assert!(crate::vault::is_sealed_file(&std::fs::read(&path).unwrap()));
+        assert_eq!(read_managed_file(&path).unwrap(), b"%PDF-secret");
+
+        crate::vault::clear_key_handle();
+        assert!(
+            read_managed_file(&path).is_err(),
+            "没有密钥不能把密文当资源"
+        );
+        assert!(
+            write_managed_file(&path, b"downgrade").is_err(),
+            "没有密钥不能以明文覆盖密文"
+        );
+        assert!(crate::vault::is_sealed_file(&std::fs::read(&path).unwrap()));
+    }
+
     #[test]
     fn image_dir_is_slot_aware() {
         let dir = tempfile::tempdir().unwrap();

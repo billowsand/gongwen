@@ -7,14 +7,27 @@
 //!
 //! 用户数据（打印机名、任务名、文件路径）都作为独立参数交给 `Command`，不经 shell；
 //! 页码先解析成区间再格式化，不原样透传；文件名前有 `--`。
+//!
+//! **打印队列去标识**：`lp` 的任务名与文件路径都会留在 CUPS 队列（`lpstat -o`、
+//! 打印机面板）里，公文标题本身就是敏感信息。所以送打前把 PDF 复制到缓存目录里
+//! 一个随机命名的文件，`lp -t` 只用固定中性任务名、只收这个中性路径，返回后
+//! （成功或失败）立即删掉副本；见 [`stage_document`]。
 
 use super::{
     ColorMode, Duplex, MediaOption, PrintJob, PrintOutcome, PrinterCaps, PrinterInfo, PrinterState,
     Scaling, pages,
 };
+use crate::file_limits::MAX_PDF_BYTES;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// 交给 CUPS 的固定任务名。原来是公文标题，会留在队列与打印机面板上，
+/// 同机用户随手 `lpstat -o` 就能看到；现在只说明这是本程序的任务。
+const NEUTRAL_JOB_TITLE: &str = "公文助手打印任务";
+/// 送打用副本所在的缓存子目录（相对 [`crate::storage::cache_dir`]）。
+const STAGED_PRINT_DIR: &str = "print";
 
 pub(super) fn lp_available() -> bool {
     program("lp").is_some()
@@ -56,6 +69,11 @@ pub(super) fn printer_caps(name: &str) -> PrinterCaps {
 ///
 /// `lp` 是一次把整份 PDF 交出去，没法逐页报进度；取消也只在交给它之前看一次
 /// （之后任务已经在 CUPS 队列里，该由打印队列管理去取消，不在本程序范围）。
+///
+/// 送去的是 [`stage_document`] 复制出的中性副本，不是用户选中的原路径：公文标题
+/// 不再出现在命令行与队列里。副本在函数返回（成功、失败、`lp` 起不来）时由
+/// [`StagedDocument`] 的析构删除。Windows 后端（`print/win.rs`）走系统 spooler
+/// 的文档名与文件句柄，不经命令行，没有同样的泄露面，因此不改。
 pub(super) fn print(
     job: &PrintJob,
     cancel: &std::sync::atomic::AtomicBool,
@@ -66,10 +84,13 @@ pub(super) fn print(
     }
     let program = program("lp")
         .ok_or_else(|| "未找到 lp 命令，本机可能没有安装 CUPS 打印服务".to_string())?;
+    // 先准备副本；`lp` 只看到这个随机命名的中性路径。
+    let document = stage_document(job)?;
     let output = Command::new(program)
-        .args(lp_args(job))
+        .args(lp_args(job, document.path()))
         .output()
         .map_err(|error| format!("无法启动打印：{error}"))?;
+    // 从这里往下仍在 `document` 的生命周期内；函数返回时副本自动删除。
     if output.status.success() {
         // `lp` 的成功提示会翻译成系统语言，只从里面找「打印机名-数字」这个词。
         let job_id = parse_job_id(
@@ -87,8 +108,51 @@ pub(super) fn print(
     })
 }
 
+/// 送打用的中性 PDF 副本：`lp` 只看得到这个随机文件名，公文标题与真实路径都不在
+/// 命令行里。析构即删除，覆盖成功、失败与提前返回三种收尾。
+struct StagedDocument {
+    path: PathBuf,
+}
+
+impl StagedDocument {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for StagedDocument {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// 把 PDF 字节复制到 `缓存目录/print/<uuid>.pdf`（Unix 0600，由
+/// [`crate::storage::atomic_write`] 保证），返回负责删除的副本。
+fn stage_document(job: &PrintJob) -> Result<StagedDocument, String> {
+    let dir = crate::storage::cache_dir()
+        .map_err(|error| format!("无法确定打印缓存目录：{error}"))?
+        .join(STAGED_PRINT_DIR);
+    stage_document_in(&dir, &job.path)
+}
+
+/// [`stage_document`] 的可测试入口：显式指定副本目录。
+fn stage_document_in(dir: &Path, source: &Path) -> Result<StagedDocument, String> {
+    let bytes = crate::file_limits::read_bytes(source, MAX_PDF_BYTES, "打印文件")
+        .map_err(|error| format!("无法读取待打印文件：{error}"))?;
+    let path = dir.join(format!("{}.pdf", uuid::Uuid::new_v4()));
+    crate::storage::atomic_write(&path, |file| {
+        file.write_all(&bytes)?;
+        Ok(())
+    })
+    .map_err(|error| format!("无法准备打印副本：{error}"))?;
+    Ok(StagedDocument { path })
+}
+
 /// `lp` 的参数。只在选项与默认不同时才加，命令行越短越不容易撞上老版本 CUPS 的毛病。
-pub(super) fn lp_args(job: &PrintJob) -> Vec<OsString> {
+///
+/// `document` 是送打副本的路径（见 [`StagedDocument`]），不是用户选中的原文件：
+/// 原路径带着公文标题，不能交给 `lp`。
+pub(super) fn lp_args(job: &PrintJob, document: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = Vec::new();
     if let Some(printer) = &job.printer {
         args.push("-d".into());
@@ -136,13 +200,12 @@ pub(super) fn lp_args(job: &PrintJob) -> Vec<OsString> {
     if job.reverse {
         push_option(&mut args, "outputorder=reverse".to_string());
     }
-    if !job.title.trim().is_empty() {
-        args.push("-t".into());
-        args.push(job.title.as_str().into());
-    }
+    // 任务名固定成中性文字：公文标题（`job.title`）绝不进队列。
+    args.push("-t".into());
+    args.push(NEUTRAL_JOB_TITLE.into());
     // `--` 之后即使文件名以短横线开头也不会被当成选项。
     args.push("--".into());
-    args.push(job.path.as_os_str().to_owned());
+    args.push(document.as_os_str().to_owned());
     args
 }
 
@@ -561,15 +624,39 @@ PageSize/Media Size: *A4 Letter";
         }
     }
 
+    /// 送打副本的中性路径：真实流程由 `stage_document` 生成（缓存目录 + UUID），
+    /// 测试只关心 `lp` 看到的是它，而不是带公文标题的原路径。
+    const STAGED: &str = "/tmp/gongwen-print-0b6f.pdf";
+
     #[test]
-    fn plain_job_only_names_the_title_and_file() {
-        let args = lp_args(&job());
+    fn plain_job_only_names_the_fixed_title_and_staged_file() {
+        let args = lp_args(&job(), Path::new(STAGED));
         assert_eq!(
             args,
-            ["-t", "关于××的请示", "--", "/tmp/-请示.pdf"]
+            ["-t", NEUTRAL_JOB_TITLE, "--", STAGED]
                 .map(OsString::from)
                 .to_vec()
         );
+    }
+
+    /// 公文标题不进军命令行：任务名固定中性文字，路径是送打副本。
+    #[test]
+    fn document_title_never_reaches_the_print_command_line() {
+        let job = PrintJob {
+            title: "关于××的请示".to_string(),
+            path: PathBuf::from("/tmp/关于××的请示.pdf"),
+            ..job()
+        };
+        let args = lp_args(&job, Path::new(STAGED));
+        let joined = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!joined.contains("关于××"), "{joined}");
+        assert!(!joined.contains("请示"), "{joined}");
+        assert!(joined.contains(NEUTRAL_JOB_TITLE), "{joined}");
+        assert!(joined.contains(STAGED), "{joined}");
     }
 
     #[test]
@@ -581,7 +668,7 @@ PageSize/Media Size: *A4 Letter";
             pages: Some(vec![(1, 3), (5, 5)]),
             ..job()
         };
-        let args = lp_args(&job);
+        let args = lp_args(&job, Path::new(STAGED));
         assert_eq!(
             args,
             [
@@ -594,9 +681,9 @@ PageSize/Media Size: *A4 Letter";
                 "-P",
                 "1-3,5",
                 "-t",
-                "关于××的请示",
+                NEUTRAL_JOB_TITLE,
                 "--",
-                "/tmp/-请示.pdf",
+                STAGED,
             ]
             .map(OsString::from)
             .to_vec()
@@ -614,7 +701,7 @@ PageSize/Media Size: *A4 Letter";
             ..job()
         };
         assert_eq!(
-            lp_args(&job),
+            lp_args(&job, Path::new(STAGED)),
             [
                 "-o",
                 "sides=two-sided-short-edge",
@@ -627,9 +714,9 @@ PageSize/Media Size: *A4 Letter";
                 "-o",
                 "print-scaling=fit",
                 "-t",
-                "关于××的请示",
+                NEUTRAL_JOB_TITLE,
                 "--",
-                "/tmp/-请示.pdf",
+                STAGED,
             ]
             .map(OsString::from)
             .to_vec()
@@ -643,14 +730,14 @@ PageSize/Media Size: *A4 Letter";
             ..job()
         };
         assert_eq!(
-            lp_args(&job),
+            lp_args(&job, Path::new(STAGED)),
             [
                 "-o",
                 "outputorder=reverse",
                 "-t",
-                "关于××的请示",
+                NEUTRAL_JOB_TITLE,
                 "--",
-                "/tmp/-请示.pdf",
+                STAGED,
             ]
             .map(OsString::from)
             .to_vec()
@@ -715,7 +802,7 @@ PageSize/Media Size: *A4 Letter";
                 ..job()
             };
             let output = Command::new(&lp)
-                .args(lp_args(&job))
+                .args(lp_args(&job, Path::new(STAGED)))
                 .output()
                 .expect("运行假 lp");
             (
@@ -727,10 +814,56 @@ PageSize/Media Size: *A4 Letter";
         let recorded = std::fs::read_to_string(&record).expect("读参数记录");
         assert_eq!(
             recorded.lines().collect::<Vec<_>>(),
-            ["-d", "Office", "-t", "关于××的请示", "--", "/tmp/-请示.pdf"]
+            ["-d", "Office", "-t", NEUTRAL_JOB_TITLE, "--", STAGED]
         );
         let (ok, stderr) = run("broken");
         assert!(!ok);
         assert!(stderr.contains("打印机不存在"));
+    }
+
+    /// 送打副本：写到给定目录的随机 PDF、0600，`lp` 返回（含失败）后由析构删除。
+    #[test]
+    fn staged_document_is_private_and_removed_on_drop() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = tempfile::tempdir().expect("临时目录");
+        let pdf = source.path().join("关于××的请示.pdf");
+        std::fs::write(&pdf, b"%PDF-1.7\n").expect("写入假 PDF");
+
+        let stage = tempfile::tempdir().expect("临时目录");
+        let document = stage_document_in(stage.path(), &pdf).expect("应能准备副本");
+        let path = document.path().to_path_buf();
+        assert!(path.starts_with(stage.path()), "{}", path.display());
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("pdf"));
+        assert!(
+            !path
+                .file_name()
+                .expect("有文件名")
+                .to_string_lossy()
+                .contains("请示"),
+            "副本名不能带公文标题"
+        );
+        assert_eq!(std::fs::read(&path).expect("读副本"), b"%PDF-1.7\n");
+        let mode = std::fs::metadata(&path)
+            .expect("副本元数据")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "打印副本里是公文正文，只给自己读写");
+        drop(document);
+        assert!(!path.exists(), "lp 返回后（成功或失败）必须删掉副本");
+    }
+
+    /// 原 PDF 读不到时连副本都不建，更不会去调 `lp`。
+    #[test]
+    fn staging_a_missing_pdf_fails_before_the_command_runs() {
+        let stage = tempfile::tempdir().expect("临时目录");
+        let missing = stage.path().join("missing.pdf");
+        assert!(stage_document_in(stage.path(), &missing).is_err());
+        assert_eq!(
+            std::fs::read_dir(stage.path()).expect("读目录").count(),
+            0,
+            "失败时不该留下任何文件"
+        );
     }
 }

@@ -622,7 +622,100 @@ pub(crate) fn ensure_slot_encrypted() -> Result<()> {
             }
         }
     }
+    // 用户资源：图片、PDF 插图与 Mermaid 缓存整文件 AEAD。帮助截图是随包公开
+    // 内容，永远保持明文（诱饵槽缺图时还要按字节比对回落）。
+    seal_resource_dirs(&key)?;
     Ok(())
+}
+
+/// 用户资源目录（图片 / Mermaid 缓存）。两处都按槽位命名，随稿件长期保留。
+fn resource_dirs() -> [(String, bool); 2] {
+    [
+        (crate::images::IMAGE_DIR.to_string(), true),
+        (storage::MERMAID_CACHE_DIR.to_string(), false),
+    ]
+}
+
+/// 把当前槽位资源目录里的明文文件封成密文；已是密文的跳过。公开帮助截图跳过。
+fn seal_resource_dirs(key: &[u8; DEK_LEN]) -> Result<()> {
+    for (name, skip_public) in resource_dirs() {
+        let Ok(dir) = storage::slot_subdir(&name) else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            if skip_public && crate::images::is_public_help_file(&path) {
+                continue;
+            }
+            seal_plaintext_file(&path, key)?;
+        }
+    }
+    Ok(())
+}
+
+/// 停用加密时把当前槽位资源目录解回明文。
+fn unseal_resource_dirs() -> Result<()> {
+    let key = key_dek()?;
+    for (name, _) in resource_dirs() {
+        let Ok(dir) = storage::slot_subdir(&name) else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let raw =
+                std::fs::read(&path).with_context(|| format!("读取 {} 失败", path.display()))?;
+            if !is_sealed_file(&raw) {
+                continue;
+            }
+            let plain = open_bytes(&key, &raw)?;
+            storage::atomic_write(&path, |file| {
+                use std::io::Write as _;
+                file.write_all(&plain)?;
+                Ok(())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// 资源目录里是否还有明文文件（帮助截图除外）。只读文件头，不整文件解密。
+fn resource_dirs_need_encryption(slot: DataSlot) -> bool {
+    for (name, skip_public) in resource_dirs() {
+        let Ok(dir) = storage::slot_subdir_for(slot, &name) else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let pending = entries.flatten().any(|entry| {
+            let path = entry.path();
+            entry.metadata().map(|meta| meta.is_file()).unwrap_or(false)
+                && (!skip_public || !crate::images::is_public_help_file(&path))
+                && file_head_is_not_sealed(&path)
+        });
+        if pending {
+            return true;
+        }
+    }
+    false
 }
 
 /// 把一个明文文件原地封成密文；已是密文的跳过。失败时保留明文并报错——调用方
@@ -709,7 +802,7 @@ pub(crate) fn slot_needs_encryption(slot: DataSlot) -> bool {
             }
         }
     }
-    false
+    resource_dirs_need_encryption(slot)
 }
 
 /// 库文件头嗅探：`SQLite format 3` 魔数 = 明文库，需要迁移；文件不存在或
@@ -742,6 +835,7 @@ fn file_head_is_not_sealed(path: &Path) -> bool {
 /// 停用的最后一步：把当前槽位的密文数据解回明文（库导出、小文件解封）。
 pub(crate) fn decrypt_slot_files() -> Result<()> {
     migrate_database(&storage::manuscript_db_path()?, Migration::ToPlain)?;
+    unseal_resource_dirs()?;
     for name in SEALED_FILE_NAMES {
         let path = storage::slot_file(name)?;
         if path.is_file() {
@@ -1482,6 +1576,42 @@ mod tests {
         // 幂等：再跑一次不重复加密、不破坏已封文件。
         ensure_slot_encrypted().unwrap();
         assert!(is_sealed_file(&std::fs::read(&styles).unwrap()));
+        drop(dir);
+        reset();
+    }
+
+    /// 启用加密时把用户图片、PDF 插图与 Mermaid 缓存一起密封；随包帮助截图
+    /// 保持明文（诱饵槽缺图时要按字节比对回落）。停用时全部解回明文。
+    #[test]
+    fn ensure_slot_encrypted_seals_user_resources_but_not_public_help() {
+        let dir = use_temp_dir();
+        set_key_handle([7u8; DEK_LEN], true);
+        let images = crate::images::image_dir().unwrap();
+        std::fs::create_dir_all(&images).unwrap();
+        let user = images.join("20260101_扫描件.pdf");
+        std::fs::write(&user, b"%PDF-user").unwrap();
+        let (help_name, help_bytes) = crate::help::content::IMAGES[0];
+        let help = images.join(help_name);
+        std::fs::write(&help, help_bytes).unwrap();
+        let cache = crate::storage::slot_subdir(crate::storage::MERMAID_CACHE_DIR).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        let diagram = cache.join("abc123.svg");
+        std::fs::write(&diagram, b"<svg/>").unwrap();
+
+        assert!(slot_needs_encryption(DataSlot::Real));
+        ensure_slot_encrypted().unwrap();
+        assert!(is_sealed_file(&std::fs::read(&user).unwrap()));
+        assert_eq!(
+            std::fs::read(&help).unwrap(),
+            help_bytes,
+            "公开帮助截图不参与加密"
+        );
+        assert!(is_sealed_file(&std::fs::read(&diagram).unwrap()));
+        assert!(!slot_needs_encryption(DataSlot::Real));
+
+        decrypt_slot_files().unwrap();
+        assert_eq!(std::fs::read(&user).unwrap(), b"%PDF-user");
+        assert!(!is_sealed_file(&std::fs::read(&diagram).unwrap()));
         drop(dir);
         reset();
     }

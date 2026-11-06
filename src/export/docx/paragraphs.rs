@@ -498,7 +498,7 @@ pub(crate) fn red_record_paragraph(
 /// 小图保持原尺寸）；PDF 输出附件说明段落——docx-rs 无法把 PDF 作为图片嵌入。
 pub(crate) fn image_paragraph(alt: &str, src: &str, max_width_twips: usize) -> Option<Paragraph> {
     let path = images::resolve(src).ok()?;
-    let bytes = std::fs::read(&path).ok()?;
+    let bytes = images::read_managed_file(&path).ok()?;
     let file_name = src.rsplit('/').next().unwrap_or(src).to_string();
     let is_pdf = path
         .extension()

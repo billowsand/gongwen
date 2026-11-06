@@ -553,7 +553,7 @@ pub fn import_with_actions(
     let image_dir = crate::images::image_dir()?;
     for (path, bytes) in &images {
         let dest = crate::images::resolve_from_base(&crate::storage::config_dir()?, path)?;
-        if dest.exists() && std::fs::read(&dest)? != *bytes {
+        if dest.exists() && crate::images::read_managed_file(&dest)? != *bytes {
             bail!("图片同名但内容不同，请先处理资源冲突：{path}");
         }
     }
@@ -785,7 +785,8 @@ pub fn import_with_actions(
         for (path, bytes) in &images {
             let dest = crate::images::resolve_from_base(&crate::storage::config_dir()?, path)?;
             if !dest.exists() {
-                std::fs::write(&dest, bytes)?;
+                // 目标机启用加密时按目标槽位密钥重新加密；未启用时写明文。
+                crate::images::write_image_file(&dest, bytes)?;
                 created_files.push(dest);
             }
         }

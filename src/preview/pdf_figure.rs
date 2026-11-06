@@ -98,7 +98,9 @@ fn spawn(path: PathBuf, slot: Slot, ctx: egui::Context) {
 }
 
 fn rasterize(path: &Path) -> Result<egui::ColorImage, String> {
-    let bytes = std::fs::read(path).map_err(|error| format!("无法读取：{error}"))?;
+    // 启用应用锁后 PDF 插图是 AEAD 密文，这里解密后再光栅化。
+    let bytes =
+        crate::images::read_managed_file(path).map_err(|error| format!("无法读取：{error:#}"))?;
     let pdf = Pdf::new(bytes).map_err(|error| format!("PDF 文件结构无法解析：{error:?}"))?;
     let pages = pdf.pages();
     let Some(page) = pages.first() else {

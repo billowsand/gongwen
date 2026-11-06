@@ -27,13 +27,22 @@ const REPORT_PREFIX: &str = "crash-";
 /// 同一次进程里只写第一份：panic 之后连锁出的错误多半只是余波。
 static WRITTEN: AtomicBool = AtomicBool::new(false);
 
-/// 崩溃日志所在目录：`config_dir()/logs/`。
+/// 日志目录名（相对配置目录）；诱饵槽位会映射成 `alt-logs`。
+const LOG_DIR_NAME: &str = "logs";
+
+/// 崩溃日志所在目录：当前槽位的配置目录下 `logs/`。
+///
+/// 走 [`crate::storage::slot_subdir`]：真实槽是 `logs/`，第二密码进入的诱饵槽是
+/// `alt-logs/`。日志里带着程序路径、正文片段与系统信息，诱饵系统必须写自己那一份，
+/// 不能落进真实槽的目录里留下「有人用过这个程序」的痕迹。
 pub fn log_dir() -> Option<PathBuf> {
-    crate::storage::config_dir()
-        .ok()
-        .map(|dir| dir.join("logs"))
+    log_dir_for_slot(crate::storage::current_slot())
 }
 
+/// 按显式槽位算日志目录；不依赖进程当前槽位，便于单测两个槽位都对。
+fn log_dir_for_slot(slot: crate::storage::DataSlot) -> Option<PathBuf> {
+    crate::storage::slot_subdir_for(slot, LOG_DIR_NAME).ok()
+}
 /// 装 panic hook。必须在 `main` 最开头调用，赶在读配置、装字体之前。
 ///
 /// 原来的 hook 照常执行，终端里启动时 stderr 的输出不变。
@@ -221,6 +230,23 @@ mod tests {
         chrono::Local
             .with_ymd_and_hms(2026, 9, 23, 10, 0, second)
             .unwrap()
+    }
+
+    /// 日志目录按槽位映射：诱饵系统写 `alt-logs`，不落进真实槽的 `logs/`。
+    #[test]
+    fn log_dir_is_slot_aware() {
+        use crate::storage::DataSlot;
+        let root = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(root.path().to_path_buf()));
+        assert_eq!(
+            log_dir_for_slot(DataSlot::Real),
+            Some(root.path().join("logs"))
+        );
+        assert_eq!(
+            log_dir_for_slot(DataSlot::Decoy),
+            Some(root.path().join("alt-logs"))
+        );
+        crate::storage::set_test_config_dir(None);
     }
 
     #[test]
