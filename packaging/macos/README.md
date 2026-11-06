@@ -4,7 +4,7 @@
 本文档说明如何在本机或 CI 上把「二进制 + 字体 runtime + Pi 运行时」组装成可安装的
 `.app` / `.dmg`，以及签名、公证、验收与已知限制。
 
-> 状态：macOS 产物目前只做 **arm64**（`macos-14` / Apple Silicon）。x64 的 Intel Mac
+> 状态：macOS 产物目前只做 **arm64**（`macos-15` / Apple Silicon）。x64 的 Intel Mac
 > 可以按本文手动出包（见「arm64 / x64 双包策略」），CI 与 release 暂不覆盖。
 > 应用内导入 `.gwx` 走拖放 / 应用内导入，**不支持双击 .gwx 打开应用**（见下文）。
 
@@ -183,7 +183,7 @@ xcrun notarytool log <submission-id> --keychain-profile gongwen-notary   # 公�
 
 | 架构 | 平台名 | 状态 |
 | --- | --- | --- |
-| Apple Silicon | `darwin-arm64` | CI（`macos-14`）与 release 产出 DMG |
+| Apple Silicon | `darwin-arm64` | CI（`macos-15`）与 release 产出 DMG |
 | Intel | `darwin-x64` | 可在 Intel Mac 上按本文手动出包，CI 未覆盖 |
 
 `package-dmg.sh` 按 `uname -m` 自动取 `darwin-arm64` / `darwin-x64`；DMG 文件名保持
@@ -198,7 +198,7 @@ xcrun notarytool log <submission-id> --keychain-profile gongwen-notary   # 公�
 | `MACOS_SIGN_IDENTITY` | `GONGWEN_MACOS_SIGN_IDENTITY`，Developer ID Application 证书的完整名称 | 走 ad-hoc 签名，不公证，仅供本机测试 |
 | `MACOS_NOTARY_PROFILE` | `GONGWEN_MACOS_NOTARY_PROFILE`，notarytool keychain profile 名 | 跳过公证 |
 
-注意：GitHub 的 `macos-14` runner 是临时机器，**证书本身不会自己出现**。要真正签名，
+注意：GitHub 的 `macos-15` runner 是临时机器，**证书本身不会自己出现**。要真正签名，
 还需要在作业里从 secrets 导入 `.p12` 到临时 keychain（以及写入 notary profile）；
 当前 workflow 只注入上面两个变量、没有证书导入步骤——配置 secrets 之前请先补导入
 步骤，或在证书已预装的 self-hosted runner 上跑。CI 产物在未配置 secrets 时是未签名 /

@@ -155,7 +155,7 @@ CI（buster 作业组装 `linux-arm64` 运行时 + 离线验收 + Pi 的 Rust �
   证书与 Apple 账号的准备见 `packaging/macos/README.md`。
 - `release.yml` 各平台作业都先组装运行时、跑无公网验收，再进入原有打包流程；新增 macOS
   arm64 的 `.dmg`（先只出 arm64，x64 可按同一办法出包）。`ci.yml` 在 Windows、Ubuntu 20.04
-  ARM64 与 `macos-14` 上跑同样的组装 + 验收；Debian buster 作业会组装 `linux-arm64` 运行时
+  ARM64 与 `macos-15` 上跑同样的组装 + 验收；Debian buster 作业会组装 `linux-arm64` 运行时
   并把 `runtime/pi/bin` 加进 PATH，Pi 的进程 / 锁 / 交付 Rust 测试因此真正执行；Linux 与
   Windows 作业另跑 `cargo test --locked --release shipped_pi_runtime_manifest -- --ignored`
   做随包运行时 manifest 的端到端校验。
@@ -419,7 +419,7 @@ Pi 增加两个只读领域工具：`style_list`（按当前文种列出启用�
   1.3 万个文件）；完整安装包会明显变大，增量包只带变化的文件。
 - **Linux / macOS 真机未验收**：Linux 骨架已进 CI（buster 作业组装 `linux-arm64` 运行时 +
   离线验收 + Pi 的 Rust 进程 / 锁 / 交付测试，GLIBC / GLIBCXX 与解释器也在目标架构检查），
-  **真机整链仍待验**；macOS 的运行时组装、离线验收（`lsof`）、打包与 `macos-14` CI 已补，
+  **真机整链仍待验**；macOS 的运行时组装、离线验收（`lsof`）、打包与 `macos-15` CI 已补，
   但尚未在真机和发布环境跑通，签名 / 公证需要证书与 Apple 账号（见
   [`packaging/macos/README.md`](../packaging/macos/README.md)）。本机只真验 Windows x64。
 - **Windows 干净机整链未验收**：安装包在无开发环境机器上的安装 → 启动 → 内网模型 →

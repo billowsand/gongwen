@@ -428,7 +428,7 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   `name = "gongwen-assistant"` 的 `version`。
 - 本机**没有 `pwsh`**，不要调用 `scripts/bump-version.ps1`，手动编辑上述两处。
 - `ci.yml` 在 push `main` 时触发：Windows x64、Linux ARM64（GLIBC 2.28）与 macOS arm64
-  （`macos-14`）三平台跑 fmt / clippy / test；Debian buster 作业会组装 `linux-arm64` 运行时
+  （`macos-15`）三平台跑 fmt / clippy / test；Debian buster 作业会组装 `linux-arm64` 运行时
   并把 `runtime/pi/bin` 加进 PATH，Pi 的进程 / 锁 / 交付 Rust 测试真正执行，Linux 与 Windows
   作业还跑 `cargo test --locked --release shipped_pi_runtime_manifest -- --ignored`；
   另在干净的 Ubuntu 20.04 ARM64 里装 deb 并用 Xvfb 真正启动一次，见 `scripts/smoke-launch-linux.sh`。
