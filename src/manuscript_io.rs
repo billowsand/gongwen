@@ -395,7 +395,7 @@ fn export_zip_ids(
 /// 把选中的稿件按选项导出为 PDF 集合，压缩进一个 zip。
 ///
 /// - 盖章件（`stamped`）：直接取稿件附件里的 PDF；
-/// - 非盖章件（`compiled`）：在临时工作目录写 TeX 并调用本机 TeX 引擎编译。
+/// - 非盖章件（`compiled`）：在进程内用 Typst 排版，直接取得内存 PDF 字节。
 ///
 /// 文件按稿件导出命名主干（不含分钟级时间戳）命名，盖章件在主干后追加
 /// `（盖章）`（同一稿件多个盖章附件依次 `（盖章2）`、`（盖章3）`…）。逐篇
@@ -461,7 +461,7 @@ pub fn export_selected_pdfs(
                 }
             }
             if options.compiled {
-                match compile_record_pdf(&record, &display, &fonts, numbering, &stem) {
+                match compile_record_pdf(&record, &display, &fonts, numbering) {
                     Ok(pdf_bytes) => {
                         let entry = unique_zip_name(&mut used_names, &stem, "pdf");
                         zip.start_file(entry, stored_options)?;
@@ -493,14 +493,13 @@ pub fn export_selected_pdfs(
     result
 }
 
-/// 在临时工作目录编译单篇稿件，返回生成的 PDF 字节；目录用后即删。
+/// 在内存中编译单篇稿件，直接返回 PDF 字节。
 /// 排版失败时视为该篇失败（原因写入汇总，不阻断整批）。
 fn compile_record_pdf(
     record: &ManuscriptRecord,
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
-    stem: &str,
 ) -> Result<Vec<u8>> {
     compile_snapshot_pdf(
         &record.snapshot,
@@ -508,11 +507,10 @@ fn compile_record_pdf(
         display,
         fonts,
         numbering,
-        stem,
     )
 }
 
-/// 按一份行文要素 + 正文排出非盖章件 PDF，返回字节；临时目录用后即删。
+/// 按一份行文要素 + 正文在内存中排出非盖章件 PDF，返回字节。
 /// 活稿行与历史版本快照（送批材料导出）都走这里，版式与单独导出一致。
 pub(crate) fn compile_snapshot_pdf(
     snapshot: &crate::models::DraftInput,
@@ -520,30 +518,16 @@ pub(crate) fn compile_snapshot_pdf(
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
-    stem: &str,
 ) -> Result<Vec<u8>> {
-    // 目录名随机、独占创建（已存在就换一个名字），权限只给本用户；`TempDir`
-    // 析构时整个删掉。可预测的名字在共享的 /tmp 里会被别的用户抢先占用。
-    let dir = tempfile::Builder::new()
-        .prefix("gongwen_pdf_export_")
-        .tempdir()
-        .context("无法创建临时工作目录")?;
-    let result = (|| {
-        let pdf_path = crate::export::write_pdf_for_kind(
-            dir.path(),
-            stem,
-            snapshot,
-            markdown,
-            display,
-            fonts,
-            numbering,
-            &crate::visual_diff::ElementMarks::default(),
-        )?;
-        std::fs::read(&pdf_path).with_context(|| format!("无法读取编译产物 {}", pdf_path.display()))
-    })();
-    // 清理临时目录；清理失败不掩盖编译结果。
-    let _ = dir.close();
-    result
+    crate::export::compile_pdf(
+        snapshot,
+        markdown,
+        display,
+        fonts,
+        numbering,
+        &crate::visual_diff::ElementMarks::default(),
+    )
+    .map(|outcome| outcome.pdf)
 }
 
 /// 新格式必须完整携带活稿和历史版本引用的资源，缺一张图就拒绝导出。

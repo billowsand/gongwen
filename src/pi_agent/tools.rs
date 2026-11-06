@@ -521,9 +521,10 @@ impl ApiResultCache {
             let path = dir.join(API_CACHE_DIR);
             if std::fs::create_dir_all(&path).is_ok() {
                 let file = path.join(format!("{id}.json"));
-                let _ = std::fs::write(
+                let _ = crate::vault::write_path(
                     &file,
-                    serde_json::to_vec(&result.json()).unwrap_or_default(),
+                    "pi",
+                    &serde_json::to_vec(&result.json()).unwrap_or_default(),
                 );
             }
             prune_api_cache_dir(&path);
@@ -553,7 +554,12 @@ impl ApiResultCache {
             return Some(found.clone());
         }
         let dir = self.dir.as_ref()?;
-        let raw = std::fs::read(dir.join(API_CACHE_DIR).join(format!("{id}.json"))).ok()?;
+        let raw = crate::vault::read_path(
+            &dir.join(API_CACHE_DIR).join(format!("{id}.json")),
+            "pi",
+            MAX_CACHED_API_BYTES as u64,
+        )
+        .ok()?;
         let value: Value = serde_json::from_slice(&raw).ok()?;
         let result = CachedApiResult::from_json(value)?;
         if result.id != id {

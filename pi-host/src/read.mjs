@@ -8,7 +8,6 @@
 //!
 //! 最终交付仍由 `submit_document` 读完整文件并独立校验，不用分块结果代替全文。
 
-import fs from "node:fs";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 
@@ -57,7 +56,7 @@ export function createBoundedReadTool({ guard, maxFileBytes = 8 * 1024 * 1024, m
       if (!resolved.ok) throw new Error(resolved.error?.message ?? "读不到文件");
       let text;
       try {
-        text = new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(resolved.value));
+        text = new TextDecoder("utf-8", { fatal: true }).decode(guard.files.readBytes(resolved.value, maxFileBytes));
       } catch (error) {
         throw new Error(`文件不是合法 UTF-8：${error.message}`);
       }

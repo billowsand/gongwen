@@ -84,6 +84,15 @@ fn app_relative(path: &Path) -> Result<PathBuf> {
     let Some(first) = path.components().next() else {
         anyhow::bail!("非法图片路径：空");
     };
+    // 正文只能使用逻辑目录名，由这里映射到当前槽位。显式写 alt-* 会绕过
+    // 映射直接读到另一槽；配置目录命名空间里一律拒绝，外部基准目录不受影响。
+    if first
+        .as_os_str()
+        .to_string_lossy()
+        .starts_with(storage::DECOY_PREFIX)
+    {
+        anyhow::bail!("非法图片路径：不允许显式引用另一数据槽位");
+    }
     if first.as_os_str() == storage::MERMAID_CACHE_DIR {
         // Mermaid 缓存同样是用户正文派生物：按槽位落目录，缺图失败的判定交给
         // 读取方（加密文件解不开时缓存会重新渲染）。
@@ -132,47 +141,54 @@ pub(crate) fn read_managed_file(path: &Path) -> Result<Vec<u8>> {
     read_managed_file_limited(path, crate::file_limits::MAX_IMAGE_BYTES, "资源文件")
 }
 
-/// 带体积上限的 [`read_managed_file`]：先按上限读原始字节，再解密。
+/// 带体积上限的 [`read_managed_file`]：`max_bytes` 始终限制解密后的明文；
+/// 原始读取额外允许一个固定 GWA1 封套，未密封文件仍按原上限拒绝。
 pub(crate) fn read_managed_file_limited(
     path: &Path,
     max_bytes: u64,
     what: &str,
 ) -> Result<Vec<u8>> {
-    let raw = crate::file_limits::read_bytes(path, max_bytes, what)
+    let raw_limit = max_bytes.saturating_add(crate::vault::SEALED_FILE_OVERHEAD as u64);
+    let raw = crate::file_limits::read_bytes(path, raw_limit, what)
         .with_context(|| format!("无法读取{} {}", what, path.display()))?;
     if !crate::vault::is_sealed_file(&raw) {
+        if raw.len() as u64 > max_bytes {
+            return Err(crate::file_limits::too_large(what, max_bytes).into());
+        }
         return Ok(raw);
     }
     let handle = crate::vault::key_handle()
         .with_context(|| format!("{} 已加密，尚未解锁：{}", what, path.display()))?;
-    crate::vault::open_bytes(handle.dek(), &raw).with_context(|| {
+    let plain = crate::vault::open_path_bytes(
+        &handle,
+        path,
+        crate::vault::resource_kind_for_path(path)?,
+        &raw,
+    )
+    .with_context(|| {
         format!(
             "{} 解密失败（密钥不匹配或文件损坏）：{}",
             what,
             path.display()
         )
-    })
+    })?;
+    if plain.len() as u64 > max_bytes {
+        return Err(crate::file_limits::too_large(what, max_bytes).into());
+    }
+    Ok(plain)
 }
 
 /// 写入应用管理的资源文件：有句柄时密封，原子写 + Unix 0600。没有句柄时写明文
 /// （未启用应用锁的系统）；若目标已是密文则拒绝写明文，避免静默降级。
 pub(crate) fn write_managed_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let bytes = match crate::vault::key_handle() {
-        Some(handle) => crate::vault::seal_bytes(handle.dek(), bytes)?,
-        None => {
-            if path.is_file()
-                && std::fs::read(path).is_ok_and(|raw| crate::vault::is_sealed_file(&raw))
-            {
-                anyhow::bail!("{} 已加密但当前未解锁，拒绝以明文覆盖", path.display());
-            }
-            bytes.to_vec()
-        }
+    // 普通模式的样张/临时输出可以位于配置目录外，此时用途不参与封套；
+    // 一旦持有密钥，仍由 GWA2 的配置根与槽位校验拒绝越界写入。
+    let kind = if crate::vault::key_handle().is_some() {
+        crate::vault::resource_kind_for_path(path)?
+    } else {
+        "image"
     };
-    storage::atomic_write(path, |file| {
-        use std::io::Write as _;
-        file.write_all(&bytes)?;
-        Ok(())
-    })
+    crate::vault::write_path(path, kind, bytes)
 }
 
 /// 随包公开的帮助截图（名称与字节都与内置资源一致）：属于公开内容，不做槽位复制，
@@ -622,6 +638,7 @@ mod tests {
     #[test]
     fn managed_resources_are_sealed_and_read_with_the_current_key() {
         let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
         let path = dir.path().join("扫描件.pdf");
         crate::vault::clear_key_handle();
         write_managed_file(&path, b"%PDF-plain").unwrap();
@@ -643,6 +660,55 @@ mod tests {
             "没有密钥不能以明文覆盖密文"
         );
         assert!(crate::vault::is_sealed_file(&std::fs::read(&path).unwrap()));
+        crate::storage::set_test_config_dir(None);
+    }
+
+    #[test]
+    fn managed_resource_limit_counts_plaintext_not_the_sealed_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        let path = dir.path().join("boundary.bin");
+        let plain = vec![42u8; 4096];
+        crate::vault::set_key_handle([12u8; 32], true);
+        write_managed_file(&path, &plain).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            plain.len() as u64 + crate::vault::SEALED_FILE_OVERHEAD as u64
+        );
+        assert_eq!(
+            read_managed_file_limited(&path, plain.len() as u64, "测试资源").unwrap(),
+            plain
+        );
+
+        write_managed_file(&path, &vec![42u8; 4097]).unwrap();
+        assert!(read_managed_file_limited(&path, 4096, "测试资源").is_err());
+        crate::vault::clear_key_handle();
+        std::fs::write(&path, vec![42u8; 4097]).unwrap();
+        assert!(
+            read_managed_file_limited(&path, 4096, "测试资源").is_err(),
+            "额外封套预算不能放宽明文文件的上限"
+        );
+        crate::storage::set_test_config_dir(None);
+    }
+
+    #[test]
+    fn app_resource_paths_reject_explicit_decoy_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        for rel in ["alt-images/secret.png", "alt-mermaid-cache/secret.svg"] {
+            assert!(
+                resolve_from_base(dir.path(), rel).is_err(),
+                "配置目录内不得显式跨槽引用 {rel}"
+            );
+        }
+        crate::storage::set_test_config_dir(None);
+
+        let external = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_from_base(external.path(), "alt-images/example.png").unwrap(),
+            external.path().join("alt-images/example.png"),
+            "外部 Markdown 基准目录不使用应用的槽位保留名"
+        );
     }
 
     #[test]

@@ -35,12 +35,17 @@ pub(super) fn list(dir: &Path) -> Vec<Record> {
 /// Windows 上杀毒软件与索引服务会在文件刚落盘时短暂占住它（移动磁盘、沙箱里更明显），
 /// 这时 `fs::read` 报 `os error 5`。修改记录是刚写完就要读回的，一次共享冲突就把
 /// 快照读失败、甚至把索引读成空表，只能是偶发故障，所以重试几百毫秒。
-fn read_settled(path: &Path) -> std::io::Result<Vec<u8>> {
-    let mut last: Option<io::Error> = None;
+fn read_settled(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let mut last: Option<anyhow::Error> = None;
     for attempt in 0..6u32 {
-        match std::fs::read(path) {
+        match data::load_internal_bytes(path) {
             Ok(bytes) => return Ok(bytes),
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            Err(error)
+                if error
+                    .root_cause()
+                    .downcast_ref::<io::Error>()
+                    .is_some_and(|error| error.kind() == io::ErrorKind::PermissionDenied) =>
+            {
                 std::thread::sleep(std::time::Duration::from_millis(
                     u64::from(attempt) * 20 + 10,
                 ));
@@ -66,9 +71,9 @@ pub(super) fn record(dir: &Path, label: &str) -> anyhow::Result<()> {
         now.format("%Y%m%d-%H%M%S"),
         &uuid::Uuid::new_v4().simple().to_string()[..6]
     );
-    data::save_bytes(
+    data::save_internal_bytes(
         &history.join(format!("{id}.json")),
-        &std::fs::read(&current)?,
+        &data::load_internal_bytes(&current)?,
     )?;
     let mut records = list(dir);
     records.reverse();
@@ -81,7 +86,7 @@ pub(super) fn record(dir: &Path, label: &str) -> anyhow::Result<()> {
     for old in records.drain(..excess) {
         let _ = std::fs::remove_file(history.join(format!("{}.json", old.id)));
     }
-    data::save_json(&index_path(dir), &records)
+    data::save_internal_json(&index_path(dir), &records)
 }
 
 /// 读出某条记录保存的个人层。
@@ -99,6 +104,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn encrypted_history_stores_plaintext_once_and_can_be_restored() {
+        let root = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(root.path().to_path_buf()));
+        crate::vault::set_key_handle([42; 32], true);
+        let dir = data::directory().unwrap();
+        let first = Personal {
+            entries: vec![super::super::table::Entry {
+                code: "abcd".into(),
+                text: "第一版".into(),
+            }],
+            ..Default::default()
+        };
+        data::save_internal_json(&dir.join("tables.json"), &first).unwrap();
+        record(&dir, "加密前快照").unwrap();
+        let second = Personal {
+            entries: vec![super::super::table::Entry {
+                code: "abcd".into(),
+                text: "第二版".into(),
+            }],
+            ..Default::default()
+        };
+        data::save_internal_json(&dir.join("tables.json"), &second).unwrap();
+        record(&dir, "再次修改").unwrap();
+        let records = list(&dir);
+        let historical = load(&dir, &records[1].id).unwrap();
+        assert_eq!(historical.entries[0].text, "第一版");
+        let snapshot = dir.join("history").join(format!("{}.json", records[1].id));
+        assert!(std::fs::read(snapshot).unwrap().starts_with(b"GWA2"));
+        crate::vault::clear_key_handle();
+        crate::storage::set_test_config_dir(None);
+    }
+
+    #[test]
     fn keeps_latest_records_and_loads_them_back() {
         let dir = tempfile::tempdir().unwrap();
         record(dir.path(), "无文件").unwrap();
@@ -111,7 +149,7 @@ mod tests {
                 }],
                 ..Default::default()
             };
-            data::save_json(&dir.path().join("tables.json"), &personal).unwrap();
+            data::save_internal_json(&dir.path().join("tables.json"), &personal).unwrap();
             record(dir.path(), &format!("修改{round}")).unwrap();
         }
         let records = list(dir.path());

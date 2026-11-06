@@ -8,7 +8,6 @@
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::io::Write;
 use std::path::Path;
 
 /// 材料用途。只有 [`Self::Fact`] 与来函可以作为本次事项的事实来源。
@@ -120,11 +119,8 @@ pub(crate) fn write_all(
         let name = format!("{:02}.md", index + 1);
         let relative = format!("input/materials/{name}");
         let path = dir.join(&name);
-        crate::storage::atomic_write(&path, |file| {
-            file.write_all(material.text.as_bytes())?;
-            Ok(())
-        })
-        .map_err(|error| format!("写不出材料《{}》：{error:#}", material.title))?;
+        crate::vault::write_path(&path, "pi", material.text.as_bytes())
+            .map_err(|error| format!("写不出材料《{}》：{error:#}", material.title))?;
         metas.push(PiMaterialMeta {
             file: relative,
             title: material.title.trim().to_string(),
@@ -137,11 +133,8 @@ pub(crate) fn write_all(
     let index =
         serde_json::to_vec_pretty(&metas).map_err(|error| format!("组装材料索引失败：{error}"))?;
     let path = dir.join("index.json");
-    crate::storage::atomic_write(&path, |file| {
-        file.write_all(&index)?;
-        Ok(())
-    })
-    .map_err(|error| format!("写不出材料索引（{}）：{error:#}", path.display()))?;
+    crate::vault::write_path(&path, "pi", &index)
+        .map_err(|error| format!("写不出材料索引（{}）：{error:#}", path.display()))?;
     Ok(metas)
 }
 

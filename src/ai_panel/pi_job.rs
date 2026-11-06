@@ -1630,8 +1630,8 @@ mod tests {
             None,
         )
         .unwrap();
-        // 恢复会校验 Durable 库还在。
-        std::fs::write(&workspace.state, b"sqlite").unwrap();
+        // 恢复会校验 Durable JSONL 目录还在。
+        std::fs::create_dir_all(&workspace.state).unwrap();
         let record = PiRunRecord::start(
             "old-run".into(),
             "old-request".into(),

@@ -14,10 +14,10 @@ use super::PiWorkspace;
 use super::delivery::{PiSelection, safe_work_path, sha256_hex, verify_submission};
 use super::materials::PiMaterialMeta;
 use super::protocol::{
-    HOST_VERSION, HostEvent, InitCapability, InitLimits, InitMessage, InitModel, InitRecovery,
-    InitSelection, InitStrategy, InitTask, InitWorkspace, MAX_CANDIDATE_BYTES, MAX_DELIVERY_BYTES,
-    MAX_EVENTS, MAX_HOST_LINE_BYTES, MAX_MESSAGE_CHARS, MAX_TOTAL_TOOL_CALLS, PROTOCOL_VERSION,
-    PiReportItem, RawQuestion,
+    HOST_VERSION, HostEvent, InitCapability, InitEncryption, InitLimits, InitMessage, InitModel,
+    InitRecovery, InitSelection, InitStrategy, InitTask, InitWorkspace, MAX_CANDIDATE_BYTES,
+    MAX_DELIVERY_BYTES, MAX_EVENTS, MAX_HOST_LINE_BYTES, MAX_MESSAGE_CHARS, MAX_TOTAL_TOOL_CALLS,
+    PROTOCOL_VERSION, PiReportItem, RawQuestion,
 };
 use super::recovery::{PiReceipt, PiRunLog, PiRunStatus, read_receipt, read_snapshot};
 use super::runtime::hidden_command;
@@ -657,6 +657,23 @@ pub(crate) fn run(
         }
     });
 
+    // 只在 stdin 的 init 中交给 host；固定的 KeyHandle 同时固定槽位，后台运行
+    // 期间即使用户切换解锁槽，也不会拿另一槽的 DEK 重封本轮文件。
+    let encryption = match crate::vault::key_handle() {
+        Some(handle) => {
+            let config_root = crate::storage::config_dir()
+                .map_err(|error| format!("读不到 Pi 加密配置目录：{error:#}"))?;
+            Some(InitEncryption {
+                key_hex: handle.dek_hex(),
+                slot: match handle.slot() {
+                    crate::storage::DataSlot::Real => "real",
+                    crate::storage::DataSlot::Decoy => "decoy",
+                },
+                config_root: path_text(&config_root),
+            })
+        }
+        None => None,
+    };
     let init = InitMessage {
         kind: "init",
         protocol: PROTOCOL_VERSION,
@@ -671,6 +688,7 @@ pub(crate) fn run(
             pi_skills: "skills/pi-skills".into(),
             materials: "input/materials".into(),
             delivery: path_text(&job.workspace.run),
+            encryption,
         },
         model: InitModel {
             base_url: job.model.base_url.clone(),
@@ -1516,7 +1534,7 @@ let handled = false;
 const waiters = new Map();
 const emit = (o) => process.stdout.write(JSON.stringify({ ...base(o), ...o }) + "\n");
 let init;
-function base(o) { return { protocol: 3, requestId: init?.requestId ?? "r", runId: init?.runId ?? "u" }; }
+function base(o) { return { protocol: __PROTOCOL_VERSION__, requestId: init?.requestId ?? "r", runId: init?.runId ?? "u" }; }
 const content = "# 成品\n\n正文。\n";
 const sha256 = createHash("sha256").update(content, "utf8").digest("hex");
 const delivery = () => init.workspace.delivery;
@@ -1691,7 +1709,13 @@ rl.on("line", (line) => {
 
     fn fixture(dir: &Path) -> PathBuf {
         let path = dir.join("host-fixture.mjs");
-        std::fs::write(&path, FIXTURE.replace("__HOST_VERSION__", HOST_VERSION)).unwrap();
+        std::fs::write(
+            &path,
+            FIXTURE
+                .replace("__HOST_VERSION__", HOST_VERSION)
+                .replace("__PROTOCOL_VERSION__", &PROTOCOL_VERSION.to_string()),
+        )
+        .unwrap();
         path
     }
 
@@ -1762,7 +1786,7 @@ rl.on("line", (line) => {
             },
             workspace: PiWorkspace {
                 root,
-                state: dir.join("session.sqlite"),
+                state: dir.join("session"),
                 run: dir.to_path_buf(),
                 label: "test/workspace".into(),
             },
@@ -1793,7 +1817,7 @@ rl.on("line", (line) => {
             record: {
                 let workspace = PiWorkspace {
                     root: dir.join("workspace"),
-                    state: dir.join("session.sqlite"),
+                    state: dir.join("session"),
                     run: dir.to_path_buf(),
                     label: "test/workspace".into(),
                 };
@@ -2108,7 +2132,7 @@ rl.on("line", (line) => {
 import readline from "node:readline";
 const rl = readline.createInterface({{ input: process.stdin }});
 let init;
-const emit = (o) => process.stdout.write(JSON.stringify({{ protocol: 3, requestId: init.requestId, runId: init.runId, ...o }}) + "\n");
+const emit = (o) => process.stdout.write(JSON.stringify({{ protocol: {PROTOCOL_VERSION}, requestId: init.requestId, runId: init.runId, ...o }}) + "\n");
 rl.on("line", (line) => {{
   const value = JSON.parse(line);
   if (value.type === "init") {{

@@ -5,11 +5,12 @@
 //! 读允许 input / work / skills / resources，写只允许 work。先不接受 `bash`，因此没有
 //! 子进程可以绕过这层检查。
 
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { ExecutionError, FileError, err, ok } from "@earendil-works/pi-durable/env";
+import { ProtectedFileSystem, plaintextFiles } from "./encrypted-files.mjs";
+
+export { atomicWrite } from "./encrypted-files.mjs";
 
 const MAX_PATH_LENGTH = 4096;
 
@@ -63,7 +64,7 @@ function resolveLinkTarget(target, depth) {
  * 把用户/模型给的路径变成工作区内的真实路径。
  * `mode` 为 `"write"` 时只允许 `work/` 下（不含 `work` 目录本身）。
  */
-export function resolveInside(root, cwd, input, { mode = "read", maxFileBytes = 8 * 1024 * 1024 } = {}) {
+export function resolveInside(root, cwd, input, { mode = "read", maxFileBytes = 8 * 1024 * 1024, files = plaintextFiles } = {}) {
   if (typeof input !== "string" || input.trim() === "") {
     return fileError("invalid", "路径不能为空");
   }
@@ -97,8 +98,8 @@ export function resolveInside(root, cwd, input, { mode = "read", maxFileBytes = 
   }
   if (maxFileBytes > 0) {
     try {
-      const stat = fs.statSync(real);
-      if (stat.isFile() && stat.size > maxFileBytes) {
+      const stat = files.info(real);
+      if (stat.kind === "file" && stat.size > maxFileBytes) {
         return fileError("invalid", `文件超过上限（${stat.size} / ${maxFileBytes} 字节）：${input}`, input);
       }
     } catch (error) {
@@ -111,17 +112,18 @@ export function resolveInside(root, cwd, input, { mode = "read", maxFileBytes = 
 }
 
 export class WorkspaceGuard {
-  constructor(root) {
+  constructor(root, files = plaintextFiles) {
     this.root = fs.realpathSync.native(root);
     this.work = path.join(this.root, "work");
+    this.files = files;
   }
 
   read(input, cwd = this.root, maxFileBytes = 8 * 1024 * 1024) {
-    return resolveInside(this.root, cwd, input, { mode: "read", maxFileBytes });
+    return resolveInside(this.root, cwd, input, { mode: "read", maxFileBytes, files: this.files });
   }
 
   write(input, cwd = this.root, maxFileBytes = 8 * 1024 * 1024) {
-    return resolveInside(this.root, cwd, input, { mode: "write", maxFileBytes });
+    return resolveInside(this.root, cwd, input, { mode: "write", maxFileBytes, files: this.files });
   }
 
   /** 读取提交文件：必须是 work/ 下的普通文件，UTF-8，非空，限体积。 */
@@ -130,11 +132,11 @@ export class WorkspaceGuard {
     if (!resolved.ok) return resolved;
     let stat;
     try {
-      stat = fs.statSync(resolved.value);
+      stat = this.files.info(resolved.value);
     } catch (error) {
       return fileError(error?.code === "ENOENT" ? "not_found" : "invalid", `提交文件不存在：${error.message}`, input);
     }
-    if (!stat.isFile()) {
+    if (stat.kind !== "file") {
       return fileError("invalid", "提交路径不是普通文件", input);
     }
     if (stat.size === 0) {
@@ -145,7 +147,7 @@ export class WorkspaceGuard {
     }
     let text;
     try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(resolved.value));
+      text = new TextDecoder("utf-8", { fatal: true }).decode(this.files.readBytes(resolved.value, maxFileBytes));
     } catch (error) {
       return fileError("invalid", `提交文件读不出来：${error.message}`, input);
     }
@@ -178,7 +180,7 @@ export class WorkspaceGuard {
           walk(checked.value, depth + 1);
         } else if (entry.isFile() && /\.(md|markdown)$/i.test(entry.name)) {
           try {
-            const stat = fs.statSync(checked.value);
+            const stat = this.files.info(checked.value);
             if (stat.size > 0 && stat.size <= maxBytes) {
               candidates.push({ path: checked.value, mtimeMs: stat.mtimeMs, size: stat.size });
             }
@@ -193,7 +195,7 @@ export class WorkspaceGuard {
     const preferred = candidates.find((entry) => path.basename(entry.path).toLowerCase() === "final.md");
     const chosen = preferred ?? candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
     try {
-      const text = fs.readFileSync(chosen.path, "utf8");
+      const text = this.files.readText(chosen.path, maxBytes);
       if (text.trim() === "" || text.includes("\uFFFD")) return undefined;
       return { absolute: chosen.path, relative: path.relative(this.root, chosen.path).replaceAll("\\", "/"), text };
     } catch {
@@ -202,61 +204,23 @@ export class WorkspaceGuard {
   }
 }
 
-/** 原子替换写文件：同目录临时文件 + fsync + rename。 */
-export function atomicWrite(target, content) {
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  const temp = path.join(path.dirname(target), `.${process.pid}-${randomUUID()}.tmp`);
-  let fd;
-  try {
-    fd = fs.openSync(temp, "wx", 0o600);
-    fs.writeFileSync(fd, content);
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-    fd = undefined;
-    // Windows 的杀毒/索引器可能短暂持有目标文件，不删除旧件，只有限重试原子替换。
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        fs.renameSync(temp, target);
-        break;
-      } catch (error) {
-        if (process.platform !== "win32" || !["EPERM", "EACCES", "EBUSY"].includes(error?.code) || attempt >= 4) throw error;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (attempt + 1));
-      }
-    }
-  } catch (error) {
-    if (fd !== undefined) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        // 关闭失败不覆盖原始错误。
-      }
-    }
-    try {
-      fs.unlinkSync(temp);
-    } catch {
-      // 临时文件可能还没创建。
-    }
-    throw error;
-  }
-}
-
 /**
  * 文件工具实际使用的环境。只实现文件工具会调用的方法；其余能力明确报不支持，
  * 不留给调用方一个“看着能用”的空实现。
  */
-export class WorkspaceEnv extends NodeExecutionEnv {
-  constructor({ root, cwd, maxFileBytes = 8 * 1024 * 1024, maxTotalBytes = 64 * 1024 * 1024, maxWorkEntries = 1024 }) {
+export class WorkspaceEnv extends ProtectedFileSystem {
+  constructor({ root, cwd, maxFileBytes = 8 * 1024 * 1024, maxTotalBytes = 64 * 1024 * 1024, maxWorkEntries = 1024, files = plaintextFiles }) {
     // macOS 的临时目录（/var → /private/var）和 Windows 的 8.3 短名会让
     // realpath(root) 与传入的 cwd 字面路径不一致，路径守卫会把正常工作区
     // 误判成“越出工作区”。root 与 cwd 都先真实化，再交给守卫比较。
     const realRoot = fs.realpathSync.native(root);
     const realCwd = cwd ? realpathOfNearest(path.resolve(cwd)) : realRoot;
-    super({ cwd: realCwd });
+    super({ cwd: realCwd, files });
     this.root = realRoot;
     this.maxFileBytes = maxFileBytes;
     this.maxTotalBytes = maxTotalBytes;
     this.maxWorkEntries = maxWorkEntries;
-    this.guard = new WorkspaceGuard(this.root);
+    this.guard = new WorkspaceGuard(this.root, files);
     this.id = `gongwen-pi:${this.root}`;
   }
 
@@ -279,13 +243,13 @@ export class WorkspaceEnv extends NodeExecutionEnv {
         if (++entries > this.maxWorkEntries) throw new Error("工作区文件和目录数量超过上限");
         const full = path.join(entry.parentPath ?? entry.path, entry.name);
         if (entry.isDirectory()) pending.push(full);
-        else if (entry.isFile()) total += fs.statSync(full).size;
+        else if (entry.isFile()) total += this.files.info(full).size;
       }
     }
     let oldBytes = 0;
     if (fs.existsSync(target)) {
-      const stat = fs.statSync(target);
-      if (stat.isFile()) oldBytes = stat.size;
+      const stat = this.files.info(target);
+      if (stat.kind === "file") oldBytes = stat.size;
     }
     for (let current = target; current !== work; current = path.dirname(current)) {
       if (!within(work, current)) throw new Error("写入目标不在 work/ 下");
@@ -361,7 +325,7 @@ export class WorkspaceEnv extends NodeExecutionEnv {
     }
     try {
       this.#checkQuota(resolved.value, bytes);
-      atomicWrite(resolved.value, content);
+      this.files.atomicWrite(resolved.value, content);
       return ok(undefined);
     } catch (error) {
       return fileError("unknown", `写入失败：${error.message}`, p);
@@ -386,8 +350,7 @@ export class WorkspaceEnv extends NodeExecutionEnv {
     const to = this.#write(destination);
     if (!to.ok) return to;
     try {
-      atomicWrite(to.value, fs.readFileSync(from.value));
-      fs.unlinkSync(from.value);
+      this.files.renameFile(from.value, to.value);
       return ok(undefined);
     } catch (error) {
       return fileError("unknown", `移动文件失败：${error.message}`, source);

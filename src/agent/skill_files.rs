@@ -78,7 +78,8 @@ pub(crate) fn user_file(id: &str) -> anyhow::Result<PathBuf> {
 pub(crate) fn disabled_ids() -> Vec<String> {
     skills_dir()
         .ok()
-        .and_then(|dir| std::fs::read_to_string(dir.join(DISABLED_FILE)).ok())
+        .and_then(|dir| crate::vault::read_path(&dir.join(DISABLED_FILE), "skill", 64 * 1024).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok())
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
 }
@@ -93,7 +94,11 @@ pub(crate) fn set_enabled(id: &str, enabled: bool) -> anyhow::Result<()> {
     ids.sort();
     let dir = skills_dir()?;
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join(DISABLED_FILE), serde_json::to_string_pretty(&ids)?)?;
+    crate::vault::write_path(
+        &dir.join(DISABLED_FILE),
+        "skill",
+        serde_json::to_string_pretty(&ids)?.as_bytes(),
+    )?;
     Ok(())
 }
 
@@ -140,7 +145,8 @@ pub(crate) fn save(id: &str, text: &str) -> Result<Vec<String>, String> {
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&file, text).map_err(|e| format!("写入 {} 失败：{e}", file.display()))?;
+    crate::vault::write_path(&file, "skill", text.as_bytes())
+        .map_err(|e| format!("写入 {} 失败：{e:#}", file.display()))?;
     Ok(problems)
 }
 

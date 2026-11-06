@@ -18,7 +18,7 @@ function baseInit(overrides = {}) {
     runId: "run-1",
     workspace: {
       root: process.platform === "win32" ? "C:\\tmp\\gongwen-ws" : "/tmp/gongwen-ws",
-      state: process.platform === "win32" ? "C:\\tmp\\gongwen-state.sqlite" : "/tmp/gongwen-state.sqlite",
+      state: process.platform === "win32" ? "C:\\tmp\\gongwen-state" : "/tmp/gongwen-state",
       delivery: process.platform === "win32" ? "C:\\tmp\\gongwen-run" : "/tmp/gongwen-run",
       current: "input/current.md",
       request: "input/request.md",

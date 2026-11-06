@@ -19,7 +19,7 @@ function fixture() {
   fs.writeFileSync(path.join(root,"input/materials/01.md"),"为推动工作落实，现就有关安排通知如下。各单位明确责任，协同推进，确保各项任务落地见效。");
   fs.writeFileSync(path.join(root,"input/materials/index.json"),"[]");
   fs.writeFileSync(path.join(root,"input/style-guide.json"),JSON.stringify({candidates:[{role:"开头",text:"为推动工作落实",source:"样稿"}]}));
-  const config=validateInit({type:"init",protocol:PROTOCOL_VERSION,requestId:"style-input",runId:"style-run",workspace:{root,delivery:run,state:path.join(run,"session.sqlite")},model:{baseUrl:"http://127.0.0.1:9/v1",modelId:"faux-style",contextWindow:262144,maxTokens:4096},task:{kind:"风格档案",request:"学习风格，不写正文",skill:"gongwen-style-learn",systemDate:"2031-03-16",materials:[{file:"input/materials/01.md",role:"style_sample",bytes:120,title:"样稿",source:"上传样稿"}]}});
+  const config=validateInit({type:"init",protocol:PROTOCOL_VERSION,requestId:"style-input",runId:"style-run",workspace:{root,delivery:run,state:path.join(run,"session")},model:{baseUrl:"http://127.0.0.1:9/v1",modelId:"faux-style",contextWindow:262144,maxTokens:4096},task:{kind:"风格档案",request:"学习风格，不写正文",skill:"gongwen-style-learn",systemDate:"2031-03-16",materials:[{file:"input/materials/01.md",role:"style_sample",bytes:120,title:"样稿",source:"上传样稿"}]}});
   const faux=fauxProvider({provider:"faux-style",models:[{id:"faux-style",contextWindow:262144,maxTokens:4096}]});
   const models=createModels();models.setProvider(faux.provider);
   return {base,root,run,config,faux,models,model:faux.getModel()};

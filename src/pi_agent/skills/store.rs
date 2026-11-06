@@ -123,7 +123,10 @@ pub(crate) fn load_package(name: &str) -> Result<Package, String> {
         if !dir.join("SKILL.md").is_file() {
             return Err(format!("「{name}」缺了 SKILL.md，先在管理页修复或删除。"));
         }
-        Package::read_dir_with(&dir, LIMITS).map_err(|error| format!("{error:#}"))
+        Package::read_dir_with_reader(&dir, LIMITS, |path| {
+            crate::vault::read_path(path, "pi", LIMITS.max_file)
+        })
+        .map_err(|error| format!("{error:#}"))
     } else {
         builtin_package(name)
     }
@@ -174,12 +177,8 @@ pub(crate) fn save_text(name: &str, relative: &str, text: &str) -> Result<(), St
         ));
     }
     let path = destination_with(&dir, &relative, LIMITS).map_err(|error| format!("{error:#}"))?;
-    crate::storage::atomic_write(&path, |file| {
-        use std::io::Write;
-        file.write_all(text.as_bytes())?;
-        Ok(())
-    })
-    .map_err(|error| format!("写不出技能文件（{}）：{error:#}", path.display()))?;
+    crate::vault::write_path(&path, "pi", text.as_bytes())
+        .map_err(|error| format!("写不出技能文件（{}）：{error:#}", path.display()))?;
     super::bump_revision();
     Ok(())
 }
@@ -314,8 +313,7 @@ fn read_disabled_parts() -> (Vec<String>, Vec<String>) {
     if !path.is_file() {
         return (Vec::new(), Vec::new());
     }
-    let bytes = match crate::file_limits::read_bytes(&path, MAX_DISABLED_BYTES, "Pi 技能停用清单")
-    {
+    let bytes = match crate::vault::read_path(&path, "pi", MAX_DISABLED_BYTES) {
         Ok(bytes) => bytes,
         Err(error) => {
             return (
@@ -349,12 +347,9 @@ fn write_disabled(ids: &[String]) -> Result<(), String> {
     ids.sort();
     ids.dedup();
     let path = disabled_path()?;
-    crate::storage::atomic_write(&path, |file| {
-        use std::io::Write;
-        file.write_all(serde_json::to_string_pretty(&ids)?.as_bytes())?;
-        Ok(())
-    })
-    .map_err(|error| format!("写不出技能停用清单（{}）：{error:#}", path.display()))
+    let bytes = serde_json::to_vec_pretty(&ids).map_err(|error| error.to_string())?;
+    crate::vault::write_path(&path, "pi", &bytes)
+        .map_err(|error| format!("写不出技能停用清单（{}）：{error:#}", path.display()))
 }
 
 fn install_new(name: &str, package: &Package) -> Result<(), String> {
@@ -374,8 +369,21 @@ fn install_new(name: &str, package: &Package) -> Result<(), String> {
                 std::fs::create_dir_all(parent)
                     .map_err(|error| format!("建不了技能目录（{}）：{error}", parent.display()))?;
             }
-            std::fs::write(&path, bytes)
-                .map_err(|error| format!("写不出技能文件（{}）：{error}", path.display()))?;
+            // GWA2 的 AAD 绑定最终逻辑路径；暂存目录只是密文的搬运位置，
+            // 不能按 `.staging-*` 路径密封后再改名，否则安装后永远解不开。
+            let final_path = destination_with(&target, relative, LIMITS)
+                .map_err(|error| format!("{error:#}"))?;
+            let protected = match crate::vault::key_handle() {
+                Some(handle) => crate::vault::seal_path_bytes(&handle, &final_path, "pi", bytes)
+                    .map_err(|error| format!("加密技能文件失败：{error:#}"))?,
+                None => bytes.clone(),
+            };
+            crate::storage::atomic_write(&path, |file| {
+                use std::io::Write;
+                file.write_all(&protected)?;
+                Ok(())
+            })
+            .map_err(|error| format!("写不出技能文件（{}）：{error}", path.display()))?;
         }
         std::fs::rename(&staging, &target).map_err(|error| {
             format!(

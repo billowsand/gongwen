@@ -10,15 +10,13 @@
 //!     skills/pi-skills/    本轮启用的标准写作技能完整快照（只读）
 //!     work/                模型的工作文件
 //!     resources/           预留只读资源
-//!   pi/session.sqlite      Durable 数据库，位于模型可读写区域之外
+//!   pi/session/            Durable JSONL 会话，位于模型可读写区域之外
 //! ```
 //!
 //! 工作区默认保留：中断、停止以后仍能查看本次文件。AI 管理页可按稿件只保留最近几轮，
 //! 并清理已接受的旧轮次（见 [`prune_workspaces`]）。数据库也不放进 `workspace/`，
 //! 模型没有路径能读到它。
 
-use anyhow::Context;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::materials::{self, PiMaterialInput, PiMaterialMeta};
@@ -28,7 +26,7 @@ use super::skills::{Catalog, SkillSnapshot};
 pub(crate) struct PiWorkspace {
     /// 模型可见的工作区根目录。
     pub(crate) root: PathBuf,
-    /// Durable 的 SQLite 文件，在 `workspace/` 之外。
+    /// Durable 的 JSONL 会话目录，在 `workspace/` 之外。
     pub(crate) state: PathBuf,
     /// 运行目录（`workspace/` 的上一级）：运行记录、回执、成品快照都在这里。
     pub(crate) run: PathBuf,
@@ -173,7 +171,7 @@ pub(crate) fn prune_workspaces(
 /// `try_lock`；拿不到锁就跳过该目录。锁文件不存在时创建它，
 /// 这样崩溃残留的空锁文件与从未开跑的目录都不影响清理。
 ///
-/// 不用 `host-owner.sqlite` 判断：host 退出后它留在目录里是常态。
+/// 不用 `host-owner.lock` 判断：host 退出后它留在目录里是常态。
 fn lock_for_cleanup(run_dir: &Path) -> Option<std::fs::File> {
     let Ok(lock) = std::fs::OpenOptions::new()
         .create(true)
@@ -220,8 +218,11 @@ impl PiWorkspace {
     pub(crate) fn write_candidate(&self, text: &str) -> Result<(), String> {
         write_text(&self.root.join("input/candidate.md"), text)?;
         let request_path = self.root.join("input/request.md");
-        let mut request = std::fs::read_to_string(&request_path)
-            .map_err(|error| format!("读取本轮要求失败：{error}"))?;
+        let mut request = String::from_utf8(super::recovery::read_bounded(
+            &request_path,
+            super::recovery::MAX_RECORD_BYTES,
+        )?)
+        .map_err(|_| "读取本轮要求失败：不是 UTF-8 文本".to_string())?;
         request.push_str("\n\n## 继续修改未采纳稿\n请读取 input/candidate.md，以此作为本轮修改基准。它不是事实来源；事实仍以 input/current.md、用户要求和事实材料为准。只改选区时，以正式快照中的选区及其外部原文为准。\n");
         write_text(&request_path, &request)
     }
@@ -272,7 +273,7 @@ impl PiWorkspace {
         Ok((
             Self {
                 root,
-                state: state_dir.join("session.sqlite"),
+                state: state_dir.join("session"),
                 run: run_dir,
                 label,
             },
@@ -283,7 +284,7 @@ impl PiWorkspace {
     /// 恢复时重新打开原工作区：路径由 `recovery::resolve_workspace` 校验过。
     pub(crate) fn reopen(root: PathBuf, label: String) -> Result<Self, String> {
         let run = root.parent().ok_or("Pi 工作区没有运行目录")?.to_path_buf();
-        let state = run.join("pi").join("session.sqlite");
+        let state = run.join("pi").join("session");
         Ok(Self {
             root,
             state,
@@ -367,8 +368,10 @@ fn build_run(
         &root.join("input").join("request.md"),
         &request_file.join("\n"),
     )?;
-    crate::skill_pack::write_directory(&root.join("skills"))
-        .map_err(|error| format!("写不出随包技能：{error:#}"))?;
+    crate::skill_pack::write_directory_with(&root.join("skills"), |path, bytes| {
+        crate::vault::write_path(path, "pi", bytes)
+    })
+    .map_err(|error| format!("写不出随包技能：{error:#}"))?;
     std::fs::create_dir_all(state_dir)
         .map_err(|error| format!("建不了 Pi 状态目录（{}）：{error}", state_dir.display()))?;
     Ok(metas)
@@ -385,11 +388,8 @@ fn short_uuid() -> String {
 }
 
 fn write_text(path: &Path, text: &str) -> Result<(), String> {
-    crate::storage::atomic_write(path, |file| {
-        file.write_all(text.as_bytes())
-            .context("写工作区输入文件失败")
-    })
-    .map_err(|error| format!("写工作区输入文件失败（{}）：{error:#}", path.display()))
+    crate::vault::write_path(path, "pi", text.as_bytes())
+        .map_err(|error| format!("写工作区输入文件失败（{}）：{error:#}", path.display()))
 }
 
 #[cfg(test)]
@@ -424,7 +424,7 @@ mod tests {
         std::fs::write(run_dir.join("rust-owner.lock"), b"").unwrap();
         let workspace = PiWorkspace {
             root: run_dir.join("workspace"),
-            state: run_dir.join("pi/session.sqlite"),
+            state: run_dir.join("pi/session"),
             run: run_dir.clone(),
             label: format!("pi/workspaces/doc-test/{name}"),
         };
@@ -477,7 +477,7 @@ mod tests {
     }
 
     /// 清理：删掉旧的已接受轮次，保留最新 N 个、Running 与正被本进程锁住的目录；
-    /// `host-owner.sqlite` 留着不影响删除（host 退出后它是常态）。
+    /// `host-owner.lock` 留着不影响删除（host 退出后它是常态）。
     #[test]
     fn prune_removes_old_accepted_runs_and_keeps_what_is_needed() {
         let (_config, _reset) = isolated_config_dir();
@@ -489,8 +489,8 @@ mod tests {
         let old_b = fake_run(&doc, "run-20260102-000000-bbbbbbbb", PiRunStatus::Accepted);
         let running = fake_run(&doc, "run-20260103-000000-cccccccc", PiRunStatus::Running);
         let hosted = fake_run(&doc, "run-20260104-000000-dddddddd", PiRunStatus::Accepted);
-        // host 退出后 host-owner.sqlite 还留在目录里，是常态，不能当成「正在跑」。
-        std::fs::write(hosted.join("host-owner.sqlite"), b"").unwrap();
+        // host 退出后 host-owner.lock 还留在目录里，是常态，不能当成「正在跑」。
+        std::fs::write(hosted.join("host-owner.lock"), b"").unwrap();
         let newest = fake_run(&doc, "run-20260105-000000-eeeeeeee", PiRunStatus::Accepted);
         // 本进程持着 rust-owner.lock：这一轮正在跑，不能删（它也比最新一轮旧）。
         let locked = fake_run(&doc, "run-20260106-000000-ffffffff", PiRunStatus::Accepted);
@@ -525,10 +525,7 @@ mod tests {
         let (count, freed) = prune_workspaces(1, std::time::Duration::ZERO).unwrap();
         assert_eq!(count, 6, "doc-1 删 4 个、doc-2 删 2 个");
         assert!(freed >= 42, "要回报释放的字节数：{freed}");
-        assert!(
-            !hosted.exists(),
-            "host-owner.sqlite 留着不表示正在跑，应删除"
-        );
+        assert!(!hosted.exists(), "host-owner.lock 留着不表示正在跑，应删除");
         assert!(!newest.exists(), "不在最新 N 个里的已接受轮次应删除");
         assert!(!old_a.exists(), "旧的已接受轮次应删除");
         assert!(!old_b.exists(), "旧的已接受轮次应删除");
@@ -614,6 +611,48 @@ mod tests {
         let (bytes, runs) = workspace_usage().unwrap();
         assert_eq!(runs, 2);
         assert!(bytes >= 14, "应统计到文件字节：{bytes}");
+    }
+
+    #[test]
+    fn encrypted_workspace_writes_gwa2_and_reads_the_same_plaintext() {
+        let (_config, _reset) = isolated_config_dir();
+        crate::vault::set_key_handle([43; 32], true);
+        let skills = super::super::skills::SkillSnapshot::build_builtin(None).unwrap();
+        let materials = vec![PiMaterialInput {
+            title: "内部材料".into(),
+            source: "测试".into(),
+            role: materials::MaterialRole::Fact,
+            text: "材料正文".into(),
+        }];
+        let (workspace, _) = PiWorkspace::prepare_with_snapshot(
+            &base_dir().unwrap(),
+            9,
+            "机密正文",
+            "起草要求",
+            &materials,
+            &skills,
+        )
+        .unwrap();
+        for relative in [
+            "input/current.md",
+            "input/request.md",
+            "input/materials/01.md",
+            "input/skills.json",
+            "skills/gongwen-markdown/SKILL.md",
+        ] {
+            let raw = std::fs::read(workspace.root.join(relative)).unwrap();
+            assert!(raw.starts_with(b"GWA2"), "{relative} 必须密封");
+        }
+        assert!(workspace.read_request().unwrap().contains("起草要求"));
+        assert_eq!(workspace.read_material_texts().unwrap()[0].text, "材料正文");
+        workspace.write_candidate("候选稿").unwrap();
+        assert_eq!(
+            super::super::recovery::read_bounded(&workspace.root.join("input/candidate.md"), 1024,)
+                .unwrap(),
+            "候选稿".as_bytes()
+        );
+        std::fs::create_dir_all(&workspace.state).unwrap();
+        crate::vault::clear_key_handle();
     }
 
     #[test]
@@ -706,7 +745,7 @@ mod tests {
         )
         .unwrap();
         assert!(frozen.contains("一句话写清"), "{frozen}");
-        std::fs::write(&workspace.state, b"sqlite").unwrap();
+        std::fs::create_dir_all(&workspace.state).unwrap();
         let record = super::super::PiRunRecord::start(
             "run-frozen".into(),
             "request-frozen".into(),

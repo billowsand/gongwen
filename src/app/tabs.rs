@@ -306,6 +306,10 @@ impl GongwenApp {
                     mut request,
                     print,
                 } => {
+                    if print && crate::vault::key_handle().is_some() {
+                        self.status = "加密工作区不允许直接打印；请改用「另存并系统打开」，显式导出 PDF 后自行打印。".into();
+                        continue;
+                    }
                     let ctx = ctx.clone();
                     let name = crate::export::safe_filename(&request.title);
                     let name = if name.to_ascii_lowercase().ends_with(".pdf") {

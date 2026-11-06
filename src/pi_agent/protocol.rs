@@ -6,9 +6,9 @@ use super::materials::PiMaterialMeta;
 
 /// 与 `pi-host/src/protocol.mjs` 一一对应。协议升版时必须两边同时改：旧 host 会
 /// 直接拒绝新 init，恢复时也不会拿旧 host 去开原工作区。
-pub(crate) const PROTOCOL_VERSION: u32 = 3;
+pub(crate) const PROTOCOL_VERSION: u32 = 4;
 /// host 版本；运行记录里存一份，恢复时不一致就拒绝在原工作区接着写。
-pub(crate) const HOST_VERSION: &str = "0.3.6";
+pub(crate) const HOST_VERSION: &str = "0.4.0";
 /// 宿主与 Rust 共同对账的领域工具额度：常规上限与分阶段绝对硬上限。
 pub(crate) const MAX_REGULAR_TOOL_CALLS: usize = 60;
 pub(crate) const MAX_TOTAL_TOOL_CALLS: usize = 84;
@@ -66,6 +66,17 @@ pub(crate) struct InitWorkspace {
     pub(crate) materials: String,
     /// 交付回执与成品快照所在的运行目录（绝对路径，必须在工作区之外）。
     pub(crate) delivery: String,
+    /// 加密工作区的固定 DEK、槽位与逻辑路径根；只随 stdin init 传递。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) encryption: Option<InitEncryption>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InitEncryption {
+    pub(crate) key_hex: String,
+    pub(crate) slot: &'static str,
+    pub(crate) config_root: String,
 }
 
 #[derive(Debug, Serialize)]

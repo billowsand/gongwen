@@ -457,6 +457,9 @@ fn wrap_dek(wrap_key: &[u8; KEY_LEN], dek: &[u8; DEK_LEN]) -> Result<String> {
 pub(crate) struct KeyHandle {
     dek: Zeroizing<[u8; DEK_LEN]>,
     db_active: bool,
+    /// 句柄创建时绑定的数据槽位。后台任务复制句柄后，即使全局当前槽位改变，
+    /// 资源 AAD 与路径校验仍固定在原槽位，不能拿新槽位重写旧任务的数据。
+    slot: DataSlot,
 }
 
 impl KeyHandle {
@@ -471,6 +474,10 @@ impl KeyHandle {
 
     pub(crate) fn dek(&self) -> &[u8; DEK_LEN] {
         &self.dek
+    }
+
+    pub(crate) fn slot(&self) -> DataSlot {
+        self.slot
     }
 }
 
@@ -488,6 +495,7 @@ fn clone_handle(handle: &KeyHandle) -> KeyHandle {
     KeyHandle {
         dek: Zeroizing::new(*handle.dek),
         db_active: handle.db_active,
+        slot: handle.slot,
     }
 }
 
@@ -506,6 +514,7 @@ pub(crate) fn set_key_handle(dek: [u8; DEK_LEN], db_active: bool) {
     let handle = Some(KeyHandle {
         dek: Zeroizing::new(dek),
         db_active,
+        slot: storage::current_slot(),
     });
     #[cfg(test)]
     TEST_KEY_HANDLE.with(|cell| *cell.borrow_mut() = handle);
@@ -513,6 +522,17 @@ pub(crate) fn set_key_handle(dek: [u8; DEK_LEN], db_active: bool) {
     if let Ok(mut guard) = KEY_HANDLE.write() {
         *guard = handle;
     }
+}
+
+#[cfg(test)]
+fn set_slot_key_handle(dek: [u8; DEK_LEN], db_active: bool, slot: DataSlot) {
+    TEST_KEY_HANDLE.with(|cell| {
+        *cell.borrow_mut() = Some(KeyHandle {
+            dek: Zeroizing::new(dek),
+            db_active,
+            slot,
+        })
+    });
 }
 
 /// 迁移完成后把句柄切到「按密文开库」。
@@ -542,45 +562,201 @@ pub(crate) fn clear_key_handle() {
 
 // ── 文件 AEAD（config.json、密钥文件等整份加密） ─────────────────────
 
-/// 加密文件的头：魔数 + 版本，明文文件永远不会以这四个字节开头。
+/// GWA1 文件头：魔数 + 版本。只保留给历史数据与锁内部小封套的兼容读取。
 pub(crate) const FILE_MAGIC: &[u8; 4] = b"GWA1";
+/// GWA2 资源封套。与 GWA1 的二进制布局相同，但加密时把槽位、资源用途与逻辑路径
+/// 放进 AAD；同一把 DEK 下互换两个文件也会认证失败。
+pub(crate) const RESOURCE_MAGIC: &[u8; 4] = b"GWA2";
+
+/// 密封文件相对明文增加的固定字节数：魔数、nonce 与认证标签。
+/// 带明文上限的读取要给它留出预算，否则恰好达到上限的原文加密后会读不回来。
+pub(crate) const SEALED_FILE_OVERHEAD: usize = FILE_MAGIC.len() + NONCE_LEN + TAG_LEN;
 
 pub(crate) fn is_sealed_file(bytes: &[u8]) -> bool {
-    bytes.starts_with(FILE_MAGIC)
+    bytes.starts_with(FILE_MAGIC) || bytes.starts_with(RESOURCE_MAGIC)
 }
 
-/// 整份加密：MAGIC ‖ nonce ‖ AEAD(DEK, 明文)。
+pub(crate) fn is_current_resource_file(bytes: &[u8]) -> bool {
+    bytes.starts_with(RESOURCE_MAGIC)
+}
+
+/// 锁内部使用的 GWA1 整份加密：MAGIC ‖ nonce ‖ AEAD(DEK, 明文)。
+/// 应用管理的磁盘资源不要再用它，改用 [`seal_path_bytes`] 写入 GWA2。
 pub(crate) fn seal_bytes(dek: &[u8; DEK_LEN], plain: &[u8]) -> Result<Vec<u8>> {
+    seal_with_magic(dek, FILE_MAGIC, &[], plain)
+}
+
+fn seal_with_magic(
+    dek: &[u8; DEK_LEN],
+    magic: &[u8; 4],
+    aad: &[u8],
+    plain: &[u8],
+) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new(dek.into());
     let nonce = random_nonce()?;
-    let ciphertext = cipher.encrypt(&nonce, plain).context("文件加密失败")?;
-    let mut out = Vec::with_capacity(FILE_MAGIC.len() + NONCE_LEN + ciphertext.len());
-    out.extend_from_slice(FILE_MAGIC);
+    let ciphertext = cipher
+        .encrypt(&nonce, aes_gcm::aead::Payload { msg: plain, aad })
+        .context("文件加密失败")?;
+    let mut out = Vec::with_capacity(magic.len() + NONCE_LEN + ciphertext.len());
+    out.extend_from_slice(magic);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ciphertext);
     Ok(out)
 }
 
-/// 整份解密。不是密封格式、或认证失败，都返回 Err（上层按损坏处理）。
+/// 锁内部 GWA1 解密。GWA2 必须带预期路径上下文，走 [`open_path_bytes`]。
 pub(crate) fn open_bytes(dek: &[u8; DEK_LEN], sealed: &[u8]) -> Result<Vec<u8>> {
+    anyhow::ensure!(sealed.starts_with(FILE_MAGIC), "不是 GWA1 加密文件");
+    open_with_aad(dek, sealed, &[])
+}
+
+fn open_with_aad(dek: &[u8; DEK_LEN], sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
     anyhow::ensure!(is_sealed_file(sealed), "不是加密文件");
-    anyhow::ensure!(
-        sealed.len() >= FILE_MAGIC.len() + NONCE_LEN + TAG_LEN,
-        "加密文件长度不符"
-    );
+    anyhow::ensure!(sealed.len() >= SEALED_FILE_OVERHEAD, "加密文件长度不符");
     let cipher = Aes256Gcm::new(dek.into());
     let nonce = nonce_from(&sealed[FILE_MAGIC.len()..FILE_MAGIC.len() + NONCE_LEN])?;
     cipher
-        .decrypt(&nonce, &sealed[FILE_MAGIC.len() + NONCE_LEN..])
-        .context("文件解密失败（密钥不符或内容损坏）")
+        .decrypt(
+            &nonce,
+            aes_gcm::aead::Payload {
+                msg: &sealed[FILE_MAGIC.len() + NONCE_LEN..],
+                aad,
+            },
+        )
+        .context("文件解密失败（密钥、用途或路径不符，或内容损坏）")
+}
+
+/// GWA2 的 AAD 与 Node host 的 `secure-file.mjs` 保持一致。
+/// 槽位使用中性数字，逻辑路径统一 `/`，诱饵目录的物理 `alt-` 前缀不进入 ID。
+fn resource_aad(slot: DataSlot, kind: &str, logical_id: &str) -> Result<Vec<u8>> {
+    anyhow::ensure!(!kind.is_empty() && kind.len() <= 64, "资源用途标识不合法");
+    anyhow::ensure!(
+        !logical_id.is_empty() && logical_id.len() <= 4096,
+        "资源逻辑路径不合法"
+    );
+    anyhow::ensure!(
+        kind.bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'-'),
+        "资源用途标识只能含小写字母与短横线"
+    );
+    let slot = match slot {
+        DataSlot::Real => "0",
+        DataSlot::Decoy => "1",
+    };
+    Ok(format!("gongwen-resource-v2\0{slot}\0{kind}\0{logical_id}").into_bytes())
+}
+
+/// 从配置目录内的物理路径推出稳定逻辑 ID。真实与诱饵槽有相同逻辑 ID，
+/// 但 AAD 的槽位不同；备份/恢复换目录不会改变 ID。
+pub(crate) fn resource_identity(path: &Path) -> Result<(DataSlot, String)> {
+    let root = storage::config_dir()?;
+    let relative = path
+        .strip_prefix(&root)
+        .with_context(|| format!("资源不在配置目录内：{}", path.display()))?;
+    let mut parts = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(value) => Ok(value.to_string_lossy().into_owned()),
+            _ => bail!("资源逻辑路径含非法组件：{}", path.display()),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(!parts.is_empty(), "资源逻辑路径为空");
+    let slot = if let Some(rest) = parts[0].strip_prefix(storage::DECOY_PREFIX) {
+        parts[0] = rest.to_string();
+        DataSlot::Decoy
+    } else {
+        DataSlot::Real
+    };
+    Ok((slot, parts.join("/")))
+}
+
+pub(crate) fn seal_path_bytes(
+    handle: &KeyHandle,
+    path: &Path,
+    kind: &str,
+    plain: &[u8],
+) -> Result<Vec<u8>> {
+    let (slot, id) = resource_identity(path)?;
+    anyhow::ensure!(slot == handle.slot(), "拒绝使用另一数据槽位的密钥写资源");
+    let aad = resource_aad(slot, kind, &id)?;
+    seal_with_magic(handle.dek(), RESOURCE_MAGIC, &aad, plain)
+}
+
+/// 读取 GWA2 时调用方必须给出预期物理路径与用途；GWA1 旧数据仍可解，交由
+/// 解锁迁移升级为 GWA2。
+pub(crate) fn open_path_bytes(
+    handle: &KeyHandle,
+    path: &Path,
+    kind: &str,
+    sealed: &[u8],
+) -> Result<Vec<u8>> {
+    let (slot, id) = resource_identity(path)?;
+    anyhow::ensure!(slot == handle.slot(), "拒绝用当前槽位读取另一槽位资源");
+    if sealed.starts_with(FILE_MAGIC) {
+        return open_bytes(handle.dek(), sealed);
+    }
+    let aad = resource_aad(slot, kind, &id)?;
+    open_with_aad(handle.dek(), sealed, &aad)
+}
+
+/// 应用管理文件统一写入口：有句柄写 GWA2；无句柄只允许普通工作区。
+/// 目标存在但读不出时同样拒绝，避免把「权限错误」误判成可以明文覆盖。
+pub(crate) fn write_path(path: &Path, kind: &str, plain: &[u8]) -> Result<()> {
+    let bytes = match key_handle() {
+        Some(handle) => seal_path_bytes(&handle, path, kind, plain)?,
+        None => {
+            if path.exists() {
+                let raw = std::fs::read(path)
+                    .with_context(|| format!("无法确认 {} 是否已加密", path.display()))?;
+                anyhow::ensure!(
+                    !is_sealed_file(&raw),
+                    "目标已加密但当前未解锁，拒绝明文覆盖"
+                );
+            }
+            plain.to_vec()
+        }
+    };
+    storage::atomic_write(path, |file| {
+        use std::io::Write as _;
+        file.write_all(&bytes)?;
+        Ok(())
+    })
+}
+
+/// 应用管理文件统一读入口；`max_bytes` 限制解密后的明文，而非封套大小。
+pub(crate) fn read_path(path: &Path, kind: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    let raw = crate::file_limits::read_bytes(
+        path,
+        max_bytes.saturating_add(SEALED_FILE_OVERHEAD as u64),
+        "受保护文件",
+    )?;
+    let plain = if is_sealed_file(&raw) {
+        let handle = key_handle().context("文件已加密，尚未解锁")?;
+        open_path_bytes(&handle, path, kind, &raw)?
+    } else {
+        raw
+    };
+    if plain.len() as u64 > max_bytes {
+        return Err(crate::file_limits::too_large("受保护文件", max_bytes).into());
+    }
+    Ok(plain)
 }
 
 /// 应用锁启用后必须整份密封的文件名单。唯一来源是 [`crate::storage::SEALED_FILE_NAMES`]，
 /// 这里只做转出：解锁迁移、明文嗅探、解封、擦除都必须用同一份，漏一项就是永久明文。
 /// 数据库不在这份名单里（走 SQLCipher 迁移）。
-pub(crate) const SEALED_FILE_NAMES: [&str; 6] = crate::storage::SEALED_FILE_NAMES;
+pub(crate) const SEALED_FILE_NAMES: [&str; 7] = crate::storage::SEALED_FILE_NAMES;
 
 // ── 明文 ⇄ 密文迁移 ─────────────────────────────────────────────────
+
+/// 目录不存在表示没有待迁移内容；其他错误必须上抛，不能把「没读到」当成「已迁完」。
+fn read_dir_if_exists(path: &Path) -> Result<Option<std::fs::ReadDir>> {
+    match std::fs::read_dir(path) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("读取目录 {} 失败", path.display())),
+    }
+}
 
 /// 解锁后为当前槽位做的数据迁移：库不够密文就整体搬进密文库，小文件逐个密封。
 /// 幂等：已是密文就直接返回。任何一步失败返回 Err，由闸门翻译成提示。
@@ -596,23 +772,25 @@ pub(crate) fn ensure_slot_encrypted() -> Result<()> {
     // 接口定义目录（apis/*.openapi.json）与旧接口迁移兜底文件同样是敏感明文：
     // 里有内网地址与参数说明。目录不在 SEALED_FILE_NAMES（是动态文件名），
     // 逐文件密封；启用加密前留下的明文在这里一次迁完。
-    if let Ok(dir) = storage::slot_subdir("apis")
-        && let Ok(entries) = std::fs::read_dir(&dir)
-    {
-        for entry in entries.flatten() {
+    if let Some(entries) = read_dir_if_exists(&storage::slot_subdir("apis")?)? {
+        for entry in entries {
+            let entry = entry.context("读取接口定义目录条目失败")?;
             let path = entry.path();
-            if path.is_file() {
+            if entry
+                .metadata()
+                .with_context(|| format!("读取 {} 元数据失败", path.display()))?
+                .is_file()
+            {
                 seal_plaintext_file(&path, &key)?;
             }
         }
     }
     // `config.json` 的副本（身份迁移前备份）与旧接口 `apis.json.bak`：都在槽位根下。
     // 只处理**当前槽位**的条目，绝不能拿当前 DEK 去封另一个槽的文件。
-    if let Ok(dir) = storage::config_dir()
-        && let Ok(entries) = std::fs::read_dir(&dir)
-    {
+    if let Some(entries) = read_dir_if_exists(&storage::config_dir()?)? {
         let slot = storage::current_slot();
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.context("读取配置目录条目失败")?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if storage::slot_relative_name(&name, slot).is_some_and(|name| {
@@ -625,6 +803,44 @@ pub(crate) fn ensure_slot_encrypted() -> Result<()> {
     // 用户资源：图片、PDF 插图与 Mermaid 缓存整文件 AEAD。帮助截图是随包公开
     // 内容，永远保持明文（诱饵槽缺图时还要按字节比对回落）。
     seal_resource_dirs(&key)?;
+    // Pi（工作区、Durable JSONL、来源、接口缓存、用户技能）、个人词表与诊断日志
+    // 都是逐文件 GWA2，不在退出时打包，也不允许 host 运行期间写明文。
+    for name in ["pi", "ime", "skills", "logs"] {
+        let dir = storage::slot_subdir(name)?;
+        for_each_regular_file(&dir, |path| seal_plaintext_file(path, &key))?;
+    }
+    Ok(())
+}
+
+/// 不跟随链接地遍历应用私有目录。任何目录/条目/元数据错误都 fail-closed；
+/// 文件数设硬上限，避免损坏目录让解锁迁移无限扫描。
+fn for_each_regular_file(root: &Path, visit: impl Fn(&Path) -> Result<()>) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut pending = vec![root.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(dir) = pending.pop() {
+        let Some(entries) = read_dir_if_exists(&dir)? else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("读取 {} 目录条目失败", dir.display()))?;
+            visited += 1;
+            anyhow::ensure!(visited <= 200_000, "私有资源目录条目过多，已停止迁移");
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path)
+                .with_context(|| format!("读取 {} 元数据失败", path.display()))?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                pending.push(path);
+            } else if meta.is_file() {
+                visit(&path)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -639,17 +855,16 @@ fn resource_dirs() -> [(String, bool); 2] {
 /// 把当前槽位资源目录里的明文文件封成密文；已是密文的跳过。公开帮助截图跳过。
 fn seal_resource_dirs(key: &[u8; DEK_LEN]) -> Result<()> {
     for (name, skip_public) in resource_dirs() {
-        let Ok(dir) = storage::slot_subdir(&name) else {
+        let dir = storage::slot_subdir(&name)?;
+        let Some(entries) = read_dir_if_exists(&dir)? else {
             continue;
         };
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.with_context(|| format!("读取 {} 目录条目失败", dir.display()))?;
             let path = entry.path();
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
+            let meta = entry
+                .metadata()
+                .with_context(|| format!("读取 {} 元数据失败", path.display()))?;
             if !meta.is_file() {
                 continue;
             }
@@ -664,19 +879,18 @@ fn seal_resource_dirs(key: &[u8; DEK_LEN]) -> Result<()> {
 
 /// 停用加密时把当前槽位资源目录解回明文。
 fn unseal_resource_dirs() -> Result<()> {
-    let key = key_dek()?;
+    let handle = key_handle().context("停用加密需要当前槽位密钥")?;
     for (name, _) in resource_dirs() {
-        let Ok(dir) = storage::slot_subdir(&name) else {
+        let dir = storage::slot_subdir(&name)?;
+        let Some(entries) = read_dir_if_exists(&dir)? else {
             continue;
         };
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.with_context(|| format!("读取 {} 目录条目失败", dir.display()))?;
             let path = entry.path();
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
+            let meta = entry
+                .metadata()
+                .with_context(|| format!("读取 {} 元数据失败", path.display()))?;
             if !meta.is_file() {
                 continue;
             }
@@ -685,7 +899,7 @@ fn unseal_resource_dirs() -> Result<()> {
             if !is_sealed_file(&raw) {
                 continue;
             }
-            let plain = open_bytes(&key, &raw)?;
+            let plain = open_path_bytes(&handle, &path, resource_kind_for_path(&path)?, &raw)?;
             storage::atomic_write(&path, |file| {
                 use std::io::Write as _;
                 file.write_all(&plain)?;
@@ -697,35 +911,74 @@ fn unseal_resource_dirs() -> Result<()> {
 }
 
 /// 资源目录里是否还有明文文件（帮助截图除外）。只读文件头，不整文件解密。
+/// 这个探测接口只能返回 bool，所以任何 I/O 错误都按「仍需迁移」处理；真正的
+/// 迁移会再次读取并向用户报告具体错误，而不是把目录跳过并宣称加密完成。
 fn resource_dirs_need_encryption(slot: DataSlot) -> bool {
     for (name, skip_public) in resource_dirs() {
-        let Ok(dir) = storage::slot_subdir_for(slot, &name) else {
-            continue;
+        let dir = match storage::slot_subdir_for(slot, &name) {
+            Ok(dir) => dir,
+            Err(_) => return true,
         };
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let entries = match read_dir_if_exists(&dir) {
+            Ok(Some(entries)) => entries,
+            Ok(None) => continue,
+            Err(_) => return true,
         };
-        let pending = entries.flatten().any(|entry| {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => return true,
+            };
             let path = entry.path();
-            entry.metadata().map(|meta| meta.is_file()).unwrap_or(false)
-                && (!skip_public || !crate::images::is_public_help_file(&path))
-                && file_head_is_not_sealed(&path)
-        });
-        if pending {
-            return true;
+            match entry.metadata() {
+                Ok(meta) if meta.is_file() => {}
+                Ok(_) => continue,
+                Err(_) => return true,
+            }
+            if skip_public && crate::images::is_public_help_file(&path) {
+                continue;
+            }
+            if file_head_is_not_sealed(&path) {
+                return true;
+            }
         }
     }
     false
 }
 
-/// 把一个明文文件原地封成密文；已是密文的跳过。失败时保留明文并报错——调用方
-/// （解锁迁移）会把整个槽位判为未完成，下次解锁重试，不能假装成功。
+/// 按逻辑路径给出 AAD 的资源用途。用途与路径都绑定，不能用「图片」密文替换
+/// 同路径形状的 Pi 记录或配置文件。
+pub(crate) fn resource_kind_for_path(path: &Path) -> Result<&'static str> {
+    let (_, id) = resource_identity(path)?;
+    let first = id.split('/').next().unwrap_or_default();
+    Ok(match first {
+        "images" => "image",
+        "mermaid-cache" => "mermaid",
+        "pi" => "pi",
+        "ime" => "ime",
+        "skills" => "skill",
+        "logs" => "log",
+        "apis" => "api",
+        _ => "config",
+    })
+}
+
+/// 把一个文件迁到当前 GWA2；明文与 GWA1 都读取后原子替换，GWA2 保持不变。
+/// 失败时保留原文件并报错，下次解锁继续迁移。
 fn seal_plaintext_file(path: &Path, key: &[u8; DEK_LEN]) -> Result<()> {
     let raw = std::fs::read(path).with_context(|| format!("读取 {} 失败", path.display()))?;
-    if is_sealed_file(&raw) {
+    if is_current_resource_file(&raw) {
         return Ok(());
     }
-    let sealed = seal_bytes(key, &raw)?;
+    let handle = key_handle().context("资源迁移需要固定槽位密钥句柄")?;
+    anyhow::ensure!(handle.dek() == key, "资源迁移密钥上下文发生变化");
+    let kind = resource_kind_for_path(path)?;
+    let plain = if raw.starts_with(FILE_MAGIC) {
+        open_path_bytes(&handle, path, kind, &raw)?
+    } else {
+        raw
+    };
+    let sealed = seal_path_bytes(&handle, path, kind, &plain)?;
     storage::atomic_write(path, |file| {
         use std::io::Write as _;
         file.write_all(&sealed)?;
@@ -733,16 +986,66 @@ fn seal_plaintext_file(path: &Path, key: &[u8; DEK_LEN]) -> Result<()> {
     })
 }
 
-/// 这个槽位在磁盘上是否已有**密文形态**的数据（配置或库）。
+/// 文件是否带密封魔数。这个函数服务于「能否安全当作无加密数据」的探测：
+/// 不存在才是 false；存在但读不出来时保守返回 true，绝不放行重置或明文降级。
+fn sealed_header_at(path: &Path) -> bool {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    let mut head = [0u8; FILE_MAGIC.len()];
+    use std::io::Read as _;
+    match file.read(&mut head) {
+        Ok(n) => is_sealed_file(&head[..n]),
+        Err(_) => true,
+    }
+}
+
+/// 动态文件目录里是否存在密封数据；目录或条目读不出来同样按有数据处理。
+fn directory_has_encrypted_data(path: PathBuf) -> bool {
+    let mut pending = vec![path];
+    let mut visited = 0usize;
+    while let Some(dir) = pending.pop() {
+        let entries = match read_dir_if_exists(&dir) {
+            Ok(Some(entries)) => entries,
+            Ok(None) => continue,
+            Err(_) => return true,
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => return true,
+            };
+            visited += 1;
+            if visited > 200_000 {
+                return true;
+            }
+            let path = entry.path();
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_symlink() => continue,
+                Ok(meta) if meta.is_dir() => pending.push(path),
+                Ok(meta) if meta.is_file() => {
+                    if sealed_header_at(&path) {
+                        return true;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => return true,
+            }
+        }
+    }
+    false
+}
+
+/// 这个槽位在磁盘上是否已有**密文形态**的数据（配置、库或动态资源文件）。
 ///
 /// 用途：锁文件丢失/损坏、或用户选「暂不设置」时，若磁盘上已有加密数据，
 /// 就绝不能以没有密钥的工作区进入——旧实现会在那种状态下把密封配置当损坏
 /// 改名，再以明文写回默认配置（静默降级），并且看起来「数据全没了」。
 /// 这里只做文件头嗅探，不打开数据库。
 pub(crate) fn slot_has_encrypted_data(slot: DataSlot) -> bool {
-    if let Ok(path) = storage::slot_file_for(slot, "config.json")
-        && std::fs::read(&path).is_ok_and(|bytes| is_sealed_file(&bytes))
-    {
+    if storage::slot_file_for(slot, "config.json").is_ok_and(|path| sealed_header_at(&path)) {
         return true;
     }
     if let Ok(path) = storage::slot_file_for(slot, "manuscripts.db")
@@ -752,10 +1055,21 @@ pub(crate) fn slot_has_encrypted_data(slot: DataSlot) -> bool {
         return true;
     }
     // 密钥类小文件也足以证明「这里有过加密工作区」。
-    SEALED_FILE_NAMES.iter().skip(1).any(|name| {
-        storage::slot_file_for(slot, name)
-            .map(|path| std::fs::read(&path).is_ok_and(|bytes| is_sealed_file(&bytes)))
-            .unwrap_or(false)
+    if SEALED_FILE_NAMES
+        .iter()
+        .skip(1)
+        .any(|name| storage::slot_file_for(slot, name).is_ok_and(|path| sealed_header_at(&path)))
+    {
+        return true;
+    }
+    if ["apis", "pi", "ime", "skills", "logs"]
+        .into_iter()
+        .any(|name| storage::slot_subdir_for(slot, name).is_ok_and(directory_has_encrypted_data))
+    {
+        return true;
+    }
+    resource_dirs().into_iter().any(|(name, _)| {
+        storage::slot_subdir_for(slot, &name).is_ok_and(directory_has_encrypted_data)
     })
 }
 
@@ -779,41 +1093,107 @@ pub(crate) fn slot_needs_encryption(slot: DataSlot) -> bool {
         return true;
     }
     // 接口定义目录与旧接口/配置副本：文件名是动态的，逐个嗅探文件头。
-    if let Ok(dir) = storage::slot_file_for(slot, "apis")
-        && let Ok(entries) = std::fs::read_dir(&dir)
-        && entries.flatten().any(|entry| {
-            let path = entry.path();
-            path.is_file() && file_head_is_not_sealed(&path)
-        })
-    {
+    if let Ok(dir) = storage::slot_file_for(slot, "apis") {
+        match read_dir_if_exists(&dir) {
+            Ok(Some(entries)) => {
+                for entry in entries {
+                    let Ok(entry) = entry else {
+                        return true;
+                    };
+                    let path = entry.path();
+                    match entry.metadata() {
+                        Ok(meta) if meta.is_file() && file_head_is_not_sealed(&path) => {
+                            return true;
+                        }
+                        Ok(_) => {}
+                        Err(_) => return true,
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(_) => return true,
+        }
+    }
+    if let Ok(dir) = storage::config_dir() {
+        match read_dir_if_exists(&dir) {
+            Ok(Some(entries)) => {
+                for entry in entries {
+                    let Ok(entry) = entry else {
+                        return true;
+                    };
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if storage::slot_relative_name(&name, slot).is_some_and(|name| {
+                        name.starts_with("config.json.") || name.ends_with("apis.json.bak")
+                    }) && file_head_is_not_sealed(&entry.path())
+                    {
+                        return true;
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(_) => return true,
+        }
+    }
+    if resource_dirs_need_encryption(slot) {
         return true;
     }
-    if let Ok(dir) = storage::config_dir()
-        && let Ok(entries) = std::fs::read_dir(&dir)
-    {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if storage::slot_relative_name(&name, slot).is_some_and(|name| {
-                name.starts_with("config.json.") || name.ends_with("apis.json.bak")
-            }) && file_head_is_not_sealed(&entry.path())
-            {
+    ["pi", "ime", "skills", "logs"].into_iter().any(|name| {
+        storage::slot_subdir_for(slot, name)
+            .map(|dir| tree_needs_migration(&dir))
+            .unwrap_or(true)
+    })
+}
+
+/// 保守探测私有目录：明文、GWA1、读取错误都意味着必须进入迁移流程。
+fn tree_needs_migration(root: &Path) -> bool {
+    if !root.exists() {
+        return false;
+    }
+    let mut pending = vec![root.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(dir) = pending.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => return true,
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { return true };
+            visited += 1;
+            if visited > 200_000 {
+                return true;
+            }
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                return true;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                pending.push(path);
+            } else if meta.is_file() && file_head_is_not_sealed(&path) {
                 return true;
             }
         }
     }
-    resource_dirs_need_encryption(slot)
+    false
 }
 
 /// 库文件头嗅探：`SQLite format 3` 魔数 = 明文库，需要迁移；文件不存在或
 /// 已是密文 = 不需要。读不出文件头按明文对待（迁移会给出明确的损坏错误）。
 fn file_head_is_plaintext_db(path: &Path) -> bool {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
     };
     let mut head = [0u8; 16];
     use std::io::Read as _;
-    let n = file.read(&mut head).unwrap_or(0);
+    let n = match file.read(&mut head) {
+        Ok(n) => n,
+        Err(_) => return true,
+    };
     if n == 0 {
         // 空库：开库时带 key 会按密文惰性创建，没有要搬的数据。
         return false;
@@ -822,27 +1202,48 @@ fn file_head_is_plaintext_db(path: &Path) -> bool {
 }
 
 /// 小文件嗅探：名单内文件存在、头又不是密封魔数 = 还没密封。
+/// 存在但读不出来也按待迁移处理，让实际迁移返回错误，不能静默跳过。
 fn file_head_is_not_sealed(path: &Path) -> bool {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
     };
     let mut head = [0u8; 4];
     use std::io::Read as _;
-    let n = file.read(&mut head).unwrap_or(0);
-    n == 0 || !is_sealed_file(&head[..n])
+    match file.read(&mut head) {
+        Ok(n) => n == 0 || !is_current_resource_file(&head[..n]),
+        Err(_) => true,
+    }
 }
 
 /// 停用的最后一步：把当前槽位的密文数据解回明文（库导出、小文件解封）。
 pub(crate) fn decrypt_slot_files() -> Result<()> {
     migrate_database(&storage::manuscript_db_path()?, Migration::ToPlain)?;
     unseal_resource_dirs()?;
+    let handle = key_handle().context("停用加密需要当前槽位密钥")?;
+    for name in ["pi", "ime", "skills", "logs"] {
+        let dir = storage::slot_subdir(name)?;
+        for_each_regular_file(&dir, |path| {
+            let raw = std::fs::read(path)?;
+            if !is_sealed_file(&raw) {
+                return Ok(());
+            }
+            let plain = open_path_bytes(&handle, path, resource_kind_for_path(path)?, &raw)?;
+            storage::atomic_write(path, |file| {
+                use std::io::Write as _;
+                file.write_all(&plain)?;
+                Ok(())
+            })
+        })?;
+    }
     for name in SEALED_FILE_NAMES {
         let path = storage::slot_file(name)?;
         if path.is_file() {
             let raw =
                 std::fs::read(&path).with_context(|| format!("读取 {} 失败", path.display()))?;
             if is_sealed_file(&raw) {
-                let plain = open_bytes(&key_dek()?, &raw)?;
+                let plain = open_path_bytes(&handle, &path, resource_kind_for_path(&path)?, &raw)?;
                 storage::atomic_write(&path, |file| {
                     use std::io::Write as _;
                     file.write_all(&plain)?;
@@ -1415,6 +1816,71 @@ mod tests {
     }
 
     #[test]
+    fn gwa2_binds_slot_kind_and_logical_path_and_reads_legacy_gwa1() {
+        let dir = use_temp_dir();
+        set_key_handle([7; DEK_LEN], true);
+        let handle = key_handle().unwrap();
+        let path = crate::storage::config_dir()
+            .unwrap()
+            .join("pi/workspaces/doc-1/run-1/workspace/work/final.md");
+        let plain = "机密正文：不得明文落盘".as_bytes();
+        write_path(&path, "pi", plain).unwrap();
+        let sealed = std::fs::read(&path).unwrap();
+        assert!(sealed.starts_with(RESOURCE_MAGIC));
+        assert!(!sealed.windows(plain.len()).any(|part| part == plain));
+        assert_eq!(read_path(&path, "pi", 1024).unwrap(), plain);
+        let other = path.with_file_name("other.md");
+        assert!(open_path_bytes(&handle, &other, "pi", &sealed).is_err());
+        assert!(open_path_bytes(&handle, &path, "log", &sealed).is_err());
+
+        // GWA1 只读兼容；下一次解锁迁移会升级为 GWA2。
+        std::fs::write(&other, seal_bytes(handle.dek(), plain).unwrap()).unwrap();
+        assert_eq!(read_path(&other, "pi", 1024).unwrap(), plain);
+        seal_plaintext_file(&other, handle.dek()).unwrap();
+        assert!(std::fs::read(&other).unwrap().starts_with(RESOURCE_MAGIC));
+
+        let decoy = dir.path().join("alt-pi/workspaces/doc-2/run-2/run.json");
+        // 不改进程级当前槽位：路径本身决定逻辑槽，测试句柄显式绑定诱饵槽，
+        // 避免并行测试里的全局槽位切换干扰其他迁移用例。
+        assert!(seal_path_bytes(&handle, &decoy, "pi", plain).is_err());
+        set_slot_key_handle([8; DEK_LEN], true, DataSlot::Decoy);
+        write_path(&decoy, "pi", plain).unwrap();
+        assert_eq!(read_path(&decoy, "pi", 1024).unwrap(), plain);
+        drop(dir);
+        reset();
+    }
+
+    #[test]
+    fn node_gwa2_fixed_vector_decrypts_in_rust() {
+        let dir = use_temp_dir();
+        let dek: [u8; DEK_LEN] = std::array::from_fn(|index| index as u8);
+        set_key_handle(dek, true);
+        let path = dir.path().join("pi/runs/run-1/final.md");
+        // pi-host/test/encryption.test.mjs：nonce 00..0b，明文为「# 保密正文\n」。
+        let sealed = hex_decode_vec("47574132000102030405060708090a0b642232a458006d9d6bec346d276e72cd4dea0db75b75f3a33f98214e5db4d3").unwrap();
+        let plain = open_path_bytes(&key_handle().unwrap(), &path, "pi", &sealed).unwrap();
+        assert_eq!(plain, "# 保密正文\n".as_bytes());
+        drop(dir);
+        reset();
+    }
+
+    #[test]
+    fn sealed_file_limit_applies_to_plaintext_not_the_envelope() {
+        let dir = use_temp_dir();
+        set_key_handle([9; DEK_LEN], true);
+        let path = crate::storage::slot_subdir("logs")
+            .unwrap()
+            .join("crash-test.log");
+        let plain = vec![b'x'; 1024];
+        write_path(&path, "log", &plain).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 1056);
+        assert_eq!(read_path(&path, "log", 1024).unwrap(), plain);
+        assert!(read_path(&path, "log", 1023).is_err());
+        drop(dir);
+        reset();
+    }
+
+    #[test]
     fn ensure_slot_encrypted_migrates_a_plain_database_and_files() {
         let dir = use_temp_dir();
         let path = plain_database();
@@ -1450,7 +1916,13 @@ mod tests {
         let config = std::fs::read(crate::storage::config_path().unwrap()).unwrap();
         assert!(is_sealed_file(&config));
         assert_eq!(
-            open_bytes(&dek, &config).unwrap(),
+            open_path_bytes(
+                &key_handle().unwrap(),
+                &crate::storage::config_path().unwrap(),
+                "config",
+                &config,
+            )
+            .unwrap(),
             b"{\"output_dir\":\"x\"}"
         );
 
@@ -1642,6 +2114,47 @@ mod tests {
         drop(dir);
         reset();
     }
+    /// 动态资源与接口定义即使没有配置/数据库，也足以证明锁文件后面还有加密数据。
+    #[test]
+    fn encrypted_data_detection_covers_resources_and_api_definitions() {
+        for (name, slot) in [
+            ("images", DataSlot::Real),
+            ("mermaid-cache", DataSlot::Decoy),
+            ("apis", DataSlot::Real),
+        ] {
+            let dir = use_temp_dir();
+            let resource_dir = crate::storage::slot_subdir_for(slot, name).unwrap();
+            std::fs::create_dir_all(&resource_dir).unwrap();
+            std::fs::write(
+                resource_dir.join("sealed.bin"),
+                seal_bytes(&[13u8; DEK_LEN], b"secret").unwrap(),
+            )
+            .unwrap();
+            assert!(
+                slot_has_encrypted_data(slot),
+                "{name} 里的密文必须阻止锁文件丢失后的明文重开"
+            );
+            drop(dir);
+            reset();
+        }
+    }
+
+    /// 资源目录读不出来时必须待迁移并报错，不能跳过目录后宣称加密完成。
+    #[test]
+    fn unreadable_resource_directory_fails_closed() {
+        let dir = use_temp_dir();
+        set_key_handle([14u8; DEK_LEN], true);
+        let images = crate::images::image_dir().unwrap();
+        // 用普通文件占住目录路径：read_dir 会得到确定性的 NotADirectory。
+        std::fs::write(&images, b"not a directory").unwrap();
+
+        assert!(slot_needs_encryption(DataSlot::Real));
+        assert!(ensure_slot_encrypted().is_err());
+        assert_eq!(std::fs::read(&images).unwrap(), b"not a directory");
+        drop(dir);
+        reset();
+    }
+
     /// 迁移真实槽时不能拿真实 DEK 去封诱饵槽的配置副本（反之亦然）。
     #[test]
     fn ensure_slot_encrypted_only_touches_current_slot_copies() {

@@ -767,10 +767,10 @@ pub(crate) fn load_all() -> (Vec<Skill>, Vec<String>) {
 fn load_files() -> (Vec<Skill>, Vec<String>) {
     let mut skills = builtin_skills();
     let mut notes = Vec::new();
-    let Ok(dir) = crate::storage::config_dir() else {
+    let Ok(dir) = crate::storage::slot_subdir("skills") else {
         return (skills, notes);
     };
-    let Ok(entries) = std::fs::read_dir(dir.join("skills")) else {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return (skills, notes);
     };
     let mut user_dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
@@ -784,7 +784,10 @@ fn load_files() -> (Vec<Skill>, Vec<String>) {
         else {
             continue;
         };
-        let Ok(text) = std::fs::read_to_string(&file) else {
+        let Ok(bytes) = crate::vault::read_path(&file, "skill", 16 * 1024 * 1024) else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
             continue;
         };
         let origin = file.display().to_string();

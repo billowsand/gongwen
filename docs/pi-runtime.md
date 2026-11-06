@@ -2,6 +2,8 @@
 
 当前进度、历史执行与退役门槛见 [Pi 现状索引](pi-current-status.md)。本文各阶段版本说明保留当时状态，实际发布版本以 `packaging/pi-runtime.json` 为准。
 
+2026-11-06 安全存储收尾：host 升至 **0.4.0 / 协议 4**。加密工作区中，Rust 与 Node 的 Pi 材料、工作文件、来源、接口缓存、进度、交付和 Durable 会话统一使用 GWA2；Durable 生产状态由 `session.sqlite` 改为 `pi/session/` 下的加密 JSONL。DEK 只经 stdin 的 init 传递。旧协议/旧 host 的中间任务不能续跑，已有交付回执仍可重放。详细边界见 [加密资源全生命周期](encrypted-resource-lifecycle.md)。
+
 2026-11-05 退役审查收尾：host 补丁升至 0.3.6（协议仍为 3），常规领域工具额度 60，分阶段按阶段追加到绝对上限 84；常规任务转分阶段后也可追加，拒绝的调用不占用未发出的额度。Rust/host 与实际握手版本由回归对账。旧 0.3.5 中间任务按既有版本保护不能在原工作区接着写，已有成品仍可查看/取回或从头写。验证与本机运行时状态见 [收尾记录](pi-implementation/retirement-fixes-2026-11-05.md)。
 
 > **2026-11-04 用户确认的 Pi 写作取舍（优先于下文历史方案）。** 新任务按 256K 及以上窗口作为主要使用场景，预算采用实际部署容量，取消未知模型 96K 封顶、材料份数与旧短步骤偏好触发的自动细分；材料优先整篇阅读，超限按大章节/大段切分。每次运行提供当前日期、星期、时区及相关组织背景，`current_date` 可重读实时日期，`vocab_search` 支持职能/简介与所属单位。Pi 不执行事实核查、不生成事实疑点或额外 AI 审校清单；全面审校和政策核查技能退出新任务目录。现有文字复核、格式检查、引用保护、授权表单权限、正文基线及精确撤销保留。旧提案和历史记录权限不变。实现与验收见 [写作上下文首版](pi-implementation/writing-context-v1.md)。
@@ -41,7 +43,7 @@ runtime/pi/
 | 平台 | `win-x64`、`linux-arm64`、`linux-x64`、`darwin-arm64`、`darwin-x64`（macOS 用官方 `.tar.gz`） |
 | Node | `22.22.3`（与本机已验版本一致，不跟随 latest） |
 | `@earendil-works/chord` / `pi-ai` / `pi-durable` | `1.4.0` |
-| host | `0.3.5`，协议 `3` |
+| host | `0.4.0`，协议 `4` |
 | lockfile | `pi-host/package-lock.json` 的 SHA-256 写进 manifest |
 
 官方压缩包与 SHA-256（来源 `https://nodejs.org/download/release/v22.22.3/SHASUMS256.txt`）：
@@ -125,7 +127,7 @@ runtime\pi\node.exe scripts\pi-offline-acceptance.mjs --runtime .\runtime\pi
   `XDG_CONFIG_HOME` / `APPDATA` / `TEMP` 指向临时目录；不继承 `NODE_PATH`、
   `NODE_OPTIONS`、`LD_LIBRARY_PATH` 与任何模型 / 云凭据，不依赖用户缓存；
 - 走完「读技能 → 读材料 → 写文件 → `submit_document`」，校验 `submitted` / `completed`、
-  回执绑定与哈希、`final.md` 快照、Durable `session.sqlite` 已落盘；
+  回执绑定与哈希、`final.md` 快照、Durable `session/` JSONL 目录已落盘且非空；
 - 再用 `recovery: { mode: "resume" }` 启动一次：必须交回同一份成品，且**不再调用模型**。
 
 注意：验收脚本工作区里的技能是**简化夹具**（只验证文件工具与交付链），7 份内置技能
@@ -168,7 +170,7 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
   一律当 `linux-*`：Windows x64 → `win-x64`，Linux arm64 / x64 → `linux-arm64` / `linux-x64`，
   macOS arm64 / x64 → `darwin-arm64` / `darwin-x64`（manifest 的平台名也用 `darwin-*`）；
   未知平台明确报「不支持的系统」，不再误接受一份别的平台的运行时；
-- 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.3.5`、协议 `3` 与配置一致；
+- 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.4.0`、协议 `4` 与配置一致；
 - 在执行 Node 前核对 Node 本身的 SHA-256，并检查依赖锁文件哈希；抽查关键入口
   （`host/main.mjs`、`host/package.json`、三个 Pi 包的 `package.json`）的
   SHA-256；不会每帧遍历 `node_modules`（manifest 只在每次开跑定位时读一次）；
@@ -182,7 +184,7 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 
 ## 六、所有权、恢复与工作区
 
-### 统一策略、分阶段与阶段成果（协议 3，host 0.3.5）
+### 统一策略、分阶段与阶段成果（当前协议 4 / host 0.4.0；策略语义沿用协议 3）
 
 模型能力档案由「测试写作能力」后台动作生成：四次同题自动 / 分阶段合成写作都经生产 Rust Pi 运行链，
 工具源显式绑定到临时 SQLite 知识库 / 稿件库与空风格源。单轮限时 **300 秒**、四轮总计 **15 分钟**，
@@ -238,10 +240,17 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 旧流程长期保留历史兼容：卡片可看 / 可导出，「复制为新 Pi 任务」只搬要求、材料、引用与已确认
 信息到统一入口，旧选区与旧检查点不迁移、也不当作 Pi 检查点。
 
-- 同一轮工作区同时只能有一个 host：host 启动时在运行目录的 `host-owner.sqlite` 上开
-  `BEGIN EXCLUSIVE`（Node 内置 `node:sqlite`），由 SQLite / 操作系统持有文件锁；第二个
-  host 拿到 `SQLITE_BUSY`，返回可读的「另一个窗口正在用」错误，不动数据库。进程死亡
-  由 OS 释放锁，没有永不回收的 `exists` 标记。
+- 加密工作区使用 GWA2（AES-256-GCM）保护 Pi 持久文件，AAD 逐字节为
+  `gongwen-resource-v2\0<slot>\0pi\0<逻辑路径>`；真实/诱饵槽分别绑定 `0`/`1`，逻辑路径
+  相对配置目录并统一用 `/`。Rust 与 Node 共用固定向量回归，跨槽、跨用途或跨路径替换密文会
+  认证失败。DEK 只在 host 启动时随 stdin 的 init 传递，不进 argv、环境变量或日志。
+- Durable 状态是运行目录 `pi/session/` 下的 JSONL；加密追加必须先解密旧内容、在内存拼接后
+  整份原子重写，不能向密文末尾追加明文。旧 `session.sqlite` 只作密封归档，不自动迁移或续跑；
+  旧协议/旧 host 记录仅在有既有交付回执时允许重放，没有回执的中间任务须「从头写」。
+- 同一轮工作区同时只能有一个 host：host 启动时在运行目录的 `host-owner.lock` 上开
+  `BEGIN EXCLUSIVE`（Node 内置 `node:sqlite`），由 SQLite / 操作系统持有文件锁；锁文件只有
+  无行业务无关锁表，不写 runId、pid 或正文。第二个 host 拿到 `SQLITE_BUSY`，返回可读的
+  「另一个窗口正在用」错误，不动数据库。进程死亡由 OS 释放锁，没有永不回收的 `exists` 标记。
 - Rust 在准备运行、等待 host 及写最终状态的整个期间还持有 `rust-owner.lock` 文件锁，
   防止第二个窗口在 host 退出到状态写回的间隙抢同一轮任务。
 - 「接着写」必须启动 host，由 host 在锁内重放交付回执；Rust 不绕过锁直读回执。
@@ -421,7 +430,7 @@ Pi 增加两个只读领域工具：`style_list`（按当前文种列出启用�
 - **manifest 较大**（约 2.6 MB）：启动时解析一次，不在每帧或每个工具调用重复读。
 - **工作区自动清理规则见第六节**：只删已写入正文或超期孤儿目录；其余目录保留以支撑「接着写」，不会无提示整目录回收。
 
-## 风格学习的独立文件交付（host 0.3.5）
+## 风格学习的独立文件交付（当前 host 0.4.0）
 
 设置页通过同一 `PiJob` / `run` / Durable Harness 执行 `gongwen-style-learn`，任务文种标识为“风格档案”。
 风格任务只注册文件、阶段登记及 `submit_style`，不注册正文提交、表单、知识库或写作模型工具。

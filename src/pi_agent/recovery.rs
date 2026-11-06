@@ -8,7 +8,7 @@
 //! receipt.json      host 写的交付回执：成品快照路径、哈希、字节数、摘要
 //! final.md          host 写的成品不可变快照（回执指向它）
 //! sources/index-<哈希>.json 事实来源索引（单项在 sources/items/<哈希>.md）
-//! pi/session.sqlite Durable 数据库
+//! pi/session/       Durable JSONL 会话目录（旧 session.sqlite 只作密封归档）
 //! ```
 //!
 //! 记录只放元数据，不放密钥、模型地址与正文：正文快照在工作区 `input/` 里，
@@ -349,11 +349,8 @@ impl PiRunRecord {
         if bytes.len() as u64 > MAX_RECORD_BYTES {
             return Err("Pi 运行记录超过大小上限，已停止记录。".into());
         }
-        crate::storage::atomic_write(&run_dir.join("run.json"), |file| {
-            std::io::Write::write_all(file, &bytes)?;
-            Ok(())
-        })
-        .map_err(|error| format!("写不出 Pi 运行记录：{error:#}"))
+        crate::vault::write_path(&run_dir.join("run.json"), "pi", &bytes)
+            .map_err(|error| format!("写不出 Pi 运行记录：{error:#}"))
     }
 
     /// 从运行目录读一份记录；坏记录返回可读原因，不 panic。
@@ -391,13 +388,17 @@ impl PiRunRecord {
         if self.workspace != label {
             return Err("这条运行记录指向的工作区与轮次对不上，不能接着写。".into());
         }
-        if self.protocol != PROTOCOL_VERSION {
+        // 协议升级只切断旧 Durable 状态的续跑；已经落盘的交付回执与不可变成品
+        // 仍可经新 host 重放。旧 session.sqlite 不当成 JSONL 打开。
+        let receipt_only = self.receipt.is_some()
+            && (self.status == PiRunStatus::Delivered || self.delivery_rejected);
+        if self.protocol != PROTOCOL_VERSION && !receipt_only {
             return Err(format!(
                 "这一轮是用协议 {} 跑的，当前 host 协议是 {PROTOCOL_VERSION}；不能在原工作区接着写，请「从头写」。",
                 self.protocol
             ));
         }
-        if self.host_version != HOST_VERSION {
+        if self.host_version != HOST_VERSION && !receipt_only {
             return Err(format!(
                 "这一轮用的是 Pi host {}，当前是 {HOST_VERSION}；不能在原工作区接着写，请「从头写」。",
                 self.host_version
@@ -470,7 +471,7 @@ impl PiRunRecord {
     }
 }
 
-/// 工作区快照完整性：正式快照、候选稿、技能与 Durable 数据库。
+/// 工作区快照完整性：正式快照、候选稿、技能与 Durable 会话。
 pub(crate) fn check_workspace_files(
     workspace: &PiWorkspace,
     record: &PiRunRecord,
@@ -508,9 +509,10 @@ pub(crate) fn check_workspace_files(
             }
         }
     }
-    if !workspace.state.is_file() {
+    let legacy_state = workspace.run.join("pi/session.sqlite");
+    if !workspace.state.is_dir() && !legacy_state.is_file() {
         return Err(
-            "这一轮的 Durable 数据库已经不在了，不能接着写；可以点「从头写」重新开始。".into(),
+            "这一轮的 Durable 会话已经不在了，不能接着写；可以点「从头写」重新开始。".into(),
         );
     }
     for relative in [
@@ -832,11 +834,8 @@ pub(crate) fn write_sources(run_dir: &Path, sources: &[String]) -> Result<String
         let hash = sha256_hex_bytes(bytes);
         let path = items.join(format!("{hash}.md"));
         if !path.exists() {
-            crate::storage::atomic_write(&path, |file| {
-                std::io::Write::write_all(file, bytes)?;
-                Ok(())
-            })
-            .map_err(|error| format!("写不出 Pi 事实来源：{error:#}"))?;
+            crate::vault::write_path(&path, "pi", bytes)
+                .map_err(|error| format!("写不出 Pi 事实来源：{error:#}"))?;
         }
         hashes.push(hash);
     }
@@ -849,11 +848,8 @@ pub(crate) fn write_sources(run_dir: &Path, sources: &[String]) -> Result<String
     let hash = sha256_hex_bytes(&bytes);
     let path = dir.join(format!("index-{hash}.json"));
     if !path.exists() {
-        crate::storage::atomic_write(&path, |file| {
-            std::io::Write::write_all(file, &bytes)?;
-            Ok(())
-        })
-        .map_err(|error| format!("写不出 Pi 事实来源索引：{error:#}"))?;
+        crate::vault::write_path(&path, "pi", &bytes)
+            .map_err(|error| format!("写不出 Pi 事实来源索引：{error:#}"))?;
     }
     // 只清理没有索引引用的项文件；索引本身等运行记录指针切换成功后再清
     // （见 [`prune_sources`]），否则“写新索引成功、改指针失败”会删掉仍被
@@ -1020,33 +1016,10 @@ pub(crate) fn read_sources(run_dir: &Path, expected: &str) -> Result<Option<Stri
     Ok(Some(text))
 }
 
-/// 读有上限的文件；超过上限返回中文问题，不先分配任意大的缓冲。
+/// 读有上限的文件；加密资源按明文长度限界，旧明文与 GWA1 仅作兼容读取。
 pub(crate) fn read_bounded(path: &Path, max: u64) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let file =
-        std::fs::File::open(path).map_err(|error| format!("读不到 {}：{error}", path.display()))?;
-    let meta = file
-        .metadata()
-        .map_err(|error| format!("读不到 {}：{error}", path.display()))?;
-    if !meta.is_file() {
-        return Err(format!("{} 不是普通文件。", path.display()));
-    }
-    if meta.len() > max {
-        return Err(format!(
-            "{} 超过读取上限（{} / {} 字节）。",
-            path.display(),
-            meta.len(),
-            max
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(max.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("读不到 {}：{error}", path.display()))?;
-    if bytes.len() as u64 > max {
-        return Err(format!("{} 超过读取上限", path.display()));
-    }
-    Ok(bytes)
+    crate::vault::read_path(path, "pi", max)
+        .map_err(|error| format!("读不到 {}：{error:#}", path.display()))
 }
 
 /// 一轮运行的后台记录。只在 Rust 侧写；host 只写 `receipt.json` 与 `final.md`。
@@ -1380,14 +1353,13 @@ mod tests {
         std::fs::create_dir_all(root.join("input/materials")).unwrap();
         std::fs::create_dir_all(root.join("skills/pi-skills")).unwrap();
         std::fs::create_dir_all(root.join("skills/gongwen-markdown")).unwrap();
-        std::fs::create_dir_all(run.join("pi")).unwrap();
+        std::fs::create_dir_all(run.join("pi/session")).unwrap();
         std::fs::write(root.join("input/current.md"), "正式正文").unwrap();
         std::fs::write(root.join("input/request.md"), "要求：改短").unwrap();
         std::fs::write(root.join("input/materials/index.json"), "[]").unwrap();
-        std::fs::write(run.join("pi/session.sqlite"), b"sqlite").unwrap();
         PiWorkspace {
             root,
-            state: run.join("pi/session.sqlite"),
+            state: run.join("pi/session"),
             run,
             label: "pi/workspaces/doc-1/run-1".into(),
         }
@@ -1467,6 +1439,34 @@ mod tests {
     }
 
     #[test]
+    fn legacy_protocol_can_replay_only_an_existing_delivery_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = workspace(dir.path());
+        let mut record = record(&workspace);
+        record.protocol = PROTOCOL_VERSION - 1;
+        record.host_version = "0.3.6".into();
+        record.status = PiRunStatus::Running;
+        assert!(
+            record
+                .check_resume(&workspace.label, "run-1", "正式正文")
+                .is_err()
+        );
+
+        record.status = PiRunStatus::Delivered;
+        record.receipt = Some(PiReceiptSummary {
+            kind: "document".into(),
+            path: "pi/final.md".into(),
+            sha256: sha256_hex("成品"),
+            bytes: 6,
+            summary: "旧成品".into(),
+            call_id: "call-1".into(),
+        });
+        record
+            .check_resume(&workspace.label, "run-1", "正式正文")
+            .unwrap();
+    }
+
+    #[test]
     fn an_accepted_run_cannot_be_resumed() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = workspace(dir.path());
@@ -1532,9 +1532,11 @@ mod tests {
         assert!(error.contains("快照"), "{error}");
         std::fs::write(workspace.root.join("input/current.md"), "正式正文").unwrap();
         check_workspace_files(&workspace, &record).unwrap();
-        std::fs::remove_file(&workspace.state).unwrap();
+        std::fs::remove_dir_all(&workspace.state).unwrap();
         let error = check_workspace_files(&workspace, &record).unwrap_err();
         assert!(error.contains("Durable"), "{error}");
+        std::fs::write(workspace.run.join("pi/session.sqlite"), b"legacy sqlite").unwrap();
+        check_workspace_files(&workspace, &record).unwrap();
     }
 
     #[test]

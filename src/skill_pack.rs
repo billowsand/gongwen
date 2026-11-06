@@ -82,14 +82,25 @@ pub(crate) fn write_archive(path: &Path) -> Result<()> {
 ///
 /// 只覆盖技能包自己的文件，目录里用户另放的东西不动。
 pub(crate) fn write_directory(parent: &Path) -> Result<PathBuf> {
+    write_directory_with(parent, |target, content| {
+        fs::write(target, content)
+            .with_context(|| format!("无法写入技能文件：{}", target.display()))
+    })
+}
+
+/// 同一份内置技能按调用方指定的受保护写入口展开；Pi 工作区借此写 GWA2，
+/// 用户显式导出仍使用普通明文文件。
+pub(crate) fn write_directory_with(
+    parent: &Path,
+    mut write: impl FnMut(&Path, &[u8]) -> Result<()>,
+) -> Result<PathBuf> {
     let root = parent.join(SKILL_NAME);
     for (relative, content) in FILES {
         let target = root.join(relative);
         if let Some(dir) = target.parent() {
             fs::create_dir_all(dir).with_context(|| format!("无法创建目录：{}", dir.display()))?;
         }
-        fs::write(&target, content)
-            .with_context(|| format!("无法写入技能文件：{}", target.display()))?;
+        write(&target, content.as_bytes())?;
     }
     Ok(root)
 }

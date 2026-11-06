@@ -702,7 +702,25 @@ fn write_transmission_sheets(
     written
 }
 
-/// 排一份 PDF 写到 `path`：研究报告走 `typst::research`，其余文种走公文模板。
+/// 在内存中排一份 PDF：研究报告走 `typst::research`，其余文种走公文模板。
+/// 不写正文 PDF，也不生成《份号清单.txt》等附属文件。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_pdf(
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+    elements: &crate::visual_diff::ElementMarks,
+) -> Result<typst_engine::TypstOutcome> {
+    if input.kind.is_research() {
+        self::typst::research::compile_pdf(input, markdown, numbering)
+    } else {
+        self::typst::compile_pdf(input, markdown, display, fonts, numbering, elements)
+    }
+}
+
+/// 排一份 PDF 写到 `path`；只有用户明确选择的输出文件与份号清单会落盘。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_pdf(
     path: &Path,
@@ -713,23 +731,21 @@ pub(crate) fn write_pdf(
     numbering: &NumberingConfig,
     elements: &crate::visual_diff::ElementMarks,
 ) -> Result<typst_engine::TypstOutcome> {
-    if input.kind.is_research() {
-        self::typst::research::write_pdf(path, input, markdown, numbering)
-    } else {
-        let outcome =
-            self::typst::write_pdf(path, input, markdown, display, fonts, numbering, elements)?;
-        if let Some(roster) = copy_roster(input) {
-            // 清单含份号、主送/抄送/承办单位，和 PDF 同等敏感：原子写 + Unix 0600，
-            // 不能默认 0644 摊在输出目录里。写失败不影响 PDF。
-            let roster_path = path.with_extension("份号清单.txt");
-            let _ = crate::storage::atomic_write(&roster_path, |file| {
-                use std::io::Write as _;
-                file.write_all(roster.as_bytes())?;
-                Ok(())
-            });
-        }
-        Ok(outcome)
+    let outcome = compile_pdf(input, markdown, display, fonts, numbering, elements)?;
+    fs::write(path, &outcome.pdf).with_context(|| format!("无法写入 PDF：{}", path.display()))?;
+    if !input.kind.is_research()
+        && let Some(roster) = copy_roster(input)
+    {
+        // 清单含份号、主送/抄送/承办单位，和 PDF 同等敏感：原子写 + Unix 0600，
+        // 不能默认 0644 摊在输出目录里。写失败不影响 PDF。
+        let roster_path = path.with_extension("份号清单.txt");
+        let _ = crate::storage::atomic_write(&roster_path, |file| {
+            use std::io::Write as _;
+            file.write_all(roster.as_bytes())?;
+            Ok(())
+        });
     }
+    Ok(outcome)
 }
 
 /// 把一份文档排成 PDF，写在 `dir/stem.pdf`，返回 PDF 路径。

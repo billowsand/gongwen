@@ -24,6 +24,7 @@ const INTERNAL_PATH_MARKERS: &[&str] = &[
     "style-guide.json",
     "session.sqlite",
     "host-owner.sqlite",
+    "host-owner.lock",
     "rust-owner.lock",
 ];
 

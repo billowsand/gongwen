@@ -5,10 +5,9 @@
 //! 引文；模型填的「已完成」、路径与偏移一律不采信。登记是幂等的：同一阶段同一单元
 //! 重复提交同一份成果不会产生第二份记录。
 
-import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { atomicWrite } from "./paths.mjs";
+import { plaintextFiles } from "./encrypted-files.mjs";
 
 export const PROGRESS_VERSION = 1;
 export const MAX_RECORDS = 400;
@@ -41,20 +40,20 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function readTextFile(file, maxBytes, allowEmpty = false) {
+function readTextFile(file, maxBytes, allowEmpty = false, files = plaintextFiles) {
   let stat;
   try {
-    stat = fs.statSync(file);
+    stat = files.info(file);
   } catch (error) {
     throw new ProgressError(
       error?.code === "ENOENT" ? "成果文件还没有写出来" : `读不到文件：${error.message}`,
     );
   }
-  if (!stat.isFile()) throw new ProgressError("登记路径不是普通文件");
+  if (stat.kind !== "file") throw new ProgressError("登记路径不是普通文件");
   if (stat.size === 0 && !allowEmpty) throw new ProgressError("成果文件是空的");
   if (stat.size > maxBytes) throw new ProgressError(`文件超过单文件上限（${stat.size} 字节）`);
   try {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(file));
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(files.readBytes(file, maxBytes));
     if (text.trim() === "" && !allowEmpty) throw new ProgressError("成果文件只有空白");
     return text;
   } catch (error) {
@@ -71,15 +70,15 @@ export function identityOf({ guard, workspace, task }) {
   const current = guard.read(workspace.current, guard.root, 8 * 1024 * 1024);
   const request = guard.read(workspace.request, guard.root, 8 * 1024 * 1024);
   const texts = {
-    current: current.ok ? readTextFile(current.value, 8 * 1024 * 1024, true) : "",
-    request: request.ok ? readTextFile(request.value, 8 * 1024 * 1024, true) : "",
+    current: current.ok ? readTextFile(current.value, 8 * 1024 * 1024, true, guard.files) : "",
+    request: request.ok ? readTextFile(request.value, 8 * 1024 * 1024, true, guard.files) : "",
   };
   const materials = (task.materials ?? []).map((material) => ({
     file: material.file,
     sha256: (() => {
       const resolved = guard.read(material.file, guard.root, 8 * 1024 * 1024);
       if (!resolved.ok) throw new ProgressError(`材料身份无法核验：${material.file}`);
-      return sha256(readTextFile(resolved.value, 8 * 1024 * 1024, true));
+      return sha256(readTextFile(resolved.value, 8 * 1024 * 1024, true, guard.files));
     })(),
     role: material.role,
   }));
@@ -100,8 +99,9 @@ function materialIndex(task) {
 }
 
 export class ProgressRegistry {
-  constructor({ deliveryDir, runId, requestId, identity, maxBytes = 8 * 1024 * 1024 }) {
+  constructor({ deliveryDir, runId, requestId, identity, maxBytes = 8 * 1024 * 1024, files = plaintextFiles }) {
     this.file = path.join(deliveryDir, "progress.json");
+    this.files = files;
     this.runId = runId;
     this.requestId = requestId;
     this.identity = identity;
@@ -121,8 +121,8 @@ export class ProgressRegistry {
     const registry = new ProgressRegistry(options);
     let raw;
     try {
-      if (fs.statSync(registry.file).size > registry.maxBytes) throw new ProgressError("阶段成果登记超过大小上限", "progress_too_large");
-      raw = fs.readFileSync(registry.file, "utf8");
+      if (registry.files.info(registry.file).size > registry.maxBytes) throw new ProgressError("阶段成果登记超过大小上限", "progress_too_large");
+      raw = registry.files.readText(registry.file, registry.maxBytes);
     } catch (error) {
       if (error?.code === "ENOENT") return registry;
       if (error instanceof ProgressError) throw error;
@@ -188,7 +188,7 @@ export class ProgressRegistry {
   refresh({ guard, workspace, task }) {
     for (const evidence of this.evidence) {
       const file = guard.read(evidence.path, guard.root, 1024 * 1024);
-      if (!file.ok || sha256(readTextFile(file.value, 1024 * 1024)) !== evidence.sha256) {
+      if (!file.ok || sha256(readTextFile(file.value, 1024 * 1024, false, guard.files)) !== evidence.sha256) {
         throw new ProgressError("知识库/稿件库工具快照已被改动，不能作为原工具返回继续使用", "progress_identity_mismatch");
       }
     }
@@ -233,14 +233,14 @@ export class ProgressRegistry {
     if (!resolved.ok) return resolved.error?.message ?? "成果文件已不在工作区";
     let stat;
     try {
-      stat = fs.statSync(resolved.value);
+      stat = guard.files.info(resolved.value);
     } catch {
       return "成果文件已被删除";
     }
-    if (!stat.isFile()) return "成果路径已不是普通文件";
+    if (stat.kind !== "file") return "成果路径已不是普通文件";
     if (stat.size !== record.bytes) return "成果文件已被改动（字节数不同）";
     try {
-      const text = fs.readFileSync(resolved.value, "utf8");
+      const text = guard.files.readText(resolved.value, this.maxBytes);
       if (sha256(text) !== record.sha256) return "成果文件已被改动（哈希不同）";
     } catch {
       return "成果文件读不出来";
@@ -250,7 +250,7 @@ export class ProgressRegistry {
       if (!sourcePath.ok) return `依据文件已不可读：${source.path}`;
       let text;
       try {
-        text = fs.readFileSync(sourcePath.value, "utf8");
+        text = guard.files.readText(sourcePath.value, this.maxBytes);
       } catch {
         return `依据文件读不出来：${source.path}`;
       }
@@ -286,7 +286,7 @@ export class ProgressRegistry {
     if (!relative.startsWith("work/")) {
       throw new ProgressError("阶段成果只能放在 work/ 下");
     }
-    const text = readTextFile(resolved.value, maxFileBytes);
+    const text = readTextFile(resolved.value, maxFileBytes, false, guard.files);
     const hash = sha256(text);
     const materials = task.materials ?? [];
     const byFile = new Map(materials.map((material) => [material.file, material]));
@@ -302,7 +302,7 @@ export class ProgressRegistry {
       if (!opened.ok) throw new ProgressError(`依据文件读不到：${sourcePath}`);
       let sourceText;
       try {
-        sourceText = readTextFile(opened.value, maxFileBytes, true);
+        sourceText = readTextFile(opened.value, maxFileBytes, true, guard.files);
       } catch (error) {
         throw new ProgressError(`依据文件读不出来：${error.message}`);
       }
@@ -481,7 +481,7 @@ export class ProgressRegistry {
     const relative = `input/evidence/${hash}.md`;
     const resolved = guard.read(relative, guard.root, 1024 * 1024);
     if (!resolved.ok) throw new ProgressError("工具资料快照路径不安全");
-    atomicWrite(resolved.value, Buffer.from(text, "utf8"));
+    guard.files.atomicWrite(resolved.value, Buffer.from(text, "utf8"));
     this.evidence.push({ path: relative, name, sha256: hash });
     this.persist();
   }
@@ -513,7 +513,7 @@ export class ProgressRegistry {
     if (bytes.length > this.maxBytes) {
       throw new ProgressError("阶段成果登记超过大小上限", "progress_too_large");
     }
-    atomicWrite(this.file, bytes);
+    this.files.atomicWrite(this.file, bytes);
   }
 }
 

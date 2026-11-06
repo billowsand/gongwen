@@ -4,7 +4,6 @@
 //! 裁剪；每一步都由同一套 Durable Harness 执行，中间成果只能经 `record_progress`
 //! 由宿主核验后登记，最终仍必须 `submit_document` / `finish_report`。
 
-import fs from "node:fs";
 import { chunkChars } from "./budget.mjs";
 import { MAX_QUOTE_CHARS, ProgressError } from "./progress.mjs";
 import { isStyleTask } from "./style.mjs";
@@ -80,7 +79,7 @@ export function materialRanges(text, maxChars) {
 function readMaterial(guard, file, maxFileBytes) {
   const resolved = guard.read(file, guard.root, maxFileBytes);
   if (!resolved.ok) throw new Error(`读不到材料 ${file}：${resolved.error?.message ?? "未知错误"}`);
-  return fs.readFileSync(resolved.value, "utf8");
+  return guard.files.readText(resolved.value, maxFileBytes);
 }
 
 function roleLabel(role) {

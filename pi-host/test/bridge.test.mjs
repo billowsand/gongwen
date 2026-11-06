@@ -39,7 +39,7 @@ function init(overrides = {}) {
     protocol: PROTOCOL_VERSION,
     requestId: "req-1",
     runId: "run-1",
-    workspace: { root: "C:\\work", state: "C:\\state\\session.sqlite", delivery: "C:\\run" },
+    workspace: { root: "C:\\work", state: "C:\\state\\session", delivery: "C:\\run" },
     model: {
       baseUrl: "http://127.0.0.1:1234/v1",
       apiKey: "sk-test",

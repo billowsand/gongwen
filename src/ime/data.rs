@@ -11,6 +11,7 @@ pub(super) fn directory() -> anyhow::Result<PathBuf> {
 
 /// 同目录临时文件替换，避免失败时把已有词表截断。写入与替换交给
 /// [`crate::storage::atomic_write`]：同目录暂存 + 刷盘 + 原子改名，Unix 下文件是 0600。
+/// 用户显式选择的导出位置：始终写明文，由应用层先做明文输出确认。
 pub(super) fn save_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     crate::storage::atomic_write(path, |file| {
         use std::io::Write as _;
@@ -18,6 +19,25 @@ pub(super) fn save_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         Ok(())
     })
 }
+
+/// 配置目录内的个人词表：解锁后写 GWA2，不能沿用显式导出的明文出口。
+pub(super) fn save_internal_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    crate::vault::write_path(path, "ime", bytes)
+}
+
+pub(super) fn save_internal_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
+    save_internal_bytes(path, &serde_json::to_vec_pretty(value)?)
+}
+
+pub(super) fn load_internal_bytes(path: &Path) -> anyhow::Result<Vec<u8>> {
+    crate::vault::read_path(path, "ime", crate::file_limits::MAX_TEXT_BYTES)
+}
+
+pub(super) fn load_internal_text(path: &Path) -> anyhow::Result<String> {
+    let bytes = load_internal_bytes(path)?;
+    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{} 不是 UTF-8 文本", path.display()))
+}
+
 pub(super) fn save_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
     save_bytes(path, &serde_json::to_vec_pretty(value)?)
 }
@@ -49,7 +69,12 @@ pub(super) fn load_base() -> anyhow::Result<Vec<super::table::Entry>> {
     paths.push(dir.join("yinxing/flypy-yinxing.txt"));
     for path in paths {
         if path.is_file() {
-            let parsed = super::table::parse(&crate::text_file::read_to_string(&path)?, false);
+            let text = if path.starts_with(&dir) {
+                load_internal_text(&path)?
+            } else {
+                crate::text_file::read_to_string(&path)?
+            };
+            let parsed = super::table::parse(&text, false);
             anyhow::ensure!(
                 !parsed.entries.is_empty(),
                 "基础词表没有有效记录：{}",
@@ -71,7 +96,7 @@ pub(super) fn save_base(entries: &[super::table::Entry]) -> anyhow::Result<()> {
         *position += 1;
         text.push_str(&format!("{},{}={}\n", entry.code, position, entry.text));
     }
-    save_bytes(&directory()?.join("base.txt"), text.as_bytes())
+    save_internal_bytes(&directory()?.join("base.txt"), text.as_bytes())
 }
 
 #[cfg(test)]

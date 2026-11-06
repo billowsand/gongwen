@@ -8,10 +8,9 @@
 //! 回执体积有硬上限：清单最多 100 条，整份序列化后不得超过 [`RECEIPT_MAX_BYTES`]，
 //! 超出的条目从尾部舍弃并标注 `omitted`，Rust 侧的读取上限比它大一倍。
 
-import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { atomicWrite } from "./paths.mjs";
+import { plaintextFiles } from "./encrypted-files.mjs";
 
 export const RECEIPT_VERSION = 1;
 /** 回执整份上限（写的这一侧）。Rust 读的上限是它的两倍。 */
@@ -40,24 +39,24 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function writeJson(target, value) {
+function writeJson(target, value, files) {
   const bytes = Buffer.from(JSON.stringify(value), "utf8");
   if (bytes.length > RECEIPT_MAX_BYTES) {
     throw new DeliveryError("交付回执超过大小上限，已拒绝交付", "receipt_too_large");
   }
-  atomicWrite(target, bytes);
+  files.atomicWrite(target, bytes);
 }
 
 /**
  * 写正文交付：`final.md` 是调用时的固定内容（不是之后文件的样子），`receipt.json`
  * 绑定 runId、requestId、路径、字节数、哈希、摘要与调用标识。
  */
-export function writeDocumentReceipt(deliveryDir, { runId, requestId, relative, content, sha256, bytes, summary, callId, kind = "document" }) {
+export function writeDocumentReceipt(deliveryDir, { runId, requestId, relative, content, sha256, bytes, summary, callId, kind = "document", files = plaintextFiles }) {
   if (typeof deliveryDir !== "string" || deliveryDir === "") {
     throw new DeliveryError("缺少交付目录，已拒绝交付", "receipt_no_dir");
   }
   if (!["document", "style"].includes(kind)) throw new DeliveryError("不支持的文件产物类型", "receipt_kind");
-  atomicWrite(path.join(deliveryDir, kind === "style" ? "final.json" : "final.md"), content);
+  files.atomicWrite(path.join(deliveryDir, kind === "style" ? "final.json" : "final.md"), content);
   const receipt = {
     version: RECEIPT_VERSION,
     runId,
@@ -71,7 +70,7 @@ export function writeDocumentReceipt(deliveryDir, { runId, requestId, relative, 
     items: [],
     at: nowIso(),
   };
-  writeJson(path.join(deliveryDir, "receipt.json"), receipt);
+  writeJson(path.join(deliveryDir, "receipt.json"), receipt, files);
   return receipt;
 }
 
@@ -79,7 +78,7 @@ export function writeDocumentReceipt(deliveryDir, { runId, requestId, relative, 
  * 写清单回执。条目按顺序装到写上限为止，剩下的计入 `omitted`；顺序与模型交的一致，
  * 不静默改变标题。
  */
-export function writeReportReceipt(deliveryDir, { runId, requestId, summary, items, callId }) {
+export function writeReportReceipt(deliveryDir, { runId, requestId, summary, items, callId, files = plaintextFiles }) {
   if (typeof deliveryDir !== "string" || deliveryDir === "") {
     throw new DeliveryError("缺少交付目录，已拒绝交付", "receipt_no_dir");
   }
@@ -115,26 +114,26 @@ export function writeReportReceipt(deliveryDir, { runId, requestId, summary, ite
     receipt.items.push(item);
     used += size;
   }
-  writeJson(path.join(deliveryDir, "receipt.json"), receipt);
+  writeJson(path.join(deliveryDir, "receipt.json"), receipt, files);
   return receipt;
 }
 
 /** 校验读回的回执（恢复时先看它，有就直接交回，不再启动模型）。 */
-export function readReceipt(deliveryDir, runId) {
+export function readReceipt(deliveryDir, runId, files = plaintextFiles) {
   const file = path.join(deliveryDir, "receipt.json");
   let stat;
   try {
-    stat = fs.statSync(file);
+    stat = files.info(file);
   } catch (error) {
     if (error?.code === "ENOENT") return undefined;
     throw new DeliveryError(`读不到交付回执：${error.message}`, "receipt_unreadable");
   }
-  if (!stat.isFile() || stat.size > RECEIPT_MAX_BYTES * 2) {
+  if (stat.kind !== "file" || stat.size > RECEIPT_MAX_BYTES * 2) {
     throw new DeliveryError("交付回执超过大小上限，已拒绝", "receipt_too_large");
   }
   let receipt;
   try {
-    receipt = JSON.parse(fs.readFileSync(file, "utf8"));
+    receipt = JSON.parse(files.readText(file, RECEIPT_MAX_BYTES * 2));
   } catch (error) {
     throw new DeliveryError(`交付回执读不出来：${error.message}`, "receipt_corrupt");
   }
@@ -148,11 +147,11 @@ export function readReceipt(deliveryDir, runId) {
     const final = path.join(deliveryDir, receipt.kind === "style" ? "final.json" : "final.md");
     let text;
     try {
-      const size = fs.statSync(final).size;
+      const size = files.info(final).size;
       if (!Number.isSafeInteger(receipt.bytes) || receipt.bytes < 1 || size > 8 * 1024 * 1024) {
         throw new Error("成品快照超过读取上限或回执字节数不合法");
       }
-      text = fs.readFileSync(final, "utf8");
+      text = files.readText(final, 8 * 1024 * 1024);
     } catch (error) {
       throw new DeliveryError(`成品快照读不出来：${error.message}`, "receipt_snapshot");
     }
@@ -171,21 +170,21 @@ export function readReceipt(deliveryDir, runId) {
 }
 
 /** 回执指向的不可变成品全文。 */
-export function readReceiptDocument(deliveryDir, receipt) {
+export function readReceiptDocument(deliveryDir, receipt, files = plaintextFiles) {
   if (!["document", "style"].includes(receipt?.kind)) {
     throw new DeliveryError("这份回执不是正文交付", "receipt_kind");
   }
   const file = path.join(deliveryDir, receipt.kind === "style" ? "final.json" : "final.md");
-  if (fs.statSync(file).size > 8 * 1024 * 1024) {
+  if (files.info(file).size > 8 * 1024 * 1024) {
     throw new DeliveryError("成品快照超过读取上限", "receipt_snapshot");
   }
-  return fs.readFileSync(file, "utf8");
+  return files.readText(file, 8 * 1024 * 1024);
 }
 
 /** 回执给 Rust 的事件（正文 / 清单两种形态）。 */
-export function receiptEvents(deliveryDir, receipt) {
+export function receiptEvents(deliveryDir, receipt, files = plaintextFiles) {
   if (["document", "style"].includes(receipt.kind)) {
-    const content = readReceiptDocument(deliveryDir, receipt);
+    const content = readReceiptDocument(deliveryDir, receipt, files);
     return [
       {
         type: "submitted",

@@ -38,7 +38,7 @@ impl Ime {
             bytes.len() as u64 <= crate::file_limits::MAX_TEXT_BYTES,
             "个人词表超过 64 MB 上限"
         );
-        data::save_bytes(&dir.join("tables.json"), &bytes)?;
+        data::save_internal_bytes(&dir.join("tables.json"), &bytes)?;
         if let Some(snapshot) = snapshot {
             self.manager.undo.push(snapshot, label.into());
         }

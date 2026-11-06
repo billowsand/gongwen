@@ -148,21 +148,12 @@ impl Metrics {
     }
 }
 
-/// 埋点文件走槽位映射：诱饵系统只写自己的 `alt-metrics.json`，两边采纳率不串。
-fn path() -> anyhow::Result<std::path::PathBuf> {
-    crate::storage::slot_file("metrics.json")
-}
-
+/// 埋点读写统一走槽位映射与密封 JSON 入口：诱饵系统只写自己的
+/// `alt-metrics.json`，加密工作区里两边都保持 GWA2 密文。
 /// 读埋点。文件不存在、损坏或读不动都返回空表——埋点是辅助信息，
 /// 任何一种失败都不该妨碍用户写公文。
 pub fn load() -> Metrics {
-    let Ok(path) = path() else {
-        return Metrics::default();
-    };
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    crate::ai_services::persistence::read_json("metrics.json").unwrap_or_default()
 }
 
 /// 落盘。失败静默：同上，这不是用户需要处理的错误。
@@ -170,16 +161,8 @@ pub fn save(metrics: &mut Metrics) {
     if !metrics.is_dirty() {
         return;
     }
-    let Ok(path) = path() else { return };
-    let Ok(text) = serde_json::to_string_pretty(metrics) else {
-        return;
-    };
-    // 原子写：中途失败不会把已有埋点截成半份；Unix 下文件是 0600。
-    let written = crate::storage::atomic_write(&path, |file| {
-        use std::io::Write as _;
-        file.write_all(text.as_bytes())?;
-        Ok(())
-    });
+    // 个人使用统计也属于配置数据：加密工作区里与接口配置一样整份 GWA2。
+    let written = crate::ai_services::persistence::write_json("metrics.json", metrics);
     if written.is_ok() {
         metrics.mark_saved();
     }
@@ -262,6 +245,21 @@ mod tests {
         let stat = metrics.get("MDL-GRAMMAR");
         assert_eq!(stat.gate_rejected, 5);
         assert_eq!(stat.decisions(), 0, "闸门拦截不是用户表态");
+    }
+
+    #[test]
+    fn encrypted_metrics_round_trip_without_plaintext_file() {
+        let root = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(root.path().to_path_buf()));
+        crate::vault::set_key_handle([52; 32], true);
+        let mut metrics = Metrics::default();
+        metrics.record_accept(&lexicon("TYP-001"));
+        save(&mut metrics);
+        let path = root.path().join("metrics.json");
+        assert!(std::fs::read(&path).unwrap().starts_with(b"GWA2"));
+        assert_eq!(load().get("TYP-001").accepted, 1);
+        crate::vault::clear_key_handle();
+        crate::storage::set_test_config_dir(None);
     }
 
     #[test]

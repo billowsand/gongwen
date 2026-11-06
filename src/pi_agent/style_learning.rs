@@ -194,12 +194,9 @@ pub(crate) fn learn(
         Some(pi_skills::STYLE_SKILL),
     )?;
     let guide = serde_json::json!({"stats": stats, "candidates": candidates});
-    crate::storage::atomic_write(&workspace.root.join("input/style-guide.json"), |file| {
-        use std::io::Write;
-        file.write_all(serde_json::to_string(&guide)?.as_bytes())?;
-        Ok(())
-    })
-    .map_err(|e| format!("保存风格学习数据失败：{e:#}"))?;
+    let guide = serde_json::to_vec(&guide).map_err(|e| e.to_string())?;
+    crate::vault::write_path(&workspace.root.join("input/style-guide.json"), "pi", &guide)
+        .map_err(|e| format!("保存风格学习数据失败：{e:#}"))?;
     let label = workspace.label.clone();
     let run_id = uuid::Uuid::new_v4().to_string();
     let request_id = format!("style-{}", uuid::Uuid::new_v4());

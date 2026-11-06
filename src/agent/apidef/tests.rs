@@ -284,6 +284,36 @@ fn legacy_endpoints_migrate_without_changing_requests() {
 }
 
 #[test]
+fn encrypted_legacy_backup_is_resealed_for_its_new_path() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+    crate::vault::set_key_handle([41; 32], true);
+    let store = ApiStore {
+        endpoints: legacy_endpoints(),
+        ..ApiStore::default()
+    };
+    api::write_json("apis.json", &store).unwrap();
+    let legacy = crate::storage::slot_file("apis.json").unwrap();
+    let original = crate::vault::read_path(&legacy, "config", 8 * 1024 * 1024).unwrap();
+
+    migrate(&legacy).unwrap();
+
+    let backup = legacy.with_extension("json.bak");
+    let sealed = std::fs::read(&backup).unwrap();
+    assert!(sealed.starts_with(b"GWA2"));
+    assert!(
+        !sealed
+            .windows(b"fire_stat".len())
+            .any(|window| window == b"fire_stat")
+    );
+    let restored = crate::vault::read_path(&backup, "config", 8 * 1024 * 1024).unwrap();
+    assert_eq!(restored, original, "留底换路径后仍须能解密");
+    assert!(!legacy.exists());
+    crate::vault::clear_key_handle();
+    crate::storage::set_test_config_dir(None);
+}
+
+#[test]
 fn optional_inputs_are_left_out_and_arrays_expanded() {
     let endpoint = ApiEndpoint {
         id: "x".into(),

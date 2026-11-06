@@ -140,9 +140,8 @@ pub(crate) fn document_with_fonts(
     Ok((data, files, warnings))
 }
 
-/// 排版并写出 PDF。插图按 `base_dir` 解析（正常是用户配置目录）。
-pub(crate) fn write_pdf_with_base(
-    path: &Path,
+/// 在内存中排版研究报告 PDF，不创建 Markdown、插图或正文 PDF 临时文件。
+pub(crate) fn compile_pdf_with_base(
     input: &DraftInput,
     markdown: &str,
     numbering: &NumberingConfig,
@@ -171,12 +170,33 @@ pub(crate) fn write_pdf_with_base(
     for warning in warnings.into_iter().rev() {
         outcome.warnings.insert(0, warning);
     }
+    Ok(outcome)
+}
+
+/// 排版并写出 PDF；只有调用方明确选择的输出路径会落盘。
+pub(crate) fn write_pdf_with_base(
+    path: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    numbering: &NumberingConfig,
+    base_dir: &Path,
+) -> Result<TypstOutcome> {
+    let outcome = compile_pdf_with_base(input, markdown, numbering, base_dir)?;
     std::fs::write(path, &outcome.pdf)
         .with_context(|| format!("无法写入 PDF：{}", path.display()))?;
     Ok(outcome)
 }
 
-/// 同上，插图按用户配置目录解析。
+/// 同上，插图按用户配置目录解析，结果只保存在内存。
+pub(crate) fn compile_pdf(
+    input: &DraftInput,
+    markdown: &str,
+    numbering: &NumberingConfig,
+) -> Result<TypstOutcome> {
+    compile_pdf_with_base(input, markdown, numbering, &crate::storage::config_dir()?)
+}
+
+/// 同上，插图按用户配置目录解析并写入指定路径。
 pub(crate) fn write_pdf(
     path: &Path,
     input: &DraftInput,

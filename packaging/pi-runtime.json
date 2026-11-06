@@ -8,8 +8,8 @@
     "@earendil-works/pi-durable": "1.4.0"
   },
   "host": {
-    "version": "0.3.6",
-    "protocol": 3,
+    "version": "0.4.0",
+    "protocol": 4,
     "main": "host/main.mjs",
     "source": "pi-host/src",
     "package": "pi-host/package.json",

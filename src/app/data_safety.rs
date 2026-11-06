@@ -51,8 +51,8 @@ impl GongwenApp {
         );
         ui.label(
             "备份包含配置、稿件库与知识库（manuscripts.db）、图片、数据接口配置、\
-             输入法词表与技能文件。崩溃日志、崩溃提示标记与损坏配置的留底文件属于\
-             本机诊断信息，不进入备份。",
+             输入法词表、技能文件与 Pi 运行数据；加密工作区中这些内容保持密文。\
+             崩溃日志、崩溃提示标记与损坏配置的留底文件属于本机诊断信息，不进入备份。",
         );
         ui.add_space(8.0);
 
@@ -510,6 +510,8 @@ fn config_recovery_dialog(ctx: &egui::Context, recovered: &mut Option<PathBuf>) 
 /// 崩溃日志提示。返回「打开日志目录」失败时的状态栏文案。
 fn crash_report_dialog(ctx: &egui::Context, pending: &mut Option<PathBuf>) -> Option<String> {
     let path = pending.clone()?;
+    let decrypted = crate::crash_log::read_report(&path);
+    let can_open_directory = crate::vault::key_handle().is_none();
     let mut open_dir = false;
     let response = modal::dialog(
         ctx,
@@ -527,10 +529,28 @@ fn crash_report_dialog(ctx: &egui::Context, pending: &mut Option<PathBuf>) -> Op
                     .wrap_mode(egui::TextWrapMode::Wrap),
             );
             ui.add_space(6.0);
-            ui.weak("把这份日志发给维护者，可以定位闪退原因。");
+            ui.weak(if can_open_directory {
+                "以下为本机诊断内容；把日志发给维护者前请先检查其中是否含本机路径。"
+            } else {
+                "以下内容仅在已解锁的应用内解密显示；日志文件本身保持密文。"
+            });
+            egui::ScrollArea::vertical()
+                .id_salt("crash_report_detail")
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    let text = match &decrypted {
+                        Ok(text) => text.clone(),
+                        Err(error) => format!("诊断内容读取失败：{error:#}"),
+                    };
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(text).monospace())
+                            .selectable(true)
+                            .wrap_mode(egui::TextWrapMode::Wrap),
+                    );
+                });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.button("打开日志目录").clicked() {
+                if can_open_directory && ui.button("打开日志目录").clicked() {
                     open_dir = true;
                 }
                 if ui.button("知道了").clicked() {

@@ -44,7 +44,7 @@ function workspace({ materials = [MATERIAL] } = {}) {
     };
   });
   fs.writeFileSync(path.join(root, "input/materials/index.json"), JSON.stringify(metas, null, 2));
-  return { base, root, run, state: path.join(run, "session.sqlite"), metas };
+  return { base, root, run, state: path.join(run, "session"), metas };
 }
 
 function init(workspace, { preference = "auto", contextWindow = 32768, request = "写一份通知。", kind = "通知" } = {}) {

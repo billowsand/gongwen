@@ -1,6 +1,6 @@
 //! host 入口：读一条 init，跑一轮 Durable，按 JSONL 回报。
 //!
-//! stdout 只写协议；任何依赖或异常的输出都改走 stderr。密钥只在 init 里出现，
+//! stdout 只写协议；任何依赖或异常的输出都改走 stderr。模型密钥与资源 DEK 只在 init 里出现，
 //! 不会进入事件、日志或命令行。
 
 import {
@@ -15,6 +15,7 @@ import { AgentError, runAgentJob } from "./agent.mjs";
 import { acquireOwner } from "./owner.mjs";
 import { receiptEvents } from "./delivery.mjs";
 import path from "node:path";
+import { ProtectedFiles } from "./encrypted-files.mjs";
 
 // 先捕获真正的 stdout，再把其他写 stdout 的代码改道 stderr；协议只用 capturedWrite。
 const capturedWrite = process.stdout.write.bind(process.stdout);
@@ -45,7 +46,7 @@ async function readInit() {
 
 function finish(code, owner) {
   // 给 stdout 一点时间把最后一条协议行写完，再结束进程；Durable 的计时器与
-  // SQLite 句柄不必逐个拆，Rust 已在收到终止事件后回收子进程。
+  // 存储句柄不必逐个拆，Rust 已在收到终止事件后回收子进程。
   setTimeout(() => {
     try {
       owner?.release();
@@ -59,13 +60,15 @@ function finish(code, owner) {
 
 async function main() {
   let config;
+  let files;
   let emit;
   try {
     const raw = await readInit();
     config = validateInit(raw);
+    files = new ProtectedFiles(config.workspace.encryption);
     emit = createEmitter({
       write: capturedWrite,
-      secrets: [config.model.apiKey],
+      secrets: [config.model.apiKey, config.workspace.encryption?.keyHex],
     });
   } catch (error) {
     // 还没拿到可信配置：只报错误类型，不回显 init 内容（可能含密钥）。
@@ -94,10 +97,10 @@ async function main() {
     }
   };
 
-  // 同一轮工作区只能有一个 host：用 SQLite 独占锁，不靠界面 busy 或残留文件。
+  // 同一轮工作区只能有一个 host：锁文件只承担 OS 独占锁，不保存业务数据。
   let owner;
   try {
-    owner = acquireOwner(path.join(config.workspace.delivery, "host-owner.sqlite"), {
+    owner = acquireOwner(path.join(config.workspace.delivery, "host-owner.lock"), {
       runId: config.runId,
     });
   } catch (error) {
@@ -154,6 +157,7 @@ async function main() {
   try {
     const result = await runAgentJob({
       config,
+      files,
       emit: send,
       onBridge: (value) => {
         bridge = value;
@@ -164,7 +168,7 @@ async function main() {
     });
     if (result.receipt) {
       // 恢复时找到已经落盘的回执：原样交回，不再调用模型。
-      for (const event of receiptEvents(config.workspace.delivery, result.receipt)) {
+      for (const event of receiptEvents(config.workspace.delivery, result.receipt, files)) {
         send(event);
       }
       finish(0, owner);

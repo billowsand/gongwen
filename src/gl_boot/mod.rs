@@ -266,25 +266,46 @@ pub fn startup_failure_hint() -> String {
         .to_owned()
 }
 
-/// 把一行诊断写进配置目录的 `logs/gl-boot.log`。
+/// 把一行诊断写进当前槽位的 `logs/gl-boot.log`。加密工作区尚未解锁时
+/// 无法安全密封，启动期探测宁可不落盘，也不留下完整明文日志。
 pub fn log_line(line: &str) {
-    use std::io::Write as _;
-    let Ok(dir) = crate::storage::config_dir() else {
-        return;
-    };
-    let dir = dir.join("logs");
-    if std::fs::create_dir_all(&dir).is_err() {
+    if crate::vault::key_handle().is_none()
+        && !matches!(
+            crate::vault::Vault::probe(),
+            crate::vault::Probe::Absent | crate::vault::Probe::Skipped
+        )
+    {
         return;
     }
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("gl-boot.log"))
-    else {
+    let Ok(dir) = crate::storage::slot_subdir("logs") else {
         return;
     };
+    let path = dir.join("gl-boot.log");
+    let mut text = if path.exists() {
+        let Ok(bytes) = crate::vault::read_path(&path, "log", 256 * 1024) else {
+            return;
+        };
+        String::from_utf8(bytes).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    let _ = writeln!(file, "[{stamp}] {line}");
+    text.push_str(&format!(
+        "[{stamp}] {}\n",
+        line.chars().take(2000).collect::<String>()
+    ));
+    if text.len() > 256 * 1024 {
+        let mut cut = text.len() - 256 * 1024;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let keep = text.split_off(cut);
+        text = keep
+            .split_once('\n')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or(keep);
+    }
+    let _ = crate::vault::write_path(&path, "log", text.as_bytes());
 }
 
 #[cfg(test)]

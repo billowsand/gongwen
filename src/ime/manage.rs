@@ -81,8 +81,7 @@ impl Ime {
             {
                 let result = (|| -> anyhow::Result<()> {
                     let path = data::directory()?.join("base.previous.txt");
-                    let entries =
-                        table::parse(&crate::text_file::read_to_string(&path)?, false).entries;
+                    let entries = table::parse(&data::load_internal_text(&path)?, false).entries;
                     anyhow::ensure!(!entries.is_empty(), "上次基础表没有有效记录");
                     self.replace_base(entries)
                 })();
@@ -405,9 +404,9 @@ impl Ime {
     fn replace_base(&mut self, entries: Vec<Entry>) -> anyhow::Result<()> {
         let path = data::directory()?.join("base.txt");
         if path.exists() {
-            data::save_bytes(
+            data::save_internal_bytes(
                 &path.with_file_name("base.previous.txt"),
-                &std::fs::read(&path)?,
+                &data::load_internal_bytes(&path)?,
             )?;
         }
         data::save_base(&entries)?;
@@ -486,7 +485,7 @@ impl Ime {
             let dir = data::directory()?;
             // 文件已损坏时仍保留原始字节，不能用空内存快照覆盖它。
             history::record(&dir, "恢复个人备份")?;
-            data::save_json(&dir.join("tables.json"), &personal)?;
+            data::save_internal_json(&dir.join("tables.json"), &personal)?;
             self.table.personal = personal;
             self.storage_ok = true;
             self.manager.undo.clear();

@@ -13,13 +13,14 @@ const MAX_REMEMBERED_PASSWORD_BYTES: u64 = 1024;
 /// 擦除（[`wipe_slot_files`]）与读写侧（`ai_services::persistence`）都从这里派生。
 /// 名单漏一项的后果是「启用加密后该文件永久明文」——二期曾漏掉 `api-envs.json`
 /// 与 `api-tests.json`，`styles.json` 里还有样稿原文片段，所以统一放这里。
-pub(crate) const SEALED_FILE_NAMES: [&str; 6] = [
+pub(crate) const SEALED_FILE_NAMES: [&str; 7] = [
     "config.json",
     ZIP_PASSWORD_FILE,
     "api-secrets.json",
     "api-envs.json",
     "api-tests.json",
     "styles.json",
+    "metrics.json",
 ];
 
 /// GUI Mermaid 缓存目录名（相对配置目录）。目录内的图与警告 sidecar 都是用户正文
@@ -27,11 +28,12 @@ pub(crate) const SEALED_FILE_NAMES: [&str; 6] = [
 pub(crate) const MERMAID_CACHE_DIR: &str = "mermaid-cache";
 
 /// [`SEALED_FILE_NAMES`] 里的 JSON 子集：`ai_services::persistence` 的读写名单。
-pub(crate) const SEALED_JSON_NAMES: [&str; 4] = [
+pub(crate) const SEALED_JSON_NAMES: [&str; 5] = [
     "api-secrets.json",
     "api-envs.json",
     "api-tests.json",
     "styles.json",
+    "metrics.json",
 ];
 
 /// 数据槽位：真实系统与诱饵系统（第二密码进入的空白系统）各有一套独立文件。
@@ -69,7 +71,7 @@ pub fn set_current_slot(slot: DataSlot) {
 /// 诱饵槽位文件名前缀。中性、不带语义；第二期 SQLCipher 落地后文件内容本身
 /// 已是密文，前缀只是第一道皮。注意：文件名映射是唯一入口，诱饵系统里任何
 /// 写入都不能落进真实文件——新增敏感文件时一律走 [`slot_file`] / [`slot_subdir`]。
-const DECOY_PREFIX: &str = "alt-";
+pub(crate) const DECOY_PREFIX: &str = "alt-";
 
 /// 按当前槽位映射配置目录里的文件名。真实槽位用原名；诱饵槽位一律加前缀，
 /// 包括未来新增的未知文件名（规则统一，不逐个点名）。
@@ -251,11 +253,11 @@ pub fn load_remembered_zip_password() -> Result<Option<String>> {
         fs::read(&path).with_context(|| format!("读取记住的 ZIP 密码失败：{}", path.display()))?;
     let bytes = if crate::vault::is_sealed_file(&raw) {
         let handle = crate::vault::key_handle().context("ZIP 密码已加密，尚未解锁")?;
-        crate::vault::open_bytes(handle.dek(), &raw)?
+        crate::vault::open_path_bytes(&handle, &path, "config", &raw)?
     } else if let Some(handle) = crate::vault::key_handle() {
         // 启用加密前留下的明文密码：读到就顺手封成密文，不能让它长期躺在盘上。
         // 落盘失败不影响本次读取（下次启动再迁）。
-        if let Ok(sealed) = crate::vault::seal_bytes(handle.dek(), &raw) {
+        if let Ok(sealed) = crate::vault::seal_path_bytes(&handle, &path, "config", &raw) {
             let _ = atomic_write(&path, |file| {
                 use std::io::Write;
                 file.write_all(&sealed)?;
@@ -276,15 +278,7 @@ pub fn save_remembered_zip_password(password: Option<&str>) -> Result<()> {
         if password.len() as u64 > MAX_REMEMBERED_PASSWORD_BYTES {
             anyhow::bail!("ZIP 密码过长，无法记住");
         }
-        let mut bytes = password.as_bytes().to_vec();
-        if let Some(handle) = crate::vault::key_handle() {
-            bytes = crate::vault::seal_bytes(handle.dek(), &bytes)?;
-        }
-        atomic_write(&path, |file| {
-            use std::io::Write;
-            file.write_all(&bytes)?;
-            Ok(())
-        })?;
+        crate::vault::write_path(&path, "config", password.as_bytes())?;
     } else if path.exists() {
         fs::remove_file(&path)?;
     }
@@ -460,18 +454,27 @@ pub fn load() -> Result<(AppConfig, Option<PathBuf>)> {
         AppConfig::default()
     } else {
         let raw = fs::read(&path).with_context(|| format!("读取配置失败：{}", path.display()))?;
-        let bytes = if crate::vault::is_sealed_file(&raw) {
+        let sealed_input = crate::vault::is_sealed_file(&raw);
+        let bytes = if sealed_input {
             let handle = crate::vault::key_handle().context("配置已加密，尚未解锁")?;
-            crate::vault::open_bytes(handle.dek(), &raw)
+            crate::vault::open_path_bytes(&handle, &path, "config", &raw)
                 .context("配置解密失败（密钥不匹配或文件损坏）")?
         } else {
             raw
         };
         match serde_json::from_slice::<AppConfig>(&bytes).context("配置内容无法解析") {
             Ok(config) => config,
-            Err(_) => {
+            Err(error) => {
                 let backup = corrupted_config_path(&path);
-                let moved = fs::rename(&path, &backup).is_ok();
+                let moved = if sealed_input {
+                    // AAD 绑定逻辑路径，不能直接把密文改名；先用已验证的明文
+                    // 在留底路径重新密封，再删除原文件，保证留底仍可解密。
+                    crate::vault::write_path(&backup, "config", &bytes)
+                        .with_context(|| format!("损坏配置留底失败：{error:#}"))?;
+                    fs::remove_file(&path).is_ok()
+                } else {
+                    fs::rename(&path, &backup).is_ok()
+                };
                 return Ok((AppConfig::default(), moved.then_some(backup)));
             }
         }
@@ -489,10 +492,15 @@ pub fn load() -> Result<(AppConfig, Option<PathBuf>)> {
     if crate::units::identity::assign(&mut config.vocabulary) && path.exists() {
         let backup = path.with_extension("json.身份迁移前备份");
         if !backup.exists() {
-            fs::copy(&path, &backup)?;
-            // 副本与主配置同等敏感：主配置若是明文，副本也要按「有句柄就密封」
-            // 的规则处理，不能留一份明文 API 密钥备份在磁盘上。
-            seal_file_if_needed(&backup)?;
+            let current = fs::read(&path)?;
+            let backup_bytes = if crate::vault::is_sealed_file(&current) {
+                let handle = crate::vault::key_handle().context("配置已加密，尚未解锁")?;
+                crate::vault::open_path_bytes(&handle, &path, "config", &current)?
+            } else {
+                current
+            };
+            // 副本按自己的逻辑路径重新密封，不能复制绑定原路径的 GWA2 密文。
+            crate::vault::write_path(&backup, "config", &backup_bytes)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -503,24 +511,6 @@ pub fn load() -> Result<(AppConfig, Option<PathBuf>)> {
         write_config(&path, &config).context("保存身份迁移失败")?;
     }
     Ok((config, None))
-}
-
-/// 把一个已存在的文件按「有句柄就密封」的规则处理；已是密文则不动。
-/// 用于 config.json 的副本这类由 [`fs::copy`] 直接复制出来的敏感文件。
-pub(crate) fn seal_file_if_needed(path: &std::path::Path) -> Result<()> {
-    let Some(handle) = crate::vault::key_handle() else {
-        return Ok(());
-    };
-    let raw = fs::read(path).with_context(|| format!("读取 {} 失败", path.display()))?;
-    if crate::vault::is_sealed_file(&raw) {
-        return Ok(());
-    }
-    let sealed = crate::vault::seal_bytes(handle.dek(), &raw)?;
-    atomic_write(path, |file| {
-        use std::io::Write as _;
-        file.write_all(&sealed)?;
-        Ok(())
-    })
 }
 
 /// 损坏配置的留底路径：与原文件同目录，文件名带秒级时间戳；同一秒里再次损坏
@@ -544,23 +534,7 @@ fn corrupted_config_path(path: &std::path::Path) -> PathBuf {
 /// 已启用时绝不能把明文写回磁盘——那等于把刚锁好的门又打开。
 fn write_config(path: &std::path::Path, config: &AppConfig) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(config).context("配置序列化失败")?;
-    let bytes = match crate::vault::key_handle() {
-        Some(handle) => crate::vault::seal_bytes(handle.dek(), &bytes)?,
-        None => {
-            // 降级防护：磁盘上是密文、当前却没有密钥句柄时，绝不能以明文覆盖。
-            // 那种状态只可能来自「锁设置丢失 / 未解锁」的异常路径，覆盖等于把
-            // 加密配置换成默认明文，是静默降级。
-            if path.exists() && fs::read(path).is_ok_and(|raw| crate::vault::is_sealed_file(&raw)) {
-                anyhow::bail!("配置已加密但当前未解锁，拒绝以明文覆盖");
-            }
-            bytes
-        }
-    };
-    atomic_write(path, |file| {
-        use std::io::Write as _;
-        file.write_all(&bytes)?;
-        Ok(())
-    })
+    crate::vault::write_path(path, "config", &bytes)
 }
 
 pub fn save(config: &AppConfig) -> Result<()> {
@@ -987,6 +961,24 @@ mod tests {
         assert!(result.is_err(), "无密钥时不得把密文配置改写成明文");
         assert_eq!(fs::read(&path).unwrap(), sealed);
     }
+
+    /// ZIP 密码与配置走同一降级规则：密文目标在未解锁时绝不能被明文替换。
+    #[test]
+    fn plaintext_save_refuses_to_overwrite_a_sealed_zip_password() {
+        let dir = tempfile::tempdir().unwrap();
+        super::set_test_config_dir(Some(dir.path().to_path_buf()));
+        let path = slot_file(ZIP_PASSWORD_FILE).unwrap();
+        let sealed = crate::vault::seal_bytes(&[11u8; 32], b"old-secret").unwrap();
+        fs::write(&path, &sealed).unwrap();
+        crate::vault::clear_key_handle();
+
+        let result = save_remembered_zip_password(Some("new-secret"));
+        super::set_test_config_dir(None);
+
+        assert!(result.is_err(), "无密钥时不得把 ZIP 密码改写成明文");
+        assert_eq!(fs::read(&path).unwrap(), sealed);
+    }
+
     /// 导出目录是用户选的，不属于应用的私密目录：写文件时不能顺手改它的权限。
     #[cfg(unix)]
     #[test]

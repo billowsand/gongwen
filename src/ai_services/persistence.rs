@@ -34,7 +34,7 @@ pub(crate) fn read_json<T: serde::de::DeserializeOwned + Default>(name: &str) ->
                 }
                 let handle = crate::vault::key_handle()
                     .with_context(|| format!("{} 已加密，尚未解锁", path.display()))?;
-                crate::vault::open_bytes(handle.dek(), &raw)
+                crate::vault::open_path_bytes(&handle, &path, "config", &raw)
                     .with_context(|| format!("{} 解密失败", path.display()))?
             } else {
                 raw
@@ -51,19 +51,9 @@ pub(crate) fn write_json<T: Serialize>(name: &str, value: &T) -> anyhow::Result<
     let path = store_path(name)?;
     // 原子写 + 仅本人可读写：这里落的是接口密钥与配置，不能写到一半，
     // 也不能让同机的其他用户读到。
-    let mut bytes = serde_json::to_vec_pretty(value)?;
+    let bytes = serde_json::to_vec_pretty(value)?;
     if is_sealed_name(name) {
-        match crate::vault::key_handle() {
-            Some(handle) => bytes = crate::vault::seal_bytes(handle.dek(), &bytes)?,
-            None => {
-                // 降级防护：磁盘上已是密文、当前却没有密钥句柄时不得写明文覆盖。
-                if path.exists()
-                    && std::fs::read(&path).is_ok_and(|raw| crate::vault::is_sealed_file(&raw))
-                {
-                    anyhow::bail!("{} 已加密但当前未解锁，拒绝以明文覆盖", path.display());
-                }
-            }
-        }
+        return crate::vault::write_path(&path, "config", &bytes);
     }
     crate::storage::atomic_write(&path, |file| {
         use std::io::Write as _;

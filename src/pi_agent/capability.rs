@@ -200,11 +200,8 @@ pub(crate) fn save_evidence(
         .collect::<String>();
     std::fs::create_dir_all(directory).map_err(|e| format!("创建校准证据目录失败：{e}"))?;
     let path = directory.join(format!("{digest}.json"));
-    crate::storage::atomic_write(&path, |file| {
-        std::io::Write::write_all(file, &bytes)?;
-        Ok(())
-    })
-    .map_err(|e| format!("保存校准原始证据失败：{e:#}"))?;
+    crate::vault::write_path(&path, "pi", &bytes)
+        .map_err(|e| format!("保存校准原始证据失败：{e:#}"))?;
     Ok(digest)
 }
 
@@ -216,10 +213,10 @@ pub(crate) fn verify_evidence(directory: &Path, digest: &str) -> bool {
     let Ok(metadata) = std::fs::metadata(&path) else {
         return false;
     };
-    if metadata.len() > 256 * 1024 {
+    if metadata.len() > MAX_FILE_BYTES + crate::vault::SEALED_FILE_OVERHEAD as u64 {
         return false;
     }
-    let Ok(bytes) = std::fs::read(path) else {
+    let Ok(bytes) = crate::vault::read_path(&path, "pi", MAX_FILE_BYTES) else {
         return false;
     };
     Sha256::digest(bytes)
@@ -324,10 +321,11 @@ pub(crate) fn load(path: &Path) -> Result<Vec<CapabilityProfile>, String> {
         return Ok(Vec::new());
     }
     let metadata = std::fs::metadata(path).map_err(|e| format!("读取 Pi 能力档案状态失败：{e}"))?;
-    if metadata.len() > MAX_FILE_BYTES {
+    if metadata.len() > MAX_FILE_BYTES + crate::vault::SEALED_FILE_OVERHEAD as u64 {
         return Err("Pi 能力档案超过 256 KiB 上限，已保守忽略。".into());
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("读取 Pi 能力档案失败：{e}"))?;
+    let bytes = crate::vault::read_path(path, "pi", MAX_FILE_BYTES)
+        .map_err(|e| format!("读取 Pi 能力档案失败：{e:#}"))?;
     let file: CapabilityFile =
         serde_json::from_slice(&bytes).map_err(|e| format!("Pi 能力档案损坏，已保守忽略：{e}"))?;
     if file.version != EVIDENCE_VERSION || file.entries.len() > MAX_ENTRIES {
@@ -352,11 +350,7 @@ pub(crate) fn save(path: &Path, entries: &[CapabilityProfile]) -> Result<(), Str
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建 Pi 能力目录失败：{e}"))?;
     }
-    crate::storage::atomic_write(path, |file| {
-        std::io::Write::write_all(file, &bytes)?;
-        Ok(())
-    })
-    .map_err(|e| format!("保存 Pi 能力档案失败：{e:#}"))
+    crate::vault::write_path(path, "pi", &bytes).map_err(|e| format!("保存 Pi 能力档案失败：{e:#}"))
 }
 
 /// 生产能力测试：所有写入都在系统临时目录，资料源是程序自造的 SQLite/FTS。
@@ -373,11 +367,20 @@ pub(crate) fn run_paired_calibration(
     use crate::models::{AppConfig, DraftInput, RagConfig, RerankMode, TemplateKind};
     use crate::pi_agent::tools::PiSources;
 
-    let temp = tempfile::Builder::new()
-        .prefix("gongwen-pi-capability-")
-        .tempdir()
-        .map_err(|error| format!("创建临时校准目录失败：{error}"))?;
-    let root = temp.path().to_path_buf();
+    // 校准也留在当前槽位的 Pi 管理目录里：加密模式下 host 的 GWA2 逻辑路径
+    // 必须以配置目录为根，不能因为工作区位于系统临时目录就退化成明文。
+    let root = crate::storage::slot_subdir("pi")
+        .map_err(|error| format!("创建校准目录失败：{error:#}"))?
+        .join("calibration")
+        .join(uuid::Uuid::new_v4().simple().to_string());
+    std::fs::create_dir_all(&root).map_err(|error| format!("创建临时校准目录失败：{error}"))?;
+    struct CalibrationDir(std::path::PathBuf);
+    impl Drop for CalibrationDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = CalibrationDir(root.clone());
     let kb_path = root.join("knowledge.sqlite");
     let ms_path = root.join("manuscripts.sqlite");
     let knowledge_doc = {
@@ -1007,7 +1010,11 @@ mod tests {
         assert_eq!(load(&path).unwrap(), vec![profile]);
         std::fs::write(&path, b"{").unwrap();
         assert!(load(&path).unwrap_err().contains("损坏"));
-        std::fs::write(&path, vec![b' '; MAX_FILE_BYTES as usize + 1]).unwrap();
+        std::fs::write(
+            &path,
+            vec![b' '; MAX_FILE_BYTES as usize + crate::vault::SEALED_FILE_OVERHEAD + 1],
+        )
+        .unwrap();
         assert!(load(&path).unwrap_err().contains("256 KiB"));
     }
 

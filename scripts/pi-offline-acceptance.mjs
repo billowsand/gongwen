@@ -1,5 +1,5 @@
 //! 无公网验收：对真实组装好的随包运行时跑一轮「读技能 → 读材料 → 编辑文件 → 提交」，
-//! 再验回执重放与 Durable 数据库重开。用本地假 OpenAI 服务，不访问公网。
+//! 再验回执重放与 Durable JSONL 会话目录重开。用本地假 OpenAI 服务，不访问公网。
 //!
 //! 用法（用随包 Node 运行，不 import 源码）：
 //!   <runtime>/pi/node.exe scripts/pi-offline-acceptance.mjs --runtime <runtime>/pi [--work <dir>]
@@ -8,7 +8,7 @@
 //! - 只监听 127.0.0.1，并检查 host 子进程没有非回环的 ESTABLISHED 连接；
 //! - 清空 HOME / USERPROFILE / Pi 配置与模型密钥环境变量，PATH 只留 Node 与系统目录；
 //! - 从安装目录启动 `host/main.mjs`，不依赖开发 node_modules 或全局 Pi；
-//! - 第一次运行校验 submitted / completed / 回执 / 快照 / SQLite；
+//! - 第一次运行校验 submitted / completed / 回执 / 快照 / Durable JSONL；
 //! - 第二次用 `recovery: resume` 启动，断言不再调用模型、交回同一份成品。
 //!
 //! 退出码 0 表示全部通过；任何一步失败打印原因并以非 0 退出。干净目标机上的
@@ -225,7 +225,7 @@ function initMessage(recovery, options = {}) {
     runId: options.runId ?? "offline-run-1",
     workspace: {
       root: rootDir,
-      state: path.join(run, "session.sqlite"),
+      state: path.join(run, "session"),
       delivery: run,
       current: "input/current.md",
       request: "input/request.md",
@@ -442,15 +442,18 @@ try {
   if (createHash("sha256").update(expected, "utf8").digest("hex") !== receipt.sha256) {
     throw new Error("回执哈希与快照不符");
   }
-  if (!fs.existsSync(path.join(runDir, "session.sqlite"))) throw new Error("Durable SQLite 没有落盘");
+  const stateDir = path.join(runDir, "session");
+  if (!fs.statSync(stateDir).isDirectory() || fs.readdirSync(stateDir).length === 0) {
+    throw new Error("Durable JSONL 没有落盘");
+  }
   if (delivered.submitted.sha256 !== receipt.sha256) throw new Error("submitted 与回执哈希不一致");
 
   const callsBefore = modelCalls;
   const second = await runHost(initMessage(true));
   assertDelivery(second, "回执重放");
   if (modelCalls !== callsBefore) throw new Error("恢复回执时不应再调用模型");
-  const reopened = fs.statSync(path.join(runDir, "session.sqlite"));
-  if (reopened.size === 0) throw new Error("重开后 Durable 数据库为空");
+  const reopened = fs.readdirSync(stateDir);
+  if (reopened.length === 0) throw new Error("重开后 Durable JSONL 目录为空");
 
   // 分阶段新流程：同一份 host、同一套交付权限，按材料提炼→提纲→分节→合稿→交付走一遍。
   phased = true;

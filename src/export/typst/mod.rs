@@ -68,10 +68,9 @@ fn drop_missing_images(doc: &mut Doc, base_dir: &Path) -> Vec<String> {
     missing
 }
 
-/// 排版并写出 PDF。插图按 `base_dir` 解析（正常是用户配置目录）。
+/// 在内存中排版 PDF。插图按 `base_dir` 解析（正常是用户配置目录），不创建正文临时文件。
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_pdf_with_base(
-    path: &Path,
+pub(crate) fn compile_pdf_with_base(
     input: &DraftInput,
     markdown: &str,
     display: &UnitDisplay,
@@ -90,6 +89,25 @@ pub(crate) fn write_pdf_with_base(
             .warnings
             .insert(0, format!("插图文件不存在，已略过：{src}"));
     }
+    Ok(outcome)
+}
+
+/// 排版并写出 PDF；只有调用方明确选择的输出路径会落盘。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_pdf_with_base(
+    path: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+    elements: &ElementMarks,
+    base_dir: &Path,
+) -> Result<TypstOutcome> {
+    let outcome = compile_pdf_with_base(
+        input, markdown, display, fonts, numbering, elements, base_dir,
+    )?;
     std::fs::write(path, &outcome.pdf)
         .with_context(|| format!("无法写入 PDF：{}", path.display()))?;
     Ok(outcome)
@@ -199,9 +217,9 @@ fn prepare(
     Ok((doc, set, missing))
 }
 
-/// 同上，插图按用户配置目录解析。
-pub(crate) fn write_pdf(
-    path: &Path,
+/// 同上，插图按用户配置目录解析，结果只保存在内存。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_pdf(
     input: &DraftInput,
     markdown: &str,
     display: &UnitDisplay,
@@ -209,8 +227,13 @@ pub(crate) fn write_pdf(
     numbering: &NumberingConfig,
     elements: &ElementMarks,
 ) -> Result<TypstOutcome> {
-    let base = crate::storage::config_dir()?;
-    write_pdf_with_base(
-        path, input, markdown, display, fonts, numbering, elements, &base,
+    compile_pdf_with_base(
+        input,
+        markdown,
+        display,
+        fonts,
+        numbering,
+        elements,
+        &crate::storage::config_dir()?,
     )
 }

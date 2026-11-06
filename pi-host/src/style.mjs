@@ -1,5 +1,4 @@
 //! 风格档案是独立产物，执行仍使用相同的 Durable Harness 与回执链。
-import fs from "node:fs";
 import { createHash } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
@@ -24,7 +23,7 @@ export function validateStyleDraft(text) {
   return value;
 }
 
-export function createSubmitStyleTool({guard, limits, state, onSubmitted, deliveryDir, runId, requestId, phase, validateCoverage}) {
+export function createSubmitStyleTool({guard, limits, state, onSubmitted, deliveryDir, runId, requestId, phase, files, validateCoverage}) {
   return defineTool({
     name: "submit_style", description: "提交work/下完整的风格JSON文件，只送设置页编辑保存，绝不写正文。",
     parameters: Type.Object({path:Type.String(),summary:Type.String()}),
@@ -39,11 +38,11 @@ export function createSubmitStyleTool({guard, limits, state, onSubmitted, delive
         const draft = validateStyleDraft(read.value.text);
         const guide = guard.read("input/style-guide.json", guard.root, 64*1024);
         if (!guide.ok) throw new Error("缺少本轮程序生成的风格学习数据");
-        const candidates = JSON.parse(fs.readFileSync(guide.value,"utf8")).candidates;
+        const candidates = JSON.parse(guard.files.readText(guide.value,64*1024)).candidates;
         if (!Array.isArray(candidates) || (draft.example_numbers??[]).some(n=>n>candidates.length)) throw new Error("范例编号不在本轮候选清单中，请重新选择");
         const bytes = Buffer.byteLength(read.value.text,"utf8");
         const sha256 = createHash("sha256").update(read.value.text).digest("hex");
-        const receipt = writeDocumentReceipt(deliveryDir,{runId,requestId,relative:read.value.relative,content:read.value.text,sha256,bytes,summary:args.summary,callId:api?.callId??"",kind:"style"});
+        const receipt = writeDocumentReceipt(deliveryDir,{runId,requestId,relative:read.value.relative,content:read.value.text,sha256,bytes,summary:args.summary,callId:api?.callId??"",kind:"style",files});
         state.snapshot = {path:read.value.relative,content:read.value.text,sha256,bytes,summary:receipt.summary,receipt};
       }
       onSubmitted(state.snapshot);

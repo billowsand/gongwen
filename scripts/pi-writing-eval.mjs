@@ -29,7 +29,7 @@ const HOST_DIR = path.join(REPO, "pi-host");
 const SKILLS_DIR = path.join(REPO, "assets", "pi-skills");
 const MARKDOWN_SKILL = path.join(REPO, "skills", "gongwen-markdown");
 const TMP_ROOT = path.join(REPO, "tmp");
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 const MAX_EVENT_BYTES = 32 * 1024 * 1024;
 const MAX_TOOL_ERROR = 2_000;
 const DEFAULT_TIMEOUT_SECONDS = 600;
@@ -923,7 +923,7 @@ function hostInit({ caseDef, requestId, runId, prepared, model, timeoutSeconds }
     runId,
     workspace: {
       root: prepared.workspace,
-      state: path.join(prepared.run, "session.sqlite"),
+      state: path.join(prepared.run, "session"),
       delivery: prepared.run,
       current: "input/current.md",
       request: "input/request.md",

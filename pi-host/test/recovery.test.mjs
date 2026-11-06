@@ -60,7 +60,7 @@ function tempRun() {
   fs.writeFileSync(path.join(root, "input", "current.md"), "# 当前\n\n原有内容。\n");
   fs.writeFileSync(path.join(root, "input", "request.md"), "写一份通知。\n");
   fs.writeFileSync(path.join(root, "skills", "gongwen-markdown", "SKILL.md"), "# 技能\n");
-  return { base, root, run, state: path.join(run, "session.sqlite") };
+  return { base, root, run, state: path.join(run, "session") };
 }
 
 function initMessage(workspace, extra = {}) {
@@ -344,7 +344,7 @@ test("a report receipt is capped before writing, never after reading", () => {
 
 test("the owner lock excludes a second process and is reacquirable after the holder dies", { timeout: CASE_TIMEOUT }, async () => {
   const workspace = tempRun();
-  const lock = path.join(workspace.run, "host-owner.sqlite");
+  const lock = path.join(workspace.run, "host-owner.lock");
   const signal = path.join(workspace.run, "holder.pid");
   const holder = spawn(
     process.execPath,

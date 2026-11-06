@@ -6,6 +6,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PROTOCOL_VERSION } from "../src/protocol.mjs";
 
 // 本测试用本机 HTTP 桩模拟 OpenAI 兼容端点，让生产入口 src/main.mjs 走真实的
 // Pi Durable + openai-completions 路径；不访问公网，也不使用 faux provider。
@@ -141,12 +142,12 @@ test("the production host path submits through a local OpenAI-compatible endpoin
     child.stdin.write(
       `${JSON.stringify({
         type: "init",
-        protocol: 3,
+        protocol: PROTOCOL_VERSION,
         requestId: "req-e2e",
         runId: "run-e2e",
         workspace: {
           root: workspaceRoot,
-          state: path.join(deliveryDir, "session.sqlite"),
+          state: path.join(deliveryDir, "session"),
           delivery: deliveryDir,
           current: "input/current.md",
           request: "input/request.md",

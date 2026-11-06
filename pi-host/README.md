@@ -1,8 +1,8 @@
 # Pi 写作宿主机（阶段二）
 
 公文助手随包的 Node 侧运行层：用 **Pi Durable** 在专属文件工作区里写作，最后只交出
-一份固定版本的 Markdown。Rust 主程序负责收集正文与要求、启动本进程、校验交付并复用
-现有提案界面；本目录不直接改正式稿，也不实现新的流程引擎。
+一份固定版本的 Markdown。Rust 主程序负责收集正文与要求、启动本进程、校验交付并按 Pi
+固定入口写入正文；本目录不直接改正式稿，也不实现新的流程引擎。
 
 ## 依赖与构建（只在开发 / CI 联网阶段做）
 
@@ -29,6 +29,8 @@ node --test
 覆盖：
 
 - `test/protocol.test.mjs`：init 校验、协议版本、行 / 消息上限、密钥抹除。
+- `test/encryption.test.mjs`：GWA2 固定向量与 AAD、GWA1 只读、路径 / 槽位防串、
+  加密工作区与交付、Durable JSONL 提交及重开恢复。
 - `test/paths.test.mjs`：绝对路径 / `..` / 符号链接与 Windows junction 越界、只写
   `work/`、原子提交快照。
 - `test/agent.test.mjs`：**测试专用** faux provider，走真实 Durable harness、文件工具与
@@ -76,7 +78,7 @@ runtime/pi/
 
 - `GONGWEN_PI_RUNTIME_DIR`（可选，开发）或 exe 邻接 `runtime/pi`（生产）；
 - 模型地址、密钥、模型名、上下文 / 输出上限、思考档位——全部来自应用当前设置；
-- 工作区根目录与 **模型不可读写** 的 SQLite 路径。
+- 工作区根目录与 **模型不可读写** 的 Durable JSONL 会话目录。
 
 密钥只从 stdin 的 `init` 消息进入本进程，不写 argv、不写日志、不进事件。
 
@@ -85,7 +87,7 @@ runtime/pi/
 Rust → host（stdin，一行一条）：
 
 ```json
-{"type":"init","protocol":1,"requestId":"…","runId":"…","workspace":{…},"model":{…},"task":{…},"limits":{…}}
+{"type":"init","protocol":4,"requestId":"…","runId":"…","workspace":{…},"model":{…},"task":{…},"limits":{…}}
 {"type":"tool_result","callId":"c1","ok":true,"result":{…}}
 {"type":"tool_result","callId":"q1","ok":true,"result":{"answers":[{"id":1,"value":"…"}]}}
 {"type":"cancel"}
@@ -126,14 +128,17 @@ host → Rust（stdout，一行一条；stderr 只放诊断）：
 
 ## 文件环境
 
-`src/paths.mjs` 实现 `WorkspaceEnv`，包住 Pi 的 `NodeExecutionEnv`：
+`src/paths.mjs` 实现 `WorkspaceEnv`，底层使用 `src/encrypted-files.mjs` 的统一受保护
+`FileSystem`：
 
 - 每次文件调用先解析真实路径（`realpath`），再检查仍在工作区内；
 - 读允许 `input/`、`work/`、`skills/`、`resources/`；写只允许 `work/`；
 - 绝对路径、`..`、指向工作区外的符号链接 / junction 一律拒绝；
 - 单文件上限 8 MiB，写入用同目录临时文件 + `fsync` + `rename` 原子替换；
 - 不注册 `bash`，`exec()` 明确返回 `shell_unavailable`；
-- Durable SQLite 位于 `workspace/` 的兄弟目录，模型没有路径能读到。
+- Durable JSONL 位于 `workspace/` 的兄弟目录，模型没有路径能读到；
+- `init.workspace.encryption` 存在时，工作区文件、JSONL、交付与进度都写 GWA2；
+  DEK 只来自 stdin，AAD 绑定槽位、用途 `pi` 与配置根相对路径，GWA1 / 明文只读兼容。
 
 ## 交付约定
 
@@ -145,9 +150,10 @@ host → Rust（stdout，一行一条；stderr 只放诊断）：
 - 写作指令在 `src/prompt.mjs`，包含公文 Markdown 最小语法与三条红线；技能正文来自
   应用随包的 `skills/gongwen-markdown/`，工作区里以只读文件提供。
 
-## 已知边界（阶段一）
+## 已知边界
 
-- 不接选区、`@` 引用、粘贴材料、知识库、词库与内网接口工具；这些在后续阶段接入。
-- 不做跨重启的会话恢复、提交去重持久化与多窗口宿主；每次运行一个新工作区，文件保留。
-- 判断“事实来源”只认本轮正文与用户要求；正式交付还会过应用现有 validator /
-  proofread / 公文引用 / 关键事实确认。
+- 加密 JSONL 的追加需要解密并整份原子重写；真实长会话的性能、断电恢复和 Windows 文件占用
+  仍需真机验收。
+- 文件名、大小与修改时间仍可见；不防解锁后的恶意软件、内存读取或截屏。
+- 旧 `session.sqlite` 不续跑；旧协议/旧 host 只在已有交付回执时重放，没有回执的中间任务
+  需要从头写。

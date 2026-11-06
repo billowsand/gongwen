@@ -1553,9 +1553,9 @@ impl GongwenApp {
                 &plan,
                 with_toc,
                 &path,
-                |snapshot, markdown, stem| {
+                |snapshot, markdown, _stem| {
                     crate::manuscript_io::compile_snapshot_pdf(
-                        snapshot, markdown, &display, &fonts, &numbering, stem,
+                        snapshot, markdown, &display, &fonts, &numbering,
                     )
                 },
                 |text| {

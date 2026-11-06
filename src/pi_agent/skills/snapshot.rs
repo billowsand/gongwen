@@ -192,23 +192,14 @@ impl SkillSnapshot {
                         format!("建不了工作区技能目录（{}）：{error}", parent.display())
                     })?;
                 }
-                crate::storage::atomic_write(&path, |file| {
-                    use std::io::Write;
-                    file.write_all(bytes)?;
-                    Ok(())
-                })
-                .map_err(|error| {
+                crate::vault::write_path(&path, "pi", bytes).map_err(|error| {
                     format!("写不出工作区技能文件（{}）：{error:#}", path.display())
                 })?;
             }
         }
         let index = workspace.join(INDEX_FILE);
-        crate::storage::atomic_write(&index, |file| {
-            use std::io::Write;
-            file.write_all(self.index_json().as_bytes())?;
-            Ok(())
-        })
-        .map_err(|error| format!("写不出本轮技能索引（{}）：{error:#}", index.display()))
+        crate::vault::write_path(&index, "pi", self.index_json().as_bytes())
+            .map_err(|error| format!("写不出本轮技能索引（{}）：{error:#}", index.display()))
     }
 
     pub(crate) fn index_json(&self) -> String {

@@ -14,6 +14,11 @@ use std::sync::atomic::AtomicBool;
 impl GongwenApp {
     /// 打开打印对话框，同时在后台列打印机、逐台查状态。已开着的对话框换成新的。
     pub(crate) fn open_print_dialog(&mut self, request: PrintRequest, ctx: &egui::Context) {
+        if crate::vault::key_handle().is_some() {
+            self.print_dialog = None;
+            self.status = "加密工作区不允许直接打印。请显式导出 PDF 并确认明文输出风险，再由系统 PDF 阅读器打印。".into();
+            return;
+        }
         let id = self.next_print_dialog;
         self.next_print_dialog += 1;
         let path = request.path.clone();

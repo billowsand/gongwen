@@ -108,13 +108,8 @@ impl Ime {
             Err(error) => ime.load_error = Some(error.to_string()),
         }
         match data::directory().map(|dir| dir.join("tables.json")) {
-            Ok(path) if path.exists() => match crate::file_limits::read_bytes(
-                &path,
-                crate::file_limits::MAX_TEXT_BYTES,
-                "个人词表",
-            )
-            .map_err(anyhow::Error::from)
-            .and_then(|bytes| Ok(serde_json::from_slice::<Personal>(&bytes)?))
+            Ok(path) if path.exists() => match data::load_internal_bytes(&path)
+                .and_then(|bytes| Ok(serde_json::from_slice::<Personal>(&bytes)?))
             {
                 Ok(personal) => ime.table.personal = personal,
                 Err(error) => {

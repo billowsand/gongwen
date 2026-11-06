@@ -238,16 +238,23 @@ pub(crate) fn load_store() -> anyhow::Result<ApiStore> {
     Ok(store)
 }
 
-/// 旧版 `apis.json` → OpenAPI：按服务器分组写成服务文件，原文件改名 `apis.json.bak`。
+/// 旧版 `apis.json` → OpenAPI：按服务器分组写成服务文件，原文件保留为 `apis.json.bak`。
 fn migrate(legacy: &Path) -> anyhow::Result<ApiStore> {
     let mut store: ApiStore = crate::agent::api::read_json("apis.json")?;
     absorb(&mut store);
     write_store(&store)?;
     let backup = legacy.with_extension("json.bak");
-    std::fs::rename(legacy, &backup).map_err(|e| anyhow::anyhow!("旧接口文件改名失败：{e}"))?;
-    // 迁移完成后旧文件只是回滚兜底：启用加密时同样封成密文，不能留一份
-    // 含内网地址的明文 `apis.json.bak` 在配置目录里。
-    let _ = crate::storage::seal_file_if_needed(&backup);
+    let raw = std::fs::read(legacy)?;
+    let plain = if crate::vault::is_sealed_file(&raw) {
+        let handle = crate::vault::key_handle()
+            .ok_or_else(|| anyhow::anyhow!("旧接口配置已加密，尚未解锁"))?;
+        crate::vault::open_path_bytes(&handle, legacy, "config", &raw)?
+    } else {
+        raw
+    };
+    // GWA2 绑定逻辑路径，不能直接 rename；留底必须按新路径重密封。
+    crate::vault::write_path(&backup, "config", &plain)?;
+    std::fs::remove_file(legacy).map_err(|e| anyhow::anyhow!("旧接口文件清理失败：{e}"))?;
     Ok(store)
 }
 
@@ -266,7 +273,7 @@ fn read_service_file(path: &Path) -> anyhow::Result<Value> {
     let bytes = if crate::vault::is_sealed_file(&raw) {
         let handle = crate::vault::key_handle()
             .ok_or_else(|| anyhow::anyhow!("{} 已加密，尚未解锁", path.display()))?;
-        crate::vault::open_bytes(handle.dek(), &raw)
+        crate::vault::open_path_bytes(&handle, path, "api", &raw)
             .map_err(|e| anyhow::anyhow!("{} 解密失败：{e}", path.display()))?
     } else {
         raw
@@ -277,22 +284,8 @@ fn read_service_file(path: &Path) -> anyhow::Result<Value> {
 /// 写一份服务定义：有句柄就密封，Unix 下 0600、原子替换；没有句柄时拒绝对
 /// 已加密文件写明文（静默降级防护）。
 fn write_service_file(path: &Path, doc: &Value) -> anyhow::Result<()> {
-    let mut bytes = serde_json::to_vec_pretty(doc)?;
-    match crate::vault::key_handle() {
-        Some(handle) => bytes = crate::vault::seal_bytes(handle.dek(), &bytes)?,
-        None => {
-            if path.exists()
-                && std::fs::read(path).is_ok_and(|raw| crate::vault::is_sealed_file(&raw))
-            {
-                anyhow::bail!("{} 已加密但当前未解锁，拒绝以明文覆盖", path.display());
-            }
-        }
-    }
-    crate::storage::atomic_write(path, |file| {
-        use std::io::Write as _;
-        file.write_all(&bytes)?;
-        Ok(())
-    })
+    let bytes = serde_json::to_vec_pretty(doc)?;
+    crate::vault::write_path(path, "api", &bytes)
 }
 
 fn write_store(store: &ApiStore) -> anyhow::Result<()> {

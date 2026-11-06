@@ -661,6 +661,7 @@ mod tests {
     #[test]
     fn world_decrypts_sealed_image_resources() {
         let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
         let path = dir.path().join("figure.png");
         crate::vault::set_key_handle([8u8; 32], true);
         crate::images::write_managed_file(&path, b"png-bytes").unwrap();
@@ -676,6 +677,7 @@ mod tests {
         assert_eq!(bytes.as_slice(), b"png-bytes");
         crate::vault::clear_key_handle();
         assert!(world.file(file_id("figure.png")).is_err(), "失钥后不能读");
+        crate::storage::set_test_config_dir(None);
     }
 
     #[test]

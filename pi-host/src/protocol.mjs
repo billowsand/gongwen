@@ -1,12 +1,12 @@
 //! JSONL 协议：一行一条 JSON，stdout 只走协议，stderr 只走诊断。
 //
 // 这里是 Rust 与 host 之间唯一的约定。协议版本不匹配、行太长、条数太多都直接失败，
-// 不猜、不降级。模型密钥只出现在 init 输入里，绝不进入任何输出或日志。
+// 不猜、不降级。模型密钥与资源 DEK 只出现在 init 输入里，绝不进入任何输出或日志。
 
 import path from "node:path";
 
-export const PROTOCOL_VERSION = 3;
-export const HOST_VERSION = "0.3.6";
+export const PROTOCOL_VERSION = 4;
+export const HOST_VERSION = "0.4.0";
 
 /** 单行输出的上限（含换行）。正文最多 8 MiB，JSON 转义后留出余量。 */
 export const MAX_OUTPUT_LINE_BYTES = 16 * 1024 * 1024;
@@ -146,6 +146,7 @@ export function validateInit(value) {
       skills: typeof workspace.skills === "string" ? workspace.skills : "skills/gongwen-markdown",
       piSkills: typeof workspace.piSkills === "string" ? workspace.piSkills : "skills/pi-skills",
       materials: typeof workspace.materials === "string" ? workspace.materials : "input/materials",
+      ...(workspace.encryption === undefined ? {} : { encryption: validateEncryption(workspace.encryption) }),
     },
     model: { baseUrl, apiKey, modelId, contextWindow, maxTokens, reasoning, thinkingLevel },
     strategy: validateStrategy(value.strategy),
@@ -169,6 +170,24 @@ export function validateInit(value) {
 }
 
 const MATERIAL_ROLES = new Set(["fact", "style_sample", "structure_sample", "incoming_letter"]);
+
+/** DEK 只从 stdin init 接收；规范化配置保留它供内存加密，不进入任何协议输出。 */
+function validateEncryption(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ProtocolError("workspace.encryption 必须是对象");
+  }
+  if (typeof value.keyHex !== "string" || !/^[0-9a-fA-F]{64}$/.test(value.keyHex)) {
+    throw new ProtocolError("workspace.encryption.keyHex 必须是 64 位十六进制");
+  }
+  if (value.slot !== "real" && value.slot !== "decoy") {
+    throw new ProtocolError("workspace.encryption.slot 只支持 real / decoy");
+  }
+  const configRoot = requireText(value.configRoot, "workspace.encryption.configRoot", 4096);
+  if (!isAbsolutePath(configRoot)) {
+    throw new ProtocolError("workspace.encryption.configRoot 必须是绝对路径");
+  }
+  return { keyHex: value.keyHex, slot: value.slot, configRoot };
+}
 
 /**
  * 分阶段倾向与有限能力元数据。旧 host 不认识这个字段会忽略，新 host 缺省按 `auto`。

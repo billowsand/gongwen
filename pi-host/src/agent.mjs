@@ -8,7 +8,6 @@
 //! 把长任务拆成几步短任务，中间成果经 `record_progress` 由宿主核验登记，最终仍必须
 //! `submit_document` / `finish_report`。这里没有第二个推理循环，也没有通用流程 DSL。
 
-import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
@@ -22,9 +21,10 @@ import {
   defineTool,
   watchEvents,
 } from "@earendil-works/pi-durable";
-import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { JsonlStorage } from "@earendil-works/pi-durable/storage/jsonl";
 import { createEditTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import { WorkspaceGuard, WorkspaceEnv } from "./paths.mjs";
+import { ProtectedFileSystem, ProtectedFiles } from "./encrypted-files.mjs";
 import { createDomainTools, createToolBridge, BridgeError } from "./bridge.mjs";
 import {
   DeliveryError,
@@ -160,7 +160,7 @@ function makePausableTimer(ms, onExpire) {
   };
 }
 
-function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId, phase }) {
+function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId, phase, files }) {
   return defineTool({
     name: SUBMIT_TOOL_NAME,
     description:
@@ -258,6 +258,7 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir
           bytes,
           summary,
           callId: api?.callId ?? "",
+          files,
         });
       } catch (error) {
         throw new AgentError(
@@ -285,7 +286,7 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir
 }
 
 /** 审核 / 找资料的清单：只进侧栏，不产生正文提案。 */
-function createReportTool({ state, emit, deliveryDir, runId, requestId, phase }) {
+function createReportTool({ state, emit, deliveryDir, runId, requestId, phase, files }) {
   return defineTool({
     name: REPORT_TOOL_NAME,
     description:
@@ -322,6 +323,7 @@ function createReportTool({ state, emit, deliveryDir, runId, requestId, phase })
           summary: String(args.summary ?? ""),
           items: Array.isArray(args.items) ? args.items : [],
           callId: api?.callId ?? "",
+          files,
         });
       } catch (error) {
         throw new AgentError(
@@ -473,7 +475,7 @@ function createRecordTool({ guard, limits, phase, registry, emit, onFatal }) {
           const opened = guard.read(spec.file, phase.workspace.root, limits.maxFileBytes);
           if (opened.ok) {
             try {
-              const raw = fs.readFileSync(opened.value, "utf8");
+              const raw = guard.files.readText(opened.value, limits.maxFileBytes);
               const start = Math.max(0, spec.start ?? 0);
               const end = Math.min(raw.length, spec.end ?? raw.length);
               const excerpt = raw.slice(start, Math.min(end, start + 220));
@@ -529,12 +531,13 @@ function createExtension({
   registry,
   readChars,
   onFatal,
+  files,
 }) {
   if (isStyleTask(phase.task)) {
     return defineExtension({name:"gongwen-writing",tools:[
       createBoundedReadTool({guard,maxFileBytes:limits.maxFileBytes,maxChars:readChars}),
       createWriteTool(),createEditTool(),createRecordTool({guard,limits,phase,registry,emit,onFatal}),
-      createSubmitStyleTool({guard,limits,state,onSubmitted,deliveryDir,runId,requestId,phase,validateCoverage:validatePhaseDelivery}),
+      createSubmitStyleTool({guard,limits,state,onSubmitted,deliveryDir,runId,requestId,phase,files,validateCoverage:validatePhaseDelivery}),
     ]});
   }
   const tools = [
@@ -556,17 +559,17 @@ function createExtension({
     createWriteTool(),
     createEditTool(),
     createRecordTool({ guard, limits, phase, registry, emit, onFatal }),
-    createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId, phase }),
-    createReportTool({ state, emit, deliveryDir, runId, requestId, phase }),
+    createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId, phase, files }),
+    createReportTool({ state, emit, deliveryDir, runId, requestId, phase, files }),
   ];
   return defineExtension({ name: "gongwen-writing", tools });
 }
 
-function readCurrentBytes(config) {
+function readCurrentBytes(config, files) {
   try {
     const file = path.resolve(config.workspace.root, config.workspace.current);
-    const stat = fs.statSync(file);
-    return stat.isFile() ? stat.size : 0;
+    const stat = files.info(file);
+    return stat.kind === "file" ? stat.size : 0;
   } catch {
     return 0;
   }
@@ -584,14 +587,15 @@ function toAgentError(error) {
  * 跑一轮。返回 `{ snapshot }`（提交了）、`{ report }`（只交清单）或 `{ snapshot: undefined }`
  * （模型结束但都没交）。`onCancel` 交给 main 注册取消；取消只结束本轮，不假装完成。
  */
-export async function runAgentJob({ config, models, model, emit, onCancel, onBridge }) {
+export async function runAgentJob({ config, models, model, emit, onCancel, onBridge, files }) {
+  files ??= new ProtectedFiles(config.workspace.encryption);
   const controller = withCancel(BACKGROUND_CONTEXT);
   onCancel?.(() => controller.cancel(new AgentError("已取消", "cancelled")));
 
   const deliveryDir = config.workspace.delivery;
   // 恢复时先看回执：上一次已经落盘了成品，就直接交回同一份，不重跑模型。
   if (config.recovery?.resume) {
-    const receipt = readReceipt(deliveryDir, config.runId);
+    const receipt = readReceipt(deliveryDir, config.runId, files);
     if (receipt) {
       if ((receipt.kind === "style") !== isStyleTask(config.task)) {
         throw new AgentError("交付回执的产物类型与本轮任务不一致，已拒绝恢复。", "receipt_kind_mismatch");
@@ -604,10 +608,10 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     }
   }
 
-  config.currentBytes = readCurrentBytes(config);
+  config.currentBytes = readCurrentBytes(config, files);
   const estimate = taskEstimate(config);
   let decision = decideStrategy(config, estimate);
-  const guard = new WorkspaceGuard(config.workspace.root);
+  const guard = new WorkspaceGuard(config.workspace.root, files);
   emit({
     type: "strategy",
     mode: decision.mode,
@@ -650,6 +654,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       runId: config.runId,
       requestId: config.requestId,
       identity,
+      files,
     });
     const previousMode = decision.mode;
     ({ plan, decision } = recoverPlan(plan, decision, registry));
@@ -730,6 +735,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
         phase,
         registry,
         readChars: readBudgetChars(decision),
+        files,
         onFatal: (error) => {
           state.terminalToolError = error;
           controller.cancel(error);
@@ -737,7 +743,12 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
         onSubmitted: (snapshot) => submitResolve(snapshot),
       }),
     );
-    storage = await openNodeSqliteStorage(config.workspace.state);
+    storage = await JsonlStorage.open(
+      config.workspace.state,
+      new ProtectedFileSystem({ cwd: path.dirname(config.workspace.state), files }),
+      controller.context,
+      { fsync: true },
+    );
     harness = await Harness.open(
       storage,
       {
@@ -748,6 +759,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
             root: config.workspace.root,
             cwd: cwd ?? config.workspace.root,
             maxFileBytes: config.limits.maxFileBytes,
+            files,
           }),
         settings: {
           stream: { timeoutMs: Math.min(config.limits.timeoutMs, 180_000) },
@@ -803,7 +815,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
           config.workspace,
           config.task,
           config.recovery,
-          loadSkillIndex(config.workspace),
+          loadSkillIndex(config.workspace, files),
           decision.mode === "phased",
         ),
         cwd: config.workspace.root,

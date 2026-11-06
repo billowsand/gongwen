@@ -232,12 +232,29 @@ impl Package {
     }
 
     pub(crate) fn read_dir_with(root: &Path, limits: Limits) -> Result<Self> {
+        Self::read_dir_with_reader(root, limits, |path| {
+            Ok(crate::file_limits::read_bytes(
+                path,
+                limits.max_file,
+                "技能文件",
+            )?)
+        })
+    }
+
+    /// 同一份目录校验，内容由调用方读取；配置目录内的用户技能据此透明解密，
+    /// 外部导入目录仍走普通文件读取。
+    pub(crate) fn read_dir_with_reader(
+        root: &Path,
+        limits: Limits,
+        read: impl Fn(&Path) -> Result<Vec<u8>>,
+    ) -> Result<Self> {
         fn walk(
             root: &Path,
             dir: &Path,
             depth: usize,
             package: &mut Package,
             limits: Limits,
+            read: &impl Fn(&Path) -> Result<Vec<u8>>,
         ) -> Result<()> {
             anyhow::ensure!(
                 depth <= limits.max_depth,
@@ -250,10 +267,11 @@ impl Package {
                 let path = entry?.path();
                 no_link(&path)?;
                 if path.is_dir() {
-                    walk(root, &path, depth + 1, package, limits)?;
+                    walk(root, &path, depth + 1, package, limits, read)?;
                 } else if path.is_file() {
                     anyhow::ensure!(
-                        path.metadata()?.len() <= limits.max_file,
+                        path.metadata()?.len()
+                            <= limits.max_file + crate::vault::SEALED_FILE_OVERHEAD as u64,
                         "文件超过 {} MB：{}",
                         limits.max_file / 1024 / 1024,
                         path.display()
@@ -263,14 +281,14 @@ impl Package {
                         .to_str()
                         .ok_or_else(|| anyhow::anyhow!("文件名不是 UTF-8"))?
                         .replace('\\', "/");
-                    let bytes = crate::file_limits::read_bytes(&path, limits.max_file, "技能文件")?;
+                    let bytes = read(&path)?;
                     package.insert_with(name, bytes, limits)?;
                 }
             }
             Ok(())
         }
         let mut package = Self::default();
-        walk(root, root, 0, &mut package, limits)?;
+        walk(root, root, 0, &mut package, limits, &read)?;
         Ok(package)
     }
 

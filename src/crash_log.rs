@@ -10,7 +10,6 @@
 
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -80,12 +79,46 @@ pub fn take_unseen_report() -> Option<PathBuf> {
     take_unseen_in(&log_dir()?)
 }
 
+/// 读出当前槽位的去敏诊断；GWA2 只在已解锁的应用内解密，绝不回退成
+/// 「解不开就把密文当 UTF-8 显示」。
+pub fn read_report(path: &Path) -> anyhow::Result<String> {
+    let bytes = crate::vault::read_path(path, "log", 64 * 1024)?;
+    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("诊断日志不是 UTF-8 文本"))
+}
+
 fn take_unseen_in(dir: &Path) -> Option<PathBuf> {
     let marker = dir.join(UNSEEN_MARKER);
-    let path = fs::read_to_string(&marker).ok()?;
+    let raw = crate::vault::read_path(&marker, "log", 4096).ok()?;
+    let marker_text = String::from_utf8(raw).ok()?;
+    let marker_text = marker_text.trim();
+    // 新格式只记文件名；旧版的绝对路径仅在仍指向同一日志目录时兼容。
+    let candidate = PathBuf::from(marker_text);
+    let path = if candidate.is_absolute() {
+        (candidate.parent() == Some(dir)).then_some(candidate)?
+    } else {
+        if marker_text.is_empty()
+            || marker_text.contains('/')
+            || marker_text.contains('\\')
+            || marker_text == ".."
+        {
+            return None;
+        }
+        dir.join(candidate)
+    };
+    if !path.is_file() {
+        let _ = fs::remove_file(&marker);
+        return None;
+    }
+    // 明文旧 marker 指向密文日志但未解锁时保留提示，不能看一眼就丢掉。
+    if fs::read(&path)
+        .ok()
+        .is_some_and(|raw| crate::vault::is_sealed_file(&raw))
+        && crate::vault::key_handle().is_none()
+    {
+        return None;
+    }
     let _ = fs::remove_file(&marker);
-    let path = PathBuf::from(path.trim());
-    path.is_file().then_some(path)
+    Some(path)
 }
 
 fn write_report(kind: &str, detail: &str) -> Option<PathBuf> {
@@ -107,15 +140,18 @@ fn write_report_in(
         "{REPORT_PREFIX}{}.log",
         now.format("%Y%m%d-%H%M%S-%3f")
     ));
-    crate::storage::atomic_write(&path, |file| {
-        file.write_all(render_report(kind, detail, &now).as_bytes())?;
-        Ok(())
-    })
-    .ok()?;
-    let _ = crate::storage::atomic_write(&dir.join(UNSEEN_MARKER), |file| {
-        file.write_all(path.display().to_string().as_bytes())?;
-        Ok(())
-    });
+    let can_seal = crate::vault::key_handle().is_some();
+    let must_reduce = !can_seal && log_dir().as_deref() == Some(dir) && {
+        use crate::vault::{Probe, Vault};
+        !matches!(Vault::probe(), Probe::Absent | Probe::Skipped)
+            || crate::vault::slot_has_encrypted_data(crate::storage::current_slot())
+    };
+    let text = render_report_mode(kind, detail, &now, !must_reduce);
+    // 有密钥时日志与提示标记都是 GWA2；尚未解锁的加密工作区只写不含
+    // panic 原文、路径与环境变量的最小诊断，绝不完整明文降级。
+    crate::vault::write_path(&path, "log", text.as_bytes()).ok()?;
+    let name = path.file_name()?.to_string_lossy();
+    let _ = crate::vault::write_path(&dir.join(UNSEEN_MARKER), "log", name.as_bytes());
     prune(dir);
     Some(path)
 }
@@ -132,7 +168,17 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn render_report(kind: &str, detail: &str, now: &chrono::DateTime<chrono::Local>) -> String {
+    render_report_mode(kind, detail, now, true)
+}
+
+fn render_report_mode(
+    kind: &str,
+    detail: &str,
+    now: &chrono::DateTime<chrono::Local>,
+    include_sensitive: bool,
+) -> String {
     let mut text = String::new();
     let _ = writeln!(text, "公文助手崩溃日志");
     let _ = writeln!(text, "类型：{kind}");
@@ -144,26 +190,33 @@ fn render_report(kind: &str, detail: &str, now: &chrono::DateTime<chrono::Local>
         std::env::consts::OS,
         std::env::consts::ARCH
     );
-    if let Some(name) = os_pretty_name() {
-        let _ = writeln!(text, "系统：{name}");
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = writeln!(text, "程序：{}", exe.display());
-    }
-    // 图形会话相关的环境变量：闪退多半与 X11/Wayland、驱动选择有关。
-    for key in [
-        "XDG_SESSION_TYPE",
-        "XDG_CURRENT_DESKTOP",
-        "DISPLAY",
-        "WAYLAND_DISPLAY",
-        "LANG",
-        "LIBGL_ALWAYS_SOFTWARE",
-    ] {
-        if let Some(value) = std::env::var_os(key) {
-            let _ = writeln!(text, "{key}={}", value.to_string_lossy());
+    if include_sensitive {
+        if let Some(name) = os_pretty_name() {
+            let _ = writeln!(text, "系统：{name}");
         }
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = writeln!(text, "程序：{}", exe.display());
+        }
+        // 图形会话相关的环境变量：闪退多半与 X11/Wayland、驱动选择有关。
+        for key in [
+            "XDG_SESSION_TYPE",
+            "XDG_CURRENT_DESKTOP",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "LANG",
+            "LIBGL_ALWAYS_SOFTWARE",
+        ] {
+            if let Some(value) = std::env::var_os(key) {
+                let _ = writeln!(text, "{key}={}", value.to_string_lossy());
+            }
+        }
+        let _ = writeln!(text, "\n{}", truncate_detail(detail));
+    } else {
+        let _ = writeln!(
+            text,
+            "\n详细错误、程序路径与环境变量未落盘：加密工作区尚未解锁，无法密封保存。"
+        );
     }
-    let _ = writeln!(text, "\n{}", truncate_detail(detail));
     text
 }
 
@@ -260,6 +313,45 @@ mod tests {
 
         assert_eq!(take_unseen_in(dir.path()), Some(path));
         assert_eq!(take_unseen_in(dir.path()), None, "只提示一次");
+    }
+
+    #[test]
+    fn encrypted_report_is_sealed_and_only_read_back_through_the_unlocked_app() {
+        let root = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(root.path().to_path_buf()));
+        crate::vault::set_key_handle([41; 32], true);
+        let dir = log_dir().unwrap();
+        let path = write_report_in(&dir, "测试", "信息：机密 panic", at(3)).unwrap();
+        let raw = fs::read(&path).unwrap();
+        assert!(raw.starts_with(b"GWA2"));
+        assert!(!String::from_utf8_lossy(&raw).contains("机密 panic"));
+        assert!(read_report(&path).unwrap().contains("机密 panic"));
+        assert_eq!(take_unseen_in(&dir), Some(path.clone()));
+
+        crate::vault::clear_key_handle();
+        let marker = dir.join(UNSEEN_MARKER);
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        crate::vault::write_path(&marker, "log", name.as_bytes()).unwrap();
+        assert_eq!(take_unseen_in(&dir), None, "未解锁不能消耗密文提示");
+        assert!(marker.exists());
+        crate::vault::clear_key_handle();
+        crate::storage::set_test_config_dir(None);
+    }
+
+    #[test]
+    fn locked_early_startup_omits_sensitive_detail_instead_of_plaintext_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(root.path().to_path_buf()));
+        let _ = crate::vault::Vault::create("主密码aaaa", None, false).unwrap();
+        crate::vault::clear_key_handle();
+        let dir = log_dir().unwrap();
+        let path = write_report_in(&dir, "启动失败", "机密错误与 /private/path", at(4)).unwrap();
+        let text = fs::read_to_string(path).unwrap();
+        assert!(!text.contains("机密错误"));
+        assert!(!text.contains("/private/path"));
+        assert!(!text.contains("程序："));
+        assert!(text.contains("未落盘"));
+        crate::storage::set_test_config_dir(None);
     }
 
     #[test]

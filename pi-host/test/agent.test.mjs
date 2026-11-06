@@ -74,7 +74,7 @@ function makeWorkspace() {
   fs.writeFileSync(path.join(root, "skills", "gongwen-markdown", "SKILL.md"), "# 技能\n");
   const delivery = path.join(root, "..", `${path.basename(root)}-run`);
   fs.mkdirSync(delivery, { recursive: true });
-  return { root, state: path.join(root, "..", `${path.basename(root)}.sqlite`), delivery };
+  return { root, state: path.join(delivery, "session"), delivery };
 }
 
 function makeConfig(workspace) {

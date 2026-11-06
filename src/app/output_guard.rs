@@ -9,7 +9,7 @@ pub(crate) const PLAINTEXT_WARNING: &str = "当前工作区已启用加密。此
 pub(crate) const PDF_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的 ZIP 由独立的 ZIP 密码保护，但解压后的 PDF 是普通文件，不受应用密码和本地加密保护。PDF 可能包含正文、图片、附件及人员等敏感信息；解压、复制、同步或发送后，可能导致信息泄露。请妥善保管 ZIP 密码并确认接收范围。";
 pub(crate) const PACKAGE_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的是稿件包（外层由独立的 ZIP 密码保护），但解压后的 Markdown 正文、历史版本、图片、PDF 附件与随行件全部是普通文件，不再受应用密码和本地加密保护。稿件包还可能包含人员、单位、文号等敏感信息；复制、同步、发送或由其他软件打开后，可能导致信息泄露。请妥善保管 ZIP 密码并确认接收范围。";
 pub(crate) const PII_EXPORT_WARNING: &str = "当前工作区已启用加密。此次导出的表格或词表是普通文件，可能包含人员姓名、职务、联系电话、个人简介、单位名称等敏感信息，以及从稿件派生出的正文用语；复制、同步、发送或由其他软件打开后，可能导致信息泄露。请确认导出范围与接收对象。";
-pub(crate) const BACKUP_WARNING: &str = "当前工作区已启用加密。备份包里的数据库与配置是密文，但图片、图表缓存、Pi 运行目录等内容目前仍是普通文件，包本身也不受应用密码保护。请把备份放在可信位置；恢复时需要使用备份当时的应用密码，恢复后请重新解锁。";
+pub(crate) const BACKUP_WARNING: &str = "当前工作区已启用加密。备份包里的数据库、配置、图片、Pi 运行数据、个人词表与自定义技能均保持密文，但 ZIP 容器本身不受应用密码保护，文件名、大小和修改时间仍可见。请把备份放在可信位置；恢复时需要使用备份当时的应用密码，恢复后请重新解锁。";
 
 pub(crate) type OutputAction = Box<dyn FnOnce(&mut GongwenApp)>;
 
@@ -123,7 +123,7 @@ mod tests {
     use crate::draft_page::ExportKind;
 
     #[test]
-    fn memory_attachment_preview_needs_no_output_but_print_release_is_guarded() {
+    fn memory_attachment_preview_needs_no_output_and_direct_print_is_refused() {
         let mut h = Harness::new(true);
         let store = h.app.manuscript_store.as_mut().unwrap();
         let id = store
@@ -157,10 +157,9 @@ mod tests {
             }],
             &h.ctx,
         );
-        assert!(h.app.pending_output.is_some());
-        assert!(h.app.pending_file_dialogs.is_empty());
+        assert!(h.app.pending_output.is_none());
+        assert!(h.app.status.contains("不允许直接打印"));
         assert!(h.app.print_dialog.is_none());
-        h.click("取消");
         assert!(h.app.pending_file_dialogs.is_empty());
         assert!(h.app.print_dialog.is_none());
         assert!(!h.dir.path().join("output").exists());
@@ -338,9 +337,8 @@ mod tests {
         }
         h.app.draft_page().start_export_for_print();
         h.app.apply_draft_actions(&h.ctx);
-        assert!(h.app.pending_output.is_some());
-        assert!(!h.app.docs[0].print_after_export);
-        h.click("取消");
+        assert!(h.app.pending_output.is_none());
+        assert!(h.app.status.contains("不允许直接打印"));
         assert!(!h.app.docs[0].print_after_export);
         assert!(!h.app.docs[0].busy);
         assert!(!h.dir.path().join("output").exists());

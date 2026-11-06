@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { isStyleTask } from "./style.mjs";
 import { sanitizeShort } from "./protocol.mjs";
+import { plaintextFiles } from "./encrypted-files.mjs";
 
 export const SUBMIT_TOOL_NAME = "submit_document";
 export const REPORT_TOOL_NAME = "finish_report";
@@ -21,17 +22,17 @@ const MAX_SKILL_DESCRIPTION = 500;
  * 本轮技能索引。优先读 Rust 写好的 `input/skills.json`；旧工作区没有索引时，
  * 只从该工作区自己的 `skills/pi-skills/` 目录扫描，不读取全局配置。
  */
-export function loadSkillIndex(workspace) {
+export function loadSkillIndex(workspace, files = plaintextFiles) {
   const root = typeof workspace?.root === "string" ? workspace.root : "";
   if (!root) return [];
   const indexFile = path.join(root, "input", "skills.json");
   try {
-    const stat = fs.statSync(indexFile);
-    if (!stat.isFile() || stat.size > MAX_SKILL_INDEX_BYTES) throw new Error("index too large");
-    const parsed = JSON.parse(fs.readFileSync(indexFile, "utf8"));
+    const stat = files.info(indexFile);
+    if (stat.kind !== "file" || stat.size > MAX_SKILL_INDEX_BYTES) throw new Error("index too large");
+    const parsed = JSON.parse(files.readText(indexFile, MAX_SKILL_INDEX_BYTES));
     return normalizeSkillIndex(parsed?.skills);
   } catch (error) {
-    if (error?.code === "ENOENT") return scanSkillDirectory(workspace);
+    if (error?.code === "ENOENT") return scanSkillDirectory(workspace, files);
     throw new Error(`读取本轮技能索引失败：${error.message}`);
   }
 }
@@ -51,7 +52,7 @@ function normalizeSkillIndex(value) {
   });
 }
 
-function scanSkillDirectory(workspace) {
+function scanSkillDirectory(workspace, files) {
   const root = typeof workspace?.root === "string" ? workspace.root : "";
   const relative = typeof workspace?.piSkills === "string" ? workspace.piSkills : "skills/pi-skills";
   if (!root) return [];
@@ -69,16 +70,16 @@ function scanSkillDirectory(workspace) {
     .map((entry) => ({
       name: entry.name,
       displayName: entry.name,
-      description: sanitizeShort(frontmatterDescription(dir, entry.name), MAX_SKILL_DESCRIPTION),
+      description: sanitizeShort(frontmatterDescription(dir, entry.name, files), MAX_SKILL_DESCRIPTION),
     }));
 }
 
-function frontmatterDescription(dir, name) {
+function frontmatterDescription(dir, name, files) {
   try {
     const file = path.join(dir, name, "SKILL.md");
-    const stat = fs.statSync(file);
-    if (!stat.isFile() || stat.size > 64 * 1024) return "";
-    const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(fs.readFileSync(file, "utf8"));
+    const stat = files.info(file);
+    if (stat.kind !== "file" || stat.size > 64 * 1024) return "";
+    const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(files.readText(file, 64 * 1024));
     if (!match) return "";
     const line = match[1].split(/\r?\n/).find((text) => /^description\s*:/.test(text));
     return line ? line.replace(/^description\s*:\s*/, "").replace(/^["']|["']$/g, "").trim() : "";

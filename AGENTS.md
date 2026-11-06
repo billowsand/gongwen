@@ -103,7 +103,8 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   旧侧栏检查点在 5D/5E 门槛通过前仍可恢复执行。不要把历史报告中的待办当作当前需求，
   也不要整目录删除仍含 API 共享服务的 `src/agent/`。旧 DSL 第 5 期、goto/loop/子图与
   固定决策流程不再继续实现，新任务使用 Pi 阶段/预算/提问。
-  本轮额度/备用模型/共享依赖已修复，孤立旧管理器已清理；host 0.3.6、协议 3，
+  本轮额度/备用模型/共享依赖已修复，孤立旧管理器已清理；当时为 host 0.3.6、协议 3
+  （2026-11-06 已升到 host 0.4.0、协议 4，见下文「应用锁与安全存储」第六轮），
   Windows 运行时已重建并验收。Rust 2896 通过/89 忽略、Node 121 通过/1 跳过；
   真实模型与目标机门槛仍未通过，不据此删除旧历史执行链。
 
@@ -303,9 +304,10 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   第二期（rusqlite 换 `bundled-sqlcipher-vendored-openssl`、DEK 包裹架构、解锁时
   `sqlcipher_export` 整库迁移、`config.json` 与密钥类文件 AEAD、停用解密、备份快照
   保持密文）已完成开发，待真机验收**；第三期（`images/`、`pi/` 运行目录加密、日志
-  清理、使用帮助威胁模型）**进行中**：图片、PDF 插图与 Mermaid 缓存已随 B 阶段落盘
-  加密（迁移、预览/导出/稿件包读取与停用解密均已接通），Pi 运行目录与最终威胁模型
-  仍未完成。方案、分期、与方案的出入和踩坑见
+  清理、使用帮助威胁模型）**开发已收尾、待真机验收**：图片、PDF 插图、Mermaid 缓存、
+  Pi 工作区与 Durable 会话、个人词表、自定义技能、使用统计和诊断日志均已纳入保护；
+  双槽备份/恢复状态机与 GWA2 已接通，加密工作区禁止直接打印。最终威胁模型与多平台、
+  真实模型/长会话验收仍未完成。方案、分期、与方案的出入和踩坑见
   `docs/security-lock-design.md`（第八节是一期交接、第九节是二期交接与真机验收清单）；
   动密钥句柄、迁移、开库路径或密封写路径前先读第九节「二期踩过的坑」。
   代码在 `src/vault.rs`、`src/app/gate.rs`、`src/app/vault_settings.rs`、
@@ -334,6 +336,19 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   图表缓存同时按槽位隔离。剩下 Pi 运行目录与会话加密（E）、打印内存化、备份恢复
   状态机（D）与文件 AEAD 的 AAD/格式版本，详见 `docs/encrypted-resource-lifecycle.md`
   末节。
+  **2026-11-06 第五轮（明文落盘审查修复，已实现、待真机验收）**：资源/接口迁移扫描
+  改 fail-closed，锁文件丢失探测补齐动态资源，ZIP 密码无密钥拒写明文，显式 `alt-*`
+  跨槽资源路径被拒绝，GWA1 读取上限按明文计算；批量 PDF 与送批材料改直接内存排版，
+  不再写系统临时正文 PDF。验证数字、剩余风险与 Pi/打印/双槽备份/GWA2 的改造顺序见
+  `docs/encrypted-resource-lifecycle.md` 末节。
+  **2026-11-06 第六轮（E/D 与本机配置日志，已实现、待真机验收）**：GWA2 以 AAD 绑定
+  槽位、用途和稳定逻辑路径；Pi Rust/Node 工作区、交付、接口缓存与 Durable JSONL 全程
+  密文，host 0.4.0 / 协议 4，旧 SQLite 不续跑、已有交付回执可重放；双槽备份拒绝带未
+  checkpoint WAL 的非当前槽，恢复先隔离暂存校验再换入；个人词表/历史、自定义技能、
+  使用统计和诊断日志纳入保护，详细日志只在解锁后应用内查看；加密工作区禁止直接打印，
+  显式导出 PDF 后由系统阅读器打印。`cargo test --locked --all-targets` 为 2976 通过 /
+  0 失败 / 90 忽略，Node host 111 通过 / 1 跳过。方案、验证数字与真机边界见
+  `docs/encrypted-resource-lifecycle.md` 末节和 `docs/pi-runtime.md`。
 
 - **Linux 图形环境兜底**（麒麟 V10 上一打开就崩：X 服务器回 `GLXBadContextTag`，
   winit 对任何 X 错误都直接 panic，于是「第一次显示窗口」时崩；panic 毒化了
