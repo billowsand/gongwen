@@ -19,7 +19,7 @@
 | 各服务的服务器地址 | `config/api-envs.json` | 一个服务一份地址 |
 | 密钥名与值 | `config/api-secrets.json` | 只存在本机，不导出、不发给模型 |
 | 接口测试记录 | `config/api-tests.json` | 只存用例结论与配置指纹，**不存返回内容** |
-| 崩溃日志与损坏配置留底 | `config/logs/`、`config/config.json.损坏-*` | 只用于本机排查，**不进全量备份** |
+| 崩溃日志与损坏配置留底 | `config/logs/`（诱饵密码槽位为 `config/alt-logs/`）、`config/config.json.损坏-*` | 只用于本机排查，落盘即加密，**不进全量备份** |
 
 设了第二密码时，诱饵系统用同构的 `alt-` 前缀目录（如 `alt-images/`、`alt-mermaid-cache/`），
 两套数据各归各位，谁也读不到谁的那份。
@@ -99,7 +99,7 @@ flowchart LR
 导出前会保存所有已修改的稿件，即使已关闭自动保存；任一保存失败都会取消导出。
 备份与恢复须等后台任务（含公文词表扫描）结束后再进行。
 
-备份包含 `config.json`、`manuscripts.db`、`images/`、`apis/`、`ime/`、`skills/` 等
+备份包含 `config.json`、`manuscripts.db`、`images/`、`apis/`、`ime/`、`skills/`、`pi/`、`mermaid-cache/`、`styles.json`、`metrics.json` 等
 配置目录内的有效数据；**不含** `logs/` 崩溃日志、`.unseen-crash` 崩溃提示标记和
 `config.json.损坏-*` 损坏配置留底——这些只对本机排查有用，恢复后反而可能让程序误报。
 
@@ -143,7 +143,7 @@ flowchart LR
 
 #### 完整备份
 
-用设置页「数据备份 → 导出备份」即可；它包含配置目录里的全部有效数据（含 `config/ime/` 学习数据）。输入法学习数据丢了不致命，但重学要时间。
+用设置页「文件与现场 → 数据备份 → 导出备份」即可；它包含配置目录里的全部有效数据（含 `config/ime/` 的基础表与个人词表）。输入法词表丢了不致命，但自定义的词条与屏蔽项要重新录。
 
 #### 单篇迁移
 
@@ -186,7 +186,7 @@ PDF 由程序内置的 **Typst** 引擎直接排版，公文与研究报告都�
 | 想清 | 怎么做 |
 |---|---|
 | 孤儿图片 | 删除稿件时**自动清理**（只清仅被该稿引用的） |
-| 输入法学习数据 | 删 `config/ime/`（不影响程序运行） |
+| 输入法词表与个人词条 | 删 `config/ime/`（不影响程序运行，但自建词表与屏蔽项会丢） |
 | 检查器埋点 | 删埋点文件 |
 | 数据接口配置 | 删 `config/apis/`（接口定义没有了） |
 | 密钥 | 删 `config/api-secrets.json` |

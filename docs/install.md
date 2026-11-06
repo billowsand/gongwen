@@ -2,7 +2,7 @@
 
 ## 获取发布版
 
-GitHub Releases 提供三种发布包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）、Linux ARM64 Debian 包（`gongwen-assistant_<版本>_arm64.deb`，按 GLIBC 2.28 构建，兼容 Ubuntu 20.04 / 麒麟 V10 及更新的系统）与 Linux x86_64 的 Arch / Omarchy 包（`gongwen-assistant-<版本>-1-x86_64.pkg.tar.zst`，用 `pacman -U` 离线安装）。macOS 与 Linux AMD64 的 deb 不再提供，需要时请按下文从源码构建。三种发布包都内含应用与字体（PDF 由程序内置的 Typst 引擎排版），安装后即可离线导出 Markdown、DOCX 与 PDF。
+GitHub Releases 提供四种发布包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）、macOS arm64 磁盘映像（`gongwen-assistant-<版本>-macos-arm64.dmg`，未配置签名时是未签名包，首次打开需右键绕过 Gatekeeper）、Linux ARM64 Debian 包（`gongwen-assistant_<版本>_arm64.deb`，按 GLIBC 2.28 构建，兼容 Ubuntu 20.04 / 麒麟 V10 及更新的系统）与 Linux x86_64 的 Arch / Omarchy 包（`gongwen-assistant-<版本>-1-x86_64.pkg.tar.zst`，用 `pacman -U` 离线安装）。Linux AMD64 的 deb 不再提供，需要时请按下文从源码构建。四种发布包都内含应用与字体（PDF 由程序内置的 Typst 引擎排版），安装后即可离线导出 Markdown、DOCX 与 PDF。
 
 安装后稿件包（`.gwx`）已与本程序关联：双击直接打开导入流程，Linux 装了 deb 或 tar
 包也会注册对应的 MIME 类型与文档图标。程序已开着时，双击的稿件包交给已开的窗口
@@ -45,6 +45,14 @@ Hyprland 等 Wayland 合成器每 1.5 秒给客户端发一次存活探测，客
 早期版本用阻塞式文件框，主线程在用户挑文件期间整个停住，探测没人回应，于是弹出
 「应用无响应」——应用本身其实照常可用。若仍看到该弹窗，说明主线程被别的事占住了
 （例如超大文档的同步排版），不是文件框的问题。
+
+### 麒麟 V10 等老图形环境下的启动
+
+部分国产 Linux 发行版带的是较老的 Mesa，X 服务器会拒绝应用申请的 OpenGL 3.3 核心配置，
+早期版本因此一开窗口就崩溃。新版本在**建窗口之前**先在子进程里按实际请求顺序探测一次图形
+能力（OpenGL 3.3 核心配置 → OpenGL ES 2.0 → 旧式上下文创建），确认建不出上下文就改用软件
+渲染（Mesa llvmpipe）再探一次；启动过程中迟到的 X 扩展类错误（GLX 等）也只记日志、不再让程序
+崩溃。仍启动失败时按提示处理，探测结论与降级过程写在配置目录的 `logs/gl-boot.log`。
 
 ### 输入法（fcitx5）候选窗定位
 

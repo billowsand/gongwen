@@ -25,7 +25,7 @@
 | [08 研究报告专章](../assets/help/08-research.md) | 区段、交叉引用、文献与数学公式 |
 | [09 核稿：审校与校验](../assets/help/09-proofread.md) | 三档提示、要素校验与存疑清零 |
 | [10 版本、对照与花脸稿](../assets/help/10-versions.md) | 提交版本、两版对照与改稿痕迹 |
-| [11 导出、打印与文件命名](../assets/help/11-export.md) | 三种格式、PDF 编译与成品入口 |
+| [11 导出、打印与文件命名](../assets/help/11-export.md) | 四种格式、PDF 进程内排版与成品入口 |
 
 ## 第三部分 AI 能力
 
@@ -33,7 +33,7 @@
 |---|---|
 | [12 AI 的边界与保障](../assets/help/12-ai-guard.md) | 三条红线、事实闸门与采纳自检 |
 | [13 AI 侧栏与技能](../assets/help/13-ai-workbench.md) | 分阶段写作、一体化输入框、/ 技能、@ 引用与内置技能 |
-| [14 AI 管理：模型、技能与风格](../assets/help/14-ai-polish.md) | AI 相关设置的六个分区与小模型逐句复核 |
+| [14 AI 管理：模型、技能与风格](../assets/help/14-ai-polish.md) | AI 相关设置的五个分区与小模型逐句复核 |
 
 ## 第四部分 词表与知识
 
