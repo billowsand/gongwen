@@ -254,6 +254,7 @@ pub struct GongwenApp {
     manuscript_batch_delete: Option<BatchDeleteConfirm>,
     /// 「导出 PDF」批量导出是否正在后台执行（防重复触发）。
     manuscript_pdf_export_busy: bool,
+    manuscript_package_export_busy: bool,
     /// 「导出 PDF」选项弹窗；None 表示未打开。
     manuscript_pdf_export: Option<PdfExportDialog>,
     /// ZIP 导入/导出密码弹窗；所有 ZIP 操作必须先经过这里。
@@ -675,6 +676,7 @@ impl GongwenApp {
             manuscript_delete_refs: Vec::new(),
             manuscript_batch_delete: None,
             manuscript_pdf_export_busy: false,
+            manuscript_package_export_busy: false,
             manuscript_pdf_export: None,
             manuscript_zip_password: None,
             remembered_zip_password: storage::load_remembered_zip_password().ok().flatten(),

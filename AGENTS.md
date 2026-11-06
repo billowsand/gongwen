@@ -228,6 +228,9 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   、第三步（Inno 注册表登记、Linux MIME / desktop、
   `assets/doc-icon/` 文档图标）均已实现，待真机验收**（macOS 未接 Apple Event open-file，
   `.gwx` 双击在 macOS 不生效，用拖放或应用内导入；见 `docs/pi-runtime.md`）。方案、进度与已知坑见 `docs/gwx-package-design.md`（单文件，第十一节是进度）。
+  **2026-11-07**：新导出 `.gwx` 已改为 7z AES-256（内容与包内文件名一起加密），
+  PDF 集合改 `.7z`；旧 ZIP 格式 `.gwx` / `.zip` 仍按文件头识别导入，清单 v1/v2/v3
+  与旧密码兼容。新包不能由旧程序读取，不能再靠改 `.zip` 后缀互传。见方案文末。
 
 - **人机决策模块**（把「问用户」从算子里抽成可组合的决策：决策形态随挂起交给界面、通用清单确认
   与修订、待决事项、自主步骤提问，分四期）：方案、分期、进度与已知坑见 `docs/decision-modules.md`

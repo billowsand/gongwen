@@ -1,8 +1,7 @@
 //! 稿件包文件（`.gwx`）：后缀判断、启动参数解析，以及把要导入的包先复制到
 //! 程序自己的暂存目录。
 //!
-//! 包内格式就是稿件管理导出的加密 ZIP（见 `manuscript_io`），只是换了专用后缀，
-//! 好在系统里登记成「双击用公文助手打开」；旧 `.zip` 稿件包照样能导入。
+//! 新包使用内容与文件名加密的 7z；旧 ZIP 格式的 `.gwx` / `.zip` 仍可导入。
 //! 方案见 `docs/gwx-package-design.md`。
 //!
 //! 为什么先复制：邮件客户端、即时通讯软件双击附件时给的是它们自己的临时文件，
@@ -16,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 /// 稿件包的专用后缀。
 pub const EXTENSION: &str = "gwx";
-/// 导入时认的后缀：新包 `.gwx` 与旧版导出的 `.zip`。
-pub const IMPORT_EXTENSIONS: &[&str] = &[EXTENSION, "zip"];
+/// 容器格式按文件头识别，不依赖后缀；也接受解压工具改名后的 `.7z`。
+pub const IMPORT_EXTENSIONS: &[&str] = &[EXTENSION, "zip", "7z"];
 /// 文件框里的过滤器名。
 pub const FILTER_NAME: &str = "公文稿件包";
 
@@ -33,10 +32,15 @@ pub fn is_package_path(path: &Path) -> bool {
 }
 
 /// 导出时保存框给回的路径：用户把后缀删了或改成别的，补上 `.gwx`。
-/// 明确写成 `.zip` 的保留——与还没升级的旧版程序互传时要用。
+/// 旧 `.zip` / 通用 `.7z` 后缀改成 `.gwx`，避免新 7z 内容被误标成 ZIP。
 pub fn with_package_extension(path: PathBuf) -> PathBuf {
-    if is_package_path(&path) {
-        return path;
+    if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+        if ext.eq_ignore_ascii_case(EXTENSION) {
+            return path;
+        }
+        if ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("7z") {
+            return path.with_extension(EXTENSION);
+        }
     }
     // 不用 set_extension：「稿件v1.2」这样的名字会被截成「稿件v1.gwx」。
     let mut name = path.file_name().map(OsString::from).unwrap_or_default();
@@ -151,6 +155,7 @@ mod tests {
         assert!(is_package_path(Path::new("a/稿件.gwx")));
         assert!(is_package_path(Path::new("稿件.GWX")));
         assert!(is_package_path(Path::new("旧包.zip")));
+        assert!(is_package_path(Path::new("新包.7Z")));
         assert!(!is_package_path(Path::new("稿件.docx")));
         assert!(!is_package_path(Path::new("gwx")));
     }
@@ -167,7 +172,7 @@ mod tests {
         );
         assert_eq!(
             with_package_extension(PathBuf::from("d/给旧版.zip")),
-            PathBuf::from("d/给旧版.zip")
+            PathBuf::from("d/给旧版.gwx")
         );
         assert_eq!(
             with_package_extension(PathBuf::from("d/a.GWX")),

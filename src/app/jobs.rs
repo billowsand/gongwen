@@ -76,7 +76,13 @@ pub(crate) enum WorkerResult {
     },
     /// 送批材料合并导出的进度与结果。
     SendPackage(crate::app::SendPackageEvent),
-    /// 稿件 PDF 批量导出的结果。`path` 是保存的 zip 路径。
+    /// 固定快照的稿件包完成加密；只有成功后才持久化用户选择记住的密码。
+    ManuscriptPackageExport {
+        path: PathBuf,
+        result: Result<manuscript_io::ExportSummary, String>,
+        remembered_password: Option<String>,
+    },
+    /// 稿件 PDF 批量导出的结果。`path` 是保存的 7z 路径。
     ManuscriptPdfExport {
         path: PathBuf,
         result: Result<manuscript_io::PdfExportSummary, String>,
@@ -626,6 +632,25 @@ impl GongwenApp {
                     }
                 }
                 WorkerResult::SendPackage(event) => self.handle_send_package_event(event),
+                WorkerResult::ManuscriptPackageExport {
+                    path,
+                    result,
+                    remembered_password,
+                } => {
+                    self.manuscript_package_export_busy = false;
+                    match result {
+                        Ok(summary) => {
+                            self.status = format!(
+                                "已导出 {} 篇稿件、{} 个 PDF 附件到 {}。",
+                                summary.records,
+                                summary.pdfs,
+                                path.display()
+                            );
+                            self.update_remembered_zip_password(remembered_password);
+                        }
+                        Err(error) => self.status = format!("导出稿件包失败：{error}"),
+                    }
+                }
                 WorkerResult::ManuscriptPdfExport { path, result } => {
                     self.manuscript_pdf_export_busy = false;
                     match result {

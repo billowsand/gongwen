@@ -100,6 +100,8 @@ typst-pdf = "0.15.1"
 url = "2.5"
 uuid = { version = "1.24", features = ["v4"] }
 zip = "8.6"
+# 稿件包与 PDF 集合：7z AES-256 同时加密正文与文件名；旧 ZIP 仍由 zip 读取。
+sevenz-rust2 = { version = "0.25", default-features = false, features = ["aes256", "compress"] }
 # 锁屏与密钥派生的缓冲清零（argon2 已带，这里直接引用其 trait）。
 zeroize = "1"
 datamatrix = "0.3.3"

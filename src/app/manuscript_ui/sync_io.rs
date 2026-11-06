@@ -158,31 +158,21 @@ impl GongwenApp {
                         app.status = format!("导出前保存当前工作稿失败：{error:#}");
                         return;
                     }
-                    let result: anyhow::Result<manuscript_io::ExportSummary> =
-                        match app.manuscript_store.as_mut() {
-                            Some(store) => manuscript_io::export_zip(
-                                store,
-                                &filter,
-                                &app.config.vocabulary,
-                                &path,
-                                &password,
-                                include_send_package,
-                            ),
-                            None => Err(anyhow::anyhow!("稿件库不可用")),
-                        };
-                    match result {
-                        Ok(summary) => {
-                            app.status = format!(
-                                "已导出 {} 篇稿件、{} 个 PDF 附件到 {}。",
-                                summary.records,
-                                summary.pdfs,
-                                path.display()
-                            );
-                            app.update_remembered_zip_password(remember.then_some(password));
+                    let prepared = (|| -> anyhow::Result<_> {
+                        let store = app.manuscript_store.as_mut().context("稿件库不可用")?;
+                        let mut ids = store
+                            .list(&filter)?
+                            .into_iter()
+                            .map(|row| row.id)
+                            .collect::<Vec<_>>();
+                        if include_send_package {
+                            ids = store.with_send_package_items(&ids)?;
                         }
-                        Err(error) => {
-                            app.status = format!("导出失败：{error:#}");
-                        }
+                        manuscript_io::prepare_package(store, &ids, &app.config.vocabulary)
+                    })();
+                    match prepared {
+                        Ok(prepared) => app.start_package_write(prepared, path, password, remember),
+                        Err(error) => app.status = format!("导出失败：{error:#}"),
                     }
                 });
             },
@@ -233,34 +223,46 @@ impl GongwenApp {
                         app.status = format!("导出前保存所选工作稿失败：{error:#}");
                         return;
                     }
-                    let result = match app.manuscript_store.as_mut() {
-                        Some(store) => manuscript_io::export_zip_selected(
-                            store,
-                            &ids,
-                            &app.config.vocabulary,
-                            &path,
-                            &password,
-                            false,
-                        ),
-                        None => Err(anyhow::anyhow!("稿件库不可用")),
-                    };
-                    match result {
-                        Ok(summary) => {
-                            app.status = format!(
-                                "已导出所选 {} 篇稿件、{} 个 PDF 附件到 {}。",
-                                summary.records,
-                                summary.pdfs,
-                                path.display()
-                            );
-                            app.update_remembered_zip_password(remember.then_some(password));
-                        }
-                        Err(error) => {
-                            app.status = format!("导出所选稿件失败：{error:#}");
-                        }
+                    let prepared = app
+                        .manuscript_store
+                        .as_mut()
+                        .context("稿件库不可用")
+                        .and_then(|store| {
+                            manuscript_io::prepare_package(store, &ids, &app.config.vocabulary)
+                        });
+                    match prepared {
+                        Ok(prepared) => app.start_package_write(prepared, path, password, remember),
+                        Err(error) => app.status = format!("导出所选稿件失败：{error:#}"),
                     }
                 });
             },
         );
+    }
+
+    fn start_package_write(
+        &mut self,
+        prepared: manuscript_io::PreparedPackage,
+        path: PathBuf,
+        password: String,
+        remember: bool,
+    ) {
+        if self.manuscript_package_export_busy {
+            self.status = "已有稿件包正在导出，请完成后再试。".into();
+            return;
+        }
+        self.manuscript_package_export_busy = true;
+        self.status = "正在加密稿件包内容与文件名…".into();
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let result = prepared
+                .write(&path, &password)
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::ManuscriptPackageExport {
+                path,
+                result,
+                remembered_password: remember.then_some(password),
+            });
+        });
     }
 
     /// 把勾选的稿件按选项导出为 PDF 集合并打包 zip，后台线程执行避免卡界面。
@@ -277,7 +279,7 @@ impl GongwenApp {
             self.status = "请先勾选要导出的稿件。".into();
             return;
         }
-        let operation = format!("批量导出 {} 篇稿件的 PDF（独立密码 ZIP）", ids.len());
+        let operation = format!("批量导出 {} 篇稿件的 PDF（独立密码 7z）", ids.len());
         let password = password.to_string();
         self.request_pdf_archive_output(operation, move |app| {
             app.perform_export_selected_manuscript_pdfs_confirmed(
@@ -302,16 +304,17 @@ impl GongwenApp {
             return;
         };
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
-        let default_name = format!("所选公文PDF-{stamp}.zip");
+        let default_name = format!("所选公文PDF-{stamp}.7z");
         let password = password.to_string();
         self.request_file(
             FileDialogSpec::save_file()
-                .filter("ZIP PDF 压缩包", &["zip"])
+                .filter("7z PDF 压缩包（文件名加密）", &["7z"])
                 .file_name(default_name),
             move |app, path| {
                 let Some(path) = path else {
                     return;
                 };
+                let path = path.with_extension("7z");
                 let vocabulary = app.config.vocabulary.clone();
                 let fonts = app.config.fonts.clone();
                 let numbering = app.config.numbering;
@@ -363,7 +366,7 @@ impl GongwenApp {
     /// 先复制到暂存目录再排队，真正弹口令框在 [`Self::pump_pending_imports`]。
     pub(crate) fn receive_import_package(&mut self, path: PathBuf) {
         if !package_file::is_package_path(&path) {
-            self.status = format!("{} 不是公文稿件包（.gwx / .zip）。", path.display());
+            self.status = format!("{} 不是公文稿件包（.gwx / .zip / .7z）。", path.display());
             return;
         }
         let staged =
@@ -953,8 +956,7 @@ fn paint_drop_hint(ctx: &egui::Context) {
     painter.galley(card.center() - text.size() / 2.0, text, theme::text());
 }
 
-/// 稿件包的保存框参数。过滤器只列 `.gwx`；用户删掉后缀时补上，明确写 `.zip` 的保留
-/// （发给还没升级的旧版程序时用）。
+/// 稿件包的保存框参数。新包统一 `.gwx`，旧 ZIP 只保留导入兼容。
 ///
 /// 对话框由 [`GongwenApp::request_file`] 在后台线程开，用户挑完再补后缀。
 fn package_save_spec(default_name: &str) -> FileDialogSpec {

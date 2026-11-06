@@ -97,6 +97,7 @@ pub(super) fn fixture() -> GongwenApp {
         manuscript_delete_refs: Vec::new(),
         manuscript_batch_delete: None,
         manuscript_pdf_export_busy: false,
+        manuscript_package_export_busy: false,
         manuscript_pdf_export: None,
         manuscript_zip_password: None,
         remembered_zip_password: None,

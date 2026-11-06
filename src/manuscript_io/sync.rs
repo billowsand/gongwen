@@ -523,8 +523,7 @@ pub fn import_with_actions(
             bail!("本机稿件自预览后发生变化，请重新预览");
         }
     }
-    let file = std::fs::File::open(zip_path)?;
-    let mut archive = zip::ZipArchive::new(file)?;
+    let mut archive = super::PackageReader::open(zip_path, password)?;
     let images = read_images(&mut archive, &manifest, password, actions)?;
     let mut pdfs = Vec::<Vec<(String, Vec<u8>)>>::new();
     for (record, action) in manifest.records.iter().zip(actions) {
@@ -903,28 +902,16 @@ fn apply_status(
 }
 
 fn read_blob(
-    archive: &mut zip::ZipArchive<std::fs::File>,
+    archive: &mut super::PackageReader,
     path: &str,
     password: &str,
     max: u64,
 ) -> Result<Vec<u8>> {
-    use std::io::Read;
-    let mut entry = archive
-        .by_name_decrypt(path, password.as_bytes())
-        .map_err(super::map_zip_password_error)?;
-    if entry.size() > max {
-        bail!("资源文件过大：{path}");
-    }
-    let mut bytes = Vec::new();
-    entry.by_ref().take(max + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > max {
-        bail!("资源解压后超过大小上限：{path}");
-    }
-    Ok(bytes)
+    archive.read(path, password, max)
 }
 
 fn read_images(
-    archive: &mut zip::ZipArchive<std::fs::File>,
+    archive: &mut super::PackageReader,
     manifest: &Manifest,
     password: &str,
     actions: &[ImportAction],
@@ -970,8 +957,8 @@ fn read_images(
     } else {
         let names = archive
             .file_names()
+            .into_iter()
             .filter(|name| name.starts_with("images/"))
-            .map(str::to_string)
             .collect::<Vec<_>>();
         for path in names {
             if !safe_image_path(&path) {
