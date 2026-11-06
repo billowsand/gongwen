@@ -346,7 +346,7 @@ pub struct ExportSelection {
     /// 两者都与原公函分开成文件，不拼进公函。默认关闭；旧配置没有这一项时按关闭处理。
     #[serde(default)]
     pub receipt: bool,
-    /// 反复导出同一篇稿件时覆盖同名文件，而不是不断生成 `-2`、`-3` 副本。
+    /// 旧配置兼容字段；导出现在始终覆盖同名文件。
     pub overwrite: bool,
 }
 
@@ -383,7 +383,7 @@ impl Default for ExportSelection {
             pdf: true,
             typst: false,
             receipt: false,
-            overwrite: false,
+            overwrite: true,
         }
     }
 }

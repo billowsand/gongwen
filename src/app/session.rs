@@ -13,7 +13,6 @@ use crate::modal::{self, Dismiss};
 use crate::storage;
 use crate::theme;
 use eframe::egui;
-use std::path::PathBuf;
 
 /// 退出前的汇总确认。上区必须处理，下区只是提醒。
 ///
@@ -66,8 +65,12 @@ pub(crate) enum DraftAction {
     ExportWritingArtifact { name: String, text: String },
     /// 插入图片：应用层开文件框，选好后把图片插进这篇稿件。
     InsertImages { key: DocKey },
-    /// 另存导出成品：应用层开保存框，选好后复制过去。
-    SaveExportCopy { key: DocKey, source: PathBuf },
+    /// 重新导出当前成品：应用层开保存框，选好后后台生成。
+    SaveExportCopy {
+        key: DocKey,
+        kind: crate::draft_page::ExportKind,
+        name: String,
+    },
     /// 导入 .bib 文献库：应用层开文件框，选好后读进这篇稿件。
     ImportBibliography { key: DocKey },
 }

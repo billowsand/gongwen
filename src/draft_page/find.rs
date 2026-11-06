@@ -18,7 +18,7 @@ pub(crate) enum FileAction {
     /// 把文件本身放进系统剪贴板，随后可在文件管理器等处直接粘贴。
     CopyToClipboard(PathBuf),
     /// 弹出保存框，另存一份到用户选的位置。
-    SaveAs(PathBuf),
+    SaveAs(crate::draft_page::ExportKind),
 }
 
 /// 起草页横幅：当前编辑内容来自哪一版本。

@@ -515,7 +515,7 @@ pub(crate) fn document_number_row(
     row_label_with_info(
         ui,
         "文号",
-        "机关代字、发文年份与序号合成一个文号；序号只在「正式版」下可填。",
+        "机关代字、发文年份与序号合成一个文号；序号只在「盖章版」下可填。",
     );
     let year_width = 42.0;
     let seq_width = 34.0;
@@ -566,7 +566,7 @@ pub(crate) fn document_number_row(
         if !code.is_empty() && !year.is_empty() {
             let number = profile.document_number.trim();
             let text = if !formal {
-                format!("预览版：{code}〔{year}〕 号（流水号留空）")
+                format!("签字版：{code}〔{year}〕 号（流水号留空）")
             } else if number.is_empty() {
                 format!("成文后显示为 {code}〔{year}〕□号")
             } else {
@@ -587,7 +587,7 @@ fn minutes_number_row(ui: &mut egui::Ui, profile: &mut crate::models::TemplatePr
     row_label_with_info(
         ui,
         "编号",
-        "纪要编号只有年份与序号，不带机关代字；序号只在「正式版」下可填。",
+        "纪要编号只有年份与序号，不带机关代字；序号只在「盖章版」下可填。",
     );
     let formal = profile.letter_version == LetterVersion::Formal;
     ui.vertical(|ui| {
@@ -613,7 +613,7 @@ fn minutes_number_row(ui: &mut egui::Ui, profile: &mut crate::models::TemplatePr
         if !year.is_empty() {
             let number = profile.document_number.trim();
             let text = if !formal {
-                format!("预览版：〔{year}〕 号（序号留空）")
+                format!("签字版：〔{year}〕 号（序号留空）")
             } else if number.is_empty() {
                 format!("成文后显示为 〔{year}〕□号")
             } else {
@@ -1049,7 +1049,7 @@ impl DraftPage<'_> {
             .show(ui, |ui| {
                 row_label_with_info(ui, "文档类型", self.doc.draft.kind.description());
                 ui.horizontal(|ui| {
-                    // 「预览版/正式版」是整篇稿子的状态而不是纸上的某个部位，
+                    // 「签字版/盖章版」是整篇稿子的状态而不是纸上的某个部位，
                     // 跟文种并排放在导航区，不占下面三段的行。
                     let versioned = !matches!(
                         self.doc.draft.kind,
@@ -1072,19 +1072,19 @@ impl DraftPage<'_> {
                     if versioned {
                         let tip = match self.doc.draft.kind {
                             TemplateKind::OfficialLetter => {
-                                "预览版自动留空函号流水号和成文日期的“日”；正式版使用填写值。"
+                                "签字版自动留空函号流水号和成文日期的“日”；盖章版使用填写值。"
                             }
                             TemplateKind::PhoneNotice | TemplateKind::WhitePaper => {
-                                "预览版自动留空落款成文日期的“日”；正式版使用完整日期。"
+                                "签字版自动留空落款成文日期的“日”；盖章版使用完整日期。"
                             }
                             TemplateKind::RedHeadApproval => {
-                                "预览版自动留空发文序号和落款成文日期的“日”；正式版使用填写值。"
+                                "签字版自动留空发文序号和落款成文日期的“日”；盖章版使用填写值。"
                             }
                             TemplateKind::MeetingAgenda => {
                                 "会议议程无落款日期，稿件版本仅用于与其他文种保持一致。"
                             }
                             TemplateKind::MeetingMinutes => {
-                                "预览版自动留空纪要编号的序号和印发日期的“日”；正式版使用填写值。"
+                                "签字版自动留空纪要编号的序号和印发日期的“日”；盖章版使用填写值。"
                             }
                             // 不能是 unreachable：`versioned` 在文种下拉框渲染之前求值，
                             // 用户点选“普通公文”的那一帧里 kind 已变、versioned 还是旧值 true，
@@ -1094,7 +1094,7 @@ impl DraftPage<'_> {
                                 "普通公文无落款成文日期，稿件版本仅用于与其他文种保持一致。"
                             }
                             TemplateKind::ResearchReport => {
-                                "研究报告不使用公文预览版、正式版状态。"
+                                "研究报告不使用公文签字版、盖章版状态。"
                             }
                         };
                         egui::ComboBox::from_id_salt("letter_version")

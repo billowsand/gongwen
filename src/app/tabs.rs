@@ -564,21 +564,12 @@ impl GongwenApp {
                         app.draft_page_at(index).insert_images_from(&ctx, &files);
                     });
                 }
-                DraftAction::SaveExportCopy { key, source } => {
-                    let file_name = source
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let mut spec =
-                        super::file_dialog::FileDialogSpec::save_file().file_name(file_name);
-                    if let Some(extension) =
-                        source.extension().and_then(|extension| extension.to_str())
-                    {
-                        let label = format!("{} 文件", extension.to_ascii_uppercase());
-                        spec = spec.filter(label, &[extension]);
-                    }
+                DraftAction::SaveExportCopy { key, kind, name } => {
+                    let spec = super::file_dialog::FileDialogSpec::save_file()
+                        .file_name(name)
+                        .filter(kind.label(), &[kind.extension()]);
                     self.request_plaintext_output(
-                        format!("另存导出成品：{}", source.display()),
+                        "按当前正文和表单重新导出到所选位置",
                         move |app| {
                             app.request_file(spec, move |app, target| {
                                 let Some(target) = target else {
@@ -587,7 +578,7 @@ impl GongwenApp {
                                 let Some(index) = app.doc_index_of_key(key) else {
                                     return;
                                 };
-                                app.draft_page_at(index).copy_export_to(&source, &target);
+                                app.draft_page_at(index).export_current_to(kind, target);
                             });
                         },
                     );

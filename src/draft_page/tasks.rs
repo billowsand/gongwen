@@ -72,6 +72,42 @@ pub(crate) fn reviewed_draft(
     }
 }
 
+/// 生成的是调用时传入的正文与要素快照；旧成品不参与另存。
+fn render_export_to(
+    input: &DraftInput,
+    markdown: &str,
+    config: &crate::models::AppConfig,
+    kind: ExportKind,
+    target: &Path,
+) -> anyhow::Result<crate::app::widgets::ExportOutcome> {
+    let temp = tempfile::tempdir()?;
+    let mut outcome = export_and_compile(
+        temp.path(),
+        input,
+        markdown,
+        &kind.selection(true, false),
+        &config.vocabulary,
+        &config.fonts,
+        &config.numbering,
+        &config.transmit_defaults,
+        None,
+        |_| {},
+    )?;
+    if let Some(error) = &outcome.compile_error {
+        anyhow::bail!("{error}");
+    }
+    let source = kind
+        .find_in(&outcome.files)
+        .ok_or_else(|| anyhow::anyhow!("未生成导出文件"))?;
+    crate::storage::atomic_write(target, |file| {
+        let mut source = std::fs::File::open(source)?;
+        std::io::copy(&mut source, file)?;
+        Ok(())
+    })?;
+    outcome.files = vec![target.to_path_buf()];
+    Ok(outcome)
+}
+
 impl DraftPage<'_> {
     /// 发起一次后台任务：记在本篇名下并推进序号，结果只认这一对标识。
     pub(crate) fn begin_job(&mut self) -> (DocKey, u64) {
@@ -85,7 +121,7 @@ impl DraftPage<'_> {
         self.start_export_with(self.config.export.clone());
     }
 
-    /// 「打印…」：按覆盖策略只导一份 PDF，导完由外壳打开并弹打印对话框。
+    /// 「打印…」：更新一份 PDF，导完由外壳打开并弹打印对话框。
     /// 走的就是 [`Self::start_export_with`]，不另写一条导出路径。
     pub(crate) fn start_export_for_print(&mut self) {
         self.request_export(
@@ -215,30 +251,6 @@ impl DraftPage<'_> {
             self.doc.result_drawer_open = true;
         }
 
-        // 在主线程按本次实际导出的快照认定版本；不能只用“已保存”或最新版本名称。
-        let version_name = match (self.doc.manuscript_id, self.store.as_deref_mut()) {
-            (Some(id), Some(store)) => {
-                let selected_version = self
-                    .doc
-                    .loaded_version
-                    .as_ref()
-                    .filter(|loaded| loaded.manuscript_id == id)
-                    .map(|loaded| loaded.version_number);
-                match store.export_version_name(
-                    id,
-                    selected_version,
-                    &self.doc.draft,
-                    &self.doc.generated_markdown,
-                ) {
-                    Ok(name) => name,
-                    Err(error) => {
-                        *self.status = format!("读取导出版本失败：{error:#}");
-                        return;
-                    }
-                }
-            }
-            _ => None,
-        };
         let (key, seq) = self.begin_job();
         *self.status = "正在导出当前审校稿…".into();
         self.doc.open_after_export = open;
@@ -269,7 +281,7 @@ impl DraftPage<'_> {
                 &fonts,
                 &numbering,
                 &transmit_defaults,
-                version_name.as_deref(),
+                None,
                 |message| {
                     let _ = tx.send(WorkerResult::Doc {
                         key,
@@ -397,8 +409,7 @@ impl DraftPage<'_> {
     }
 
     /// 成品入口：PDF / Word / Typst 包。单击按当前审校稿只导这一种并打开，
-    /// 不必先导出再另找按钮打开。右键对当前文稿最近一次导出（属于它的子目录中
-    /// 修改时间最新）留下的那一份操作：复制到剪贴板、另存到别处或在文件管理器里定位。
+    /// 不必先导出再另找按钮打开。右键可复制、定位已有成品，或重新生成并导出到别处。
     pub(crate) fn export_open_buttons(&mut self, ui: &mut egui::Ui) {
         // 导出目录里同一文稿的文件夹都以“去掉时间戳的导出主干”为前缀，
         // 用它过滤出属于当前文稿的目录，避免打开别的文稿的成品。
@@ -433,29 +444,32 @@ impl DraftPage<'_> {
             if response.clicked() {
                 export = Some(kind);
             }
-            let Some(path) = path else {
-                continue;
-            };
             response.context_menu(|ui| {
                 if ui
-                    .add(theme::menu_item(theme::Icon::Copy, "复制文件"))
+                    .add_enabled(
+                        path.is_some(),
+                        theme::menu_item(theme::Icon::Copy, "复制文件"),
+                    )
                     .clicked()
                 {
-                    action = Some(FileAction::CopyToClipboard(path.clone()));
+                    action = Some(FileAction::CopyToClipboard(path.clone().unwrap()));
                     ui.close();
                 }
                 if ui
                     .add(theme::menu_item(theme::Icon::FileDown, "导出到…"))
                     .clicked()
                 {
-                    action = Some(FileAction::SaveAs(path.clone()));
+                    action = Some(FileAction::SaveAs(kind));
                     ui.close();
                 }
                 if ui
-                    .add(theme::menu_item(theme::Icon::Reveal, "在文件管理器中定位"))
+                    .add_enabled(
+                        path.is_some(),
+                        theme::menu_item(theme::Icon::Reveal, "在文件管理器中定位"),
+                    )
                     .clicked()
                 {
-                    action = Some(FileAction::Reveal(path.clone()));
+                    action = Some(FileAction::Reveal(path.clone().unwrap()));
                     ui.close();
                 }
             });
@@ -474,8 +488,8 @@ impl DraftPage<'_> {
             FileAction::CopyToClipboard(path) => {
                 (file_clipboard::copy_file(&path), path, "复制到剪贴板")
             }
-            FileAction::SaveAs(path) => {
-                self.save_export_copy(&path);
+            FileAction::SaveAs(kind) => {
+                self.save_export_copy(kind);
                 return;
             }
         };
@@ -492,30 +506,49 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 右键“导出到…”：弹出保存框，把这份成品另存一份到用户选的位置。
-    ///
-    /// 保存框由应用层在后台线程开（主线程不能等），这里只把请求交出去。
-    fn save_export_copy(&mut self, source: &Path) {
+    /// 右键“导出到…”：先选位置，再从当前正文和表单重新生成。
+    fn save_export_copy(&mut self, kind: ExportKind) {
+        if self.doc.busy || self.doc.generated_markdown.trim().is_empty() {
+            return;
+        }
+        let title = export::document_title(&self.doc.draft, &self.doc.generated_markdown);
+        let name = match export::suggested_file_name(&self.doc.draft, &title, kind) {
+            Ok(name) => name,
+            Err(error) => {
+                *self.status = format!("无法导出：{error:#}");
+                return;
+            }
+        };
         self.actions.push(DraftAction::SaveExportCopy {
             key: self.doc.key,
-            source: source.to_path_buf(),
+            kind,
+            name,
         });
     }
 
-    /// 把导出的成品复制到用户选定的位置。
-    pub(crate) fn copy_export_to(&mut self, source: &Path, target: &Path) {
-        let same = match (source.canonicalize(), target.canonicalize()) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => false,
-        };
-        if same {
-            *self.status = "目标就是原文件，未做改动。".into();
+    /// 由应用层单次明文输出确认和异步文件框回调进入；后台重新生成，绝不复制旧缓存。
+    pub(crate) fn export_current_to(&mut self, kind: ExportKind, target: PathBuf) {
+        if self.doc.busy || self.doc.generated_markdown.trim().is_empty() {
             return;
         }
-        *self.status = match std::fs::copy(source, target) {
-            Ok(_) => format!("已导出到 {}。", target.display()),
-            Err(error) => format!("导出到 {} 失败：{error}", target.display()),
-        };
+        let input = self.doc.draft.clone();
+        let markdown = self.doc.generated_markdown.clone();
+        let config = self.config.clone();
+        let (key, seq) = self.begin_job();
+        self.doc.open_after_export = None;
+        self.doc.output_files.clear();
+        self.doc.export_error = None;
+        *self.status = "正在按当前内容重新导出…".into();
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let result = render_export_to(&input, &markdown, &config, kind, &target)
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::Doc {
+                key,
+                seq,
+                job: DocJob::Exported(result),
+            });
+        });
     }
 
     /// 功能区“导入文档”：选一个现成文档，转成 markdown 插到编辑器光标处。
@@ -617,6 +650,41 @@ impl DraftPage<'_> {
 mod delivery_tests {
     use super::*;
     use crate::models::TemplateKind;
+
+    #[test]
+    fn export_to_regenerates_current_body_and_elements_and_replaces_target() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("最新.docx");
+        std::fs::write(&target, b"old cached file").unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        input.profile.department_code = "某办函".into();
+        input.profile.document_number = "99".into();
+        let outcome = render_export_to(
+            &input,
+            "# 最新标题\n\n这是修改后的最新正文。",
+            &crate::models::AppConfig::default(),
+            ExportKind::Word,
+            &target,
+        )
+        .unwrap();
+        assert_eq!(outcome.files, vec![target.clone()]);
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&target).unwrap()).unwrap();
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        assert!(xml.contains("这是修改后的最新正文。"));
+        assert!(xml.contains("某办函"));
+        assert!(xml.contains("99"));
+        // 指定位置只留下所选成品，不遗留额外目录、源码包或清单。
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn proposal_delivery_removes_internal_marks_and_preserves_research_syntax() {

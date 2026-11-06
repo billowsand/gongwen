@@ -150,8 +150,8 @@ impl LetterVersion {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Preview => "预览版",
-            Self::Formal => "正式版",
+            Self::Preview => "签字版",
+            Self::Formal => "盖章版",
         }
     }
 }

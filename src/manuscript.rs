@@ -21,7 +21,6 @@ use std::time::Duration;
 pub(crate) mod ai_checkpoints;
 pub(crate) mod ai_sessions;
 pub(crate) mod candidates;
-mod export_naming;
 pub(crate) mod merge;
 pub(crate) mod registry;
 mod search;

@@ -1805,8 +1805,7 @@ impl GongwenApp {
             "AI 起草或优化完成后自动导出一次",
         )
         .on_hover_text("不勾选则只出稿，什么时候导出完全由你决定");
-        ui.checkbox(&mut self.config.export.overwrite, "覆盖同名文件")
-            .on_hover_text("不勾选时每次导出都会生成“标题-2、标题-3”这样的新文件");
+        ui.label("同一稿件使用固定目录，同名文件直接替换");
     }
 
     /// 加密传输单（《传发任务单》）的默认填写内容。
