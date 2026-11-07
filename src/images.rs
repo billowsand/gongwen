@@ -380,6 +380,23 @@ pub(crate) fn store_at(logical: &str, original_name: &str, bytes: &[u8]) -> Resu
     write_managed_file(&path, bytes).with_context(|| format!("无法写入图片 {}", path.display()))
 }
 
+/// 写一份可重建资源（Mermaid 图表缓存这类）。库可用时进资源库（同 SHA 去重），
+/// 不可用时回退可丢弃文件写法：允许覆盖当前密钥解不开的旧密文——缓存命中判
+/// 定会先按当前密钥验证可读，解不开才重渲染，重渲染的成品必须能落盘。
+/// 用户图片不走这里（[`store_at`] 解不开的密文一律拒绝覆盖）。
+pub(crate) fn store_disposable_at(logical: &str, original_name: &str, bytes: &[u8]) -> Result<()> {
+    if resources::put(logical, original_name, None, bytes)? {
+        return Ok(());
+    }
+    let path = resolve(logical)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("无法创建资源目录 {}", parent.display()))?;
+    }
+    write_disposable_managed_file(&path, bytes)
+        .with_context(|| format!("无法写入资源 {}", path.display()))
+}
+
 /// 写一份文本资源（Mermaid 图表警告这类没有魔数可认的内容）。库可用时进资源库，
 /// 否则回退旧的文件写法。
 pub(crate) fn store_text_at(logical: &str, original_name: &str, bytes: &[u8]) -> Result<()> {

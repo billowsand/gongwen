@@ -1117,6 +1117,8 @@ fn store_cache_file(base: &Path, logical: &str, bytes: &[u8]) -> Result<()> {
 
 /// 写一份图表缓存：配置目录基准进资源库（与正文/插图同一套加密、去重），
 /// 外部基准目录回退成普通文件。`text` 为真时按文本资源写（图表警告）。
+/// 缓存是可重建的，降级文件写法允许覆盖当前密钥解不开的旧密文（换密钥后
+/// 重渲染的成品必须落得了盘）；用户图片不走这条可丢弃通道。
 fn store_cache(
     base: &Path,
     logical: &str,
@@ -1128,12 +1130,34 @@ fn store_cache(
         let result = if text {
             crate::images::store_text_at(logical, original_name, bytes)
         } else {
-            crate::images::store_at(logical, original_name, bytes)
+            crate::images::store_disposable_at(logical, original_name, bytes)
         };
         result.with_context(|| format!("无法写入 Mermaid 图表缓存：{logical}"))
     } else {
         store_cache_file(base, logical, bytes)
     }
+}
+
+/// 缓存命中判定：存在之外还要求「当前读得出来」。
+///
+/// - **库别名**：格式与内容都由整库密钥保证——错密钥时整库都读不了，单条
+///   引用不会走到这，存在即命中（每帧只花一次索引查询）。
+/// - **回退文件（资源库不可用的降级模式）**：明文直接命中；密文必须是当前
+///   密钥解得开的才算——降级文件模式下换过密钥的旧缓存要能判未命中，
+///   重渲染后用当前密钥覆盖（可丢弃缓存的写入本来就允许替换解不开的密文）。
+/// - **没有密钥句柄（锁定中）**：不重渲染——写出来只能是明文，反而毁掉
+///   密文缓存；保持命中，上层按读失败显示占位卡片即可。
+fn cache_hit(base: &Path, relative: &str) -> bool {
+    if !crate::images::exists_from_base(base, relative) {
+        return false;
+    }
+    if is_config_base(base) && crate::resources::has(relative).unwrap_or(false) {
+        return true;
+    }
+    if crate::vault::key_handle().is_none() {
+        return true;
+    }
+    crate::images::read_from_base(base, relative).is_ok()
 }
 
 fn cache_at(
@@ -1145,9 +1169,7 @@ fn cache_at(
 ) -> Result<String> {
     let theme = resolve(theme, style);
     let relative = cache_relative(source, style, theme, format);
-    // 命中只看资源是否存在（库别名或旧文件回退）；内容由资源库按当前密钥读，
-    // 换槽、换密钥后旧引用本来就不在本槽库里。
-    if crate::images::exists_from_base(base, &relative) {
+    if cache_hit(base, &relative) {
         return Ok(relative);
     }
     let lock = || {
@@ -2027,8 +2049,9 @@ mod tests {
     }
 
     /// 资源库不可用时 Mermaid 缓存回退成槽位目录里的密文文件：密钥在场时图与
-    /// 警告都能读回；失钥后都读不到。命中判定新口径只看资源是否存在（库别名或
-    /// 回退文件），失钥不会把旧密文重新渲染覆盖。
+    /// 警告都能读回；失钥后都读不到。命中判定要求「存在且当前密钥可读」——
+    /// 失钥（锁定中）保持命中不重渲染（写出来是明文反而毁掉密文）；手上有密钥
+    /// 但解不开（降级模式下换过密钥的旧缓存）判未命中，重渲染后用当前密钥覆盖。
     ///
     /// 测试只覆盖本线程的配置目录与密钥句柄，**不改全局 `set_current_slot`**——
     /// 那是进程级状态，并行测试会互相踩。
@@ -2086,11 +2109,8 @@ mod tests {
                 warning_at(dir.path(), &relative).is_none(),
                 "失钥后读不到警告"
             );
-            // 命中判定只看资源存在，失钥时不会重新渲染覆盖已有密文。
-            anyhow::ensure!(
-                crate::images::exists_from_base(dir.path(), &relative),
-                "回退文件存在即算命中"
-            );
+            // 命中判定要求可读；没有密钥句柄（锁定中）时保持命中、不重渲染——
+            // 重渲染写出来是明文，反而毁掉密文缓存。
             anyhow::ensure!(
                 cache_at(
                     dir.path(),
@@ -2100,11 +2120,33 @@ mod tests {
                     Format::Png
                 )
                 .is_ok(),
-                "命中时不再重新渲染"
+                "失钥时保持命中，不重渲染"
             );
             anyhow::ensure!(
                 crate::vault::is_sealed_file(&fs::read(&physical)?),
                 "命中路径不能把密文改成明文"
+            );
+
+            // 换一把密钥（模拟改锁密码后的降级文件模式）：旧密文解不开，
+            // 应判未命中、重新渲染并以新密钥覆盖，图表不再永远显示占位。
+            crate::vault::set_key_handle([18u8; 32], true);
+            let rerendered = cache_at(
+                dir.path(),
+                SAMPLE,
+                Style::Official,
+                DiagramTheme::Ink,
+                Format::Png,
+            )?;
+            anyhow::ensure!(rerendered == relative, "同一张图的相对路径应稳定");
+            let plain = crate::images::read_from_base(dir.path(), &relative)?;
+            anyhow::ensure!(plain.starts_with(b"\x89PNG"), "新密钥应能读回重渲的图");
+            anyhow::ensure!(
+                crate::vault::is_sealed_file(&fs::read(&warning)?),
+                "警告 sidecar 也要用新密钥重新密封"
+            );
+            anyhow::ensure!(
+                crate::images::read_managed_file(&warning).is_ok(),
+                "新密钥应能读回警告文本"
             );
             Ok(())
         })();
