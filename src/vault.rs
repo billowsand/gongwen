@@ -789,6 +789,19 @@ fn write_path_impl(
             seal_path_bytes(&handle, path, kind, plain)?
         }
         None => {
+            // 与启动闸门使用同一判定：只有明确的普通工作区可以写明文；
+            // 已启用锁、锁文件损坏或任一槽残留密文时，无密钥一律 fail-closed。
+            let ordinary = matches!(Vault::probe(), Probe::Absent | Probe::Skipped)
+                && !slot_has_encrypted_data(DataSlot::Real)
+                && !slot_has_encrypted_data(DataSlot::Decoy);
+            // 很多测试只给受控写层一个独立临时目录，不覆盖线程局部配置目录。
+            // 这种目录外写入不应受开发机真实工作区是否加锁影响；显式设置了测试
+            // 配置目录的用例（包括锁定拒写测试）仍完整执行上面的生产判定。
+            #[cfg(test)]
+            let ordinary = ordinary
+                || (!crate::storage::has_test_config_dir()
+                    && crate::storage::config_dir().is_ok_and(|dir| !path.starts_with(dir)));
+            anyhow::ensure!(ordinary, "当前工作区尚未解锁，拒绝明文写入");
             if path.exists() {
                 let raw = std::fs::read(path)
                     .with_context(|| format!("无法确认 {} 是否已加密", path.display()))?;
@@ -1924,6 +1937,25 @@ mod tests {
         std::fs::write(&path, b"broken replacement").unwrap();
         assert!(ensure_slot_encrypted().is_err());
         assert_eq!(std::fs::read(&old).unwrap(), original);
+        drop(dir);
+        reset();
+    }
+
+    #[test]
+    fn locked_workspace_without_key_cannot_create_plaintext_files() {
+        let dir = use_temp_dir();
+        Vault::create(REAL_PW, None, false).unwrap();
+        clear_key_handle();
+        let path = dir
+            .path()
+            .join("pi/workspaces/doc-1/run-1/input/current.md");
+        assert!(write_path(&path, "pi", "敏感正文".as_bytes()).is_err());
+        assert!(!path.exists());
+
+        // 用户明确选择过普通模式时仍保持原行为。
+        Vault::create("", None, true).unwrap();
+        write_path(&path, "pi", "普通模式".as_bytes()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), "普通模式".as_bytes());
         drop(dir);
         reset();
     }

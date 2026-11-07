@@ -10,6 +10,7 @@ pub(crate) const PLAINTEXT_WARNING: &str = "此次导出的文件将以明文保
 pub(crate) const DOCUMENT_WARNING: &str = "已选择不加密导出。此次 Word、PDF、源码包及随行单据将以普通文件保存，正文、图片、人员、单位和份号等敏感信息不受密码保护。复制、发送或同步后可能导致信息泄露，锁定应用不能撤回文件。请确认保存位置、接收范围与传输方式。";
 pub(crate) const PDF_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的 7z 压缩包由独立密码保护，包内文件名也已加密，但解压后的 PDF 是普通文件，不受应用密码和本地加密保护。PDF 可能包含正文、图片、附件及人员等敏感信息；解压、复制、同步或发送后，可能导致信息泄露。压缩包自身的文件名和大小仍可见，请妥善保管导出密码并确认接收范围。";
 pub(crate) const PRINT_WARNING: &str = "当前工作区已启用加密。打印会把明文 PDF 交给系统打印队列和打印机：队列可能自行保存副本，打印机缓存、纸件与后续处置都可能留下敏感信息，这些都不受应用密码和本地加密保护。请确认接收范围与纸件/队列记录的处置方式。";
+pub(crate) const EXTERNAL_OPEN_WARNING: &str = "用系统程序打开会把文档交给外部软件处理；阅读器、Office/WPS 可能生成最近记录、缩略图、恢复文件或交换文件等明文副本，不受应用锁或导出密码保护。应用无法撤回这些副本，请确认当前环境与文档接收范围。";
 pub(crate) const PACKAGE_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的是稿件包（7z 格式，文件内容与包内文件名均由独立密码保护），但解压后的 Markdown 正文、历史版本、图片、PDF 附件与随行件全部是普通文件，不再受应用密码和本地加密保护。稿件包还可能包含人员、单位、文号等敏感信息；复制、同步、发送或由其他软件打开后，可能导致信息泄露。压缩包自身的文件名和大小仍可见，请妥善保管导出密码并确认接收范围。";
 pub(crate) const PII_EXPORT_WARNING: &str = "当前工作区已启用加密。此次导出的表格或词表是普通文件，可能包含人员姓名、职务、联系电话、个人简介、单位名称等敏感信息，以及从稿件派生出的正文用语；复制、同步、发送或由其他软件打开后，可能导致信息泄露。请确认导出范围与接收对象。";
 pub(crate) const BACKUP_WARNING: &str = "全量备份的内容和包内文件名均由独立备份密码保护，内部数据还保留应用锁加密。恢复需要备份密码和备份当时的应用锁密码；程序不保存备份密码，遗失后无法恢复。外层文件名和总大小仍可见，请使用中性名称并妥善保管。";
@@ -282,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_attachment_preview_needs_no_output_and_print_asks_once() {
+    fn memory_attachment_preview_needs_no_output_and_print_opens_dialog() {
         let mut h = Harness::new(true);
         let store = h.app.manuscript_store.as_mut().unwrap();
         let id = store
@@ -316,18 +317,12 @@ mod tests {
             }],
             &h.ctx,
         );
-        // 加密工作区允许打印，但先弹一次「队列/纸件不在保护范围内」的风险确认；
-        // 确认前既不开保存框也不打开打印对话框。
-        let pending = h.app.pending_output.as_ref().expect("打印前应确认风险");
-        assert_eq!(pending.warning, PRINT_WARNING);
-        assert!(h.app.print_dialog.is_none());
-        assert!(h.app.pending_file_dialogs.is_empty());
-        assert!(!h.dir.path().join("output").exists());
-        h.click("取消");
+        // 内存附件直接打印：打开对话框本身不释放内容，实际点击打印时才确认。
         assert!(h.app.pending_output.is_none());
-        assert!(h.app.print_dialog.is_none());
+        assert!(h.app.print_dialog.is_some());
         assert!(h.app.pending_file_dialogs.is_empty());
         assert!(!h.dir.path().join("output").exists());
+        h.app.print_dialog = None;
     }
 
     struct Harness {
@@ -360,7 +355,10 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |_| self.app.output_risk_window(&self.ctx),
+                |_| {
+                    self.app.print_dialog_window(&self.ctx);
+                    self.app.output_risk_window(&self.ctx);
+                },
             )
         }
 
@@ -465,9 +463,23 @@ mod tests {
         assert!(h.app.status.contains("未解锁"));
     }
 
-    /// 加密工作区允许打印：先确认风险，确认后照常打开打印对话框（不硬拦）。
     #[test]
-    fn encrypted_print_warns_and_then_opens_the_dialog() {
+    fn external_document_open_waits_for_confirmation() {
+        let mut h = Harness::new(true);
+        let path = h.dir.path().join("加密文档.pdf");
+        h.app.apply_pdf_actions(
+            vec![crate::pdf_viewer::PdfAction::OpenExternal(path)],
+            &h.ctx,
+        );
+        let pending = h.app.pending_output.as_ref().expect("外部打开前应确认风险");
+        assert_eq!(pending.warning, EXTERNAL_OPEN_WARNING);
+        h.click("取消");
+        assert!(h.app.pending_output.is_none());
+    }
+
+    /// 打开打印对话框不释放内容；每次实际提交打印任务都要确认。
+    #[test]
+    fn encrypted_print_is_confirmed_on_every_submission() {
         let mut h = Harness::new(true);
         let request = crate::print::PrintRequest {
             path: h.dir.path().join("尚未导出.pdf"),
@@ -477,17 +489,32 @@ mod tests {
             hints: Default::default(),
             pdf_key: None,
         };
-        h.app.open_print_dialog(request, &h.ctx);
-        let pending = h.app.pending_output.as_ref().expect("打印前应确认风险");
+        h.app.print_dialog = Some(crate::print::PrintDialog::new(
+            1,
+            request,
+            "",
+            Default::default(),
+        ));
+        h.app.apply_printers_listed(
+            1,
+            Ok(vec![crate::print::PrinterInfo {
+                name: "测试打印机".into(),
+                is_default: true,
+                state: crate::print::PrinterState::Unknown,
+            }]),
+        );
+        assert!(h.app.pending_output.is_none());
+
+        h.key(egui::Key::Enter);
+        let pending = h.app.pending_output.as_ref().expect("实际打印前应确认风险");
         assert_eq!(pending.warning, PRINT_WARNING);
         assert!(pending.operation.contains("关于测试的请示"));
-        assert!(h.app.print_dialog.is_none());
-        h.click("确认风险并继续");
-        assert!(h.app.pending_output.is_none());
-        assert!(
-            h.app.print_dialog.is_some(),
-            "确认风险后应照常打开打印对话框"
-        );
+
+        // 模拟取消：没有启动打印，也没有卡在「打印中」；再次点击仍会确认。
+        h.app.pending_output = None;
+        h.key(egui::Key::Enter);
+        assert!(h.app.pending_output.is_some());
+        h.app.pending_output = None;
     }
 
     #[test]

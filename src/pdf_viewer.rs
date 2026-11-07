@@ -88,7 +88,7 @@ pub(crate) enum PdfAction {
     Reveal(PathBuf),
     /// 打开打印对话框。份号不同的多份成品必须由导出阶段生成，不能靠打印机份数。
     Print(crate::print::PrintRequest),
-    /// 打印风险已经在外层确认过（导出后自动打印等），直接打开对话框。
+    /// 导出后自动打印入口仍直接打开对话框；实际送打时再确认。
     PrintConfirmed(crate::print::PrintRequest),
     /// 内存附件离开应用前须由外壳确认并选择输出位置。
     ReleaseMemory {
@@ -281,7 +281,7 @@ pub(crate) struct PdfSession {
     preview_wanted: Option<usize>,
     /// 这份 PDF 是起草页「打印…」导出来的：打开完成后自动弹一次打印对话框。
     print_when_ready: bool,
-    /// 这次自动打印的明文风险已经随导出确认过，不再重复弹打印风险框。
+    /// 导出后自动打开打印对话框；实际送打仍在点击「打印」时确认风险。
     print_risk_confirmed: bool,
     /// 打开这份 PDF 的调用方知道的打印提示（稿件按双面排、送批材料合并件）。
     print_hints: crate::print::PrintHints,
@@ -386,7 +386,6 @@ impl PdfSession {
     }
 
     /// 起草页「打印…」导出的 PDF：打开完成后自动弹一次打印对话框。
-    /// 明文风险已在导出确认里说明过，因此不再重复要求确认。
     pub(crate) fn request_print_when_ready_confirmed(&mut self) {
         self.print_when_ready = true;
         self.print_risk_confirmed = true;

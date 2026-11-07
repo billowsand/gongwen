@@ -200,13 +200,8 @@ impl DraftPage<'_> {
                 formats.join("、"),
                 self.config.output_dir,
             );
-            // 「打印…」会先导出普通 PDF 再交给打印队列：确认框必须同时说明
-            // 文件落盘与队列/纸件两重风险，不能只提示前者。
-            let warning = if print {
-                super::super::app::output_guard::PRINT_WARNING
-            } else {
-                super::super::app::output_guard::DOCUMENT_WARNING
-            };
+            // 这里只确认 PDF 文件落盘；打印队列与纸件风险在实际点击「打印」时另行确认。
+            let warning = super::super::app::output_guard::DOCUMENT_WARNING;
             self.actions.push(DraftAction::ConfirmPlaintextOutput {
                 operation,
                 warning,

@@ -352,6 +352,27 @@ test("虚拟工作文件树隐藏业务文件名，追加、改名和重启恢�
   assert.deepEqual(fresh.listDir(root), []);
 });
 
+test("旧文件树在十六进制编码前执行总明文预算", () => {
+  const space = fixture();
+  const work = path.join(space.root, "work");
+  const old = path.join(work, "旧标题.md");
+  space.files.atomicWrite(old, "旧工作稿");
+  const readBytes = space.files.readBytes.bind(space.files);
+  space.files.readBytes = (target, ...args) => {
+    if (target !== old) return readBytes(target, ...args);
+    return {
+      length: 256 * 1024 * 1024 + 1,
+      toString() {
+        throw new Error("超限内容不应进入十六进制编码");
+      },
+    };
+  };
+  assert.throws(
+    () => space.files.mountTree(work, path.join(space.root, "work-files.json")),
+    (error) => error?.code === "EFBIG" && !/不应进入/.test(error.message),
+  );
+});
+
 test("旧工作文件迁入容器，技能快照只读，配置路径别名不绕过虚拟树", () => {
   const space = fixture();
   const work = path.join(space.root, "work");

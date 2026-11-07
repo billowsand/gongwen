@@ -274,6 +274,7 @@ export class ProtectedFiles {
     cleanStaleTemps(root);
     const pending = [root];
     const legacy = [];
+    let legacyBytes = 0;
     while (pending.length) {
       const dir = pending.pop();
       let children;
@@ -284,8 +285,17 @@ export class ProtectedFiles {
         if (child.isSymbolicLink()) throw new Error("旧文件树包含链接，拒绝迁移");
         if (child.isDirectory()) { pending.push(full); continue; }
         if (!child.isFile()) throw new Error("旧文件树包含特殊文件");
+        if (legacy.length >= 200_000) {
+          const error = new Error("旧文件树条目过多，拒绝迁移");
+          error.code = "EFBIG";
+          throw error;
+        }
         const name = path.relative(root, full).split(path.sep).join("/");
-        const value = this.readBytes(full).toString("hex");
+        const bytes = this.readBytes(full);
+        legacyBytes += bytes.length;
+        // 必须在 hex 编码和 JSON 拼接前卡总量，与 Rust 迁移保持同一预算。
+        if (legacyBytes * 2 > 512 * 1024 * 1024) throw tooLarge(512 * 1024 * 1024);
+        const value = bytes.toString("hex");
         if (entries.has(name) && entries.get(name) !== value) throw new Error("旧文件与加密文件树冲突，保留两份");
         entries.set(name, value);
         legacy.push(full);
