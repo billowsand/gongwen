@@ -8,7 +8,7 @@ use std::{
 };
 
 pub(super) fn style_docx(path: &Path) -> Result<()> {
-    let source = std::fs::read(path)?;
+    let source = mdx::memory_files::read_output(path)?;
     let mut archive = zip::ZipArchive::new(Cursor::new(source))?;
     let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()
@@ -25,7 +25,7 @@ pub(super) fn style_docx(path: &Path) -> Result<()> {
         output.start_file(name, options)?;
         output.write_all(&bytes)?;
     }
-    std::fs::write(path, output.finish()?.into_inner())?;
+    mdx::memory_files::write_output(path, &output.finish()?.into_inner())?;
     Ok(())
 }
 

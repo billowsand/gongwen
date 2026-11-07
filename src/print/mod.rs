@@ -165,6 +165,7 @@ impl PrinterState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PrintJob {
     pub(crate) path: PathBuf,
+    pub(crate) bytes: Option<std::sync::Arc<Vec<u8>>>,
     pub(crate) title: String,
     /// `None` 表示交给系统默认打印机（列不出打印机时的退路）。
     pub(crate) printer: Option<String>,
@@ -353,7 +354,13 @@ pub(crate) fn print(
     progress: &dyn Fn(u32, u32),
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<PrintOutcome, String> {
-    check_size(&job.path)?;
+    if let Some(bytes) = &job.bytes {
+        if bytes.len() as u64 > crate::file_limits::MAX_PDF_BYTES {
+            return Err("打印 PDF 超过大小上限".into());
+        }
+    } else {
+        check_size(&job.path)?;
+    }
     #[cfg(windows)]
     {
         win::print(job, progress, cancel)
@@ -369,9 +376,11 @@ pub(crate) fn print(
 /// 改用系统自带的打印对话框打印（驱动独有的装订、打孔等选项走这里）。
 /// 只有 Windows 有；阻塞调用。
 #[cfg(windows)]
-pub(crate) fn print_with_system_dialog(path: &Path) -> Result<PrintOutcome, String> {
-    check_size(path)?;
-    win::print_with_system_dialog(path)
+pub(crate) fn print_with_system_dialog(bytes: Vec<u8>) -> Result<PrintOutcome, String> {
+    if bytes.len() as u64 > crate::file_limits::MAX_PDF_BYTES {
+        return Err("打印 PDF 超过大小上限".into());
+    }
+    win::print_with_system_dialog(bytes)
 }
 
 /// 先卡体积：超大的 PDF 不该被整体读进内存。
@@ -462,6 +471,7 @@ mod tests {
 
     fn a4_job() -> PrintJob {
         PrintJob {
+            bytes: None,
             path: PathBuf::from("/tmp/a.pdf"),
             title: "测试".to_string(),
             printer: None,

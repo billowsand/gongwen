@@ -26,9 +26,6 @@ use std::process::Command;
 /// 交给 CUPS 的固定任务名。原来是公文标题，会留在队列与打印机面板上，
 /// 同机用户随手 `lpstat -o` 就能看到；现在只说明这是本程序的任务。
 const NEUTRAL_JOB_TITLE: &str = "公文助手打印任务";
-/// 送打用副本所在的缓存子目录（相对 [`crate::storage::cache_dir`]）。
-const STAGED_PRINT_DIR: &str = "print";
-
 pub(super) fn lp_available() -> bool {
     program("lp").is_some()
 }
@@ -70,10 +67,7 @@ pub(super) fn printer_caps(name: &str) -> PrinterCaps {
 /// `lp` 是一次把整份 PDF 交出去，没法逐页报进度；取消也只在交给它之前看一次
 /// （之后任务已经在 CUPS 队列里，该由打印队列管理去取消，不在本程序范围）。
 ///
-/// 送去的是 [`stage_document`] 复制出的中性副本，不是用户选中的原路径：公文标题
-/// 不再出现在命令行与队列里。副本在函数返回（成功、失败、`lp` 起不来）时由
-/// [`StagedDocument`] 的析构删除。Windows 后端（`print/win.rs`）走系统 spooler
-/// 的文档名与文件句柄，不经命令行，没有同样的泄露面，因此不改。
+/// PDF 只经 stdin 传给 lp，不生成明文副本，也不把业务文件路径交给命令行。
 pub(super) fn print(
     job: &PrintJob,
     cancel: &std::sync::atomic::AtomicBool,
@@ -84,13 +78,34 @@ pub(super) fn print(
     }
     let program = program("lp")
         .ok_or_else(|| "未找到 lp 命令，本机可能没有安装 CUPS 打印服务".to_string())?;
-    // 先准备副本；`lp` 只看到这个随机命名的中性路径。
-    let document = stage_document(job)?;
-    let output = Command::new(program)
-        .args(lp_args(job, document.path()))
-        .output()
+    submit_pdf(&program, job)
+}
+
+fn submit_pdf(program: &Path, job: &PrintJob) -> Result<PrintOutcome, String> {
+    let bytes = match &job.bytes {
+        Some(bytes) => bytes.as_ref().clone(),
+        None => crate::file_limits::read_bytes(&job.path, MAX_PDF_BYTES, "打印文件")
+            .map_err(|e| e.to_string())?,
+    };
+    let mut args = lp_args(job, Path::new("-"));
+    args.pop(); // 不传文件路径：lp 从 stdin 读取 PDF。
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|error| format!("无法启动打印：{error}"))?;
-    // 从这里往下仍在 `document` 的生命周期内；函数返回时副本自动删除。
+    let mut stdin = child.stdin.take().ok_or("打印管道不可用")?;
+    // 同时收集 stdout/stderr，避免 lp 先大量报错、尚未读 stdin 时相互堵塞。
+    let sender = std::thread::spawn(move || stdin.write_all(&bytes));
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("等待打印失败：{error}"))?;
+    let sent = sender.join().map_err(|_| "打印发送线程异常")?;
+    if output.status.success() {
+        sent.map_err(|error| format!("发送打印数据失败：{error}"))?;
+    }
     if output.status.success() {
         // `lp` 的成功提示会翻译成系统语言，只从里面找「打印机名-数字」这个词。
         let job_id = parse_job_id(
@@ -106,46 +121,6 @@ pub(super) fn print(
     } else {
         detail.to_string()
     })
-}
-
-/// 送打用的中性 PDF 副本：`lp` 只看得到这个随机文件名，公文标题与真实路径都不在
-/// 命令行里。析构即删除，覆盖成功、失败与提前返回三种收尾。
-struct StagedDocument {
-    path: PathBuf,
-}
-
-impl StagedDocument {
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for StagedDocument {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// 把 PDF 字节复制到 `缓存目录/print/<uuid>.pdf`（Unix 0600，由
-/// [`crate::storage::atomic_write`] 保证），返回负责删除的副本。
-fn stage_document(job: &PrintJob) -> Result<StagedDocument, String> {
-    let dir = crate::storage::cache_dir()
-        .map_err(|error| format!("无法确定打印缓存目录：{error}"))?
-        .join(STAGED_PRINT_DIR);
-    stage_document_in(&dir, &job.path)
-}
-
-/// [`stage_document`] 的可测试入口：显式指定副本目录。
-fn stage_document_in(dir: &Path, source: &Path) -> Result<StagedDocument, String> {
-    let bytes = crate::file_limits::read_bytes(source, MAX_PDF_BYTES, "打印文件")
-        .map_err(|error| format!("无法读取待打印文件：{error}"))?;
-    let path = dir.join(format!("{}.pdf", uuid::Uuid::new_v4()));
-    crate::storage::atomic_write(&path, |file| {
-        file.write_all(&bytes)?;
-        Ok(())
-    })
-    .map_err(|error| format!("无法准备打印副本：{error}"))?;
-    Ok(StagedDocument { path })
 }
 
 /// `lp` 的参数。只在选项与默认不同时才加，命令行越短越不容易撞上老版本 CUPS 的毛病。
@@ -463,6 +438,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn memory_pdf_reaches_lp_stdin_without_a_source_file_or_a_business_path_argument() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("lp");
+        let input = dir.path().join("received");
+        let arguments = dir.path().join("arguments");
+        std::fs::write(&program, format!("#!/bin/sh\ncat > '{}'\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'request id is Office-17\\n'\n", input.display(), arguments.display())).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut task = job();
+        task.path = dir.path().join("不得生成的公文标题.pdf");
+        task.bytes = Some(std::sync::Arc::new(
+            b"%PDF-1.7 synthetic-memory-input".to_vec(),
+        ));
+        let result = submit_pdf(&program, &task).unwrap();
+        assert!(matches!(result, PrintOutcome::Printed { .. }));
+        assert_eq!(
+            std::fs::read(input).unwrap(),
+            b"%PDF-1.7 synthetic-memory-input"
+        );
+        let arguments = std::fs::read_to_string(arguments).unwrap();
+        assert!(!arguments.contains("不得生成") && !arguments.contains(".pdf"));
+        assert!(!task.path.exists());
+    }
+
+    #[test]
     fn program_is_found_only_when_it_exists_on_the_path() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -608,6 +608,7 @@ PageSize/Media Size: *A4 Letter";
 
     fn job() -> PrintJob {
         PrintJob {
+            bytes: None,
             path: PathBuf::from("/tmp/-请示.pdf"),
             title: "关于××的请示".to_string(),
             printer: None,
@@ -819,51 +820,5 @@ PageSize/Media Size: *A4 Letter";
         let (ok, stderr) = run("broken");
         assert!(!ok);
         assert!(stderr.contains("打印机不存在"));
-    }
-
-    /// 送打副本：写到给定目录的随机 PDF、0600，`lp` 返回（含失败）后由析构删除。
-    #[test]
-    fn staged_document_is_private_and_removed_on_drop() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let source = tempfile::tempdir().expect("临时目录");
-        let pdf = source.path().join("关于××的请示.pdf");
-        std::fs::write(&pdf, b"%PDF-1.7\n").expect("写入假 PDF");
-
-        let stage = tempfile::tempdir().expect("临时目录");
-        let document = stage_document_in(stage.path(), &pdf).expect("应能准备副本");
-        let path = document.path().to_path_buf();
-        assert!(path.starts_with(stage.path()), "{}", path.display());
-        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("pdf"));
-        assert!(
-            !path
-                .file_name()
-                .expect("有文件名")
-                .to_string_lossy()
-                .contains("请示"),
-            "副本名不能带公文标题"
-        );
-        assert_eq!(std::fs::read(&path).expect("读副本"), b"%PDF-1.7\n");
-        let mode = std::fs::metadata(&path)
-            .expect("副本元数据")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600, "打印副本里是公文正文，只给自己读写");
-        drop(document);
-        assert!(!path.exists(), "lp 返回后（成功或失败）必须删掉副本");
-    }
-
-    /// 原 PDF 读不到时连副本都不建，更不会去调 `lp`。
-    #[test]
-    fn staging_a_missing_pdf_fails_before_the_command_runs() {
-        let stage = tempfile::tempdir().expect("临时目录");
-        let missing = stage.path().join("missing.pdf");
-        assert!(stage_document_in(stage.path(), &missing).is_err());
-        assert_eq!(
-            std::fs::read_dir(stage.path()).expect("读目录").count(),
-            0,
-            "失败时不该留下任何文件"
-        );
     }
 }

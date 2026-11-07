@@ -241,9 +241,11 @@ pub(super) fn write(
             }
         }
     }
+    let mut buffer = std::io::Cursor::new(Vec::new());
     doc.build()
-        .pack(File::create(path)?)
-        .context("写入电话记录单 Word 失败")?;
+        .pack(&mut buffer)
+        .context("生成电话记录单 Word 失败")?;
+    mdx::memory_files::write_output(path, &buffer.into_inner())?;
     Ok(())
 }
 

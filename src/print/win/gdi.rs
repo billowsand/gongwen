@@ -7,7 +7,6 @@ use hayro::{
     hayro_syntax::page::Rotation,
     vello_cpu::color::palette::css::WHITE,
 };
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows_sys::Win32::Foundation::{GlobalFree, HGLOBAL};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -102,10 +101,7 @@ pub(super) struct Document {
 }
 
 impl Document {
-    pub(super) fn open(path: &Path) -> Result<Self, String> {
-        let bytes =
-            crate::file_limits::read_bytes(path, crate::file_limits::MAX_PDF_BYTES, "要打印的 PDF")
-                .map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
+    pub(super) fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
         let pdf = Pdf::new(bytes).map_err(|error| format!("PDF 文件结构无法解析：{error:?}"))?;
         if pdf.pages().is_empty() {
             return Err("PDF 中没有可打印的页面".to_string());

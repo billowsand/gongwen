@@ -25,7 +25,6 @@ use anyhow::{Context, Result};
 use chrono::{Datelike, Local};
 use docx_rs::*;
 use std::collections::HashMap;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use crate::common::ast::{Block, Inline, LineAlign, MarkerKind, QuoteItem, QuoteKind};
@@ -131,17 +130,11 @@ pub fn run_with_body_normalizer(
 
     let docx = build_docx(&parser::parse(&content), &metadata, image_base_dir);
 
-    if let Some(dir) = output_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("创建输出目录 {} 失败", dir.display()))?;
-    }
-    let file = File::create(&output_path)
-        .with_context(|| format!("创建输出文件 {} 失败", output_path.display()))?;
+    let mut buffer = std::io::Cursor::new(Vec::new());
     docx.build()
-        .pack(file)
-        .with_context(|| format!("写入 docx {} 失败", output_path.display()))?;
-
-    println!("[完成] 转换完成: {}", output_path.display());
+        .pack(&mut buffer)
+        .context("生成内存 DOCX 失败")?;
+    crate::memory_files::write_output(&output_path, &buffer.into_inner())?;
     Ok(())
 }
 

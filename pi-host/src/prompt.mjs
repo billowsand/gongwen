@@ -5,7 +5,6 @@
 //! 技能清单不再写死五份：每轮从工作区的 `input/skills.json` 读取本轮快照，读不到才退回
 //! 扫描 `skills/pi-skills/`（兼容没有索引的旧工作区）。
 
-import fs from "node:fs";
 import path from "node:path";
 import { isStyleTask } from "./style.mjs";
 import { sanitizeShort } from "./protocol.mjs";
@@ -61,12 +60,12 @@ function scanSkillDirectory(workspace, files) {
   if (within.startsWith("..") || path.isAbsolute(within)) return [];
   let entries;
   try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
+    entries = files.listDir(dir);
   } catch {
     return [];
   }
   return entries
-    .filter((entry) => entry.isDirectory() && SKILL_NAME.test(entry.name))
+    .filter((entry) => entry.kind === "directory" && SKILL_NAME.test(entry.name))
     .map((entry) => ({
       name: entry.name,
       displayName: entry.name,

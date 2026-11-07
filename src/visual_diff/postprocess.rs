@@ -6,7 +6,6 @@ use crate::export::{
     REDLINE_ADD_CLOSE, REDLINE_ADD_OPEN, REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN, RedlineKind,
 };
 use anyhow::{Context, Result};
-use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -19,7 +18,8 @@ pub(crate) const ADD_COLOR: &str = "1F4E9E";
 /// 文本按哨兵切开，删除部分加红色删除线、新增部分加蓝色字符边框。
 /// 哨兵可以跨 run（标记跨过加粗 / 公式等格式边界时），状态在 run 间延续。
 pub(crate) fn redline_research_docx(path: &Path) -> Result<()> {
-    let file = fs::File::open(path)
+    let file = mdx::memory_files::read_output(path)
+        .map(std::io::Cursor::new)
         .with_context(|| format!("无法打开研究报告 Word：{}", path.display()))?;
     let mut archive =
         zip::ZipArchive::new(file).with_context(|| format!("无法解包：{}", path.display()))?;
@@ -40,21 +40,15 @@ pub(crate) fn redline_research_docx(path: &Path) -> Result<()> {
         anyhow::bail!("研究报告 Word 缺少 word/document.xml");
     };
     let transformed = inject_ooxml_redline(&xml);
-    let temp = path.with_extension("redline-tmp");
-    {
-        let out = fs::File::create(&temp)?;
-        let mut writer = zip::ZipWriter::new(out);
-        let options = zip::write::SimpleFileOptions::default();
-        writer.start_file("word/document.xml", options)?;
-        writer.write_all(transformed.as_bytes())?;
-        for (name, bytes) in entries {
-            writer.start_file(name, options)?;
-            writer.write_all(&bytes)?;
-        }
-        writer.finish()?;
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("word/document.xml", options)?;
+    writer.write_all(transformed.as_bytes())?;
+    for (name, bytes) in entries {
+        writer.start_file(name, options)?;
+        writer.write_all(&bytes)?;
     }
-    fs::rename(&temp, path)
-        .with_context(|| format!("无法写回研究报告 Word：{}", path.display()))?;
+    mdx::memory_files::write_output(path, &writer.finish()?.into_inner())?;
     Ok(())
 }
 

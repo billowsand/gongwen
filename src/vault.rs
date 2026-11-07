@@ -134,6 +134,8 @@ impl SlotSeal {
 struct VaultData {
     v: u32,
     slots: [SlotSeal; SLOT_COUNT],
+    #[serde(default)]
+    plaintext_acknowledged: bool,
 }
 
 /// 启动探测结果：闸门据此决定进引导、进锁屏还是直接开工作区。
@@ -268,7 +270,13 @@ impl Vault {
                 Ok(data) if data.v != FORMAT_V && data.v != LEGACY_V => {
                     Probe::Broken("锁文件版本不识别".into())
                 }
-                Ok(data) if data.slots.iter().all(SlotSeal::is_empty) => Probe::Skipped,
+                Ok(data) if data.slots.iter().all(SlotSeal::is_empty) => {
+                    if data.plaintext_acknowledged {
+                        Probe::Skipped
+                    } else {
+                        Probe::Absent
+                    }
+                }
                 Ok(_) => Probe::Locked,
                 Err(error) => Probe::Broken(format!("锁文件内容损坏：{error}")),
             },
@@ -288,6 +296,7 @@ impl Vault {
             (
                 VaultData {
                     v: FORMAT_V,
+                    plaintext_acknowledged: true,
                     slots: [SlotSeal::empty(), SlotSeal::empty()],
                 },
                 None,
@@ -308,6 +317,7 @@ impl Vault {
             (
                 VaultData {
                     v: FORMAT_V,
+                    plaintext_acknowledged: false,
                     slots: [real_seal, decoy_seal],
                 },
                 Some(Unlocked {
@@ -822,6 +832,7 @@ fn read_dir_if_exists(path: &Path) -> Result<Option<std::fs::ReadDir>> {
 /// 幂等：已是密文就直接返回。任何一步失败返回 Err，由闸门翻译成提示。
 pub(crate) fn ensure_slot_encrypted() -> Result<()> {
     let key = key_dek()?;
+    recover_database_migration(&storage::manuscript_db_path()?)?;
     migrate_database(&storage::manuscript_db_path()?, Migration::ToEncrypted)?;
     for name in SEALED_FILE_NAMES {
         let path = storage::slot_file(name)?;
@@ -869,6 +880,7 @@ pub(crate) fn ensure_slot_encrypted() -> Result<()> {
         let dir = storage::slot_subdir(name)?;
         for_each_regular_file(&dir, |path| seal_plaintext_file(path, &key))?;
     }
+    crate::pi_agent::sealed_tree::migrate()?;
     Ok(())
 }
 
@@ -880,7 +892,29 @@ pub(crate) fn is_transient_private_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    name.contains(".lock") || name.ends_with(".tmp")
+    let Some(run) = path.parent() else {
+        return false;
+    };
+    let run_name = run.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let doc = run.parent();
+    let in_run = run_name.starts_with("run-")
+        && doc
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("doc-"))
+        && doc
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .is_some_and(|n| n == "workspaces");
+    in_run
+        && matches!(
+            name,
+            "host-owner.lock"
+                | "host-owner.lock-wal"
+                | "host-owner.lock-shm"
+                | "host-owner.lock-journal"
+                | "rust-owner.lock"
+        )
 }
 
 /// 不跟随链接地遍历应用私有目录。任何目录/条目/元数据错误都 fail-closed；
@@ -1170,6 +1204,14 @@ pub(crate) fn slot_has_encrypted_data(slot: DataSlot) -> bool {
 /// 只做文件头嗅探（十几字节），不打开数据库——解锁路径每次都要问形态，
 /// 大库每次跑完整性扫描太重。
 pub(crate) fn slot_needs_encryption(slot: DataSlot) -> bool {
+    if crate::pi_agent::sealed_tree::pending(slot) {
+        return true;
+    }
+    if storage::slot_file_for(slot, "manuscripts.db")
+        .is_ok_and(|p| migration_artifacts(&p).map_or(true, |v| !v.is_empty()))
+    {
+        return true;
+    }
     if let Ok(path) = storage::slot_file_for(slot, "manuscripts.db")
         && path.is_file()
         && file_head_is_plaintext_db(&path)
@@ -1355,6 +1397,13 @@ pub(crate) fn decrypt_slot_files() -> Result<()> {
         }
     }
     for name in SEALED_FILE_NAMES {
+        if name == ".zip-password" {
+            let password = storage::slot_file(name)?;
+            if password.is_file() {
+                erase_file_checked(&password)?;
+            }
+            continue;
+        }
         let path = storage::slot_file(name)?;
         if path.is_file() {
             unseal_plaintext_file(&handle, &path)?;
@@ -1412,6 +1461,7 @@ pub(crate) fn export_database(
 /// 搬完交换文件名、覆写删除旧文件与 WAL 残留。各库打开时都设 WAL，
 /// 新库首次打开会自行切回 WAL，不用在这里管 journal mode。
 fn migrate_database(path: &Path, direction: Migration) -> Result<()> {
+    recover_database_migration(path)?;
     if !path.is_file() {
         return Ok(());
     }
@@ -1424,7 +1474,7 @@ fn migrate_database(path: &Path, direction: Migration) -> Result<()> {
     }
     let key = key_dek()?;
     let parent = path.parent().context("数据库路径缺少父目录")?;
-    let stamp = format!("迁移-{}", std::process::id());
+    let stamp = "迁移-current";
     let temp = parent.join(format!(
         "{}.{}.tmp",
         path.file_name()
@@ -1441,9 +1491,13 @@ fn migrate_database(path: &Path, direction: Migration) -> Result<()> {
         // 源库形态确认：能列出 sqlite_master 才搬，不然是损坏或形态不符。
         src.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
             .context("原库读不了（已损坏或形态不符）")?;
-        // 尽量把 WAL 里的页并回主库，减少下面清理时残留的明文页；有别的连接时
-        // 这一步会失败，按尽力而为处理，后面仍会覆写删除 sidecar。
-        let _ = src.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+        // 先确认 WAL 全部并回原库且没有并发写者；未完成检查点时拒绝交换。
+        let (busy, _, _): (i64, i64, i64) =
+            src.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+        anyhow::ensure!(busy == 0, "数据库仍被占用，不能开始加密迁移");
+        src.execute_batch("PRAGMA journal_mode=DELETE")?;
         export_database(&src, &temp, if want_active { Some(&key) } else { None })
             .context("整库迁移导出失败")?;
         Ok(())
@@ -1460,23 +1514,143 @@ fn migrate_database(path: &Path, direction: Migration) -> Result<()> {
             .unwrap_or_else(|| "manuscripts.db".into()),
         stamp
     ));
-    let _ = std::fs::remove_file(&leftover);
     std::fs::rename(path, &leftover).context("挪走旧库失败")?;
-    std::fs::rename(&temp, path).context("换上新库失败")?;
-    overwrite_then_delete(&leftover);
+    sync_database_directory(path)?;
+    if let Err(error) = std::fs::rename(&temp, path) {
+        let rollback = std::fs::rename(&leftover, path);
+        bail!("换上新库失败：{error}；回滚结果：{rollback:?}。迁移文件已保留，下次解锁自动恢复");
+    }
+    sync_database_directory(path)?;
+    verify_database_file(path)?;
+    erase_file_checked(&leftover)?;
     for suffix in ["-wal", "-shm"] {
         // sidecar 跟着**原名**走：rename 只挪了主库文件，`path-wal` / `path-shm`
         // 还在原处，里面可能残留迁移前的明文页（`leftover-wal` 从不出现）。
         let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
         if sidecar.exists() {
-            overwrite_then_delete(&sidecar);
+            erase_file_checked(&sidecar)?;
         }
         let old_sidecar = PathBuf::from(format!("{}{suffix}", leftover.display()));
         if old_sidecar.exists() {
-            overwrite_then_delete(&old_sidecar);
+            erase_file_checked(&old_sidecar)?;
         }
     }
     Ok(())
+}
+
+// 固定文件名就是可恢复状态：.old 存在意味着清理尚未完成；旧 PID 命名同样接管。
+fn migration_artifacts(path: &Path) -> Result<Vec<PathBuf>> {
+    let parent = path.parent().context("数据库缺少父目录")?;
+    let prefix = format!(
+        "{}.迁移-",
+        path.file_name()
+            .context("数据库缺少文件名")?
+            .to_string_lossy()
+    );
+    let Some(entries) = read_dir_if_exists(parent)? else {
+        return Ok(Vec::new());
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && (name.ends_with(".old") || name.ends_with(".tmp")) {
+            anyhow::ensure!(entry.file_type()?.is_file(), "数据库迁移残留不是普通文件");
+            files.push(entry.path());
+        }
+    }
+    Ok(files)
+}
+
+fn sync_database_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path.parent().context("数据库缺少父目录")?)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn verify_database_file(path: &Path) -> Result<()> {
+    let encrypted = !file_head_is_plaintext_db(path);
+    let conn = rusqlite::Connection::open(path)?;
+    apply_key_with(&conn, &key_dek()?, encrypted)?;
+    let check: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    anyhow::ensure!(check == "ok", "迁移数据库完整性检查失败，原文件保留");
+    Ok(())
+}
+
+fn recover_database_migration(path: &Path) -> Result<()> {
+    let artifacts = migration_artifacts(path)?;
+    if artifacts.is_empty() {
+        return Ok(());
+    }
+    if !path.is_file() {
+        let olds: Vec<_> = artifacts
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "old"))
+            .collect();
+        anyhow::ensure!(
+            olds.len() == 1,
+            "迁移中断，无法唯一确定原数据库；已保留全部文件，请恢复备份"
+        );
+        // 先恢复原库，不能打开一个空库冒充成功；原路径的 WAL 仍属于它。
+        std::fs::rename(olds[0], path)?;
+        sync_database_directory(path)?;
+    }
+    verify_database_file(path)?;
+    for artifact in artifacts {
+        if artifact.exists() {
+            erase_file_checked(&artifact)?;
+        }
+    }
+    sync_database_directory(path)
+}
+
+/// 删除失败必须上报，不能宣称磁盘已经无明文。覆写仅为尽力降低历史残留，不能保证 SSD 擦除。
+pub(crate) fn erase_file_checked(path: &Path) -> Result<()> {
+    use std::io::Write as _;
+    let before = std::fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        before.is_file() && !before.file_type().is_symlink(),
+        "拒绝擦除非普通文件或符号链接：{}",
+        path.display()
+    );
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x00200000);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let opened = file.metadata()?;
+        anyhow::ensure!(
+            before.dev() == opened.dev() && before.ino() == opened.ino(),
+            "擦除目标在打开期间改变，已取消"
+        );
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        anyhow::ensure!(
+            file.metadata()?.file_attributes() & 0x400 == 0,
+            "拒绝擦除重解析点"
+        );
+    }
+    let mut remaining = file.metadata()?.len();
+    let buffer = [0u8; 65536];
+    while remaining > 0 {
+        let n = remaining.min(buffer.len() as u64) as usize;
+        file.write_all(&buffer[..n])?;
+        remaining -= n as u64;
+    }
+    file.sync_all()?;
+    drop(file);
+    std::fs::remove_file(path).with_context(|| format!("敏感残留删除失败：{}", path.display()))
 }
 
 /// 源库是否已经是目标形态：带 key 能读 sqlite_master = 我们的密文；不带 key 能读 = 明文。
@@ -1698,6 +1872,45 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_database_migration_restores_source_and_cleans_legacy_plaintext() {
+        let dir = use_temp_dir();
+        let path = plain_database();
+        let (.., unlocked) = Vault::create(REAL_PW, None, false).unwrap();
+        set_key_handle(*unlocked.unwrap().dek, true);
+        let old = path.with_file_name("manuscripts.db.迁移-999.old");
+        std::fs::rename(&path, &old).unwrap();
+        let temp = path.with_file_name("manuscripts.db.迁移-999.tmp");
+        std::fs::write(&temp, b"interrupted incomplete destination").unwrap();
+        assert!(slot_needs_encryption(DataSlot::Real));
+        ensure_slot_encrypted().unwrap();
+        assert!(!old.exists() && !temp.exists());
+        assert!(database_matches(&path, true).unwrap());
+        let leftovers = path.with_file_name("manuscripts.db.迁移-123.old");
+        std::fs::write(&leftovers, b"historical plaintext orphan").unwrap();
+        assert!(slot_needs_encryption(DataSlot::Real));
+        ensure_slot_encrypted().unwrap();
+        assert!(!leftovers.exists());
+        drop(dir);
+        reset();
+    }
+
+    #[test]
+    fn broken_current_database_never_erases_the_remaining_original() {
+        let dir = use_temp_dir();
+        let path = plain_database();
+        let original = std::fs::read(&path).unwrap();
+        let (.., unlocked) = Vault::create(REAL_PW, None, false).unwrap();
+        set_key_handle(*unlocked.unwrap().dek, true);
+        let old = path.with_file_name("manuscripts.db.迁移-999.old");
+        std::fs::rename(&path, &old).unwrap();
+        std::fs::write(&path, b"broken replacement").unwrap();
+        assert!(ensure_slot_encrypted().is_err());
+        assert_eq!(std::fs::read(&old).unwrap(), original);
+        drop(dir);
+        reset();
+    }
+
+    #[test]
     fn absent_then_skipped_then_locked_probe() {
         let dir = use_temp_dir();
         assert_eq!(Vault::probe(), Probe::Absent);
@@ -1858,6 +2071,7 @@ mod tests {
             ..real_slot
         };
         let legacy = VaultData {
+            plaintext_acknowledged: false,
             v: LEGACY_V,
             slots: [legacy_slot, SlotSeal::dummy().unwrap()],
         };

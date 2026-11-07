@@ -309,6 +309,10 @@ impl GongwenApp {
                     mut request,
                     print,
                 } => {
+                    if print {
+                        self.open_print_dialog(*request, ctx);
+                        continue;
+                    }
                     let ctx = ctx.clone();
                     let name = crate::export::safe_filename(&request.title);
                     let name = if name.to_ascii_lowercase().ends_with(".pdf") {

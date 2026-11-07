@@ -41,7 +41,7 @@ const SERVICE_SUFFIX: &str = ".openapi.json";
 static IO_LOCK: Mutex<()> = Mutex::new(());
 
 /// 一个服务：一份 OpenAPI 文档。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Service {
     /// 文件名用的 id：英文字母、数字、短横线。
     pub(crate) id: String,
@@ -223,6 +223,29 @@ fn service_files(dir: &Path) -> Vec<(String, PathBuf)> {
 pub(crate) fn load_store() -> anyhow::Result<ApiStore> {
     let _guard = IO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = services_dir()?;
+    let container = dir.join("services.json");
+    if container.try_exists()? {
+        let bytes = crate::vault::read_path(&container, "api", crate::file_limits::MAX_TEXT_BYTES)?;
+        let mut store = ApiStore {
+            services: serde_json::from_slice(&bytes)?,
+            ..Default::default()
+        };
+        store.envs = crate::agent::api::read_json("api-envs.json")?;
+        store.endpoints = lower_all(&store);
+        // 上次写好容器但还未删完旧文件时，重新核对后继续清理。
+        for (id, path) in service_files(&dir) {
+            let doc = read_service_file(&path)?;
+            anyhow::ensure!(
+                store
+                    .services
+                    .iter()
+                    .any(|service| service.id == id && service.doc == doc),
+                "接口容器与旧文件冲突，已保留两份，请先核对旧文件"
+            );
+            crate::vault::erase_file_checked(&path)?;
+        }
+        return Ok(store);
+    }
     let files = service_files(&dir);
     let legacy = crate::storage::slot_file("apis.json")?;
     if files.is_empty() && legacy.exists() {
@@ -235,6 +258,9 @@ pub(crate) fn load_store() -> anyhow::Result<ApiStore> {
     }
     store.envs = crate::agent::api::read_json("api-envs.json")?;
     store.endpoints = lower_all(&store);
+    if !store.services.is_empty() {
+        write_store(&store)?;
+    }
     Ok(store)
 }
 
@@ -283,22 +309,13 @@ fn read_service_file(path: &Path) -> anyhow::Result<Value> {
 
 /// 写一份服务定义：有句柄就密封，Unix 下 0600、原子替换；没有句柄时拒绝对
 /// 已加密文件写明文（静默降级防护）。
-fn write_service_file(path: &Path, doc: &Value) -> anyhow::Result<()> {
-    let bytes = serde_json::to_vec_pretty(doc)?;
-    crate::vault::write_path(path, "api", &bytes)
-}
-
 fn write_store(store: &ApiStore) -> anyhow::Result<()> {
     let dir = services_dir()?;
     std::fs::create_dir_all(&dir)?;
-    for service in &store.services {
-        let path = dir.join(format!("{}{SERVICE_SUFFIX}", service.id));
-        write_service_file(&path, &service.doc)?;
-    }
-    for (id, path) in service_files(&dir) {
-        if !store.services.iter().any(|service| service.id == id) {
-            std::fs::remove_file(&path)?;
-        }
+    let bytes = serde_json::to_vec(&store.services)?;
+    crate::vault::write_path(&dir.join("services.json"), "api", &bytes)?;
+    for (_, path) in service_files(&dir) {
+        crate::vault::erase_file_checked(&path)?;
     }
     let mut envs = store.envs.clone();
     envs.services

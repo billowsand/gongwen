@@ -7,9 +7,7 @@
 //! - 包内辅助文件原样保留；脚本只是文件，不执行、不扩大 host 权限。
 
 use super::parser;
-use crate::ai_services::skill_package::{
-    Limits, Package, destination_with, no_link, relative_path_with, remove_dir_within,
-};
+use crate::ai_services::skill_package::{Limits, Package, no_link, relative_path_with};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -59,34 +57,105 @@ pub(crate) fn user_dir(name: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-pub(crate) fn has_user_copy(name: &str) -> bool {
-    user_dir(name).is_ok_and(|dir| dir.join("SKILL.md").is_file())
+type Bundles = BTreeMap<String, BTreeMap<String, Vec<u8>>>;
+
+fn bundle_path() -> Result<PathBuf, String> {
+    Ok(crate::storage::slot_subdir("pi")
+        .map_err(|e| e.to_string())?
+        .join("user-skills.json"))
 }
 
-/// 配置目录里的用户技能目录（不读文件内容，只列目录）。
-pub(crate) fn user_dirs() -> Result<Vec<(String, PathBuf)>, String> {
+fn read_bundles() -> Result<Bundles, String> {
+    let path = bundle_path()?;
+    let mut bundles: Bundles = if path.try_exists().map_err(|e| e.to_string())? {
+        let raw =
+            crate::vault::read_path(&path, "pi", 128 * 1024 * 1024).map_err(|e| e.to_string())?;
+        serde_json::from_slice(&raw).map_err(|e| format!("用户技能容器损坏：{e}"))?
+    } else {
+        BTreeMap::new()
+    };
     let root = skills_root()?;
-    let mut dirs = Vec::new();
-    for entry in std::fs::read_dir(&root)
-        .map_err(|error| format!("读不了 Pi 技能目录（{}）：{error}", root.display()))?
-    {
-        let entry = entry.map_err(|error| format!("读 Pi 技能目录失败：{error}"))?;
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        // 暂存目录不是技能。
+    let mut legacy = Vec::new();
+    for entry in std::fs::read_dir(&root).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') {
             continue;
         }
-        // 链接条目交给目录逐项标坏，不能让一个坏条目抹掉其余用户技能。
-        if !path.is_dir() && no_link(&path).is_ok() {
+        if no_link(&entry.path()).is_err() {
             continue;
         }
-        dirs.push((name.to_string(), path));
+        if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            continue;
+        }
+        let package = Package::read_dir_with_reader(&entry.path(), LIMITS, |file| {
+            crate::vault::read_path(file, "pi", LIMITS.max_file)
+        })
+        .map_err(|e| e.to_string())?;
+        if let Some(previous) = bundles.get(&name) {
+            if !package
+                .files
+                .iter()
+                .all(|(key, value)| previous.get(key) == Some(value))
+            {
+                return Err(format!("用户技能「{name}」容器与旧目录冲突，已保留两份"));
+            }
+        } else {
+            bundles.insert(name, package.files);
+        }
+        legacy.push(entry.path());
     }
-    dirs.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(dirs)
+    if !legacy.is_empty() {
+        write_bundles(&bundles)?;
+        for dir in legacy {
+            // 保存成功后逐个覆写旧文件；失败上报，下次读取继续，不宣称迁移完成。
+            let mut pending = vec![dir.clone()];
+            while let Some(parent) = pending.pop() {
+                for entry in std::fs::read_dir(parent).map_err(|e| e.to_string())? {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    no_link(&entry.path()).map_err(|e| e.to_string())?;
+                    if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+                        pending.push(entry.path());
+                    } else {
+                        crate::vault::erase_file_checked(&entry.path())
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(bundles)
+}
+
+fn write_bundles(bundles: &Bundles) -> Result<(), String> {
+    let bytes = serde_json::to_vec(bundles).map_err(|e| e.to_string())?;
+    if bytes.len() > 128 * 1024 * 1024 {
+        return Err("用户技能总量超过容器上限".into());
+    }
+    crate::vault::write_path(&bundle_path()?, "pi", &bytes).map_err(|e| e.to_string())
+}
+
+pub(crate) fn has_user_copy(name: &str) -> bool {
+    read_bundles().is_ok_and(|bundles| bundles.contains_key(name))
+}
+
+pub(crate) fn user_dirs() -> Result<Vec<(String, PathBuf)>, String> {
+    let root = skills_root()?;
+    let mut dirs: BTreeMap<_, _> = read_bundles()?
+        .keys()
+        .map(|name| (name.clone(), root.join(name)))
+        .collect();
+    for entry in std::fs::read_dir(&root).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.file_type().map_err(|e| e.to_string())?.is_symlink() {
+            dirs.insert(
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.path(),
+            );
+        }
+    }
+    Ok(dirs.into_iter().collect())
 }
 
 pub(crate) fn known_name(name: &str) -> bool {
@@ -118,21 +187,12 @@ pub(crate) fn builtin_package(name: &str) -> Result<Package, String> {
 
 /// 读一份技能的完整包：用户副本优先，没有用户副本就用内置。
 pub(crate) fn load_package(name: &str) -> Result<Package, String> {
-    let dir = user_dir(name)?;
-    if dir.is_dir() {
-        if !dir.join("SKILL.md").is_file() {
-            return Err(format!("「{name}」缺了 SKILL.md，先在管理页修复或删除。"));
-        }
-        Package::read_dir_with_reader(&dir, LIMITS, |path| {
-            crate::vault::read_path(path, "pi", LIMITS.max_file)
-        })
-        .map_err(|error| format!("{error:#}"))
-    } else {
-        builtin_package(name)
+    if let Some(files) = read_bundles()?.remove(name) {
+        return Ok(Package { files });
     }
+    builtin_package(name)
 }
 
-#[cfg(test)]
 pub(crate) fn read_text(name: &str, relative: &str) -> Result<String, String> {
     let package = load_package(name)?;
     let relative = relative_path_with(relative, LIMITS).map_err(|error| format!("{error:#}"))?;
@@ -144,8 +204,7 @@ pub(crate) fn read_text(name: &str, relative: &str) -> Result<String, String> {
 }
 
 pub(crate) fn save_text(name: &str, relative: &str, text: &str) -> Result<(), String> {
-    let dir = user_dir(name)?;
-    if !dir.join("SKILL.md").is_file() {
+    if !has_user_copy(name) {
         return Err(format!(
             "「{name}」还是内置只读技能。请先「复制为我的技能」再编辑。"
         ));
@@ -176,9 +235,12 @@ pub(crate) fn save_text(name: &str, relative: &str, text: &str) -> Result<(), St
             LIMITS.max_total / 1024 / 1024
         ));
     }
-    let path = destination_with(&dir, &relative, LIMITS).map_err(|error| format!("{error:#}"))?;
-    crate::vault::write_path(&path, "pi", text.as_bytes())
-        .map_err(|error| format!("写不出技能文件（{}）：{error:#}", path.display()))?;
+    let mut bundles = read_bundles()?;
+    bundles
+        .get_mut(name)
+        .ok_or("用户技能不存在")?
+        .insert(relative, text.as_bytes().to_vec());
+    write_bundles(&bundles)?;
     super::bump_revision();
     Ok(())
 }
@@ -197,8 +259,8 @@ pub(crate) fn create(name: &str, display_name: Option<&str>) -> Result<(), Strin
             "「{name}」是内置技能；要改它请用「复制为我的技能」。"
         ));
     }
-    let dir = user_dir(name)?;
-    if dir.exists() {
+    user_dir(name)?;
+    if has_user_copy(name) {
         return Err(format!("已经有名为「{name}」的技能了。"));
     }
     let display = display_name
@@ -237,8 +299,8 @@ pub(crate) fn copy_builtin(name: &str) -> Result<(), String> {
 
 /// 将已有完整技能包复制到一个新的用户技能名；目标冲突一律拒绝。
 pub(crate) fn copy_to(source: &str, target: &str, display: Option<&str>) -> Result<(), String> {
-    let dir = user_dir(target)?;
-    if super::builtin_text(target).is_some() || dir.exists() {
+    user_dir(target)?;
+    if super::builtin_text(target).is_some() || has_user_copy(target) {
         return Err(format!("已经有名为「{target}」的技能了，没有覆盖。"));
     }
     let mut package = load_package(source)?;
@@ -257,10 +319,9 @@ pub(crate) fn restore_builtin(name: &str) -> Result<(), String> {
         return Err(format!("「{name}」不是内置技能，没有可恢复的内置版本。"));
     }
     let mut disabled = read_disabled_strict()?;
-    let dir = user_dir(name)?;
-    if dir.is_dir() {
-        remove_dir_within(&skills_root()?, &dir).map_err(|error| format!("{error:#}"))?;
-    }
+    let mut bundles = read_bundles()?;
+    bundles.remove(name);
+    write_bundles(&bundles)?;
     disabled.retain(|id| id != name);
     write_disabled(&disabled)?;
     super::bump_revision();
@@ -269,15 +330,11 @@ pub(crate) fn restore_builtin(name: &str) -> Result<(), String> {
 
 /// 删除用户副本。内置技能没有用户副本时不能删除，只能停用。
 pub(crate) fn delete(name: &str) -> Result<(), String> {
-    let dir = user_dir(name)?;
-    if !dir.is_dir() {
-        return Err(if super::builtin_text(name).is_some() {
-            format!("「{name}」是只读内置技能，不能删除；可以停用它。")
-        } else {
-            format!("没有名为「{name}」的用户技能。")
-        });
+    let mut bundles = read_bundles()?;
+    if bundles.remove(name).is_none() {
+        return Err(format!("没有可删除的用户技能「{name}」"));
     }
-    remove_dir_within(&skills_root()?, &dir).map_err(|error| format!("{error:#}"))?;
+    write_bundles(&bundles)?;
     // 纯用户技能删除时一并清掉停用记录；内置覆盖删除后只恢复内置，保留原来的启停状态。
     if super::builtin_text(name).is_none()
         && let Ok(mut disabled) = read_disabled_strict()
@@ -353,50 +410,13 @@ fn write_disabled(ids: &[String]) -> Result<(), String> {
 }
 
 fn install_new(name: &str, package: &Package) -> Result<(), String> {
-    let root = skills_root()?;
-    let target = user_dir(name)?;
-    if target.exists() {
-        return Err(format!("已经有名为「{name}」的技能了，没有覆盖。"));
+    user_dir(name)?; // 名称校验，虚拟路径不落盘。
+    let mut bundles = read_bundles()?;
+    if bundles.contains_key(name) {
+        return Err(format!("已经有名为「{name}」的技能"));
     }
-    let staging = root.join(format!(".staging-{}", uuid::Uuid::new_v4().simple()));
-    let result = (|| -> Result<(), String> {
-        std::fs::create_dir_all(&staging)
-            .map_err(|error| format!("建不了技能暂存目录（{}）：{error}", staging.display()))?;
-        for (relative, bytes) in &package.files {
-            let path = destination_with(&staging, relative, LIMITS)
-                .map_err(|error| format!("{error:#}"))?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|error| format!("建不了技能目录（{}）：{error}", parent.display()))?;
-            }
-            // GWA2 的 AAD 绑定最终逻辑路径；暂存目录只是密文的搬运位置，
-            // 不能按 `.staging-*` 路径密封后再改名，否则安装后永远解不开。
-            let final_path = destination_with(&target, relative, LIMITS)
-                .map_err(|error| format!("{error:#}"))?;
-            let protected = match crate::vault::key_handle() {
-                Some(handle) => crate::vault::seal_path_bytes(&handle, &final_path, "pi", bytes)
-                    .map_err(|error| format!("加密技能文件失败：{error:#}"))?,
-                None => bytes.clone(),
-            };
-            crate::storage::atomic_write(&path, |file| {
-                use std::io::Write;
-                file.write_all(&protected)?;
-                Ok(())
-            })
-            .map_err(|error| format!("写不出技能文件（{}）：{error}", path.display()))?;
-        }
-        std::fs::rename(&staging, &target).map_err(|error| {
-            format!(
-                "安装技能「{name}」失败（{} → {}）：{error}",
-                staging.display(),
-                target.display()
-            )
-        })
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&staging);
-    }
-    result?;
+    bundles.insert(name.to_owned(), package.files.clone());
+    write_bundles(&bundles)?;
     super::bump_revision();
     Ok(())
 }
@@ -504,7 +524,7 @@ fn check_import(name: &str, package: &Package) -> Result<(), String> {
     let text = std::str::from_utf8(entry)
         .map_err(|_| format!("「{name}」的 SKILL.md 不是 UTF-8 文本。"))?;
     parser::parse(name, text)?;
-    if user_dir(name)?.exists() {
+    if has_user_copy(name) {
         return Err(format!(
             "已经存在名为「{name}」的技能，导入不会覆盖。请先复制或删除现有技能，再导入。"
         ));
@@ -571,6 +591,16 @@ pub(crate) fn disabled_names() -> (Vec<String>, Vec<String>) {
 #[cfg(test)]
 pub(crate) fn skill_text(name: &str) -> Result<String, String> {
     read_text(name, "SKILL.md")
+}
+
+#[cfg(test)]
+pub(crate) fn corrupt_skill_for_test(name: &str, text: &str) {
+    let mut bundles = read_bundles().unwrap();
+    bundles
+        .get_mut(name)
+        .unwrap()
+        .insert("SKILL.md".into(), text.as_bytes().to_vec());
+    write_bundles(&bundles).unwrap();
 }
 
 #[cfg(test)]

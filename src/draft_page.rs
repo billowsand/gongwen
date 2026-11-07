@@ -656,6 +656,7 @@ impl DraftSession {
 
     /// 起草页点了「打印…」：记下「导出完自动打开并弹打印对话框」。导出真开始了
     /// 才记；导出失败或没排出 PDF 时由外壳清掉。
+    #[cfg(test)]
     pub(crate) fn request_print_after_export(&mut self) {
         self.print_after_export = true;
     }

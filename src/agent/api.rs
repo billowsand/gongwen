@@ -2074,9 +2074,10 @@ mod tests {
             .unwrap()
             .flatten()
             .collect();
-        assert_eq!(files.len(), 1, "一台服务器一份 OpenAPI");
+        assert_eq!(files.len(), 1, "服务定义集中保存在中性容器");
         let exported = std::fs::read_to_string(files[0].path()).unwrap();
-        assert!(exported.contains("\"openapi\": \"3.0.3\""));
+        let container: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        assert_eq!(container[0]["doc"]["openapi"], "3.0.3");
         assert!(!exported.contains("s3cr3t"), "接口文件里不带密钥");
         crate::storage::set_test_config_dir(None);
 

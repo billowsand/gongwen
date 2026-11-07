@@ -463,7 +463,9 @@ impl GongwenApp {
             let dialog = modal::dialog(
                 ui.ctx(),
                 egui::Id::new("manuscript_zip_password"),
-                if importing {
+                if matches!(password.purpose, super::ZipPasswordPurpose::BackupImport(_)) {
+                    "输入备份密码"
+                } else if importing {
                     "输入稿件包密码"
                 } else {
                     "设置加密密码"

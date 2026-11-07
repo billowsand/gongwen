@@ -80,30 +80,36 @@ fn render_export_to(
     kind: ExportKind,
     target: &Path,
 ) -> anyhow::Result<crate::app::widgets::ExportOutcome> {
-    let temp = tempfile::tempdir()?;
+    let memory_root = Path::new("memory-export");
     let mut selection = kind.selection(true, false);
     selection.print_trace = config.export.print_trace.clone();
-    let mut outcome = export_and_compile(
-        temp.path(),
-        input,
-        markdown,
-        &selection,
-        &config.vocabulary,
-        &config.fonts,
-        &config.numbering,
-        &config.transmit_defaults,
-        None,
-        |_| {},
-    )?;
+    let (result, mut files) = mdx::memory_files::capture_outputs(|| {
+        export_and_compile(
+            memory_root,
+            input,
+            markdown,
+            &selection,
+            &config.vocabulary,
+            &config.fonts,
+            &config.numbering,
+            &config.transmit_defaults,
+            None,
+            |_| {},
+        )
+    });
+    let mut outcome = result?;
     if let Some(error) = &outcome.compile_error {
         anyhow::bail!("{error}");
     }
     let source = kind
         .find_in(&outcome.files)
         .ok_or_else(|| anyhow::anyhow!("未生成导出文件"))?;
+    let bytes = files
+        .remove(source)
+        .ok_or_else(|| anyhow::anyhow!("内存中未生成所选格式"))?;
     crate::storage::atomic_write(target, |file| {
-        let mut source = std::fs::File::open(source)?;
-        std::io::copy(&mut source, file)?;
+        use std::io::Write as _;
+        file.write_all(&bytes)?;
         Ok(())
     })?;
     outcome.files = vec![target.to_path_buf()];
@@ -192,7 +198,7 @@ impl DraftPage<'_> {
             // 「打印…」会先导出普通 PDF 再交给打印队列：确认框必须同时说明
             // 文件落盘与队列/纸件两重风险，不能只提示前者。
             let warning = if print {
-                super::super::app::output_guard::PRINT_EXPORT_WARNING
+                super::super::app::output_guard::PRINT_WARNING
             } else {
                 super::super::app::output_guard::PLAINTEXT_WARNING
             };
@@ -258,8 +264,7 @@ impl DraftPage<'_> {
         *self.status = "正在导出当前审校稿…".into();
         self.doc.open_after_export = open;
         if print {
-            self.doc.request_print_after_export();
-            *self.status = "正在导出 PDF，排好后打开打印对话框…".into();
+            *self.status = "正在内存中排版 PDF，排好后打开打印对话框…".into();
         } else if let Some(kind) = open {
             *self.status = format!("正在导出 {}，导完自动打开…", kind.label());
         }
@@ -275,6 +280,41 @@ impl DraftPage<'_> {
         let transmit_defaults = self.config.transmit_defaults.clone();
         let tx = self.sender.clone();
         thread::spawn(move || {
+            if print {
+                let (result, mut files) = mdx::memory_files::capture_outputs(|| {
+                    export_and_compile(
+                        Path::new("memory-print"),
+                        &input,
+                        &markdown,
+                        &selection,
+                        &vocabulary,
+                        &fonts,
+                        &numbering,
+                        &transmit_defaults,
+                        None,
+                        |_| {},
+                    )
+                });
+                let result = result
+                    .and_then(|outcome| {
+                        if let Some(error) = outcome.compile_error {
+                            anyhow::bail!("{error}");
+                        }
+                        let path = ExportKind::Pdf
+                            .find_in(&outcome.files)
+                            .ok_or_else(|| anyhow::anyhow!("未生成打印 PDF"))?;
+                        files
+                            .remove(path)
+                            .ok_or_else(|| anyhow::anyhow!("内存打印 PDF 不存在"))
+                    })
+                    .map_err(|e| format!("{e:#}"));
+                let _ = tx.send(WorkerResult::Doc {
+                    key,
+                    seq,
+                    job: DocJob::MemoryPrintPdf(result),
+                });
+                return;
+            }
             let result = export_and_compile(
                 &output_dir,
                 &input,
@@ -489,6 +529,16 @@ impl DraftPage<'_> {
         let (result, path, verb) = match action {
             FileAction::Reveal(path) => (reveal_in_os(&path), path, "定位"),
             FileAction::CopyToClipboard(path) => {
+                if crate::vault::key_handle().is_some() {
+                    self.actions.push(DraftAction::ConfirmPlaintextOutput {
+                        operation: "复制导出文件到系统剪贴板".into(),
+                        warning: crate::app::output_guard::CLIPBOARD_WARNING,
+                        action: Box::new(move |app| {
+                            app.copy_file_confirmed(&path);
+                        }),
+                    });
+                    return;
+                }
                 (file_clipboard::copy_file(&path), path, "复制到剪贴板")
             }
             FileAction::SaveAs(kind) => {
@@ -653,6 +703,42 @@ impl DraftPage<'_> {
 mod delivery_tests {
     use super::*;
     use crate::models::TemplateKind;
+
+    #[test]
+    fn captured_exports_leave_no_document_directory_or_hidden_export_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let virtual_root = dir.path().join("must-not-exist");
+        let config = crate::models::AppConfig::default();
+        let input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            title_hint: "不应出现在磁盘目录的标题".into(),
+            ..Default::default()
+        };
+        for kind in ExportKind::ALL {
+            let (result, files) = mdx::memory_files::capture_outputs(|| {
+                export_and_compile(
+                    &virtual_root,
+                    &input,
+                    "# 内存测试标题\n\n内存生成的正文。",
+                    &kind.selection(true, false),
+                    &config.vocabulary,
+                    &config.fonts,
+                    &config.numbering,
+                    &config.transmit_defaults,
+                    None,
+                    |_| {},
+                )
+            });
+            let outcome = result.unwrap();
+            assert!(outcome.compile_error.is_none());
+            let path = kind.find_in(&outcome.files).unwrap();
+            assert!(!files[path].is_empty());
+            assert!(
+                !virtual_root.exists(),
+                "连隐藏导出清单或空的业务目录也不能落盘"
+            );
+        }
+    }
 
     #[test]
     fn export_to_regenerates_current_body_and_elements_and_replaces_target() {

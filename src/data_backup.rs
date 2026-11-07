@@ -20,10 +20,12 @@
 //!   换入失败会尝试把留底目录改回来并删掉暂存目录；校验失败根本不会碰当前数据。
 //!   留底目录本身就是用户的最后一道恢复手段。
 
+mod archive;
+
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read as _, Write};
+use std::io::{Read as _, Seek as _, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// 崩溃日志目录，只在当前机器上有意义。
@@ -95,8 +97,6 @@ pub(crate) struct BackupInfo {
     pub(crate) has_config: bool,
     /// 是否含稿件库 / 知识库 / 公文词表共用的数据库。
     pub(crate) has_manuscripts: bool,
-    /// 是否含旧版明文数据库或明文配置；用于恢复确认中的明确提示。
-    pub(crate) has_plaintext_data: bool,
     /// 按顶层条目归并的概要，`config.json` 与 `manuscripts.db` 排在最前。
     pub(crate) groups: Vec<BackupGroup>,
 }
@@ -104,7 +104,7 @@ pub(crate) struct BackupInfo {
 impl BackupInfo {
     /// 界面上逐行显示的条目概要。
     pub(crate) fn summary_lines(&self) -> Vec<String> {
-        let mut lines: Vec<String> = self
+        let lines: Vec<String> = self
             .groups
             .iter()
             .map(|group| {
@@ -120,13 +120,6 @@ impl BackupInfo {
                 }
             })
             .collect();
-        if self.has_plaintext_data {
-            lines.insert(
-                0,
-                "提示：备份含明文数据库或配置（旧明文备份未加密）；恢复后请按需要重新启用应用锁。"
-                    .into(),
-            );
-        }
         lines
     }
 }
@@ -141,9 +134,9 @@ pub(crate) struct RestoreReport {
 }
 
 /// 把配置目录整目录打包到 `target_zip`。
-pub(crate) fn export_backup(target_zip: &Path) -> Result<()> {
+pub(crate) fn export_backup(target_zip: &Path, password: &str) -> Result<()> {
     let config_dir = crate::storage::config_dir()?;
-    export_from(&config_dir, target_zip)
+    export_from(&config_dir, target_zip, password)
 }
 
 /// 主库与 WAL 必须由 SQLite 合并成一致快照，不能分别复制正在变化的文件。
@@ -190,24 +183,45 @@ fn copy_quiescent_database(source: &Path, destination: &Path) -> Result<()> {
         Ok(())
     };
     ensure_clean()?;
-    let bytes = fs::read(source)
-        .with_context(|| format!("无法读取非当前槽位数据库：{}", source.display()))?;
+    use sha2::{Digest, Sha256};
+    let hash_copy = |destination: Option<&Path>| -> Result<Vec<u8>> {
+        let mut input = fs::File::open(source)?;
+        let mut output = destination.map(fs::File::create).transpose()?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 65536];
+        loop {
+            let n = input.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hash.update(&buffer[..n]);
+            if let Some(output) = output.as_mut() {
+                output.write_all(&buffer[..n])?;
+            }
+        }
+        if let Some(output) = output {
+            output.sync_all()?;
+        }
+        Ok(hash.finalize().to_vec())
+    };
+    let first = hash_copy(Some(destination))?;
     ensure_clean()?;
-    let verification = fs::read(source)
-        .with_context(|| format!("无法复核非当前槽位数据库：{}", source.display()))?;
+    let second = hash_copy(None)?;
     ensure_clean()?;
-    if bytes != verification {
-        bail!(
-            "非当前槽位数据库 {name} 在备份期间发生变化，已中止。请先切换到对应槽位并正常退出应用后再备份"
-        );
-    }
-    fs::write(destination, bytes)
-        .with_context(|| format!("无法写入数据库备份副本：{}", destination.display()))?;
+    anyhow::ensure!(
+        first == second,
+        "非当前槽位数据库在备份期间发生变化，已中止，请正常退出对应槽位后再备份"
+    );
     Ok(())
 }
 
 /// [`export_backup`] 的可测试入口：显式指定要打包的目录。
-pub(crate) fn export_from(config_dir: &Path, target_zip: &Path) -> Result<()> {
+pub(crate) fn export_from(config_dir: &Path, target_zip: &Path, password: &str) -> Result<()> {
+    crate::password_policy::validate_export(password)?;
+    anyhow::ensure!(
+        crate::vault::key_handle().is_some_and(|h| h.db_active()),
+        "请先启用应用锁并完成加密，再导出全量备份；这样恢复过程也只写密文"
+    );
     if !config_dir.is_dir() {
         bail!("配置目录不存在：{}", config_dir.display());
     }
@@ -220,6 +234,12 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path) -> Result<()> {
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)
         .with_context(|| format!("无法创建备份目录：{}", parent.display()))?;
+    anyhow::ensure!(
+        !parent
+            .canonicalize()?
+            .starts_with(config_dir.canonicalize()?),
+        "备份文件不能通过目录别名放进配置目录"
+    );
 
     // 代次快照：备份里的 vault.dat 必须与库、配置属于同一代。导出是后台任务，
     // 期间用户仍可改主密码或设置 / 清除第二密码（都会重写 vault.dat，第二密码
@@ -243,6 +263,12 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path) -> Result<()> {
         if !source.is_file() {
             continue;
         }
+        let mut head = [0u8; 16];
+        fs::File::open(&source)?.read_exact(&mut head)?;
+        anyhow::ensure!(
+            &head != b"SQLite format 3\0",
+            "存在尚未加密的槽位数据库，请先解锁对应槽位完成加密"
+        );
         let is_current = current_db.as_deref() == Some(source.as_path());
         let snapshot = snapshot_dir.path().join(name);
         if !has_key_handle || is_current {
@@ -280,35 +306,44 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path) -> Result<()> {
     // 免得用户拿到一份「自己都恢复不了」的备份，或写到一半才发现磁盘不够。
     precheck_export_budget(&entries, BACKUP_LIMITS)?;
     // 先写同目录临时文件，写完再原子替换目标：导出中途失败不会留下半个 ZIP。
-    let mut temp = tempfile::NamedTempFile::new_in(parent)
+    let temp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("无法在 {} 创建临时文件", parent.display()))?;
     {
-        let mut zip = zip::ZipWriter::new(temp.as_file_mut());
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let mut writer = archive::writer(temp.reopen()?, password)?;
+        let mut actual = ArchiveBudget::default();
+        actual.account(
+            archive::FORMAT_FILE,
+            archive::FORMAT.len() as u64,
+            BudgetPhase::Export,
+        )?;
         for (rel, source, _) in &entries {
-            let name = zip_entry_name(rel);
-            let bytes = match fs::read(source) {
-                Ok(bytes) => bytes,
-                // 普通文件在遍历与读取之间被删掉时跳过；数据库快照必须存在，
-                // 缺失或其他读取错误都应中止导出。
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::NotFound
-                        && rel != Path::new("manuscripts.db")
-                        && rel != Path::new("alt-manuscripts.db") =>
-                {
-                    continue;
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| format!("无法读取 {}", source.display()));
-                }
-            };
-            zip.start_file(&name, options)
-                .with_context(|| format!("无法写入备份条目：{name}"))?;
-            zip.write_all(&bytes)
-                .with_context(|| format!("无法写入备份条目：{name}"))?;
+            let mut file = fs::File::open(source)?;
+            let size = file.metadata()?.len();
+            let mut head = Vec::new();
+            (&mut file).take(64).read_to_end(&mut head)?;
+            if let Some((_, public)) = crate::help::content::IMAGES
+                .iter()
+                .find(|(n, _)| rel == &Path::new("images").join(n))
+            {
+                file.rewind()?;
+                let mut bytes = Vec::new();
+                (&mut file)
+                    .take(public.len() as u64 + 1)
+                    .read_to_end(&mut bytes)?;
+                ensure_encrypted_payload(rel, &bytes)?;
+            } else {
+                ensure_encrypted_payload(rel, &head)?;
+            }
+            actual.account(&archive_entry_name(rel), size, BudgetPhase::Export)?;
+            file.seek(SeekFrom::Start(0))?;
+            archive::methods(&mut writer, password);
+            let written = writer.push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file(&archive_entry_name(rel)),
+                Some(file.take(BACKUP_LIMITS.entry_bytes + 1)),
+            )?;
+            anyhow::ensure!(written.size() == size, "备份源文件在读取期间改变，已中止");
         }
-        zip.finish().context("无法写完备份文件")?;
+        writer.finish()?.sync_all()?;
     }
     temp.as_file().sync_all()?;
     // 落盘前再比对一次锁文件：变了就放弃这份包（NamedTempFile 未 persist，
@@ -347,19 +382,24 @@ fn ensure_vault_generation_unchanged(before: Option<&[u8]>, after: Option<&[u8]>
     )
 }
 
-/// 导出前的容量预检：与恢复校验共用 [`ZipBudget`] 与 [`BackupLimits`]。
+/// 导出前的容量预检：与恢复校验共用 [`ArchiveBudget`] 与 [`BackupLimits`]。
 ///
 /// `entries` 是（相对路径, 来源, 解压后字节数）；数据库条目已换成一致快照，
 /// 因此这里看到的大小就是最终写进 ZIP 的大小。
 fn precheck_export_budget(entries: &[(PathBuf, PathBuf, u64)], limits: BackupLimits) -> Result<()> {
-    let mut budget = ZipBudget::with_limits(limits);
+    let mut budget = ArchiveBudget::with_limits(limits);
+    budget.account(
+        archive::FORMAT_FILE,
+        archive::FORMAT.len() as u64,
+        BudgetPhase::Export,
+    )?;
     for (rel, _, size) in entries {
         budget.account(&rel.to_string_lossy(), *size, BudgetPhase::Export)?;
     }
     Ok(())
 }
 
-/// [`ZipBudget::account`] 的两种口径：恢复校验 / 导出预检。
+/// [`ArchiveBudget::account`] 的两种口径：恢复校验 / 导出预检。
 ///
 /// 同一套上限、同一段计数逻辑，只有报错文案不同——恢复面向「包可能是伪造的」，
 /// 导出面向「这份包太大，拆开再导」。
@@ -372,19 +412,19 @@ enum BudgetPhase {
 /// 一边遍历条目一边记 ZIP 炸弹的账。`inspect_backup`、`extract_all` 与导出预检
 /// 共用同一套口径：前者在动当前数据之前拒绝，后者防「校验后文件被换掉」与伪造
 /// 头部的尺寸，导出预检则保证自己的包不会被自己的恢复拒绝。
-struct ZipBudget {
+struct ArchiveBudget {
     limits: BackupLimits,
     entries: usize,
     total_bytes: u64,
 }
 
-impl Default for ZipBudget {
+impl Default for ArchiveBudget {
     fn default() -> Self {
         Self::with_limits(BACKUP_LIMITS)
     }
 }
 
-impl ZipBudget {
+impl ArchiveBudget {
     fn with_limits(limits: BackupLimits) -> Self {
         Self {
             limits,
@@ -446,73 +486,28 @@ impl ZipBudget {
 
 /// 校验 ZIP 结构并给出条目概要。至少含 `config.json` 或 `manuscripts.db` 之一
 /// 才算公文助手备份；条目名不安全、条目数或解压尺寸超过上限时直接拒绝。
-pub(crate) fn inspect_backup(zip_path: &Path) -> Result<BackupInfo> {
-    let mut archive = open_archive(zip_path)?;
-    // 先按条目数一眼挡掉：几万个条目的炸弹包不必逐个解析。
-    if archive.len() > BACKUP_LIMITS.entries {
-        bail!(
-            "备份条目太多（{} 个，超过上限 {} 个），可能是构造出来的压缩包，已拒绝恢复",
-            archive.len(),
-            BACKUP_LIMITS.entries
-        );
-    }
+pub(crate) fn inspect_backup(zip_path: &Path, password: &str) -> Result<BackupInfo> {
+    let archive = archive::open(zip_path, password)?;
     let mut info = BackupInfo::default();
     let mut groups: BTreeMap<String, BackupGroup> = BTreeMap::new();
-    let mut budget = ZipBudget::default();
-    let mut seen = std::collections::HashSet::new();
-    for index in 0..archive.len() {
-        let entry = archive
-            .by_index(index)
-            .with_context(|| format!("无法读取备份条目 #{index}"))?;
+    for entry in &archive.archive().files {
+        if entry.name() == archive::FORMAT_FILE {
+            continue;
+        }
         let rel = safe_relative_path(entry.name())?;
-        if !seen.insert(rel.clone()) {
-            bail!("备份里包含重复条目，已拒绝：{}", entry.name());
-        }
-        budget.account(entry.name(), entry.size(), BudgetPhase::Restore)?;
-        info.entry_count += 1;
-        if entry.is_dir() {
-            continue;
-        }
-        if entry.is_symlink() {
-            bail!("备份里包含符号链接，已拒绝：{}", entry.name());
-        }
-        info.file_count += 1;
         let size = entry.size();
-        info.total_bytes = info.total_bytes.saturating_add(size);
-        if rel == Path::new("config.json") {
-            info.has_config = true;
-        }
-        if rel == Path::new("manuscripts.db") {
-            info.has_manuscripts = true;
-        }
-        if matches!(
-            rel.to_str(),
-            Some("manuscripts.db" | "alt-manuscripts.db" | "config.json" | "alt-config.json")
-        ) {
-            let mut head = Vec::new();
-            // 概要里的明文提示是尽力探测；尺寸伪造或损坏条目仍由上面的预算与
-            // 恢复时的实际解压校验拒绝，不能在这里提前变成另一种错误。
-            if entry.take(16).read_to_end(&mut head).is_ok() {
-                let plaintext_db = rel
-                    .to_str()
-                    .is_some_and(|name| name.ends_with("manuscripts.db"))
-                    && head == b"SQLite format 3\0";
-                let plaintext_config = rel
-                    .to_str()
-                    .is_some_and(|name| name.ends_with("config.json"))
-                    && head
-                        .iter()
-                        .copied()
-                        .find(|byte| !byte.is_ascii_whitespace())
-                        == Some(b'{');
-                info.has_plaintext_data |= plaintext_db || plaintext_config;
-            }
-        }
+        info.entry_count += 1;
+        info.file_count += 1;
+        info.total_bytes += size;
+        info.has_config |= rel == Path::new("config.json");
+        info.has_manuscripts |= rel == Path::new("manuscripts.db");
         let mut parts = rel.components();
-        let Some(first) = parts.next() else {
-            continue;
-        };
-        let name = first.as_os_str().to_string_lossy().into_owned();
+        let name = parts
+            .next()
+            .context("备份路径无效")?
+            .as_os_str()
+            .to_string_lossy()
+            .into_owned();
         let directory = parts.next().is_some();
         let group = groups.entry(name.clone()).or_insert_with(|| BackupGroup {
             name,
@@ -521,7 +516,7 @@ pub(crate) fn inspect_backup(zip_path: &Path) -> Result<BackupInfo> {
             bytes: 0,
         });
         group.files += 1;
-        group.bytes = group.bytes.saturating_add(size);
+        group.bytes += size;
     }
     if !info.has_config && !info.has_manuscripts {
         bail!("这不是公文助手的全量备份：既没有 config.json，也没有 manuscripts.db");
@@ -553,9 +548,13 @@ pub(crate) fn inspect_backup(zip_path: &Path) -> Result<BackupInfo> {
 /// 解锁流程执行（`src/app/gate.rs` 的解锁迁移是同一条路的合适挂点）。本轮不动
 /// 闸门，先在这里留档：不做这步时，恢复包内被替换/损坏的密文只会在用户打开对应
 /// 稿件或资源时才暴露成单个错误，而不是恢复完成时的一次性报告。
-pub(crate) fn restore_backup(zip_path: &Path, config_dir: &Path) -> Result<RestoreReport> {
-    inspect_backup(zip_path)?;
-    let mut archive = open_archive(zip_path)?;
+pub(crate) fn restore_backup(
+    zip_path: &Path,
+    config_dir: &Path,
+    password: &str,
+) -> Result<RestoreReport> {
+    inspect_backup(zip_path, password)?;
+    let mut archive = archive::open(zip_path, password)?;
     let parent = config_dir.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)
         .with_context(|| format!("无法创建恢复暂存目录的父目录：{}", parent.display()))?;
@@ -860,12 +859,6 @@ fn next_restore_backup_path(config_dir: &Path) -> PathBuf {
     }
 }
 
-fn open_archive(zip_path: &Path) -> Result<zip::ZipArchive<fs::File>> {
-    let file = fs::File::open(zip_path)
-        .with_context(|| format!("无法打开备份文件：{}", zip_path.display()))?;
-    zip::ZipArchive::new(file).context("文件不是有效的 ZIP 备份")
-}
-
 /// 递归收集要打包的文件（相对配置目录）。不跟随符号链接；瞬态文件在这里被排除。
 fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
@@ -955,6 +948,15 @@ fn is_database_sidecar(rel: &Path) -> bool {
 /// 瞬态 / 诊断文件不进入备份（**只用于导出**；恢复校验用
 /// [`collect_validation_files`]，不继承这份清单）。
 fn is_excluded(rel: &Path) -> bool {
+    if rel.components().next().is_some_and(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some("inbox" | "instance.lock" | "instance.endpoint")
+        )
+    }) || crate::vault::is_transient_private_file(rel)
+    {
+        return true;
+    }
     // 主库（含诱饵库）已经独立生成一致快照，原库的日志与共享内存不能混进快照。
     if is_database_sidecar(rel) {
         return true;
@@ -984,7 +986,7 @@ fn is_excluded(rel: &Path) -> bool {
 }
 
 /// ZIP 条目名用 `/` 分隔，与平台无关。
-fn zip_entry_name(rel: &Path) -> String {
+fn archive_entry_name(rel: &Path) -> String {
     rel.components()
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
@@ -1023,80 +1025,83 @@ fn safe_relative_path(name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn extract_all(archive: &mut zip::ZipArchive<fs::File>, target: &Path) -> Result<usize> {
-    let mut files = 0;
-    let mut budget = ZipBudget::default();
-    let mut extracted_bytes: u64 = 0;
-    for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .with_context(|| format!("无法读取备份条目 #{index}"))?;
-        let name = entry.name().to_string();
-        let rel = safe_relative_path(&name)?;
-        // 与 inspect 同一套上限：校验与解压是两次独立打开文件，不能假设它们
-        // 看到的是同一个包；伪造头部的小尺寸也在这里被真正解压时再挡一次。
-        budget.account(&name, entry.size(), BudgetPhase::Restore)?;
-        let dest = target.join(&rel);
-        if entry.is_dir() {
-            fs::create_dir_all(&dest)
-                .with_context(|| format!("无法创建目录：{}", dest.display()))?;
-            #[cfg(unix)]
-            restrict_permissions(&dest);
-            continue;
-        }
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("无法创建目录：{}", parent.display()))?;
-            // 恢复出来的资源目录（images 等）与配置目录本身都只给当前用户。
-            #[cfg(unix)]
-            restrict_permissions(parent);
-        }
-        let mut file = fs::File::create(&dest)
-            .with_context(|| format!("无法写入恢复文件：{}", dest.display()))?;
-        let written = copy_capped(&mut entry, &mut file, &dest)?;
-        extracted_bytes = extracted_bytes.saturating_add(written);
-        if extracted_bytes > BACKUP_LIMITS.total_bytes {
-            bail!(
-                "备份实际解压后总量超过 {} 上限，可能是构造出来的压缩包，已拒绝恢复",
-                format_bytes(BACKUP_LIMITS.total_bytes)
-            );
-        }
-        let _ = file.sync_all();
-        #[cfg(unix)]
-        restrict_permissions(&dest);
-        files += 1;
+/// 还原前仅接受本机加密后的载荷；绝不把归档解密后的业务明文写入隔离目录。
+fn ensure_encrypted_payload(rel: &Path, bytes: &[u8]) -> Result<()> {
+    if rel == Path::new("vault.dat") {
+        return Ok(());
     }
+    let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if name.ends_with("manuscripts.db") {
+        anyhow::ensure!(
+            bytes.len() >= 16 && !bytes.starts_with(b"SQLite format 3"),
+            "备份包含未加密数据库，请先完成应用锁迁移"
+        );
+    } else if crate::help::content::IMAGES
+        .iter()
+        .any(|(n, public)| rel == Path::new("images").join(n) && bytes == *public)
+    {
+        return Ok(());
+    } else {
+        anyhow::ensure!(
+            crate::vault::is_sealed_file(bytes),
+            "备份中存在未加密文件：{}；请先完成加密或移出私有目录",
+            rel.display()
+        );
+    }
+    Ok(())
+}
+
+fn extract_all(archive: &mut archive::Reader, target: &Path) -> Result<usize> {
+    let mut files = 0;
+    let mut total = 0u64;
+    archive.for_each_entries(|entry, reader| {
+        let result = (|| -> Result<()> {
+            if entry.name() == archive::FORMAT_FILE {
+                return Ok(());
+            }
+            let rel = safe_relative_path(entry.name())?;
+            let mut head = Vec::new();
+            (&mut *reader).take(64).read_to_end(&mut head)?;
+            if let Some((_, public)) = crate::help::content::IMAGES
+                .iter()
+                .find(|(n, _)| rel == Path::new("images").join(n))
+            {
+                (&mut *reader)
+                    .take(public.len() as u64 + 1)
+                    .read_to_end(&mut head)?;
+            }
+            ensure_encrypted_payload(&rel, &head)?;
+            let dest = target.join(&rel);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&dest)?;
+            file.write_all(&head)?;
+            let remaining = BACKUP_LIMITS.entry_bytes.saturating_sub(head.len() as u64) + 1;
+            let written =
+                head.len() as u64 + std::io::copy(&mut (&mut *reader).take(remaining), &mut file)?;
+            anyhow::ensure!(
+                written == entry.size() && written <= BACKUP_LIMITS.entry_bytes,
+                "备份条目实际大小不符"
+            );
+            total += written;
+            anyhow::ensure!(total <= BACKUP_LIMITS.total_bytes, "备份实际总量过大");
+            file.sync_all()?;
+            files += 1;
+            Ok(())
+        })();
+        result.map(|()| true).map_err(archive::io_error)
+    })?;
     Ok(files)
 }
 
-/// 解压单个条目，边写边卡单条上限。
-///
-/// ZIP 头里声明的解压尺寸可以伪造（声明很小、deflate 流实际解出很大），所以
-/// 不看声明值，按实际写出的字节数判断：最多读 `上限 + 1` 字节，超过就报错。
-fn copy_capped(
-    entry: &mut zip::read::ZipFile<'_, fs::File>,
-    file: &mut fs::File,
-    dest: &Path,
-) -> Result<u64> {
-    let limit = BACKUP_LIMITS.entry_bytes;
-    let mut limited = entry.take(limit.saturating_add(1));
-    let written = std::io::copy(&mut limited, file)
-        .with_context(|| format!("写入恢复文件失败：{}", dest.display()))?;
-    if written > limit {
-        bail!(
-            "备份条目实际解压后超过单条 {} 上限，可能是构造出来的压缩包，已拒绝恢复",
-            format_bytes(limit)
-        );
-    }
-    Ok(written)
-}
-
-/// 用户资源目录：B 阶段起 `images/`、`mermaid-cache/` 里的图片与 Mermaid 图会落成
-/// AEAD 密文，恢复后仍是密文，同样只该给当前用户读写。真实槽与诱饵槽各一套名字
-/// （`crash_log` 那类槽位映射的目录一律带 `alt-` 前缀）。
-///
-/// 只有 Unix 侧的权限收紧用得上这份名单；Windows 没有 POSIX 权限位，留着会变成
-/// 死代码被 clippy 判失败。
 #[cfg(unix)]
 const PRIVATE_RESOURCE_DIRS: [&str; 12] = [
     "images",
@@ -1161,6 +1166,159 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const PASSWORD: &str = "Backup!Secure802";
+
+    #[test]
+    fn keyed_snapshot_keeps_committed_wal_and_excludes_an_uncommitted_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_owned()));
+        crate::vault::set_key_handle([61; 32], true);
+        let path = dir.path().join("manuscripts.db");
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        crate::storage::apply_db_key(&writer).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE sample(value); INSERT INTO sample VALUES(1);").unwrap();
+        let pinned = rusqlite::Connection::open(&path).unwrap();
+        crate::storage::apply_db_key(&pinned).unwrap();
+        pinned
+            .execute_batch("BEGIN; SELECT * FROM sample;")
+            .unwrap();
+        writer
+            .execute_batch(
+                "INSERT INTO sample VALUES(2); BEGIN IMMEDIATE; INSERT INTO sample VALUES(3);",
+            )
+            .unwrap();
+        let snapshot = dir.path().join("snapshot.db");
+        snapshot_database(&path, &snapshot).unwrap();
+        assert!(!fs::read(&snapshot).unwrap().starts_with(b"SQLite format 3"));
+        let restored = rusqlite::Connection::open(snapshot).unwrap();
+        crate::storage::apply_db_key(&restored).unwrap();
+        let count: i64 = restored
+            .query_row("SELECT count(*) FROM sample", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+        writer.execute_batch("ROLLBACK").unwrap();
+        pinned.execute_batch("ROLLBACK").unwrap();
+        crate::vault::clear_key_handle();
+        crate::storage::set_test_config_dir(None);
+    }
+
+    #[test]
+    fn non_current_wal_and_unencrypted_database_never_create_a_plain_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_owned()));
+        crate::vault::set_key_handle([62; 32], true);
+        let source = dir.path().join("alt-manuscripts.db");
+        let writer = rusqlite::Connection::open(&source).unwrap();
+        crate::storage::apply_db_key(&writer).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE sample(value); INSERT INTO sample VALUES(1);").unwrap();
+        let target = dir.path().join("snapshot.db");
+        assert!(copy_quiescent_database(&source, &target).is_err());
+        assert!(!target.exists());
+        drop(writer);
+        fs::remove_file(&source).unwrap();
+        let plain = rusqlite::Connection::open(&source).unwrap();
+        plain
+            .execute_batch("CREATE TABLE sample(value); INSERT INTO sample VALUES(1)")
+            .unwrap();
+        drop(plain);
+        let archive = dir
+            .path()
+            .parent()
+            .unwrap()
+            .join(format!("old-{}.7z", uuid::Uuid::new_v4()));
+        fs::write(&archive, b"previous archive").unwrap();
+        assert!(export_from(dir.path(), &archive, PASSWORD).is_err());
+        assert_eq!(fs::read(&archive).unwrap(), b"previous archive");
+        fs::remove_file(archive).unwrap();
+        crate::vault::clear_key_handle();
+        crate::storage::set_test_config_dir(None);
+    }
+
+    #[test]
+    fn new_backup_roundtrip_is_header_encrypted_and_rejects_wrong_password_and_zip() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        fs::create_dir_all(&config).unwrap();
+        crate::storage::set_test_config_dir(Some(config.clone()));
+        let (_, unlocked) = crate::vault::Vault::create("Strong!Pass802", None, false).unwrap();
+        crate::vault::set_key_handle(*unlocked.unwrap().dek, true);
+        crate::vault::write_path(
+            &config.join("config.json"),
+            "config",
+            b"{\"organization\":\"sensitive-marker\"}",
+        )
+        .unwrap();
+        let out = root.path().join("backup.7z");
+        export_from(&config, &out, PASSWORD).unwrap();
+        let raw = fs::read(&out).unwrap();
+        assert!(raw.starts_with(b"7z"));
+        for secret in ["config.json", "sensitive-marker", "vault.dat", PASSWORD] {
+            assert!(!raw.windows(secret.len()).any(|v| v == secret.as_bytes()));
+        }
+        assert!(inspect_backup(&out, "wrong").is_err());
+        let info = inspect_backup(&out, PASSWORD).unwrap();
+        assert!(info.has_config);
+        let target = root.path().join("restored");
+        restore_backup(&out, &target, PASSWORD).unwrap();
+        assert_eq!(
+            fs::read(config.join("config.json")).unwrap(),
+            fs::read(target.join("config.json")).unwrap()
+        );
+        fs::write(root.path().join("old.zip"), b"PK\x03\x04old").unwrap();
+        assert!(inspect_backup(&root.path().join("old.zip"), PASSWORD).is_err());
+        crate::vault::clear_key_handle();
+        crate::storage::set_test_config_dir(None);
+    }
+
+    #[test]
+    fn unsafe_paths_duplicates_and_plaintext_payload_are_rejected_before_install() {
+        for name in [
+            "../secret",
+            "/absolute",
+            "C:\\secret",
+            "a:stream",
+            "a\nfile",
+        ] {
+            assert!(safe_relative_path(name).is_err());
+        }
+        assert!(ensure_encrypted_payload(Path::new("config.json"), b"{\"secret\":1}").is_err());
+        assert!(
+            ensure_encrypted_payload(Path::new("manuscripts.db"), b"SQLite format 3\0").is_err()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("bad.7z");
+        let mut writer = archive::writer(fs::File::create(&out).unwrap(), PASSWORD).unwrap();
+        for _ in 0..2 {
+            writer
+                .push_archive_entry(
+                    sevenz_rust2::ArchiveEntry::new_file("config.json"),
+                    Some(&b"GWA2invalid"[..]),
+                )
+                .unwrap();
+        }
+        writer.finish().unwrap();
+        assert!(inspect_backup(&out, PASSWORD).is_err());
+        let target = dir.path().join("current");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("keep"), b"original").unwrap();
+        assert!(restore_backup(&out, &target, PASSWORD).is_err());
+        assert_eq!(fs::read(target.join("keep")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn export_budget_limits_and_transient_exclusions_remain_enforced() {
+        let mut budget = ArchiveBudget::with_limits(BackupLimits {
+            entries: 1,
+            entry_bytes: 5,
+            total_bytes: 5,
+        });
+        assert!(budget.account("a", 6, BudgetPhase::Restore).is_err());
+        assert!(is_excluded(Path::new("inbox/request.req")));
+        assert!(is_excluded(Path::new(
+            "pi/workspaces/doc-1/run-1/host-owner.lock"
+        )));
+        assert!(!is_excluded(Path::new("pi/skills/custom/notes.lock.txt")));
+    }
 
     fn write(root: &Path, rel: &str, bytes: &[u8]) {
         let path = root.join(rel);
@@ -1174,652 +1332,6 @@ mod tests {
         fs::read(root.join(rel)).unwrap()
     }
 
-    /// 造一份带瞬态文件的假配置目录。
-    fn fake_config_dir(root: &Path) {
-        write(root, "config.json", br#"{"output_dir":"C:/out"}"#);
-        let connection = rusqlite::Connection::open(root.join("manuscripts.db")).unwrap();
-        connection
-            .execute_batch("CREATE TABLE sample(value); INSERT INTO sample VALUES ('稿件');")
-            .unwrap();
-        write(root, "images/a.png", b"png-a");
-        write(root, "apis/svc.openapi.json", b"{}");
-        write(root, "ime/base.txt", b"aaaa");
-        write(root, "skills/mine/SKILL.md", b"# skill");
-        write(root, ".zip-password", b"secret");
-        // 以下都不该进备份。
-        write(root, "logs/crash-20260101-000000.log", b"panic");
-        write(root, ".unseen-crash", b"logs/crash.log");
-        write(root, "config.json.损坏-20260101-000000", b"broken");
-    }
-
-    #[test]
-    fn export_excludes_diagnostics_and_restore_replaces_the_config_dir() {
-        let source = tempfile::tempdir().unwrap();
-        fake_config_dir(source.path());
-
-        let out = tempfile::tempdir().unwrap();
-        let zip = out.path().join("backup.zip");
-        export_from(source.path(), &zip).unwrap();
-
-        let info = inspect_backup(&zip).unwrap();
-        assert!(info.has_config && info.has_manuscripts);
-        assert_eq!(info.file_count, 7, "只应打包 7 个有效文件");
-        let names: Vec<&str> = info.groups.iter().map(|g| g.name.as_str()).collect();
-        assert!(!names.contains(&"logs"), "崩溃日志不该进备份");
-        assert!(!names.contains(&".unseen-crash"));
-        assert_eq!(names[0], "config.json");
-        assert_eq!(names[1], "manuscripts.db");
-
-        // 目标目录模拟当前配置目录：恢复后旧文件应整目录换成备份内容。
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("config");
-        write(&target, "keep.txt", b"keep");
-        write(&target, "config.json", b"old");
-
-        let report = restore_backup(&zip, &target).unwrap();
-        assert_eq!(report.restored_files, 7);
-        assert_eq!(read(&target, "config.json"), br#"{"output_dir":"C:/out"}"#);
-        assert!(!target.join("manuscripts.db-wal").exists());
-        let restored = rusqlite::Connection::open(target.join("manuscripts.db")).unwrap();
-        let value: String = restored
-            .query_row("SELECT value FROM sample", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(value, "稿件");
-        assert_eq!(read(&target, "images/a.png"), b"png-a");
-        assert_eq!(read(&target, "apis/svc.openapi.json"), b"{}");
-        assert_eq!(read(&target, "ime/base.txt"), b"aaaa");
-        assert_eq!(read(&target, "skills/mine/SKILL.md"), b"# skill");
-        assert_eq!(read(&target, ".zip-password"), b"secret");
-        assert!(!target.join("keep.txt").exists(), "恢复应替换整个目录");
-        assert!(!target.join("logs").exists());
-        assert!(!target.join(".unseen-crash").exists());
-
-        // 旧数据留底在同级目录，原名内容还在。
-        let backup = report.backup_dir.expect("应留下恢复前备份");
-        assert_eq!(read(&backup, "keep.txt"), b"keep");
-        assert_eq!(read(&backup, "config.json"), b"old");
-        assert_eq!(backup.parent(), Some(root.path()));
-        assert!(
-            backup
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with(RESTORE_BACKUP_PREFIX)
-        );
-    }
-
-    #[test]
-    fn backup_keeps_committed_wal_data_with_a_pinned_reader_and_pending_writer() {
-        let source = tempfile::tempdir().unwrap();
-        let path = source.path().join("manuscripts.db");
-        let writer = rusqlite::Connection::open(&path).unwrap();
-        writer.busy_timeout(std::time::Duration::ZERO).unwrap();
-        writer
-            .execute_batch(
-                "PRAGMA journal_mode=WAL; CREATE TABLE sample(value); \
-                 PRAGMA wal_checkpoint(TRUNCATE);",
-            )
-            .unwrap();
-        let reader = rusqlite::Connection::open(&path).unwrap();
-        reader
-            .execute_batch("BEGIN; SELECT * FROM sample;")
-            .unwrap();
-        writer
-            .execute("INSERT INTO sample VALUES ('已提交')", [])
-            .unwrap();
-        let busy: i64 = writer
-            .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(busy, 1, "读事务应阻止旧方案的 FULL 检查点完成");
-        writer
-            .execute_batch("BEGIN IMMEDIATE; INSERT INTO sample VALUES ('未提交');")
-            .unwrap();
-
-        let out = tempfile::tempdir().unwrap();
-        let zip = out.path().join("backup.zip");
-        export_from(source.path(), &zip).unwrap();
-        let mut archive = open_archive(&zip).unwrap();
-        assert!(archive.by_name("manuscripts.db-wal").is_err());
-        assert!(archive.by_name("manuscripts.db-shm").is_err());
-        assert!(archive.by_name("manuscripts.db-journal").is_err());
-        drop(archive);
-        writer.execute_batch("ROLLBACK;").unwrap();
-        reader.execute_batch("COMMIT;").unwrap();
-        writer
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .unwrap();
-
-        let target = out.path().join("restored");
-        restore_backup(&zip, &target).unwrap();
-        let restored = rusqlite::Connection::open(target.join("manuscripts.db")).unwrap();
-        let values: Vec<String> = restored
-            .prepare("SELECT value FROM sample")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(values, ["已提交"]);
-        let integrity: String = restored
-            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(integrity, "ok");
-    }
-
-    struct TestVaultState;
-
-    impl Drop for TestVaultState {
-        fn drop(&mut self) {
-            crate::storage::set_test_config_dir(None);
-            crate::vault::clear_key_handle();
-        }
-    }
-
-    fn use_plain_current_slot_with_lock_handle(config_dir: &Path) -> TestVaultState {
-        crate::storage::set_test_config_dir(Some(config_dir.to_path_buf()));
-        // 只让备份进入「有第二槽、非当前槽不能用当前 DEK 试开」的分支；
-        // 测试库仍是明文，避免依赖真实配置目录或真实密码。
-        crate::vault::set_key_handle([41; 32], false);
-        TestVaultState
-    }
-
-    #[test]
-    fn non_current_slot_with_pending_wal_aborts_instead_of_copying_only_main_db() {
-        let source = tempfile::tempdir().unwrap();
-        fake_config_dir(source.path());
-        let _state = use_plain_current_slot_with_lock_handle(source.path());
-        let alt = source.path().join("alt-manuscripts.db");
-        let writer = rusqlite::Connection::open(&alt).unwrap();
-        writer
-            .execute_batch(
-                "PRAGMA journal_mode=WAL; CREATE TABLE sample(value); \
-                 PRAGMA wal_checkpoint(TRUNCATE); INSERT INTO sample VALUES ('另一槽已提交');",
-            )
-            .unwrap();
-        assert!(sibling_with_suffix(&alt, "-wal").metadata().unwrap().len() > 0);
-
-        let out = tempfile::tempdir().unwrap();
-        let zip = out.path().join("backup.zip");
-        fs::write(&zip, b"previous backup").unwrap();
-        let error = export_from(source.path(), &zip).unwrap_err().to_string();
-        assert!(
-            error.contains("WAL") && error.contains("切换到对应槽位"),
-            "{error}"
-        );
-        assert_eq!(fs::read(&zip).unwrap(), b"previous backup");
-
-        // 正常关闭对应槽后 WAL 已合并；此时同一目录可以完整备份并恢复另一槽。
-        drop(writer);
-        export_from(source.path(), &zip).unwrap();
-        let target = out.path().join("restored");
-        restore_backup(&zip, &target).unwrap();
-        let restored = rusqlite::Connection::open(target.join("alt-manuscripts.db")).unwrap();
-        let value: String = restored
-            .query_row("SELECT value FROM sample", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(value, "另一槽已提交");
-    }
-
-    #[test]
-    fn current_slot_keeps_keyed_snapshot_and_clean_other_slot_restores() {
-        let source = tempfile::tempdir().unwrap();
-        fake_config_dir(source.path());
-        crate::storage::set_test_config_dir(Some(source.path().to_path_buf()));
-        let _state = TestVaultState;
-        let alt = rusqlite::Connection::open(source.path().join("alt-manuscripts.db")).unwrap();
-        alt.execute_batch("CREATE TABLE sample(value); INSERT INTO sample VALUES ('另一槽');")
-            .unwrap();
-        drop(alt);
-
-        let (_vault, unlocked) =
-            crate::vault::Vault::create("Test#Real2026Lock", Some("Test#Decoy2026Cloud"), false)
-                .unwrap();
-        let unlocked = unlocked.unwrap();
-        crate::vault::set_key_handle(*unlocked.dek, false);
-        crate::vault::ensure_slot_encrypted().unwrap();
-        crate::vault::activate_db_encryption();
-
-        let out = tempfile::tempdir().unwrap();
-        let zip = out.path().join("encrypted.zip");
-        export_from(source.path(), &zip).unwrap();
-        let target = out.path().join("restored");
-        restore_backup(&zip, &target).unwrap();
-
-        let restored = rusqlite::Connection::open(target.join("manuscripts.db")).unwrap();
-        crate::storage::apply_db_key(&restored).unwrap();
-        let value: String = restored
-            .query_row("SELECT value FROM sample", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(value, "稿件");
-        let alt = rusqlite::Connection::open(target.join("alt-manuscripts.db")).unwrap();
-        let value: String = alt
-            .query_row("SELECT value FROM sample", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(value, "另一槽");
-    }
-
-    #[test]
-    fn staged_dynamic_sealed_resource_requires_its_slot_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let zip = dir.path().join("orphan-pi.zip");
-        {
-            let file = fs::File::create(&zip).unwrap();
-            let mut writer = zip::ZipWriter::new(file);
-            let mut sealed = b"GWA2".to_vec();
-            sealed.resize(crate::vault::SEALED_FILE_OVERHEAD, 0);
-            for (name, bytes) in [
-                ("config.json", b"{}".to_vec()),
-                ("pi/workspaces/doc-1/run-1/run.json", sealed),
-            ] {
-                writer
-                    .start_file(name, zip::write::SimpleFileOptions::default())
-                    .unwrap();
-                writer.write_all(&bytes).unwrap();
-            }
-            writer.finish().unwrap();
-        }
-        let target = dir.path().join("config");
-        let error = format!("{:#}", restore_backup(&zip, &target).unwrap_err());
-        assert!(error.contains("缺少 vault.dat"), "{error}");
-        assert!(!target.exists(), "校验失败不能换入任何数据");
-    }
-
-    #[test]
-    fn staged_database_validation_failure_preserves_existing_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let zip = dir.path().join("broken.zip");
-        {
-            let file = fs::File::create(&zip).unwrap();
-            let mut writer = zip::ZipWriter::new(file);
-            for (name, bytes) in [
-                ("config.json", b"{}".as_slice()),
-                ("manuscripts.db", b"not a sqlite database".as_slice()),
-            ] {
-                writer
-                    .start_file(name, zip::write::SimpleFileOptions::default())
-                    .unwrap();
-                writer.write_all(bytes).unwrap();
-            }
-            writer.finish().unwrap();
-        }
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("config");
-        write(&target, "config.json", br#"{"kept":true}"#);
-        write(&target, "keep.txt", b"keep");
-
-        let error = restore_backup(&zip, &target).unwrap_err().to_string();
-        assert!(error.contains("备份内容校验失败"), "{error}");
-        assert_eq!(read(&target, "keep.txt"), b"keep");
-        assert_eq!(read(&target, "config.json"), br#"{"kept":true}"#);
-        assert_eq!(
-            fs::read_dir(root.path()).unwrap().count(),
-            1,
-            "失败不能留下留底或隔离暂存目录"
-        );
-    }
-
-    #[test]
-    fn a_broken_database_aborts_export_without_replacing_the_previous_backup() {
-        let source = tempfile::tempdir().unwrap();
-        write(source.path(), "manuscripts.db", b"broken database");
-        let out = tempfile::tempdir().unwrap();
-        let zip = out.path().join("backup.zip");
-        fs::write(&zip, b"previous backup").unwrap();
-        assert!(export_from(source.path(), &zip).is_err());
-        assert_eq!(fs::read(&zip).unwrap(), b"previous backup");
-        assert_eq!(read(source.path(), "manuscripts.db"), b"broken database");
-        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn restores_legacy_backups_that_carry_a_database_and_its_wal() {
-        let source = tempfile::tempdir().unwrap();
-        let database = source.path().join("manuscripts.db");
-        let writer = rusqlite::Connection::open(&database).unwrap();
-        writer
-            .execute_batch(
-                "PRAGMA journal_mode=WAL; CREATE TABLE sample(value); \
-                 PRAGMA wal_checkpoint(TRUNCATE); INSERT INTO sample VALUES ('旧包稿件');",
-            )
-            .unwrap();
-        let out = tempfile::tempdir().unwrap();
-        let zip = out.path().join("legacy.zip");
-        let mut archive = zip::ZipWriter::new(fs::File::create(&zip).unwrap());
-        for name in ["manuscripts.db", "manuscripts.db-wal"] {
-            archive
-                .start_file(name, zip::write::SimpleFileOptions::default())
-                .unwrap();
-            archive.write_all(&read(source.path(), name)).unwrap();
-        }
-        archive.finish().unwrap();
-        let info = inspect_backup(&zip).unwrap();
-        assert!(info.has_plaintext_data);
-        assert!(
-            info.summary_lines()
-                .iter()
-                .any(|line| line.contains("旧明文备份"))
-        );
-        let target = out.path().join("restored");
-        restore_backup(&zip, &target).unwrap();
-        let restored = rusqlite::Connection::open(target.join("manuscripts.db")).unwrap();
-        let value: String = restored
-            .query_row("SELECT value FROM sample", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(value, "旧包稿件");
-    }
-
-    #[test]
-    fn zip_without_config_or_manuscripts_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let zip = dir.path().join("other.zip");
-        {
-            let file = fs::File::create(&zip).unwrap();
-            let mut writer = zip::ZipWriter::new(file);
-            writer
-                .start_file("readme.txt", zip::write::SimpleFileOptions::default())
-                .unwrap();
-            writer.write_all(b"not a gongwen backup").unwrap();
-            writer.finish().unwrap();
-        }
-        let error = inspect_backup(&zip).unwrap_err().to_string();
-        assert!(error.contains("config.json"), "{error}");
-
-        // 恢复也不能动当前目录。
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("config");
-        write(&target, "keep.txt", b"keep");
-        assert!(restore_backup(&zip, &target).is_err());
-        assert_eq!(read(&target, "keep.txt"), b"keep");
-    }
-
-    #[test]
-    fn path_traversal_entries_are_rejected_before_touching_current_data() {
-        let dir = tempfile::tempdir().unwrap();
-        let zip = dir.path().join("evil.zip");
-        {
-            let file = fs::File::create(&zip).unwrap();
-            let mut writer = zip::ZipWriter::new(file);
-            for (name, bytes) in [
-                ("config.json", b"{}".as_slice()),
-                ("images/../evil.png", b"evil".as_slice()),
-            ] {
-                writer
-                    .start_file(name, zip::write::SimpleFileOptions::default())
-                    .unwrap();
-                writer.write_all(bytes).unwrap();
-            }
-            writer.finish().unwrap();
-        }
-
-        let error = inspect_backup(&zip).unwrap_err().to_string();
-        assert!(error.contains("路径穿越"), "{error}");
-
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("config");
-        write(&target, "keep.txt", b"keep");
-        assert!(restore_backup(&zip, &target).is_err());
-        assert_eq!(
-            read(&target, "keep.txt"),
-            b"keep",
-            "校验失败时当前数据必须原样保留"
-        );
-        // 也不该留下恢复前的留底目录。
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn export_refuses_to_write_inside_the_config_dir() {
-        let source = tempfile::tempdir().unwrap();
-        fake_config_dir(source.path());
-        let error = export_from(source.path(), &source.path().join("out.zip"))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("不能放在配置目录内"), "{error}");
-        assert!(!source.path().join("out.zip").exists());
-    }
-    /// 停用标记与配置副本绝不能进备份：带回去恢复会让下次解锁自动解密并删锁。
-    #[test]
-    fn backup_excludes_disable_marker_and_config_copies() {
-        assert!(is_excluded(Path::new("vault.pending-disable")));
-        assert!(is_excluded(Path::new("alt-vault.pending-disable")));
-        assert!(is_excluded(Path::new("config.json.身份迁移前备份")));
-        assert!(is_excluded(Path::new("alt-config.json.身份迁移前备份")));
-        assert!(!is_excluded(Path::new("config.json")));
-        assert!(!is_excluded(Path::new("manuscripts.db")));
-    }
-
-    /// 两个槽位的崩溃日志目录都不进备份（诱饵槽是 `alt-logs/`）。
-    #[test]
-    fn both_slots_crash_log_dirs_are_excluded() {
-        assert!(is_excluded(Path::new("logs/crash-20260101-000000.log")));
-        assert!(is_excluded(Path::new("alt-logs/crash-20260101-000000.log")));
-        assert!(!is_excluded(Path::new("images/a.png")));
-    }
-
-    /// 手工拼一个 ZIP：条目用 stored，头部声明的**解压尺寸**由调用方填，可以
-    /// 随意写大（真实数据只有几个字节），用来模拟「声明尺寸像炸弹」的备份包。
-    fn write_zip_with_declared_sizes(path: &Path, entries: &[(&str, &[u8], u32)]) {
-        fn u16(bytes: &mut Vec<u8>, value: u16) {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        fn u32(bytes: &mut Vec<u8>, value: u32) {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-
-        let mut body = Vec::new();
-        let mut central = Vec::new();
-        for (name, data, declared) in entries {
-            let name = name.as_bytes();
-            let offset = body.len() as u32;
-            // 本地文件头。
-            u32(&mut body, 0x0403_4b50);
-            u16(&mut body, 20); // 解压所需版本
-            u16(&mut body, 0); // 标志
-            u16(&mut body, 0); // 压缩方法：stored
-            u16(&mut body, 0); // 时间
-            u16(&mut body, 0); // 日期
-            u32(&mut body, 0); // CRC（不读数据就不校验）
-            u32(&mut body, data.len() as u32);
-            u32(&mut body, *declared);
-            u16(&mut body, name.len() as u16);
-            u16(&mut body, 0); // 扩展字段
-            body.extend_from_slice(name);
-            body.extend_from_slice(data);
-
-            // 中央目录记录。
-            u32(&mut central, 0x0201_4b50);
-            u16(&mut central, 20); // 制作版本
-            u16(&mut central, 20); // 解压所需版本
-            u16(&mut central, 0); // 标志
-            u16(&mut central, 0); // 压缩方法
-            u16(&mut central, 0); // 时间
-            u16(&mut central, 0); // 日期
-            u32(&mut central, 0); // CRC
-            u32(&mut central, data.len() as u32);
-            u32(&mut central, *declared);
-            u16(&mut central, name.len() as u16);
-            u16(&mut central, 0); // 扩展字段
-            u16(&mut central, 0); // 注释
-            u16(&mut central, 0); // 起始磁盘
-            u16(&mut central, 0); // 内部属性
-            u32(&mut central, 0); // 外部属性
-            u32(&mut central, offset);
-            central.extend_from_slice(name);
-        }
-        let mut zip = body;
-        let cd_offset = zip.len() as u32;
-        zip.extend_from_slice(&central);
-        u32(&mut zip, 0x0605_4b50); // 中央目录结束记录
-        u16(&mut zip, 0); // 磁盘号
-        u16(&mut zip, 0); // 中央目录所在磁盘
-        u16(&mut zip, entries.len() as u16);
-        u16(&mut zip, entries.len() as u16);
-        u32(&mut zip, central.len() as u32);
-        u32(&mut zip, cd_offset);
-        u16(&mut zip, 0); // 注释长度
-        fs::write(path, zip).unwrap();
-    }
-
-    /// 声明尺寸超单条上限 / 整包总量上限时，校验与恢复都拒绝，且不动当前数据。
-    #[test]
-    fn declared_bomb_sizes_are_rejected_before_touching_current_data() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // 单条 3 GiB，超过 2 GiB 的单条上限。
-        let single = dir.path().join("single.zip");
-        write_zip_with_declared_sizes(&single, &[("config.json", b"{}", 3 * 1024 * 1024 * 1024)]);
-        let error = inspect_backup(&single).unwrap_err().to_string();
-        assert!(
-            error.contains("单条") && error.contains("上限"),
-            "应说清是单条上限：{error}"
-        );
-
-        // 每条 2 GiB 不超单条上限，但 5 条合计 10 GiB，超过 8 GiB 的整包上限。
-        let total = dir.path().join("total.zip");
-        write_zip_with_declared_sizes(
-            &total,
-            &[
-                ("config.json", b"{}", 2 * 1024 * 1024 * 1024),
-                ("manuscripts.db", b"", 2 * 1024 * 1024 * 1024),
-                ("images/a.png", b"", 2 * 1024 * 1024 * 1024),
-                ("images/b.png", b"", 2 * 1024 * 1024 * 1024),
-                ("images/c.png", b"", 2 * 1024 * 1024 * 1024),
-            ],
-        );
-        let error = inspect_backup(&total).unwrap_err().to_string();
-        assert!(
-            error.contains("总量") && error.contains("上限"),
-            "应说清是整包总量上限：{error}"
-        );
-
-        // 超限包绝不能改动当前配置目录，也不留「恢复前备份」目录。
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("config");
-        write(&target, "keep.txt", b"keep");
-        for zip_path in [&single, &total] {
-            assert!(restore_backup(zip_path, &target).is_err());
-            assert_eq!(read(&target, "keep.txt"), b"keep", "超限包不能改动当前数据");
-            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
-        }
-    }
-
-    /// 条目数上限：计数与报错文案由 [`ZipBudget`] 负责（`inspect_backup` 先用
-    /// `archive.len()` 一眼挡掉，解压侧再用同一套账兜底）。
-    #[test]
-    fn too_many_entries_are_rejected() {
-        let mut budget = ZipBudget::default();
-        for _ in 0..BACKUP_LIMITS.entries {
-            budget.account("条目", 0, BudgetPhase::Restore).unwrap();
-        }
-        let error = budget
-            .account("条目", 0, BudgetPhase::Restore)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("条目太多") && error.contains("上限"),
-            "{error}"
-        );
-    }
-
-    /// 用户资源目录（images / mermaid-cache，含诱饵槽的 alt- 前缀）恢复后
-    /// 文件 0600、目录 0700：B 阶段起它们也是密文资源。
-    #[cfg(unix)]
-    #[test]
-    fn restored_resource_files_and_dirs_are_private_on_unix() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let zip_path = dir.path().join("resources.zip");
-        {
-            let file = fs::File::create(&zip_path).unwrap();
-            let mut writer = zip::ZipWriter::new(file);
-            for (name, bytes) in [
-                ("config.json", b"{}".as_slice()),
-                ("images/图.png", b"png".as_slice()),
-                ("alt-images/图.png", b"png".as_slice()),
-                ("mermaid-cache/图.svg", b"svg".as_slice()),
-                ("alt-mermaid-cache/图.svg", b"svg".as_slice()),
-                ("pi/workspaces/doc/run/run.json", b"{}".as_slice()),
-                ("alt-ime/tables.json", b"{}".as_slice()),
-            ] {
-                writer
-                    .start_file(name, zip::write::SimpleFileOptions::default())
-                    .unwrap();
-                writer.write_all(bytes).unwrap();
-            }
-            writer.finish().unwrap();
-        }
-
-        let target = dir.path().join("config");
-        restore_backup(&zip_path, &target).unwrap();
-        let mode = |path: PathBuf| fs::metadata(path).unwrap().permissions().mode() & 0o777;
-        for rel in [
-            "images/图.png",
-            "alt-images/图.png",
-            "mermaid-cache/图.svg",
-            "alt-mermaid-cache/图.svg",
-            "pi/workspaces/doc/run/run.json",
-            "alt-ime/tables.json",
-        ] {
-            assert_eq!(mode(target.join(rel)), 0o600, "{rel} 应只有本人可读写");
-        }
-        for rel in [
-            "images",
-            "alt-images",
-            "mermaid-cache",
-            "alt-mermaid-cache",
-            "pi/workspaces/doc/run",
-            "alt-ime",
-        ] {
-            assert_eq!(mode(target.join(rel)), 0o700, "{rel}/ 应只有本人可读写");
-        }
-
-        // 直接调用权限函数也覆盖真实槽与诱饵槽两套名字。
-        let loose = target.join("images").join("再存一张.png");
-        fs::write(&loose, b"png").unwrap();
-        fs::set_permissions(&loose, fs::Permissions::from_mode(0o644)).unwrap();
-        restrict_permissions(&loose);
-        assert_eq!(mode(loose), 0o600);
-    }
-    /// 拼一个 GWA2/GWA1 形状的假密文（只需长度与魔数，`validate_staged_backup`
-    /// 的包裹校验不解析内容）。
-    fn fake_sealed(magic: &[u8; 4]) -> Vec<u8> {
-        let mut bytes = magic.to_vec();
-        bytes.resize(crate::vault::SEALED_FILE_OVERHEAD, 0);
-        bytes
-    }
-
-    /// 手工写一个 ZIP（stored，条目名与内容由调用方给）。
-    fn write_plain_zip(path: &Path, entries: &[(&str, &[u8])]) {
-        let mut writer = zip::ZipWriter::new(fs::File::create(path).unwrap());
-        for (name, bytes) in entries {
-            writer
-                .start_file(*name, zip::write::SimpleFileOptions::default())
-                .unwrap();
-            writer.write_all(bytes).unwrap();
-        }
-        writer.finish().unwrap();
-    }
-
-    /// 造一份结构合法的锁文件（v2）。`slot0` / `slot1` 为真时该槽有完整
-    /// 盐、验证器与 DEK 包裹，恢复校验只检查这些字段的形状。
-    fn vault_json(slot0: bool, slot1: bool) -> Vec<u8> {
-        fn slot(present: bool) -> String {
-            if present {
-                format!(
-                    r#"{{"salt":"{}","seal":"{}","wrapped":"{}"}}"#,
-                    "aa".repeat(16),
-                    "bb".repeat(49),
-                    "cc".repeat(60)
-                )
-            } else {
-                r#"{"salt":"","seal":"","wrapped":""}"#.to_string()
-            }
-        }
-        format!(r#"{{"v":2,"slots":[{},{}]}}"#, slot(slot0), slot(slot1)).into_bytes()
-    }
-
-    /// 恢复失败后配置目录同级不能留下 `.gongwen-restore-*` 暂存目录。
     fn assert_no_staging_leftovers(parent: &Path) {
         let leftovers: Vec<String> = fs::read_dir(parent)
             .unwrap()
@@ -1833,9 +1345,6 @@ mod tests {
         );
     }
 
-    /// 恢复校验的遍历不能继承导出排除清单：`logs/`、损坏配置留底、身份迁移前
-    /// 备份都要被看见（只有数据库 sidecar 不算内容），这样塞在里面的密文才躲不开
-    /// 「必须带对应槽位 DEK 包裹」的检查。
     #[test]
     fn validation_scan_does_not_inherit_export_exclusions() {
         let dir = tempfile::tempdir().unwrap();
@@ -1874,76 +1383,6 @@ mod tests {
         );
     }
 
-    /// 伪造/旧包把 GWA2 塞进 `logs/`（导出会排除的路径）也不能绕过 DEK 包裹校验：
-    /// 没有锁文件就拒绝，换入前中止且不留暂存目录。
-    #[test]
-    fn sealed_file_under_logs_still_requires_slot_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let zip_path = dir.path().join("logs-sealed.zip");
-        let sealed = fake_sealed(b"GWA2");
-        write_plain_zip(
-            &zip_path,
-            &[("config.json", b"{}"), ("logs/crash-1.log", &sealed)],
-        );
-        let target = dir.path().join("config");
-        let error = format!("{:#}", restore_backup(&zip_path, &target).unwrap_err());
-        assert!(
-            error.contains("缺少 vault.dat"),
-            "logs 下的密封文件也要对应槽 DEK：{error}"
-        );
-        assert!(!target.exists(), "校验失败不能换入任何数据");
-        assert_no_staging_leftovers(dir.path());
-    }
-
-    /// 诱饵槽 `alt-logs/` 下的密文必须用诱饵槽的 DEK 包裹：只有真实槽包裹时拒绝。
-    #[test]
-    fn sealed_decoy_log_requires_decoy_slot_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let zip_path = dir.path().join("alt-logs-sealed.zip");
-        let sealed = fake_sealed(b"GWA2");
-        let vault = vault_json(true, false);
-        write_plain_zip(
-            &zip_path,
-            &[
-                ("config.json", b"{}"),
-                ("vault.dat", &vault),
-                ("alt-logs/crash-1.log", &sealed),
-            ],
-        );
-        let target = dir.path().join("config");
-        let error = format!("{:#}", restore_backup(&zip_path, &target).unwrap_err());
-        assert!(
-            error.contains("槽位 1") && error.contains("数据密钥包裹"),
-            "诱饵槽密文要诱饵槽包裹：{error}"
-        );
-        assert!(!target.exists(), "校验失败不能换入任何数据");
-        assert_no_staging_leftovers(dir.path());
-    }
-
-    /// 反过来：带对应槽包裹的 `logs/` 密文可以恢复（不能因为「日志目录」就
-    /// 过度拒绝旧包/手工包里的密文日志）。
-    #[test]
-    fn sealed_log_with_matching_slot_key_restores() {
-        let dir = tempfile::tempdir().unwrap();
-        let zip_path = dir.path().join("logs-ok.zip");
-        let sealed = fake_sealed(b"GWA1");
-        let vault = vault_json(true, false);
-        write_plain_zip(
-            &zip_path,
-            &[
-                ("config.json", b"{}"),
-                ("vault.dat", &vault),
-                ("logs/crash-1.log", &sealed),
-            ],
-        );
-        let target = dir.path().join("config");
-        restore_backup(&zip_path, &target).unwrap();
-        assert_eq!(read(&target, "logs/crash-1.log"), sealed);
-        assert_no_staging_leftovers(dir.path());
-    }
-
-    /// 导出前预检与恢复使用同一套上限：条目数 / 单条 / 总量任一超限都在写 ZIP
-    /// 之前报错并提示拆分（用注入的小上限测，不实际造 2 GiB 文件）。
     #[test]
     fn export_precheck_uses_the_same_limits_as_restore() {
         let entries = |count: usize, size: u64| -> Vec<(PathBuf, PathBuf, u64)> {
@@ -1996,7 +1435,6 @@ mod tests {
         assert!(error.contains("总量") && error.contains("拆分"), "{error}");
     }
 
-    /// 导出期间的锁文件代次比对：任何变化都取消本次导出，提示重试。
     #[test]
     fn vault_generation_change_cancels_export() {
         ensure_vault_generation_unchanged(None, None).unwrap();
@@ -2017,21 +1455,6 @@ mod tests {
         }
     }
 
-    /// 有锁文件时正常导出不受代次比对误伤（前后一致即可）。
-    #[test]
-    fn export_with_unchanged_vault_succeeds() {
-        let source = tempfile::tempdir().unwrap();
-        write(source.path(), "config.json", b"{}");
-        fs::write(source.path().join("vault.dat"), vault_json(true, false)).unwrap();
-        let out = tempfile::tempdir().unwrap();
-        let zip = out.path().join("backup.zip");
-        export_from(source.path(), &zip).unwrap();
-        let info = inspect_backup(&zip).unwrap();
-        assert!(info.has_config);
-    }
-
-    /// 换入失败但回滚成功：留底目录改回原位置，已校验的暂存目录也要删掉，
-    /// 不能在配置目录同级留下整份用户数据副本。
     #[test]
     fn rollback_after_failed_install_removes_staging_even_with_backup_dir() {
         let root = tempfile::tempdir().unwrap();
@@ -2058,7 +1481,6 @@ mod tests {
         assert_no_staging_leftovers(root.path());
     }
 
-    /// 回滚失败：两侧都保留并给出路径，供用户手工处理；此时不删暂存目录。
     #[test]
     fn rollback_failure_keeps_both_sides_for_manual_recovery() {
         let root = tempfile::tempdir().unwrap();

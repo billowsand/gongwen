@@ -646,6 +646,8 @@ export function assertResumeSession(config, files) {
  */
 export async function runAgentJob({ config, models, model, emit, onCancel, onBridge, files }) {
   files ??= new ProtectedFiles(config.workspace.encryption);
+  files.mountTree(path.join(config.workspace.root, "work"), path.join(config.workspace.root, "work-files.json"));
+  files.mountTree(path.join(config.workspace.root, "skills/pi-skills"), path.join(config.workspace.root, "skill-files.json"), { readonly: true });
   // host 启动第一步：清掉上一进程被打断时留下的原子写临时文件。
   try {
     cleanRunTemps(config.workspace);

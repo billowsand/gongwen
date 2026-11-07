@@ -283,6 +283,11 @@ pub fn load_remembered_zip_password() -> Result<Option<String>> {
     }
     let raw =
         fs::read(&path).with_context(|| format!("读取记住的 ZIP 密码失败：{}", path.display()))?;
+    // 普通模式不再读取或保留旧版明文密码。
+    if crate::vault::key_handle().is_none() && !crate::vault::is_sealed_file(&raw) {
+        crate::vault::erase_file_checked(&path)?;
+        return Ok(None);
+    }
     let bytes = if crate::vault::is_sealed_file(&raw) {
         let handle = crate::vault::key_handle().context("ZIP 密码已加密，尚未解锁")?;
         crate::vault::open_path_bytes(&handle, &path, "config", &raw)?
@@ -307,6 +312,10 @@ pub fn load_remembered_zip_password() -> Result<Option<String>> {
 pub fn save_remembered_zip_password(password: Option<&str>) -> Result<()> {
     let path = slot_file(ZIP_PASSWORD_FILE)?;
     if let Some(password) = password {
+        anyhow::ensure!(
+            crate::vault::key_handle().is_some(),
+            "请先启用应用锁，才能加密记住导出密码"
+        );
         if password.len() as u64 > MAX_REMEMBERED_PASSWORD_BYTES {
             anyhow::bail!("ZIP 密码过长，无法记住");
         }
@@ -645,6 +654,20 @@ mod tests {
     use crate::models::{
         JointIssuanceMode, LetterVersion, SecurityLevel, TemplateKind, VocabularyCategory,
     };
+
+    #[test]
+    fn ordinary_workspace_never_remembers_a_password_and_removes_the_legacy_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        set_test_config_dir(Some(dir.path().to_owned()));
+        crate::vault::clear_key_handle();
+        assert!(save_remembered_zip_password(Some("ShouldNeverReachDisk!80")).is_err());
+        let password_file = slot_file(ZIP_PASSWORD_FILE).unwrap();
+        assert!(!password_file.exists());
+        fs::write(&password_file, b"old plaintext password").unwrap();
+        assert!(load_remembered_zip_password().unwrap().is_none());
+        assert!(!password_file.exists());
+        set_test_config_dir(None);
+    }
 
     #[test]
     fn failed_write_preserves_previous_file_and_cleans_up_temporary_file() {

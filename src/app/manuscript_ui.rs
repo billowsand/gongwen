@@ -105,11 +105,13 @@ pub(crate) enum ZipPasswordPurpose {
     SelectedExport(Vec<i64>),
     PdfExport(manuscript_io::PdfExportOptions, Vec<i64>),
     Import(PathBuf),
+    BackupExport,
+    BackupImport(PathBuf),
 }
 
 impl ZipPasswordPurpose {
     fn is_import(&self) -> bool {
-        matches!(self, Self::Import(_))
+        matches!(self, Self::Import(_) | Self::BackupImport(_))
     }
 }
 

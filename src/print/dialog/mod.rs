@@ -1364,6 +1364,7 @@ impl PrintDialog {
         duplex: Option<Duplex>,
     ) -> PrintJob {
         PrintJob {
+            bytes: None,
             path: self.request.path.clone(),
             title: self.request.title.clone(),
             printer: self.selected.clone(),

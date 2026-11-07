@@ -311,12 +311,17 @@ impl GongwenApp {
 
     fn start_print(
         &mut self,
-        job: PrintJob,
+        mut job: PrintJob,
         prefs: Option<(String, PrinterPrefs)>,
         dialog: Option<u64>,
         cancel: Arc<AtomicBool>,
         ctx: &egui::Context,
     ) {
+        job.bytes = self
+            .pdfs
+            .iter()
+            .find(|pdf| pdf.path() == job.path)
+            .and_then(|pdf| pdf.memory_bytes());
         let mut changed = false;
         if let Some(printer) = &job.printer
             && *printer != self.config.print.last_printer
@@ -361,10 +366,25 @@ impl GongwenApp {
     #[cfg(windows)]
     fn start_system_dialog_print(&mut self, path: std::path::PathBuf, ctx: &egui::Context) {
         self.status = format!("正在准备打印 {}…", path.display());
+        let bytes = self
+            .pdfs
+            .iter()
+            .find(|pdf| pdf.path() == path)
+            .and_then(|pdf| pdf.memory_bytes());
         let tx = self.sender.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = crate::print::print_with_system_dialog(&path);
+            let result = bytes
+                .map(|b| Ok(b.as_ref().clone()))
+                .unwrap_or_else(|| {
+                    crate::file_limits::read_bytes(
+                        &path,
+                        crate::file_limits::MAX_PDF_BYTES,
+                        "打印文件",
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .and_then(crate::print::print_with_system_dialog);
             let _ = tx.send(WorkerResult::PdfPrinted {
                 path,
                 printer: None,

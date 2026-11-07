@@ -79,3 +79,50 @@ pub(crate) fn rasterize_pdf(path: &Path, page: u32) -> Option<anyhow::Result<Vec
             .and_then(|bytes| (input.pdf_renderer)(bytes, page)),
     )
 }
+
+// 输出捕获与输入作用域独立：嵌套和 panic 都恢复先前状态，业务内容不经过临时文件。
+thread_local! {
+    static OUTPUT: RefCell<Option<HashMap<PathBuf, Vec<u8>>>> = const { RefCell::new(None) };
+}
+
+pub fn capture_outputs<T>(convert: impl FnOnce() -> T) -> (T, HashMap<PathBuf, Vec<u8>>) {
+    struct Restore(Option<HashMap<PathBuf, Vec<u8>>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OUTPUT.with(|out| *out.borrow_mut() = self.0.take());
+        }
+    }
+    let restore = Restore(OUTPUT.with(|out| out.replace(Some(HashMap::new()))));
+    let result = convert();
+    let files = OUTPUT.with(|out| out.borrow_mut().take().unwrap_or_default());
+    drop(restore);
+    (result, files)
+}
+
+pub fn output_is_captured() -> bool {
+    OUTPUT.with(|out| out.borrow().is_some())
+}
+
+pub fn write_output(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    OUTPUT.with(|out| {
+        if let Some(files) = out.borrow_mut().as_mut() {
+            files.insert(path.to_owned(), bytes.to_vec());
+            Ok(())
+        } else {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, bytes)
+        }
+    })
+}
+
+pub fn read_output(path: &Path) -> std::io::Result<Vec<u8>> {
+    OUTPUT.with(|out| match out.borrow().as_ref() {
+        Some(files) => files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "内存输出不存在")),
+        None => std::fs::read(path),
+    })
+}

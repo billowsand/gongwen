@@ -66,6 +66,8 @@ async function main() {
     const raw = await readInit();
     config = validateInit(raw);
     files = new ProtectedFiles(config.workspace.encryption);
+    files.mountTree(path.join(config.workspace.root, "work"), path.join(config.workspace.root, "work-files.json"));
+    files.mountTree(path.join(config.workspace.root, "skills/pi-skills"), path.join(config.workspace.root, "skill-files.json"), { readonly: true });
     emit = createEmitter({
       write: capturedWrite,
       secrets: [config.model.apiKey, config.workspace.encryption?.keyHex],

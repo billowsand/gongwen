@@ -1106,7 +1106,7 @@ impl DraftPage<'_> {
             }
             return;
         }
-        if crate::vault::key_handle().is_some() {
+        if !print_preview && crate::vault::key_handle().is_some() {
             let key = self.doc.key;
             let location = if print_preview {
                 "应用缓存目录（花脸稿打印预览也会生成普通 PDF）".to_string()
@@ -1147,19 +1147,7 @@ impl DraftPage<'_> {
             *self.status = "当前修订与基准版一致，没有可出的花脸稿。".into();
             return;
         }
-        // 打印预览放本用户的缓存目录，并按数据槽位分目录：预览件是正文明文，
-        // 不能进配置目录（会随备份 / 同步带走），也不能让诱饵系统与真实系统混放。
-        let output_dir = if print_preview {
-            match redline::redline_preview_dir() {
-                Ok(dir) => dir,
-                Err(error) => {
-                    *self.status = format!("无法确定缓存目录，花脸稿打印预览没有生成：{error}");
-                    return;
-                }
-            }
-        } else {
-            PathBuf::from(&self.config.output_dir)
-        };
+        let output_dir = PathBuf::from(&self.config.output_dir);
         let (key, seq) = self.begin_job();
         *self.status = if print_preview {
             "正在排版花脸稿打印预览…".into()
@@ -1174,27 +1162,32 @@ impl DraftPage<'_> {
             let display = UnitDisplay::new(&vocabulary);
             // 与定稿导出同样先落实字体：本机字体文件不在了就退回内置字体。
             let (fonts, _warnings) = crate::system_fonts::resolve(&fonts);
-            let result = if print_preview {
-                // 预览件只出 PDF，走原子写（0600）的预览入口；普通导出仍走
-                // `export_files`（用户选定的输出目录）。
-                redline::export_preview_pdf(&output_dir, &input, &doc, &display, &fonts, &numbering)
-                    .map(|path| vec![path])
-            } else {
-                redline::export_files(
-                    &output_dir,
-                    &input,
-                    &doc,
-                    formats,
-                    &display,
-                    &fonts,
-                    &numbering,
-                )
-            }
-            .map_err(|error| format!("{error:#}"));
             let job = if print_preview {
-                DocJob::RedlinePrintPreview(result)
+                DocJob::RedlinePrintPreview(
+                    crate::export::compile_pdf(
+                        &input,
+                        &doc.markdown,
+                        &display,
+                        &fonts,
+                        &numbering,
+                        &doc.elements,
+                    )
+                    .map(|out| out.pdf)
+                    .map_err(|e| format!("{e:#}")),
+                )
             } else {
-                DocJob::RedlineExported(result)
+                DocJob::RedlineExported(
+                    redline::export_files(
+                        &output_dir,
+                        &input,
+                        &doc,
+                        formats,
+                        &display,
+                        &fonts,
+                        &numbering,
+                    )
+                    .map_err(|e| format!("{e:#}")),
+                )
             };
             let _ = tx.send(WorkerResult::Doc { key, seq, job });
         });

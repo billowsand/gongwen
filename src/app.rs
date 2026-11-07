@@ -196,6 +196,8 @@ pub struct GongwenApp {
     /// 还没问完结果的系统文件对话框；后台线程开窗，主线程每帧问一次。
     pending_file_dialogs: Vec<file_dialog::PendingFileDialog>,
     pending_output: Option<output_guard::PendingOutput>,
+    clipboard_output_approved: bool,
+    clipboard_cut_replay: Option<Option<egui::Id>>,
     /// 送批材料面板；None 表示未打开。
     send_package: Option<SendPackagePanel>,
     /// 正在后台进行的送批材料合并导出；同一时间只跑一个。
@@ -316,6 +318,7 @@ pub struct GongwenApp {
     backup_busy: bool,
     /// 正在恢复：独占模态窗，恢复期间不接受其他操作。
     backup_restore_running: bool,
+    backup_restore_password: Option<zeroize::Zeroizing<String>>,
     /// 待二次确认的恢复：已校验的 ZIP 与条目概要。
     backup_restore_prompt: Option<(PathBuf, crate::data_backup::BackupInfo)>,
     /// 恢复完成后的报告（留底目录、解出文件数）。
@@ -638,6 +641,8 @@ impl GongwenApp {
             next_print_dialog: 1,
             pending_file_dialogs: Vec::new(),
             pending_output: None,
+            clipboard_output_approved: false,
+            clipboard_cut_replay: None,
             send_package: None,
             send_package_export: None,
             macos_titlebar_metrics,
@@ -732,6 +737,7 @@ impl GongwenApp {
             crash_report_pending,
             backup_busy: false,
             backup_restore_running: false,
+            backup_restore_password: None,
             backup_restore_prompt: None,
             backup_restore_result: None,
             backup_restore_error: None,

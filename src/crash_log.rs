@@ -61,7 +61,17 @@ pub fn install() {
         if let Some(path) = write_report("程序异常（panic）", &detail) {
             eprintln!("崩溃日志已写入：{}", path.display());
         }
-        previous(info);
+        if crate::vault::key_handle().is_none()
+            && matches!(
+                crate::vault::Vault::probe(),
+                crate::vault::Probe::Absent | crate::vault::Probe::Skipped
+            )
+            && !crate::vault::slot_has_encrypted_data(crate::storage::current_slot())
+        {
+            previous(info);
+        } else {
+            eprintln!("程序异常，详细诊断仅在解锁后查看。");
+        }
     }));
 }
 

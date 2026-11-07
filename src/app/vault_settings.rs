@@ -129,7 +129,7 @@ impl GongwenApp {
         setting_row(ui, "", None, |ui| {
             if ui
                 .button("启用密码保护")
-                .on_hover_text("启用后启动与闲置超时都要输入密码；现有数据在下次解锁时自动加密。")
+                .on_hover_text("启用后立即迁移加密现有数据，启动与闲置超时都要输入密码。")
                 .clicked()
             {
                 self.vault_apply_enable();

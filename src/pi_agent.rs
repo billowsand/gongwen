@@ -15,6 +15,7 @@ mod process;
 mod protocol;
 pub(crate) mod recovery;
 mod runtime;
+pub(crate) mod sealed_tree;
 pub(crate) mod skills;
 mod strategy;
 pub(crate) mod style_learning;

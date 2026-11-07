@@ -207,6 +207,20 @@ function stripLongPathPrefix(target) {
   return target;
 }
 
+function canonicalNearest(target) {
+  let current = path.resolve(stripLongPathPrefix(target));
+  const missing = [];
+  for (;;) {
+    try { return path.join(fs.realpathSync.native(current), ...missing.reverse()); }
+    catch (error) {
+      if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+      const parent = path.dirname(current);
+      if (parent === current) throw error;
+      missing.push(path.basename(current)); current = parent;
+    }
+  }
+}
+
 export class ProtectedFiles {
   constructor(encryption = undefined, { maxAppendBytes = MAX_ENCRYPTED_APPEND_BYTES, maxReadBytes = DEFAULT_READ_MAX_BYTES } = {}) {
     for (const [name, value] of [["maxAppendBytes", maxAppendBytes], ["maxReadBytes", maxReadBytes]]) {
@@ -215,6 +229,7 @@ export class ProtectedFiles {
     this.maxAppendBytes = maxAppendBytes;
     this.maxReadBytes = maxReadBytes;
     this.encryption = encryption;
+    this.trees = [];
     if (!encryption) return;
     if (typeof encryption.keyHex !== "string" || !/^[0-9a-fA-F]{64}$/.test(encryption.keyHex)) {
       throw new EncryptionError("encryption.keyHex 必须是 64 位十六进制", "encryption_key");
@@ -237,6 +252,107 @@ export class ProtectedFiles {
       // 配置根还不存在（首次启动）时没有 realpath，用字面路径即可。
     }
     this.realConfigRoot = real;
+  }
+
+  // 名称和内容放进同一个 GWA2 文件；逻辑路径仅存在内存和密文里。
+  mountTree(root, bundle, { readonly = false } = {}) {
+    if (!this.encrypted) return;
+    fs.mkdirSync(root, { recursive: true });
+    root = fs.realpathSync.native(root);
+    if (this.trees.some((t) => t.root === root)) return;
+    let entries = new Map();
+    try {
+      const raw = this.readBytes(bundle, 512 * 1024 * 1024);
+      const object = JSON.parse(raw.toString("utf8"));
+      if (!object || Array.isArray(object) || typeof object !== "object") throw new Error("文件树格式错误");
+      for (const [name, value] of Object.entries(object)) {
+        if (!name || name.startsWith("/") || name.includes("\\") || name.split("/").some((p) => p === ".." || p === ".") || typeof value !== "string" || !/^(?:[0-9a-f]{2})*$/.test(value)) throw new Error("加密文件树含非法条目");
+        entries.set(name, value);
+      }
+    } catch (error) { if (error?.code !== "ENOENT") throw error; }
+    // 接管旧工作区：先完整加密写容器，再清理旧文件。失败保留容器，重入校验一致后继续。
+    cleanStaleTemps(root);
+    const pending = [root];
+    const legacy = [];
+    while (pending.length) {
+      const dir = pending.pop();
+      let children;
+      try { children = fs.readdirSync(dir, { withFileTypes: true }); }
+      catch (error) { if (error?.code === "ENOENT") continue; throw error; }
+      for (const child of children) {
+        const full = path.join(dir, child.name);
+        if (child.isSymbolicLink()) throw new Error("旧文件树包含链接，拒绝迁移");
+        if (child.isDirectory()) { pending.push(full); continue; }
+        if (!child.isFile()) throw new Error("旧文件树包含特殊文件");
+        const name = path.relative(root, full).split(path.sep).join("/");
+        const value = this.readBytes(full).toString("hex");
+        if (entries.has(name) && entries.get(name) !== value) throw new Error("旧文件与加密文件树冲突，保留两份");
+        entries.set(name, value);
+        legacy.push(full);
+      }
+    }
+    if (legacy.length) {
+      const bytes = Buffer.from(JSON.stringify(Object.fromEntries(entries)));
+      if (bytes.length > 512 * 1024 * 1024) throw tooLarge(512 * 1024 * 1024);
+      this.atomicWrite(bundle, bytes);
+      for (const full of legacy) {
+        const fd = fs.openSync(full, "r+");
+        try {
+          let left = fs.fstatSync(fd).size; const zeros = Buffer.alloc(65536); let offset = 0;
+          while (left) { const n = Math.min(left, zeros.length); fs.writeSync(fd, zeros, 0, n, offset); left -= n; offset += n; }
+          fs.fsyncSync(fd);
+        } finally { fs.closeSync(fd); }
+        fs.unlinkSync(full);
+      }
+      fs.rmSync(root, { recursive: true });
+      fs.mkdirSync(root, { recursive: true });
+    }
+    this.trees.push({ root, bundle, entries, readonly, mtimeMs: Date.now() });
+  }
+
+  treePath(target) {
+    if (!this.trees.length) return undefined;
+    const absolute = canonicalNearest(target);
+    for (const tree of this.trees) {
+      const relative = path.relative(tree.root, absolute).split(path.sep).join("/");
+      if (relative !== ".." && !relative.startsWith("../") && !path.isAbsolute(relative)) return { tree, relative };
+    }
+    return undefined;
+  }
+
+  isVirtual(target) { return Boolean(this.treePath(target)); }
+
+  saveTree(tree, entries) {
+    if (tree.readonly) throw Object.assign(new Error("只读技能快照不能修改"), { code: "EACCES" });
+    const bytes = Buffer.from(JSON.stringify(Object.fromEntries(entries)));
+    if (bytes.length > 512 * 1024 * 1024) throw tooLarge(512 * 1024 * 1024);
+    this.atomicWrite(tree.bundle, bytes);
+    tree.entries = entries;
+    tree.mtimeMs = Date.now();
+  }
+
+  createDir(target, options = {}) {
+    const virtual = this.treePath(target);
+    if (!virtual) return fs.mkdirSync(target, options);
+    const { tree, relative } = virtual;
+    if (!relative) return;
+    const entries = new Map(tree.entries);
+    entries.set(`${relative}/`, "");
+    this.saveTree(tree, entries);
+  }
+
+  removePath(target, options = {}) {
+    const virtual = this.treePath(target);
+    if (!virtual) return fs.rmSync(target, options);
+    const { tree, relative } = virtual;
+    if (!relative) throw new Error("不能删除工作区根目录");
+    const entries = new Map(tree.entries);
+    const children = [...entries.keys()].filter((name) => name.startsWith(`${relative}/`));
+    if (children.length && !options.recursive) throw Object.assign(new Error("目录非空"), { code: "ENOTEMPTY" });
+    if (!entries.has(relative) && !children.length && !options.force) throw Object.assign(new Error("文件不存在"), { code: "ENOENT" });
+    entries.delete(relative);
+    for (const child of children) entries.delete(child);
+    this.saveTree(tree, entries);
   }
 
   get encrypted() {
@@ -264,6 +380,13 @@ export class ProtectedFiles {
   }
 
   readBytes(target, maxBytes = undefined) {
+    const virtual = this.treePath(target);
+    if (virtual) {
+      const hex = virtual.tree.entries.get(virtual.relative);
+      if (hex === undefined) throw Object.assign(new Error("文件不存在"), { code: "ENOENT" });
+      if (hex.length / 2 > this.#readLimit(maxBytes)) throw tooLarge(this.#readLimit(maxBytes));
+      return Buffer.from(hex, "hex");
+    }
     const identity = this.identity(target);
     const limit = this.#readLimit(maxBytes);
     const raw = readPhysical(target, limit);
@@ -282,6 +405,14 @@ export class ProtectedFiles {
 
   atomicWrite(target, content) {
     const plain = asBytes(content);
+    const virtual = this.treePath(target);
+    if (virtual) {
+      if (!virtual.relative) throw new Error("不能覆盖工作区根目录");
+      const entries = new Map(virtual.tree.entries);
+      entries.set(virtual.relative, plain.toString("hex"));
+      this.saveTree(virtual.tree, entries);
+      return;
+    }
     const identity = this.identity(target);
     const physical = identity ? sealGwa2(this.key, identity.slot, identity.logicalId, plain) : plain;
     atomicWrite(target, physical);
@@ -335,7 +466,7 @@ export class ProtectedFiles {
     // GWA2 绑定目标路径，不能直接 rename 后留下旧 AAD 的密文。
     const plain = this.readBytes(source);
     this.atomicWrite(destination, plain);
-    fs.unlinkSync(source);
+    this.removePath(source);
   }
 
   flushFile(target) {
@@ -353,6 +484,14 @@ export class ProtectedFiles {
 
   info(target) {
     this.assertPath(target);
+    const virtual = this.treePath(target);
+    if (virtual) {
+      const { tree, relative } = virtual;
+      const hex = tree.entries.get(relative);
+      const directory = !relative || [...tree.entries.keys()].some((name) => name.startsWith(`${relative}/`));
+      if (hex === undefined && !directory) throw Object.assign(new Error("文件不存在"), { code: "ENOENT" });
+      return { name: path.basename(target), path: target, kind: hex === undefined ? "directory" : "file", size: hex === undefined ? 0 : hex.length / 2, mtimeMs: tree.mtimeMs };
+    }
     const stat = fs.lstatSync(target);
     if (!stat.isFile()) return infoFromStat(target, stat, stat.size);
     // 崩溃残留的临时文件可能是半截密文：只为取大小，别去解密，也别让上层列举失败。
@@ -365,6 +504,13 @@ export class ProtectedFiles {
 
   listDir(target) {
     this.assertPath(target);
+    const virtual = this.treePath(target);
+    if (virtual) {
+      if (this.info(target).kind !== "directory") throw Object.assign(new Error("不是目录"), { code: "ENOTDIR" });
+      const prefix = virtual.relative ? `${virtual.relative}/` : "";
+      const names = new Set([...virtual.tree.entries.keys()].filter((name) => name.startsWith(prefix)).map((name) => name.slice(prefix.length).split("/")[0]).filter(Boolean));
+      return [...names].sort().map((name) => this.info(path.join(target, name)));
+    }
     return fs
       .readdirSync(target, { withFileTypes: true })
       // 残留临时文件不是资源：跳过，否则 JsonlStorage.recover 会在 listDir 阶段
@@ -595,7 +741,7 @@ export class ProtectedFileSystem extends NodeExecutionEnv {
   }
 
   async openBinaryReader(target, options, context) {
-    if (options?.noFollow === true) {
+    if (options?.noFollow === true && !this.files.isVirtual(target)) {
       try {
         if (fs.lstatSync(target).isSymbolicLink()) {
           return err(new FileError("invalid", "Refusing to follow a symbolic link", target));
@@ -691,6 +837,7 @@ export class ProtectedFileSystem extends NodeExecutionEnv {
   }
 
   async canonicalPath(target, context) {
+    if (this.files.isVirtual(target)) { try { this.files.info(target); return ok(path.resolve(target)); } catch (error) { return err(fileError(error, target)); } }
     const resolved = await super.canonicalPath(target, context);
     if (!resolved.ok) return resolved;
     try {
@@ -713,7 +860,7 @@ export class ProtectedFileSystem extends NodeExecutionEnv {
     } catch (error) {
       return err(fileError(error, target));
     }
-    return super.createDir(target, options, context);
+    try { this.files.createDir(target, { recursive: options?.recursive === true }); return ok(undefined); } catch (error) { return err(fileError(error, target)); }
   }
 
   async remove(target, options, context) {
@@ -722,7 +869,7 @@ export class ProtectedFileSystem extends NodeExecutionEnv {
     } catch (error) {
       return err(fileError(error, target));
     }
-    return super.remove(target, options, context);
+    try { this.files.removePath(target, options); return ok(undefined); } catch (error) { return err(fileError(error, target)); }
   }
 
   async createTempDir(_prefix, _context) {

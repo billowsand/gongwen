@@ -15,6 +15,7 @@ use crate::models::{DraftInput, FontConfig, LeaderReading, NumberingConfig, Temp
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result, bail};
 use docx_rs::*;
+#[cfg(test)]
 use std::fs::File;
 use std::path::Path;
 
@@ -864,11 +865,11 @@ pub fn write_docx_with_numbering(
         doc = minutes::add_record(doc, input, display, elements);
     }
 
-    let file =
-        File::create(path).with_context(|| format!("无法创建 Word 文件：{}", path.display()))?;
+    let mut file = std::io::Cursor::new(Vec::new());
     let mut xml = doc.build();
     xml.document = record::with_record_gap(xml.document);
-    xml.pack(file).context("写入 DOCX 包失败")?;
+    xml.pack(&mut file).context("写入 DOCX 包失败")?;
+    mdx::memory_files::write_output(path, &file.into_inner())?;
     Ok(())
 }
 

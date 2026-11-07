@@ -895,7 +895,7 @@ fn store_loads_migrates_and_saves_files() {
         legacy.endpoints.len()
     );
     let files = std::fs::read_dir(dir.join("apis")).unwrap().count();
-    assert_eq!(files, 4);
+    assert_eq!(files, 1);
     // 删到只剩一个服务的接口：别的服务文件跟着删。
     store.endpoints.retain(|e| e.id == "fire_stat");
     store.save().unwrap();

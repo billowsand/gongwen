@@ -259,7 +259,8 @@ pub(crate) enum DocJob {
     /// 「打开最近导出」指向的定稿文件。
     RedlineExported(Result<Vec<std::path::PathBuf>, String>),
     /// 花脸稿打印预览：只出 PDF、落在临时目录，编完在内置查看器里打开。
-    RedlinePrintPreview(Result<Vec<std::path::PathBuf>, String>),
+    RedlinePrintPreview(Result<Vec<u8>, String>),
+    MemoryPrintPdf(Result<Vec<u8>, String>),
     /// 小模型逐句文字复核的结果。只产出待确认的建议，不碰正文。
     Reviewed(Result<crate::revise_model::ReviewOutcome, String>),
 }
@@ -581,6 +582,7 @@ impl GongwenApp {
                             self.backup_restore_prompt = Some((path, info));
                         }
                         Err(error) => {
+                            self.backup_restore_password = None;
                             self.status = format!("备份文件校验失败：{error}");
                             self.backup_restore_error =
                                 Some(format!("无法恢复这个文件：\n{error}"));
@@ -2007,17 +2009,23 @@ impl GongwenApp {
             DocJob::RedlineExported(Err(error)) => {
                 self.status = format!("{prefix}花脸稿导出失败：{error}");
             }
-            DocJob::RedlinePrintPreview(Ok(files)) => {
-                match files
-                    .into_iter()
-                    .find(|file| file.extension().is_some_and(|ext| ext == "pdf"))
-                {
-                    Some(pdf) => {
-                        self.status = format!("{prefix}花脸稿打印预览已生成。");
-                        self.open_pdf(pdf, Some("花脸稿打印预览".to_string()));
+            DocJob::MemoryPrintPdf(result) => match result {
+                Ok(bytes) => {
+                    self.status = format!("{prefix}打印 PDF 已在内存中排版。");
+                    self.open_pdf_memory(-(self.next_pdf_key as i64) - 1, "打印预览".into(), bytes);
+                    if let Some(pdf) = self.pdfs.last_mut() {
+                        pdf.request_print_when_ready_confirmed();
                     }
-                    None => self.status = format!("{prefix}花脸稿打印预览没有编出 PDF。"),
                 }
+                Err(error) => self.status = format!("{prefix}打印排版失败：{error}"),
+            },
+            DocJob::RedlinePrintPreview(Ok(bytes)) => {
+                self.status = format!("{prefix}花脸稿打印预览已生成（仅在内存中）。");
+                self.open_pdf_memory(
+                    -(self.next_pdf_key as i64) - 1,
+                    "花脸稿打印预览".into(),
+                    bytes,
+                );
             }
             DocJob::RedlinePrintPreview(Err(error)) => {
                 self.status = format!("{prefix}花脸稿打印预览编译失败：{error}");

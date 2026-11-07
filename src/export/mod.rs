@@ -437,11 +437,15 @@ pub(crate) fn export_artifacts(
         selection.print_trace.validate()?;
     }
     let file_stem = export_file_stem(input, &title, version_name, "")?;
-    fs::create_dir_all(output_dir)
-        .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
+    if !mdx::memory_files::output_is_captured() {
+        fs::create_dir_all(output_dir)
+            .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
+    }
     let document_dir = output_dir.join(&export_stem);
-    fs::create_dir_all(&document_dir)
-        .with_context(|| format!("无法创建文稿导出目录：{}", document_dir.display()))?;
+    if !mdx::memory_files::output_is_captured() {
+        fs::create_dir_all(&document_dir)
+            .with_context(|| format!("无法创建文稿导出目录：{}", document_dir.display()))?;
+    }
     let mut files = Vec::new();
     // 公函两类随行单据的份数；非公函或没勾选时保持为零。
     let mut sheet_outputs = SheetOutputs::default();
@@ -564,10 +568,11 @@ pub(crate) fn export_artifacts(
     if selection.print_trace.enabled && (selection.pdf || receipt) {
         print_trace::stamp_outputs(&files, &selection.print_trace, input, markdown)?;
         if let Some(main) = typst.as_mut().filter(|main| !main.pdf.is_empty()) {
-            main.pdf = fs::read(document_dir.join(format!("{file_stem}.pdf")))?;
+            main.pdf =
+                mdx::memory_files::read_output(&document_dir.join(format!("{file_stem}.pdf")))?;
         }
     }
-    if !files.is_empty() {
+    if !files.is_empty() && !mdx::memory_files::output_is_captured() {
         naming::record_outputs(
             &document_dir,
             input,
@@ -683,18 +688,15 @@ pub(crate) fn write_pdf(
     elements: &crate::visual_diff::ElementMarks,
 ) -> Result<typst_engine::TypstOutcome> {
     let outcome = compile_pdf(input, markdown, display, fonts, numbering, elements)?;
-    fs::write(path, &outcome.pdf).with_context(|| format!("无法写入 PDF：{}", path.display()))?;
+    mdx::memory_files::write_output(path, &outcome.pdf)
+        .with_context(|| format!("无法写入 PDF：{}", path.display()))?;
     if !input.kind.is_research()
         && let Some(roster) = copy_roster(input)
     {
         // 清单含份号、主送/抄送/承办单位，和 PDF 同等敏感：原子写 + Unix 0600，
         // 不能默认 0644 摊在输出目录里。写失败不影响 PDF。
         let roster_path = path.with_extension("份号清单.txt");
-        let _ = crate::storage::atomic_write(&roster_path, |file| {
-            use std::io::Write as _;
-            file.write_all(roster.as_bytes())?;
-            Ok(())
-        });
+        let _ = mdx::memory_files::write_output(&roster_path, roster.as_bytes());
     }
     Ok(outcome)
 }

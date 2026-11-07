@@ -591,6 +591,8 @@ mod tests {
     #[test]
     #[ignore]
     fn help_pdf_sample() {
+        let config = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(config.path().to_owned()));
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/typst-samples/help");
         std::fs::create_dir_all(&dir).unwrap();
         content::install_images().unwrap();
@@ -606,5 +608,6 @@ mod tests {
             println!("提示：{warning}");
         }
         println!("{}", path.display());
+        crate::storage::set_test_config_dir(None);
     }
 }

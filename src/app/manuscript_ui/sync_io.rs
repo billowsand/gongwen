@@ -22,10 +22,15 @@ use std::thread;
 
 impl GongwenApp {
     pub(crate) fn open_zip_password_dialog(&mut self, purpose: ZipPasswordPurpose) {
-        self.manuscript_zip_password = Some(ZipPasswordDialog::new(
+        let remembered = if matches!(
             purpose,
-            self.remembered_zip_password.as_deref(),
-        ));
+            ZipPasswordPurpose::BackupExport | ZipPasswordPurpose::BackupImport(_)
+        ) {
+            None
+        } else {
+            self.remembered_zip_password.as_deref()
+        };
+        self.manuscript_zip_password = Some(ZipPasswordDialog::new(purpose, remembered));
     }
 
     pub(crate) fn run_zip_password_action(
@@ -36,6 +41,12 @@ impl GongwenApp {
         include_send_package: bool,
     ) {
         match purpose {
+            ZipPasswordPurpose::BackupExport => {
+                self.perform_backup_export(zeroize::Zeroizing::new(password))
+            }
+            ZipPasswordPurpose::BackupImport(path) => {
+                self.perform_backup_inspection(path, zeroize::Zeroizing::new(password))
+            }
             // 三个导出都要先问保存位置，而文件对话框是异步的（后台线程开），
             // 所以「导出成功」与「记住密码」都挪到对话框回调里做。
             ZipPasswordPurpose::FilteredExport(filter) => {

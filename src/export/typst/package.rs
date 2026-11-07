@@ -160,14 +160,7 @@ pub(crate) fn write_package_with_base(
     prepared.resources.sort_by(|a, b| a.0.cmp(&b.0));
     prepared.resources.dedup_by(|a, b| a.0 == b.0);
 
-    // 写完 ZIP 中央目录后再替换目标，写入失败时保留上一次可用的包。
-    let parent = path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut file = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("无法创建 Typst 包临时文件：{}", path.display()))?;
-    let mut zip = zip::ZipWriter::new(file.as_file_mut());
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
@@ -186,10 +179,15 @@ pub(crate) fn write_package_with_base(
         zip.start_file(name, options)?;
         zip.write_all(bytes)?;
     }
-    zip.finish()
-        .with_context(|| format!("无法写完 Typst 包：{}", path.display()))?;
-    file.persist(path)
-        .with_context(|| format!("无法保存 Typst 包：{}", path.display()))?;
+    let bytes = zip.finish()?.into_inner();
+    if mdx::memory_files::output_is_captured() {
+        mdx::memory_files::write_output(path, &bytes)?;
+    } else {
+        crate::storage::atomic_write(path, |file| {
+            file.write_all(&bytes)?;
+            Ok(())
+        })?;
+    }
     Ok(prepared.warnings)
 }
 

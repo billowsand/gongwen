@@ -151,7 +151,19 @@ pub(crate) fn load() -> Catalog {
                 user_entries.insert(name, entry);
             }
         }
-        Err(error) => catalog.notes.push(error),
+        Err(error) => {
+            catalog.notes.push(error.clone());
+            for name in super::BUILTINS {
+                user_entries.insert(
+                    (*name).to_string(),
+                    broken_entry(
+                        name,
+                        false,
+                        format!("用户技能容器不可用，已停止回退内置技能：{error}"),
+                    ),
+                );
+            }
+        }
     }
 
     for name in super::BUILTINS {
@@ -216,36 +228,10 @@ fn read_entry(
 ) -> Entry {
     let label = name.to_string();
     let enabled = !disabled.contains(name);
-    let file = dir.join("SKILL.md");
-    for path in [dir, file.as_path()] {
-        if let Err(error) = crate::ai_services::skill_package::no_link(path) {
-            return broken_entry(name, enabled, format!("{error:#}"));
-        }
-    }
-    if !file.is_file() {
-        return Entry {
-            name: name.to_string(),
-            label,
-            description: String::new(),
-            display_name: None,
-            builtin: super::builtin_text(name).is_some(),
-            user: true,
-            enabled: false,
-            error: Some(format!("「{name}」缺了 SKILL.md")),
-        };
-    }
-    let bytes = match crate::file_limits::read_bytes(
-        &file,
-        crate::ai_services::skill_package::Limits::PI.max_file,
-        "技能文件",
-    ) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return broken_entry(name, enabled, format!("{error}"));
-        }
-    };
-    let Ok(text) = String::from_utf8(bytes) else {
-        return broken_entry(name, enabled, "SKILL.md 不是 UTF-8 文本".into());
+    let _ = dir; // 用户技能的名称与辅助文件名只存在于加密容器。
+    let text = match store::read_text(name, "SKILL.md") {
+        Ok(text) => text,
+        Err(error) => return broken_entry(name, enabled, error),
     };
     match parser::parse(name, &text) {
         Ok(parsed) => Entry {
@@ -366,10 +352,7 @@ mod tests {
                 .unwrap_err()
                 .contains("已下线")
         );
-        assert!(
-            store::user_dir("gongwen-review").unwrap().is_dir(),
-            "保留用户副本"
-        );
+        assert!(store::has_user_copy("gongwen-review"), "保留用户副本");
     }
 
     #[test]
@@ -394,12 +377,10 @@ mod tests {
             "---\nname: gongwen-draft\ndescription: x\nflow:\n  - step: a\n---\n正文",
         )
         .unwrap_err();
-        let user_file = store::user_dir("gongwen-draft").unwrap().join("SKILL.md");
-        std::fs::write(
-            &user_file,
+        store::corrupt_skill_for_test(
+            "gongwen-draft",
             "---\nname: gongwen-draft\ndescription: x\n---\n",
-        )
-        .unwrap();
+        );
         let catalog = load();
         let entry = catalog.get("gongwen-draft").unwrap();
         assert!(entry.error.is_some());

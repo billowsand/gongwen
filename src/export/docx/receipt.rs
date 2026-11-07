@@ -6,7 +6,6 @@
 //! 细线，内容行至少 18mm，跨页重复表头、行不拆分，每页都印页码，手写处是带下划线的
 //! 全角空格；表下送文信息行距放宽到 12mm。
 
-use std::fs::File;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -189,11 +188,11 @@ pub(crate) fn write(
         docx = docx.add_paragraph(paragraph);
     }
 
-    let file =
-        File::create(path).with_context(|| format!("无法创建 Word 文件：{}", path.display()))?;
+    let mut file = std::io::Cursor::new(Vec::new());
     let mut xml = docx.build();
     xml.document = with_repeat_header(xml.document);
-    xml.pack(file).context("写入 DOCX 包失败")?;
+    xml.pack(&mut file).context("写入 DOCX 包失败")?;
+    mdx::memory_files::write_output(path, &file.into_inner())?;
     Ok(())
 }
 
@@ -309,6 +308,7 @@ pub(crate) fn with_repeat_header(document: Vec<u8>) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::models::{TemplateKind, TemplateProfile};
+    use std::fs::File;
 
     fn letter() -> DraftInput {
         let mut input = DraftInput {

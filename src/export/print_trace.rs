@@ -192,7 +192,7 @@ pub(crate) fn stamp_outputs(
                     break code;
                 }
             };
-            let bytes = std::fs::read(path)?;
+            let bytes = mdx::memory_files::read_output(path)?;
             let stamped = stamp_pdf(&bytes, config, &code)?;
             let record = TraceRecord {
                 code,
@@ -202,16 +202,20 @@ pub(crate) fn stamp_outputs(
                 source_hash: source_hash.clone(),
                 pdf_hash: sha256_hex(&stamped),
             };
-            crate::storage::atomic_write(path, |file| {
-                use std::io::Write;
-                file.write_all(&stamped)?;
-                Ok(())
-            })?;
+            if mdx::memory_files::output_is_captured() {
+                mdx::memory_files::write_output(path, &stamped)?;
+            } else {
+                crate::storage::atomic_write(path, |file| {
+                    use std::io::Write as _;
+                    file.write_all(&stamped)?;
+                    Ok(())
+                })?;
+            }
             store.register_print_trace(&record)?;
         }
         Ok(())
     })();
-    if result.is_err() {
+    if result.is_err() && !mdx::memory_files::output_is_captured() {
         for path in pdfs {
             let _ = std::fs::remove_file(path);
         }

@@ -152,15 +152,8 @@ const REDLINE_PREVIEW_ROOT: &str = "redline-preview";
 
 /// 花脸稿打印预览目录：缓存目录 + 按数据槽位分开（`real` / `decoy`）。
 ///
-/// 预览件是正文明文，不能放配置目录（会随同步包 / 备份带走），也不能放共享的
-/// 系统临时目录；按槽位分目录是为了让真实系统与诱饵系统互相看不到对方的花脸稿。
-/// 锁定与启动时整个根目录由 [`purge_redline_previews`] 清掉。
-pub(crate) fn redline_preview_dir() -> Result<PathBuf> {
-    let root = crate::storage::cache_dir()?.join(REDLINE_PREVIEW_ROOT);
-    Ok(root.join(preview_slot_name(crate::storage::current_slot())))
-}
-
 /// 槽位 → 预览子目录名。
+#[cfg(test)]
 fn preview_slot_name(slot: crate::storage::DataSlot) -> &'static str {
     match slot {
         crate::storage::DataSlot::Real => "real",
@@ -184,40 +177,8 @@ fn purge_redline_previews_in(root: &Path) {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// 花脸稿打印预览：与定稿同一条 Typst 排版链，但只出 PDF（附带《份号清单.txt》），
-/// 两样都经 [`crate::storage::atomic_write`] 落盘（Unix 0600、原子替换）。
-///
-/// 不调 [`export::write_pdf_for_kind`]：那是给用户选定的导出目录用的，PDF 走普通
-/// `fs::write`（默认 0644）。预览件留在缓存目录里只给内置查看器看，权限与清理都
-/// 要更严，所以这里直接用 `export::compile_pdf` 排进内存再原子写。
-pub(crate) fn export_preview_pdf(
-    output_dir: &Path,
-    input: &DraftInput,
-    doc: &RedlineDoc,
-    display: &UnitDisplay,
-    fonts: &FontConfig,
-    numbering: &NumberingConfig,
-) -> Result<PathBuf> {
-    let markdown = &doc.markdown;
-    let title = export::strip_redline(&export::document_title(input, markdown));
-    let stem = format!("{}-花脸稿", export::safe_filename(&title));
-    let dir = output_dir.join(&stem);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("无法创建花脸稿预览目录：{}", dir.display()))?;
-    let path = dir.join(format!("{stem}.pdf"));
-    let outcome = export::compile_pdf(input, markdown, display, fonts, numbering, &doc.elements)
-        .context("花脸稿 PDF 排版失败")?;
-    write_private(&path, &outcome.pdf)?;
-    if !input.kind.is_research()
-        && let Some(roster) = export::copy_roster(input)
-    {
-        // 清单含份号与收件单位，和 PDF 同等敏感；写失败不影响预览。
-        let _ = write_private(&path.with_extension("份号清单.txt"), roster.as_bytes());
-    }
-    Ok(path)
-}
-
 /// 预览文件一律原子写（Unix 0600）：预览目录在缓存里，不能默认 0644 摊着。
+#[cfg(test)]
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     crate::storage::atomic_write(path, |file| {
         use std::io::Write as _;

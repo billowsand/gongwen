@@ -266,7 +266,7 @@ test("完整 faux 写作链在加密工作区、JSONL 与交付目录之间往�
   const result = await runAgentJob({ config, models, model: faux.getModel(), emit: () => {} });
   assert.equal(result.snapshot.content, content);
   for (const target of [
-    path.join(space.root, "work/final.md"),
+    path.join(space.root, "work-files.json"),
     path.join(space.run, "final.md"),
     path.join(space.run, "receipt.json"),
     ...fs.readdirSync(space.state).map((name) => path.join(space.state, name)),
@@ -324,4 +324,57 @@ test("init 校验加密上下文，keyHex 纳入秘密抹除且没有密钥也�
   emit({ type: "error", message: `不得泄露 ${KEY_HEX}` });
   assert.equal(lines[0].includes(KEY_HEX), false);
   assert.ok(lines[0].includes("[已隐藏]"));
+});
+
+
+test("虚拟工作文件树隐藏业务文件名，追加、改名和重启恢复均不生成物理文件", () => {
+  const space = fixture();
+  const root = path.join(space.root, "work");
+  const bundle = path.join(space.root, "work-files.json");
+  space.files.mountTree(root, bundle);
+  const target = path.join(root, "关于某单位人事调整的请示.md");
+  space.files.atomicWrite(target, "保密正文");
+  space.files.appendFile(target, "继续");
+  assert.equal(space.files.readText(target), "保密正文继续");
+  assert.deepEqual(fs.readdirSync(root), []);
+  assert.equal(space.files.listDir(root)[0].name, path.basename(target));
+  const renamed = path.join(root, "notes", "另一份标题.md");
+  space.files.renameFile(target, renamed);
+  assert.throws(() => space.files.readText(target), /文件不存在/);
+  assert.equal(space.files.info(path.dirname(renamed)).kind, "directory");
+  const fresh = new ProtectedFiles(space.encryption);
+  fresh.mountTree(root, bundle);
+  assert.equal(fresh.readText(renamed), "保密正文继续");
+  for (const marker of ["关于某单位", "人事调整", "保密正文", "另一份标题"]) {
+    assert.equal(fs.readFileSync(bundle).includes(Buffer.from(marker)), false);
+  }
+  fresh.removePath(path.dirname(renamed), { recursive: true });
+  assert.deepEqual(fresh.listDir(root), []);
+});
+
+test("旧工作文件迁入容器，技能快照只读，配置路径别名不绕过虚拟树", () => {
+  const space = fixture();
+  const work = path.join(space.root, "work");
+  const old = path.join(work, "旧标题.md");
+  space.files.atomicWrite(old, "旧工作稿");
+  space.files.mountTree(work, path.join(space.root, "work-files.json"));
+  assert.equal(fs.existsSync(old), false);
+  assert.equal(space.files.readText(old), "旧工作稿");
+  const skills = path.join(space.root, "skills", "pi-skills");
+  fs.mkdirSync(skills, { recursive: true });
+  const source = path.join(skills, "custom", "references", "某单位样稿.md");
+  space.files.atomicWrite(source, "只读材料");
+  space.files.mountTree(skills, path.join(space.root, "skill-files.json"), { readonly: true });
+  assert.equal(space.files.readText(source), "只读材料");
+  assert.throws(() => space.files.atomicWrite(source, "覆盖"), /只读/);
+  assert.deepEqual(fs.readdirSync(skills), []);
+  assert.equal(space.files.readText(source), "只读材料");
+  if (process.platform !== "win32") {
+    const alias = path.join(space.base, "workspace-alias");
+    fs.symlinkSync(space.root, alias, "dir");
+    const aliased = path.join(alias, "work", "别名下的敏感标题.md");
+    space.files.atomicWrite(aliased, "别名正文");
+    assert.equal(space.files.readText(aliased), "别名正文");
+    assert.deepEqual(fs.readdirSync(work), []);
+  }
 });

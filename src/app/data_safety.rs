@@ -47,7 +47,9 @@ impl GongwenApp {
         sub_heading(
             ui,
             "全量备份",
-            Some("把配置目录里的有效数据打成一个 ZIP，换机器或重装系统前先导出一份。"),
+            Some(
+                "把配置目录里的有效数据打成一个内容和文件名均加密的 7z，换机器或重装系统前先导出一份。",
+            ),
         );
         ui.label(
             "备份包含配置、稿件库与知识库（manuscripts.db）、图片、数据接口配置、\
@@ -65,7 +67,7 @@ impl GongwenApp {
                 {
                     export = true;
                 }
-                ui.weak("选一个配置目录之外的位置保存 ZIP。");
+                ui.weak("选一个配置目录之外的位置保存 7z。");
             });
             setting_continuation(ui, |ui| {
                 ui.weak("导出前会保存所有已修改稿件；保存失败将取消备份。");
@@ -155,8 +157,19 @@ impl GongwenApp {
         if !self.backup_ready() {
             return;
         }
+        if !crate::vault::key_handle().is_some_and(|h| h.db_active()) {
+            self.status = "请先启用应用锁并完成加密，再导出全量备份；恢复过程也只写密文。".into();
+            return;
+        }
+        self.open_zip_password_dialog(super::manuscript_ui::ZipPasswordPurpose::BackupExport);
+    }
+
+    pub(crate) fn perform_backup_export(&mut self, password: zeroize::Zeroizing<String>) {
+        if !self.backup_ready() {
+            return;
+        }
         let file_name = format!(
-            "公文助手备份-{}.zip",
+            "公文助手备份-{}.7z",
             chrono::Local::now().format("%Y%m%d-%H%M%S")
         );
         // 起始目录跟原来一致：输出目录存在就从它开始挑。
@@ -170,20 +183,21 @@ impl GongwenApp {
             }
         };
         let mut spec = FileDialogSpec::save_file()
-            .filter("ZIP 备份", &["zip"])
+            .filter("加密 7z 备份", &["7z"])
             .file_name(file_name);
         if let Some(directory) = output_dir {
             spec = spec.directory(directory);
         }
         // 备份包含数据库、配置、图片与风格档案等用户数据，加密工作区里写成普通 ZIP 要先确认风险。
         self.request_output_with_warning(
-            "导出全量备份 ZIP（数据库、配置、图片、风格档案与运行数据）",
+            "导出加密 7z 全量备份",
             super::output_guard::BACKUP_WARNING,
             move |app| {
                 app.request_file(spec, move |app, path| {
                     let Some(path) = path else {
                         return;
                     };
+                    let path = path.with_extension("7z");
                     if let Err(error) = app.prepare_backup_export() {
                         app.status = format!("备份前保存失败，未导出备份：{error:#}");
                         return;
@@ -192,7 +206,7 @@ impl GongwenApp {
                     app.status = format!("正在打包备份到 {}…", path.display());
                     let tx = app.sender.clone();
                     thread::spawn(move || {
-                        let result = data_backup::export_backup(&path)
+                        let result = data_backup::export_backup(&path, &password)
                             .map(|()| {
                                 std::fs::metadata(&path)
                                     .map(|metadata| metadata.len())
@@ -212,21 +226,34 @@ impl GongwenApp {
             return;
         }
         self.request_file(
-            FileDialogSpec::pick_file().filter("ZIP 备份", &["zip"]),
+            FileDialogSpec::pick_file().filter("加密 7z 备份", &["7z"]),
             |app, path| {
                 let Some(path) = path else {
                     return;
                 };
-                app.backup_busy = true;
-                app.status = format!("正在校验备份 {}…", path.display());
-                let tx = app.sender.clone();
-                thread::spawn(move || {
-                    let result =
-                        data_backup::inspect_backup(&path).map_err(|error| format!("{error:#}"));
-                    let _ = tx.send(WorkerResult::BackupInspected { path, result });
-                });
+                app.open_zip_password_dialog(
+                    super::manuscript_ui::ZipPasswordPurpose::BackupImport(path),
+                );
             },
         );
+    }
+
+    pub(crate) fn perform_backup_inspection(
+        &mut self,
+        path: PathBuf,
+        password: zeroize::Zeroizing<String>,
+    ) {
+        if !self.backup_ready() {
+            return;
+        }
+        self.backup_busy = true;
+        self.backup_restore_password = Some(password.clone());
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let result =
+                data_backup::inspect_backup(&path, &password).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkerResult::BackupInspected { path, result });
+        });
     }
 
     /// 用户确认后真正执行恢复：先释放 SQLite 连接，再在后台替换数据。
@@ -241,6 +268,10 @@ impl GongwenApp {
                 return;
             }
         };
+        let Some(password) = self.backup_restore_password.take() else {
+            self.backup_restore_error = Some("备份密码已清除，请重新选择备份并输入密码。".into());
+            return;
+        };
         self.backup_busy = true;
         self.backup_restore_running = true;
         self.status = "正在恢复备份，请勿关闭应用…".into();
@@ -249,7 +280,7 @@ impl GongwenApp {
         self.close_local_stores();
         let tx = self.sender.clone();
         thread::spawn(move || {
-            let result = data_backup::restore_backup(&zip, &config_dir)
+            let result = data_backup::restore_backup(&zip, &config_dir, &password)
                 .map_err(|error| format!("{error:#}"));
             let _ = tx.send(WorkerResult::BackupRestored { path: zip, result });
         });
@@ -291,6 +322,7 @@ impl GongwenApp {
                     ui.weak(format!("……另有 {} 类内容。", info.groups.len() - 12));
                 }
                 ui.add_space(8.0);
+                ui.label(egui::RichText::new("恢复前会原样保留当前数据。若当前数据未加密，留底目录也仍是明文；恢复新版备份不会自动加密或擦除旧副本。").color(theme::danger()));
                 if let Some(location) = &backup_location {
                     ui.label(format!("当前数据会先备份到：{}", location.display()));
                 }
@@ -319,6 +351,7 @@ impl GongwenApp {
             }
         } else if cancel {
             self.backup_restore_prompt = None;
+            self.backup_restore_password = None;
         }
     }
 

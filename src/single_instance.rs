@@ -1,79 +1,116 @@
-//! 单实例：程序已开着时，再双击 `.gwx`（或再点一次图标）不开第二个窗口，
-//! 把要导入的稿件包转交给已开的窗口。
-//!
-//! 不开网络端口（本机端口可能触发防火墙提示）、不引入新依赖：主实例在配置目录
-//! 持有 `instance.lock` 的独占锁，进程结束时系统自动释放，崩溃也不会留下残留锁；
-//! 后起的进程拿不到锁，就把请求写进 `inbox/` 后退出，主实例的后台线程每 300 ms
-//! 看一次收件目录。两个进程也就不会同时写同一个稿件库和标签记录。
-//! 方案见 `docs/gwx-package-design.md` 第四节。
-
+//! 单实例转交：请求只在 loopback 管道和内存中传递，不再写入路径收件文件。
+//! endpoint 仅包含临时端口与本轮随机认证令牌；不含业务路径、应用密码或数据密钥。
 use anyhow::{Context, Result};
 use eframe::egui;
 use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver},
+};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-/// 跳过单实例检查、照旧另开一个窗口的命令行参数。
 pub const NEW_WINDOW_FLAG: &str = "--new-window";
-
 const LOCK_FILE: &str = "instance.lock";
-const INBOX_DIR: &str = "inbox";
-const REQUEST_EXT: &str = "req";
-const POLL_INTERVAL: Duration = Duration::from_millis(300);
-/// 收件目录里放了这么久还没被取走的请求（主实例当时卡死后被强杀之类），
-/// 下次启动时直接丢掉，免得过了很久突然弹出口令框。
-const STALE_AFTER: Duration = Duration::from_secs(10 * 60);
-/// 一条请求只是几行路径，超过这个大小的不是本程序写的，不读。
+const ENDPOINT_FILE: &str = "instance.endpoint";
 const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 
-/// 启动时争主实例的结果。
 pub enum Startup {
-    /// 自己就是主实例，照常建窗口。
     Primary(Instance),
-    /// 已有实例在跑，请求已转交，本进程直接退出。
     Forwarded,
 }
 
-/// 主实例：持有锁文件直到进程结束。
 pub struct Instance {
     _lock: File,
-    inbox: PathBuf,
+    endpoint: PathBuf,
+    running: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+    requests: Mutex<Option<Receiver<Vec<PathBuf>>>>,
 }
 
-/// 在配置目录争主实例。锁或收件目录用不了（只读盘、网络盘不支持文件锁）时返回错误，
-/// 调用方照旧开一个独立窗口。
+impl Drop for Instance {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        let _ = fs::remove_file(&self.endpoint);
+    }
+}
+
 pub fn start(imports: &[PathBuf]) -> Result<Startup> {
     start_in(&crate::storage::config_dir()?, imports)
 }
 
 fn start_in(dir: &Path, imports: &[PathBuf]) -> Result<Startup> {
-    fs::create_dir_all(dir).with_context(|| format!("无法创建 {}", dir.display()))?;
+    fs::create_dir_all(dir)?;
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(dir.join(LOCK_FILE))
-        .context("无法打开实例锁文件")?;
-    // 锁文件只给当前用户可读写：里面没有内容，但文件名本身就说明本机在用这个程序。
+        .open(dir.join(LOCK_FILE))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        lock.set_permissions(fs::Permissions::from_mode(0o600))
-            .context("无法设置实例锁文件权限")?;
+        lock.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
-    let inbox = dir.join(INBOX_DIR);
+    let endpoint = dir.join(ENDPOINT_FILE);
     match lock.try_lock() {
         Ok(()) => {
-            // 转交进程只在需要时才建收件目录；主实例先建出来并把权限收紧，
-            // 免得旧版本留下的宽松目录一直被沿用。建不出来也不影响本进程启动。
-            let _ = create_private_dir(&inbox);
-            clear_stale(&inbox, SystemTime::now());
-            Ok(Startup::Primary(Instance { _lock: lock, inbox }))
+            // 旧版明文收件箱不再消费；清理失败不能装作风险已消失。
+            let inbox = dir.join("inbox");
+            if inbox.is_dir() {
+                for entry in fs::read_dir(&inbox)? {
+                    let entry = entry?;
+                    if entry.file_type()?.is_file() {
+                        crate::vault::erase_file_checked(&entry.path())?;
+                    }
+                }
+                fs::remove_dir(&inbox).context("旧明文转交目录清理失败")?;
+            }
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+            listener.set_nonblocking(true)?;
+            let token = uuid::Uuid::new_v4().simple().to_string();
+            let record = format!("{}\n{}", listener.local_addr()?.port(), token);
+            // 仅公开本轮寻址信息；复制磁盘也拿不到任何已转交的路径。
+            crate::storage::atomic_write(&endpoint, |file| {
+                file.write_all(record.as_bytes())?;
+                Ok(())
+            })?;
+            let running = Arc::new(AtomicBool::new(true));
+            let alive = running.clone();
+            let (tx, rx) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                while alive.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((mut stream, peer)) if peer.ip().is_loopback() => {
+                            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                            let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                            if let Ok(paths) = receive(&mut stream, &token) {
+                                if tx.send(paths).is_err() {
+                                    break;
+                                }
+                                let _ = stream.write_all(b"OK");
+                            }
+                        }
+                        _ => thread::sleep(Duration::from_millis(25)),
+                    }
+                }
+            });
+            Ok(Startup::Primary(Instance {
+                _lock: lock,
+                endpoint,
+                running,
+                worker: Some(worker),
+                requests: Mutex::new(Some(rx)),
+            }))
         }
         Err(fs::TryLockError::WouldBlock) => {
-            forward(&inbox, imports)?;
+            forward(&endpoint, imports)?;
             foreground::allow_any();
             Ok(Startup::Forwarded)
         }
@@ -81,108 +118,54 @@ fn start_in(dir: &Path, imports: &[PathBuf]) -> Result<Startup> {
     }
 }
 
-/// 建收件目录并收紧到仅当前用户：请求里是用户要导入的稿件包路径。
-/// Windows 上没有对应的权限位，只建目录。
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    }
+fn receive(stream: &mut TcpStream, token: &str) -> Result<Vec<PathBuf>> {
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length)?;
+    let length = u32::from_le_bytes(length) as u64;
+    anyhow::ensure!(length <= MAX_REQUEST_BYTES, "转交请求过大");
+    let mut body = vec![0u8; length as usize];
+    stream.read_exact(&mut body)?;
+    let (received, paths): (String, Vec<PathBuf>) = serde_json::from_slice(&body)?;
+    anyhow::ensure!(received == token, "转交认证失败");
+    Ok(paths)
+}
+
+fn forward(endpoint: &Path, imports: &[PathBuf]) -> Result<()> {
+    let record = crate::file_limits::read_bytes(endpoint, 128, "实例地址")?;
+    let record = String::from_utf8(record)?;
+    let (port, token) = record.split_once('\n').context("实例地址格式错误")?;
+    let port: u16 = port.parse()?;
+    let mut stream = TcpStream::connect_timeout(
+        &SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into(),
+        Duration::from_secs(1),
+    )?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let body = serde_json::to_vec(&(token, imports))?;
+    anyhow::ensure!(body.len() as u64 <= MAX_REQUEST_BYTES, "转交请求过大");
+    stream.write_all(&(body.len() as u32).to_le_bytes())?;
+    stream.write_all(&body)?;
+    let mut ack = [0u8; 2];
+    stream.read_exact(&mut ack)?;
+    anyhow::ensure!(&ack == b"OK", "转交未确认");
     Ok(())
 }
 
 impl Instance {
-    /// 起后台线程盯着收件目录：每条请求是一组要导入的路径（空表示只要把窗口唤到前台），
-    /// 送进返回的通道并让界面重绘一帧。通道收端被丢掉后线程自己结束。
     pub fn watch(&self, ctx: egui::Context) -> Receiver<Vec<PathBuf>> {
         let (tx, rx) = mpsc::channel();
-        let inbox = self.inbox.clone();
-        thread::spawn(move || {
-            loop {
-                let requests = take_requests(&inbox);
-                if !requests.is_empty() {
-                    for request in requests {
-                        if tx.send(request).is_err() {
-                            return;
-                        }
+        let requests = self.requests.lock().unwrap().take();
+        if let Some(requests) = requests {
+            thread::spawn(move || {
+                while let Ok(request) = requests.recv() {
+                    if tx.send(request).is_err() {
+                        break;
                     }
                     ctx.request_repaint();
                 }
-                thread::sleep(POLL_INTERVAL);
-            }
-        });
-        rx
-    }
-}
-
-/// 把请求写进收件目录：先写同目录暂存再改名，主实例只读完整的 `.req`。
-/// 文件名以纳秒时间戳开头，主实例按名字排序就是到达顺序。
-/// 落盘走 [`crate::storage::atomic_write`]：Unix 下 `.req` 是 0600，请求里的路径不外泄。
-fn forward(inbox: &Path, imports: &[PathBuf]) -> Result<()> {
-    create_private_dir(inbox).with_context(|| format!("无法创建 {}", inbox.display()))?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let stem = format!("{nanos:024}-{}", uuid::Uuid::new_v4().simple());
-    let body = imports
-        .iter()
-        .map(|path| path.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("\n");
-    crate::storage::atomic_write(&inbox.join(format!("{stem}.{REQUEST_EXT}")), |file| {
-        use std::io::Write as _;
-        file.write_all(body.as_bytes())?;
-        Ok(())
-    })
-    .context("无法提交转交请求")?;
-    Ok(())
-}
-
-/// 取走收件目录里的全部请求（读完即删），按到达顺序返回。
-fn take_requests(inbox: &Path) -> Vec<Vec<PathBuf>> {
-    let Ok(entries) = fs::read_dir(inbox) else {
-        return Vec::new();
-    };
-    let mut files = entries
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == REQUEST_EXT))
-        .collect::<Vec<_>>();
-    files.sort();
-    files
-        .into_iter()
-        .filter_map(|file| {
-            let body = crate::file_limits::read_bytes(&file, MAX_REQUEST_BYTES, "转交请求");
-            let _ = fs::remove_file(&file);
-            let body = String::from_utf8_lossy(&body.ok()?).into_owned();
-            Some(
-                body.lines()
-                    .filter(|line| !line.is_empty())
-                    .map(PathBuf::from)
-                    .collect(),
-            )
-        })
-        .collect()
-}
-
-/// 删掉放得太久的请求与没写完的半截文件；新近的留给 [`Instance::watch`] 照常处理
-/// （转交进程恰好赶上上一个主实例退出时，请求会等到下次启动再处理）。
-fn clear_stale(inbox: &Path, now: SystemTime) {
-    let Ok(entries) = fs::read_dir(inbox) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let stale = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| now.duration_since(modified).ok())
-            .is_none_or(|age| age > STALE_AFTER);
-        if stale {
-            let _ = fs::remove_file(entry.path());
+            });
         }
+        rx
     }
 }
 
@@ -210,138 +193,49 @@ mod foreground {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn primary(dir: &Path) -> Instance {
-        match start_in(dir, &[]).unwrap() {
-            Startup::Primary(instance) => instance,
-            Startup::Forwarded => panic!("应当成为主实例"),
+    #[test]
+    fn transfer_is_memory_only_and_new_primary_can_start_after_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let Startup::Primary(primary) = start_in(dir.path(), &[]).unwrap() else {
+            panic!()
+        };
+        let rx = primary.watch(egui::Context::default());
+        let paths = vec![PathBuf::from("/某单位/关于人事调整的请示.gwx")];
+        assert!(matches!(
+            start_in(dir.path(), &paths).unwrap(),
+            Startup::Forwarded
+        ));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), paths);
+        for entry in fs::read_dir(dir.path()).unwrap() {
+            let bytes = fs::read(entry.unwrap().path()).unwrap();
+            assert!(
+                !bytes
+                    .windows("人事调整".len())
+                    .any(|v| v == "人事调整".as_bytes())
+            );
         }
+        assert!(!dir.path().join("inbox").exists());
+        drop(primary);
+        assert!(matches!(
+            start_in(dir.path(), &[]).unwrap(),
+            Startup::Primary(_)
+        ));
     }
 
     #[test]
-    fn second_start_forwards_paths_to_the_primary() {
-        let temp = tempfile::tempdir().unwrap();
-        let instance = primary(temp.path());
-
-        let packages = vec![PathBuf::from("/收文/甲.gwx"), PathBuf::from("/收文/乙.zip")];
-        assert!(matches!(
-            start_in(temp.path(), &packages).unwrap(),
-            Startup::Forwarded
-        ));
-        // 再点一次图标：空请求，只唤到前台。
-        assert!(matches!(
-            start_in(temp.path(), &[]).unwrap(),
-            Startup::Forwarded
-        ));
-
-        assert_eq!(
-            take_requests(&instance.inbox),
-            vec![packages, Vec::<PathBuf>::new()]
-        );
-        // 读完即删。
-        assert!(take_requests(&instance.inbox).is_empty());
-
-        // 主实例退出（锁释放）后，下一个进程自己成为主实例。
-        drop(instance);
-        primary(temp.path());
-    }
-
-    const PROBE_DIR_VAR: &str = "GONGWEN_INSTANCE_PROBE_DIR";
-
-    /// 子进程探针：只在下面的跨进程测试里被重新拉起时干活，平时直接返回。
-    #[test]
-    #[ignore]
-    fn child_probe() {
-        let Some(dir) = std::env::var_os(PROBE_DIR_VAR) else {
-            return;
+    fn wrong_token_cannot_inject_a_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let Startup::Primary(primary) = start_in(dir.path(), &[]).unwrap() else {
+            panic!()
         };
-        let role = match start_in(Path::new(&dir), &[PathBuf::from("/子进程.gwx")]).unwrap() {
-            Startup::Primary(_) => "primary",
-            Startup::Forwarded => "forwarded",
-        };
-        println!("probe:{role}");
-    }
-
-    fn run_probe(dir: &Path) -> String {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "single_instance::tests::child_probe",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env(PROBE_DIR_VAR, dir)
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
-    /// 同进程两个句柄的锁冲突不足以说明跨进程也成立，这里真起一个子进程。
-    #[test]
-    fn another_process_forwards_while_the_primary_holds_the_lock() {
-        let temp = tempfile::tempdir().unwrap();
-        let instance = primary(temp.path());
-        assert!(run_probe(temp.path()).contains("probe:forwarded"));
-        assert_eq!(
-            take_requests(&instance.inbox),
-            vec![vec![PathBuf::from("/子进程.gwx")]]
-        );
-        drop(instance);
-        assert!(run_probe(temp.path()).contains("probe:primary"));
-    }
-
-    #[test]
-    fn half_written_requests_are_not_taken() {
-        let temp = tempfile::tempdir().unwrap();
-        let inbox = temp.path().join(INBOX_DIR);
-        fs::create_dir_all(&inbox).unwrap();
-        fs::write(inbox.join("1.tmp"), "/半截.gwx").unwrap();
-        assert!(take_requests(&inbox).is_empty());
-        assert!(inbox.join("1.tmp").exists());
-    }
-
-    #[test]
-    fn stale_requests_are_dropped_and_fresh_ones_kept() {
-        let temp = tempfile::tempdir().unwrap();
-        let inbox = temp.path().join(INBOX_DIR);
-        forward(&inbox, &[PathBuf::from("/新.gwx")]).unwrap();
-
-        clear_stale(&inbox, SystemTime::now());
-        assert_eq!(take_requests(&inbox), vec![vec![PathBuf::from("/新.gwx")]]);
-
-        forward(&inbox, &[PathBuf::from("/旧.gwx")]).unwrap();
-        clear_stale(&inbox, SystemTime::now() + STALE_AFTER * 2);
-        assert!(take_requests(&inbox).is_empty());
-    }
-
-    #[test]
-    fn watcher_delivers_forwarded_requests() {
-        let temp = tempfile::tempdir().unwrap();
-        let instance = primary(temp.path());
-        let rx = instance.watch(egui::Context::default());
-        assert!(matches!(
-            start_in(temp.path(), &[PathBuf::from("/来函.gwx")]).unwrap(),
-            Startup::Forwarded
-        ));
-        let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(request, vec![PathBuf::from("/来函.gwx")]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn lock_file_inbox_and_requests_are_owner_only_on_unix() {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().unwrap();
-        let instance = primary(temp.path());
-        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(&temp.path().join(LOCK_FILE)), 0o600);
-        assert_eq!(mode(&temp.path().join(INBOX_DIR)), 0o700);
-        forward(&instance.inbox, &[PathBuf::from("/来函.gwx")]).unwrap();
-        let request = fs::read_dir(&instance.inbox)
-            .unwrap()
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .find(|path| path.extension().is_some_and(|ext| ext == REQUEST_EXT))
-            .unwrap();
-        assert_eq!(mode(&request), 0o600);
+        let rx = primary.watch(egui::Context::default());
+        let record = fs::read_to_string(&primary.endpoint).unwrap();
+        fs::write(
+            dir.path().join("fake"),
+            format!("{}\nwrong", record.split_once('\n').unwrap().0),
+        )
+        .unwrap();
+        assert!(forward(&dir.path().join("fake"), &[]).is_err());
+        assert!(rx.try_recv().is_err());
     }
 }

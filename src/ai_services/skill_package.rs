@@ -163,6 +163,7 @@ pub(crate) fn destination_with(root: &Path, name: &str, limits: Limits) -> Resul
 }
 
 /// 删除 `base` 下的一个目录；解析后的目标必须仍位于 `base` 内。
+#[cfg(test)]
 pub(crate) fn remove_dir_within(base: &Path, root: &Path) -> Result<()> {
     if !root.exists() {
         return Ok(());

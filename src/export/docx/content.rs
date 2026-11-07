@@ -21,7 +21,6 @@ use crate::export::{
 use crate::models::{DraftInput, FontConfig, ListNumbering, NumberingConfig};
 use anyhow::{Context, Result};
 use docx_rs::*;
-use std::fs::File;
 use std::path::Path;
 
 #[allow(clippy::too_many_arguments)]
@@ -407,8 +406,10 @@ pub(crate) fn write_meeting_agenda_docx(
             }
         }
     }
-    let file =
-        File::create(path).with_context(|| format!("无法创建 Word 文件：{}", path.display()))?;
-    doc.build().pack(file).context("写入会议议程 DOCX 包失败")?;
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    doc.build()
+        .pack(&mut buffer)
+        .context("生成会议议程 DOCX 失败")?;
+    mdx::memory_files::write_output(path, &buffer.into_inner())?;
     Ok(())
 }

@@ -176,6 +176,27 @@ impl SkillSnapshot {
 
     /// 写到工作区：技能包与 `input/skills.json`。
     pub(crate) fn write_to(&self, workspace: &Path) -> Result<(), String> {
+        if crate::vault::key_handle().is_some() {
+            let root = workspace.join(SKILLS_DIR);
+            std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+            let mut tree = super::super::sealed_tree::Tree::new();
+            for (name, package) in &self.packages {
+                for (relative, bytes) in &package.files {
+                    tree.insert(
+                        format!("{name}/{relative}"),
+                        super::super::sealed_tree::encode(bytes),
+                    );
+                }
+            }
+            super::super::sealed_tree::write(&workspace.join("skill-files.json"), &tree)
+                .map_err(|e| e.to_string())?;
+            return crate::vault::write_path(
+                &workspace.join(INDEX_FILE),
+                "pi",
+                self.index_json().as_bytes(),
+            )
+            .map_err(|e| e.to_string());
+        }
         let root = workspace.join(SKILLS_DIR);
         std::fs::create_dir_all(&root)
             .map_err(|error| format!("建不了工作区技能目录（{}）：{error}", root.display()))?;

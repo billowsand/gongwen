@@ -107,13 +107,7 @@ fn a_broken_skill_can_be_opened_and_repaired() {
     let _config = ConfigDir::new();
     pi_skills::store::create("repair-me", None).unwrap();
     let original = pi_skills::store::skill_text("repair-me").unwrap();
-    std::fs::write(
-        pi_skills::store::user_dir("repair-me")
-            .unwrap()
-            .join("SKILL.md"),
-        "坏掉的文件",
-    )
-    .unwrap();
+    pi_skills::store::corrupt_skill_for_test("repair-me", "坏掉的文件");
     let mut page = PiSkillsPage::default();
     page.reload();
     page.select("repair-me");

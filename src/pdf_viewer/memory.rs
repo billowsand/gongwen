@@ -14,19 +14,16 @@ impl PdfSession {
         session
     }
 
+    pub(crate) fn memory_bytes(&self) -> Option<Arc<Vec<u8>>> {
+        self.memory.clone()
+    }
+
     pub(crate) fn is_memory(&self) -> bool {
         self.memory.is_some()
     }
 
     pub(super) fn print_action(&self) -> PdfAction {
-        match &self.memory {
-            Some(bytes) => PdfAction::ReleaseMemory {
-                bytes: Arc::clone(bytes),
-                request: Box::new(self.print_request()),
-                print: true,
-            },
-            None => PdfAction::Print(self.print_request()),
-        }
+        PdfAction::Print(self.print_request())
     }
 }
 
@@ -55,17 +52,11 @@ mod tests {
         assert!(!identity.exists());
         assert!(session.tab_hover().contains("内存预览"));
         session.request_print_when_ready();
-        let Some(PdfAction::ReleaseMemory {
-            bytes: released,
-            request,
-            print,
-        }) = session.take_print_when_ready()
-        else {
-            panic!("内存 PDF 不能绕过明文释放确认直接打印");
+        let Some(PdfAction::Print(request)) = session.take_print_when_ready() else {
+            panic!("内存 PDF 应交由统一打印风险确认，不另存文件");
         };
-        assert!(print);
-        assert_eq!(released.as_ref(), &bytes);
         assert_eq!(request.pdf_key, Some(7));
+        assert_eq!(session.memory_bytes().unwrap().as_ref(), &bytes);
         assert!(session.take_print_when_ready().is_none());
         assert!(!identity.exists());
     }

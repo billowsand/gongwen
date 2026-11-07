@@ -5,13 +5,13 @@ use super::GongwenApp;
 use crate::modal::{self, Dismiss};
 use eframe::egui;
 
+pub(crate) const CLIPBOARD_WARNING: &str = "复制或剪切会把明文交给系统剪贴板；系统历史记录、跨设备同步或第三方剪贴板工具可能保存副本，不受应用锁保护。锁定或清空当前剪贴板不能保证删除历史副本。";
 pub(crate) const PLAINTEXT_WARNING: &str = "当前工作区已启用加密。此次导出的 PDF、Word、源码文件及随附的《份号清单.txt》（含份号与主送/抄送单位）将以普通文件保存，不再受应用密码和本地加密保护。文件可能包含正文、图片、附件及人员等敏感信息；复制、同步、发送或由其他软件打开时，可能导致信息泄露。请确认保存位置和接收范围。";
 pub(crate) const PDF_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的 7z 压缩包由独立密码保护，包内文件名也已加密，但解压后的 PDF 是普通文件，不受应用密码和本地加密保护。PDF 可能包含正文、图片、附件及人员等敏感信息；解压、复制、同步或发送后，可能导致信息泄露。压缩包自身的文件名和大小仍可见，请妥善保管导出密码并确认接收范围。";
-pub(crate) const PRINT_EXPORT_WARNING: &str = "当前工作区已启用加密。此次会先把普通 PDF 导出到磁盘，再交给系统打印队列和打印机：PDF 文件、队列副本、打印机缓存与纸件都不受应用密码和本地加密保护，可能包含正文、图片、附件及人员等敏感信息。请确认保存位置、接收范围与纸件/队列记录的处置方式。";
 pub(crate) const PRINT_WARNING: &str = "当前工作区已启用加密。打印会把明文 PDF 交给系统打印队列和打印机：队列可能自行保存副本，打印机缓存、纸件与后续处置都可能留下敏感信息，这些都不受应用密码和本地加密保护。请确认接收范围与纸件/队列记录的处置方式。";
 pub(crate) const PACKAGE_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的是稿件包（7z 格式，文件内容与包内文件名均由独立密码保护），但解压后的 Markdown 正文、历史版本、图片、PDF 附件与随行件全部是普通文件，不再受应用密码和本地加密保护。稿件包还可能包含人员、单位、文号等敏感信息；复制、同步、发送或由其他软件打开后，可能导致信息泄露。压缩包自身的文件名和大小仍可见，请妥善保管导出密码并确认接收范围。";
 pub(crate) const PII_EXPORT_WARNING: &str = "当前工作区已启用加密。此次导出的表格或词表是普通文件，可能包含人员姓名、职务、联系电话、个人简介、单位名称等敏感信息，以及从稿件派生出的正文用语；复制、同步、发送或由其他软件打开后，可能导致信息泄露。请确认导出范围与接收对象。";
-pub(crate) const BACKUP_WARNING: &str = "当前工作区已启用加密。备份包里的数据库、配置、图片、Pi 运行数据、个人词表与自定义技能均保持密文，但 ZIP 容器本身不受应用密码保护，文件名、大小和修改时间仍可见。请把备份放在可信位置；恢复时需要使用备份当时的应用密码，恢复后请重新解锁。";
+pub(crate) const BACKUP_WARNING: &str = "全量备份的内容和包内文件名均由独立备份密码保护，内部数据还保留应用锁加密。恢复需要备份密码和备份当时的应用锁密码；程序不保存备份密码，遗失后无法恢复。外层文件名和总大小仍可见，请使用中性名称并妥善保管。";
 
 pub(crate) type OutputAction = Box<dyn FnOnce(&mut GongwenApp)>;
 
@@ -23,6 +23,87 @@ pub(super) struct PendingOutput {
 }
 
 impl GongwenApp {
+    pub(crate) fn copy_file_confirmed(&mut self, path: &std::path::Path) {
+        self.status = match crate::file_clipboard::copy_file(path) {
+            Ok(()) => "文件已复制到系统剪贴板。".into(),
+            Err(error) => format!("复制文件失败：{error}"),
+        };
+    }
+
+    /// 剪切必须在编辑器删除文字前确认；取消确认不能丢失源文字。
+    pub(crate) fn guard_clipboard_input(&mut self, ctx: &egui::Context) {
+        if let Some(focus) = self.clipboard_cut_replay.take() {
+            if let Some(id) = focus {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+            ctx.input_mut(|input| input.events.push(egui::Event::Cut));
+            self.clipboard_output_approved = true;
+            return;
+        }
+        if crate::vault::key_handle().is_none() {
+            return;
+        }
+        let mut cut = false;
+        ctx.input_mut(|input| {
+            input.events.retain(|event| {
+                if matches!(event, egui::Event::Cut) {
+                    cut = true;
+                    false
+                } else {
+                    true
+                }
+            })
+        });
+        if cut {
+            let focus = ctx.memory(|memory| memory.focused());
+            self.request_output_with_warning(
+                "剪切内容到系统剪贴板",
+                CLIPBOARD_WARNING,
+                move |app| {
+                    app.clipboard_cut_replay = Some(focus);
+                },
+            );
+        }
+    }
+
+    /// 捕获所有 egui 文本/图片复制（包括 Ctrl+C），确认前不交给系统。
+    pub(crate) fn guard_clipboard_output(&mut self, ctx: &egui::Context) {
+        if crate::vault::key_handle().is_none() {
+            return;
+        }
+        let mut copied = Vec::new();
+        ctx.output_mut(|output| {
+            output.commands.retain(|command| {
+                if matches!(
+                    command,
+                    egui::OutputCommand::CopyText(_) | egui::OutputCommand::CopyImage(_)
+                ) {
+                    copied.push(command.clone());
+                    false
+                } else {
+                    true
+                }
+            })
+        });
+        if copied.is_empty() {
+            self.clipboard_output_approved = false;
+            return;
+        }
+        if std::mem::take(&mut self.clipboard_output_approved) {
+            ctx.output_mut(|output| output.commands.extend(copied));
+            return;
+        }
+        let ctx = ctx.clone();
+        self.request_output_with_warning(
+            "复制内容到系统剪贴板",
+            CLIPBOARD_WARNING,
+            move |app| {
+                app.clipboard_output_approved = true;
+                ctx.output_mut(|output| output.commands.extend(copied));
+            },
+        );
+    }
+
     pub(crate) fn request_plaintext_output(
         &mut self,
         operation: impl Into<String>,
@@ -98,12 +179,17 @@ impl GongwenApp {
             self.status = "加密状态已变化，本次导出已取消。".into();
             return;
         }
+        let clipboard = pending.warning == CLIPBOARD_WARNING;
         let mut confirmed = false;
         let mut cancelled = false;
         let response = modal::dialog(
             ctx,
             egui::Id::new("plaintext_output_risk"),
-            "导出文件可能泄露信息",
+            if clipboard {
+                "剪贴板内容可能泄露"
+            } else {
+                "导出文件可能泄露信息"
+            },
             480.0,
             Dismiss::EscOnly,
             |ui| {
@@ -111,7 +197,7 @@ impl GongwenApp {
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(pending.warning).color(crate::theme::danger()));
                 ui.add_space(8.0);
-                ui.weak("本次确认仅用于此次操作。取消不会生成文件。文件保存后，锁定应用也不会加密或撤回这些文件。");
+                ui.weak(if clipboard { "本次确认仅用于此次操作。取消不向剪贴板释放内容；锁定应用不能撤回外部副本。" } else { "本次确认仅用于此次操作。取消不会生成文件。文件保存后，锁定应用也不会加密或撤回这些文件。" });
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     cancelled = ui.button("取消").clicked();
@@ -121,7 +207,12 @@ impl GongwenApp {
         );
         if cancelled || response.dismissed {
             self.pending_output = None;
-            self.status = "已取消导出，未生成文件。".into();
+            self.status = if clipboard {
+                "已取消剪贴板操作。"
+            } else {
+                "已取消导出，未生成文件。"
+            }
+            .into();
         } else if confirmed && let Some(pending) = self.pending_output.take() {
             (pending.action)(self);
         }
@@ -132,6 +223,29 @@ impl GongwenApp {
 mod tests {
     use super::*;
     use crate::draft_page::ExportKind;
+
+    #[test]
+    fn clipboard_copy_waits_for_confirmation_and_cut_waits_before_modifying_the_editor() {
+        let mut h = Harness::new(true);
+        h.ctx.copy_text("保密剪贴板内容".into());
+        h.app.guard_clipboard_output(&h.ctx);
+        assert!(h.ctx.output(|output| output.commands.is_empty()));
+        assert!(h.app.pending_output.is_some());
+        let pending = h.app.pending_output.take().unwrap();
+        (pending.action)(&mut h.app);
+        h.app.guard_clipboard_output(&h.ctx);
+        assert!(h.ctx.output(|output| output.commands.iter().any(|command| matches!(command, egui::OutputCommand::CopyText(text) if text == "保密剪贴板内容"))));
+        h.ctx.output_mut(|output| output.commands.clear());
+        h.ctx.input_mut(|input| input.events.push(egui::Event::Cut));
+        h.app.guard_clipboard_input(&h.ctx);
+        assert!(
+            !h.ctx
+                .input(|input| input.events.contains(&egui::Event::Cut))
+        );
+        assert!(h.app.pending_output.is_some());
+        h.app.pending_output = None; // 取消：不重放剪切，源文字不会被编辑器删除。
+        assert!(h.app.clipboard_cut_replay.is_none());
+    }
 
     #[test]
     fn memory_attachment_preview_needs_no_output_and_print_asks_once() {

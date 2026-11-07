@@ -84,6 +84,7 @@ struct GateState {
     mode: GateMode,
     password: String,
     confirm: String,
+    plaintext_acknowledged: bool,
     decoy: String,
     decoy_confirm: String,
     with_decoy: bool,
@@ -127,6 +128,7 @@ impl GateState {
             mode: GateMode::FirstRun,
             password: String::new(),
             confirm: String::new(),
+            plaintext_acknowledged: false,
             decoy: String::new(),
             decoy_confirm: String::new(),
             with_decoy: false,
@@ -745,7 +747,9 @@ impl AppShell {
                         input.pointer = egui::PointerState::default();
                     });
                 }
+                app.guard_clipboard_input(&ctx);
                 app.update_workspace(ui, frame);
+                app.guard_clipboard_output(&ctx);
                 if app.take_force_relock() {
                     // 备份恢复：目录已整体替换，保存会拿旧密钥覆盖新数据；
                     // 恢复后还需要按新磁盘重新 probe（可能变成无锁/跳过/损坏）。
@@ -1478,8 +1482,16 @@ fn gate_card(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
                 });
             }
             ui.add_space(8.0);
+            ui.label(egui::RichText::new("不启用应用锁时，稿件、人员资料、模型密钥及本机配置将以明文保存。获得这些文件的人可以直接读取；以后启用加密也不能保证擦除历史副本。").color(theme::danger()));
+            ui.checkbox(
+                &mut gate.plaintext_acknowledged,
+                "我已了解明文保存风险，仍选择不加密",
+            );
             if ui
-                .add(egui::Button::new("暂不设置，直接进入").frame(false))
+                .add_enabled(
+                    gate.plaintext_acknowledged,
+                    egui::Button::new("暂不设置，直接进入").frame(false),
+                )
                 .on_hover_text("本次跳过；之后随时可以在「设置 → 应用锁」里启用。")
                 .clicked()
             {

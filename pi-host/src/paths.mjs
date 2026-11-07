@@ -164,7 +164,7 @@ export class WorkspaceGuard {
       if (depth > 5 || candidates.length >= maxFiles) return;
       let entries;
       try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
+        entries = this.files.listDir(dir);
       } catch {
         return;
       }
@@ -176,9 +176,9 @@ export class WorkspaceGuard {
         // 不能借“预览”把外部文件读进来。
         const checked = this.read(full, this.root, maxBytes);
         if (!checked.ok) continue;
-        if (entry.isDirectory()) {
+        if (entry.kind === "directory") {
           walk(checked.value, depth + 1);
-        } else if (entry.isFile() && /\.(md|markdown)$/i.test(entry.name)) {
+        } else if (entry.kind === "file" && /\.(md|markdown)$/i.test(entry.name)) {
           try {
             const stat = this.files.info(checked.value);
             if (stat.size > 0 && stat.size <= maxBytes) {
@@ -239,23 +239,20 @@ export class WorkspaceEnv extends ProtectedFileSystem {
     let total = 0;
     let entries = 0;
     while (pending.length) {
-      for (const entry of fs.readdirSync(pending.pop(), { withFileTypes: true })) {
+      for (const entry of this.files.listDir(pending.pop())) {
         // 崩溃残留的原子写临时文件可能解不开；它不是模型成果，跳过不参与配额。
         if (isAtomicTempName(entry.name)) continue;
         if (++entries > this.maxWorkEntries) throw new Error("工作区文件和目录数量超过上限");
-        const full = path.join(entry.parentPath ?? entry.path, entry.name);
-        if (entry.isDirectory()) pending.push(full);
-        else if (entry.isFile()) total += this.files.info(full).size;
+        const full = entry.path;
+        if (entry.kind === "directory") pending.push(full);
+        else if (entry.kind === "file") total += entry.size;
       }
     }
     let oldBytes = 0;
-    if (fs.existsSync(target)) {
-      const stat = this.files.info(target);
-      if (stat.kind === "file") oldBytes = stat.size;
-    }
+    try { const stat = this.files.info(target); if (stat.kind === "file") oldBytes = stat.size; } catch (error) { if (error?.code !== "ENOENT") throw error; }
     for (let current = target; current !== work; current = path.dirname(current)) {
       if (!within(work, current)) throw new Error("写入目标不在 work/ 下");
-      if (!fs.existsSync(current)) entries += 1;
+      try { this.files.info(current); } catch (error) { if (error?.code !== "ENOENT") throw error; entries += 1; }
     }
     if (entries > this.maxWorkEntries) throw new Error("工作区文件和目录数量超过上限");
     if (total - oldBytes + bytes > this.maxTotalBytes) throw new Error("工作区总文件体积超过上限");
@@ -363,7 +360,7 @@ export class WorkspaceEnv extends ProtectedFileSystem {
     const resolved = this.#write(p);
     if (!resolved.ok) return resolved;
     try {
-      fs.mkdirSync(resolved.value, { recursive: options?.recursive === true });
+      this.files.createDir(resolved.value, { recursive: options?.recursive === true });
       return ok(undefined);
     } catch (error) {
       return fileError("unknown", `创建目录失败：${error.message}`, p);
@@ -374,7 +371,7 @@ export class WorkspaceEnv extends ProtectedFileSystem {
     const resolved = this.#write(p);
     if (!resolved.ok) return resolved;
     try {
-      fs.rmSync(resolved.value, { recursive: options?.recursive === true, force: options?.force === true });
+      this.files.removePath(resolved.value, { recursive: options?.recursive === true, force: options?.force === true });
       return ok(undefined);
     } catch (error) {
       return fileError("unknown", `删除失败：${error.message}`, p);

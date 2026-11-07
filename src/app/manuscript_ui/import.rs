@@ -270,7 +270,14 @@ pub(crate) fn zip_password_form(
     dialog: &mut ZipPasswordDialog,
     importing: bool,
 ) -> bool {
+    let backup = matches!(
+        dialog.purpose,
+        ZipPasswordPurpose::BackupExport | ZipPasswordPurpose::BackupImport(_)
+    );
     match &dialog.purpose {
+        ZipPasswordPurpose::BackupExport | ZipPasswordPurpose::BackupImport(_) => {
+            ui.label("全量备份使用独立密码加密内容与文件名。恢复需要备份密码，以及备份当时的应用锁密码。备份密码不在本机保存；仅支持新版 7z 备份。");
+        }
         ZipPasswordPurpose::Import(path) => {
             // 路径是暂存副本，文件名与用户双击 / 选中的那个相同。
             if let Some(name) = path.file_name() {
@@ -312,8 +319,15 @@ pub(crate) fn zip_password_form(
         ui.weak(crate::password_policy::EXPORT_HINT);
     }
     ui.horizontal(|ui| {
-        ui.checkbox(&mut dialog.remember, "记住密码")
-            .on_hover_text("保存在本机受限权限文件中，下次仍会显示确认窗口");
+        let can_remember = !backup && crate::vault::key_handle().is_some();
+        if !can_remember {
+            dialog.remember = false;
+        }
+        ui.add_enabled(
+            can_remember,
+            egui::Checkbox::new(&mut dialog.remember, "加密记住密码"),
+        )
+        .on_hover_text("仅启用应用锁后可用；密码加密保存在本机，下次仍显示确认窗口");
         ui.checkbox(&mut dialog.show_password, "显示密码");
     });
     if matches!(
