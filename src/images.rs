@@ -313,11 +313,10 @@ pub(crate) fn is_pdf(src: &str) -> bool {
 /// 资源内容指纹：资源库用内容 SHA-256 前 64 位，旧文件用修改时间纳秒。
 /// 预览缓存按它失效（同一路径换了对象就换纹理）。
 pub(crate) fn stamp(src: &str) -> u64 {
-    if let Ok(Some(meta)) = resources::meta(&normalize_ref(src)) {
-        let hex = meta.sha256.get(..16).unwrap_or(&meta.sha256);
-        if let Ok(value) = u64::from_str_radix(hex, 16) {
-            return value;
-        }
+    if let Ok(Some(meta)) = resources::meta(&normalize_ref(src))
+        && let Ok(value) = u64::from_str_radix(&meta.sha256[..meta.sha256.len().min(16)], 16)
+    {
+        return value;
     }
     resolve(src)
         .ok()
@@ -325,6 +324,14 @@ pub(crate) fn stamp(src: &str) -> u64 {
         .and_then(|meta| meta.modified().ok())
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |elapsed| elapsed.as_nanos() as u64)
+}
+
+/// [`stamp`] 的元数据版：已经查过 [`meta`] 的调用方（比如预览每帧渲染）
+/// 不必为指纹再查一次库。库里没有内容校验值的旧文件返回 `None`，
+/// 调用方退回 [`stamp`] 的修改时间口径。
+pub(crate) fn stamp_of(meta: &ImageMeta) -> Option<u64> {
+    let hex = meta.sha256.get(..16)?;
+    u64::from_str_radix(hex, 16).ok()
 }
 
 /// 按扩展名猜 MIME（只用于没有入库的旧文件与外部基准目录）。
@@ -1059,6 +1066,38 @@ mod tests {
         assert!(resolve_from_base(base, "/etc/passwd").is_err());
         #[cfg(windows)]
         assert!(resolve_from_base(base, "C:\\evil.png").is_err());
+    }
+
+    #[test]
+    fn shared_help_fallback_checks_both_the_bundled_name_and_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let (name, bytes) = crate::help::content::IMAGES[0];
+        let path = dir.path().join(name);
+        fs::write(&path, bytes).unwrap();
+        assert!(public_help_copy(&path, name));
+        assert!(!public_help_copy(&path, "help-private.png"));
+        fs::write(&path, b"sensitive user image").unwrap();
+        assert!(!public_help_copy(&path, name));
+    }
+
+    #[test]
+    fn app_resource_paths_reject_explicit_decoy_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        for rel in ["alt-images/secret.png", "alt-mermaid-cache/secret.svg"] {
+            assert!(
+                resolve_from_base(dir.path(), rel).is_err(),
+                "配置目录内不得显式跨槽引用 {rel}"
+            );
+        }
+        storage::set_test_config_dir(None);
+
+        let external = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_from_base(external.path(), "alt-images/example.png").unwrap(),
+            external.path().join("alt-images/example.png"),
+            "外部 Markdown 基准目录不使用应用的槽位保留名"
+        );
     }
 
     #[test]

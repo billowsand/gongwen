@@ -563,14 +563,28 @@ pub fn import_with_actions(
         }
         pdfs.push(record_pdfs);
     }
-    // 资源名冲突必须在写入前发现：同一个逻辑引用在本机库里已指向不同内容时，
+    // 资源名冲突必须在写入前发现：同一个逻辑引用在本机已指向不同内容时，
     // 说明两边对这张图各有版本，静默覆盖会改变其他稿件的插图，必须先处理。
+    // 本机形态有两种：资源库别名，或迁移跳过、仍留在槽位目录里的旧文件——
+    // 读取优先走库，写别名同样会遮蔽这些旧文件，两种情况都要查。
     for (path, _name, bytes) in &images {
         let sha = super::bytes_hash(bytes);
-        if let Some(existing) = store.resource_sha256(path)?
-            && existing != sha
+        let existing_sha = store.resource_sha256(path)?;
+        if existing_sha
+            .as_deref()
+            .is_some_and(|existing| existing != sha)
         {
             bail!("图片同名但内容不同，请先处理资源冲突：{path}");
+        }
+        if existing_sha.is_none()
+            && let Ok(dest) = crate::images::resolve(path)
+            && dest.is_file()
+        {
+            let local = crate::images::read_managed_file(&dest)
+                .with_context(|| format!("本机同名图片无法读取，无法判断是否冲突：{path}"))?;
+            if super::bytes_hash(&local) != sha {
+                bail!("图片同名但内容不同，请先处理资源冲突：{path}");
+            }
         }
     }
     store.begin_sync_import()?;
@@ -1723,6 +1737,47 @@ mod round_trip_tests {
         )
         .unwrap();
         assert_eq!(preview[0].relationship, Relationship::Same);
+    }
+
+    /// 本机没有资源别名、但仍留有未迁移的磁盘旧文件（迁移跳过项）时，
+    /// 同名不同内容一样要拒绝：写别名会遮蔽磁盘文件，静默改掉引用它的稿件的图。
+    #[test]
+    fn image_conflicts_also_check_legacy_files_on_disk() {
+        const A: &[u8] = b"\x89PNG\r\n\x1a\npng-by-a";
+        const B: &[u8] = b"\x89PNG\r\n\x1a\npng-by-b-different";
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let image_dir = config.join("images");
+        std::fs::create_dir_all(&image_dir).unwrap();
+        let _guard = ConfigGuard::set(config);
+        let pic = image_dir.join("pic.png");
+        std::fs::write(&pic, A).unwrap();
+
+        let mut a = ManuscriptStore::open(&dir.path().join("a.db")).unwrap();
+        let id_a = create(&mut a, "![图](images/pic.png)\n内容。\n", "带图稿");
+        let zip = dir.path().join("with-image.zip");
+        export(&mut a, id_a, &zip);
+
+        // 目标机没有资源库别名，只有内容不同的磁盘旧文件：必须拒绝，不能遮蔽。
+        let mut b = ManuscriptStore::open(&dir.path().join("b.db")).unwrap();
+        std::fs::write(&pic, B).unwrap();
+        let err = import(&mut b, &zip, vec![ImportAction::New]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("图片同名"),
+            "unexpected: {err:#}"
+        );
+        assert!(b.list(&Default::default()).unwrap().is_empty());
+        assert_eq!(std::fs::read(&pic).unwrap(), B);
+
+        // 磁盘文件内容与包一致：正常导入，别名进库，磁盘文件不被触碰。
+        std::fs::write(&pic, A).unwrap();
+        let summary = import(&mut b, &zip, vec![ImportAction::New]).unwrap();
+        assert_eq!(summary.created, 1);
+        assert_eq!(std::fs::read(&pic).unwrap(), A);
+        assert_eq!(
+            b.resource_bytes("images/pic.png").unwrap().as_deref(),
+            Some(A)
+        );
     }
 
     #[test]

@@ -416,7 +416,13 @@ pub(crate) fn put(
         let result = put_with(&global.conn, logical, original_name, media_override, bytes);
         match result {
             Ok(()) => {
-                global.conn.execute_batch("COMMIT")?;
+                // COMMIT 自己也可能失败（磁盘满、忙碌）：事务在连接上残留时，
+                // 下一次 BEGIN IMMEDIATE 会报「cannot start a transaction within
+                // a transaction」，此后所有资源写入一直失败直到重启——必须回滚清场。
+                if let Err(error) = global.conn.execute_batch("COMMIT") {
+                    let _ = global.conn.execute_batch("ROLLBACK");
+                    return Err(error).context("提交资源事务失败");
+                }
                 Ok(true)
             }
             Err(error) => {
@@ -431,10 +437,16 @@ pub(crate) fn put(
 ///
 /// 迁移旧图片时先入库、确认落盘、再删原文件：WAL 模式下仅提交还不够，
 /// 断电可能丢掉尚未 checkpoint 的帧，那时原文件已经被删就是唯一副本丢失。
+/// checkpoint 忙碌（另一连接持读/写）时按失败处理：调用方保留原文件，
+/// WAL 里的帧只是延后合并，不会丢。
 pub(crate) fn checkpoint() -> Result<()> {
     with_current(|conn| {
-        conn.execute_batch("PRAGMA wal_checkpoint(FULL)")
+        // pragma 的结果在返回行里（busy, log, checkpointed）：execute_batch 会
+        // 把整行丢弃，busy 标志必须显式查出来，否则「没校验点就删原文件」。
+        let busy: i64 = conn
+            .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| row.get(0))
             .context("资源库 checkpoint 失败")?;
+        anyhow::ensure!(busy == 0, "资源库 checkpoint 被占用，请稍后再试");
         Ok(())
     })?;
     Ok(())

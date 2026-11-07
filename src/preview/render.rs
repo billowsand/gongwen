@@ -1098,11 +1098,24 @@ pub(crate) fn diagram_image_block(
 
 /// `research` 为真时按 `figure_size` 定宽居中，否则是公文的排法。
 fn figure_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str, research: bool) {
+    // 一次 meta 查询拿全：原名、MIME 与内容指纹。这个函数每帧都跑，
+    // 分开调 display_name/is_pdf/stamp 会让每张图每帧多查好几次资源库。
+    let meta = images::meta(src);
     // 导出与版面用的是资源库里的原名；新引用 `images/<uuid>` 本身没有语义。
-    let file_name = images::display_name(src);
+    let file_name = meta.as_ref().map_or_else(
+        || src.rsplit('/').next().unwrap_or(src).to_string(),
+        |meta| meta.original_name.clone(),
+    );
     // 格式按库里的 MIME（旧文件按扩展名回退）判断，不再看路径后缀。
-    if images::is_pdf(src) {
-        return pdf_block(ui, metrics, alt, src, &file_name, research);
+    if meta
+        .as_ref()
+        .is_some_and(|meta| meta.media_type == "application/pdf")
+    {
+        let stamp = meta
+            .as_ref()
+            .and_then(images::stamp_of)
+            .unwrap_or_else(|| images::stamp(src));
+        return pdf_block(ui, metrics, alt, src, &file_name, stamp, research);
     }
     let bytes = match images::read(src) {
         Ok(bytes) => bytes,
@@ -1118,7 +1131,11 @@ fn figure_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str, rese
     };
     // 每张图片一个固定 uri，egui 的 ImageCache 按 uri 缓存解码结果，避免每帧重读重解码。
     // 后缀带上资源内容指纹：同一个路径换了对象（比如重导入）就换 uri，不会继续用旧纹理。
-    let uri = format!("bytes://{src}@{}", images::stamp(src));
+    let stamp = meta
+        .as_ref()
+        .and_then(images::stamp_of)
+        .unwrap_or_else(|| images::stamp(src));
+    let uri = format!("bytes://{src}@{stamp}");
     // 用 fit_to_original_size 按纹理尺寸布局，再受 max_size 限制（宽=版心、高不设限）。
     // 不能用默认的 Fraction 适配：滚动区里 available_size.y 是无穷大，会把图片高度
     // 撑成无穷大，矩形超出可视区域而不绘制。
@@ -1171,9 +1188,9 @@ fn pdf_block(
     alt: &str,
     src: &str,
     file_name: &str,
+    stamp: u64,
     research: bool,
 ) {
-    let stamp = images::stamp(src);
     // 缓存键带内容指纹；未命中时后台线程才读字节（资源库优先，旧数据回退文件），
     // 主线程不碰 IO，也不把路径传进光栅化。
     let logical = src.to_string();
