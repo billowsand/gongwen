@@ -272,9 +272,15 @@ impl GongwenApp {
         setting_row(
             ui,
             "停用密码保护",
-            Some("锁定后输入一次密码，把数据解密回明文，回到无密码状态。"),
+            Some(
+                "锁定后输入一次密码，把全部本机数据解密回明文并删除应用锁。历史副本、SSD 残留与系统快照不能撤回；停用后同机其他用户或拿到磁盘的人可直接读取。",
+            ),
             |ui| {
                 if self.vault_page.disable_confirm {
+                    ui.colored_label(
+                        theme::danger(),
+                        "停用会一次性解除所有数据的加密；如有第二密码系统，必须先清除第二密码。",
+                    );
                     if ui.button("确认停用").clicked() {
                         self.vault_apply_disable();
                     }
@@ -453,6 +459,15 @@ impl GongwenApp {
     fn vault_apply_disable(&mut self) {
         // 停用 = 解密回明文：先标记，再锁定；锁屏输入一次密码完成数据库解密，
         // 之后删锁文件、写「暂不设置」标记，回到无密码状态。
+        //
+        // 第二密码系统若还有加密数据，停用删锁后那些数据永远解不开，应用下次
+        // 启动还会被判成「锁文件丢失」。必须先清掉第二密码（或从备份恢复）。
+        if crate::vault::slot_has_encrypted_data(crate::storage::DataSlot::Decoy) {
+            self.fail_vault(
+                "第二密码系统仍有加密数据：请先点「清除第二密码」，或从备份恢复后再停用密码保护。",
+            );
+            return;
+        }
         match crate::vault::request_disable() {
             Ok(()) => {
                 self.vault_page.disable_confirm = false;

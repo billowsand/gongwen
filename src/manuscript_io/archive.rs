@@ -51,9 +51,40 @@ impl PackageWriter {
         Ok(())
     }
 
-    pub(super) fn finish(self) -> Result<File> {
+    pub(super) fn finish(mut self) -> Result<File> {
+        // 头部加密复用当前内容方法的 AES 参数；换一套新 salt/IV 再 finish，
+        // 避免头部与最后一个条目共用同一组 CBC IV。
+        self.writer
+            .set_content_methods(vec![aes_options(&self.password).into()]);
         Ok(self.writer.finish()?)
     }
+}
+
+/// 旧 ZIP 稿件包先看 EOCD 里的条目总数：ZIP64 标记（0xFFFF）意味着条目数
+/// 由 ZIP64 记录决定，可能在 `ZipArchive::new` 解析中央目录时先吃掉大量内存。
+/// 正常稿件包不会有几万个条目，遇到标记直接拒绝。
+fn ensure_zip_entry_budget(file: &mut File) -> Result<()> {
+    let len = file.metadata()?.len();
+    if len < 22 {
+        bail!("ZIP 稿件包结构不完整");
+    }
+    let tail_len = len.min(64 * 1024);
+    file.seek(SeekFrom::End(-(tail_len as i64)))?;
+    let mut tail = Vec::with_capacity(tail_len as usize);
+    file.take(tail_len).read_to_end(&mut tail)?;
+    file.seek(SeekFrom::Start(0))?;
+    let Some(pos) = tail.windows(4).rposition(|w| w == b"PK\x05\x06") else {
+        bail!("ZIP 稿件包缺少中央目录结尾");
+    };
+    let record = &tail[pos..];
+    ensure!(record.len() >= 22, "ZIP 稿件包结构不完整");
+    let entries = u16::from_le_bytes([record[10], record[11]]) as usize;
+    ensure!(
+        entries < u16::MAX as usize,
+        "稿件包条目过多（ZIP64 大包不支持，请改用新版 7z 包）"
+    );
+    ensure!(entries <= MAX_ENTRIES, "稿件包条目过多");
+    Ok(())
 }
 
 pub(super) enum PackageReader {
@@ -98,9 +129,10 @@ impl PackageReader {
                 password,
             })
         } else if magic.starts_with(b"PK\x03\x04") || magic.starts_with(b"PK\x05\x06") {
-            Ok(Self::Zip(
-                zip::ZipArchive::new(file).context("文件不是有效的 ZIP 稿件包")?,
-            ))
+            ensure_zip_entry_budget(&mut file)?;
+            let archive = zip::ZipArchive::new(file).context("文件不是有效的 ZIP 稿件包")?;
+            ensure!(archive.len() <= MAX_ENTRIES, "稿件包条目过多");
+            Ok(Self::Zip(archive))
         } else {
             bail!("文件不是有效的公文助手稿件包（支持 7z 与旧 ZIP）")
         }
@@ -191,6 +223,30 @@ mod tests {
     const PASSWORD: &str = "Jade!River7Cloud";
     const NAME: &str = "pdf/关于人事安排的通知.pdf";
     const CONTENT: &[u8] = b"confidential document body for archive tests";
+
+    /// 旧 ZIP 包的 EOCD 声明 ZIP64 条目数（0xFFFF）时必须先拒绝，
+    /// 不能让 `ZipArchive::new` 先解析可能巨大的中央目录。
+    #[test]
+    fn zip64_packages_are_rejected_before_parsing_the_central_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.zip");
+        let mut eocd = vec![b'P', b'K', 5, 6];
+        eocd.extend_from_slice(&[0; 6]);
+        eocd.extend_from_slice(&u16::MAX.to_le_bytes()); // total entries
+        eocd.extend_from_slice(&[0; 10]); // 中央目录大小/偏移 + 注释长度
+        std::fs::write(&path, &eocd).unwrap();
+        let mut file = std::fs::File::open(&path).unwrap();
+        let error = ensure_zip_entry_budget(&mut file).unwrap_err();
+        assert!(format!("{error:#}").contains("条目过多"));
+        // 正常的 1 条记录可以通过。
+        let mut ok = vec![b'P', b'K', 5, 6];
+        ok.extend_from_slice(&[0; 6]);
+        ok.extend_from_slice(&1u16.to_le_bytes());
+        ok.extend_from_slice(&[0; 10]);
+        std::fs::write(&path, &ok).unwrap();
+        let mut file = std::fs::File::open(&path).unwrap();
+        ensure_zip_entry_budget(&mut file).unwrap();
+    }
 
     fn write_sample(path: &Path) {
         let mut writer = PackageWriter::new(File::create(path).unwrap(), PASSWORD).unwrap();

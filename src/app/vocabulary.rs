@@ -277,27 +277,33 @@ impl GongwenApp {
     }
 
     pub(crate) fn export_blank_vocabulary_template(&mut self) {
-        self.request_file(
-            FileDialogSpec::save_file()
-                .filter("Excel", &["xlsx"])
-                .file_name("公文助手标准词库模板.xlsx"),
-            |app, path| {
-                let Some(path) = path else {
-                    return;
-                };
-                let codes: Vec<String> = app
-                    .config
-                    .vocabulary
-                    .iter()
-                    .filter(|e| e.category == VocabularyCategory::Unit)
-                    .map(|e| e.code.trim().to_string())
-                    .filter(|c| !c.is_empty())
-                    .collect();
-                let result = vocabulary_xlsx::to_xlsx(&[], &path, &codes);
-                match result {
-                    Ok(()) => app.status = format!("空白词库模板已导出到 {}。", path.display()),
-                    Err(error) => app.status = format!("模板导出失败：{error}"),
-                }
+        let spec = FileDialogSpec::save_file()
+            .filter("Excel", &["xlsx"])
+            .file_name("公文助手标准词库模板.xlsx");
+        // 模板本身是空白表，但数据校验列表会带出配置里的单位代字（可反推发文单位），
+        // 与标准词库导出同属普通文件出口，加密工作区里先确认风险。
+        self.request_output_with_warning(
+            "导出空白词库模板（数据校验列表含单位代字）",
+            super::output_guard::PII_EXPORT_WARNING,
+            move |app| {
+                app.request_file(spec, |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    let codes: Vec<String> = app
+                        .config
+                        .vocabulary
+                        .iter()
+                        .filter(|e| e.category == VocabularyCategory::Unit)
+                        .map(|e| e.code.trim().to_string())
+                        .filter(|c| !c.is_empty())
+                        .collect();
+                    let result = vocabulary_xlsx::to_xlsx(&[], &path, &codes);
+                    match result {
+                        Ok(()) => app.status = format!("空白词库模板已导出到 {}。", path.display()),
+                        Err(error) => app.status = format!("模板导出失败：{error}"),
+                    }
+                });
             },
         );
     }

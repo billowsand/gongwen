@@ -829,7 +829,7 @@ pub(crate) fn read_path(path: &Path, kind: &str, max_bytes: u64) -> Result<Vec<u
 /// 应用锁启用后必须整份密封的文件名单。唯一来源是 [`crate::storage::SEALED_FILE_NAMES`]，
 /// 这里只做转出：解锁迁移、明文嗅探、解封、擦除都必须用同一份，漏一项就是永久明文。
 /// 数据库不在这份名单里（走 SQLCipher 迁移）。
-pub(crate) const SEALED_FILE_NAMES: [&str; 8] = crate::storage::SEALED_FILE_NAMES;
+pub(crate) const SEALED_FILE_NAMES: [&str; 9] = crate::storage::SEALED_FILE_NAMES;
 
 // ── 明文 ⇄ 密文迁移 ─────────────────────────────────────────────────
 
@@ -1709,7 +1709,11 @@ fn apply_key_with(conn: &rusqlite::Connection, key: &[u8; DEK_LEN], active: bool
 /// 覆写一遍再删：明文库文件直接 delete 会被恢复工具捞回来。
 /// 尽力而为——覆写失败仍删除，只是不保证抗恢复。
 pub(crate) fn overwrite_then_delete(path: &Path) {
-    if let Ok(metadata) = std::fs::metadata(path)
+    // 只处理普通文件本身：`std::fs::metadata` 会跟随符号链接，覆写的就会是
+    // 链接目标（可能是配置目录外的用户文件）。这里用 `symlink_metadata`
+    // 拒绝链接，链接本身留给后面的 `remove_file` 只删链接。
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && metadata.file_type().is_file()
         && let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(path)
     {
         use std::io::Write as _;
@@ -2478,6 +2482,29 @@ mod tests {
         // 幂等：再跑一次不重复加密、不破坏已封文件。
         ensure_slot_encrypted().unwrap();
         assert!(is_sealed_file(&std::fs::read(&styles).unwrap()));
+        drop(dir);
+        reset();
+    }
+
+    /// 旧版根目录 `apis.json`（v0.8 之前的数据接口配置）没有懒迁移时也必须
+    /// 被应用锁密封：它含内网地址、请求头与参数说明，漏掉就是永久明文，
+    /// 还会让全量备份的「内部只许密文」检查永久失败。
+    #[test]
+    fn ensure_slot_encrypted_seals_legacy_root_apis_json() {
+        let dir = use_temp_dir();
+        set_key_handle([9u8; DEK_LEN], true);
+        let legacy = crate::storage::config_dir().unwrap().join("apis.json");
+        std::fs::write(&legacy, br#"{"services":[{"base":"http://intranet"}]}"#).unwrap();
+        assert!(slot_needs_encryption(DataSlot::Real));
+        ensure_slot_encrypted().unwrap();
+        assert!(is_sealed_file(&std::fs::read(&legacy).unwrap()));
+        assert!(!slot_needs_encryption(DataSlot::Real));
+        // 停用还要能把它解回明文，否则停用会卡在残留检查上。
+        decrypt_slot_files().unwrap();
+        assert_eq!(
+            std::fs::read(&legacy).unwrap(),
+            br#"{"services":[{"base":"http://intranet"}]}"#
+        );
         drop(dir);
         reset();
     }

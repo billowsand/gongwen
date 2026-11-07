@@ -634,7 +634,12 @@ pub(crate) fn migrate_legacy_files() -> Result<MigrateReport> {
             .collect();
         entries.sort();
         for path in entries {
-            if !path.is_file() {
+            // 迁移会先读原文件再覆写删除：符号链接不能跟，否则读写的都是
+            // 配置目录外的目标；链接本身留给人工处理，不进资源库。
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !metadata.file_type().is_file() {
                 continue;
             }
             let Some(name) = path

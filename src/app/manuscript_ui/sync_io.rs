@@ -921,6 +921,16 @@ pub(crate) fn purge_plaintext_caches() {
     let _ = purge_staged_print_files();
     // 花脸稿打印预览（含《份号清单.txt》）。
     crate::redline::purge_redline_previews();
+    // `.gwx` 导入的暂存副本：内容是包密文，但副本文件名沿用原件（磁盘上仍是
+    // 明文元数据）。锁定、启动与退出都不该留下它；需要导入时会重新复制。
+    if let Ok(root) = crate::package_file::staging_root() {
+        crate::package_file::clear_staging(&root);
+    }
+    // 崩溃留下的原子写临时文件（`.tmpXXXXXX`）可能是明文配置/密钥副本：
+    // 以后启用应用锁也不会被迁移扫描认出来，必须在这里清掉。
+    if let Ok(dir) = crate::storage::config_dir() {
+        crate::storage::remove_stale_write_temp_files(&dir);
+    }
 }
 
 /// 清掉崩溃残留的送打副本（`缓存目录/print/<uuid>.pdf`）。只删这个目录里的

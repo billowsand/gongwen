@@ -9,6 +9,8 @@ pub(super) struct PasswordSettings {
     show: bool,
     notice: String,
     saving: Option<std::sync::mpsc::Receiver<anyhow::Result<()>>>,
+    /// 「重置损坏的导出设置」需要点两次，避免误删还能用的密码文件。
+    reset_confirm: bool,
 }
 
 impl PasswordSettings {
@@ -48,10 +50,46 @@ impl PasswordSettings {
                 ui.weak("勾选时加密导出，不弹安全风险确认；不勾选时导出普通文件，每次都需明确确认。打印与剪贴板仍单独确认。");
             }
             Err(error) => {
+                // fail-closed：解不开就不导出。但用户必须有一条恢复路径，
+                // 否则只能手工去配置目录删文件（而且不知道该删哪个）。
                 ui.colored_label(
                     crate::theme::danger(),
                     format!("导出设置读取失败：{error:#}"),
                 );
+                ui.weak("导出密码文件可能来自另一代锁设置或已损坏。重置只删除这份导出密码设置，不影响稿件、登录密码与其它配置；旧加密成果仍可用原密码在系统阅读器打开。");
+                if self.reset_confirm {
+                    ui.colored_label(
+                        crate::theme::danger(),
+                        "重置后应用内无法再预览旧加密 PDF，导出前需要重新设置导出密码。",
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("确认重置导出设置").clicked() {
+                            let result = crate::vault::key_handle().map_or_else(
+                                || Err(anyhow::anyhow!("当前已锁定，未重置")),
+                                |handle| {
+                                    let path = crate::storage::slot_file_for(
+                                        handle.slot(),
+                                        crate::export::protection::PASSWORD_FILE,
+                                    )?;
+                                    crate::vault::erase_file_checked(&path)
+                                },
+                            );
+                            self.reset_confirm = false;
+                            self.notice = match result {
+                                Ok(()) => "已重置导出设置，请设置新的导出密码。".into(),
+                                Err(error) => format!("重置失败：{error:#}"),
+                            };
+                        }
+                        if ui.button("取消").clicked() {
+                            self.reset_confirm = false;
+                        }
+                    });
+                } else if ui.button("重置导出设置…").clicked() {
+                    self.reset_confirm = true;
+                }
+                if !self.notice.is_empty() {
+                    ui.label(&self.notice);
+                }
                 return;
             }
         }

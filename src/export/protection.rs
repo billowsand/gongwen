@@ -157,8 +157,12 @@ impl Protection {
 
     pub(crate) fn encode(&self, path: &Path, bytes: &[u8]) -> Result<(PathBuf, Vec<u8>)> {
         self.check_slot()?;
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        match ext {
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match ext.as_str() {
             "pdf" => Ok((path.into(), encrypt_pdf(bytes, &self.password)?)),
             "docx" => Ok((path.into(), encrypt_word(bytes, &self.password)?)),
             "zip" => {
@@ -252,14 +256,22 @@ fn encrypt_pdf(bytes: &[u8], password: &str) -> Result<Vec<u8>> {
 fn encrypt_archive(entries: Vec<(String, Vec<u8>)>, password: &str) -> Result<Vec<u8>> {
     use sevenz_rust2::encoder_options::{AesEncoderOptions, Lzma2Options};
     use sevenz_rust2::{ArchiveEntry, ArchiveWriter, Password};
+    // 每个条目单独生成 salt 与 IV：7z 的 AES 参数是按「当前内容方法」用的，
+    // 整包共用一套参数会让同 key+IV 的 CBC 流泄露条目之间相同前缀的信息。
+    // 头部加密也复用同一套方法，所以最后还要换一套新参数再 finish。
+    fn methods(password: &str) -> Vec<sevenz_rust2::EncoderConfiguration> {
+        let mut aes = AesEncoderOptions::new(Password::from(password));
+        aes.num_cycles_power = 19;
+        vec![aes.into(), Lzma2Options::from_level(1).into()]
+    }
     let mut writer = ArchiveWriter::new(Cursor::new(Vec::new()))?;
     writer.set_encrypt_header(true);
-    let mut aes = AesEncoderOptions::new(Password::from(password));
-    aes.num_cycles_power = 19;
-    writer.set_content_methods(vec![aes.into(), Lzma2Options::from_level(1).into()]);
+    writer.set_content_methods(methods(password));
     for (name, bytes) in entries {
+        writer.set_content_methods(methods(password));
         writer.push_archive_entry(ArchiveEntry::new_file(&name), Some(bytes.as_slice()))?;
     }
+    writer.set_content_methods(methods(password));
     Ok(writer.finish()?.into_inner())
 }
 

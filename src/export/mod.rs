@@ -447,8 +447,13 @@ pub(crate) fn export_artifacts(
         artifacts.files = artifacts
             .files
             .into_iter()
-            .map(|p| paths[&p].clone())
-            .collect();
+            .map(|p| {
+                paths
+                    .get(&p)
+                    .cloned()
+                    .with_context(|| format!("加密输出缺失：{}", p.display()))
+            })
+            .collect::<Result<Vec<_>>>()?;
         // 清单不参与主格式查找，但用户也应能找到加密后的清单。
         for path in paths.into_values() {
             if !artifacts.files.contains(&path) {
@@ -727,8 +732,19 @@ pub(crate) fn write_pdf(
     {
         // 清单含份号、主送/抄送/承办单位，和 PDF 同等敏感：原子写 + Unix 0600，
         // 不能默认 0644 摊在输出目录里。写失败不影响 PDF。
+        //
+        // 加密导出时走内存捕获，这份清单随后会被 encrypt_archive 变成 7z；
+        // 明文导出（或未启用应用锁）必须自己走 atomic_write，不能落到
+        // `std::fs::write` —— 那是 0644 且先截断后写。
         let roster_path = path.with_extension("份号清单.txt");
-        let _ = mdx::memory_files::write_output(&roster_path, roster.as_bytes());
+        if mdx::memory_files::output_is_captured() {
+            let _ = mdx::memory_files::write_output(&roster_path, roster.as_bytes());
+        } else {
+            let _ = crate::storage::atomic_write(&roster_path, |file| {
+                file.write_all(roster.as_bytes())?;
+                Ok(())
+            });
+        }
     }
     Ok(outcome)
 }

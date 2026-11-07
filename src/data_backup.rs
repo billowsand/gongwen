@@ -321,15 +321,10 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path, password: &str) 
             let size = file.metadata()?.len();
             let mut head = Vec::new();
             (&mut file).take(64).read_to_end(&mut head)?;
-            if let Some((_, public)) = crate::help::content::IMAGES
-                .iter()
-                .find(|(n, _)| rel == &Path::new("images").join(n))
-            {
+            if let Some(public_len) = public_help_head_len(rel) {
                 file.rewind()?;
                 let mut bytes = Vec::new();
-                (&mut file)
-                    .take(public.len() as u64 + 1)
-                    .read_to_end(&mut bytes)?;
+                (&mut file).take(public_len + 1).read_to_end(&mut bytes)?;
                 ensure_encrypted_payload(rel, &bytes)?;
             } else {
                 ensure_encrypted_payload(rel, &head)?;
@@ -343,6 +338,9 @@ pub(crate) fn export_from(config_dir: &Path, target_zip: &Path, password: &str) 
             )?;
             anyhow::ensure!(written.size() == size, "备份源文件在读取期间改变，已中止");
         }
+        // 头部加密复用最后一套 AES 参数；换一套新 salt/IV 再 finish，
+        // 避免头部与最后一个条目共用同一组 CBC IV。
+        archive::methods(&mut writer, password);
         writer.finish()?.sync_all()?;
     }
     temp.as_file().sync_all()?;
@@ -964,7 +962,12 @@ fn is_excluded(rel: &Path) -> bool {
     if rel.components().next().is_some_and(|first| {
         let name = first.as_os_str().to_string_lossy();
         // 真实槽与诱饵槽的崩溃日志目录都排除（见 `crash_log::log_dir`）。
-        name.eq_ignore_ascii_case(LOG_DIR) || name.eq_ignore_ascii_case(DECOY_LOG_DIR)
+        // `help/` 是旧版本写在配置目录里的帮助手册 PDF（随包公开、可重建）；
+        // 新版已改放缓存目录，但用户机器上可能留着旧的明文 PDF，不排除就会让
+        // 整份备份被「未加密文件」拒绝。
+        name.eq_ignore_ascii_case(LOG_DIR)
+            || name.eq_ignore_ascii_case(DECOY_LOG_DIR)
+            || name.eq_ignore_ascii_case("help")
     }) {
         return true;
     }
@@ -972,6 +975,10 @@ fn is_excluded(rel: &Path) -> bool {
         return false;
     };
     name == UNSEEN_CRASH_MARKER
+        // 操作系统自己的元数据（访达/Finder、AppleDouble、Windows 缩略图）：
+        // 用户没有放进去过，也不可能「完成加密」，不能让它把整份备份拒掉。
+        || matches!(name, ".DS_Store" | "Thumbs.db" | "desktop.ini")
+        || name.starts_with("._")
         // 停用加密的待办标记：带着它恢复，下次解锁会自动把数据解成明文并删锁。
         || name == "vault.pending-disable"
         || name.ends_with("-vault.pending-disable")
@@ -1025,6 +1032,39 @@ fn safe_relative_path(name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// 随包公开的帮助截图副本：名称与字节都与内置资源一致时，真实槽 (`images/`)
+/// 与诱饵槽 (`alt-images/`) 都算公开内容，不要求 GWA2 密封。
+///
+/// 诱饵槽里的帮助截图同样是程序自己写出的公开字节，却曾因只认 `images/` 让
+/// 全量备份永久失败；这里按内容判定，不再按槽位路径。
+fn public_help_image(rel: &Path, bytes: &[u8]) -> bool {
+    let Some(parent) = rel.parent() else {
+        return false;
+    };
+    if parent != Path::new("images") && parent != Path::new("alt-images") {
+        return false;
+    }
+    let Some(name) = rel.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    crate::help::content::IMAGES
+        .iter()
+        .any(|(bundled, public)| *bundled == name && *public == bytes)
+}
+
+/// 这份文件最多先读多少字节才能判定是不是公开帮助截图。
+fn public_help_head_len(rel: &Path) -> Option<u64> {
+    let parent = rel.parent()?;
+    if parent != Path::new("images") && parent != Path::new("alt-images") {
+        return None;
+    }
+    let name = rel.file_name()?.to_str()?;
+    crate::help::content::IMAGES
+        .iter()
+        .find(|(bundled, _)| *bundled == name)
+        .map(|(_, public)| public.len() as u64)
+}
+
 /// 还原前仅接受本机加密后的载荷；绝不把归档解密后的业务明文写入隔离目录。
 fn ensure_encrypted_payload(rel: &Path, bytes: &[u8]) -> Result<()> {
     if rel == Path::new("vault.dat") {
@@ -1036,10 +1076,7 @@ fn ensure_encrypted_payload(rel: &Path, bytes: &[u8]) -> Result<()> {
             bytes.len() >= 16 && !bytes.starts_with(b"SQLite format 3"),
             "备份包含未加密数据库，请先完成应用锁迁移"
         );
-    } else if crate::help::content::IMAGES
-        .iter()
-        .any(|(n, public)| rel == Path::new("images").join(n) && bytes == *public)
-    {
+    } else if public_help_image(rel, bytes) {
         return Ok(());
     } else {
         anyhow::ensure!(
@@ -1062,13 +1099,8 @@ fn extract_all(archive: &mut archive::Reader, target: &Path) -> Result<usize> {
             let rel = safe_relative_path(entry.name())?;
             let mut head = Vec::new();
             (&mut *reader).take(64).read_to_end(&mut head)?;
-            if let Some((_, public)) = crate::help::content::IMAGES
-                .iter()
-                .find(|(n, _)| rel == Path::new("images").join(n))
-            {
-                (&mut *reader)
-                    .take(public.len() as u64 + 1)
-                    .read_to_end(&mut head)?;
+            if let Some(public_len) = public_help_head_len(&rel) {
+                (&mut *reader).take(public_len + 1).read_to_end(&mut head)?;
             }
             ensure_encrypted_payload(&rel, &head)?;
             let dest = target.join(&rel);
@@ -1303,6 +1335,42 @@ mod tests {
         fs::write(target.join("keep"), b"original").unwrap();
         assert!(restore_backup(&out, &target, PASSWORD).is_err());
         assert_eq!(fs::read(target.join("keep")).unwrap(), b"original");
+    }
+
+    /// 帮助手册 PDF 与帮助截图是随包公开、可重建的明文；它们不能让加密工作区的
+    /// 全量备份永久失败（旧版曾把帮助 PDF 写在配置目录、把截图写进诱饵槽）。
+    #[test]
+    fn public_help_plaintext_never_blocks_a_backup() {
+        assert!(is_excluded(Path::new("help/公文助手使用帮助-abc.pdf")));
+        // 诱饵槽里的公开截图与真实槽同权：按名称 + 字节判定，不按槽位路径。
+        let (name, public) = crate::help::content::IMAGES[0];
+        for base in ["images", "alt-images"] {
+            let rel = Path::new(base).join(name);
+            assert!(
+                ensure_encrypted_payload(&rel, public).is_ok(),
+                "{rel:?} 是随包公开字节，不应卡住备份"
+            );
+            assert!(ensure_encrypted_payload(&rel, b"user-private-bytes").is_err());
+        }
+        // 别处同名文件不算公开内容。
+        assert!(ensure_encrypted_payload(&Path::new("help").join(name), public).is_err());
+
+        // 端到端：配置目录里同时有旧帮助 PDF、诱饵槽公开截图与密封配置，备份应成功。
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        fs::create_dir_all(&config).unwrap();
+        crate::storage::set_test_config_dir(Some(config.clone()));
+        let (_, unlocked) = crate::vault::Vault::create("Strong!Pass802", None, false).unwrap();
+        crate::vault::set_key_handle(*unlocked.unwrap().dek, true);
+        crate::vault::write_path(&config.join("config.json"), "config", b"{}").unwrap();
+        write(&config, "help/公文助手使用帮助-old.pdf", b"%PDF-public");
+        write(&config, &format!("alt-images/{name}"), public);
+        let out = root.path().join("backup.7z");
+        export_from(&config, &out, PASSWORD).unwrap();
+        let info = inspect_backup(&out, PASSWORD).unwrap();
+        assert!(!info.groups.iter().any(|group| group.name == "help"));
+        crate::vault::clear_key_handle();
+        crate::storage::set_test_config_dir(None);
     }
 
     #[test]

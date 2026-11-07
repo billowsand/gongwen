@@ -283,7 +283,7 @@ impl GongwenApp {
                             theme::icon_text_button(theme::Icon::FileDown, "导出 PDF"),
                         )
                         .on_hover_text(
-                            "把勾选的稿件导出为 PDF 并打包 zip：盖章件直接取附件、非盖章件编译生成",
+                            "把勾选的稿件导出为 PDF、打进文件名加密的 7z：盖章件直接取附件、非盖章件编译生成",
                         )
                         .clicked()
                     {
@@ -417,7 +417,7 @@ impl GongwenApp {
                 Dismiss::EscOnly,
                 |ui| {
                     ui.label(format!(
-                        "已选 {} 篇稿件，导出为 PDF 压缩包：",
+                        "已选 {} 篇稿件，导出为 PDF 的加密 7z 包（内容与文件名均加密）：",
                         export.ids.len()
                     ));
                     ui.checkbox(&mut export.stamped, "导出盖章件（直接取附件 PDF）");

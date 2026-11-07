@@ -91,6 +91,8 @@ struct GateState {
     /// 统一的失败文案：密码错误、两次输入不一致、锁文件异常都走这里，
     /// 不区分类别。
     error: Option<String>,
+    /// 中性提示（例如「已取消停用申请」），不是错误、不用危险色。
+    notice: Option<String>,
     /// 首帧把焦点放进第一个密码框。
     focused: bool,
     show_password: bool,
@@ -123,6 +125,12 @@ enum WorkKind {
 }
 
 impl GateState {
+    /// 撤销停用申请后清掉旧错误，换成中性提示。
+    fn exception_notice(&mut self) {
+        self.error = None;
+        self.notice = Some("已取消停用申请；请正常输入密码解锁。".into());
+    }
+
     fn first_run() -> Self {
         Self {
             mode: GateMode::FirstRun,
@@ -133,6 +141,7 @@ impl GateState {
             decoy_confirm: String::new(),
             with_decoy: false,
             error: None,
+            notice: None,
             focused: false,
             show_password: false,
             veiled: false,
@@ -171,6 +180,15 @@ impl GateState {
 fn encrypted_data_on_disk() -> bool {
     crate::vault::slot_has_encrypted_data(DataSlot::Real)
         || crate::vault::slot_has_encrypted_data(DataSlot::Decoy)
+}
+
+/// 停用应用锁会删掉锁文件；另一套密码系统的密文从此再也没有 DEK。停用前
+/// 必须确认另一槽没有加密数据，否则重启会被判成「锁文件丢失」而永久进不去。
+fn other_slot_has_encrypted_data(slot: DataSlot) -> bool {
+    match slot {
+        DataSlot::Real => crate::vault::slot_has_encrypted_data(DataSlot::Decoy),
+        DataSlot::Decoy => crate::vault::slot_has_encrypted_data(DataSlot::Real),
+    }
 }
 
 /// 锁屏这一次交互要外壳做的事。
@@ -439,13 +457,15 @@ impl AppShell {
                     // 先确认当前槽位真的没有密文残留，再删锁封套。少解一类文件
                     // （apis/配置副本等）时，这里必须失败并保留封套，不能让数据
                     // 变成「没有 DEK 的密文」。
-                    if crate::vault::slot_has_encrypted_data(slot) {
+                    if crate::vault::slot_has_encrypted_data(slot)
+                        || other_slot_has_encrypted_data(slot)
+                    {
                         crate::vault::clear_key_handle();
                         crate::storage::set_writes_blocked(true);
                         let mut gate = GateState::unlock();
                         gate.veiled = !self.compact_startup;
                         gate.error = Some(
-                            "停用未完成：仍有加密数据没有解开，已保留密码保护设置。请重试或从备份恢复。"
+                            "停用未完成：仍有加密数据没有解开（包括另一套密码系统的数据），已保留密码保护设置。请重试或从备份恢复。"
                                 .into(),
                         );
                         self.phase = ShellPhase::Gate(gate);
@@ -469,7 +489,9 @@ impl AppShell {
                 crate::vault::clear_key_handle();
                 let mut gate = GateState::unlock();
                 gate.veiled = !self.compact_startup;
-                gate.error = Some(format!("数据处理失败：{message}"));
+                gate.error = Some(format!(
+                    "数据处理失败：{message}\n\n如果中止的是「停用密码保护」，已有部分数据被解密成明文；请重试，或点下方「取消停用」继续保留密码保护（解锁后这些明文会被重新加密）。"
+                ));
                 self.phase = ShellPhase::Gate(gate);
             }
         }
@@ -489,6 +511,16 @@ impl AppShell {
                             // 真实槽的解密与删锁，否则可否认性与数据都保不住。
                             let disable = unlocked.slot == DataSlot::Real
                                 && crate::vault::disable_pending(&unlocked.dek);
+                            // 停用会删锁文件；另一套密码系统若还有密文，删掉锁文件
+                            // 就等于把这些数据永久锁死。先要求用户清掉另一槽。
+                            if disable && other_slot_has_encrypted_data(unlocked.slot) {
+                                gate.error = Some(
+                                    "无法停用密码保护：另一套密码系统仍有加密数据，停用后它们会永远打不开。请先解锁进入设置页「清除第二密码」，或从备份恢复后再停用。".into(),
+                                );
+                                gate.password.clear();
+                                self.phase = ShellPhase::Gate(gate);
+                                return;
+                            }
                             // 没有要搬的明文数据（通常：上次解锁已迁完）就直接
                             // 进工作区，不再显示「正在加密」卡片——那张卡只在
                             // 真的有活干时出现。两套密码各自只看自己槽位的文件，
@@ -1227,7 +1259,7 @@ fn unlock_form(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<GateE
     let available = ui.available_rect_before_wrap();
     let width = (available.width() - 48.0).clamp(180.0, 304.0);
     let height = if crate::vault::disable_marker_present() {
-        178.0
+        212.0
     } else {
         154.0
     };
@@ -1314,8 +1346,26 @@ fn unlock_form(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<GateE
                         .color(theme::text_muted()),
                 );
             });
+            if crate::vault::disable_marker_present() {
+                ui.add_space(4.0);
+                if ui
+                    .button("取消停用，保留密码保护")
+                    .on_hover_text("只撤销本次「停用密码保护」的申请，不改动磁盘上的任何数据。")
+                    .clicked()
+                {
+                    crate::vault::cancel_disable();
+                    gate.exception_notice();
+                }
+            }
             if let Some(error) = gate.error.as_deref() {
                 ui.label(egui::RichText::new(error).color(theme::danger()));
+            }
+            if let Some(notice) = gate.notice.as_deref() {
+                ui.label(
+                    egui::RichText::new(notice)
+                        .size(theme::font_sizes::SMALL)
+                        .color(theme::text_soft()),
+                );
             }
         },
     );

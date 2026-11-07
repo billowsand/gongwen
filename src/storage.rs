@@ -13,8 +13,12 @@ const MAX_REMEMBERED_PASSWORD_BYTES: u64 = 1024;
 /// 擦除（[`wipe_slot_files`]）与读写侧（`ai_services::persistence`）都从这里派生。
 /// 名单漏一项的后果是「启用加密后该文件永久明文」——二期曾漏掉 `api-envs.json`
 /// 与 `api-tests.json`，`styles.json` 里还有样稿原文片段，所以统一放这里。
-pub(crate) const SEALED_FILE_NAMES: [&str; 8] = [
+pub(crate) const SEALED_FILE_NAMES: [&str; 9] = [
     "config.json",
+    // 旧版（v0.8 之前）数据接口配置曾写在根目录 `apis.json`；新版只在打开
+    // 「数据接口」页时才把它迁成 `apis/services.json`。它含内网地址、请求头与
+    // 参数说明，必须和应用锁一样受保护，否则升级后可能永久留在磁盘上明文。
+    "apis.json",
     ZIP_PASSWORD_FILE,
     ".export-password",
     "api-secrets.json",
@@ -29,7 +33,8 @@ pub(crate) const SEALED_FILE_NAMES: [&str; 8] = [
 pub(crate) const MERMAID_CACHE_DIR: &str = "mermaid-cache";
 
 /// [`SEALED_FILE_NAMES`] 里的 JSON 子集：`ai_services::persistence` 的读写名单。
-pub(crate) const SEALED_JSON_NAMES: [&str; 5] = [
+pub(crate) const SEALED_JSON_NAMES: [&str; 6] = [
+    "apis.json",
     "api-secrets.json",
     "api-envs.json",
     "api-tests.json",
@@ -115,9 +120,10 @@ pub fn slot_subdir_for(slot: DataSlot, name: &str) -> Result<PathBuf> {
 /// 不可读，物理删除不留残留。目录整棵删掉；删不掉的单个文件尽力而为。
 pub(crate) fn wipe_slot_files(slot: DataSlot) {
     // 单文件和库的 WAL/SHM 一起删；`manuscripts.db` 另有 `-wal/-shm` 后缀。
-    const FILES: [&str; 9] = [
+    const FILES: [&str; 10] = [
         "manuscripts.db",
         "config.json",
+        "apis.json",
         ".zip-password",
         ".export-password",
         "api-secrets.json",
@@ -126,9 +132,19 @@ pub(crate) fn wipe_slot_files(slot: DataSlot) {
         "styles.json",
         "metrics.json",
     ];
-    // 目录列表必须与真实使用的槽位私有目录一致；`images` 在 B 阶段前仍是
-    // 共享目录（`alt-images` 现在才成为诱饵槽的图片目录，见 `images::image_dir`）。
-    const DIRS: [&str; 6] = ["pi", "apis", "images", "mermaid-cache", "skills", "ime"];
+    // 目录列表必须与 vault 的迁移/停用解密/锁文件丢失探测保持一致；`images` 在
+    // B 阶段前仍是共享目录（`alt-images` 现在才成为诱饵槽的图片目录）。
+    // **`logs` 不能漏**：诱饵槽的崩溃日志同样由旧 DEK 加密，漏删会在停用应用锁
+    // 后留下「没有密钥的密文」，重启即被判成锁文件丢失。
+    const DIRS: [&str; 7] = [
+        "pi",
+        "apis",
+        "images",
+        "mermaid-cache",
+        "skills",
+        "ime",
+        "logs",
+    ];
     if let Ok(dir) = config_dir() {
         for name in FILES {
             for suffix in ["", "-wal", "-shm"] {
@@ -147,9 +163,12 @@ pub(crate) fn wipe_slot_files(slot: DataSlot) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if slot_relative_name(&name, slot)
-                    .is_some_and(|name| name.starts_with("config.json."))
-                {
+                if slot_relative_name(&name, slot).is_some_and(|name| {
+                    name.starts_with("config.json.")
+                        // 数据库迁移中断留下的旧库/临时库（`manuscripts.db.迁移-*`）：
+                        // 旧 DEK 的密文残留同样会让停用残留检查失败。
+                        || name.contains(".迁移-")
+                }) {
                     let _ = fs::remove_file(entry.path());
                 }
             }
@@ -625,6 +644,42 @@ pub fn save(config: &AppConfig) -> Result<()> {
     crate::units::identity::validate(&config.vocabulary).map_err(anyhow::Error::msg)?;
     let path = config_path()?;
     write_config(&path, config).context("保存配置失败，上一次有效配置会在替换前保留")
+}
+
+/// 清掉崩溃时留下的原子写临时文件（`tempfile` 默认名 `.tmpXXXXXX`）。
+///
+/// 为什么必须清：明文模式下保存 `config.json` / 密钥文件时进程被强杀，会留下
+/// 一份**明文**临时副本；之后启用应用锁的迁移扫描只认已知文件名，不会碰它，
+/// 于是永久明文，并让「全量备份内部只许密文」的检查永久失败。
+///
+/// 只删配置目录顶层、名字以 `.tmp` 开头、且超过一小时没有修改的普通文件：
+/// 一小时足够避开任何在途写入，也不会碰用户自己的数据。
+pub(crate) fn remove_stale_write_temp_files(dir: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let stale_before = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(3600))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with(".tmp") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let old = meta
+            .modified()
+            .map(|modified| modified < stale_before)
+            .unwrap_or(false);
+        if old {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// 给 SQLite 连接应用当前槽位的数据密钥（SQLCipher PRAGMA key）。
@@ -1128,6 +1183,53 @@ mod tests {
         );
     }
     /// 槽位前缀只能映射自己那一槽：真实文件不能被诱饵密钥处理，反之亦然。
+    /// 崩溃残留的原子写临时文件（`.tmpXXXXXX`）可能是明文配置副本：清掉旧的，
+    /// 但在途写入（新文件）与用户自己的 `.tmp` 后缀文件不能动。
+    #[test]
+    fn stale_atomic_write_temps_are_removed_but_fresh_files_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join(".tmpAbCdEf");
+        let fresh = dir.path().join(".tmpFresh1");
+        let user = dir.path().join("keep.tmp");
+        fs::write(&stale, b"plaintext config").unwrap();
+        fs::write(&fresh, b"in flight").unwrap();
+        fs::write(&user, b"user file").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        remove_stale_write_temp_files(dir.path());
+        assert!(!stale.exists(), "旧临时文件应清掉");
+        assert!(fresh.exists(), "在途写入不能删");
+        assert!(user.exists(), "只清 `.tmp` 前缀的原子写临时名");
+    }
+
+    /// 「清除第二密码」必须把诱饵槽的崩溃日志一起擦掉：日志用旧诱饵 DEK 密封，
+    /// 锁文件一换就再也解不开；残留下来还会让停用应用锁后误判「锁文件丢失」。
+    #[test]
+    fn wiping_a_slot_also_removes_its_logs_and_legacy_api_file() {
+        let dir = tempfile::tempdir().unwrap();
+        set_test_config_dir(Some(dir.path().to_owned()));
+        fs::create_dir_all(dir.path().join("alt-logs")).unwrap();
+        fs::write(dir.path().join("alt-logs/crash-1.log"), b"sealed").unwrap();
+        fs::write(dir.path().join("alt-apis.json"), b"legacy").unwrap();
+        fs::write(dir.path().join("alt-config.json"), b"sealed").unwrap();
+        wipe_slot_files(DataSlot::Decoy);
+        assert!(!dir.path().join("alt-logs").exists());
+        assert!(!dir.path().join("alt-apis.json").exists());
+        assert!(!dir.path().join("alt-config.json").exists());
+        // 真实槽的同名文件不受影响。
+        fs::write(dir.path().join("apis.json"), b"real").unwrap();
+        fs::write(dir.path().join("config.json"), b"real").unwrap();
+        wipe_slot_files(DataSlot::Decoy);
+        assert!(dir.path().join("apis.json").exists());
+        assert!(dir.path().join("config.json").exists());
+        set_test_config_dir(None);
+    }
+
     #[test]
     fn slot_relative_name_never_mixes_slots() {
         assert_eq!(
