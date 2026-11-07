@@ -26,6 +26,7 @@ fn setting_note_colored(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
 /// 设置页「应用锁」分区的输入草稿与会话内提示。
 #[derive(Default)]
 pub(crate) struct VaultPageState {
+    pub(super) export: super::export_password::PasswordSettings,
     /// 启用表单：主密码与确认。
     enable_real: String,
     enable_real_confirm: String,

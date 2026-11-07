@@ -353,6 +353,14 @@ impl Vault {
         Ok(Self { data })
     }
 
+    /// 只验证口令是否可用于登录，不切槽、不解锁、不升级旧文件。
+    pub(crate) fn accepts_password(&self, password: &str) -> bool {
+        self.data
+            .slots
+            .iter()
+            .any(|slot| try_open_slot(password, slot).is_some())
+    }
+
     /// 试两个槽，命中哪个返回哪个槽位与数据密钥；都不中返回 None。
     /// 顺序固定（先真实后诱饵），文案层不区分失败原因。
     /// v1 老格式命中时原地升级 v2：给命中槽补一把全新 DEK 并裹好写回
@@ -402,6 +410,12 @@ impl Vault {
         current_dek: Option<&[u8; DEK_LEN]>,
     ) -> Result<Unlocked> {
         check_password(password)?;
+        if key_handle().is_some()
+            && storage::slot_file(crate::export::protection::PASSWORD_FILE)?.is_file()
+            && crate::export::protection::ExportPolicy::load()?.password == password
+        {
+            bail!("登录密码不能与独立导出密码相同");
+        }
         let index = slot_index(slot);
         if index == 1 {
             // 借用检查：新密码不能恰好也是主密码。
@@ -815,7 +829,7 @@ pub(crate) fn read_path(path: &Path, kind: &str, max_bytes: u64) -> Result<Vec<u
 /// 应用锁启用后必须整份密封的文件名单。唯一来源是 [`crate::storage::SEALED_FILE_NAMES`]，
 /// 这里只做转出：解锁迁移、明文嗅探、解封、擦除都必须用同一份，漏一项就是永久明文。
 /// 数据库不在这份名单里（走 SQLCipher 迁移）。
-pub(crate) const SEALED_FILE_NAMES: [&str; 7] = crate::storage::SEALED_FILE_NAMES;
+pub(crate) const SEALED_FILE_NAMES: [&str; 8] = crate::storage::SEALED_FILE_NAMES;
 
 // ── 明文 ⇄ 密文迁移 ─────────────────────────────────────────────────
 
@@ -1397,7 +1411,7 @@ pub(crate) fn decrypt_slot_files() -> Result<()> {
         }
     }
     for name in SEALED_FILE_NAMES {
-        if name == ".zip-password" {
+        if matches!(name, ".zip-password" | ".export-password") {
             let password = storage::slot_file(name)?;
             if password.is_file() {
                 erase_file_checked(&password)?;

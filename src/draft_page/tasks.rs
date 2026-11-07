@@ -107,12 +107,13 @@ fn render_export_to(
     let bytes = files
         .remove(source)
         .ok_or_else(|| anyhow::anyhow!("内存中未生成所选格式"))?;
-    crate::storage::atomic_write(target, |file| {
-        use std::io::Write as _;
-        file.write_all(&bytes)?;
-        Ok(())
-    })?;
-    outcome.files = vec![target.to_path_buf()];
+    let logical_target = if kind == ExportKind::Typst {
+        target.with_extension("zip")
+    } else {
+        target.to_path_buf()
+    };
+    let target = export::protection::write_final(&logical_target, &bytes)?;
+    outcome.files = vec![target];
     Ok(outcome)
 }
 
@@ -167,7 +168,11 @@ impl DraftPage<'_> {
             self.start_confirmed_export(selection, open, print);
             return;
         }
-        if crate::vault::key_handle().is_some() {
+        if !print || crate::vault::key_handle().is_some() {
+            if !print && let Err(error) = export::protection::Protection::current() {
+                *self.status = format!("无法导出：{error:#}");
+                return;
+            }
             let key = self.doc.key;
             let mut formats = Vec::new();
             if selection.pdf {
@@ -200,7 +205,7 @@ impl DraftPage<'_> {
             let warning = if print {
                 super::super::app::output_guard::PRINT_WARNING
             } else {
-                super::super::app::output_guard::PLAINTEXT_WARNING
+                super::super::app::output_guard::DOCUMENT_WARNING
             };
             self.actions.push(DraftAction::ConfirmPlaintextOutput {
                 operation,

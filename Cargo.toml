@@ -105,6 +105,8 @@ sevenz-rust2 = { version = "0.25", default-features = false, features = ["aes256
 # 锁屏与密钥派生的缓冲清零（argon2 已带，这里直接引用其 trait）。
 zeroize = "1"
 datamatrix = "0.3.3"
+ms-offcrypto-writer = "1.0.7"
+rand = "0.9"
 
 [target.'cfg(windows)'.dependencies]
 # 应用内打印走原生 GDI：不依赖任何第三方 PDF 软件注册 print 谓词。
@@ -155,6 +157,7 @@ opt-level = 3
 [dev-dependencies]
 egui_kittest = { version = "0.36.2", default-features = false }
 insta = "1.48.0"
+office-crypto = "0.2"
 proptest = "1.11.0"
 
 # Typst 排版引擎打了一处公文补丁（两端对齐不压行内标点），见 vendor/typst-layout/README.md。

@@ -1060,8 +1060,8 @@ impl DraftPage<'_> {
     /// 导出花脸稿：基准版 → 当前修订，删掉的画红色删除线、新增的套蓝框。
     ///
     /// 与定稿导出一样放后台线程——PDF 要真编译一遍，同步做会把界面卡住几秒。
-    /// `print_preview` 为 true 时只出 PDF、写进缓存目录里按槽位隔离的预览目录
-    /// （原子写，Unix 0600），编完在内置查看器里打开，不在导出目录里留文件
+    /// `print_preview` 为 true 时只出 PDF、整份留在内存里（不落盘），
+    /// 编完在内置查看器里打开，不在导出目录里留文件
     /// （方案需求结论第 20 条「打印预览」）。
     fn export_redline(&mut self, formats: RedlineFormats, print_preview: bool) {
         let state = &self.doc.draft_diff;
@@ -1106,17 +1106,15 @@ impl DraftPage<'_> {
             }
             return;
         }
-        if !print_preview && crate::vault::key_handle().is_some() {
+        // print_preview 的花脸稿只进内存（见 jobs.rs 的 RedlinePrintPreview 处理），
+        // 不落盘也不需要确认；只有真正导出普通文件才走风险确认。
+        if !print_preview {
             let key = self.doc.key;
-            let location = if print_preview {
-                "应用缓存目录（花脸稿打印预览也会生成普通 PDF）".to_string()
-            } else {
-                self.config.output_dir.clone()
-            };
+            let location = self.config.output_dir.clone();
             self.actions
                 .push(crate::app::DraftAction::ConfirmPlaintextOutput {
                     operation: format!("导出花脸稿（含删除和新增的内容）\n输出位置：{location}"),
-                    warning: crate::app::output_guard::PLAINTEXT_WARNING,
+                    warning: crate::app::output_guard::DOCUMENT_WARNING,
                     action: Box::new(move |app| {
                         if let Some(index) = app.doc_index_of_key(key) {
                             app.draft_page_at(index).export_redline_confirmed(

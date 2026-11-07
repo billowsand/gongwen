@@ -102,14 +102,26 @@ pub fn export_files(
     fonts: &FontConfig,
     numbering: &NumberingConfig,
 ) -> Result<Vec<PathBuf>> {
+    if !mdx::memory_files::output_is_captured()
+        && let Some(protection) = export::protection::Protection::current()?
+    {
+        let (result, outputs) = mdx::memory_files::capture_outputs(|| {
+            export_files(output_dir, input, doc, formats, display, fonts, numbering)
+        });
+        result?;
+        let paths = protection.persist(outputs)?;
+        return Ok(paths.into_values().collect());
+    }
     let markdown = &doc.markdown;
     // 标题取自正文 H1，哨兵已在生成时避开标题语法位置，这里再兜一层底：
     // 文件名里绝不能出现私用区字符。
     let title = export::strip_redline(&export::document_title(input, markdown));
     let stem = format!("{}-花脸稿", export::safe_filename(&title));
     let dir = output_dir.join(&stem);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("无法创建花脸稿目录：{}", dir.display()))?;
+    if !mdx::memory_files::output_is_captured() {
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("无法创建花脸稿目录：{}", dir.display()))?;
+    }
 
     let mut files = Vec::new();
     if formats.docx {

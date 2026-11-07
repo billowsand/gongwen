@@ -1771,6 +1771,11 @@ impl GongwenApp {
     }
 
     fn export_section_ui(&mut self, ui: &mut egui::Ui) {
+        let can_change_export = !self.any_busy()
+            && self.pending_output.is_none()
+            && self.pending_file_dialogs.is_empty();
+        ui.add_enabled_ui(can_change_export, |ui| self.vault_page.export.ui(ui));
+        ui.add_space(12.0);
         // Word 导出尚未达到 PDF 的成熟度，入口保留但暂不允许启用。
         self.config.export.docx = false;
         setting_row(ui, "格式", None, |ui| {

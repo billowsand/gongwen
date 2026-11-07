@@ -262,3 +262,12 @@ Python 或全局 Pi：
 印制追溯码使用 `datamatrix` 0.3.3（MIT OR Apache-2.0）生成标准长方形 Data Matrix ECC 200；运行时完全离线。
 
 - 项目：<https://github.com/jannschu/datamatrix-rs>
+
+## ms-offcrypto-writer
+
+Word 原生打开密码加密使用 `ms-offcrypto-writer` 1.0.7（MIT OR Apache-2.0），
+按 MS-OFFCRYPTO Agile Encryption 生成 AES-256 / SHA-512 加密文件。
+独立解密回归使用开发依赖 `office-crypto` 0.2.0（MIT）。
+
+- 项目：<https://github.com/42triangles/ms-offcrypto-writer>
+- 版本：<https://crates.io/crates/ms-offcrypto-writer/1.0.7>

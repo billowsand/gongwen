@@ -182,7 +182,7 @@ pub(crate) fn write_pdf_with_base(
     base_dir: &Path,
 ) -> Result<TypstOutcome> {
     let outcome = compile_pdf_with_base(input, markdown, numbering, base_dir)?;
-    std::fs::write(path, &outcome.pdf)
+    mdx::memory_files::write_output(path, &outcome.pdf)
         .with_context(|| format!("无法写入 PDF：{}", path.display()))?;
     Ok(outcome)
 }

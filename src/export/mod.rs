@@ -10,6 +10,7 @@ mod docx;
 pub(crate) mod element_display;
 pub(crate) mod minutes;
 pub(crate) mod print_trace;
+pub(crate) mod protection;
 pub(crate) mod research;
 mod research_theme;
 pub(crate) mod table;
@@ -268,8 +269,7 @@ fn write_markdown_archive(
         markdown.to_string()
     };
 
-    let file = fs::File::create(path)
-        .with_context(|| format!("无法创建 Markdown 源码包：{}", path.display()))?;
+    let file = std::io::Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
@@ -295,8 +295,8 @@ fn write_markdown_archive(
         zip.write_all(content.as_bytes())?;
     }
 
-    zip.finish()
-        .with_context(|| format!("无法写完 Markdown 源码包：{}", path.display()))?;
+    let bytes = zip.finish()?.into_inner();
+    mdx::memory_files::write_output(path, &bytes)?;
     Ok(())
 }
 
@@ -425,6 +425,38 @@ pub(crate) fn export_artifacts(
     version_name: Option<&str>,
     transmit_defaults: &TransmitDefaults,
 ) -> Result<ExportArtifacts> {
+    // 捕获整批成品后再加密，附属清单也不能绕过；预览/打印的内存捕获不落盘。
+    if !mdx::memory_files::output_is_captured()
+        && let Some(protection) = protection::Protection::current()?
+    {
+        let (result, outputs) = mdx::memory_files::capture_outputs(|| {
+            export_artifacts(
+                output_dir,
+                input,
+                markdown,
+                selection,
+                display,
+                fonts,
+                numbering,
+                version_name,
+                transmit_defaults,
+            )
+        });
+        let mut artifacts = result?;
+        let paths = protection.persist(outputs)?;
+        artifacts.files = artifacts
+            .files
+            .into_iter()
+            .map(|p| paths[&p].clone())
+            .collect();
+        // 清单不参与主格式查找，但用户也应能找到加密后的清单。
+        for path in paths.into_values() {
+            if !artifacts.files.contains(&path) {
+                artifacts.files.push(path);
+            }
+        }
+        return Ok(artifacts);
+    }
     display
         .for_input(input)
         .ensure_resolved(input)

@@ -44,7 +44,9 @@ fn install(package: &Package, id: &str) -> anyhow::Result<Vec<String>> {
         .collect::<anyhow::Result<Vec<_>>>()?;
     for ((_, bytes), path) in package.files.iter().zip(destinations) {
         std::fs::create_dir_all(path.parent().expect("技能目录"))?;
-        std::fs::write(path, bytes)?;
+        // 技能正文属于受保护数据：加密工作区里必须走 GWA2 密封，不能裸写明文
+        // （旧流程虽已退役，这条路径保留期间也要保持口径，避免恢复旧链时复活）。
+        crate::vault::write_path(&path, "skill", bytes)?;
     }
     Ok(problems)
 }
@@ -95,11 +97,7 @@ pub(crate) fn save_file(id: &str, name: &str, text: &str) -> anyhow::Result<Vec<
     } else {
         Vec::new()
     };
-    crate::storage::atomic_write(&path, |file| {
-        use std::io::Write;
-        file.write_all(text.as_bytes())?;
-        Ok(())
-    })?;
+    crate::vault::write_path(&path, "skill", text.as_bytes())?;
     Ok(problems)
 }
 

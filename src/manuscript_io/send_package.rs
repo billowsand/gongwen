@@ -322,17 +322,8 @@ fn inherited_attributes(doc: &Document, page_id: ObjectId) -> Result<Vec<(Vec<u8
 
 /// 先写同目录下的临时文件，成功后改名到目标路径。
 fn write_atomically(output: &Path, bytes: &[u8]) -> Result<()> {
-    let temp = output.with_extension("pdf.tmp");
-    let result = std::fs::write(&temp, bytes)
-        .with_context(|| format!("无法写入 {}", temp.display()))
-        .and_then(|()| {
-            std::fs::rename(&temp, output)
-                .with_context(|| format!("无法写入导出文件 {}", output.display()))
-        });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    result
+    crate::export::protection::write_final(output, bytes)?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -6,7 +6,8 @@ use crate::modal::{self, Dismiss};
 use eframe::egui;
 
 pub(crate) const CLIPBOARD_WARNING: &str = "复制或剪切会把明文交给系统剪贴板；系统历史记录、跨设备同步或第三方剪贴板工具可能保存副本，不受应用锁保护。锁定或清空当前剪贴板不能保证删除历史副本。";
-pub(crate) const PLAINTEXT_WARNING: &str = "当前工作区已启用加密。此次导出的 PDF、Word、源码文件及随附的《份号清单.txt》（含份号与主送/抄送单位）将以普通文件保存，不再受应用密码和本地加密保护。文件可能包含正文、图片、附件及人员等敏感信息；复制、同步、发送或由其他软件打开时，可能导致信息泄露。请确认保存位置和接收范围。";
+pub(crate) const PLAINTEXT_WARNING: &str = "此次导出的文件将以明文保存，可能包含正文、图片、附件、人员和单位等敏感信息，不受应用锁或导出密码保护。复制、同步、发送或由其他软件打开后，可能留下无法撤回的副本。请确认保存位置、接收范围及传输方式。";
+pub(crate) const DOCUMENT_WARNING: &str = "已选择不加密导出。此次 Word、PDF、源码包及随行单据将以普通文件保存，正文、图片、人员、单位和份号等敏感信息不受密码保护。复制、发送或同步后可能导致信息泄露，锁定应用不能撤回文件。请确认保存位置、接收范围与传输方式。";
 pub(crate) const PDF_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的 7z 压缩包由独立密码保护，包内文件名也已加密，但解压后的 PDF 是普通文件，不受应用密码和本地加密保护。PDF 可能包含正文、图片、附件及人员等敏感信息；解压、复制、同步或发送后，可能导致信息泄露。压缩包自身的文件名和大小仍可见，请妥善保管导出密码并确认接收范围。";
 pub(crate) const PRINT_WARNING: &str = "当前工作区已启用加密。打印会把明文 PDF 交给系统打印队列和打印机：队列可能自行保存副本，打印机缓存、纸件与后续处置都可能留下敏感信息，这些都不受应用密码和本地加密保护。请确认接收范围与纸件/队列记录的处置方式。";
 pub(crate) const PACKAGE_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的是稿件包（7z 格式，文件内容与包内文件名均由独立密码保护），但解压后的 Markdown 正文、历史版本、图片、PDF 附件与随行件全部是普通文件，不再受应用密码和本地加密保护。稿件包还可能包含人员、单位、文号等敏感信息；复制、同步、发送或由其他软件打开后，可能导致信息泄露。压缩包自身的文件名和大小仍可见，请妥善保管导出密码并确认接收范围。";
@@ -19,6 +20,7 @@ pub(super) struct PendingOutput {
     operation: String,
     warning: &'static str,
     slot: crate::storage::DataSlot,
+    requires_key: bool,
     action: OutputAction,
 }
 
@@ -104,12 +106,21 @@ impl GongwenApp {
         );
     }
 
+    #[cfg(test)]
     pub(crate) fn request_plaintext_output(
         &mut self,
         operation: impl Into<String>,
         action: impl FnOnce(&mut Self) + 'static,
     ) {
         self.request_sensitive_output(operation.into(), PLAINTEXT_WARNING, Box::new(action));
+    }
+
+    pub(crate) fn request_document_output(
+        &mut self,
+        operation: impl Into<String>,
+        action: impl FnOnce(&mut Self) + 'static,
+    ) {
+        self.request_sensitive_output(operation.into(), DOCUMENT_WARNING, Box::new(action));
     }
 
     pub(crate) fn request_pdf_archive_output(
@@ -146,14 +157,34 @@ impl GongwenApp {
         warning: &'static str,
         action: OutputAction,
     ) {
-        // fail-closed：只有确认「没启用加密」才直接执行。加密工作区里失去密钥
-        // 句柄时（锁定中 / 异常降级）绝不能静默放行导出，宁可取消。
-        if !self.vault_locked && crate::vault::key_handle().is_none() {
+        let document = warning == DOCUMENT_WARNING;
+        let has_key = crate::vault::key_handle().is_some();
+        if self.vault_locked && !has_key {
+            self.status = "当前未解锁，已取消本次导出。".into();
+            return;
+        }
+        // 稿件包、PDF 集合和全量备份始终由各自独立密码加密，无需明文风险提示。
+        if warning == PDF_ARCHIVE_WARNING
+            || warning == PACKAGE_ARCHIVE_WARNING
+            || warning == BACKUP_WARNING
+        {
             action(self);
             return;
         }
-        if crate::vault::key_handle().is_none() {
-            self.status = "当前未解锁，已取消本次导出。".into();
+        if document {
+            match crate::export::protection::Protection::current() {
+                Ok(Some(_)) => {
+                    action(self);
+                    return;
+                }
+                Ok(None) => {} // 明文导出，包括未启用应用锁的工作区，每次确认。
+                Err(error) => {
+                    self.status = format!("无法导出：{error:#}");
+                    return;
+                }
+            }
+        } else if !has_key {
+            action(self);
             return;
         }
         // 不覆盖另一项待确认操作，避免用户确认的对象与执行的对象不一致。
@@ -165,6 +196,7 @@ impl GongwenApp {
             operation,
             warning,
             slot: crate::storage::current_slot(),
+            requires_key: has_key,
             action,
         });
     }
@@ -174,7 +206,9 @@ impl GongwenApp {
             return;
         };
         // 锁定会丢弃整个工作区；此处还防范确认期间状态被其它入口改变。
-        if crate::vault::key_handle().is_none() || pending.slot != crate::storage::current_slot() {
+        if pending.requires_key != crate::vault::key_handle().is_some()
+            || pending.slot != crate::storage::current_slot()
+        {
             self.pending_output = None;
             self.status = "加密状态已变化，本次导出已取消。".into();
             return;
@@ -197,7 +231,7 @@ impl GongwenApp {
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(pending.warning).color(crate::theme::danger()));
                 ui.add_space(8.0);
-                ui.weak(if clipboard { "本次确认仅用于此次操作。取消不向剪贴板释放内容；锁定应用不能撤回外部副本。" } else { "本次确认仅用于此次操作。取消不会生成文件。文件保存后，锁定应用也不会加密或撤回这些文件。" });
+                ui.weak(if clipboard { "本次确认仅用于此次操作。取消不向剪贴板释放内容；锁定应用不能撤回外部副本。" } else { "本次确认仅用于此次操作。取消不会生成文件。文件保存后，锁定应用不会撤回这些文件；已加密成果仍由独立导出密码保护。" });
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     cancelled = ui.button("取消").clicked();
@@ -482,6 +516,15 @@ mod tests {
     #[test]
     fn quick_export_and_print_wait_without_attaching_followup_to_other_jobs() {
         let mut h = Harness::new(true);
+        crate::vault::write_path(
+            &h.dir.path().join(crate::export::protection::PASSWORD_FILE),
+            "config",
+            b"Jade!River7Cloud",
+        )
+        .unwrap();
+        let mut policy = crate::export::protection::ExportPolicy::load().unwrap();
+        policy.enabled = false;
+        policy.save(&crate::vault::key_handle().unwrap()).unwrap();
         h.app.docs[0].generated_markdown = "# 标题\n\n正文。".into();
         for kind in ExportKind::ALL {
             h.app.draft_page().start_export_and_open(kind);
@@ -505,24 +548,60 @@ mod tests {
     }
 
     #[test]
-    fn pdf_archive_explains_the_independent_password_and_plaintext_after_extraction() {
+    fn encrypted_documents_skip_confirmation_but_plaintext_requires_it_every_time() {
         let mut h = Harness::new(true);
-        h.app.perform_export_selected_manuscript_pdfs(
-            crate::manuscript_io::PdfExportOptions {
-                stamped: true,
-                compiled: true,
-            },
-            vec![1, 2],
-            "independent-zip-password",
-            false,
-        );
-        let pending = h.app.pending_output.as_ref().unwrap();
-        assert_eq!(pending.warning, PDF_ARCHIVE_WARNING);
-        assert!(pending.operation.contains("2 篇"));
-        assert!(!h.app.manuscript_pdf_export_busy);
-        assert!(h.app.pending_file_dialogs.is_empty());
-        h.click("取消");
-        assert!(h.app.pending_file_dialogs.is_empty());
+        crate::vault::write_path(
+            &h.dir.path().join(crate::export::protection::PASSWORD_FILE),
+            "config",
+            b"Jade!River7Cloud",
+        )
+        .unwrap();
+        h.app
+            .request_document_output("加密导出", |app| app.status = "已执行加密导出".into());
+        assert!(h.app.pending_output.is_none());
+        assert_eq!(h.app.status, "已执行加密导出");
+        let mut policy = crate::export::protection::ExportPolicy::load().unwrap();
+        policy.enabled = false;
+        policy.save(&crate::vault::key_handle().unwrap()).unwrap();
+        for _ in 0..2 {
+            h.app.request_document_output("明文导出", |app| {
+                app.status = "已执行明文导出".into()
+            });
+            let pending = h.app.pending_output.as_ref().unwrap();
+            assert_eq!(pending.warning, DOCUMENT_WARNING);
+            h.click("取消");
+            assert_ne!(h.app.status, "已执行明文导出");
+        }
+        h.app
+            .request_document_output("明文导出", |app| app.status = "已执行明文导出".into());
+        h.click("确认风险并继续");
+        assert_eq!(h.app.status, "已执行明文导出");
+    }
+
+    #[test]
+    fn ordinary_workspace_document_export_also_warns_before_writing() {
+        let mut h = Harness::new(false);
+        let path = h.dir.path().join("plain.md");
+        let target = path.clone();
+        h.app.request_document_output("明文导出", move |_| {
+            std::fs::write(target, b"body").unwrap();
+        });
+        assert!(!path.exists());
+        h.click("确认风险并继续");
+        assert_eq!(std::fs::read(path).unwrap(), b"body");
+    }
+
+    #[test]
+    fn encrypted_archives_skip_the_plaintext_risk_dialog() {
+        let mut h = Harness::new(true);
+        for warning in [PDF_ARCHIVE_WARNING, PACKAGE_ARCHIVE_WARNING, BACKUP_WARNING] {
+            h.app
+                .request_output_with_warning("加密包导出", warning, |app| {
+                    app.status = "已继续导出加密包".into()
+                });
+            assert!(h.app.pending_output.is_none());
+            assert_eq!(h.app.status, "已继续导出加密包");
+        }
     }
 
     #[test]

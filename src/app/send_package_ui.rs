@@ -1518,7 +1518,7 @@ impl GongwenApp {
                 path.display()
             )
         };
-        self.request_plaintext_output(operation, move |app| {
+        self.request_document_output(operation, move |app| {
             app.run_confirmed_send_package_export(path)
         });
     }

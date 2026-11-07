@@ -351,7 +351,21 @@ impl GongwenApp {
                 });
                 progress_ctx.request_repaint();
             };
-            let result = crate::print::print(&job, &progress, &cancel);
+            let result = (|| {
+                let bytes = match &job.bytes {
+                    Some(bytes) => bytes.as_ref().clone(),
+                    None => crate::file_limits::read_bytes(
+                        &job.path,
+                        crate::file_limits::MAX_PDF_BYTES,
+                        "打印文件",
+                    )
+                    .map_err(|e| e.to_string())?,
+                };
+                job.bytes = Some(Arc::new(
+                    crate::export::protection::pdf_for_use(bytes).map_err(|e| format!("{e:#}"))?,
+                ));
+                crate::print::print(&job, &progress, &cancel)
+            })();
             let _ = tx.send(WorkerResult::PdfPrinted {
                 path: job.path,
                 printer: job.printer,
@@ -383,6 +397,9 @@ impl GongwenApp {
                         "打印文件",
                     )
                     .map_err(|e| e.to_string())
+                })
+                .and_then(|bytes| {
+                    crate::export::protection::pdf_for_use(bytes).map_err(|e| format!("{e:#}"))
                 })
                 .and_then(crate::print::print_with_system_dialog);
             let _ = tx.send(WorkerResult::PdfPrinted {

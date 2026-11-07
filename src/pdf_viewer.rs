@@ -1521,6 +1521,13 @@ fn worker(
             return;
         }
     };
+    let bytes = match crate::export::protection::pdf_for_use(bytes.as_ref().clone()) {
+        Ok(bytes) => Arc::new(bytes),
+        Err(error) => {
+            send(PdfMessage::Failed(format!("无法打开 PDF：{error:#}")));
+            return;
+        }
+    };
     let pdf = match Pdf::new(Arc::clone(&bytes)) {
         Ok(pdf) => pdf,
         Err(error) => {

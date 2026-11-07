@@ -380,18 +380,25 @@ fn never_committed_items_block_export_and_are_pending() {
 }
 
 #[test]
-fn encrypted_send_package_waits_for_confirmation_before_starting_or_writing() {
+fn plaintext_send_package_waits_for_confirmation_before_starting_or_writing() {
     let (store, panel) = package();
     let mut app = super::super::management_samples::fixture();
     app.manuscript_store = Some(store);
     app.send_package = Some(panel);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("send-package.pdf");
+    crate::storage::set_test_config_dir(Some(dir.path().to_owned()));
     crate::vault::set_key_handle([71; 32], true);
+    let policy = crate::export::protection::ExportPolicy {
+        enabled: false,
+        password: String::new(),
+    };
+    policy.save(&crate::vault::key_handle().unwrap()).unwrap();
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
             crate::vault::clear_key_handle();
+            crate::storage::set_test_config_dir(None);
         }
     }
     let _reset = Reset;

@@ -871,7 +871,7 @@ impl GongwenApp {
         }) else {
             return;
         };
-        self.request_plaintext_output(format!("另存 PDF 附件：{file_name}"), move |app| {
+        self.request_document_output(format!("另存 PDF 附件：{file_name}"), move |app| {
             app.request_file(
                 FileDialogSpec::save_file()
                     .filter("PDF", &["pdf"])
@@ -880,8 +880,8 @@ impl GongwenApp {
                     let Some(path) = path else {
                         return;
                     };
-                    match std::fs::write(&path, &bytes) {
-                        Ok(()) => app.status = format!("已保存附件到 {}。", path.display()),
+                    match crate::export::protection::write_final(&path, &bytes) {
+                        Ok(_) => app.status = format!("已保存附件到 {}。", path.display()),
                         Err(error) => app.status = format!("保存附件失败：{error}"),
                     }
                 },

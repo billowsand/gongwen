@@ -297,7 +297,7 @@ pub(crate) fn write_pdf_with_base(
     doc.fonts = set.families.clone();
     let data = serde_json::to_string(&doc).context("无法序列化签收记录单数据")?;
     let outcome = typst_engine::compile(&TypstJob::receipt(data, base_dir), &set)?;
-    std::fs::write(path, &outcome.pdf)
+    mdx::memory_files::write_output(path, &outcome.pdf)
         .with_context(|| format!("无法写入签收记录单 PDF：{}", path.display()))?;
     Ok(outcome)
 }

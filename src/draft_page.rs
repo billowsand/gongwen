@@ -154,9 +154,15 @@ impl ExportKind {
         let extension_matches = path
             .extension()
             .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case(self.extension()));
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case(self.extension())
+                    || (self == Self::Typst && ext.eq_ignore_ascii_case("7z"))
+            });
         extension_matches
-            && (self != Self::Typst || name.is_some_and(|name| name.ends_with("-Typst包.zip")))
+            && (self != Self::Typst
+                || name.is_some_and(|name| {
+                    name.ends_with("-Typst包.zip") || name.ends_with("-Typst包.7z")
+                }))
     }
 
     /// 一次导出产出的文件里这种成品的那一份。

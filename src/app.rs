@@ -33,6 +33,7 @@ pub(crate) mod ai_proposal;
 mod api_settings;
 mod chrome;
 mod data_safety;
+mod export_password;
 pub(crate) mod file_dialog;
 pub(crate) mod gate;
 mod ime_page;

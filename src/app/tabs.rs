@@ -322,7 +322,7 @@ impl GongwenApp {
                     };
                     self.request_output_with_warning(
                         format!(
-                            "{} PDF 附件：{}。请选择普通 PDF 的保存位置。",
+                            "{} PDF 附件：{}。请选择 PDF 的保存位置。",
                             if print {
                                 "另存并打印"
                             } else {
@@ -333,7 +333,7 @@ impl GongwenApp {
                         if print {
                             super::output_guard::PRINT_WARNING
                         } else {
-                            super::output_guard::PLAINTEXT_WARNING
+                            super::output_guard::DOCUMENT_WARNING
                         },
                         move |app| {
                             app.request_file(
@@ -342,11 +342,8 @@ impl GongwenApp {
                                     .file_name(name),
                                 move |app, path| {
                                     let Some(path) = path else { return };
-                                    let result = crate::storage::atomic_write(&path, |file| {
-                                        use std::io::Write as _;
-                                        file.write_all(&bytes)?;
-                                        Ok(())
-                                    });
+                                    let result =
+                                        crate::export::protection::write_final(&path, &bytes);
                                     if let Err(error) = result {
                                         app.status = format!("保存 PDF 附件失败：{error:#}");
                                         return;
@@ -543,14 +540,39 @@ impl GongwenApp {
                     );
                 }
                 DraftAction::ExportWritingArtifact { name, text } => {
+                    let encrypted = match crate::export::protection::encryption_enabled() {
+                        Ok(enabled) => enabled,
+                        Err(error) => {
+                            self.status = format!("导出设置读取失败：{error:#}");
+                            continue;
+                        }
+                    };
+                    let name = if encrypted {
+                        std::path::Path::new(&name)
+                            .with_extension("7z")
+                            .to_string_lossy()
+                            .into_owned()
+                    } else {
+                        name
+                    };
                     let spec = super::file_dialog::FileDialogSpec::save_file()
                         .file_name(name)
-                        .filter("Markdown", &["md"]);
-                    self.request_plaintext_output("导出写作成果 Markdown", move |app| {
+                        .filter(
+                            if encrypted { "加密 7z" } else { "Markdown" },
+                            &[if encrypted { "7z" } else { "md" }],
+                        );
+                    self.request_document_output("导出写作成果 Markdown", move |app| {
                         app.request_file(spec, move |app, path| {
                             if let Some(path) = path {
-                                app.status = match std::fs::write(&path, text.as_bytes()) {
-                                    Ok(()) => format!("写作成果已导出到 {}", path.display()),
+                                app.status = match crate::export::protection::write_final(
+                                    &if encrypted {
+                                        path.with_extension("md")
+                                    } else {
+                                        path.clone()
+                                    },
+                                    text.as_bytes(),
+                                ) {
+                                    Ok(target) => format!("写作成果已导出到 {}", target.display()),
                                     Err(error) => format!("导出写作成果失败：{error}"),
                                 };
                             }
@@ -569,11 +591,34 @@ impl GongwenApp {
                         app.draft_page_at(index).insert_images_from(&ctx, &files);
                     });
                 }
-                DraftAction::SaveExportCopy { key, kind, name } => {
+                DraftAction::SaveExportCopy {
+                    key,
+                    kind,
+                    mut name,
+                } => {
+                    let encrypted = match crate::export::protection::encryption_enabled() {
+                        Ok(enabled) => enabled,
+                        Err(error) => {
+                            self.status = format!("导出设置读取失败：{error:#}");
+                            continue;
+                        }
+                    };
+                    if encrypted
+                        && let Err(error) = crate::export::protection::Protection::current()
+                    {
+                        self.status = format!("无法导出：{error:#}");
+                        continue;
+                    }
+                    let extension = if encrypted && kind == crate::draft_page::ExportKind::Typst {
+                        name = name.trim_end_matches(".zip").to_owned() + ".7z";
+                        "7z"
+                    } else {
+                        kind.extension()
+                    };
                     let spec = super::file_dialog::FileDialogSpec::save_file()
                         .file_name(name)
-                        .filter(kind.label(), &[kind.extension()]);
-                    self.request_plaintext_output(
+                        .filter(kind.label(), &[extension]);
+                    self.request_document_output(
                         "按当前正文和表单重新导出到所选位置",
                         move |app| {
                             app.request_file(spec, move |app, target| {

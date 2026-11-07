@@ -853,7 +853,7 @@ pub(crate) fn write_pdf_with_base(
         let data = serde_json::to_string(&doc).context("无法序列化传发任务单数据")?;
         let outcome = typst_engine::compile(&TypstJob::transmit(data, base_dir), &set)?;
         if outcome.pages <= 1 {
-            std::fs::write(path, &outcome.pdf)
+            mdx::memory_files::write_output(path, &outcome.pdf)
                 .with_context(|| format!("无法写入传发任务单 PDF：{}", path.display()))?;
             return Ok((outcome, index));
         }
@@ -862,7 +862,7 @@ pub(crate) fn write_pdf_with_base(
     // 收到最紧的档位还是两页：内容实在太多（公文标题极长之类）。
     // 照样把 PDF 写出来，但要在提示里说清楚。
     let (outcome, index) = last.expect("收紧阶梯至少有一档");
-    std::fs::write(path, &outcome.pdf)
+    mdx::memory_files::write_output(path, &outcome.pdf)
         .with_context(|| format!("无法写入传发任务单 PDF：{}", path.display()))?;
     Ok((outcome, index))
 }
