@@ -2074,7 +2074,17 @@ impl GongwenApp {
                 self.reopen_exported_pdf(path, hints);
                 Ok("已在应用内打开。")
             }
-            ExportKind::Word => crate::app::open_in_os(&path).map(|()| "已用系统程序打开。"),
+            ExportKind::Word => {
+                self.request_output_with_warning(
+                    format!("用系统程序打开 Word：{}", path.display()),
+                    super::output_guard::EXTERNAL_OPEN_WARNING,
+                    move |app| match crate::app::open_in_os(&path) {
+                        Ok(()) => app.status.push_str(" 已用系统程序打开。"),
+                        Err(error) => app.status.push_str(&format!(" 打开失败：{error}")),
+                    },
+                );
+                return;
+            }
             ExportKind::Typst => crate::app::reveal_in_os(&path).map(|()| "已在文件管理器里定位。"),
         };
         match result {

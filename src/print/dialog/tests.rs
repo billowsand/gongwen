@@ -337,6 +337,8 @@ fn manual_duplex_submits_the_front_pass_and_waits_for_the_user() {
     assert_eq!(job.duplex, Some(Duplex::Manual));
     assert_eq!(job.pages, Some(vec![(1, 1), (3, 3), (5, 5)]));
     assert!(!job.reverse);
+    assert_eq!(dialog.stage, Stage::Editing, "确认前不能进入打印中");
+    dialog.confirmed_print(&job);
     assert_eq!(
         dialog.stage,
         Stage::Printing {
@@ -359,6 +361,7 @@ fn manual_duplex_submits_the_front_pass_and_waits_for_the_user() {
     };
     assert_eq!(job.pages, Some(vec![(2, 2), (4, 4)]));
     assert!(job.reverse);
+    dialog.confirmed_print(&job);
     assert!(dialog.manual_finished(&Ok(PrintOutcome::Printed { job: None })));
 }
 
@@ -370,7 +373,10 @@ fn a_failed_manual_pass_comes_back_with_the_error() {
     dialog.duplex = Some(Duplex::Manual);
     dialog.duplex_touched = true;
     let pages = dialog.pages();
-    dialog.print_outcome(&pages).expect("第一轮");
+    let DialogOutcome::Print(job) = dialog.print_outcome(&pages).expect("第一轮") else {
+        panic!("第一轮应交给外壳");
+    };
+    dialog.confirmed_print(&job);
     assert!(!dialog.manual_finished(&Err("卡纸".to_string())));
     assert_eq!(dialog.stage, Stage::Editing);
     assert!(
@@ -389,7 +395,10 @@ fn cancelling_the_front_pass_returns_to_editing_instead_of_waiting_for_a_flip() 
     dialog.duplex = Some(Duplex::Manual);
     dialog.duplex_touched = true;
     let pages = dialog.pages();
-    dialog.print_outcome(&pages).expect("第一轮");
+    let DialogOutcome::Print(job) = dialog.print_outcome(&pages).expect("第一轮") else {
+        panic!("第一轮应交给外壳");
+    };
+    dialog.confirmed_print(&job);
     // 正面一张没出完就取消了：没有可翻的纸，不能停在「等待翻面」。
     assert!(!dialog.manual_finished(&Ok(PrintOutcome::Cancelled)));
     assert_eq!(dialog.stage, Stage::Editing);
@@ -451,9 +460,11 @@ fn a_plain_print_keeps_the_dialog_open_until_it_finishes() {
     let mut dialog = ready_dialog();
     let pages = dialog.pages();
     let outcome = dialog.print_outcome(&pages).expect("应能打印");
-    let DialogOutcome::Print(_) = outcome else {
+    let DialogOutcome::Print(job) = outcome else {
         panic!("打印要交给外壳");
     };
+    assert_eq!(dialog.stage, Stage::Editing, "确认前不能进入打印中");
+    dialog.confirmed_print(&job);
     assert_eq!(dialog.stage, Stage::Printing { manual: None });
     // 打完就关。
     assert!(dialog.manual_finished(&Ok(PrintOutcome::Printed { job: None })));

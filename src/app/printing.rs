@@ -12,23 +12,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 impl GongwenApp {
-    /// 打开打印对话框，同时在后台列打印机、逐台查状态。已开着的对话框换成新的。
-    ///
-    /// 加密工作区**不禁止打印**，但打印会把明文 PDF 交给系统打印队列与打印机，
-    /// 队列/纸件不在应用锁的保护范围内：先弹一次风险确认，确认后照常打开。
+    /// 打开打印对话框不释放内容；真正点击「打印」时才逐次确认风险。
     pub(crate) fn open_print_dialog(&mut self, request: PrintRequest, ctx: &egui::Context) {
-        if crate::vault::key_handle().is_some() {
-            let ctx = ctx.clone();
-            self.request_print_output(format!("打印 PDF：{}", request.title), move |app| {
-                app.open_print_dialog_confirmed(request, &ctx)
-            });
-            return;
-        }
         self.open_print_dialog_confirmed(request, ctx);
     }
 
-    /// 风险已经确认过（例如「打印…」先导出 PDF 时才确认过、或内存附件
-    /// 「另存并打印」刚确认过）时直接打开，不重复弹框。
+    /// 直接打开对话框；实际送打统一在提交打印任务时确认。
     pub(crate) fn open_print_dialog_confirmed(
         &mut self,
         request: PrintRequest,
@@ -235,18 +224,58 @@ impl GongwenApp {
             // 打印中对话框不关：显示进度与「取消」，结果按 dialog 编号转回来
             // （手动双面第一轮还会停在「等待翻面」）。
             DialogOutcome::Print(job) => {
+                let second_pass = self
+                    .print_dialog
+                    .as_ref()
+                    .is_some_and(PrintDialog::waiting_flip);
                 let cancel = self
                     .print_dialog
                     .as_ref()
                     .map(PrintDialog::cancel_token)
                     .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-                self.start_print(job, printer_prefs, Some(dialog_id), cancel, ctx);
+                if second_pass {
+                    // 手动双面的反面是同一任务的 continuation，不重复确认。
+                    self.start_confirmed_print(job, printer_prefs, Some(dialog_id), cancel, ctx);
+                } else {
+                    let ctx = ctx.clone();
+                    self.request_print_output(format!("打印 PDF：{}", job.title), move |app| {
+                        app.start_confirmed_print(
+                            job,
+                            printer_prefs,
+                            Some(dialog_id),
+                            cancel,
+                            &ctx,
+                        );
+                    });
+                }
             }
             DialogOutcome::SystemDialog => {
-                self.print_dialog = None;
-                self.start_system_dialog_print(path, ctx);
+                let ctx = ctx.clone();
+                self.request_print_output("通过系统对话框打印 PDF", move |app| {
+                    app.print_dialog = None;
+                    app.start_system_dialog_print(path, &ctx);
+                });
             }
         }
+    }
+
+    /// 只有风险确认通过后才改变对话框状态并启动后端；取消确认不会卡在「打印中」。
+    fn start_confirmed_print(
+        &mut self,
+        job: PrintJob,
+        printer_prefs: Option<(String, PrinterPrefs)>,
+        dialog: Option<u64>,
+        cancel: Arc<AtomicBool>,
+        ctx: &egui::Context,
+    ) {
+        if let Some(open) = self
+            .print_dialog
+            .as_mut()
+            .filter(|open| Some(open.id()) == dialog)
+        {
+            open.confirmed_print(&job);
+        }
+        self.start_print(job, printer_prefs, dialog, cancel, ctx);
     }
 
     /// 打印任务结束：状态栏照旧，手动双面的一轮还要把结果转回对话框。

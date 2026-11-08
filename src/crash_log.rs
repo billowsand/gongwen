@@ -341,26 +341,22 @@ mod tests {
         crate::vault::clear_key_handle();
         let marker = dir.join(UNSEEN_MARKER);
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        crate::vault::write_path(&marker, "log", name.as_bytes()).unwrap();
+        crate::vault::write_path(&marker, "log", name.as_bytes()).unwrap_err();
+        assert!(!marker.exists(), "未解锁不能补写明文提示标记");
         assert_eq!(take_unseen_in(&dir), None, "未解锁不能消耗密文提示");
-        assert!(marker.exists());
         crate::vault::clear_key_handle();
         crate::storage::set_test_config_dir(None);
     }
 
     #[test]
-    fn locked_early_startup_omits_sensitive_detail_instead_of_plaintext_fallback() {
+    fn locked_early_startup_does_not_write_a_plaintext_report() {
         let root = tempfile::tempdir().unwrap();
         crate::storage::set_test_config_dir(Some(root.path().to_path_buf()));
         let _ = crate::vault::Vault::create("Test#Real2026Lock", None, false).unwrap();
         crate::vault::clear_key_handle();
         let dir = log_dir().unwrap();
-        let path = write_report_in(&dir, "启动失败", "机密错误与 /private/path", at(4)).unwrap();
-        let text = fs::read_to_string(path).unwrap();
-        assert!(!text.contains("机密错误"));
-        assert!(!text.contains("/private/path"));
-        assert!(!text.contains("程序："));
-        assert!(text.contains("未落盘"));
+        assert!(write_report_in(&dir, "启动失败", "机密错误与 /private/path", at(4)).is_none());
+        assert!(fs::read_dir(&dir).unwrap().next().is_none());
         crate::storage::set_test_config_dir(None);
     }
 

@@ -1193,7 +1193,6 @@ impl PrintDialog {
             };
         }
         let job = self.job(pages)?;
-        self.start_printing(None);
         Some(DialogOutcome::Print(job))
     }
 
@@ -1220,7 +1219,6 @@ impl PrintDialog {
         }
         let job = self.manual_job(&front, false);
         self.manual_passes = Some(ManualPasses { back, odd });
-        self.start_printing(Some(ManualPass::First));
         Ok(job)
     }
 
@@ -1231,7 +1229,6 @@ impl PrintDialog {
             return Some(DialogOutcome::Cancel);
         }
         let job = self.manual_job(&back, self.manual_reverse);
-        self.start_printing(Some(ManualPass::Second));
         Some(DialogOutcome::Print(job))
     }
 
@@ -1259,6 +1256,25 @@ impl PrintDialog {
 
     fn cancelling(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// 实际风险确认已经通过，才开始一轮打印；取消确认时仍停留在原编辑/翻面状态。
+    pub(crate) fn confirmed_print(&mut self, job: &PrintJob) {
+        let manual = if job.duplex == Some(Duplex::Manual) {
+            Some(if self.stage == Stage::WaitingFlip {
+                ManualPass::Second
+            } else {
+                ManualPass::First
+            })
+        } else {
+            None
+        };
+        self.start_printing(manual);
+    }
+
+    /// 手动双面的反面与已确认的正面属于同一次打印任务。
+    pub(crate) fn waiting_flip(&self) -> bool {
+        self.stage == Stage::WaitingFlip
     }
 
     /// 开始一轮打印：清掉上一轮的进度与取消标志，进入「送纸中」。

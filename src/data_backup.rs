@@ -1098,10 +1098,10 @@ fn extract_all(archive: &mut archive::Reader, target: &Path) -> Result<usize> {
             }
             let rel = safe_relative_path(entry.name())?;
             let mut head = Vec::new();
-            (&mut *reader).take(64).read_to_end(&mut head)?;
-            if let Some(public_len) = public_help_head_len(&rel) {
-                (&mut *reader).take(public_len + 1).read_to_end(&mut head)?;
-            }
+            // 公开截图必须从条目起点一次读完；不能先读 64 字节再追加整图，
+            // 否则拼接结果与内置公开资源永远不相等，合法备份会被拒绝。
+            let head_len = public_help_head_len(&rel).map_or(64, |public_len| public_len + 1);
+            (&mut *reader).take(head_len).read_to_end(&mut head)?;
             ensure_encrypted_payload(&rel, &head)?;
             let dest = target.join(&rel);
             if let Some(parent) = dest.parent() {
@@ -1369,6 +1369,9 @@ mod tests {
         export_from(&config, &out, PASSWORD).unwrap();
         let info = inspect_backup(&out, PASSWORD).unwrap();
         assert!(!info.groups.iter().any(|group| group.name == "help"));
+        let target = root.path().join("restored");
+        restore_backup(&out, &target, PASSWORD).unwrap();
+        assert_eq!(read(&target, &format!("alt-images/{name}")), public);
         crate::vault::clear_key_handle();
         crate::storage::set_test_config_dir(None);
     }

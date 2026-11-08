@@ -2209,6 +2209,8 @@ mod tests {
         let ctx = egui::Context::default();
         theme::configure_icons(&ctx);
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let _root = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(_root.path().to_path_buf()));
         let dir = crate::images::image_dir().unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         let name = format!("gw_diag_{}.png", std::process::id());
@@ -2263,6 +2265,7 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(&img_path);
+        crate::storage::set_test_config_dir(None);
         match result {
             Ok(egui::load::TexturePoll::Ready { texture }) => {
                 assert!(texture.size.x > 0.0 && texture.size.y > 0.0);
@@ -2282,6 +2285,8 @@ mod tests {
         let ctx = egui::Context::default();
         theme::configure_icons(&ctx);
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let _root = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(_root.path().to_path_buf()));
         let dir = crate::images::image_dir().unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         let name = format!("gw_diag2_{}.png", std::process::id());
@@ -2329,6 +2334,7 @@ mod tests {
             egui::load::SizeHint::default(),
         );
         let _ = std::fs::remove_file(&img_path);
+        crate::storage::set_test_config_dir(None);
         match result {
             Ok(egui::load::TexturePoll::Ready { texture }) => {
                 assert!(texture.size.x > 0.0 && texture.size.y > 0.0);
@@ -2350,6 +2356,8 @@ mod tests {
         let ctx = egui::Context::default();
         theme::configure_icons(&ctx);
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let _root = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(_root.path().to_path_buf()));
         let dir = crate::images::image_dir().unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         let name = format!("gw_diag3_{}.png", std::process::id());
@@ -2443,6 +2451,7 @@ mod tests {
             }
         }
         let _ = std::fs::remove_file(&img_path);
+        crate::storage::set_test_config_dir(None);
         // 文件存在期间（循环内），图片应真正绘制：出现尺寸有限的带纹理矩形。
         // （旧实现把图片高度算成无穷大，tessellate 后画面损坏，正是用户看不到图的原因。）
         assert!(

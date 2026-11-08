@@ -236,6 +236,12 @@ pub fn set_test_config_dir(dir: Option<std::path::PathBuf>) {
     TEST_CONFIG_DIR.with(|cell| *cell.borrow_mut() = dir);
 }
 
+/// 当前测试线程是否显式指定了配置目录。
+#[cfg(test)]
+pub(crate) fn has_test_config_dir() -> bool {
+    TEST_CONFIG_DIR.with(|cell| cell.borrow().is_some())
+}
+
 /// 测试用：把父线程解析出的配置目录**带到另一个线程**。
 ///
 /// [`set_test_config_dir`] 写的是线程局部量，后台线程（如加密迁移的搬运线程）

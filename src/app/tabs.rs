@@ -292,10 +292,18 @@ impl GongwenApp {
     pub(crate) fn apply_pdf_actions(&mut self, actions: Vec<PdfViewerAction>, ctx: &egui::Context) {
         for action in actions {
             match action {
-                PdfViewerAction::OpenExternal(path) => match open_in_os(&path) {
-                    Ok(()) => self.status = format!("已用系统程序打开 {}。", path.display()),
-                    Err(error) => self.status = format!("打开 PDF 失败：{error}"),
-                },
+                PdfViewerAction::OpenExternal(path) => {
+                    self.request_output_with_warning(
+                        format!("用系统程序打开 PDF：{}", path.display()),
+                        super::output_guard::EXTERNAL_OPEN_WARNING,
+                        move |app| {
+                            app.status = match open_in_os(&path) {
+                                Ok(()) => format!("已用系统程序打开 {}。", path.display()),
+                                Err(error) => format!("打开 PDF 失败：{error}"),
+                            };
+                        },
+                    );
+                }
                 PdfViewerAction::Reveal(path) => match reveal_in_os(&path) {
                     Ok(()) => self.status = format!("已定位 {}。", path.display()),
                     Err(error) => self.status = format!("定位 PDF 失败：{error}"),
@@ -353,12 +361,22 @@ impl GongwenApp {
                                         // 保存+打印风险已经在上面确认过，不再重复弹框。
                                         app.open_print_dialog_confirmed(*request, &ctx);
                                     } else {
-                                        app.status = match open_in_os(&path) {
-                                            Ok(()) => "已保存 PDF 附件并用系统程序打开。".into(),
-                                            Err(error) => {
-                                                format!("PDF 已保存，但系统打开失败：{error}")
-                                            }
-                                        };
+                                        app.request_output_with_warning(
+                                            format!("用系统程序打开 PDF 附件：{}", path.display()),
+                                            super::output_guard::EXTERNAL_OPEN_WARNING,
+                                            move |app| {
+                                                app.status = match open_in_os(&path) {
+                                                    Ok(()) => {
+                                                        "已保存 PDF 附件并用系统程序打开。".into()
+                                                    }
+                                                    Err(error) => {
+                                                        format!(
+                                                            "PDF 已保存，但系统打开失败：{error}"
+                                                        )
+                                                    }
+                                                };
+                                            },
+                                        );
                                     }
                                 },
                             );
