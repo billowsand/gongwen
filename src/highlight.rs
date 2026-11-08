@@ -152,16 +152,17 @@ fn align_editor_text(galley: &mut Arc<egui::Galley>, manuscript: bool) {
     for placed in &mut galley.rows {
         let row = Arc::make_mut(&mut placed.row);
         for glyph in &mut row.glyphs {
+            // 由当前基线还原字体框顶边。显式 `line_height` 多出来的空间 egui 0.37
+            // 起由它自己居中，这里只需在居中结果上再挪一次。
+            let top = glyph.pos.y
+                - glyph.font_face_ascent
+                - 0.5 * (glyph.font_height - glyph.font_face_height);
             let offset = if manuscript {
-                // egui 已按各段行高底对齐；补各自内部的留白，保持稿纸贴线。
-                (glyph.line_height - glyph.font_height - 2.0).max(0.0)
+                // 稿纸贴线：字框底边距行底留 2 像素。
+                (row.size.y - glyph.font_height - 2.0 - top).max(0.0)
             } else {
-                // egui 只居中字体族内的回退字面，不会居中显式 line_height
-                // 多出来的空间。标题与 # 使用不同字体时，不能统一平移整行。
-                // 由当前基线还原字体框顶边，再将其居中到实际视觉行（含软换行）。
-                let top = glyph.pos.y
-                    - glyph.font_face_ascent
-                    - 0.5 * (glyph.font_height - glyph.font_face_height);
+                // 标题与 # 使用不同字体时，不能统一平移整行：按各自字面居中到
+                // 实际视觉行（含软换行）。
                 (row.size.y - glyph.font_height) * 0.5 - top
             };
             glyph.pos.y += offset;

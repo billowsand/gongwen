@@ -82,6 +82,9 @@ struct Harness {
     export_links: ExportLinks,
     metrics: crate::metrics::Metrics,
     store: Option<crate::manuscript::ManuscriptStore>,
+    /// 上一帧画侧栏时父 `Ui` 的作用域 id：侧栏状态按它加盐存档（egui 0.37 起
+    /// 面板 id 不再等于面板名的 hash，只能照同样的算法拼回来）。
+    panel_scope: Option<egui::Id>,
     _keep: Receiver<WorkerResult>,
 }
 
@@ -113,6 +116,7 @@ impl Harness {
             export_links: ExportLinks::default(),
             metrics: crate::metrics::Metrics::default(),
             store: None,
+            panel_scope: None,
             _keep,
         }
     }
@@ -176,7 +180,23 @@ impl Harness {
             ..Default::default()
         };
         let ctx = self.ctx.clone();
-        ctx.run_ui(raw, |ui| self.with_page(|page| page.ai_panel_side(ui)))
+        ctx.run_ui(raw, |ui| {
+            self.panel_scope = Some(ui.scope_id());
+            self.with_page(|page| page.ai_panel_side(ui))
+        })
+    }
+
+    /// 上一帧侧栏的外框。侧栏状态是 egui 的面板持久化数据，键由父 `Ui` 作用域
+    /// 与面板名加盐得到；直接读它可以不看形状就量出侧栏宽度。
+    fn panel_rect(&self) -> Option<egui::Rect> {
+        let scope = self.panel_scope?;
+        self.ctx
+            .data_mut(|data| {
+                data.get_persisted::<egui::containers::panel::PanelState>(
+                    scope.with_salt(egui::IdSalt::new("ai_panel_v1")),
+                )
+            })
+            .map(|state| state.outer_rect)
     }
 
     /// 只要形状、不上传纹理的帧：egui 0.36 要求析构前清掉纹理增量。
@@ -2217,15 +2237,7 @@ fn article_popup_has_no_widget_id_clashes_with_long_or_duplicate_titles() {
             .memory(|memory| memory.area_rect(input_id.with("popup")))
             .unwrap();
         let input = harness.ctx.read_response(input_id).unwrap().rect;
-        let panel = harness
-            .ctx
-            .data(|data| {
-                data.get_temp::<egui::containers::panel::PanelState>(egui::Id::unique(
-                    "ai_panel_v1",
-                ))
-            })
-            .unwrap()
-            .outer_rect;
+        let panel = harness.panel_rect().expect("侧栏应有状态");
         assert!(
             egui::Rect::from_min_size(egui::Pos2::ZERO, size).contains_rect(popup),
             "弹层越界：{size:?} {popup:?}"
@@ -3458,12 +3470,21 @@ fn long_phase_and_steps_stay_inside_the_panel() {
             ..Default::default()
         };
         let ctx = harness.ctx.clone();
+        let mut panel_scope = None;
         let _ = crate::test_support::run_ui(&ctx, raw, |ui| {
-            egui::CentralPanel::default()
-                .show(ui, |ui| harness.with_page(|page| page.create_ui(ui)));
+            egui::CentralPanel::default().show(ui, |ui| {
+                panel_scope = Some(ui.scope_id());
+                harness.with_page(|page| page.create_ui(ui));
+            });
         });
-        let state = harness.ctx.data(|data| {
-            data.get_temp::<egui::containers::panel::PanelState>(egui::Id::unique("ai_panel_v1"))
+        // egui 0.37 起面板状态键由父 `Ui` 作用域与面板名加盐得到，不能再按
+        // `Id::unique("ai_panel_v1")` 直接取，也不能从临时数据里读。
+        let state = panel_scope.and_then(|scope| {
+            ctx.data_mut(|data| {
+                data.get_persisted::<egui::containers::panel::PanelState>(
+                    scope.with_salt(egui::IdSalt::new("ai_panel_v1")),
+                )
+            })
         });
         panel_rects.push(state.map(|state| state.outer_rect));
     }

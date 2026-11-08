@@ -264,7 +264,7 @@ fn harness(stage: Stage) -> egui_kittest::Harness<'static, Bench> {
         actions: Vec::new(),
         exports: ExportLinks::default(),
     };
-    let mut harness = egui_kittest::Harness::new_ui_state(
+    let mut harness = crate::test_support::harness_ui_state(
         |ui, bench: &mut Bench| {
             crate::theme::configure_icons(ui.ctx());
             let mut page = DraftPage {

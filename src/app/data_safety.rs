@@ -619,7 +619,7 @@ fn crash_report_dialog(ctx: &egui::Context, pending: &mut Option<PathBuf>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_kittest::Harness;
+    use crate::test_support::harness_ui;
     use egui_kittest::kittest::Queryable;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -732,7 +732,7 @@ mod tests {
             "C:/配置/config.json.损坏-20260101-000000",
         ))));
         let state = recovered.clone();
-        let mut harness = Harness::new_ui(move |ui| {
+        let mut harness = harness_ui(move |ui| {
             config_recovery_dialog(ui.ctx(), &mut state.borrow_mut());
         });
         harness.run();
@@ -749,7 +749,7 @@ mod tests {
             "C:/配置/logs/crash-20260101-000000.log",
         ))));
         let state = pending.clone();
-        let mut harness = Harness::new_ui(move |ui| {
+        let mut harness = harness_ui(move |ui| {
             crash_report_dialog(ui.ctx(), &mut state.borrow_mut());
         });
         harness.run();

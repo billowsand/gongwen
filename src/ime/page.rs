@@ -703,12 +703,12 @@ mod tests {
 
     #[test]
     fn delete_shortcut_never_removes_words_while_search_has_focus() {
-        use egui_kittest::Harness;
+        use crate::test_support::harness_ui_state;
         let mut ime = Ime::bare(super::super::ImeSettings::default());
         ime.table.base = table::parse("ab,1=甲", false).entries;
         ime.table.rebuild();
         ime.page.checked.insert(("ab".into(), "甲".into()));
-        let mut harness = Harness::new_ui_state(
+        let mut harness = harness_ui_state(
             |ui, ime: &mut Ime| {
                 ime.page_ui(ui);
             },
@@ -725,7 +725,8 @@ mod tests {
 
     #[test]
     fn page_selects_rows_and_switches_tabs() {
-        use egui_kittest::{Harness, kittest::Queryable};
+        use crate::test_support::harness_ui_state;
+        use egui_kittest::kittest::Queryable;
         let mut ime = Ime::bare(super::super::ImeSettings::default());
         ime.table.base = table::parse(
             "ab,1=甲
@@ -736,7 +737,7 @@ vidc,1=指导",
         .entries;
         ime.table.rebuild();
         ime.rebuild_encoder();
-        let mut harness = Harness::new_ui_state(
+        let mut harness = harness_ui_state(
             |ui, ime: &mut Ime| {
                 ime.page_ui(ui);
             },

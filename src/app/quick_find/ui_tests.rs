@@ -2,7 +2,8 @@
 use super::super::index::Entry;
 use super::*;
 use crate::app::NavPage;
-use egui_kittest::{Harness, kittest::Queryable};
+use crate::test_support::{harness_ui, harness_ui_state};
+use egui_kittest::kittest::Queryable;
 
 #[test]
 fn keyboard_opens_selected_result_and_empty_search_never_opens() {
@@ -15,7 +16,7 @@ fn keyboard_opens_selected_result_and_empty_search_never_opens() {
     );
     state.query = "稿".into();
     let mut opened = None;
-    let mut harness = Harness::new_ui(|ui| {
+    let mut harness = harness_ui(|ui| {
         if let Some(target) = state.ui(ui).0 {
             opened = Some(target);
         }
@@ -29,7 +30,7 @@ fn keyboard_opens_selected_result_and_empty_search_never_opens() {
     assert_eq!(opened, Some(Target::Manuscript(2)));
     state.query = "完全没有匹配项".into();
     opened = None;
-    let mut harness = Harness::new_ui(|ui| {
+    let mut harness = harness_ui(|ui| {
         if let Some(target) = state.ui(ui).0 {
             opened = Some(target);
         }
@@ -54,7 +55,7 @@ fn clicking_a_page_result_returns_its_identity() {
     );
     state.query = "设置".into();
     let mut opened = None;
-    let mut harness = Harness::new_ui(|ui| {
+    let mut harness = harness_ui(|ui| {
         if let Some(target) = state.ui(ui).0 {
             opened = Some(target);
         }
@@ -78,7 +79,7 @@ fn ime_commit_does_not_open_a_result_until_the_next_enter() {
         None,
     );
     let mut opened = None;
-    let mut harness = Harness::new_ui(|ui| {
+    let mut harness = harness_ui(|ui| {
         if let Some(target) = state.ui(ui).0 {
             opened = Some(target);
         }
@@ -103,7 +104,7 @@ fn ime_commit_does_not_open_a_result_until_the_next_enter() {
     harness.run();
     drop(harness);
     assert_eq!(opened, None);
-    let mut harness = Harness::new_ui(|ui| {
+    let mut harness = harness_ui(|ui| {
         if let Some(target) = state.ui(ui).0 {
             opened = Some(target);
         }
@@ -126,7 +127,7 @@ fn empty_query_collapses_and_expanding_keeps_the_search_box_in_place() {
         )],
         None,
     );
-    let mut harness = Harness::new_ui_state(
+    let mut harness = harness_ui_state(
         |ui, (state, opened): &mut (QuickFind, Option<Target>)| {
             let response = modal(ui.ctx()).show(ui.ctx(), |ui| state.ui(ui));
             if let Some(target) = response.inner.0 {
@@ -164,7 +165,7 @@ fn empty_query_collapses_and_expanding_keeps_the_search_box_in_place() {
 #[test]
 fn escape_and_keycap_both_close_the_modal() {
     let state = QuickFind::new(Vec::new(), None);
-    let mut harness = Harness::new_ui_state(
+    let mut harness = harness_ui_state(
         |ui, (state, closed): &mut (QuickFind, bool)| {
             let response = modal(ui.ctx()).show(ui.ctx(), |ui| state.ui(ui));
             *closed |= response.inner.1 || response.should_close();

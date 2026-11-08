@@ -2171,7 +2171,7 @@ impl GongwenApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_kittest::Harness;
+    use crate::test_support::harness_ui_state;
     use egui_kittest::kittest::Queryable;
 
     /// 测试结束恢复线程级的密钥句柄与配置目录覆盖。
@@ -2194,7 +2194,7 @@ mod tests {
 
     /// 把待确认的风险框画出来并点「取消」，返回取消后的应用。
     fn cancel_output_risk(app: GongwenApp) -> GongwenApp {
-        let mut harness = Harness::new_ui_state(
+        let mut harness = harness_ui_state(
             |ui, app: &mut GongwenApp| app.output_risk_window(ui.ctx()),
             app,
         );

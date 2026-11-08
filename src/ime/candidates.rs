@@ -873,7 +873,8 @@ fn paint_bold_copy(
 mod tests {
     use super::super::{ImeSettings, keys::Action, keys::Navigation, table};
     use super::*;
-    use egui_kittest::{Harness, kittest::Queryable};
+    use crate::test_support::harness_ui_state;
+    use egui_kittest::kittest::Queryable;
 
     /// 候选窗依赖应用注册的字体族；轻量交互测试保留 egui 默认字面。
     fn configure_test_fonts(ctx: &egui::Context) {
@@ -914,18 +915,18 @@ mod tests {
 
     #[test]
     fn window_shows_hints_and_empty_code() {
-        let mut harness = Harness::new_ui_state(candidate_ui(), ime("abcd"));
+        let mut harness = harness_ui_state(candidate_ui(), ime("abcd"));
         harness.run();
         // 简码提示跟在词后；个人词条仅加粗候选正文。
         harness.get_by_label_contains("‹ab›");
         harness.get_by_label_contains("个人词");
-        let mut harness = Harness::new_ui_state(candidate_ui(), ime("zz"));
+        let mut harness = harness_ui_state(candidate_ui(), ime("zz"));
         harness.run();
         harness.get_by_label("空码");
     }
     #[test]
     fn expanded_panel_lists_no_phrases_and_collapses_with_the_arrow() {
-        let mut harness = Harness::new_ui_state(candidate_ui(), ime("ab"));
+        let mut harness = harness_ui_state(candidate_ui(), ime("ab"));
         harness.run();
         harness.get_by_label("展开候选").click();
         harness.run();
@@ -941,7 +942,7 @@ mod tests {
 
     #[test]
     fn single_code_has_no_expand_button() {
-        let mut harness = Harness::new_ui_state(candidate_ui(), ime("a"));
+        let mut harness = harness_ui_state(candidate_ui(), ime("a"));
         harness.run();
         assert!(harness.query_by_label("展开候选").is_none());
     }
@@ -949,7 +950,7 @@ mod tests {
     #[test]
     fn clicking_blank_panel_space_keeps_editor_focus() {
         let editor = egui::Id::unique("editor");
-        let mut harness = Harness::new_ui_state(
+        let mut harness = harness_ui_state(
             |ui, (ime, text, started): &mut (Ime, String, bool)| {
                 ui.add(egui::TextEdit::singleline(text).id(editor));
                 if !*started {
@@ -1002,7 +1003,7 @@ mod tests {
             state.execute_guarded(Action::Push(c));
         }
         state.expand_browser();
-        let mut harness = Harness::new_ui_state(candidate_ui(), state);
+        let mut harness = harness_ui_state(candidate_ui(), state);
         harness.run();
         // 只列单字（词组「简码」不在），每行 5 格、露 4 行。第 5 行（第 21 个字起）
         // 滚动区备着画了，但被裁在可见区外，点不中。
@@ -1071,7 +1072,7 @@ mod tests {
         }
         state.expand_browser();
         let mut configured = false;
-        let mut harness = Harness::new_ui_state(
+        let mut harness = harness_ui_state(
             move |ui, ime: &mut Ime| {
                 if !configured {
                     fonts(ui.ctx());

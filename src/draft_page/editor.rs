@@ -1277,8 +1277,8 @@ impl DraftPage<'_> {
                 ui.ctx().request_repaint();
             }
         }
-        if let Some(action) = menu_action {
-            self.run_editor_menu_action(ui.ctx(), action);
+        if let Some((action, selection)) = menu_action {
+            self.run_editor_menu_action(ui.ctx(), action, selection);
         }
         if let Some(action) = citation_action {
             self.run_citation_card_action(ui.ctx(), action);

@@ -425,7 +425,8 @@ pub(super) fn parts_text(parts: &[(char, String)]) -> String {
 mod tests {
     use super::super::ImeSettings;
     use super::*;
-    use egui_kittest::{Harness, kittest::Queryable};
+    use crate::test_support::harness_ui_state;
+    use egui_kittest::kittest::Queryable;
 
     #[test]
     fn window_fills_code_and_keeps_extra_options_collapsed() {
@@ -435,7 +436,7 @@ mod tests {
         ime.table.rebuild();
         ime.rebuild_encoder();
         ime.open_add_word("指导", None);
-        let mut harness = Harness::new_ui_state(|ui, ime: &mut Ime| ime.windows_ui(ui.ctx()), ime);
+        let mut harness = harness_ui_state(|ui, ime: &mut Ime| ime.windows_ui(ui.ctx()), ime);
         harness.run();
         assert_eq!(harness.state().add_word.code, "vidc");
         harness.get_by_label("添加");

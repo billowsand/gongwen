@@ -14,7 +14,7 @@ fn harness() -> egui_kittest::Harness<'static, Bench> {
         draft: Some(task),
         ..Default::default()
     };
-    let mut h = egui_kittest::Harness::new_ui_state(
+    let mut h = crate::test_support::harness_ui_state(
         |ui, b: &mut Bench| {
             show(ui, Some(&mut b.store), None, &b.vocabulary, &mut b.state);
         },
@@ -58,7 +58,7 @@ fn task_assistant_editor_cancel_closes_without_writing() {
 }
 
 fn bench(state: State, store: Store) -> egui_kittest::Harness<'static, Bench> {
-    let mut h = egui_kittest::Harness::new_ui_state(
+    let mut h = crate::test_support::harness_ui_state(
         |ui, b: &mut Bench| {
             show(ui, Some(&mut b.store), None, &b.vocabulary, &mut b.state);
         },
@@ -852,7 +852,7 @@ fn task_assistant_owner_picker_keeps_same_name_people_separate() {
         draft: Some(Task::blank()),
         ..Default::default()
     };
-    let mut h = egui_kittest::Harness::new_ui_state(
+    let mut h = crate::test_support::harness_ui_state(
         |ui, b: &mut Bench| {
             if let Some(d) = b.state.draft.as_mut() {
                 let _ = owner::picker(

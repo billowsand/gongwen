@@ -231,12 +231,20 @@ impl DraftPage<'_> {
         )
     }
 
-    /// 执行编辑框右键菜单里选中的动作。
-    pub(crate) fn run_editor_menu_action(&mut self, ctx: &egui::Context, action: EditorMenuAction) {
-        let selection = editor_selection(ctx, &self.doc.generated_markdown);
+    /// 执行编辑框右键菜单里选中的动作。`selection` 是菜单打开时的选区：
+    /// 点菜单的瞬间编辑框已经丢焦点，现读多半是空的。
+    pub(crate) fn run_editor_menu_action(
+        &mut self,
+        ctx: &egui::Context,
+        action: EditorMenuAction,
+        selection: Option<egui::text::CCursorRange>,
+    ) {
+        let selection = selection
+            .map(|range| ccursor_range_bytes(&self.doc.generated_markdown, range))
+            .filter(|range| !range.is_empty());
         match action {
             EditorMenuAction::Copy => {
-                if let Some(range) = selection.filter(|range| !range.is_empty()) {
+                if let Some(range) = selection {
                     ctx.copy_text(self.doc.generated_markdown[range].to_string());
                 }
             }
@@ -244,7 +252,7 @@ impl DraftPage<'_> {
                 if self.doc.read_only() {
                     return;
                 }
-                if let Some(range) = selection.filter(|range| !range.is_empty()) {
+                if let Some(range) = selection {
                     ctx.copy_text(self.doc.generated_markdown[range.clone()].to_string());
                     self.doc.generated_markdown.replace_range(range.clone(), "");
                     self.doc.pending_source_jump = Some(range.start);
@@ -258,7 +266,10 @@ impl DraftPage<'_> {
                 ctx.memory_mut(|memory| memory.request_focus(editor_id()));
                 ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
             }
-            EditorMenuAction::MoveToCandidates => self.move_selection_to_candidates(ctx),
+            EditorMenuAction::MoveToCandidates => match selection {
+                Some(range) => self.move_range_to_candidates(ctx, range),
+                None => *self.status = "先在正文里选中要移入候选区的文字。".into(),
+            },
         }
     }
 
@@ -287,7 +298,7 @@ impl DraftPage<'_> {
         candidates.mark_dirty(false);
     }
 
-    /// 把正文里选中的文字移入候选区。
+    /// 把正文里选中的文字移入候选区（键盘快捷键：选区还在编辑框里）。
     pub(crate) fn move_selection_to_candidates(&mut self, ctx: &egui::Context) {
         if self.doc.read_only() || !self.candidates_available() {
             return;
@@ -298,6 +309,14 @@ impl DraftPage<'_> {
             *self.status = "先在正文里选中要移入候选区的文字。".into();
             return;
         };
+        self.move_range_to_candidates(ctx, range);
+    }
+
+    /// 把一个已知的正文范围移入候选区（右键菜单用菜单打开时的选区）。
+    fn move_range_to_candidates(&mut self, ctx: &egui::Context, range: Range<usize>) {
+        if self.doc.read_only() || !self.candidates_available() {
+            return;
+        }
         let text = clean_candidate_text(&self.doc.generated_markdown[range.clone()]);
         if text.is_empty() {
             *self.status = "选中的只有空白，没有移入候选区。".into();
@@ -505,10 +524,16 @@ pub(crate) fn editor_context_menu(
     output: &egui::text_edit::TextEditOutput,
     before: Option<egui::text::CCursorRange>,
     editable: bool,
-) -> Option<EditorMenuAction> {
+) -> Option<(EditorMenuAction, Option<egui::text::CCursorRange>)> {
     keep_selection_on_secondary(ui, output, before, editor_id());
-    let has_selection =
-        selection_before_show(ui.ctx(), editor_id()).is_some_and(|range| !range.is_empty());
+    if output.response.secondary_clicked() {
+        remember_menu_selection(ui.ctx(), before);
+    }
+    // 菜单打开后的帧里编辑框可能已经丢掉焦点、清掉存储的选区，回落到打开时记下的那份。
+    let selection = before
+        .filter(|range| !range.is_empty())
+        .or_else(|| menu_selection(ui.ctx()));
+    let has_selection = selection.is_some();
     let mut action = None;
     output.response.context_menu(|ui| {
         ui.set_min_width(200.0);
@@ -543,7 +568,7 @@ pub(crate) fn editor_context_menu(
         ];
         for (label, shortcut, request) in ime_requests {
             if menu_entry(ui, has_selection, label, &shortcut) {
-                if let Some(range) = selection_before_show(ui.ctx(), editor_id()) {
+                if let Some(range) = selection {
                     let sorted = range.sorted_cursors();
                     let text: String = output
                         .galley
@@ -571,7 +596,7 @@ pub(crate) fn editor_context_menu(
             ui.close();
         }
     });
-    action
+    action.map(|action| (action, selection))
 }
 
 /// 右键菜单里带快捷键提示的一项。
@@ -590,9 +615,37 @@ pub(crate) fn selection_bytes(
     text: &str,
 ) -> Option<Range<usize>> {
     let range = selection_before_show(ctx, id)?;
+    Some(ccursor_range_bytes(text, range))
+}
+
+/// 字符选区换算成 `text` 里的字节范围，越界时取文末。
+pub(crate) fn ccursor_range_bytes(text: &str, range: egui::text::CCursorRange) -> Range<usize> {
     let primary = byte_at_char(text, range.primary.index.0);
     let secondary = byte_at_char(text, range.secondary.index.0);
-    Some(primary.min(secondary)..primary.max(secondary))
+    primary.min(secondary)..primary.max(secondary)
+}
+
+/// 右键菜单打开时记下的选区。
+///
+/// egui 0.37 的弹层一按下就把焦点从编辑框拿走，编辑框随即清掉存储的选区；
+/// 菜单里的「剪切」「复制」「移入候选区」若每帧重新读编辑框状态，按下的那一帧
+/// 读到的是空选区，菜单项被禁用、点了也没反应。所以右键松开（菜单打开）时把
+/// 绘制前的选区存进临时数据，菜单各帧都用它。
+const MENU_SELECTION_ID: &str = "gw-editor-menu-selection";
+
+fn remember_menu_selection(ctx: &egui::Context, range: Option<egui::text::CCursorRange>) {
+    ctx.data_mut(|data| match range.filter(|range| !range.is_empty()) {
+        Some(range) => {
+            data.insert_temp(egui::Id::unique(MENU_SELECTION_ID), range);
+        }
+        None => {
+            data.remove::<egui::text::CCursorRange>(egui::Id::unique(MENU_SELECTION_ID));
+        }
+    });
+}
+
+fn menu_selection(ctx: &egui::Context) -> Option<egui::text::CCursorRange> {
+    ctx.data(|data| data.get_temp::<egui::text::CCursorRange>(egui::Id::unique(MENU_SELECTION_ID)))
 }
 
 /// 不计空白的字数。
