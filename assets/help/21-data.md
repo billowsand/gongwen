@@ -21,14 +21,13 @@
 | 接口测试记录 | `config/api-tests.json` | 只存用例结论与配置指纹，**不存返回内容** |
 | 崩溃日志与损坏配置留底 | `config/logs/`（诱饵密码槽位为 `config/alt-logs/`）、`config/config.json.损坏-*` | 只用于本机排查，落盘即加密，**不进全量备份** |
 
-设了第二密码时，诱饵系统用同构的 `alt-` 前缀目录（如 `alt-images/`、`alt-mermaid-cache/`），
+设了第二密码时，诱饵系统用同构的 `alt-` 前缀目录（如 `alt-pi/`、`alt-ime/`），
 两套数据各归各位，谁也读不到谁的那份。
 
 ```mermaid
 flowchart LR
   R[配置目录] --> C[config.json：设置、词库、提示词]
-  R --> M[manuscripts.db：稿件、知识库、公文词表]
-  R --> I[images：插图与 PDF 附件]
+  R --> M[manuscripts.db：稿件、知识库、公文词表、插图与 PDF 附件]
   R --> E[ime：输入法词表]
   R --> A[apis：数据接口]
 ```
@@ -113,8 +112,9 @@ flowchart LR
 导出前会保存所有已修改的稿件，即使已关闭自动保存；任一保存失败都会取消导出。
 备份与恢复须等后台任务（含公文词表扫描）结束后再进行。
 
-备份包含 `config.json`、`manuscripts.db`、`images/`、`apis/`、`ime/`、`skills/`、`pi/`、`mermaid-cache/`、`styles.json`、`metrics.json` 等
-配置目录内的有效数据；**不含** `logs/` 崩溃日志、`.unseen-crash` 崩溃提示标记和
+备份包含 `config.json`、`manuscripts.db`、`apis/`、`ime/`、`skills/`、`pi/`、`styles.json`、`metrics.json` 等
+配置目录内的有效数据；插图、PDF 附件与图表缓存随稿件库一起进 `manuscripts.db`，不再单独成目录。
+备份**不含** `logs/` 崩溃日志、`.unseen-crash` 崩溃提示标记和
 `config.json.损坏-*` 损坏配置留底——这些只对本机排查有用，恢复后反而可能让程序误报。
 
 备份密码不保存在本机，遗失后无法恢复。恢复暂存阶段只写密文（公开帮助截图除外），不生成明文数据库或业务文件。外层文件名和总大小仍可见，请用中性名称，并妥善保管两种密码。
@@ -142,14 +142,13 @@ flowchart LR
 只备份**配置目录**：
 
 - `config.json`（词库、提示词、模板默认要素）；
-- `manuscripts.db`（稿件、版本、知识库、公文词表）；
-- `images/`（稿件里引用的图片）；
+- `manuscripts.db`（稿件、版本、知识库、公文词表，以及插图、PDF 附件与图表缓存）；
 - `apis/`（数据接口配置）；
 - `api-envs.json`（各服务的服务器地址）；
 - `api-secrets.json`（密钥名与值）；
 - `api-tests.json`（用例结论与配置指纹）。
 
-前四样齐了，换机器就能完整恢复；要用数据接口，后四样也一起带上。
+前三样齐了，换机器就能完整恢复；要用数据接口，后三样也一起带上。
 
 > [!注意]
 >

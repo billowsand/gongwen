@@ -464,12 +464,15 @@ mod tests {
         input.profile.recipient = "甲单位".into();
         input.profile.issuing_unit = "某局".into();
         input.profile.number_copies = true;
+        // PDF 与两类随行单据都要随包字体；没有 runtime/fonts 的环境（CI）排不了版，
+        // 只验其余格式的加密，依赖 PDF 的断言（有随行单据、有份号清单）随之跳过。
+        let fonts_available = crate::portable_runtime::find_font_dir().is_some();
         let selection = crate::models::ExportSelection {
             markdown: true,
             docx: true,
-            pdf: true,
+            pdf: fonts_available,
             typst: true,
-            receipt: true,
+            receipt: fonts_available,
             ..Default::default()
         };
         let artifacts = super::super::export_artifacts(
@@ -489,13 +492,21 @@ mod tests {
             "{:?}",
             artifacts.compile_error
         );
-        assert!(artifacts.sheets.receipt >= 1);
-        assert!(artifacts.sheets.transmit >= 1);
+        if fonts_available {
+            assert!(artifacts.sheets.receipt >= 1);
+            assert!(artifacts.sheets.transmit >= 1);
+            assert!(
+                artifacts
+                    .files
+                    .iter()
+                    .any(|p| p.to_string_lossy().contains("份号清单.7z"))
+            );
+        }
+        // Word 与源码包（Typst 包）各一份，缺字体时也必须照常加密交付。
         assert!(
-            artifacts
-                .files
-                .iter()
-                .any(|p| p.to_string_lossy().contains("份号清单.7z"))
+            artifacts.files.len() >= 3,
+            "加密产物过少：{:?}",
+            artifacts.files
         );
         for path in artifacts.files {
             let bytes = std::fs::read(&path).unwrap();

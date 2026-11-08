@@ -207,7 +207,14 @@ mod tests {
         ));
         assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), paths);
         for entry in fs::read_dir(dir.path()).unwrap() {
-            let bytes = fs::read(entry.unwrap().path()).unwrap();
+            let path = entry.unwrap().path();
+            // 实例锁被主实例独占锁住：Windows 上锁住的文件读不了（错误码 33），
+            // 它只被打开、从不被写入，大小为 0 就说明没有落过业务路径。
+            if path.file_name().is_some_and(|name| name == LOCK_FILE) {
+                assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+                continue;
+            }
+            let bytes = fs::read(&path).unwrap();
             assert!(
                 !bytes
                     .windows("人事调整".len())

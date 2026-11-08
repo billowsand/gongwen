@@ -720,6 +720,11 @@ mod delivery_tests {
             ..Default::default()
         };
         for kind in ExportKind::ALL {
+            // PDF 要随包字体；没有 runtime/fonts 的环境（CI）排不了版，
+            // 只跑其余两种格式——「内存导出不在磁盘落目录」在 Word 与 Typst 包上照样成立。
+            if kind == ExportKind::Pdf && crate::portable_runtime::find_font_dir().is_none() {
+                continue;
+            }
             let (result, files) = mdx::memory_files::capture_outputs(|| {
                 export_and_compile(
                     &virtual_root,
