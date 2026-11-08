@@ -194,6 +194,10 @@ pub(crate) enum HostEvent {
         name: String,
         #[serde(default)]
         message: Option<String>,
+        #[serde(default, rename = "activityId")]
+        activity_id: Option<String>,
+        #[serde(default)]
+        outcome: Option<String>,
         #[serde(default, rename = "requestId")]
         request_id: Option<String>,
         #[serde(default, rename = "runId")]

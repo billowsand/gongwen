@@ -259,10 +259,10 @@ pub(crate) fn learn(
             proxy_env: crate::net::proxy_env(&config.proxy),
         },
         cancel.clone(),
-        |event| {
-            if let PiEvent::Progress(message) | PiEvent::Tool(message) = event {
-                on_phase(message);
-            }
+        |event| match event {
+            PiEvent::Progress(message) | PiEvent::Tool(message) => on_phase(message),
+            PiEvent::Activity(activity) if activity.outcome.is_none() => on_phase(activity.action),
+            _ => {}
         },
     )
     .map_err(|e| format!("{e}；工作文件保留在 {label}"))?;

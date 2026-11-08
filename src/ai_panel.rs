@@ -210,6 +210,10 @@ pub(crate) struct AiTurn {
     pub(crate) notes: Vec<String>,
     /// 研究式起草的过程：每次工具调用一行。
     pub(crate) steps: Vec<String>,
+    /// 当前活动及起始时间只用于实时显示，完成后的摘要随过程保存。
+    pub(crate) pi_active: Vec<(String, String, Instant)>,
+    pub(crate) pi_recent: Option<String>,
+
     /// 要用户回答的选择题（动笔前，或第一稿之后）。
     pub(crate) questions: Vec<Question>,
     /// 每道题当前的作答状态，与 `questions` 一一对应。
@@ -261,6 +265,7 @@ impl AiTurn {
             self.elapsed = Some(self.started.elapsed());
         }
         self.phase.clear();
+        self.pi_active.clear();
         self.state = state;
     }
 }
@@ -384,6 +389,8 @@ impl AiPanel {
             phase: String::new(),
             notes: Vec::new(),
             steps: Vec::new(),
+            pi_active: Vec::new(),
+            pi_recent: None,
             questions: Vec::new(),
             replies: Vec::new(),
             decision: Default::default(),
@@ -521,6 +528,28 @@ impl AiPanel {
         if let Some(turn) = self.running_turn_mut() {
             turn.state = TurnState::Streaming;
             turn.phase = phase.to_string();
+        }
+    }
+
+    pub(crate) fn pi_activity(&mut self, activity: crate::pi_agent::PiActivity) {
+        let Some(turn) = self.running_turn_mut() else {
+            return;
+        };
+        turn.pi_active.retain(|(id, ..)| *id != activity.id);
+        match activity.outcome {
+            None => turn
+                .pi_active
+                .push((activity.id, activity.action, Instant::now())),
+            Some(outcome) if !outcome.is_empty() => {
+                if activity.action.is_empty() {
+                    turn.pi_recent = Some(outcome.clone());
+                    turn.steps.push(outcome);
+                } else {
+                    turn.pi_recent = Some(format!("{outcome} · {}", activity.action));
+                    turn.steps.push(format!("{} · {outcome}", activity.action));
+                }
+            }
+            Some(_) => {}
         }
     }
 

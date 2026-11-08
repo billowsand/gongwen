@@ -802,14 +802,36 @@ fn turn_card(
         });
     }
 
+    let is_pi = turn.pi_run.is_some() || turn.provenance.starts_with("Pi Durable");
+    if is_pi {
+        if turn.state.running()
+            && let Some((_, action, since)) = turn.pi_active.last()
+        {
+            let seconds = since.elapsed().as_secs();
+            let text = if seconds >= 5 {
+                format!("{action} · {seconds} 秒")
+            } else {
+                action.clone()
+            };
+            phase_label(ui, &text);
+        }
+        if let Some(recent) = &turn.pi_recent {
+            phase_label(ui, &format!("最近 · {recent}"));
+        }
+    }
+
     if !turn.steps.is_empty() {
         egui::CollapsingHeader::new(
-            egui::RichText::new(format!("过程（{} 步）", turn.steps.len()))
-                .small()
-                .color(theme::text_soft()),
+            egui::RichText::new(if is_pi {
+                "查看过程".to_owned()
+            } else {
+                format!("过程（{} 步）", turn.steps.len())
+            })
+            .small()
+            .color(theme::text_soft()),
         )
         .id_salt(("ai_turn_steps", turn.id))
-        .default_open(true)
+        .default_open(!is_pi)
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt(("ai_turn_steps_scroll", turn.id))

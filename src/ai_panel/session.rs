@@ -58,6 +58,8 @@ pub(crate) struct SavedTurn {
     pub(crate) notes: Vec<String>,
     #[serde(default)]
     pub(crate) steps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pi_recent: Option<String>,
     #[serde(default)]
     pub(crate) questions: Vec<Question>,
     #[serde(default)]
@@ -268,6 +270,7 @@ impl SavedTurn {
             reasoning,
             notes: turn.notes.clone(),
             steps: turn.steps.clone(),
+            pi_recent: turn.pi_recent.clone(),
             questions: turn.questions.clone(),
             replies: turn.replies.clone(),
             decision: turn.decision.clone(),
@@ -378,6 +381,8 @@ impl SavedTurn {
             phase: String::new(),
             notes,
             steps: self.steps,
+            pi_active: Vec::new(),
+            pi_recent: self.pi_recent,
             questions,
             replies,
             decision,
@@ -1275,6 +1280,7 @@ mod tests {
             reasoning: String::new(),
             notes: vec![],
             steps: vec![],
+            pi_recent: None,
             questions: vec![question()],
             replies: vec![ReplyDraft::default()],
             decision: Default::default(),

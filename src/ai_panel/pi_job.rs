@@ -565,6 +565,8 @@ impl DraftPage<'_> {
             turn.usage_job_seq = Some(seq);
             turn.started = Instant::now();
             turn.elapsed = None;
+            turn.pi_active.clear();
+            turn.pi_recent = None;
             turn.context = context.clone();
         }
         self.open_pi_panel(&turn_title, seq);
@@ -745,13 +747,11 @@ fn spawn_prepare_with(
         let result = run_launch(launch, cancel, |event| match event {
             PiEvent::Progress(message) => send(DocJob::PiProgress(message)),
             PiEvent::Strategy(info) => {
-                let line = info.line();
-                send(DocJob::PiTool(line.clone()));
-                send(DocJob::PiProgress(line));
+                send(DocJob::PiTool(info.line()));
             }
             PiEvent::Tool(line) => send(DocJob::PiTool(line)),
-            PiEvent::Evidence(line) => send(DocJob::PiTool(line)),
-            PiEvent::Candidate { path, .. } => send(DocJob::PiCandidate { path }),
+            PiEvent::Activity(activity) => send(DocJob::PiActivity(activity)),
+            PiEvent::Candidate => send(DocJob::PiCandidate),
             PiEvent::Questions(batch) => send(DocJob::PiQuestions(batch)),
         })
         .map_err(|error| {
