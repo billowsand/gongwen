@@ -1,6 +1,5 @@
 # shellcheck shell=bash
-# deb 的 Depends / Recommends，由 scripts/package-deb.sh 与
-# scripts/repack-deb-depends.sh 共同 source，只在这里维护一份。
+# deb 的 Depends / Recommends，由 scripts/package-deb.sh source，只在这里维护一份。
 
 # Runtime dependencies for eframe/glow + rfd (GTK3) on X11/Wayland. Kept as a
 # deterministic list instead of dpkg-shlibdeps so the package does not depend

@@ -124,7 +124,7 @@ Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\shell\open\command
 - 卸载时删掉 ProgId 整键、`.gwx` 只删默认值（别的程序可能也挂在 `.gwx` 下）。
 - 便携版不登记（没有安装步骤）。需要的话后续在设置页加「关联 .gwx 文件」按钮，本期不做。
 
-### Linux（deb，`scripts/package-deb.sh` 与 `package-linux-tar.sh`）
+### Linux（deb 与 pacman 包，`scripts/package-deb.sh`、`scripts/package-arch-pkg.sh`）
 
 - 新增 `assets/linux/cn.localtools.GongwenAssistant.xml`（freedesktop shared-mime-info）：
 
@@ -180,7 +180,7 @@ Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\shell\open\command
 | `src/storage.rs` | `inbox`、`instance.lock` 路径函数（第二步） |
 | `scripts/gongwen-assistant.iss` | `ChangesAssociations`、`[Registry]` 五条 |
 | `scripts/package-portable.ps1` | 带上 `gwx-document.ico` |
-| `scripts/package-deb.sh`、`package-linux-tar.sh` | mime xml、文档图标 |
+| `scripts/package-deb.sh`、`scripts/package-arch-pkg.sh` | mime xml、文档图标 |
 | `assets/linux/*.desktop` | `Exec %F`、`MimeType` |
 | `scripts/generate-brand-icons.py` + `assets/doc-icon/` | 文档图标 |
 | `scripts/verify-deb-install.sh` | xdg-mime 检查 |

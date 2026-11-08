@@ -54,7 +54,7 @@ hayro = { version = "0.7.1", default-features = false, features = ["embed-fonts"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 jieba-rs = "0.11.0"
 # 研究报告公式的预览渲染：纯 Rust 排版 + PNG 光栅化（STIX Two Math），不走 tectonic。
-# 只开 png feature；它的 egui feature 钉在 egui 0.28，与本项目的 0.35 不兼容。
+# 只开 png feature；它的 egui feature 钉在 egui 0.28，与本项目的 0.37 不兼容。
 latex-rust = { path = "vendor/latex-rust", features = ["png"] }
 # 送批材料合并导出：把逐件编译的 PDF 合成一个、补双面打印的空白页。
 # 只用读写与对象操作，关掉默认的 rayon / chrono-clock。

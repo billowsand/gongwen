@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
   schedule:
@@ -22,7 +22,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -74,7 +74,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -132,7 +132,7 @@ jobs:
             dist/gongwen-assistant-macos-arm64.zip
 
       - name: Upload macOS app artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-macos-arm64-app
           path: dist/gongwen-assistant-macos-arm64.zip
@@ -182,7 +182,7 @@ jobs:
             libxcb1-dev \
             libxkbcommon-dev
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         run: |
@@ -261,7 +261,7 @@ jobs:
             libxcb1-dev \
             libxkbcommon-dev
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         run: |
@@ -274,7 +274,7 @@ jobs:
         run: cargo build --release --locked
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-linux-arm64-binary
           path: target/release/gongwen-assistant
@@ -308,10 +308,10 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl unzip jq xz-utils binutils libstdc++6 iproute2
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ci-linux-arm64-binary
           path: dist/staging
@@ -322,7 +322,11 @@ jobs:
           staging=dist/staging
           chmod 755 "$staging/gongwen-assistant"
           asset="runtime.zip"
-          curl --fail --location --retry 3 \
+          # Ubuntu 20.04 的软件源里没有 gh（21.04 起才收录），这里只能走 curl。
+          # GitHub 的 Release CDN 偶发 504，按 --retry 的退避只重试 4 次不够
+          # （2026-11-08 的 CI 就连续 4 次 504 失败）；放宽到 10 次、覆盖 5xx。
+          curl --fail --location --retry 10 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 30 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
             --output "/tmp/${asset}"
           unzip -qo "/tmp/${asset}" -d "$staging/runtime" || {
@@ -366,7 +370,7 @@ jobs:
 
       - name: Upload launch logs and screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: launch-smoke-ubuntu2004-arm64
           path: launch-smoke
@@ -384,7 +388,7 @@ jobs:
       contents: read
       checks: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 

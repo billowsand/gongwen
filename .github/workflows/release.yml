@@ -42,7 +42,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -106,7 +106,7 @@ jobs:
             [System.Text.UTF8Encoding]::new($false))
 
       - name: Upload Windows release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-win-x64
           path: |
@@ -124,7 +124,7 @@ jobs:
       GONGWEN_MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
       GONGWEN_MACOS_NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -137,7 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           asset=runtime.zip
-          curl --fail --location --retry 3 \
+          curl --fail --location --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
             --output "/tmp/${asset}"
           unzip -qo "/tmp/${asset}" -d runtime || {
@@ -165,7 +165,7 @@ jobs:
             --output "$GITHUB_WORKSPACE/dist/macos"
 
       - name: Upload macOS release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-macos-arm64
           path: |
@@ -212,7 +212,7 @@ jobs:
             libxcb1-dev \
             libxkbcommon-dev
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         run: |
@@ -267,7 +267,7 @@ jobs:
         run: |
           set -euo pipefail
           asset=runtime.zip
-          curl --fail --location --retry 3 \
+          curl --fail --location --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
             --output "/tmp/${asset}"
           unzip -qo "/tmp/${asset}" -d runtime || {
@@ -289,7 +289,7 @@ jobs:
           cargo test --locked --release --bin gongwen-assistant "shipped_runtime_typesets_every_kind" -- --ignored
 
       - name: Upload GLIBC 2.28 binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-arm64-glibc228-binary
           path: target/release/gongwen-assistant
@@ -301,10 +301,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download GLIBC 2.28 binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: linux-arm64-glibc228-binary
           path: target/release
@@ -349,7 +349,7 @@ jobs:
           sha256sum "$asset" | awk '{ printf "%s  %s\n", $1, $2 }' > "${asset}.sha256"
 
       - name: Upload Linux release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-linux-arm64
           path: |
@@ -378,7 +378,7 @@ jobs:
             libxkbcommon libxkbcommon-x11 libglvnd wayland \
             fontconfig dbus zlib jq iproute2
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         run: |
@@ -403,7 +403,7 @@ jobs:
       - name: Download runtime assets
         run: |
           set -euo pipefail
-          curl --fail --location --retry 3 \
+          curl --fail --location --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/runtime.zip" \
             --output /tmp/runtime.zip
           unzip -qo /tmp/runtime.zip -d runtime || {
@@ -438,7 +438,7 @@ jobs:
             "$version" dist/staging-linux-x86_64 dist amd64
 
       - name: Upload Arch release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-linux-x86_64-arch
           path: |
@@ -463,10 +463,10 @@ jobs:
           set -euo pipefail
           pacman -Sy --noconfirm --needed git
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download Arch release assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-linux-x86_64-arch
           path: dist
@@ -499,7 +499,7 @@ jobs:
 
       - name: Upload launch logs and screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: launch-smoke-arch-x86_64
           path: launch-smoke
@@ -520,10 +520,10 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download Linux release assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-linux-arm64
           path: dist
@@ -546,7 +546,7 @@ jobs:
 
       - name: Upload launch logs and screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: launch-smoke-arm64-ubuntu2004
           path: launch-smoke
@@ -565,9 +565,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: release-assets

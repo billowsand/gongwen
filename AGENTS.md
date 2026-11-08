@@ -11,7 +11,7 @@
 
 ## 技术栈
 
-- Rust edition 2024（stable），GUI 用 `eframe` / `egui` 0.35，纯 CPU 渲染 PDF 用 `hayro`。
+- Rust edition 2024（stable），GUI 用 `eframe` / `egui` 0.37，纯 CPU 渲染 PDF 用 `hayro`。
 - PDF 全部由 **Typst** 进程内排版（`typst` 0.15.1，World 在 `src/typst_engine.rs`；
   `typst-layout` vendor 在 `vendor/typst-layout/` 打了标点收缩补丁）。公文模板
   `assets/typst/gongwen.typ`、数据由 `src/export/typst/` 生成；研究报告模板
