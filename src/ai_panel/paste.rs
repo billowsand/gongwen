@@ -20,14 +20,17 @@ pub(crate) struct Material {
 
 #[derive(Debug)]
 pub(crate) struct PastedFile {
+    pub(crate) id: u64,
     pub(crate) material: Material,
     pub(crate) chars: usize,
 }
 
 impl PastedFile {
     pub(super) fn new(text: &str) -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let chars = text.chars().count();
         Self {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             chars,
             material: Material {
                 // 中性标签：不带正文片段、不带路径，只用于界面与提示词里区分材料。

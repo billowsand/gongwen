@@ -62,7 +62,7 @@ const DEDICATED_BOLD_PREVIEW_ID: &str = "gw-dedicated-bold-preview";
 
 pub(crate) fn preview_uses_dedicated_bold(ctx: &egui::Context) -> bool {
     ctx.data(|data| {
-        data.get_temp::<bool>(egui::Id::new(DEDICATED_BOLD_PREVIEW_ID))
+        data.get_temp::<bool>(egui::Id::unique(DEDICATED_BOLD_PREVIEW_ID))
             .unwrap_or(false)
     })
 }
@@ -265,7 +265,8 @@ pub(crate) fn load_system_ui_font(fonts: &mut egui::FontDefinitions, key: &str) 
 /// 按钮、下拉框里的字明显靠上。把字形下移半个 line gap，上下各分一半，字面
 /// 落回行正中；line gap 为 0 的字体不受影响。
 pub(crate) fn center_line_gap(font_data: &mut egui::FontData) {
-    font_data.tweak.y_offset_factor = line_gap_offset_factor(&font_data.font, font_data.index);
+    font_data.tweak.y_offset_factor =
+        line_gap_offset_factor(font_data.font.as_ref().as_ref(), font_data.index);
 }
 
 /// 半个 line gap 占字号的比例，即 `FontTweak::y_offset_factor` 该取的值。
@@ -342,7 +343,7 @@ pub(crate) fn font_candidates(bundled: Option<&Path>, file: &str, system: &[&str
 pub(crate) fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
     ctx.data_mut(|data| {
         data.insert_temp(
-            egui::Id::new(DEDICATED_BOLD_PREVIEW_ID),
+            egui::Id::unique(DEDICATED_BOLD_PREVIEW_ID),
             config.uses_dedicated_bold_font(),
         );
     });

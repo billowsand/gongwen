@@ -667,7 +667,7 @@ pub(crate) fn layout_thumbnail(
         top += height + 4.5;
         let response = ui.interact(
             zone,
-            ui.id().with(("form_thumbnail", index)),
+            ui.scope_id().with(("form_thumbnail", index)),
             egui::Sense::click(),
         );
         let hovered = response.hovered();
@@ -710,7 +710,7 @@ pub(crate) fn layout_thumbnail(
         );
         let response = ui.interact(
             zone,
-            ui.id()
+            ui.scope_id()
                 .with(("form_thumbnail", FormSection::Transmit.index())),
             egui::Sense::click(),
         );

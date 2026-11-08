@@ -362,7 +362,7 @@ pub(crate) fn paint(
         );
         let response = ui.interact(
             hit,
-            egui::Id::new(("gw-preview-line-number", number)),
+            egui::Id::unique(("gw-preview-line-number", number)),
             match &row.source {
                 Some(_) => egui::Sense::click(),
                 None => egui::Sense::hover(),

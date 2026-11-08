@@ -18,9 +18,13 @@ use crate::draft_page::diff_editor::replace_with_undo;
 use crate::draft_page::{
     DraftPage, blank_line_padding, editor_cursor, editor_id, editor_selection,
 };
+#[cfg(test)]
+use crate::rich_paste::clipboard;
 use crate::rich_paste::{self, Context, Source};
 use crate::theme;
 use eframe::egui;
+use std::ops::Range;
+use std::sync::mpsc::Receiver;
 
 /// 「改为原样粘贴」按钮保留多久（秒）。再久用户已经按自己的意思改过正文了。
 const RECENT_PASTE_SECONDS: f64 = 15.0;
@@ -37,10 +41,43 @@ pub(crate) struct RecentPaste {
     expires_at: f64,
 }
 
+/// 等待后台转换的粘贴。原文先照常插入，转换成功后只替换这段原文。
+pub(crate) struct PendingPaste {
+    pub(crate) range: Range<usize>,
+    pub(crate) plain: String,
+    pub(crate) receiver: Receiver<PreparedPaste>,
+}
+
+pub(crate) struct PreparedPaste {
+    pub(crate) outcome: Option<rich_paste::Outcome>,
+    pub(crate) markdown: String,
+    pub(crate) line_start: usize,
+    pub(crate) block: bool,
+}
+
+fn move_editor_cursor(ctx: &egui::Context, text: &str, mut byte: usize) {
+    byte = byte.min(text.len());
+    while !text.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    let mut state = egui::TextEdit::load_state(ctx, editor_id()).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(text[..byte].chars().count()),
+        )));
+    state.store(ctx, editor_id());
+}
+
 impl DraftPage<'_> {
     /// 在编辑框绘制之前接管本帧的 `Event::Paste`。
     pub(crate) fn smart_paste(&mut self, ui: &egui::Ui, editable: bool) {
         let ctx = ui.ctx();
+        // 接管异步粘贴后，这一帧不再让 TextEdit 自己处理输入事件；否则
+        // 刚写入的撤销器又会被同一个按键/粘贴事件推进一步。
+        if self.doc.pending_paste.is_some() {
+            ui.input_mut(|input| input.events.clear());
+        }
         if !editable || self.doc.read_only() || self.doc.ai_panel.workspace_view.is_some() {
             return;
         }
@@ -54,16 +91,7 @@ impl DraftPage<'_> {
         let Some((index, text)) = paste_event(ui) else {
             return;
         };
-        // 剪贴板 HTML 在这里读一次：单行内容要不要接管得看它有没有图。
-        let html = rich_paste::read_html();
-        // 只粘贴一行（复制一个词、一个数字）不接管。带图的段落例外：Word 里那张图
-        // 常常单独一段、纯文本是空的，只按行数判断就永远粘不进图片。
-        let single_line = !text.trim_end_matches(['\r', '\n']).contains('\n');
-        if single_line
-            && !html
-                .as_deref()
-                .is_some_and(rich_paste::has_importable_image)
-        {
+        if self.doc.pending_paste.is_some() {
             return;
         }
         let markdown = &self.doc.generated_markdown;
@@ -75,13 +103,6 @@ impl DraftPage<'_> {
         let anchor = selection.as_ref().map_or(cursor, |range| range.start);
         let line_start = markdown[..anchor].rfind('\n').map_or(0, |index| index + 1);
         let block = markdown[line_start..anchor].trim().is_empty();
-        let source = match html {
-            Some(html) => Source::Html {
-                html,
-                plain: text.clone(),
-            },
-            None => Source::Plain(text.clone()),
-        };
         let context = Context {
             kind: self.doc.draft.kind,
             draft_empty: markdown.trim().is_empty(),
@@ -90,23 +111,119 @@ impl DraftPage<'_> {
                 .any(|line| line.trim_start().starts_with("# ")),
             section_level: section_level(markdown, anchor),
         };
-        let outcome = if block {
-            rich_paste::convert(&source, &context)
-        } else {
-            rich_paste::convert_inline(&source, &context)
-        };
-        let Some(outcome) = outcome else {
-            return;
-        };
-        // 接管：把这个事件从本帧删掉，编辑框就不会再插一遍纯文本。
+        // 先原样插入：HTML 剪贴板读取、图片解码与结构转换都在后台做，不让
+        // Wayland 事件循环停在这里。结果回来后只替换下面这一段原文。
         ui.input_mut(|input| {
             if index < input.events.len() {
                 input.events.remove(index);
             }
         });
-        if !block {
-            // 行内粘贴：替换选区或插在光标处，不补空行。
-            let range = selection.unwrap_or(cursor..cursor);
+        let range = selection.clone().unwrap_or(cursor..cursor);
+        let mut updated = String::with_capacity(markdown.len() + text.len());
+        updated.push_str(&markdown[..range.start]);
+        updated.push_str(&text);
+        updated.push_str(&markdown[range.end..]);
+        let start = range.start;
+        let end = start + text.len();
+        replace_with_undo(ctx, &mut self.doc.generated_markdown, updated, end);
+        self.doc.pending_source_jump = Some(end);
+        self.revalidate();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.doc.pending_paste = Some(PendingPaste {
+            range: start..end,
+            plain: text.clone(),
+            receiver,
+        });
+        let key = self.doc.key;
+        let tx = self.sender.clone();
+        let wake = ctx.clone();
+        #[cfg(test)]
+        let test_html = clipboard::test_html().flatten();
+        #[cfg(test)]
+        let worker_config_dir = crate::storage::config_dir().ok();
+        std::thread::spawn(move || {
+            #[cfg(test)]
+            clipboard::set_test_html_in_current_thread(test_html);
+            #[cfg(test)]
+            if let Some(dir) = worker_config_dir {
+                crate::storage::set_test_config_dir_in_current_thread(dir);
+            }
+            // 剪贴板是进程外的数据源：它可能等待另一个应用提供 HTML，绝不能
+            // 在 UI 线程里等。失败时保持已经插入的纯文本，不覆盖用户的输入。
+            let html = rich_paste::read_html();
+            let single_line = !text.trim_end_matches(['\r', '\n']).contains('\n');
+            let source = match html {
+                Some(html) if !single_line || rich_paste::has_importable_image(&html) => {
+                    Source::Html {
+                        html,
+                        plain: text.clone(),
+                    }
+                }
+                _ => Source::Plain(text.clone()),
+            };
+            let outcome = if block {
+                rich_paste::convert(&source, &context)
+            } else {
+                rich_paste::convert_inline(&source, &context)
+            };
+            let _ = sender.send(PreparedPaste {
+                outcome,
+                markdown: text,
+                line_start,
+                block,
+            });
+            let _ = tx.send(crate::app::WorkerResult::SmartPasteDone { key });
+            wake.request_repaint();
+        });
+    }
+
+    /// 收取一次后台粘贴。`None` 表示无需转换，保留已经插入的原文。
+    pub(crate) fn finish_paste(
+        &mut self,
+        ui: &egui::Ui,
+        pasted_range: Range<usize>,
+        prepared: PreparedPaste,
+    ) {
+        let Some(outcome) = prepared.outcome else {
+            return;
+        };
+        let ctx = ui.ctx();
+        let markdown = &self.doc.generated_markdown;
+        if prepared.block {
+            // 插入点所在行行首的空白一起换掉，免得留下两个缩进空格。
+            let range = prepared.line_start.min(pasted_range.start)..pasted_range.end;
+            let (start, end) = (range.start, range.end);
+            let lead = blank_line_padding(markdown[..start].trim_end_matches(' '), true);
+            let rest = markdown[end..].trim_start_matches(' ');
+            let tail = if rest.trim_end_matches('\n').is_empty() {
+                ""
+            } else {
+                blank_line_padding(rest, false)
+            };
+            let body = outcome.markdown.trim_end_matches('\n');
+            let inserted = format!("{lead}{body}{tail}");
+            let mut updated = String::with_capacity(markdown.len() + inserted.len());
+            updated.push_str(&markdown[..start]);
+            updated.push_str(&inserted);
+            updated.push_str(&markdown[end..]);
+            let markdown_start = start + lead.len();
+            let markdown_end = markdown_start + body.len();
+            // 原文插入时已经记好「粘贴前 → 原文」的撤销点；这里只推进
+            // 当前正文，不能再把临时原文变成额外的一步撤销。
+            self.doc.generated_markdown = updated;
+            move_editor_cursor(ctx, &self.doc.generated_markdown, markdown_end);
+            self.doc.pending_source_jump = Some(markdown_end);
+            self.doc.recent_paste = Some(RecentPaste {
+                range: markdown_start..markdown_end,
+                inserted: body.to_string(),
+                plain: prepared.markdown,
+                expires_at: ctx.input(|input| input.time) + RECENT_PASTE_SECONDS,
+            });
+            self.revalidate();
+            *self.status = outcome.stats.notice();
+        } else {
+            let range = pasted_range;
             let body = outcome.markdown.as_str();
             let mut updated = String::with_capacity(markdown.len() + body.len());
             updated.push_str(&markdown[..range.start]);
@@ -114,52 +231,18 @@ impl DraftPage<'_> {
             updated.push_str(&markdown[range.end..]);
             let start = range.start;
             let end = start + body.len();
-            replace_with_undo(ctx, &mut self.doc.generated_markdown, updated, end);
+            self.doc.generated_markdown = updated;
+            move_editor_cursor(ctx, &self.doc.generated_markdown, end);
             self.doc.pending_source_jump = Some(end);
             self.doc.recent_paste = Some(RecentPaste {
                 range: start..end,
                 inserted: body.to_string(),
-                plain: source.plain_text().to_string(),
+                plain: prepared.markdown,
                 expires_at: ctx.input(|input| input.time) + RECENT_PASTE_SECONDS,
             });
             self.revalidate();
             *self.status = outcome.stats.inline_notice();
-            if !self.doc.warnings.is_empty() || !self.doc.revisions.is_empty() {
-                self.open_result_drawer();
-            }
-            return;
         }
-        // 插入点所在行行首的空白一起换掉，免得留下两个缩进空格。
-        let range = line_start..selection.map_or(cursor, |range| range.end);
-        let (start, end) = (range.start, range.end);
-        let lead = blank_line_padding(markdown[..start].trim_end_matches(' '), true);
-        let rest = markdown[end..].trim_start_matches(' ');
-        // 后面只剩换行（或什么都不剩）时不必再补空行：那些换行已经够收尾。
-        let tail = if rest.trim_end_matches('\n').is_empty() {
-            ""
-        } else {
-            blank_line_padding(rest, false)
-        };
-        // 转换结果自带收尾换行，这里去掉再补前后空行，免得正文里白多几行。
-        let body = outcome.markdown.trim_end_matches('\n');
-        let inserted = format!("{lead}{body}{tail}");
-        let mut updated = String::with_capacity(markdown.len() + inserted.len());
-        updated.push_str(&markdown[..start]);
-        updated.push_str(&inserted);
-        updated.push_str(&markdown[end..]);
-        let markdown_start = start + lead.len();
-        let markdown_end = markdown_start + body.len();
-        // 光标落在插入内容的末尾，`replace_with_undo` 前后各记一个撤销点。
-        replace_with_undo(ctx, &mut self.doc.generated_markdown, updated, markdown_end);
-        self.doc.pending_source_jump = Some(markdown_end);
-        self.doc.recent_paste = Some(RecentPaste {
-            range: markdown_start..markdown_end,
-            inserted: body.to_string(),
-            plain: source.plain_text().to_string(),
-            expires_at: ctx.input(|input| input.time) + RECENT_PASTE_SECONDS,
-        });
-        self.revalidate();
-        *self.status = outcome.stats.notice();
         if !self.doc.warnings.is_empty() || !self.doc.revisions.is_empty() {
             self.open_result_drawer();
         }
@@ -358,7 +441,31 @@ mod ui_tests {
             self.frame(
                 vec![egui::Event::Paste(text.to_string())],
                 egui::Modifiers::NONE,
-            )
+            );
+            self.settle_paste()
+        }
+
+        fn settle_paste(&mut self) -> Vec<String> {
+            let Some(pending) = self.doc.pending_paste.take() else {
+                return self.frame(Vec::new(), egui::Modifiers::NONE);
+            };
+            let prepared = pending
+                .receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("后台粘贴应及时完成");
+            if self.doc.generated_markdown.get(pending.range.clone())
+                == Some(pending.plain.as_str())
+            {
+                let raw = egui::RawInput::default();
+                let ctx = self.ctx.clone();
+                let mut prepared = Some(prepared);
+                crate::test_support::run_ui(&ctx, raw, |ui| {
+                    self.with_page(|page| {
+                        page.finish_paste(ui, pending.range.clone(), prepared.take().unwrap())
+                    });
+                });
+            }
+            self.frame(Vec::new(), egui::Modifiers::NONE)
         }
 
         /// 把编辑框的光标放到第 `char_index` 个字符（0 起）。
@@ -468,6 +575,8 @@ mod ui_tests {
             repeat: false,
             modifiers: egui::Modifiers::COMMAND,
         };
+        harness.frame(vec![undo.clone()], egui::Modifiers::COMMAND);
+        assert_ne!(harness.doc.generated_markdown, "某某单位：\n\n");
         harness.frame(vec![undo], egui::Modifiers::COMMAND);
         assert_eq!(harness.doc.generated_markdown, "某某单位：\n\n");
         clipboard::clear_test_html();
@@ -487,9 +596,40 @@ mod ui_tests {
 
         // 只有一行：不接管。
         let mut harness = Harness::new("");
-        harness.paste("一、总体要求");
+        harness.frame(
+            vec![egui::Event::Paste("一、总体要求".to_string())],
+            egui::Modifiers::NONE,
+        );
+        harness.frame(Vec::new(), egui::Modifiers::NONE);
         assert_eq!(harness.doc.generated_markdown, "一、总体要求");
 
+        clipboard::clear_test_html();
+    }
+
+    #[test]
+    fn editing_the_plain_placeholder_keeps_the_users_text() {
+        clipboard::set_test_html(None);
+        let mut harness = Harness::new("某某单位：\n\n");
+        harness.frame(
+            vec![egui::Event::Paste(PLAIN.to_string())],
+            egui::Modifiers::NONE,
+        );
+        let pending = harness.doc.pending_paste.take().unwrap();
+        harness
+            .doc
+            .generated_markdown
+            .replace_range(pending.range.start..pending.range.start, "用户继续输入");
+        pending
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            harness
+                .doc
+                .generated_markdown
+                .starts_with("某某单位：\n\n用户继续输入")
+        );
+        assert!(!harness.doc.generated_markdown.contains("## 总体要求"));
         clipboard::clear_test_html();
     }
 
@@ -552,6 +692,7 @@ mod ui_tests {
             )],
             egui::Modifiers::NONE,
         );
+        harness.settle_paste();
         let text = &harness.doc.generated_markdown;
         assert!(text.contains("### 背景"), "{text}");
         assert!(text.contains("#### 现状"), "{text}");
@@ -619,6 +760,7 @@ mod ui_tests {
             repeat: false,
             modifiers: egui::Modifiers::COMMAND,
         };
+        harness.frame(vec![undo.clone()], egui::Modifiers::COMMAND);
         harness.frame(vec![undo], egui::Modifiers::COMMAND);
         assert_eq!(harness.doc.generated_markdown, "");
 

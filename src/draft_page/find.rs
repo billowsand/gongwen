@@ -95,7 +95,7 @@ pub(crate) enum FindAction {
 }
 
 pub(crate) fn find_query_id() -> egui::Id {
-    egui::Id::new("gw-markdown-find-query")
+    egui::Id::unique("gw-markdown-find-query")
 }
 
 /// 返回非重叠匹配的 UTF-8 字节范围，正好可以安全交给 `String::replace_range`。

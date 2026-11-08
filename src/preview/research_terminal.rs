@@ -468,7 +468,7 @@ fn hatched_number(ctx: &egui::Context, number: &str) -> Option<(egui::TextureHan
             .ok()
     });
     let color = theme::paper::ink_muted();
-    let key = egui::Id::new(("terminal-hatched-number", number, color));
+    let key = egui::Id::unique(("terminal-hatched-number", number, color));
     if let Some(hit) = ctx.data(|d| d.get_temp::<(egui::TextureHandle, f32)>(key)) {
         return Some(hit);
     }

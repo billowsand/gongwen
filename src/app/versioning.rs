@@ -78,7 +78,7 @@ impl GongwenApp {
         };
         let dialog = modal::dialog(
             ctx,
-            egui::Id::new("version_switch"),
+            egui::Id::unique("version_switch"),
             "切换版本",
             420.0,
             Dismiss::EscOrBackdrop,
@@ -209,7 +209,7 @@ impl GongwenApp {
         // 有输入的表单：点到遮罩不关，免得误点丢掉已填的名称和注释；Esc 仍可取消。
         let dialog = modal::dialog(
             ctx,
-            egui::Id::new("version_commit"),
+            egui::Id::unique("version_commit"),
             "提交版本",
             380.0,
             Dismiss::EscOnly,
@@ -346,7 +346,7 @@ impl GongwenApp {
     /// 版本对照窗（稿件版 / 配置版共用）。
     pub(crate) fn version_diff_window(&mut self, ctx: &egui::Context) {
         let Some(mut diff) = self.version_diff.take() else {
-            theme::reset_window_anim(ctx, egui::Id::new("version_diff_anim"));
+            theme::reset_window_anim(ctx, egui::Id::unique("version_diff_anim"));
             return;
         };
         let scope = diff.scope.clone();
@@ -366,7 +366,7 @@ impl GongwenApp {
                 VersionScope::Config => self.config_diff_ui(ui, &mut diff),
             });
         if let Some(w) = win {
-            theme::window_enter_anim(ctx, egui::Id::new("version_diff_anim"), &w.response);
+            theme::window_enter_anim(ctx, egui::Id::unique("version_diff_anim"), &w.response);
         }
         if !open {
             return;
@@ -541,7 +541,7 @@ impl GongwenApp {
     /// 配置版本历史窗：列表 + 应用（二次确认）+ 对照。
     pub(crate) fn config_versions_window(&mut self, ctx: &egui::Context) {
         if !self.config_versions_open {
-            theme::reset_window_anim(ctx, egui::Id::new("config_versions_anim"));
+            theme::reset_window_anim(ctx, egui::Id::unique("config_versions_anim"));
             return;
         }
         let versions = self
@@ -626,7 +626,7 @@ impl GongwenApp {
                 }
             });
         if let Some(w) = win {
-            theme::window_enter_anim(ctx, egui::Id::new("config_versions_anim"), &w.response);
+            theme::window_enter_anim(ctx, egui::Id::unique("config_versions_anim"), &w.response);
         }
         if let Some(n) = open_diff {
             self.version_diff = Some(VersionDiffState {
@@ -728,7 +728,7 @@ impl GongwenApp {
         };
         let dialog = modal::dialog(
             ctx,
-            egui::Id::new("revert_confirm"),
+            egui::Id::unique("revert_confirm"),
             "回退到该版本",
             380.0,
             Dismiss::EscOrBackdrop,
@@ -946,7 +946,7 @@ pub(crate) fn manuscript_diff_ui_impl(
     let new_label = format!("v{to}");
     let _edit_source = diff.pair.show(
         ui,
-        egui::Id::new(("manuscript_pair", key)),
+        egui::Id::unique(("manuscript_pair", key)),
         &old_label,
         &new_label,
         display,

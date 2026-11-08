@@ -30,7 +30,7 @@ pub(super) fn header_button(ui: &mut egui::Ui, icon: theme::Icon, label: &str) -
             .corner_radius(4)
             .min_size(egui::vec2(26.0, 26.0)),
     );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     response.on_hover_text(label)
 }
 

@@ -7,7 +7,6 @@ use crate::app::{DocJob, DraftAction, WorkerResult, accent, export_and_compile, 
 use crate::doc_import;
 use crate::draft_page::{DocKey, DraftPage, ExportKind, FileAction};
 use crate::export;
-use crate::file_clipboard;
 use crate::images;
 use crate::models::{DraftInput, ExportSelection, GeneratedDraft, ReviewNote};
 use crate::prompt;
@@ -539,7 +538,8 @@ impl DraftPage<'_> {
                     });
                     return;
                 }
-                (file_clipboard::copy_file(&path), path, "复制到剪贴板")
+                self.actions.push(DraftAction::CopyFile { path });
+                return;
             }
             FileAction::SaveAs(kind) => {
                 self.save_export_copy(kind);

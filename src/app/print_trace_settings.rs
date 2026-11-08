@@ -34,7 +34,7 @@ impl GongwenApp {
         egui::CollapsingHeader::new("按印制编号查询 / 最近登记")
             .id_salt("print_trace_history")
             .show(ui, |ui| {
-                let key = egui::Id::new("print_trace_lookup_code");
+                let key = egui::Id::unique("print_trace_lookup_code");
                 let mut query = ui
                     .ctx()
                     .data_mut(|data| data.get_temp::<String>(key))

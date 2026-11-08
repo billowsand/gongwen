@@ -39,7 +39,7 @@ pub(crate) fn show(
     editable: bool,
 ) -> Option<CardAction> {
     let groups = index.groups(text);
-    let state_id = egui::Id::new("gw-citation-card");
+    let state_id = egui::Id::unique("gw-citation-card");
     let mut state: CardState = ui.data(|data| data.get_temp(state_id)).unwrap_or_default();
     if groups.is_empty() {
         ui.data_mut(|data| data.remove::<CardState>(state_id));
@@ -144,7 +144,7 @@ fn card(
     let text = group.text();
     let nonstandard = group.nonstandard.contains(&range);
     let mut action = None;
-    let area = egui::Area::new(egui::Id::new("gw-citation-card-area"))
+    let area = egui::Area::new(egui::Id::unique("gw-citation-card-area"))
         .order(egui::Order::Foreground)
         .fixed_pos(anchor.left_bottom() + egui::vec2(0.0, 4.0))
         .constrain(true)

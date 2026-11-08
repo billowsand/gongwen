@@ -116,7 +116,7 @@ const CACHE_LIMIT: usize = 2048;
 /// 分词断行要跑 jieba，预览每帧都重画看得见的标题与表格，按内容缓存判定结果。
 fn cached(ctx: &egui::Context, key: impl std::hash::Hash, compute: impl FnOnce() -> Fit) -> Fit {
     let key = super::memo::key(key);
-    let id = egui::Id::new("gw-preview-fit");
+    let id = egui::Id::unique("gw-preview-fit");
     if let Some(fit) = ctx.data_mut(|data| {
         data.get_temp_mut_or_default::<HashMap<u64, Arc<Fit>>>(id)
             .get(&key)

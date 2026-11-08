@@ -63,7 +63,12 @@ pub(crate) fn clear_test_html() {
 }
 
 #[cfg(test)]
-fn test_html() -> Option<Option<String>> {
+pub(crate) fn set_test_html_in_current_thread(html: Option<String>) {
+    set_test_html(html.as_deref());
+}
+
+#[cfg(test)]
+pub(crate) fn test_html() -> Option<Option<String>> {
     TEST_HTML.with(|slot| slot.borrow().clone())
 }
 

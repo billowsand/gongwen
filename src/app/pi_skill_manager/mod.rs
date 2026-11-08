@@ -948,7 +948,7 @@ impl PiSkillsPage {
         } else {
             "新建 Pi 技能"
         })
-        .id(egui::Id::new("pi_skill_create"))
+        .id(egui::Id::unique("pi_skill_create"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

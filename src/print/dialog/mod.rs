@@ -349,7 +349,7 @@ impl PrintDialog {
         };
         let dialog = modal::dialog(
             ctx,
-            egui::Id::new("print_dialog"),
+            egui::Id::unique("print_dialog"),
             "打印",
             680.0,
             dismiss,

@@ -98,12 +98,12 @@ impl Ime {
     /// 浮窗：加词与查码。正文右键菜单经临时存储发来请求。
     pub(crate) fn windows_ui(&mut self, ctx: &egui::Context) {
         if let Some(text) =
-            ctx.data_mut(|data| data.remove_temp::<String>(egui::Id::new("ime-add-word")))
+            ctx.data_mut(|data| data.remove_temp::<String>(egui::Id::unique("ime-add-word")))
         {
             self.open_add_word(&text, None);
         }
         if let Some(text) =
-            ctx.data_mut(|data| data.remove_temp::<String>(egui::Id::new("ime-lookup")))
+            ctx.data_mut(|data| data.remove_temp::<String>(egui::Id::unique("ime-lookup")))
         {
             self.open_lookup(&text);
         }
@@ -121,7 +121,7 @@ impl Ime {
         let mut open = true;
         let mut close = false;
         let mut window = egui::Window::new("加入词表")
-            .id(egui::Id::new("ime-add-word-window"))
+            .id(egui::Id::unique("ime-add-word-window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

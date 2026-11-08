@@ -8,15 +8,15 @@ pub(super) const MAX_RESULTS: usize = 50;
 const SEARCH_HEIGHT: f32 = 64.0;
 
 pub(in crate::app) fn search_id() -> egui::Id {
-    egui::Id::new("quick_find_query")
+    egui::Id::unique("quick_find_query")
 }
 
 /// 顶边固定，避免结果数量变化时居中的浮层带着输入框上下跳动。
 pub(super) fn modal(ctx: &egui::Context) -> egui::Modal {
     let top = (ctx.content_rect().height() * 0.18).clamp(24.0, 140.0);
-    egui::Modal::new(egui::Id::new("quick_find_modal"))
+    egui::Modal::new(egui::Id::unique("quick_find_modal"))
         .area(
-            egui::Modal::default_area(egui::Id::new("quick_find_modal"))
+            egui::Modal::default_area(egui::Id::unique("quick_find_modal"))
                 .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, top)),
         )
         .frame(
@@ -143,7 +143,7 @@ impl QuickFind {
                 .frame(egui::Frame::NONE)
                 .margin(egui::Margin::symmetric(0, 4))
                 .min_size(text_rect.size())
-                .vertical_align(egui::Align::Center)
+                .align(egui::Align2::LEFT_CENTER)
                 .desired_width(text_rect.width()),
         );
         if self.focus_search {
@@ -157,7 +157,7 @@ impl QuickFind {
         );
         let escape = ui.interact(esc_rect, search_id().with("escape"), egui::Sense::click());
         escape.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "关闭快捷查找")
+            egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), "关闭快捷查找")
         });
         view::keycap(ui, esc_rect, "Esc", escape.hovered());
         escape.on_hover_text("关闭快捷查找").clicked()

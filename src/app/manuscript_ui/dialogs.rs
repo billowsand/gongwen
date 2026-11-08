@@ -146,7 +146,7 @@ pub(crate) fn batch_delete_dialog(
 ) -> modal::DialogResponse<bool> {
     modal::dialog(
         ctx,
-        egui::Id::new("manuscript_batch_delete"),
+        egui::Id::unique("manuscript_batch_delete"),
         "批量删除稿件",
         400.0,
         Dismiss::EscOrBackdrop,

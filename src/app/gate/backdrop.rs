@@ -9,7 +9,7 @@ pub(super) fn paint(painter: &egui::Painter, rect: egui::Rect, opacity: f32) {
         theme::surface_sunk(),
         theme::border(),
     ];
-    let id = egui::Id::new(("gate_frost", colors));
+    let id = egui::Id::unique(("gate_frost", colors));
     let cached = painter
         .ctx()
         .data(|data| data.get_temp::<egui::TextureHandle>(id));

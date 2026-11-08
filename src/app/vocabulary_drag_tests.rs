@@ -294,7 +294,7 @@ fn edge_scroll_only_moves_when_pointer_is_inside_tree() {
                             let (_, rect) = ui.allocate_space(egui::vec2(350.0, 1000.0));
                             edge_scroll(ui, rect);
                         });
-                    offset = output.state.offset.y;
+                    offset = output.state.clamped_offset().y;
                 },
             );
         }

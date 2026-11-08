@@ -458,6 +458,8 @@ impl GongwenApp {
             || self.pdfs.iter().any(PdfSession::busy)
             || self.manuscript_pdf_export_busy
             || self.manuscript_package_export_busy
+            || self.package_staging_busy
+            || self.import_preparation.is_some()
             || self.send_package_exporting()
     }
 
@@ -523,6 +525,7 @@ impl GongwenApp {
                 } => {
                     self.request_output_with_warning(operation, warning, action);
                 }
+                DraftAction::CopyFile { path } => self.start_file_copy(path, ctx.clone()),
 
                 DraftAction::ImportDocument { key } => {
                     let ctx = ctx.clone();

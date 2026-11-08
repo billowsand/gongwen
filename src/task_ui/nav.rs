@@ -196,9 +196,7 @@ fn row(
 ) -> egui::Response {
     let size = egui::vec2(ui.available_width(), 28.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
-    });
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, label));
     if ui.is_rect_visible(rect) {
         let fill = if selected {
             Some(theme::accent_soft())

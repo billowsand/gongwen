@@ -548,7 +548,7 @@ impl PdfSession {
             actions.push(action);
         }
 
-        egui::Panel::top(egui::Id::new("pdf_toolbar").with(self.key))
+        egui::Panel::top(egui::Id::unique("pdf_toolbar").with(self.key))
             .frame(theme::panel(theme::surface(), 10))
             .show(ui, |ui| self.toolbar(ui, &mut actions));
 
@@ -1057,8 +1057,8 @@ impl PdfSession {
             select_text(ui, &response, &shown, slots, selection);
         });
         let max_offset = (output.content_size.y - output.inner_rect.height()).max(0.0);
-        self.at_top = output.state.offset.y <= 1.0;
-        self.at_bottom = output.state.offset.y >= max_offset - 1.0;
+        self.at_top = output.state.clamped_offset().y <= 1.0;
+        self.at_bottom = output.state.clamped_offset().y >= max_offset - 1.0;
 
         // 当前一屏先渲，从左到右；再备下一屏、上一屏，翻过去就是现成的。
         let start = spread_start(self.current_page, self.per_view);

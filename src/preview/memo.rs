@@ -42,7 +42,7 @@ pub(crate) fn memo<T: Send + Sync + 'static>(
     key: u64,
     compute: impl FnOnce() -> T,
 ) -> Arc<T> {
-    let id = egui::Id::new(("gw-preview-memo", slot));
+    let id = egui::Id::unique(("gw-preview-memo", slot));
     let hit = ctx.data_mut(|data| {
         let slots = data.get_temp_mut_or_default::<Slots<T>>(id);
         let index = slots.0.iter().position(|(cached, _)| *cached == key)?;
@@ -84,7 +84,7 @@ pub(crate) fn font_epoch(ctx: &egui::Context) -> u64 {
         )
     });
     ctx.data_mut(|data| {
-        let state = data.get_temp_mut_or_default::<Epoch>(egui::Id::new("gw-font-epoch"));
+        let state = data.get_temp_mut_or_default::<Epoch>(egui::Id::unique("gw-font-epoch"));
         if !state
             .probe
             .as_ref()

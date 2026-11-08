@@ -13,6 +13,7 @@ use crate::modal::{self, Dismiss};
 use crate::storage;
 use crate::theme;
 use eframe::egui;
+use std::path::PathBuf;
 
 /// 退出前的汇总确认。上区必须处理，下区只是提醒。
 ///
@@ -54,6 +55,8 @@ pub(crate) enum DraftAction {
         warning: &'static str,
         action: super::output_guard::OutputAction,
     },
+    /// 后台把已有成品放进系统剪贴板；Linux 的外部剪贴板工具不在主线程等待。
+    CopyFile { path: PathBuf },
     /// 导入文档：应用层开文件框，选好后把正文插进这篇稿件。
     ImportDocument { key: DocKey },
     /// 给分阶段写作添加原文快照；系统文件框仍由应用层调度。
@@ -177,7 +180,7 @@ impl GongwenApp {
         let running = self.close_confirm_running;
         let dialog = modal::dialog(
             ctx,
-            egui::Id::new("close_confirm"),
+            egui::Id::unique("close_confirm"),
             "关闭稿件",
             360.0,
             Dismiss::EscOrBackdrop,
@@ -337,7 +340,7 @@ impl GongwenApp {
             .retain(|(key, _)| self.doc_index_of_key(*key).is_some());
         let dialog = modal::dialog(
             ctx,
-            egui::Id::new("exit_prompt"),
+            egui::Id::unique("exit_prompt"),
             "退出公文助手",
             420.0,
             Dismiss::EscOrBackdrop,

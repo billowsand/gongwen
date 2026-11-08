@@ -31,7 +31,7 @@ impl Ime {
         }
         let mut open = true;
         egui::Window::new("查编码")
-            .id(egui::Id::new("ime-lookup-window"))
+            .id(egui::Id::unique("ime-lookup-window"))
             .open(&mut open)
             .collapsible(false)
             .default_width(360.0)

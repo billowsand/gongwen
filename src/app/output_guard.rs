@@ -27,10 +27,11 @@ pub(super) struct PendingOutput {
 
 impl GongwenApp {
     pub(crate) fn copy_file_confirmed(&mut self, path: &std::path::Path) {
-        self.status = match crate::file_clipboard::copy_file(path) {
-            Ok(()) => "文件已复制到系统剪贴板。".into(),
-            Err(error) => format!("复制文件失败：{error}"),
+        let Some(ctx) = self.clipboard_context.clone() else {
+            self.status = "界面尚未就绪，无法复制文件。".into();
+            return;
         };
+        self.start_file_copy(path.to_path_buf(), ctx);
     }
 
     /// 剪切必须在编辑器删除文字前确认；取消确认不能丢失源文字。
@@ -71,6 +72,7 @@ impl GongwenApp {
 
     /// 捕获所有 egui 文本/图片复制（包括 Ctrl+C），确认前不交给系统。
     pub(crate) fn guard_clipboard_output(&mut self, ctx: &egui::Context) {
+        self.clipboard_context = Some(ctx.clone());
         if crate::vault::key_handle().is_none() {
             return;
         }
@@ -219,7 +221,7 @@ impl GongwenApp {
         let mut cancelled = false;
         let response = modal::dialog(
             ctx,
-            egui::Id::new("plaintext_output_risk"),
+            egui::Id::unique("plaintext_output_risk"),
             if clipboard {
                 "剪贴板内容可能泄露"
             } else {

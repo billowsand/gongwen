@@ -9,7 +9,7 @@ pub(super) fn window(ui: &mut egui::Ui, store: &mut Store, state: &mut State, da
     }
     let mut open = true;
     egui::Window::new("管理分类")
-        .id(egui::Id::new("task_categories"))
+        .id(egui::Id::unique("task_categories"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

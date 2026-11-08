@@ -200,9 +200,9 @@ fn research_entries(markdown: &str) -> Vec<NavEntry> {
 /// 没法按源码范围回查——那一种由调用方退化成按字节比例排布。
 pub(crate) fn heading_top(ctx: &egui::Context, line: &Range<usize>) -> Option<f32> {
     // 普通块：preview::layout::clickable。
-    let block = egui::Id::new(("gw-preview-block", line.start, line.end));
+    let block = egui::Id::unique(("gw-preview-block", line.start, line.end));
     // 节内紧缩：标题与随后的正文合成一段，标题占第 0 行的可点区。
-    let compact = egui::Id::new(("gw-preview-source-line", line.start, line.end, 0usize));
+    let compact = egui::Id::unique(("gw-preview-source-line", line.start, line.end, 0usize));
     ctx.read_response(block)
         .or_else(|| ctx.read_response(compact))
         .map(|response| response.rect.top())
@@ -336,13 +336,13 @@ impl DraftPage<'_> {
         // 点击照样归它，滚轮仍旧落到滚动区。
         let strip = ui.interact(
             rail,
-            egui::Id::new("gw_nav_rail_strip"),
+            egui::Id::unique("gw_nav_rail_strip"),
             egui::Sense::click(),
         );
 
         // 靠近右缘才淡入。热区要把整块板圈进去并且宽出一截，否则指针一往左挪到
         // 板上就判定为"离开"，板当场缩回去。
-        let anim_id = ui.id().with("nav_reveal");
+        let anim_id = ui.scope_id().with("nav_reveal");
         let hot = egui::Rect::from_min_max(
             egui::pos2(rail.right() - COLUMN_WIDTH, region.top()),
             egui::pos2(region.right(), region.bottom()),
@@ -382,7 +382,7 @@ impl DraftPage<'_> {
             for (position, (row, band)) in rows.iter().zip(&bands).enumerate() {
                 let hit = ui.interact(
                     *band,
-                    egui::Id::new(("gw_nav_label", row.index)),
+                    egui::Id::unique(("gw_nav_label", row.index)),
                     egui::Sense::click(),
                 );
                 if hit.hovered() {
@@ -507,7 +507,8 @@ fn outline_rows(
         .collect::<Vec<_>>();
     let top = outline_top(rail, &heights, focus.or(current));
     // 滚动要插值：大纲一整列瞬移比字号忽大忽小更晃眼。装得下的稿子这里恒等。
-    let top = ctx.animate_value_with_time(egui::Id::new("gw_nav_outline_top"), top, SCROLL_GLIDE);
+    let top =
+        ctx.animate_value_with_time(egui::Id::unique("gw_nav_outline_top"), top, SCROLL_GLIDE);
 
     let mut rows = Vec::with_capacity(measured.len());
     let mut y = top;
@@ -783,7 +784,7 @@ fn edge_taper(start: f32, end: f32) -> Vec<(f32, f32)> {
 /// 噪声围着中灰上下摆，浅色纸上压、深色纸上提，两套主题都成立。
 /// 种子写死，颗粒每帧完全一样——否则整片底衬会像电视雪花一样闪。
 fn grain_texture(ctx: &egui::Context) -> egui::TextureHandle {
-    let id = egui::Id::new("gw_nav_grain");
+    let id = egui::Id::unique("gw_nav_grain");
     if let Some(handle) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
         return handle;
     }

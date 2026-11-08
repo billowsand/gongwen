@@ -77,7 +77,7 @@ impl DraftPage<'_> {
         let running = self.doc.ai_panel.running();
         let selection_now = crate::draft_page::editor_selection(&ctx, &self.doc.generated_markdown)
             .filter(|range| !range.is_empty());
-        let input_id = egui::Id::new(("ai_panel_input", self.doc.key));
+        let input_id = egui::Id::unique(("ai_panel_input", self.doc.key));
         let popup_id = input_id.with("popup");
         let had_focus_id = input_id.with("had_focus");
         let had_focus = ctx.data(|data| data.get_temp::<bool>(had_focus_id).unwrap_or(false));
@@ -92,13 +92,32 @@ impl DraftPage<'_> {
                     {
                         // 材料要的是原文：剪贴板里有 HTML 就用它转出来的 Markdown
                         // （网页、Word 的表格不会散成制表符），没有就照旧用纯文本。
-                        let material = crate::rich_paste::material_text(text);
-                        composer
-                            .materials
-                            .push(super::paste::PastedFile::new(&material));
+                        let pasted = super::paste::PastedFile::new(text);
+                        let id = pasted.id;
+                        composer.materials.push(pasted);
                         // 逐篇用途跟着材料一起进，旧会话没有这项时回退到默认值。
                         composer.pi_material_roles.push(composer.pi_material_role);
                         composer.error = None;
+                        let key = self.doc.key;
+                        let tx = self.sender.clone();
+                        let wake = ctx.clone();
+                        let plain = text.clone();
+                        #[cfg(test)]
+                        let test_html = crate::rich_paste::clipboard::test_html().flatten();
+                        std::thread::spawn(move || {
+                            #[cfg(test)]
+                            crate::rich_paste::clipboard::set_test_html_in_current_thread(
+                                test_html,
+                            );
+                            let markdown = crate::rich_paste::material_text(&plain);
+                            let _ = tx.send(crate::app::WorkerResult::MaterialPasteDone {
+                                key,
+                                id,
+                                plain,
+                                markdown,
+                            });
+                            wake.request_repaint();
+                        });
                         return false;
                     }
                     true
@@ -1057,8 +1076,8 @@ fn popup_ui(
                                 }
                                 // 标题可能重名，也可能筛选后换位置；按来源与真实 ID 隔离整行的控件。
                                 let row_id = match &row.pick {
-                                    Pick::Skill(id) => ui.id().with(("skill", id)),
-                                    Pick::Article(reference) => ui.id().with((
+                                    Pick::Skill(id) => ui.scope_id().with(("skill", id)),
+                                    Pick::Article(reference) => ui.scope_id().with((
                                         "article",
                                         reference.source.label(),
                                         reference.id,
@@ -1119,7 +1138,7 @@ fn popup_row(ui: &mut egui::Ui, row: &Row, highlighted: bool) -> egui::Response 
     }
     let rect = frame.allocate_space(ui).rect;
     let response = ui
-        .interact(rect, ui.id().with("select"), egui::Sense::click())
+        .interact(rect, ui.scope_id().with("select"), egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.hovered() && !highlighted {
         frame.frame.fill = theme::surface_hover();

@@ -567,7 +567,7 @@ mod tests {
                     ..Default::default()
                 };
                 let _ = crate::test_support::run_ui(&ctx, raw, |ui| {
-                    height = egui::Area::new(egui::Id::new("popup"))
+                    height = egui::Area::new(egui::Id::unique("popup"))
                         .fixed_pos(egui::pos2(10.0, 10.0))
                         .show(ui.ctx(), |ui| {
                             scroll().show(ui, |ui| {
@@ -664,7 +664,7 @@ mod tests {
                 .font_data
                 .get(last)
                 .unwrap_or_else(|| panic!("{family} 末尾的 {last} 没有字体数据"));
-            let face = ttf_parser::Face::parse(&data.font, data.index)
+            let face = ttf_parser::Face::parse(data.font.as_ref().as_ref(), data.index)
                 .unwrap_or_else(|_| panic!("{last} 解析不出字体"));
             for ch in "喆赟堃昇".chars() {
                 assert!(

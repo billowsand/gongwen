@@ -429,11 +429,14 @@ impl DraftPage<'_> {
         };
         let editable = !self.doc.read_only();
         let mut actions = Vec::new();
-        let response = egui::Modal::new(egui::Id::new(("document_reference_picker", self.doc.key)))
-            .frame(theme::card().inner_margin(egui::Margin::same(18)))
-            .show(ctx, |ui| {
-                reference_picker_contents(ui, &mut picker, editable, &mut actions);
-            });
+        let response = egui::Modal::new(egui::Id::unique((
+            "document_reference_picker",
+            self.doc.key,
+        )))
+        .frame(theme::card().inner_margin(egui::Margin::same(18)))
+        .show(ctx, |ui| {
+            reference_picker_contents(ui, &mut picker, editable, &mut actions);
+        });
         let mut close = response.should_close();
         for action in actions {
             let result = match action {

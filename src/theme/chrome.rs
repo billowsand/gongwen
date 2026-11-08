@@ -59,7 +59,7 @@ pub(crate) fn clickable_card<R>(
                 // 先设手型，子部件（如输入框）若要自己的光标可以在后面覆盖。
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
-            let id = ui.id();
+            let id = ui.scope_id();
             let hover_t = ui
                 .ctx()
                 .animate_bool_with_time(id.with("hover"), hovered, anim::FAST);

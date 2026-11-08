@@ -52,7 +52,7 @@ pub(crate) fn table_enter_replacement(
 /// egui 0.36 的 IME 组句光标状态不可读；用公开的 Event::Ime 在帧间保存组句状态。
 /// 本帧出现提交事件也屏蔽 Enter，防止提交候选的 Enter 同时插入 `<br>`。
 pub(super) fn ime_composition_blocks_input(ctx: &egui::Context, focused: bool) -> bool {
-    let id = egui::Id::new("draft_editor_ime_composing");
+    let id = egui::Id::unique("draft_editor_ime_composing");
     let previous = if focused {
         ctx.data(|data| data.get_temp::<bool>(id).unwrap_or(false))
     } else {

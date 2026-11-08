@@ -166,6 +166,13 @@ pub(crate) struct ImportPreview {
     notice: Option<String>,
 }
 
+pub(crate) struct ImportPreparation {
+    pub(super) path: PathBuf,
+    pub(super) password: String,
+    pub(super) remember: bool,
+    pub(super) rx: std::sync::mpsc::Receiver<anyhow::Result<ImportPreview>>,
+}
+
 pub(crate) struct PendingMergeDialog {
     manuscript_id: i64,
     preview: manuscript_io::sync::PendingPreview,
@@ -261,7 +268,7 @@ mod dialog_snapshot_tests {
             let mut pick_pdfs = false;
             modal::dialog(
                 ui.ctx(),
-                egui::Id::new("manuscript_archive"),
+                egui::Id::unique("manuscript_archive"),
                 "归档稿件",
                 460.0,
                 Dismiss::EscOnly,
@@ -341,7 +348,7 @@ mod dialog_snapshot_tests {
             let (width, body) = large_dialog_size(ui.ctx());
             modal::dialog(
                 ui.ctx(),
-                egui::Id::new("manuscript_import_preview"),
+                egui::Id::unique("manuscript_import_preview"),
                 "导入预览",
                 width,
                 Dismiss::ButtonsOnly,

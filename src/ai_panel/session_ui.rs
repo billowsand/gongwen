@@ -295,7 +295,7 @@ impl DraftPage<'_> {
         let mut open = None;
         let mut delete = None;
         let mut rename: Option<(String, String)> = None;
-        let editing_id = ui.id().with("renaming");
+        let editing_id = ui.scope_id().with("renaming");
         let editing: Option<(String, String)> = ui.memory(|m| m.data.get_temp(editing_id));
         theme::popup_scroll(360.0).show(ui, |ui| {
             for record in &list {

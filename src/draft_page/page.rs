@@ -120,7 +120,7 @@ impl DraftPage<'_> {
         }
 
         let mut confirm = false;
-        let response = egui::Modal::new(egui::Id::new(("clear_review_confirm", self.doc.key)))
+        let response = egui::Modal::new(egui::Id::unique(("clear_review_confirm", self.doc.key)))
             .frame(theme::card())
             .show(ctx, |ui| {
                 ui.set_width(360.0);

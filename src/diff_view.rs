@@ -713,7 +713,7 @@ pub fn unified_body_ui(
                 let response = ui
                     .interact(
                         rect,
-                        egui::Id::new(("unified-diff-change", change_index)),
+                        egui::Id::unique(("unified-diff-change", change_index)),
                         egui::Sense::click(),
                     )
                     .on_hover_text(format!(

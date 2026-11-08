@@ -61,11 +61,6 @@ impl StylesPage {
             cancel.store(true, Ordering::Relaxed);
         }
     }
-
-    /// 是否有一轮风格学习还没收尾（关窗时要等它退出 Node）。
-    pub(crate) fn learning_in_progress(&self) -> bool {
-        self.learning.is_some()
-    }
 }
 
 struct Editor {

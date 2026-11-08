@@ -5,7 +5,7 @@
 
 use crate::app::file_dialog::FileDialogSpec;
 use crate::app::manuscript_ui::{
-    ImportPreview, PendingMergeDialog, ZipPasswordDialog, ZipPasswordPurpose,
+    ImportPreparation, ImportPreview, PendingMergeDialog, ZipPasswordDialog, ZipPasswordPurpose,
 };
 use crate::app::{GongwenApp, NavPage, WorkerResult};
 use crate::draft_page::DraftSession;
@@ -69,16 +69,7 @@ impl GongwenApp {
                 self.perform_export_selected_manuscript_pdfs(options, ids, &password, remember);
             }
             ZipPasswordPurpose::Import(path) => {
-                // 导入的文件是早就定好的，没有对话框要等，失败照旧退回密码框。
-                if self.prepare_import_manuscript(path.clone(), &password) {
-                    self.update_remembered_zip_password(remember.then_some(password));
-                } else {
-                    let mut dialog = ZipPasswordDialog::new(ZipPasswordPurpose::Import(path), None);
-                    dialog.password = password;
-                    dialog.remember = remember;
-                    dialog.error = Some(self.status.clone());
-                    self.manuscript_zip_password = Some(dialog);
-                }
+                self.prepare_import_manuscript(path, password, remember);
             }
         }
     }
@@ -380,20 +371,26 @@ impl GongwenApp {
             self.status = format!("{} 不是公文稿件包（.gwx / .zip / .7z）。", path.display());
             return;
         }
-        let staged =
-            package_file::staging_root().and_then(|root| package_file::stage(&path, &root));
-        match staged {
-            Ok(staged) => {
-                self.pending_imports.push_back(staged);
-                if self.import_dialog_open() {
-                    self.status = format!(
-                        "已收到稿件包，当前导入处理完后接着导入（还有 {} 个等待）。",
-                        self.pending_imports.len()
-                    );
-                }
-            }
-            Err(error) => self.status = format!("无法导入稿件包：{error:#}"),
+        self.pending_package_staging.push_back(path);
+        self.pump_package_staging();
+    }
+
+    pub(crate) fn pump_package_staging(&mut self) {
+        if self.package_staging_busy {
+            return;
         }
+        let Some(path) = self.pending_package_staging.pop_front() else {
+            return;
+        };
+        self.package_staging_busy = true;
+        self.status = format!("正在暂存稿件包 {}…", path.display());
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let result = package_file::staging_root()
+                .and_then(|root| package_file::stage(&path, &root))
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::ImportPackageStaged(result));
+        });
     }
 
     /// 启动时调用一次：清掉上次留下的暂存副本，再收下命令行带进来的稿件包
@@ -459,6 +456,7 @@ impl GongwenApp {
     fn import_dialog_open(&self) -> bool {
         self.manuscript_zip_password.is_some()
             || self.manuscript_import_preview.is_some()
+            || self.import_preparation.is_some()
             || self.pending_merge.is_some()
     }
 
@@ -487,113 +485,156 @@ impl GongwenApp {
         }
     }
 
-    pub(crate) fn prepare_import_manuscript(&mut self, path: PathBuf, password: &str) -> bool {
-        let result: anyhow::Result<ImportPreview> = (|| {
-            let manifest = manuscript_io::read_manifest(&path, password)?;
-            let vocabulary = match manuscript_io::read_vocabulary(&path, password) {
-                Ok(vocabulary) => vocabulary,
-                Err(error) => {
-                    self.status = format!("稿件包词库读取失败（不影响稿件导入）：{error:#}");
-                    None
-                }
-            };
-            let store = self
-                .manuscript_store
-                .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-            let relations = manuscript_io::sync::inspect(store, &manifest)?;
-            use manuscript_io::sync::{ImportAction, Relationship, default_take_package};
-            let package_diffs = relations
-                .iter()
-                .zip(&manifest.records)
-                .map(|(relation, record)| {
-                    manuscript_io::sync::package_difference(store, relation.local_id, record)
+    fn prepare_import_manuscript(&mut self, path: PathBuf, password: String, remember: bool) {
+        let db_path = match storage::manuscript_db_path() {
+            Ok(path) => path,
+            Err(error) => {
+                self.status = format!("稿件库不可用：{error:#}");
+                return;
+            }
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_password = password.clone();
+        self.import_preparation = Some(ImportPreparation {
+            path,
+            password,
+            remember,
+            rx,
+        });
+        let path = self
+            .import_preparation
+            .as_ref()
+            .expect("刚建立导入预览")
+            .path
+            .clone();
+        self.status = "正在解密并读取稿件包…".into();
+        thread::spawn(move || {
+            // 导出任务也这样显式带密钥：测试构建的句柄是线程局部的。
+            #[cfg(test)]
+            if let Some(handle) = crate::vault::key_handle() {
+                crate::vault::set_key_handle_for_slot(
+                    *handle.dek(),
+                    handle.db_active(),
+                    handle.slot(),
+                );
+            }
+            let result: anyhow::Result<ImportPreview> = (|| {
+                let manifest = manuscript_io::read_manifest(&path, &worker_password)?;
+                let vocabulary = manuscript_io::read_vocabulary(&path, &worker_password)
+                    .map_err(|error| anyhow::anyhow!("稿件包词库读取失败：{error:#}"))
+                    .unwrap_or(None);
+                let mut store = ManuscriptStore::open(&db_path)
+                    .with_context(|| format!("无法打开稿件库 {}", db_path.display()))?;
+                let relations = manuscript_io::sync::inspect(&mut store, &manifest)?;
+                use manuscript_io::sync::{ImportAction, Relationship, default_take_package};
+                let package_diffs = relations
+                    .iter()
+                    .zip(&manifest.records)
+                    .map(|(relation, record)| {
+                        manuscript_io::sync::package_difference(&store, relation.local_id, record)
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let actions = relations
+                    .iter()
+                    .enumerate()
+                    .map(|(index, relation)| {
+                        let take_package =
+                            default_take_package(relation.relationship, package_diffs[index]);
+                        match relation.relationship {
+                            Relationship::New | Relationship::Legacy
+                                if relation.candidates.is_empty() =>
+                            {
+                                ImportAction::New
+                            }
+                            Relationship::New | Relationship::Legacy => ImportAction::Skip,
+                            Relationship::IncomingAhead | Relationship::Equivalent => {
+                                ImportAction::UseIncoming {
+                                    take_status: false,
+                                    take_package,
+                                }
+                            }
+                            // 内容一样但清单不同、且本机清单为空：采用导入版不会丢任何东西。
+                            Relationship::Same
+                                if relation.attachments_changed
+                                    || take_package
+                                    || relation.local_status.is_some_and(|status| {
+                                        status != manifest.records[index].status
+                                    }) =>
+                            {
+                                ImportAction::UseIncoming {
+                                    take_status: relation.local_status.is_some_and(|status| {
+                                        status != manifest.records[index].status
+                                    }),
+                                    take_package,
+                                }
+                            }
+                            Relationship::Diverged
+                                if relation
+                                    .proposal
+                                    .as_ref()
+                                    .is_some_and(|proposal| proposal.conflict_count() == 0) =>
+                            {
+                                ImportAction::Merge {
+                                    choices: Vec::new(),
+                                    markdown_override: None,
+                                    take_status: false,
+                                    take_package,
+                                }
+                            }
+                            Relationship::Diverged | Relationship::NoBase => ImportAction::Pending,
+                            Relationship::Archived
+                            | Relationship::Same
+                            | Relationship::LocalAhead => ImportAction::Skip,
+                        }
+                    })
+                    .collect();
+                let manifest_hash =
+                    crate::manuscript::sync::bytes_hash(&serde_json::to_vec(&manifest)?);
+                let selected = vec![true; manifest.records.len()];
+                let reviews = (0..selected.len()).map(|_| None).collect();
+                Ok(ImportPreview {
+                    manifest,
+                    zip_path: path,
+                    selected,
+                    keyword: String::new(),
+                    relations,
+                    actions,
+                    reviews,
+                    manifest_hash,
+                    package_diffs,
+                    focused: None,
+                    vocabulary,
+                    merge_vocabulary: true,
+                    password: worker_password,
+                    notice: None,
                 })
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            let actions = relations
-                .iter()
-                .enumerate()
-                .map(|(index, relation)| {
-                    let take_package =
-                        default_take_package(relation.relationship, package_diffs[index]);
-                    match relation.relationship {
-                        Relationship::New | Relationship::Legacy
-                            if relation.candidates.is_empty() =>
-                        {
-                            ImportAction::New
-                        }
-                        Relationship::New | Relationship::Legacy => ImportAction::Skip,
-                        Relationship::IncomingAhead | Relationship::Equivalent => {
-                            ImportAction::UseIncoming {
-                                take_status: false,
-                                take_package,
-                            }
-                        }
-                        // 内容一样但清单不同、且本机清单为空：采用导入版不会丢任何东西。
-                        Relationship::Same
-                            if relation.attachments_changed
-                                || take_package
-                                || relation.local_status.is_some_and(|status| {
-                                    status != manifest.records[index].status
-                                }) =>
-                        {
-                            ImportAction::UseIncoming {
-                                take_status: relation
-                                    .local_status
-                                    .is_some_and(|status| status != manifest.records[index].status),
-                                take_package,
-                            }
-                        }
-                        Relationship::Diverged
-                            if relation
-                                .proposal
-                                .as_ref()
-                                .is_some_and(|proposal| proposal.conflict_count() == 0) =>
-                        {
-                            ImportAction::Merge {
-                                choices: Vec::new(),
-                                markdown_override: None,
-                                take_status: false,
-                                take_package,
-                            }
-                        }
-                        Relationship::Diverged | Relationship::NoBase => ImportAction::Pending,
-                        Relationship::Archived | Relationship::Same | Relationship::LocalAhead => {
-                            ImportAction::Skip
-                        }
-                    }
-                })
-                .collect();
-            let manifest_hash =
-                crate::manuscript::sync::bytes_hash(&serde_json::to_vec(&manifest)?);
-            let selected = vec![true; manifest.records.len()];
-            let reviews = (0..selected.len()).map(|_| None).collect();
-            Ok(ImportPreview {
-                manifest,
-                zip_path: path,
-                selected,
-                keyword: String::new(),
-                relations,
-                actions,
-                reviews,
-                manifest_hash,
-                package_diffs,
-                focused: None,
-                vocabulary,
-                merge_vocabulary: true,
-                password: password.to_string(),
-                notice: None,
-            })
-        })();
+            })();
+            let _ = tx.send(result);
+        });
+    }
+
+    pub(crate) fn poll_import_preparation(&mut self) {
+        let Some(pending) = self.import_preparation.take() else {
+            return;
+        };
+        let Ok(result) = pending.rx.try_recv() else {
+            self.import_preparation = Some(pending);
+            return;
+        };
         match result {
             Ok(preview) => {
                 self.manuscript_import_preview = Some(preview);
                 self.status = "已读取稿件包，请逐篇核对处理方式后确认。".into();
-                true
+                self.update_remembered_zip_password(pending.remember.then_some(pending.password));
             }
             Err(error) => {
                 self.status = format!("读取稿件包失败：{error:#}");
-                false
+                let mut dialog =
+                    ZipPasswordDialog::new(ZipPasswordPurpose::Import(pending.path), None);
+                dialog.password = pending.password;
+                dialog.remember = pending.remember;
+                dialog.error = Some(self.status.clone());
+                self.manuscript_zip_password = Some(dialog);
             }
         }
     }
@@ -957,7 +998,7 @@ fn purge_staged_print_files() -> std::io::Result<()> {
 fn paint_drop_hint(ctx: &egui::Context) {
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new("gw-package-drop-hint"),
+        egui::Id::unique("gw-package-drop-hint"),
     ));
     let screen = ctx.content_rect();
     painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(96));

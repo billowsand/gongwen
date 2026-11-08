@@ -86,7 +86,7 @@ impl DraftPage<'_> {
                 let arrow = ui
                     .interact(
                         arrow_rect,
-                        ui.id().with("research_file_type_presets"),
+                        ui.scope_id().with("research_file_type_presets"),
                         egui::Sense::click(),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand);

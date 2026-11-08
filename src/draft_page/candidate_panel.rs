@@ -22,7 +22,7 @@ const ROW_HEIGHT: f32 = 46.0;
 const HOVER_PREVIEW_CHARS: usize = 240;
 
 fn candidate_editor_id(key: u64) -> egui::Id {
-    egui::Id::new(("candidate_editor", key))
+    egui::Id::unique(("candidate_editor", key))
 }
 
 /// 面板里点出来的动作。面板画的时候借着候选内容，动作等画完再统一执行。

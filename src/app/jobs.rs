@@ -25,6 +25,13 @@ use std::path::PathBuf;
 use std::thread;
 
 pub(crate) enum WorkerResult {
+    /// 外部程序把文件放进系统剪贴板的结果，后台线程执行。
+    FileCopied {
+        path: PathBuf,
+        result: Result<(), String>,
+    },
+    /// 稿件包已复制到私有暂存目录；导入只在主线程继续排队。
+    ImportPackageStaged(Result<PathBuf, String>),
     /// 探测一家提供商：连接结果与已加载模型清单。
     /// `probed_kinds` 是服务原生接口自报的模型用途（目前只有 LM Studio 给），
     /// 写回配置前还要过一遍 `classify_model` 补名字启发式。
@@ -48,6 +55,15 @@ pub(crate) enum WorkerResult {
         hash: u64,
         // 装箱：RedlineDoc 带要素标注后比其他变体大不少，枚举就地传递不划算。
         doc: Box<crate::redline::RedlineDoc>,
+    },
+    /// 后台读取剪贴板并转换完成；真正的正文替换在主线程按粘贴快照执行。
+    SmartPasteDone { key: DocKey },
+    /// AI 侧栏的大段材料先保留纯文本，富文本转换完成后按材料身份替换。
+    MaterialPasteDone {
+        key: DocKey,
+        id: u64,
+        plain: String,
+        markdown: String,
     },
     /// 知识库任务：与具体稿件无关的全局任务（索引构建 / 检索测试）。
     Knowledge(KnowledgeJob),
@@ -266,6 +282,40 @@ pub(crate) enum DocJob {
 }
 
 impl GongwenApp {
+    pub(crate) fn poll_smart_paste(&mut self, ui: &egui::Ui) {
+        let Some(doc) = self.docs.get_mut(self.active_doc) else {
+            return;
+        };
+        let Some(pending) = doc.pending_paste.take() else {
+            return;
+        };
+        let Ok(prepared) = pending.receiver.try_recv() else {
+            doc.pending_paste = Some(pending);
+            return;
+        };
+        if doc.generated_markdown.get(pending.range.clone()) != Some(pending.plain.as_str()) {
+            self.status = "粘贴期间原文已被修改，保留原样粘贴。".into();
+            return;
+        }
+        self.draft_page_at(self.active_doc)
+            .finish_paste(ui, pending.range, prepared);
+    }
+
+    pub(crate) fn start_file_copy(&mut self, path: PathBuf, wake: egui::Context) {
+        self.status = format!(
+            "正在复制 {} 到系统剪贴板…",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("文件")
+        );
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let result = crate::file_clipboard::copy_file(&path);
+            let _ = tx.send(WorkerResult::FileCopied { path, result });
+            wake.request_repaint();
+        });
+    }
+
     /// 探测一家提供商：测试连接并把已加载模型清单缓存进配置。
     ///
     /// 各家独立进行，互不阻塞；状态挂在提供商卡片上（`provider_status`）。
@@ -517,6 +567,52 @@ impl GongwenApp {
                             status.note = format!("连接失败：{error}");
                             self.status = format!("「{name}」连接失败：{error}");
                         }
+                    }
+                }
+                WorkerResult::FileCopied { path, result } => {
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("文件");
+                    self.status = match result {
+                        Ok(()) => format!("已复制到剪贴板 {name}。"),
+                        Err(error) => format!("复制到剪贴板失败：{error}"),
+                    };
+                }
+                WorkerResult::ImportPackageStaged(result) => {
+                    self.package_staging_busy = false;
+                    ctx.request_repaint();
+                    match result {
+                        Ok(path) => self.pending_imports.push_back(path),
+                        Err(error) => self.status = format!("无法导入稿件包：{error}"),
+                    }
+                    self.pump_package_staging();
+                }
+                WorkerResult::SmartPasteDone { key } => {
+                    let Some(index) = self.doc_index_of_key(key) else {
+                        continue;
+                    };
+                    // 唤醒只负责让这一帧收取结果；真正替换由编辑器处理。
+                    debug_assert!(self.docs[index].pending_paste.is_some());
+                }
+                WorkerResult::MaterialPasteDone {
+                    key,
+                    id,
+                    plain,
+                    markdown,
+                } => {
+                    let Some(index) = self.doc_index_of_key(key) else {
+                        continue;
+                    };
+                    if let Some(material) = self.docs[index]
+                        .ai_panel
+                        .composer
+                        .materials
+                        .iter_mut()
+                        .find(|material| material.id == id && material.material.text == plain)
+                    {
+                        material.material.text = markdown;
+                        material.chars = material.material.text.chars().count();
                     }
                 }
                 WorkerResult::Doc { key, seq, job } => {
@@ -1386,7 +1482,7 @@ impl GongwenApp {
     /// 知识库文档预览浮窗：复用起草页的公文版式渲染，按窗口宽度自适应缩放。
     pub(crate) fn knowledge_preview_window(&mut self, ctx: &egui::Context) {
         let Some(preview) = self.knowledge_preview.as_mut() else {
-            theme::reset_window_anim(ctx, egui::Id::new("knowledge_preview_anim"));
+            theme::reset_window_anim(ctx, egui::Id::unique("knowledge_preview_anim"));
             return;
         };
         let mut open = true;
@@ -1456,7 +1552,7 @@ impl GongwenApp {
                     });
             });
         if let Some(w) = win {
-            theme::window_enter_anim(ctx, egui::Id::new("knowledge_preview_anim"), &w.response);
+            theme::window_enter_anim(ctx, egui::Id::unique("knowledge_preview_anim"), &w.response);
         }
         if !open || close_clicked {
             self.knowledge_preview = None;

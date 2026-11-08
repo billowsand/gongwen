@@ -57,7 +57,7 @@ impl Cull {
     pub(crate) fn new(ui: &egui::Ui, metrics: &Metrics, flavor: &'static str) -> Self {
         let ctx = ui.ctx();
         let heights = ctx.data_mut(|data| {
-            data.get_temp_mut_or_default::<Arc<Mutex<Heights>>>(egui::Id::new(
+            data.get_temp_mut_or_default::<Arc<Mutex<Heights>>>(egui::Id::unique(
                 "gw-preview-block-heights",
             ))
             .clone()
@@ -117,7 +117,7 @@ impl Cull {
                 // 与 `layout::clickable` 同一个 id：导航按它回查标题的版面位置。
                 ui.interact(
                     egui::Rect::from_min_size(origin, egui::vec2(metrics.content, height)),
-                    egui::Id::new(("gw-preview-block", range.start, range.end)),
+                    egui::Id::unique(("gw-preview-block", range.start, range.end)),
                     egui::Sense::hover(),
                 );
             }
@@ -350,8 +350,12 @@ mod tests {
         let first = markdown.find("## 专项工作1\n").unwrap();
         let range = first..first + "## 专项工作1".len();
         assert!(
-            ctx.read_response(egui::Id::new(("gw-preview-block", range.start, range.end)))
-                .is_some(),
+            ctx.read_response(egui::Id::unique((
+                "gw-preview-block",
+                range.start,
+                range.end
+            )))
+            .is_some(),
             "跳过的标题也要登记矩形"
         );
     }

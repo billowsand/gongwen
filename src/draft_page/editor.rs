@@ -145,7 +145,7 @@ fn paint_drag_card(
 ) {
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new("gw-markdown-drag-card"),
+        egui::Id::unique("gw-markdown-drag-card"),
     ));
     let (excerpt, detail) = drag_excerpt(selected);
     let first = painter.layout_no_wrap(excerpt, egui::FontId::proportional(13.0), theme::text());
@@ -513,7 +513,7 @@ impl PreviewAnchor {
 
 /// 审校区编辑框的固定 id：预览点击回跳时要按它取回光标状态。
 pub(crate) fn editor_id() -> egui::Id {
-    egui::Id::new("gw-markdown-editor")
+    egui::Id::unique("gw-markdown-editor")
 }
 
 pub(crate) fn source_line_at_char(text: &str, char_index: usize) -> usize {
@@ -1196,7 +1196,7 @@ impl DraftPage<'_> {
                     }
                 });
                 (
-                    scrolled.state.offset.y,
+                    scrolled.state.clamped_offset().y,
                     scrolled.content_size.y,
                     scrolled.inner_rect.top(),
                     scrolled.inner_rect.height(),
@@ -1429,7 +1429,7 @@ impl DraftPage<'_> {
         preview::set_text_cursor(ui.ctx(), &self.doc.generated_markdown, None);
         // 右缘导航刻度要把标题的版面位置换算成刻度条上的位置，量度只有滚动区知道。
         self.doc.preview_scroll = PreviewScroll {
-            offset_y: scrolled.state.offset.y,
+            offset_y: scrolled.state.clamped_offset().y,
             content_height: scrolled.content_size.y,
             viewport_top: scrolled.inner_rect.top(),
             viewport_height: scrolled.inner_rect.height(),

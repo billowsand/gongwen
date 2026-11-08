@@ -590,7 +590,7 @@ impl DraftPage<'_> {
         let mut apply = false;
         let mut cancel = false;
         let mut large = self.config.heading_focus_large;
-        let response = egui::Modal::new(egui::Id::new(("heading_focus", self.doc.key)))
+        let response = egui::Modal::new(egui::Id::unique(("heading_focus", self.doc.key)))
             .frame(theme::card())
             .show(ctx, |ui| {
                 // 大字模式给投屏用，尽量铺满屏幕宽度，长标题也不必折断。
@@ -809,7 +809,7 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
                             },
                         );
                         // 输入框按打开时的先后起名：调整顺序后光标与焦点仍跟着这一条。
-                        let id = ui.id().with(("heading_focus_text", item.order));
+                        let id = ui.scope_id().with(("heading_focus_text", item.order));
                         // 先于输入框认下 Alt+↑ / Alt+↓，单行输入框见上下键会自己挪光标。
                         if ui.memory(|memory| memory.has_focus(id)) {
                             let (up, down) = ui.input_mut(|input| {

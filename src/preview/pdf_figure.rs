@@ -55,7 +55,7 @@ pub(crate) fn page(
     stamp: u64,
     load: impl FnOnce() -> Result<Arc<Vec<u8>>, String> + Send + 'static,
 ) -> PdfPage {
-    let id = egui::Id::new(("gw_pdf_figure", src, stamp));
+    let id = egui::Id::unique(("gw_pdf_figure", src, stamp));
 
     match ctx.data(|data| data.get_temp::<Thumb>(id)) {
         None => {

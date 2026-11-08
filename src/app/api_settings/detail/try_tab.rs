@@ -519,7 +519,7 @@ fn confirm_send_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
     let mut cancelled = false;
     let response = modal::dialog(
         ui.ctx(),
-        egui::Id::new(("api_confirm_send", index)),
+        egui::Id::unique(("api_confirm_send", index)),
         "发送会改数据的请求？",
         480.0,
         Dismiss::EscOrBackdrop,

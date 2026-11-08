@@ -392,7 +392,7 @@ impl GongwenApp {
             }
             let drag = ui.interact(
                 zone,
-                ui.id().with(("titlebar_drag", index)),
+                ui.scope_id().with(("titlebar_drag", index)),
                 egui::Sense::click_and_drag(),
             );
             if drag.double_clicked() && !hyprland {
@@ -415,7 +415,7 @@ impl GongwenApp {
             let response = ui
                 .interact(
                     btn_rect,
-                    ui.id().with(("titlebar_btn", index)),
+                    ui.scope_id().with(("titlebar_btn", index)),
                     egui::Sense::click(),
                 )
                 .on_hover_text(match kind {
@@ -533,7 +533,7 @@ impl GongwenApp {
         if drag_rect.width() > 4.0 {
             let drag = ui.interact(
                 drag_rect,
-                ui.id().with("macos_titlebar_drag"),
+                ui.scope_id().with("macos_titlebar_drag"),
                 egui::Sense::click_and_drag(),
             );
             if drag.double_clicked() {
@@ -746,7 +746,7 @@ impl GongwenApp {
         ];
 
         for (name, rect, direction, cursor) in zones {
-            egui::Area::new(egui::Id::new(("window_resize_zone", name)))
+            egui::Area::new(egui::Id::unique(("window_resize_zone", name)))
                 .order(egui::Order::Foreground)
                 .fixed_pos(rect.min)
                 .constrain(false)
@@ -756,7 +756,8 @@ impl GongwenApp {
                     ui.set_min_size(rect.size());
                     // 只感知 drag：纯拖拽控件按下当帧就算起拖（见 egui interaction.rs），
                     // 不必先挪够阈值，手感与系统边框一致。
-                    let response = ui.interact(rect, ui.id().with("hit"), egui::Sense::drag());
+                    let response =
+                        ui.interact(rect, ui.scope_id().with("hit"), egui::Sense::drag());
                     if response.hovered() || response.dragged() {
                         ui.ctx().set_cursor_icon(cursor);
                     }
@@ -858,7 +859,7 @@ impl GongwenApp {
                     theme::menu_item(theme::Icon::Book, "词库")
                         .selected(lexicon_active)
                         .frame_when_inactive(lexicon_active)
-                        .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
+                        .right_text(egui::containers::menu::SubMenuButton::arrow_atom(None)),
                 )
                 .ui(ui, |ui| {
                     compact_menu(ui);
@@ -874,7 +875,7 @@ impl GongwenApp {
                 // 导出也跟着变，留在菜单里挨着设置。
                 egui::containers::menu::SubMenuButton::from_button(
                     theme::menu_item(theme::Icon::GitCommit, "图表样式")
-                        .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
+                        .right_text(egui::containers::menu::SubMenuButton::arrow_atom(None)),
                 )
                 .ui(ui, |ui| {
                     compact_menu(ui);
@@ -992,7 +993,6 @@ impl GongwenApp {
             ui.close();
         }
         ui.separator();
-        let ids = egui::Id::new("theme_swatch");
         let mut index = 0usize;
         let preset_group = |dark: bool| -> Vec<ThemeName> {
             ThemeName::ALL
@@ -1017,7 +1017,7 @@ impl GongwenApp {
             for name in names {
                 let palette = theme::by_name(name);
                 let selected = name == self.applied_theme;
-                let swatch = ids.with(index);
+                let swatch = egui::IdSalt::new(("theme_swatch", index));
                 index += 1;
                 let mut item = egui::Button::new((
                     egui::Atom::custom(swatch, egui::Vec2::splat(THEME_SWATCH_SIZE)),
@@ -1065,7 +1065,7 @@ impl GongwenApp {
     /// 应用图标菜单下的"关于"弹窗：版本号、构建信息、依赖致谢。
     pub(crate) fn about_window(&mut self, ctx: &egui::Context) {
         if !self.about_window_open {
-            theme::reset_window_anim(ctx, egui::Id::new("about_win_anim"));
+            theme::reset_window_anim(ctx, egui::Id::unique("about_win_anim"));
             return;
         }
         let mut close_clicked = false;
@@ -1161,7 +1161,7 @@ impl GongwenApp {
                 });
             });
         if let Some(w) = win {
-            theme::window_enter_anim(ctx, egui::Id::new("about_win_anim"), &w.response);
+            theme::window_enter_anim(ctx, egui::Id::unique("about_win_anim"), &w.response);
         }
         if start_check {
             self.start_update_check(ctx);
@@ -1388,17 +1388,17 @@ impl GongwenApp {
         let hovered = ui.rect_contains_pointer(rect);
         let pressed = hovered && ctx.input(|i| i.pointer.primary_down());
         let hover_t = ctx.animate_bool_with_time(
-            egui::Id::new("tab_hover").with(tab),
+            egui::Id::unique("tab_hover").with(tab),
             hovered,
             TAB_HOVER_ANIM,
         );
         let press_t = ctx.animate_bool_with_time(
-            egui::Id::new("tab_press").with(tab),
+            egui::Id::unique("tab_press").with(tab),
             pressed,
             TAB_PRESS_ANIM,
         );
         let sel_t = ctx.animate_bool_with_time(
-            egui::Id::new("tab_select").with(tab),
+            egui::Id::unique("tab_select").with(tab),
             selected,
             TAB_SELECT_ANIM,
         );
@@ -1556,13 +1556,13 @@ impl GongwenApp {
         let close_response = content
             .interact(
                 close_rect,
-                egui::Id::new("tab_close").with(tab),
+                egui::Id::unique("tab_close").with(tab),
                 egui::Sense::click(),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text("关闭这个标签");
         let close_hover_t = ctx.animate_bool_with_time(
-            egui::Id::new("tab_close_hover").with(tab),
+            egui::Id::unique("tab_close_hover").with(tab),
             close_response.hovered(),
             TAB_HOVER_ANIM,
         );
@@ -1600,7 +1600,7 @@ impl GongwenApp {
         // 「按下去了」的反馈。半透明叠在已画好的标签底上，选中态的主题色胶囊
         // 不会被糊成一块死色。
         let close_press = ctx.animate_bool_with_time(
-            egui::Id::new("tab_close_press").with(tab),
+            egui::Id::unique("tab_close_press").with(tab),
             close_response.is_pointer_button_down_on(),
             TAB_PRESS_ANIM,
         );

@@ -39,13 +39,13 @@ directories = "6.0"
 docx-rs = "0.4.22"
 # Word 里的 EMF / WMF 矢量图转 SVG（再经 resvg 出 PNG），见 src/metafile.rs。
 emf-core = { version = "0.1.1", default-features = false, features = ["svg"] }
-eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland", "x11"] }
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland", "x11"] }
 # 剪贴板 HTML：起草页粘贴时读富文本片段（见 src/rich_paste/）。egui-winit 已经
 # 间接引入 3.6.1，这里只是声明直接引用；关掉默认的 image-data，不新增系统依赖。
 arboard = { version = "3.6.1", default-features = false }
-egui = "0.36.2"
-egui_dnd = "0.17.0"
-egui_extras = { version = "0.36.2", features = ["image", "svg"] }
+egui = "0.37.0"
+egui_dnd = "0.18.0"
+egui_extras = { version = "0.37.0", features = ["image", "svg"] }
 encoding_rs = "0.8.41"
 # 文献著录预览：与 Typst 排 PDF 参考文献表同一个库、同一份 GB/T 7714 样式，
 # 版本钉在 typst 所用的 0.10.1，不多编一份。
@@ -155,7 +155,7 @@ strip = true
 opt-level = 3
 
 [dev-dependencies]
-egui_kittest = { version = "0.36.2", default-features = false }
+egui_kittest = { version = "0.37.0", default-features = false }
 insta = "1.48.0"
 office-crypto = "0.2"
 proptest = "1.11.0"

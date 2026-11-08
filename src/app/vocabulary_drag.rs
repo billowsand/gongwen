@@ -93,7 +93,7 @@ pub(super) fn drop_target(
 ) -> Option<VocabAction> {
     let response = ui.interact(
         rect,
-        egui::Id::new(("vocab_drop", target)),
+        egui::Id::unique(("vocab_drop", target)),
         egui::Sense::hover(),
     );
     let dragged = response.dnd_hover_payload::<Payload>()?;

@@ -782,7 +782,7 @@ impl GongwenApp {
         // 有下拉的表单：点遮罩常常只是想收起下拉，不能顺手把整个框关掉，只认 Esc。
         let dialog = modal::dialog(
             ctx,
-            egui::Id::new("vocabulary_move_window"),
+            egui::Id::unique("vocabulary_move_window"),
             "精确移动",
             430.0,
             Dismiss::EscOnly,
@@ -1082,7 +1082,7 @@ impl GongwenApp {
             );
             let row_response = ui.interact(
                 row_rect,
-                egui::Id::new(("vocab_row", id)),
+                egui::Id::unique(("vocab_row", id)),
                 egui::Sense::click(),
             );
             let mut row_ui = ui.new_child(
@@ -1093,7 +1093,7 @@ impl GongwenApp {
             );
             // 新行淡入。
             let seen_t = ui.ctx().animate_bool_with_time(
-                egui::Id::new(("vocab_row_seen", id)),
+                egui::Id::unique(("vocab_row_seen", id)),
                 true,
                 theme::anim::SLOW,
             );
@@ -1102,7 +1102,7 @@ impl GongwenApp {
             // 指针落在它们上面时整行反而算「未悬停」，背景会一闪一闪。
             let hovered = ui.rect_contains_pointer(row_rect) || dragged == Some(id);
             let hover_t = ui.ctx().animate_bool_with_time(
-                egui::Id::new(("vocab_row_hover", id)),
+                egui::Id::unique(("vocab_row_hover", id)),
                 hovered,
                 theme::anim::FAST,
             );
@@ -1190,7 +1190,7 @@ impl GongwenApp {
             if row.is_unit && row.has_children {
                 let toggle = row_ui.interact(
                     chevron_rect,
-                    egui::Id::new(("vocab_toggle", id)),
+                    egui::Id::unique(("vocab_toggle", id)),
                     if filter.is_empty() {
                         egui::Sense::click()
                     } else {

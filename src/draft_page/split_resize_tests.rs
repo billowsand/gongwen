@@ -748,7 +748,7 @@ impl Harness {
     /// 右缘刻度带这一帧占的位置。导航关掉时它根本不登记，返回 None。
     fn navigator_rail(&self) -> Option<egui::Rect> {
         self.ctx
-            .read_response(egui::Id::new("gw_nav_rail_strip"))
+            .read_response(egui::Id::unique("gw_nav_rail_strip"))
             .map(|response| response.rect)
     }
 
@@ -840,7 +840,7 @@ fn source_minimap_click_reaches_later_sections() {
     assert!(harness.doc.source_minimap.content_height > harness.doc.source_minimap.viewport_height);
     let rect = harness
         .ctx
-        .read_response(egui::Id::new("gw_source_minimap"))
+        .read_response(egui::Id::unique("gw_source_minimap"))
         .expect("源码模式应显示可交互的缩略图")
         .rect;
     let before = harness.doc.source_minimap.offset;
@@ -858,7 +858,7 @@ fn source_minimap_wheel_scrolls_its_own_long_canvas() {
     harness.preview_frames(egui::pos2(10.0, 10.0), 3);
     let rect = harness
         .ctx
-        .read_response(egui::Id::new("gw_source_minimap"))
+        .read_response(egui::Id::unique("gw_source_minimap"))
         .expect("源码模式应显示缩略图")
         .rect;
     assert!(
@@ -881,6 +881,7 @@ fn source_minimap_wheel_scrolls_its_own_long_canvas() {
                 delta: egui::vec2(0.0, -160.0),
                 phase: egui::TouchPhase::Move,
                 modifiers: egui::Modifiers::NONE,
+                source: egui::MouseWheelSource::Wheel,
             },
         ],
         ..Default::default()
@@ -941,7 +942,7 @@ fn source_minimap_edge_drag_advances_smoothly_across_frames() {
     harness.preview_frames(egui::pos2(10.0, 10.0), 3);
     let rect = harness
         .ctx
-        .read_response(egui::Id::new("gw_source_minimap"))
+        .read_response(egui::Id::unique("gw_source_minimap"))
         .expect("源码模式应显示缩略图")
         .rect;
     // 可见框现在随正文视口等比缩放；从中心拖到下沿外 10 点，验证小幅越界
@@ -1033,7 +1034,7 @@ fn approaching_the_right_edge_lays_out_a_steady_outline() {
             .filter_map(|index| {
                 harness
                     .ctx
-                    .read_response(egui::Id::new(("gw_nav_label", index)))
+                    .read_response(egui::Id::unique(("gw_nav_label", index)))
                     .map(|hit| (index, hit.rect))
             })
             .collect()
@@ -1191,7 +1192,7 @@ impl Harness {
         (1..=400usize)
             .filter_map(|number| {
                 self.ctx
-                    .read_response(egui::Id::new(("gw-preview-line-number", number)))
+                    .read_response(egui::Id::unique(("gw-preview-line-number", number)))
                     .map(|response| (number, response.rect))
             })
             .collect()
@@ -1206,7 +1207,7 @@ impl Harness {
             .next()
             .expect("样稿第一行是文档标题");
         self.ctx
-            .read_response(egui::Id::new(("gw-preview-block", 0usize, title.len())))
+            .read_response(egui::Id::unique(("gw-preview-block", 0usize, title.len())))
             .expect("文档标题应当登记成可点的块")
             .rect
     }

@@ -1262,7 +1262,7 @@ mod tests {
     fn focus_change_clears_code_and_mouse_commit_keeps_target() {
         let mut ime = ime();
         let ctx = egui::Context::default();
-        let id = egui::Id::new("正文");
+        let id = egui::Id::unique("正文");
         ctx.memory_mut(|m| m.request_focus(id));
         ime.focus_id = Some(id);
         ime.editable_focus = true;
@@ -1274,7 +1274,7 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e,egui::Event::Text(s) if s=="公文"))
         }));
-        ctx.memory_mut(|m| m.request_focus(egui::Id::new("新框")));
+        ctx.memory_mut(|m| m.request_focus(egui::Id::unique("新框")));
         ime.begin_frame(&ctx);
         assert!(ime.preedit.text.is_empty());
     }

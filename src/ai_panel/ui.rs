@@ -319,7 +319,7 @@ impl DraftPage<'_> {
                     self.doc.ai_panel.composer.pi_skill = None;
                     self.doc.ai_panel.composer.error = None;
                     ui.ctx().memory_mut(|memory| {
-                        memory.request_focus(egui::Id::new(("ai_panel_input", self.doc.key)));
+                        memory.request_focus(egui::Id::unique(("ai_panel_input", self.doc.key)));
                     });
                 }
                 return;
@@ -413,8 +413,9 @@ impl DraftPage<'_> {
         conversation_edge_fades(
             ui,
             scroll.inner_rect,
-            scroll.state.offset.y > 0.5,
-            scroll.content_size.y - scroll.state.offset.y > scroll.inner_rect.height() + 0.5,
+            scroll.state.clamped_offset().y > 0.5,
+            scroll.content_size.y - scroll.state.clamped_offset().y
+                > scroll.inner_rect.height() + 0.5,
         );
         if running {
             // 计时与流式文字都要动；忙碌时外壳只按 100 ms 刷新，这里提到 50 ms。

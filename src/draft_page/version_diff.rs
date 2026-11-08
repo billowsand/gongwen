@@ -868,7 +868,7 @@ impl DraftPage<'_> {
         // 历史版本的内容与当前正文不对应，双击定位源码没有意义，忽略返回值。
         let _jump = self.doc.draft_diff.version_pair.show(
             ui,
-            egui::Id::new(("version_diff_history_pair", key)),
+            egui::Id::unique(("version_diff_history_pair", key)),
             &old_label,
             &new_label,
             &display,
@@ -1015,7 +1015,7 @@ impl DraftPage<'_> {
         let display = UnitDisplay::new(&self.config.vocabulary);
         let jump = state.show(
             ui,
-            egui::Id::new("version_diff_code"),
+            egui::Id::unique("version_diff_code"),
             &old_label,
             new_label,
             &display,

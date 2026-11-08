@@ -178,7 +178,7 @@ fn outline_row_ui(
     );
     let response = ui.interact(
         rect,
-        ui.id().with(("source_outline_node", &node.key)),
+        ui.scope_id().with(("source_outline_node", &node.key)),
         egui::Sense::click(),
     );
     let arrow_x = rect.left() + 5.0 + node.depth.min(5) as f32 * OUTLINE_INDENT;
@@ -745,7 +745,7 @@ impl DraftPage<'_> {
         );
         let response = ui.interact(
             rect,
-            egui::Id::new("gw_source_minimap"),
+            egui::Id::unique("gw_source_minimap"),
             egui::Sense::click_and_drag(),
         );
         let map = &mut self.doc.source_minimap;
@@ -836,7 +836,7 @@ impl DraftPage<'_> {
         );
         let bar = ui.interact(
             track,
-            egui::Id::new("gw_source_minimap_bar"),
+            egui::Id::unique("gw_source_minimap_bar"),
             egui::Sense::click_and_drag(),
         );
         let ratio = (map.viewport_height / map.content_height.max(1.0)).clamp(0.0, 1.0);

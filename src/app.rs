@@ -197,6 +197,7 @@ pub struct GongwenApp {
     /// 还没问完结果的系统文件对话框；后台线程开窗，主线程每帧问一次。
     pending_file_dialogs: Vec<file_dialog::PendingFileDialog>,
     pending_output: Option<output_guard::PendingOutput>,
+    clipboard_context: Option<egui::Context>,
     clipboard_output_approved: bool,
     clipboard_cut_replay: Option<Option<egui::Id>>,
     /// 送批材料面板；None 表示未打开。
@@ -271,6 +272,10 @@ pub struct GongwenApp {
     /// 等着导入的稿件包（暂存目录里的副本）：按钮、启动参数、拖放进来的都排在这里，
     /// 前一个的口令框 / 导入预览关掉后再弹下一个。
     pending_imports: VecDeque<PathBuf>,
+    /// 尚未暂存的包串行复制，避免多个大文件同时读写，也保持接收顺序。
+    pending_package_staging: VecDeque<PathBuf>,
+    package_staging_busy: bool,
+    import_preparation: Option<manuscript_ui::ImportPreparation>,
     /// 正在口令框或导入预览里处理的那个副本，处理完删掉。
     active_import: Option<PathBuf>,
     /// 主实例的锁，随 App 活到进程结束；`--new-window` 或锁不可用时为 None。
@@ -642,6 +647,7 @@ impl GongwenApp {
             next_print_dialog: 1,
             pending_file_dialogs: Vec::new(),
             pending_output: None,
+            clipboard_context: None,
             clipboard_output_approved: false,
             clipboard_cut_replay: None,
             send_package: None,
@@ -708,6 +714,9 @@ impl GongwenApp {
             manuscript_detail_delete_pdf: None,
             manuscript_import_preview: None,
             pending_imports: VecDeque::new(),
+            pending_package_staging: VecDeque::new(),
+            package_staging_busy: false,
+            import_preparation: None,
             active_import: None,
             forwarded_requests: forwarded_requests.or_else(|| {
                 instance
@@ -912,6 +921,11 @@ impl GongwenApp {
         self.poll_writing_tasks(&ctx);
         // 系统文件对话框在后台线程开窗，这里问一次结果；用户挑完再接着做那件事。
         self.poll_file_dialogs(&ctx);
+        self.poll_smart_paste(ui);
+        self.poll_import_preparation();
+        if self.package_staging_busy || self.import_preparation.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         self.receive_forwarded_requests(&ctx);
         self.receive_dropped_packages(&ctx);
         self.pump_pending_imports();
@@ -943,8 +957,8 @@ impl GongwenApp {
         // 让切换有明确的「进入新场景」感。
         if self.last_content_tab != Some(active) {
             self.last_content_tab = Some(active);
-            ctx.animate_bool_with_time(egui::Id::new("content_fade"), false, 0.0);
-            ctx.animate_value_with_time(egui::Id::new("content_slide"), CONTENT_SLIDE_PX, 0.0);
+            ctx.animate_bool_with_time(egui::Id::unique("content_fade"), false, 0.0);
+            ctx.animate_value_with_time(egui::Id::unique("content_slide"), CONTENT_SLIDE_PX, 0.0);
         }
         egui::CentralPanel::default()
             .frame(if theme::smartisan::active() {
@@ -954,12 +968,12 @@ impl GongwenApp {
             })
             .show(ui, |ui| {
                 let fade = ui.ctx().animate_bool_with_time(
-                    egui::Id::new("content_fade"),
+                    egui::Id::unique("content_fade"),
                     true,
                     CONTENT_FADE_ANIM,
                 );
                 let slide = ui.ctx().animate_value_with_time(
-                    egui::Id::new("content_slide"),
+                    egui::Id::unique("content_slide"),
                     0.0,
                     CONTENT_FADE_ANIM,
                 );
@@ -1186,10 +1200,8 @@ impl GongwenApp {
     }
 
     /// 停掉在跑的 Pi 写作（锁定与关窗共用）：取消标志置位、在途回执作废、
-    /// Pi 子进程由 host 收尾退出。返回是否还有任务在收尾——关窗时据此多等
-    /// 一会儿，别让 Node 子进程在窗口消失后还占着模型与工作区。
-    pub(crate) fn cancel_pi_tasks(&mut self) -> bool {
-        let running = self.docs.iter().any(|doc| doc.ai_panel.running());
+    /// Pi 子进程由 host 收尾退出。关窗不能在 UI 线程固定睡眠等待。
+    pub(crate) fn cancel_pi_tasks(&mut self) {
         for index in 0..self.docs.len() {
             self.stop_doc_tasks(index);
         }
@@ -1198,14 +1210,11 @@ impl GongwenApp {
         if let Some(cancel) = &self.pi_calibration_cancel {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        running || self.styles_page.learning_in_progress() || self.pi_calibration_rx.is_some()
     }
 
     /// 外壳关窗前调用。
     pub(crate) fn shutdown(&mut self) {
-        if self.cancel_pi_tasks() {
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-        }
+        self.cancel_pi_tasks();
     }
 }
 

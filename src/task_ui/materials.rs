@@ -80,12 +80,7 @@ pub(super) fn list(ui: &mut egui::Ui, state: &mut State, data: &Snapshot) {
             .interact(egui::Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         response.widget_info(|| {
-            egui::WidgetInfo::selected(
-                egui::WidgetType::SelectableLabel,
-                true,
-                selected,
-                &source.title,
-            )
+            egui::WidgetInfo::selected(egui::Role::Button, true, selected, &source.title)
         });
         if response.clicked() {
             state.material_selected = Some(source.id.clone());
@@ -215,7 +210,7 @@ pub(super) fn delete_dialog(
         return;
     };
     egui::Window::new("确认删除材料")
-        .id(egui::Id::new("task_material_delete"))
+        .id(egui::Id::unique("task_material_delete"))
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)

@@ -23,11 +23,11 @@ pub(super) fn field(ui: &mut egui::Ui, id_salt: &str, value: &mut Option<String>
         let button = theme::icon_button(ui, theme::Icon::Calendar, "选日期");
         if button.clicked() {
             // 每次打开都回到所填日期（或今天）所在的月份。
-            let month_id = egui::Id::new(("task_date_month", id_salt));
+            let month_id = egui::Id::unique(("task_date_month", id_salt));
             ui.data_mut(|d| d.remove::<NaiveDate>(month_id));
         }
         egui::Popup::menu(&button)
-            .id(egui::Id::new(("task_date_popup", id_salt)))
+            .id(egui::Id::unique(("task_date_popup", id_salt)))
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| calendar(ui, id_salt, value));
     });
@@ -45,7 +45,7 @@ fn calendar(ui: &mut egui::Ui, id_salt: &str, value: &mut Option<String>) {
     let picked = value
         .as_deref()
         .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
-    let month_id = egui::Id::new(("task_date_month", id_salt));
+    let month_id = egui::Id::unique(("task_date_month", id_salt));
     let mut month = ui
         .data(|d| d.get_temp::<NaiveDate>(month_id))
         .unwrap_or_else(|| first_of_month(picked.unwrap_or(today)));

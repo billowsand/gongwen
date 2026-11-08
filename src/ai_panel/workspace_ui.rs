@@ -122,11 +122,11 @@ impl DraftPage<'_> {
             );
             let response = ui.interact(
                 rect,
-                ui.id().with(("workspace_sheet_tab", index)),
+                ui.scope_id().with(("workspace_sheet_tab", index)),
                 egui::Sense::click(),
             );
             response.widget_info(|| {
-                egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label)
+                egui::WidgetInfo::selected(egui::Role::Button, true, selected, label)
             });
             // 选中签填纸色：AI 稿是校样纸，正文是稿纸；未选签由主题画牛皮纸。
             let paper = if ai {

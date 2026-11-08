@@ -271,7 +271,7 @@ pub(crate) fn icon_button_impl(
             false,
         );
     }
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     response.on_hover_text(label)
 }
 
@@ -323,9 +323,7 @@ pub(crate) fn titlebar_icon_button(
                     ui,
                     egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(16.0)),
                 );
-            response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label)
-            });
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
             return response.on_hover_text(label);
         }
         let fill = if !enabled {
@@ -352,7 +350,7 @@ pub(crate) fn titlebar_icon_button(
             egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(16.0)),
         );
     }
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     response.on_hover_text(label)
 }
 
@@ -425,8 +423,7 @@ pub(crate) fn chip(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) -> e
     // 文字与背景一起分配空间，避免 Frame 的子布局先在行尾落位。
     let (rect, response) =
         ui.allocate_exact_size(galley.size() + egui::vec2(16.0, 4.0), egui::Sense::hover());
-    response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), text));
     if ui.is_rect_visible(rect) {
         ui.painter().rect_filled(rect, chrome_radius(255), bg);
         ui.painter()

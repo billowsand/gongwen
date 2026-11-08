@@ -554,7 +554,7 @@ pub(crate) fn editor_context_menu(
                         .take(sorted[1].index.0 - sorted[0].index.0)
                         .collect();
                     ui.ctx()
-                        .data_mut(|data| data.insert_temp(egui::Id::new(request), text));
+                        .data_mut(|data| data.insert_temp(egui::Id::unique(request), text));
                 }
                 ui.close();
             }

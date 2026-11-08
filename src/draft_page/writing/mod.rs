@@ -621,7 +621,7 @@ impl DraftPage<'_> {
         };
         let dialog = crate::modal::dialog(
             ctx,
-            egui::Id::new(("writing_confirm", self.doc.key)),
+            egui::Id::unique(("writing_confirm", self.doc.key)),
             title,
             400.0,
             crate::modal::Dismiss::EscOrBackdrop,
@@ -795,7 +795,7 @@ impl DraftPage<'_> {
         } else {
             egui::Frame::side_top_panel(ui.style())
         };
-        egui::Panel::bottom(egui::Id::new(("writing_footer", self.doc.key)))
+        egui::Panel::bottom(egui::Id::unique(("writing_footer", self.doc.key)))
             .frame(panel_frame)
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -857,7 +857,7 @@ impl DraftPage<'_> {
             });
         let inline_evidence = self.doc.writing.evidence_open && ui.available_width() <= 850.0;
         if self.doc.writing.evidence_open && !inline_evidence {
-            egui::Panel::right(egui::Id::new(("writing_evidence", self.doc.key)))
+            egui::Panel::right(egui::Id::unique(("writing_evidence", self.doc.key)))
                 .frame(panel_frame)
                 .default_size(280.0)
                 .size_range(240.0..=360.0)

@@ -1588,7 +1588,7 @@ pub(crate) fn paint_red_print_pages(
                             let line_rect = row_rect(local_start, local_end);
                             let response = ui.interact(
                                 line_rect,
-                                egui::Id::new((
+                                egui::Id::unique((
                                     "red-print-source-line",
                                     page_index,
                                     fragment_index,
@@ -1682,7 +1682,7 @@ pub(crate) fn paint_red_print_pages(
                     }
                     let response = ui.interact(
                         rect,
-                        egui::Id::new(("red-print-fragment", page_index, fragment_index)),
+                        egui::Id::unique(("red-print-fragment", page_index, fragment_index)),
                         egui::Sense::click(),
                     );
                     if response.clicked() {
@@ -1799,7 +1799,7 @@ pub(crate) fn paint_red_print_pages(
                     metrics.mark_row(row_rect, baseline, Some(source.clone()));
                     let response = ui.interact(
                         row_rect,
-                        egui::Id::new(("red-print-table-row", page_index, slice_index, row)),
+                        egui::Id::unique(("red-print-table-row", page_index, slice_index, row)),
                         egui::Sense::click(),
                     );
                     if response.clicked() {

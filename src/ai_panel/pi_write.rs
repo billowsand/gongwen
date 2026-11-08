@@ -88,7 +88,7 @@ pub(crate) fn write_text(ctx: Option<&eframe::egui::Context>, text: &mut String,
 /// 共用 editor_id 的状态按稿件保存在 egui 内存中；后台写入也能保留自己的撤销点。
 pub(crate) fn bind_editor(ctx: &eframe::egui::Context, key: crate::draft_page::DocKey) {
     use eframe::egui;
-    let owner_id = egui::Id::new("pi_editor_owner");
+    let owner_id = egui::Id::unique("pi_editor_owner");
     let previous = ctx.data(|data| data.get_temp::<u64>(owner_id));
     if previous == Some(key) {
         return;
@@ -96,11 +96,16 @@ pub(crate) fn bind_editor(ctx: &eframe::egui::Context, key: crate::draft_page::D
     if let Some(previous) = previous
         && let Some(state) = egui::TextEdit::load_state(ctx, crate::draft_page::editor_id())
     {
-        ctx.data_mut(|data| data.insert_temp(egui::Id::new(("pi_editor_state", previous)), state));
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::unique(("pi_editor_state", previous)), state)
+        });
     }
     let state = ctx
         .data(|data| {
-            data.get_temp::<egui::text_edit::TextEditState>(egui::Id::new(("pi_editor_state", key)))
+            data.get_temp::<egui::text_edit::TextEditState>(egui::Id::unique((
+                "pi_editor_state",
+                key,
+            )))
         })
         .or_else(|| {
             previous
@@ -119,7 +124,7 @@ fn write_document(
     after: &str,
 ) {
     let previous = ctx.and_then(|ctx| {
-        ctx.data(|data| data.get_temp::<u64>(eframe::egui::Id::new("pi_editor_owner")))
+        ctx.data(|data| data.get_temp::<u64>(eframe::egui::Id::unique("pi_editor_owner")))
     });
     if let Some(ctx) = ctx {
         bind_editor(ctx, doc.key);

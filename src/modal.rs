@@ -135,7 +135,7 @@ mod tests {
     use super::*;
 
     fn editor_id() -> egui::Id {
-        egui::Id::new("modal_guard_test_editor")
+        egui::Id::unique("modal_guard_test_editor")
     }
 
     /// 画一帧：背后一个文本框，`modal` 为真时再盖一个模态。守卫在帧首跑，与应用里一致。
@@ -144,7 +144,7 @@ mod tests {
             guard.begin_frame(ui.ctx());
             ui.add(egui::TextEdit::singleline(text).id(editor_id()));
             if modal {
-                egui::Modal::new(egui::Id::new("modal_guard_test_modal")).show(ui.ctx(), |ui| {
+                egui::Modal::new(egui::Id::unique("modal_guard_test_modal")).show(ui.ctx(), |ui| {
                     ui.label("确认？");
                 });
             }
@@ -182,7 +182,7 @@ mod tests {
             let _ = crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| {
                 taken.push(takes_keys(ui));
                 if modal {
-                    egui::Modal::new(egui::Id::new("modal_guard_test_modal"))
+                    egui::Modal::new(egui::Id::unique("modal_guard_test_modal"))
                         .show(ui.ctx(), |ui| ui.label("确认？"));
                 }
             });
@@ -204,7 +204,7 @@ mod tests {
         let _ = crate::test_support::run_ui(ctx, input, |ui| {
             dismissed = dialog(
                 ui.ctx(),
-                egui::Id::new("dialog_test"),
+                egui::Id::unique("dialog_test"),
                 "确认",
                 200.0,
                 dismiss,

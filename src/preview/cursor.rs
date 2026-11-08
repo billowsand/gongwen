@@ -19,7 +19,7 @@ struct Blink {
 }
 
 fn blink_id() -> egui::Id {
-    egui::Id::new("gw-preview-cursor-blink")
+    egui::Id::unique("gw-preview-cursor-blink")
 }
 
 /// 同一光标跨帧保留相位；输入、移动、恢复窗口焦点或重新进入预览都先亮起。

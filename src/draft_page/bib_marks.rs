@@ -32,7 +32,7 @@ pub(super) fn show(
     library: &Library,
     cited: impl FnOnce() -> Arc<Vec<CitedKey>>,
 ) {
-    let state_id = egui::Id::new("gw-bib-card");
+    let state_id = egui::Id::unique("gw-bib-card");
     let spans: Vec<_> = if text.contains('@') {
         crossref::citation_marks(text, &|key| library.contains(key))
             .into_iter()
@@ -122,7 +122,7 @@ fn card(
     library: &Library,
     cited: &[CitedKey],
 ) -> egui::Rect {
-    egui::Area::new(egui::Id::new("gw-bib-card-area"))
+    egui::Area::new(egui::Id::unique("gw-bib-card-area"))
         .order(egui::Order::Foreground)
         .fixed_pos(anchor.left_bottom() + egui::vec2(0.0, 4.0))
         .constrain(true)

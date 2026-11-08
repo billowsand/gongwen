@@ -102,7 +102,7 @@ pub(super) fn result_row(
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 64.0), egui::Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(
-            egui::WidgetType::Button,
+            egui::Role::Button,
             ui.is_enabled(),
             selected,
             format!("{}\n{}", entry.title, entry.subtitle),

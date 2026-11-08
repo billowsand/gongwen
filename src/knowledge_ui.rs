@@ -658,7 +658,9 @@ fn search_results(app: &mut GongwenApp, ui: &mut egui::Ui) {
                                                         .map_or(0, |range| range.end);
                                                 ui.ctx().data_mut(|data| {
                                                     data.insert_temp(
-                                                        egui::Id::new("knowledge_local_original"),
+                                                        egui::Id::unique(
+                                                            "knowledge_local_original",
+                                                        ),
                                                         LocalOriginal {
                                                             doc_id: hit.doc_id,
                                                             title,
@@ -722,7 +724,7 @@ struct LocalOriginal {
 }
 
 fn local_original_window(ctx: &egui::Context) {
-    let key = egui::Id::new("knowledge_local_original");
+    let key = egui::Id::unique("knowledge_local_original");
     let Some(mut original) = ctx.data_mut(|data| data.get_temp::<LocalOriginal>(key)) else {
         return;
     };
@@ -997,7 +999,7 @@ fn import_dialog(app: &mut GongwenApp, ui: &mut egui::Ui) {
     // 有下拉的表单：点遮罩常常只是想收起下拉，只认 Esc 与「取消」。
     let dialog = modal::dialog(
         ui.ctx(),
-        egui::Id::new("knowledge_import"),
+        egui::Id::unique("knowledge_import"),
         "导入文档到知识库",
         420.0,
         Dismiss::EscOnly,
@@ -1057,7 +1059,7 @@ fn delete_confirm(app: &mut GongwenApp, ui: &mut egui::Ui) {
     };
     let dialog = modal::dialog(
         ui.ctx(),
-        egui::Id::new("knowledge_delete_confirm"),
+        egui::Id::unique("knowledge_delete_confirm"),
         "删除知识库文档",
         380.0,
         Dismiss::EscOrBackdrop,
@@ -1094,7 +1096,7 @@ fn rename_dialog(app: &mut GongwenApp, ui: &mut egui::Ui) {
     let id = *id;
     let dialog = modal::dialog(
         ui.ctx(),
-        egui::Id::new("knowledge_rename"),
+        egui::Id::unique("knowledge_rename"),
         "修改文档标题",
         460.0,
         Dismiss::EscOrBackdrop,

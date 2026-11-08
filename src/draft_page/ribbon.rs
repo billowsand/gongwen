@@ -1723,7 +1723,7 @@ fn crossref_menu(ui: &mut egui::Ui, markdown: &str) -> Option<String> {
             .filter(|t| CrossrefGroup::of(t.kind) == group)
             .count()
     };
-    let memory = egui::Id::new("research-crossref-group");
+    let memory = egui::Id::unique("research-crossref-group");
     let mut group = ui
         .data(|data| data.get_temp::<CrossrefGroup>(memory))
         .or_else(|| {

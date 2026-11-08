@@ -43,7 +43,7 @@ enum Cached {
 fn cached(ctx: &egui::Context, src: &str, display: bool, font_pt: f32) -> Cached {
     let color = theme::paper::ink();
     let quantized = (font_pt * 100.0).round() as i64;
-    let id = egui::Id::new(("gw_math", src, display, quantized, color));
+    let id = egui::Id::unique(("gw_math", src, display, quantized, color));
     if let Some(hit) = ctx.data(|data| data.get_temp::<Cached>(id)) {
         return hit;
     }

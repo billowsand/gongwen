@@ -297,7 +297,7 @@ impl GongwenApp {
         let mut cancel = false;
         let response = modal::dialog(
             ctx,
-            egui::Id::new("backup_restore_confirm"),
+            egui::Id::unique("backup_restore_confirm"),
             "恢复备份",
             540.0,
             Dismiss::ButtonsOnly,
@@ -361,7 +361,7 @@ impl GongwenApp {
         }
         modal::dialog(
             ctx,
-            egui::Id::new("backup_restoring"),
+            egui::Id::unique("backup_restoring"),
             "正在恢复备份",
             420.0,
             Dismiss::ButtonsOnly,
@@ -383,7 +383,7 @@ impl GongwenApp {
         let mut exit = false;
         modal::dialog(
             ctx,
-            egui::Id::new("backup_restore_done"),
+            egui::Id::unique("backup_restore_done"),
             "恢复完成",
             480.0,
             Dismiss::ButtonsOnly,
@@ -418,7 +418,7 @@ impl GongwenApp {
         let mut close = false;
         let response = modal::dialog(
             ctx,
-            egui::Id::new("backup_restore_error"),
+            egui::Id::unique("backup_restore_error"),
             "备份恢复未完成",
             480.0,
             Dismiss::ButtonsOnly,
@@ -523,7 +523,7 @@ fn config_recovery_dialog(ctx: &egui::Context, recovered: &mut Option<PathBuf>) 
     };
     let response = modal::dialog(
         ctx,
-        egui::Id::new("config_recovered"),
+        egui::Id::unique("config_recovered"),
         "配置文件已损坏",
         500.0,
         Dismiss::ButtonsOnly,
@@ -559,7 +559,7 @@ fn crash_report_dialog(ctx: &egui::Context, pending: &mut Option<PathBuf>) -> Op
     let mut open_dir = false;
     let response = modal::dialog(
         ctx,
-        egui::Id::new("crash_report"),
+        egui::Id::unique("crash_report"),
         "上次运行异常退出",
         520.0,
         Dismiss::ButtonsOnly,

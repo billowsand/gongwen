@@ -456,6 +456,8 @@ pub(crate) struct DraftSession {
     /// 最近一次智能粘贴（插入的字节范围、内容与原始纯文本），编辑区上方的
     /// 「改为原样粘贴」按钮用它。下一次改动那段文字、换稿或约 15 秒后清掉。
     pub(crate) recent_paste: Option<paste::RecentPaste>,
+    /// 原文已插入、富文本转换仍在后台进行的一次粘贴；不随稿件存盘。
+    pub(crate) pending_paste: Option<paste::PendingPaste>,
     /// 待处理的“跳到源码”请求，编辑框下次绘制时把光标挪过去并滚动到位。
     pub(crate) pending_source_jump: Option<usize>,
     /// 查找命中需要选中完整范围；普通预览点击仍只移动光标。
@@ -602,6 +604,7 @@ impl DraftSession {
             preview_selection: None,
             text_drag: None,
             recent_paste: None,
+            pending_paste: None,
             pending_source_jump: None,
             pending_source_selection: None,
             pending_render_jump: false,

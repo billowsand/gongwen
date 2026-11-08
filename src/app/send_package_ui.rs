@@ -52,7 +52,7 @@ struct PackageRow {
 
 impl egui_dnd::DragDropItem for &PackageRow {
     fn id(&self) -> egui::Id {
-        egui::Id::new(&self.item_uuid)
+        egui::Id::unique(&self.item_uuid)
     }
 }
 
@@ -400,7 +400,7 @@ impl GongwenApp {
         let mut action = None;
 
         egui::Window::new("送批材料")
-            .id(egui::Id::new("send_package_window"))
+            .id(egui::Id::unique("send_package_window"))
             .open(&mut keep)
             .collapsible(false)
             .resizable(true)
@@ -880,7 +880,7 @@ fn items_ui(
     let count = items.len();
     let id = ("send_package_sort", owner_id);
     // 换一份拖放状态即可取消手势；松开鼠标前不允许重新触发拖动。
-    let cancel_id = egui::Id::new((id, "cancel"));
+    let cancel_id = egui::Id::unique((id, "cancel"));
     let cancel = ui.input(|input| input.key_pressed(egui::Key::Escape));
     let pressed = ui.input(|input| input.pointer.any_down());
     let (generation, cancelled) = ui.data_mut(|data| {
@@ -910,7 +910,7 @@ fn items_ui(
         return cancelled && pressed;
     }
     let top = ui.cursor().top();
-    let response = egui_dnd::dnd(ui, (id, generation))
+    let response = egui_dnd::dnd(ui, ui.make_persistent_id((id, generation)))
         .with_touch_config(Some(egui_dnd::DragDropConfig::touch_scroll()))
         .show(items.iter(), |ui, row, handle, state| {
             row_card(
@@ -964,7 +964,7 @@ fn row_card(
         RowRole::Owner => theme::card().fill(theme::accent_soft()),
         RowRole::Item { .. } => theme::card(),
     };
-    let hover_id = egui::Id::new(("send_package_card_hover", &row.item_uuid));
+    let hover_id = egui::Id::unique(("send_package_card_hover", &row.item_uuid));
     // 悬停状态取上一帧的：卡片高度本帧才定，指针移动自会触发下一帧重绘。
     let hovered = ui
         .data(|data| data.get_temp::<bool>(hover_id))

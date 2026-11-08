@@ -59,7 +59,7 @@ impl GongwenApp {
         }
         let index = self.active_doc;
         let Some(mut proposal) = self.docs[index].ai_proposal.take() else {
-            theme::reset_window_anim(ctx, egui::Id::new("ai_proposal_anim"));
+            theme::reset_window_anim(ctx, egui::Id::unique("ai_proposal_anim"));
             return;
         };
         if !proposal.open {
@@ -229,7 +229,7 @@ impl GongwenApp {
                 );
             });
         if let Some(window) = win {
-            theme::window_enter_anim(ctx, egui::Id::new("ai_proposal_anim"), &window.response);
+            theme::window_enter_anim(ctx, egui::Id::unique("ai_proposal_anim"), &window.response);
         }
         if !keep {
             proposal.open = false;

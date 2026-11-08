@@ -62,7 +62,7 @@ pub(crate) fn help_page(ui: &mut egui::Ui, state: &mut HelpState) {
     }
     let mut goto: Option<Range<usize>> = None;
 
-    egui::Panel::left(egui::Id::new("help_toc_panel"))
+    egui::Panel::left(egui::Id::unique("help_toc_panel"))
         .resizable(false)
         .exact_size(TOC_WIDTH)
         .frame(
@@ -73,7 +73,7 @@ pub(crate) fn help_page(ui: &mut egui::Ui, state: &mut HelpState) {
         .show(ui, |ui| {
             toc_panel_ui(ui, state.current.as_ref(), &mut state.query, &mut goto)
         });
-    egui::Panel::top(egui::Id::new("help_header_panel"))
+    egui::Panel::top(egui::Id::unique("help_header_panel"))
         .frame(egui::Frame::new().inner_margin(egui::Margin {
             left: 16,
             right: 14,

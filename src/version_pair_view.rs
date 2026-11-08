@@ -393,7 +393,7 @@ mod tests {
                     .set_pair(self.key, &self.old, &self.new, &self.display);
                 let _ = self.state.show(
                     ui,
-                    egui::Id::new(("version_pair_test", self.key)),
+                    egui::Id::unique(("version_pair_test", self.key)),
                     "v1 · 送审稿",
                     "v2 · 定稿",
                     &self.display,

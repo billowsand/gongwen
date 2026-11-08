@@ -31,7 +31,7 @@ struct PreviewTextSelection {
 }
 
 fn selection_id() -> egui::Id {
-    egui::Id::new("gw-preview-text-selection")
+    egui::Id::unique("gw-preview-text-selection")
 }
 
 pub(crate) fn set_text_selection(ctx: &egui::Context, source: &str, range: Option<Range<usize>>) {
@@ -88,7 +88,7 @@ struct PreviewTextCursor {
 }
 
 fn cursor_id() -> egui::Id {
-    egui::Id::new("gw-preview-text-cursor")
+    egui::Id::unique("gw-preview-text-cursor")
 }
 
 pub(crate) fn set_text_cursor(ctx: &egui::Context, source: &str, byte: Option<usize>) {
@@ -1356,7 +1356,7 @@ pub(crate) fn clickable_justified_job(
             let rect = row_rect(local_start, local_end);
             let response = ui.interact(
                 rect,
-                egui::Id::new((
+                egui::Id::unique((
                     "gw-preview-source-line",
                     segment.source.start,
                     segment.source.end,
@@ -2106,7 +2106,7 @@ pub(crate) fn clickable_table(
         metrics.mark_row(row_rect, baseline, Some(source.clone()));
         let response = ui.interact(
             row_rect,
-            egui::Id::new(("gw-preview-table-row", range.start, range.end, row)),
+            egui::Id::unique(("gw-preview-table-row", range.start, range.end, row)),
             egui::Sense::click(),
         );
         if response.clicked() {
@@ -2169,7 +2169,7 @@ pub(crate) fn clickable(
     let rect = inner.expand2(egui::vec2(4.0, 1.0));
     let response = ui.interact(
         rect,
-        egui::Id::new(("gw-preview-block", range.start, range.end)),
+        egui::Id::unique(("gw-preview-block", range.start, range.end)),
         egui::Sense::click(),
     );
     if response.clicked() {
@@ -2262,7 +2262,7 @@ pub(crate) fn clickable_rows(
     for (index, rect) in tints.iter().enumerate() {
         let response = ui.interact(
             *rect,
-            egui::Id::new(("gw-preview-row", range.start, range.end, index)),
+            egui::Id::unique(("gw-preview-row", range.start, range.end, index)),
             egui::Sense::click(),
         );
         if response.clicked() {
@@ -2304,18 +2304,18 @@ const HOVERED_SOURCE: &str = "gw-preview-hovered-source";
 
 fn note_hovered(ui: &egui::Ui, range: &Range<usize>) {
     ui.ctx().data_mut(|data| {
-        data.insert_temp(egui::Id::new(HOVERED_SOURCE), range.clone());
+        data.insert_temp(egui::Id::unique(HOVERED_SOURCE), range.clone());
     });
 }
 
 /// 开画前清掉上一帧的悬停结果。
 pub(crate) fn clear_hovered(ctx: &egui::Context) {
-    ctx.data_mut(|data| data.remove::<Range<usize>>(egui::Id::new(HOVERED_SOURCE)));
+    ctx.data_mut(|data| data.remove::<Range<usize>>(egui::Id::unique(HOVERED_SOURCE)));
 }
 
 /// 本帧悬停的源码块（预览所画 Markdown 里的字节范围）。
 pub(crate) fn hovered_source(ctx: &egui::Context) -> Option<Range<usize>> {
-    ctx.data(|data| data.get_temp::<Range<usize>>(egui::Id::new(HOVERED_SOURCE)))
+    ctx.data(|data| data.get_temp::<Range<usize>>(egui::Id::unique(HOVERED_SOURCE)))
 }
 
 /// 把目标放在可视区中部略偏上（约 40% 高度），给下方正文留下更多阅读空间。

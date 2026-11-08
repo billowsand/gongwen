@@ -154,7 +154,7 @@ impl Harness {
 
     /// 把焦点放进侧栏输入框（下一帧生效）。
     fn focus_input(&mut self) {
-        let id = egui::Id::new(("ai_panel_input", self.doc.key));
+        let id = egui::Id::unique(("ai_panel_input", self.doc.key));
         self.ctx.memory_mut(|memory| memory.request_focus(id));
     }
 
@@ -232,7 +232,7 @@ fn large_paste_becomes_material_only_in_the_focused_composer() {
     harness.frame_with(vec![egui::Event::Paste("短材料".into())]);
     assert!(harness.doc.ai_panel.composer.text.contains("短材料"));
     harness.ctx.memory_mut(|memory| {
-        memory.surrender_focus(egui::Id::new(("ai_panel_input", harness.doc.key)))
+        memory.surrender_focus(egui::Id::unique(("ai_panel_input", harness.doc.key)))
     });
     harness.frame_with(vec![egui::Event::Paste(text)]);
     assert_eq!(harness.doc.ai_panel.composer.materials.len(), 1);
@@ -252,6 +252,30 @@ fn pasted_material_keeps_html_tables() {
     harness.focus_input();
     let text = "序号\t事项\n1\t隐患排查\n".repeat(40);
     harness.frame_with(vec![egui::Event::Paste(text)]);
+    let result = harness
+        ._keep
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("material conversion should finish");
+    let WorkerResult::MaterialPasteDone {
+        key,
+        id,
+        plain,
+        markdown,
+    } = result
+    else {
+        panic!("expected material conversion result")
+    };
+    assert_eq!(key, harness.doc.key);
+    let material = harness
+        .doc
+        .ai_panel
+        .composer
+        .materials
+        .iter_mut()
+        .find(|material| material.id == id && material.material.text == plain)
+        .unwrap();
+    material.material.text = markdown;
+    material.chars = material.material.text.chars().count();
     assert!(harness.doc.ai_panel.composer.text.is_empty());
     assert_eq!(harness.doc.ai_panel.composer.materials.len(), 1);
     let material = &harness.doc.ai_panel.composer.materials[0].material.text;
@@ -389,7 +413,11 @@ fn workspace_is_shown_on_the_left_and_readonly_until_adopted() {
     let ctx = harness.ctx.clone();
     let mut drawn = false;
     ctx.memory_mut(|memory| {
-        memory.request_focus(egui::Id::new(("ai_workspace_text", harness.doc.key, 1_u64)))
+        memory.request_focus(egui::Id::unique((
+            "ai_workspace_text",
+            harness.doc.key,
+            1_u64,
+        )))
     });
     let output = crate::test_support::run_ui(
         &ctx,
@@ -2059,7 +2087,7 @@ fn escape_closes_the_popup_until_the_trigger_is_typed_again() {
     let texts = harness.frame_texts();
     assert!(!has(&texts, "↑↓ 选择"), "Esc 关掉：{texts:?}");
     assert_eq!(harness.doc.ai_panel.composer.text, "/", "Esc 不动文字");
-    let id = egui::Id::new(("ai_panel_input", harness.doc.key));
+    let id = egui::Id::unique(("ai_panel_input", harness.doc.key));
     assert!(
         harness.ctx.memory(|memory| memory.has_focus(id)),
         "Esc 被弹出层吃掉，输入框不失焦"
@@ -2183,7 +2211,7 @@ fn article_popup_has_no_widget_id_clashes_with_long_or_duplicate_titles() {
         for _ in 0..8 {
             harness.frame_output_cleared(Vec::new(), size);
         }
-        let input_id = egui::Id::new(("ai_panel_input", harness.doc.key));
+        let input_id = egui::Id::unique(("ai_panel_input", harness.doc.key));
         let popup = harness
             .ctx
             .memory(|memory| memory.area_rect(input_id.with("popup")))
@@ -2192,7 +2220,9 @@ fn article_popup_has_no_widget_id_clashes_with_long_or_duplicate_titles() {
         let panel = harness
             .ctx
             .data(|data| {
-                data.get_temp::<egui::containers::panel::PanelState>(egui::Id::new("ai_panel_v1"))
+                data.get_temp::<egui::containers::panel::PanelState>(egui::Id::unique(
+                    "ai_panel_v1",
+                ))
             })
             .unwrap()
             .outer_rect;
@@ -2348,7 +2378,7 @@ fn composer_samples() {
             )
         }));
     shoot(&mut harness, "mention-long");
-    let popup_id = egui::Id::new(("ai_panel_input", harness.doc.key)).with("popup");
+    let popup_id = egui::Id::unique(("ai_panel_input", harness.doc.key)).with("popup");
     let popup = harness
         .ctx
         .memory(|memory| memory.area_rect(popup_id))
@@ -2824,6 +2854,7 @@ fn question_samples() {
                 delta: egui::vec2(0.0, -400.0),
                 modifiers: egui::Modifiers::default(),
                 phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
             }],
             size,
         );
@@ -3432,7 +3463,7 @@ fn long_phase_and_steps_stay_inside_the_panel() {
                 .show(ui, |ui| harness.with_page(|page| page.create_ui(ui)));
         });
         let state = harness.ctx.data(|data| {
-            data.get_temp::<egui::containers::panel::PanelState>(egui::Id::new("ai_panel_v1"))
+            data.get_temp::<egui::containers::panel::PanelState>(egui::Id::unique("ai_panel_v1"))
         });
         panel_rects.push(state.map(|state| state.outer_rect));
     }

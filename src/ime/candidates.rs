@@ -153,7 +153,7 @@ impl Ime {
         let mut menu_open = false;
         let mut measured = 0.0;
         let mut toggle = false;
-        let area = egui::Area::new(egui::Id::new("gw-ime-candidates"))
+        let area = egui::Area::new(egui::Id::unique("gw-ime-candidates"))
             .order(egui::Order::Tooltip)
             .fixed_pos(position)
             .constrain_to(ctx.viewport_rect())
@@ -303,7 +303,7 @@ impl Ime {
             Pick::Down => self.move_word(&slot.code, &slot.text, 1),
             Pick::Block => self.block(&slot.code, &slot.text),
             Pick::Lookup => {
-                ctx.data_mut(|data| data.insert_temp(egui::Id::new("ime-lookup"), slot.text));
+                ctx.data_mut(|data| data.insert_temp(egui::Id::unique("ime-lookup"), slot.text));
                 return;
             }
             // 提交在上面已经处理过；真走到这里也不该崩，按「无动作」收场。
@@ -545,7 +545,7 @@ fn browse_grid(
             }
         }
     });
-    *top_row = (output.state.offset.y / stride).round() as usize;
+    *top_row = (output.state.clamped_offset().y / stride).round() as usize;
     // 宽度按格子算，不取滚动区量到的：表头按这个宽度摆箭头，取量到的会互相撑大。
     grid_width(ui, cols, cell)
 }
@@ -601,7 +601,7 @@ fn browser_footer(ui: &mut egui::Ui, total: usize, width: f32, look: Look) {
         egui::Sense::hover(),
     );
     let count = format!("{total} 个候选");
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &count));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &count));
     let painter = ui.painter();
     let font = ime_font(look.small() * 0.9);
     let count = painter.layout_no_wrap(count, font.clone(), theme::text_muted());
@@ -659,9 +659,7 @@ fn grid_cell(
     size: egui::Vec2,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, row.text.clone())
-    });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, row.text.clone()));
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -743,7 +741,7 @@ fn chevron(ui: &mut egui::Ui, icon: Icon, label: &str, look: Look) -> egui::Resp
             .frame(false)
             .small(),
     );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     response.on_hover_text(label)
 }
 
@@ -819,9 +817,7 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) ->
     let size =
         (galley.size() + CELL_PADDING * 2.0).max(egui::vec2(0.0, ui.spacing().interact_size.y));
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
-    });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &label));
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -952,7 +948,7 @@ mod tests {
 
     #[test]
     fn clicking_blank_panel_space_keeps_editor_focus() {
-        let editor = egui::Id::new("editor");
+        let editor = egui::Id::unique("editor");
         let mut harness = Harness::new_ui_state(
             |ui, (ime, text, started): &mut (Ime, String, bool)| {
                 ui.add(egui::TextEdit::singleline(text).id(editor));

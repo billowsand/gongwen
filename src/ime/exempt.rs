@@ -21,7 +21,7 @@ struct Declared(HashSet<egui::Id>);
 
 /// 临时存储里的键。
 fn key() -> egui::Id {
-    egui::Id::new("gw-ime-exempt")
+    egui::Id::unique("gw-ime-exempt")
 }
 
 /// 声明这个文本框不走应用内输入法，原样返回 `Response` 以便接着链式调用。

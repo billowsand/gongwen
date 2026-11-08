@@ -85,8 +85,8 @@ pub(super) fn citation_menu(
         return None;
     }
 
-    let state_id = egui::Id::new("research-citation-menu");
-    let group_id = egui::Id::new("research-citation-group");
+    let state_id = egui::Id::unique("research-citation-menu");
+    let group_id = egui::Id::unique("research-citation-group");
     let pass = ui.ctx().cumulative_pass_nr();
     let mut state: MenuState = ui.data(|data| data.get_temp(state_id)).unwrap_or_default();
     let fresh = pass > state.last_pass + 1 || state.last_pass == 0;

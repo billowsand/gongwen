@@ -157,7 +157,7 @@ impl DraftPage<'_> {
             let mut added = false;
             let title = format!("添加{}", picker.role.label());
             egui::Window::new(title)
-                .id(egui::Id::new(("writing_material_picker", self.doc.key)))
+                .id(egui::Id::unique(("writing_material_picker", self.doc.key)))
                 .open(&mut keep)
                 .default_width(580.0)
                 .collapsible(false)
@@ -261,7 +261,7 @@ impl DraftPage<'_> {
         if let Some(viewer) = self.doc.writing.source_viewer.take() {
             let mut keep = true;
             egui::Window::new(&viewer.title)
-                .id(egui::Id::new(("writing_source_viewer", self.doc.key)))
+                .id(egui::Id::unique(("writing_source_viewer", self.doc.key)))
                 .open(&mut keep)
                 .default_width(700.0)
                 .default_height(520.0)

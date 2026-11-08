@@ -66,7 +66,13 @@ impl StartupBundle {
 
 enum ShellPhase {
     Gate(GateState),
+    Unlocking(UnlockState),
     Ready(Box<GongwenApp>),
+}
+
+struct UnlockState {
+    rx: std::sync::mpsc::Receiver<Result<Option<crate::vault::Unlocked>, String>>,
+    veiled: bool,
 }
 
 /// 启动时由 `Vault::probe()` 决定的闸门形态。
@@ -103,12 +109,12 @@ struct GateState {
     /// 磁盘上有加密数据、但锁文件缺失/为空：没有密钥就绝不进工作区。
     /// 只给恢复指引，不提供「清除锁设置」这种会丢数据的按钮。
     lock_lost: bool,
-    /// 正在后台跑的数据处理（明文→密文迁移 / 停用解密）：
+    /// 正在后台跑的数据处理（密码校验 / 明文→密文迁移 / 停用解密）：
     /// 期间锁屏只显示进度，完成后才进工作区。
     working: Option<GateWorking>,
 }
 
-/// 闸门上的后台任务：数据密钥已在句柄里，线程只做搬运。
+/// 闸门上的后台任务：密码派生、数据密钥搬运都不占用界面事件循环。
 struct GateWorking {
     title: String,
     kind: WorkKind,
@@ -384,7 +390,7 @@ impl AppShell {
             _ => {}
         }
         self.phase = ShellPhase::Ready(Box::new(app));
-        ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("gate_password_primary")));
+        ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::unique("gate_password_primary")));
         self.unlock_fade_started = Some(ctx.input(|input| input.time));
         if self.compact_startup {
             self.restore_workspace_window(ctx);
@@ -392,11 +398,40 @@ impl AppShell {
         }
     }
 
+    /// 密码派生与锁文件验证放后台；主线程继续处理 Wayland 事件。
+    fn begin_unlock(&mut self, ctx: &egui::Context, password: String) {
+        let veiled = matches!(&self.phase, ShellPhase::Gate(gate) if gate.veiled);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let wake = ctx.clone();
+        #[cfg(test)]
+        let worker_config_dir = crate::storage::config_dir().ok();
+        std::thread::spawn(move || {
+            #[cfg(test)]
+            if let Some(dir) = worker_config_dir {
+                crate::storage::set_test_config_dir_in_current_thread(dir);
+            }
+            let result = Vault::load()
+                .map_err(|error| format!("{error:#}"))
+                .map(|mut vault| vault.unlock(&password));
+            let _ = tx.send(result);
+            wake.request_repaint();
+        });
+        self.phase = ShellPhase::Unlocking(UnlockState { rx, veiled });
+    }
+
     /// 起一个闸门后台任务：数据密钥进句柄，搬运在线程里跑，锁屏显示进度。
     /// Disable 的句柄立刻按密文开库（磁盘已是密文）；Encrypt 此刻 db_active=false，
     /// 迁移完成才切 true。
-    fn begin_work(&mut self, kind: WorkKind, slot: DataSlot, dek: [u8; 32], title: &str) {
+    fn begin_work(
+        &mut self,
+        ctx: &egui::Context,
+        kind: WorkKind,
+        slot: DataSlot,
+        dek: [u8; 32],
+        title: &str,
+    ) {
         let veiled = matches!(&self.phase, ShellPhase::Gate(gate) if gate.veiled);
+        let wake = ctx.clone();
         // 先切槽位，再用**显式槽位**创建句柄：句柄绑定的槽位必须与磁盘路径一致，
         // 不能依赖「先设句柄、后切槽位」的调用顺序（诱饵密码会拿到 Real 句柄）。
         crate::resources::close();
@@ -422,6 +457,7 @@ impl AppShell {
             }
             .map_err(|error| format!("{error:#}"));
             let _ = tx.send(result);
+            wake.request_repaint();
         });
         let mut gate = GateState::unlock();
         gate.veiled = veiled;
@@ -499,77 +535,32 @@ impl AppShell {
 
     /// 处理锁屏提交。所有失败都翻译成统一文案，不区分原因类别。
     fn apply_outcome(&mut self, ctx: &egui::Context, outcome: GateOutcome) {
-        let mut gate = GateState::unlock();
-        gate.veiled = matches!(&self.phase, ShellPhase::Gate(previous) if previous.veiled);
         match outcome {
             GateOutcome::Unlock(password) => {
-                match Vault::load() {
-                    Ok(mut vault) => match vault.unlock(&password) {
-                        Some(unlocked) => {
-                            // 停用标记必须由「刚解锁的 DEK」认证：伪造的明文标记
-                            // 一律无效。停用只对真实槽生效——用诱饵密码不能执行
-                            // 真实槽的解密与删锁，否则可否认性与数据都保不住。
-                            let disable = unlocked.slot == DataSlot::Real
-                                && crate::vault::disable_pending(&unlocked.dek);
-                            // 停用会删锁文件；另一套密码系统若还有密文，删掉锁文件
-                            // 就等于把这些数据永久锁死。先要求用户清掉另一槽。
-                            if disable && other_slot_has_encrypted_data(unlocked.slot) {
-                                gate.error = Some(
-                                    "无法停用密码保护：另一套密码系统仍有加密数据，停用后它们会永远打不开。请先解锁进入设置页「清除第二密码」，或从备份恢复后再停用。".into(),
-                                );
-                                gate.password.clear();
-                                self.phase = ShellPhase::Gate(gate);
-                                return;
-                            }
-                            // 没有要搬的明文数据（通常：上次解锁已迁完）就直接
-                            // 进工作区，不再显示「正在加密」卡片——那张卡只在
-                            // 真的有活干时出现。两套密码各自只看自己槽位的文件，
-                            // 交替解锁互不触发对方的数据搬运。
-                            if !disable && !crate::vault::slot_needs_encryption(unlocked.slot) {
-                                crate::vault::set_key_handle_for_slot(
-                                    *unlocked.dek,
-                                    true,
-                                    unlocked.slot,
-                                );
-                                self.enter_workspace(ctx, unlocked.slot, None);
-                                return;
-                            }
-                            let (kind, title) = if disable {
-                                (WorkKind::Disable, "正在解密数据并停用密码保护…")
-                            } else {
-                                (WorkKind::Encrypt, "正在加密现有数据…")
-                            };
-                            self.begin_work(kind, unlocked.slot, *unlocked.dek, title);
-                            return;
-                        }
-                        None => gate.error = Some("密码不正确".into()),
-                    },
-                    Err(_) => {
-                        // 探测之后文件变损坏（极少见）：不许猜着解锁。
-                        gate = GateState::broken();
-                    }
-                }
+                self.begin_unlock(ctx, password);
             }
             GateOutcome::Setup { real, decoy } => {
                 match Vault::create(&real, decoy.as_deref(), false) {
                     Ok((_, Some(unlocked))) => {
                         self.begin_work(
+                            ctx,
                             WorkKind::Encrypt,
                             DataSlot::Real,
                             *unlocked.dek,
                             "正在加密现有数据…",
                         );
-                        return;
                     }
                     Ok((_, None)) => {
-                        gate = GateState::first_run();
+                        let mut gate = GateState::first_run();
                         gate.error = Some("锁设置保存失败，请重试".into());
+                        self.phase = ShellPhase::Gate(gate);
                     }
                     // 密码不合要求时把**具体原因**告诉用户（哪一条不满足），
                     // 否则用户只会看到一句“保存失败”，不知道该改哪里。
                     Err(error) => {
-                        gate = GateState::first_run();
+                        let mut gate = GateState::first_run();
                         gate.error = Some(format!("{error:#}"));
+                        self.phase = ShellPhase::Gate(gate);
                     }
                 }
             }
@@ -589,22 +580,67 @@ impl AppShell {
                     return;
                 }
                 self.enter_workspace(ctx, DataSlot::Real, None);
+            }
+            GateOutcome::ClearBroken => match Vault::reset_file() {
+                Ok(()) => {
+                    let mut broken = GateState::broken();
+                    broken.cleared = true;
+                    self.phase = ShellPhase::Gate(broken);
+                }
+                Err(error) => {
+                    let mut broken = GateState::broken();
+                    broken.error = Some(format!("清除锁设置失败：{error:#}"));
+                }
+            },
+        }
+    }
+
+    fn finish_unlock(
+        &mut self,
+        ctx: &egui::Context,
+        result: Result<Option<crate::vault::Unlocked>, String>,
+    ) {
+        let veiled = matches!(&self.phase, ShellPhase::Unlocking(state) if state.veiled);
+        let mut gate = GateState::unlock();
+        gate.veiled = veiled;
+        match result {
+            Ok(Some(unlocked)) => {
+                // 停用标记必须由「刚解锁的 DEK」认证：伪造的明文标记
+                // 一律无效。停用只对真实槽生效——用诱饵密码不能执行
+                // 真实槽的解密与删锁，否则可否认性与数据都保不住。
+                let disable =
+                    unlocked.slot == DataSlot::Real && crate::vault::disable_pending(&unlocked.dek);
+                // 停用会删锁文件；另一套密码系统若还有密文，删掉锁文件
+                // 就等于把这些数据永久锁死。先要求用户清掉另一槽。
+                if disable && other_slot_has_encrypted_data(unlocked.slot) {
+                    gate.error = Some(
+                        "无法停用密码保护：另一套密码系统仍有加密数据，停用后它们会永远打不开。请先解锁进入设置页「清除第二密码」，或从备份恢复后再停用。".into(),
+                    );
+                    gate.password.clear();
+                    self.phase = ShellPhase::Gate(gate);
+                    return;
+                }
+                // 没有要搬的明文数据（通常：上次解锁已迁完）就直接
+                // 进工作区，不再显示「正在加密」卡片——那张卡只在
+                // 真的有活干时出现。两套密码各自只看自己槽位的文件，
+                // 交替解锁互不触发对方的数据搬运。
+                if !disable && !crate::vault::slot_needs_encryption(unlocked.slot) {
+                    crate::vault::set_key_handle_for_slot(*unlocked.dek, true, unlocked.slot);
+                    self.enter_workspace(ctx, unlocked.slot, None);
+                    return;
+                }
+                let (kind, title) = if disable {
+                    (WorkKind::Disable, "正在解密数据并停用密码保护…")
+                } else {
+                    (WorkKind::Encrypt, "正在加密现有数据…")
+                };
+                self.begin_work(ctx, kind, unlocked.slot, *unlocked.dek, title);
                 return;
             }
-            GateOutcome::ClearBroken => {
-                match Vault::reset_file() {
-                    Ok(()) => {
-                        let mut broken = GateState::broken();
-                        broken.cleared = true;
-                        self.phase = ShellPhase::Gate(broken);
-                    }
-                    Err(error) => {
-                        let mut broken = GateState::broken();
-                        broken.error = Some(format!("清除锁设置失败：{error:#}"));
-                        self.phase = ShellPhase::Gate(broken);
-                    }
-                }
-                return;
+            Ok(None) => gate.error = Some("密码不正确".into()),
+            Err(_) => {
+                // 探测之后文件变损坏（极少见）：不许猜着解锁。
+                gate = GateState::broken();
             }
         }
         if gate.mode == GateMode::Broken && self.compact_startup {
@@ -646,7 +682,13 @@ impl AppShell {
         let dek = *handle.dek();
         let slot = handle.slot();
         self.lock_now(ctx);
-        self.begin_work(WorkKind::Encrypt, slot, dek, "正在把现有数据加密到磁盘…");
+        self.begin_work(
+            ctx,
+            WorkKind::Encrypt,
+            slot,
+            dek,
+            "正在把现有数据加密到磁盘…",
+        );
     }
 
     /// 退回锁屏：丢掉整个工作区（数据库连接、内存数据随 Drop 释放），
@@ -710,7 +752,7 @@ impl AppShell {
 impl AppShell {
     pub(crate) fn run(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if matches!(self.phase, ShellPhase::Gate(_))
+        if matches!(self.phase, ShellPhase::Gate(_) | ShellPhase::Unlocking(_))
             && theme::current().label == theme::omarchy::LABEL
             && theme::omarchy::palette().is_some_and(|palette| palette != theme::current())
         {
@@ -736,7 +778,7 @@ impl AppShell {
         // 无边框窗口（Windows / 传统 Linux）：锁屏也要有一条能拖动、
         // 能关窗的标题栏。只在锁屏期画——工作区自己的标题栏由
         // update_workspace 画，这里再画一条就成了双标题栏。
-        if matches!(self.phase, ShellPhase::Gate(_)) {
+        if matches!(self.phase, ShellPhase::Gate(_) | ShellPhase::Unlocking(_)) {
             let minimal = self.compact_startup;
             egui::Panel::top("gate_titlebar")
                 .show_separator_line(!theme::smartisan::active())
@@ -757,6 +799,7 @@ impl AppShell {
                 slot: DataSlot,
                 result: Result<(), String>,
             },
+            Unlocked(Result<Option<crate::vault::Unlocked>, String>),
             Lock,
             /// 刚启用密码保护：丢弃工作区并把磁盘上的明文数据迁成密文。
             EnableEncrypt,
@@ -769,6 +812,27 @@ impl AppShell {
                 }
                 None => None,
             },
+            ShellPhase::Unlocking(state) => {
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add(egui::Spinner::new().size(24.0));
+                        ui.add_space(12.0);
+                        ui.label(
+                            egui::RichText::new("正在验证密码…")
+                                .size(theme::font_sizes::HEADING)
+                                .strong()
+                                .color(theme::text()),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            egui::RichText::new("请稍候，不要关闭应用。")
+                                .size(theme::font_sizes::SMALL)
+                                .color(theme::text_muted()),
+                        );
+                    });
+                });
+                state.rx.try_recv().ok().map(After::Unlocked)
+            }
             ShellPhase::Ready(app) => {
                 let fading = self
                     .unlock_fade_started
@@ -833,6 +897,7 @@ impl AppShell {
             }
             Some(After::EnableEncrypt) => self.begin_enable_encrypt(&ctx),
             Some(After::Outcome(outcome)) => self.apply_outcome(&ctx, outcome),
+            Some(After::Unlocked(result)) => self.finish_unlock(&ctx, result),
             Some(After::WorkDone { kind, slot, result }) => {
                 self.finish_work(&ctx, kind, slot, result)
             }
@@ -848,7 +913,7 @@ impl AppShell {
             }
         }
         // 锁屏期间保持后台任务（Omarchy 跟随）能推动重绘。
-        if matches!(self.phase, ShellPhase::Gate(_)) {
+        if matches!(self.phase, ShellPhase::Gate(_) | ShellPhase::Unlocking(_)) {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
     }
@@ -857,7 +922,7 @@ impl AppShell {
 fn paint_lock_veil(ctx: &egui::Context, opacity: f32) {
     // ViewportInfo::inner_rect 是桌面坐标，绘制必须使用本地内容坐标。
     let rect = ctx.input(|input| input.content_rect());
-    let id = egui::Id::new("lock_transition_veil");
+    let id = egui::Id::unique("lock_transition_veil");
     egui::Area::new(id)
         .order(egui::Order::Tooltip)
         .fade_in(false)
@@ -869,7 +934,7 @@ fn paint_lock_veil(ctx: &egui::Context, opacity: f32) {
             ui.set_min_size(rect.size());
             ui.interact(
                 rect,
-                ui.id().with("input_shield"),
+                ui.scope_id().with("input_shield"),
                 egui::Sense::click_and_drag(),
             );
         });
@@ -1014,7 +1079,7 @@ fn bare_titlebar(ui: &mut egui::Ui, minimal: bool) {
     }
     let drag = ui.interact(
         title_rect,
-        ui.id().with("gate_titlebar_drag"),
+        ui.scope_id().with("gate_titlebar_drag"),
         egui::Sense::click_and_drag(),
     );
     if drag.double_clicked() && !hyprland {
@@ -1035,7 +1100,7 @@ fn bare_titlebar(ui: &mut egui::Ui, minimal: bool) {
         let response = ui
             .interact(
                 btn_rect,
-                ui.id().with(("gate_titlebar_btn", index)),
+                ui.scope_id().with(("gate_titlebar_btn", index)),
                 egui::Sense::click(),
             )
             .on_hover_text(match kind {
@@ -1254,7 +1319,7 @@ fn gate_ui(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateEvent> {
 fn unlock_form(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<GateEvent>) {
     if !gate.focused {
         gate.focused = true;
-        ui.memory_mut(|memory| memory.request_focus(egui::Id::new("gate_password_primary")));
+        ui.memory_mut(|memory| memory.request_focus(egui::Id::unique("gate_password_primary")));
     }
     let available = ui.available_rect_before_wrap();
     let width = (available.width() - 48.0).clamp(180.0, 304.0);
@@ -1282,10 +1347,10 @@ fn unlock_form(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<GateE
             let field_size = egui::vec2(width, 40.0);
             let (field_rect, _) = ui.allocate_exact_size(field_size, egui::Sense::hover());
             let field = egui::TextEdit::singleline(&mut gate.password)
-                .id(egui::Id::new("gate_password_primary"))
+                .id(egui::Id::unique("gate_password_primary"))
                 .password(!gate.show_password)
                 .hint_text("输入密码")
-                .vertical_align(egui::Align::Center)
+                .align(egui::Align2::LEFT_CENTER)
                 .margin(egui::Margin {
                     left: 10,
                     right: 38,
@@ -1445,7 +1510,7 @@ fn working_card(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<Gate
 fn gate_card(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
     if !gate.focused {
         gate.focused = true;
-        ui.memory_mut(|memory| memory.request_focus(egui::Id::new("gate_password_primary")));
+        ui.memory_mut(|memory| memory.request_focus(egui::Id::unique("gate_password_primary")));
     }
     let mut outcome = None;
     let heading = match gate.mode {
@@ -1612,7 +1677,7 @@ fn password_field(ui: &mut egui::Ui, id: &str, hint: &str, text: &mut String) {
     ui.add_sized(
         [CARD_WIDTH, GATE_CONTROL_HEIGHT],
         egui::TextEdit::singleline(text)
-            .id(egui::Id::new(id))
+            .id(egui::Id::unique(id))
             .password(true)
             .hint_text(hint)
             .margin(egui::Margin::symmetric(10, 0)),
@@ -1780,6 +1845,16 @@ mod lifecycle_tests {
                 &egui::Context::default(),
                 GateOutcome::Unlock("wrong-password".into()),
             );
+            let result = {
+                let ShellPhase::Unlocking(state) = &shell.phase else {
+                    panic!("unlock verification should run in the background")
+                };
+                state
+                    .rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("unlock worker should finish")
+            };
+            shell.finish_unlock(&egui::Context::default(), result);
             let ShellPhase::Gate(gate) = &shell.phase else {
                 panic!("wrong password unlocked workspace")
             };

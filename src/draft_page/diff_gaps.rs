@@ -194,7 +194,7 @@ mod tests {
                                 Arc::new(open_gaps(&base, &gaps))
                             };
                         egui::TextEdit::multiline(text)
-                            .id(egui::Id::new("spike_editor"))
+                            .id(egui::Id::unique("spike_editor"))
                             .frame(egui::Frame::NONE)
                             .margin(egui::Margin::ZERO)
                             .desired_width(500.0)
@@ -211,7 +211,7 @@ mod tests {
                     galley_pos: output.galley_pos,
                     cursor: output.cursor_range,
                     ime: None,
-                    scroll_offset: scroll.state.offset.y,
+                    scroll_offset: scroll.state.clamped_offset().y,
                     viewport: scroll.inner_rect,
                 });
             });
@@ -461,7 +461,7 @@ mod tests {
         let frame = harness.frame(Vec::new());
         harness.click(line_point(&frame, 3));
         harness.ctx.memory_mut(|memory| {
-            memory.request_focus(egui::Id::new("spike_editor"));
+            memory.request_focus(egui::Id::unique("spike_editor"));
         });
         let frame = harness.frame(Vec::new());
         let ime = frame.ime.expect("编辑框聚焦时应报告输入法光标");

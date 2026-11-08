@@ -532,7 +532,7 @@ fn toast(ui: &mut egui::Ui, state: &mut State, page: egui::Rect) {
         return;
     };
     let width = (page.width() - 32.0).clamp(160.0, 460.0);
-    let clicked = egui::Area::new(egui::Id::new("task_toast"))
+    let clicked = egui::Area::new(egui::Id::unique("task_toast"))
         .order(egui::Order::Foreground)
         .movable(false)
         .pivot(egui::Align2::CENTER_BOTTOM)
@@ -637,7 +637,7 @@ pub(super) fn days_from(today: &str, date: &str) -> Option<i64> {
 fn dialogs(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data: &Snapshot) {
     if let Some(replace) = state.replace_draft.clone() {
         egui::Window::new("当前表单未保存")
-            .id(egui::Id::new("task_replace_draft"))
+            .id(egui::Id::unique("task_replace_draft"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -660,7 +660,7 @@ fn dialogs(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data: &Snaps
     }
     if let Some(id) = state.delete_confirm.clone() {
         egui::Window::new("确认移入回收站")
-            .id(egui::Id::new("task_delete_confirm"))
+            .id(egui::Id::unique("task_delete_confirm"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -706,7 +706,7 @@ fn dialogs(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data: &Snaps
     if let Some((title, content)) = state.source_view.clone() {
         let mut open = true;
         egui::Window::new("来源原文")
-            .id(egui::Id::new("task_source_view"))
+            .id(egui::Id::unique("task_source_view"))
             .open(&mut open)
             .collapsible(false)
             .default_width(520.0)

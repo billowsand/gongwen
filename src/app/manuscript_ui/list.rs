@@ -411,7 +411,7 @@ impl GongwenApp {
         if let Some(export) = self.manuscript_pdf_export.as_mut() {
             let dialog = modal::dialog(
                 ui.ctx(),
-                egui::Id::new("manuscript_pdf_export"),
+                egui::Id::unique("manuscript_pdf_export"),
                 "导出 PDF",
                 400.0,
                 Dismiss::EscOnly,
@@ -462,7 +462,7 @@ impl GongwenApp {
             // 有输入的表单：点遮罩不关，免得误点丢掉已经敲好的密码；Esc 与「取消」照常关。
             let dialog = modal::dialog(
                 ui.ctx(),
-                egui::Id::new("manuscript_zip_password"),
+                egui::Id::unique("manuscript_zip_password"),
                 if matches!(password.purpose, super::ZipPasswordPurpose::BackupImport(_)) {
                     "输入备份密码"
                 } else if importing {
@@ -495,7 +495,7 @@ impl GongwenApp {
             // 选了附件、选了钉版方式的表单：点遮罩不关，Esc 与「取消」照常关。
             let dialog = modal::dialog(
                 ui.ctx(),
-                egui::Id::new("manuscript_archive"),
+                egui::Id::unique("manuscript_archive"),
                 "归档稿件",
                 460.0,
                 Dismiss::EscOnly,
@@ -527,7 +527,7 @@ impl GongwenApp {
             // 逐篇选好的处理方式重来一遍要再输一次密码，只认按钮，Esc、遮罩都不关。
             let dialog = modal::dialog(
                 ui.ctx(),
-                egui::Id::new("manuscript_import_preview"),
+                egui::Id::unique("manuscript_import_preview"),
                 "导入预览",
                 width,
                 Dismiss::ButtonsOnly,
@@ -545,7 +545,7 @@ impl GongwenApp {
             // 「稍后处理」只是关框，分支仍暂存在库里，Esc 同样处理；点遮罩不关。
             let dialog = modal::dialog(
                 ui.ctx(),
-                egui::Id::new("manuscript_pending_merge"),
+                egui::Id::unique("manuscript_pending_merge"),
                 "继续合并待处理分支",
                 width,
                 Dismiss::EscOnly,
@@ -711,7 +711,7 @@ impl GongwenApp {
                     let data = &self.manuscript_rows[index];
                     // 新行淡入：新增行首次出现时从不透明 0 平滑升到 1。
                     let seen_t = ctx.animate_bool_with_time(
-                        egui::Id::new(("manuscript_row_seen", data.id)),
+                        egui::Id::unique(("manuscript_row_seen", data.id)),
                         true,
                         theme::anim::SLOW,
                     );
