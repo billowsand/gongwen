@@ -53,7 +53,7 @@ export function createEmitter({ write, secrets = [], maxLineBytes = MAX_OUTPUT_L
       throw new ProtocolError(`协议消息超过上限（${maxMessages} 条）`);
     }
     const safe = { ...event };
-    for (const key of ["message", "error", "summary", "phase", "reason"]) {
+    for (const key of ["message", "error", "summary", "phase", "reason", "outcome"]) {
       if (typeof safe[key] === "string") {
         safe[key] = scrubSecrets(sanitizeShort(safe[key]), secrets);
       }

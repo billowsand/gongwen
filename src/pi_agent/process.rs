@@ -11,6 +11,7 @@
 
 use super::PiRuntime;
 use super::PiWorkspace;
+use super::activity::{PiActivity, label, tool_action, tool_outcome};
 use super::delivery::{PiSelection, safe_work_path, sha256_hex, verify_submission};
 use super::materials::PiMaterialMeta;
 use super::protocol::{
@@ -145,15 +146,12 @@ pub(crate) struct PiJob {
 pub(crate) enum PiEvent {
     Progress(String),
     Tool(String),
+    Activity(PiActivity),
     /// host 算出的策略决定：模式、原因、实际窗口与工作预算。
     Strategy(PiStrategyInfo),
-    Candidate {
-        path: String,
-    },
+    Candidate,
     /// 模型在等用户回答。答案由界面通过 [`PiBridge::answer`] 送回。
     Questions(PiQuestionBatch),
-    /// 工具返回的证据已登记（侧栏「过程」里一行）。
-    Evidence(String),
 }
 
 /// host 算出的策略决定。原因只给人看；界面不解析字符串判断类别。
@@ -476,6 +474,8 @@ enum StdoutMsg {
 
 struct ToolDone {
     call_id: String,
+    name: String,
+    action: String,
     evidence_before: usize,
     result: Result<serde_json::Value, String>,
 }
@@ -856,6 +856,7 @@ pub(crate) fn run(
                 if cancel_sent.is_some() || cancel.load(Ordering::Relaxed) {
                     return Err("已停止 Pi 智能写作，未交付任何提案。".into());
                 }
+                let outcome = tool_outcome(&done.name, &done.result, &job.model.api_key);
                 let (ok, result, error) = match done.result {
                     Ok(value) => (true, value, String::new()),
                     Err(error) => (false, serde_json::Value::Null, error),
@@ -869,14 +870,15 @@ pub(crate) fn run(
                             .take(3)
                             .filter_map(serde_json::Value::as_str)
                         {
-                            let short: String = warning.chars().take(300).collect();
-                            on_event(PiEvent::Tool(format!("Pi · kb_search 降级说明：{short}")));
+                            on_event(PiEvent::Tool(format!(
+                                "知识库检索提醒 · {}",
+                                label(warning, &job.model.api_key)
+                            )));
                         }
                     }
                     let ledger = job.tools.evidence();
                     if let Some(item) = ledger.get(done.evidence_before) {
                         job.record.evidence(&item.line());
-                        on_event(PiEvent::Evidence(item.line()));
                     }
                     // 工具实际返回的事实先落盘，再把结果交给 host：崩溃后恢复的闸门
                     // 仍认这些依据，不会因为“还没到最后交付”就丢掉。来源只是恢复辅助，
@@ -889,6 +891,11 @@ pub(crate) fn run(
                         )));
                     }
                 }
+                on_event(PiEvent::Activity(PiActivity {
+                    id: format!("domain:{}", done.call_id),
+                    action: done.action,
+                    outcome: Some(outcome),
+                }));
                 let line = serde_json::json!({
                     "type": "tool_result",
                     "callId": done.call_id,
@@ -999,15 +1006,24 @@ pub(crate) fn run(
                 };
                 on_event(PiEvent::Strategy(info));
             }
-            HostEvent::Tool { name, message, .. } => {
-                let line = match message.filter(|text| !text.trim().is_empty()) {
-                    Some(message) => format!(
-                        "Pi · {name}：{}",
-                        scrub(&short(&message), &job.model.api_key)
-                    ),
-                    None => format!("Pi · {name}"),
-                };
-                on_event(PiEvent::Tool(line));
+            HostEvent::Tool {
+                name,
+                message,
+                activity_id,
+                outcome,
+                ..
+            } => {
+                if let Some(id) = activity_id {
+                    on_event(PiEvent::Activity(PiActivity {
+                        id: format!("host:{}", short(&id)),
+                        action: label(message.as_deref().unwrap_or_default(), &job.model.api_key),
+                        outcome: outcome.map(|text| label(&text, &job.model.api_key)),
+                    }));
+                } else if !PiToolContext::known(&name) {
+                    // 老 host 的技术过程仍可展开查看。领域工具的开始、结果统一由 Rust 报告。
+                    let line = message.unwrap_or(name);
+                    on_event(PiEvent::Tool(scrub(&short(&line), &job.model.api_key)));
+                }
             }
             HostEvent::Candidate {
                 path,
@@ -1026,7 +1042,7 @@ pub(crate) fn run(
                     return Err("Pi host 返回的候选稿与哈希不一致".into());
                 }
                 let _ = content;
-                on_event(PiEvent::Candidate { path });
+                on_event(PiEvent::Candidate);
             }
             HostEvent::ToolRequest {
                 call_id,
@@ -1069,13 +1085,20 @@ pub(crate) fn run(
                 }
                 let tools = job.tools.clone();
                 let tx = tool_tx.clone();
-                on_event(PiEvent::Tool(format!("Pi · {name}：执行中")));
+                let action = tool_action(&name, &args, &job.model.api_key);
+                on_event(PiEvent::Activity(PiActivity {
+                    id: format!("domain:{call_id}"),
+                    action: action.clone(),
+                    outcome: None,
+                }));
                 let evidence_before = job.tools.evidence().len();
                 pending_tool = Some((call_id.clone(), Instant::now()));
                 std::thread::spawn(move || {
                     let result = tools.call(&name, &args);
                     let _ = tx.send(ToolDone {
                         call_id,
+                        name,
+                        action,
                         evidence_before,
                         result,
                     });
@@ -2315,7 +2338,7 @@ rl.on("line", (line) => {{
         let flag = cancel.clone();
         let started = Instant::now();
         let error = outcome(job, cancel, |event| {
-            if matches!(event, PiEvent::Tool(ref line) if line.contains("执行中")) {
+            if matches!(event, PiEvent::Activity(ref activity) if activity.outcome.is_none()) {
                 flag.store(true, Ordering::Relaxed);
             }
         })

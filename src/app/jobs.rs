@@ -227,10 +227,9 @@ pub(crate) enum DocJob {
     PiProgress(String),
     /// Pi 本轮的一次工具调用，侧栏「过程」里一行。
     PiTool(String),
-    /// Pi 工作区里最新候选稿。只报路径进度：Pi 直接写正文，不再做工作稿预览。
-    PiCandidate {
-        path: String,
-    },
+    PiActivity(crate::pi_agent::PiActivity),
+    /// Pi 工作区有已验证的候选稿，可作为缺少阶段信息时的进度提示。
+    PiCandidate,
     /// Pi 本轮结束。成功时是一份固定版本或侧栏清单，失败时报原因；
     /// 未提交、超时、取消、崩溃都不会走到成功分支。
     /// Pi 交付结果。装箱：`PiOutcome` 带着完整正文，不把整个 `DocJob` 撞大。
@@ -1767,7 +1766,8 @@ impl GongwenApp {
                 | DocJob::AiTool(_)
                 | DocJob::PiProgress(_)
                 | DocJob::PiTool(_)
-                | DocJob::PiCandidate { .. }
+                | DocJob::PiActivity(_)
+                | DocJob::PiCandidate
                 | DocJob::PiQuestions(_)
                 | DocJob::PiPrepared { .. }
                 | DocJob::AiWorkspace(_)
@@ -1841,12 +1841,16 @@ impl GongwenApp {
                 self.status = format!("{prefix}{message}");
             }
             DocJob::PiTool(line) => self.docs[index].ai_panel.step(line),
-            DocJob::PiCandidate { path, .. } => {
-                // Pi 成品直接写正文，不再切到「AI 工作稿」预览候选。这里只报进度；
-                // 交付完成后正文与「AI 写入前」自动版本就是可看的对照。
-                self.docs[index]
-                    .ai_panel
-                    .pi_progress(&format!("候选文件已更新：{path}"));
+            DocJob::PiActivity(activity) => self.docs[index].ai_panel.pi_activity(activity),
+            DocJob::PiCandidate => {
+                // 候选扫描可能在任何阶段触发，不覆盖正在做的事。
+                let panel = &mut self.docs[index].ai_panel;
+                if panel
+                    .running_turn_mut()
+                    .is_some_and(|turn| turn.phase.is_empty())
+                {
+                    panel.pi_progress("候选文件已更新");
+                }
             }
             DocJob::PiPrepared {
                 turn_id,
@@ -2225,19 +2229,49 @@ mod tests {
         turn
     }
 
-    /// Pi 候选只报进度：不再切到「AI 工作稿」，正文保持原样等交付。
     #[test]
-    fn pi_candidate_only_reports_progress_without_opening_a_workspace() {
+    fn pi_activity_reports_one_completed_step_and_preserves_stage() {
         let mut app = management_samples::fixture();
         let turn = waiting_pi_turn(&mut app, 7);
         let key = app.docs[0].key;
         app.apply_doc_job(
             key,
             7,
-            DocJob::PiCandidate {
-                path: "work/candidate.md".into(),
-            },
+            DocJob::PiProgress("正在写第 2/4 节「工作安排」".into()),
         );
+        let activity = |outcome: Option<&str>| {
+            DocJob::PiActivity(crate::pi_agent::PiActivity {
+                id: "search".into(),
+                action: "查知识库 · 整改时限".into(),
+                outcome: outcome.map(str::to_owned),
+            })
+        };
+        app.apply_doc_job(key, 7, activity(None));
+        app.apply_doc_job(key, 7, DocJob::PiCandidate);
+        {
+            let item = app.docs[0].ai_panel.turn_mut(turn).unwrap();
+            assert_eq!(item.pi_active.len(), 1);
+            assert!(item.steps.is_empty());
+            assert_eq!(item.phase, "正在写第 2/4 节「工作安排」");
+        }
+        app.apply_doc_job(key, 7, activity(Some("未找到相关资料")));
+        app.apply_doc_job(key, 6, activity(Some("迟到结果")));
+        let item = app.docs[0].ai_panel.turn_mut(turn).unwrap();
+        assert!(item.pi_active.is_empty());
+        assert_eq!(
+            item.pi_recent.as_deref(),
+            Some("未找到相关资料 · 查知识库 · 整改时限")
+        );
+        assert_eq!(item.steps, ["查知识库 · 整改时限 · 未找到相关资料"]);
+    }
+
+    /// Pi 候选只报进度：不再切到「AI 工作稿」，正文保持原样等交付。
+    #[test]
+    fn pi_candidate_only_reports_progress_without_opening_a_workspace() {
+        let mut app = management_samples::fixture();
+        let turn = waiting_pi_turn(&mut app, 7);
+        let key = app.docs[0].key;
+        app.apply_doc_job(key, 7, DocJob::PiCandidate);
         assert!(
             app.docs[0].ai_panel.workspace_view.is_none(),
             "Pi 候选不能再自动展开工作稿"

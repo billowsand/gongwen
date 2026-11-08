@@ -171,8 +171,8 @@ test("完整分阶段闭环：提炼→提纲→逐节→合稿→显式提交",
   assert.match(result.snapshot.content, /10月8日/);
   assert.equal(result.report, undefined);
   assert.ok(events.some((event) => event.type === "strategy" && event.mode === "phased"));
-  assert.ok(events.some((event) => event.type === "progress" && /提炼第 1\/1 份材料/.test(event.message)));
-  assert.ok(events.some((event) => event.type === "progress" && /写第 1\/1 节/.test(event.message)));
+  assert.ok(events.some((event) => event.activityId === `stage:${DISTILL}` && event.outcome === "已整理 1/1 个材料单元"));
+  assert.ok(events.some((event) => event.type === "progress" && /写第 1\/1 节「[^」]+」/.test(event.message)));
   const progress = JSON.parse(fs.readFileSync(path.join(space.run, "progress.json"), "utf8"));
   assert.deepEqual(
     progress.records.map((record) => record.unit).sort(),
@@ -578,7 +578,7 @@ test("真实 Harness 停止在成果登记后，重开沿用阶段且不重做�
     config, models: first.models, model: first.model,
     onCancel: (callback) => { cancel = callback; },
     emit: (event) => {
-      if (!stopped && event.type === "progress" && /正在提炼第 1\/1/.test(event.message)) {
+      if (!stopped && event.activityId === `stage:${DISTILL}` && event.outcome === "已整理 1/1 个材料单元") {
         stopped = true;
         cancel();
       }

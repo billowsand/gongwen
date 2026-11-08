@@ -1118,6 +1118,43 @@ fn toggling_with_a_selection_locks_it_for_polish() {
 }
 
 #[test]
+fn pi_activity_card_shows_progress_with_details_collapsed() {
+    let mut harness = Harness::new("# 标题\n\n正文");
+    let panel = &mut harness.doc.ai_panel;
+    panel.open = true;
+    let id = panel.push_turn(
+        "智能写作（Pi · 自动）".into(),
+        "起草通知".into(),
+        vec![],
+        None,
+    );
+    panel.turn_mut(id).unwrap().provenance = "Pi Durable · 文件工作区".into();
+    panel.pi_progress("正在写第 2/4 节「工作安排」");
+    panel.step("先前已读附件".into());
+    panel.pi_activity(crate::pi_agent::PiActivity {
+        id: "search".into(),
+        action: "查知识库 · 整改时限".into(),
+        outcome: Some("找到 3 段相关资料".into()),
+    });
+    panel.pi_activity(crate::pi_agent::PiActivity {
+        id: "model".into(),
+        action: "等待模型返回本轮内容".into(),
+        outcome: None,
+    });
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    for expected in [
+        "正在写第 2/4 节",
+        "等待模型返回本轮内容",
+        "找到 3 段相关资料",
+        "查看过程",
+    ] {
+        assert!(has(&texts, expected), "缺少 {expected}: {texts:?}");
+    }
+    assert!(!has(&texts, "先前已读附件"), "{texts:?}");
+}
+
+#[test]
 fn pi_composer_has_one_execution_path_and_no_legacy_controls() {
     let mut harness = Harness::new("");
     harness.with_page(|page| page.toggle_ai_panel(None));

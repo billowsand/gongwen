@@ -52,6 +52,7 @@ import {
 } from "./phases.mjs";
 import { ProgressError, ProgressRegistry, identityOf } from "./progress.mjs";
 import { createBoundedReadTool } from "./read.mjs";
+import { observeActivity } from "./activity.mjs";
 
 import { isStyleTask, createSubmitStyleTool } from "./style.mjs";
 
@@ -490,10 +491,11 @@ function createRecordTool({ guard, limits, phase, registry, emit, onFatal }) {
         return rejectRegistration(new AgentError(`${failure.message}。${hint}`, failure.code), args?.unit);
       }
       const status = registry.status(phase.id, accepted.allUnits ?? accepted.units);
-      if (phase.id === "distill") {
-        emit({ type: "progress", message: `正在提炼第 ${status.done}/${status.total} 份材料…` });
-      } else {
-        emit({ type: "progress", message: `已登记${spec.title ? ` ${spec.title}` : ""}，宿主核对通过` });
+      if (result.status === "recorded") {
+        const outcome = phase.id === "distill"
+          ? `已整理 ${status.done}/${status.total} 个材料单元`
+          : `已完成「${spec.title}」`;
+        emit({ type: "tool", name: "activity", activityId: `stage:${spec.id}`, outcome });
       }
       return {
         output: [
@@ -890,11 +892,11 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     });
 
     stream = await watchEvents(harness, root.id, controller.context);
+    const showActivity = observeActivity(config.task, emit);
     stream.start(async (events) => {
       for (const event of events) {
-        if (event.type === "tool_execution_start") {
-          emit({ type: "tool", name: event.toolName, message: `正在使用 ${event.toolName}` });
-        } else if (event.type === "tool_execution_end") {
+        showActivity(event);
+        if (event.type === "tool_execution_end") {
           if (event.toolName !== SUBMIT_TOOL_NAME && event.toolName !== REPORT_TOOL_NAME) {
             candidateScan();
           }
@@ -909,7 +911,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       }
     });
 
-    emit({ type: "progress", message: "正在读取正文、材料与写作要求…" });
+    emit({ type: "progress", message: "正在开始本轮写作…" });
     if (config.recovery?.resume || config.recovery?.continuationId) {
       // 先让崩溃前的 Durable 任务收尾，防止人工补交和原任务同时生成或提交。
       await root.waitForIdle(controller.context);
@@ -987,11 +989,13 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
           emit({ type: "progress", message: `${spec.title}已完成（${check.done}/${check.total}）` });
           return;
         }
+        const object = spec.section?.title ?? (spec.id === "distill" ? spec.units[0]?.title : undefined);
+        const title = object ? `${spec.title}「${object}」` : spec.title;
         emit({
           type: "progress",
           message: attempt === 1
-            ? `正在${spec.title}…`
-            : `${spec.title}还缺 ${check.missing.length} 项，正在补齐（${attempt}/2）…`,
+            ? `正在${title}…`
+            : `正在补齐${title}（还缺 ${check.missing.length} 项）…`,
         });
         registry.cursor = {
           phased: true,
@@ -1073,6 +1077,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
 
     if (decision.mode === "phased") {
       await runPhases(0);
+      emit({ type: "progress", message: "正在准备交付成品…" });
       phase.id = "deliver";
       phase.title = "交付";
       phase.spec = undefined;
@@ -1115,6 +1120,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       });
       grantTools(24);
       await runPhases(0);
+      emit({ type: "progress", message: "正在准备交付成品…" });
       phase.id = "deliver";
       phase.spec = undefined;
       grantTools(8);

@@ -202,15 +202,28 @@ test("budgeted read and kb/ms full reads survive Durable Harness output limits",
     queueMicrotask(() => bridge.handle({ type: "tool_result", callId: event.callId, ok: true, result }));
   };
   let bridge;
+  const activities = [];
   const result = await runAgentJob({
     config,
     models,
     model,
     onBridge: (value) => { bridge = value; },
-    emit: (event) => { if (event.type === "tool_request") bridgeResult(event); },
+    emit: (event) => {
+      if (event.type === "tool_request") bridgeResult(event);
+      if (event.type === "tool" && event.activityId) activities.push(event);
+    },
   });
   assert.deepEqual(names, ["kb_read", "ms_read"]);
   assert.equal(result.snapshot.content, final);
+  assert.ok(activities.some(event => event.message === "等待模型返回本轮内容"));
+  assert.ok(activities.some(event => event.message === "模型正在生成本轮内容"));
+  const reads = activities.filter(event => event.message === "读工作区资料" && event.outcome);
+  assert.deepEqual(reads.map(event => event.outcome), ["已读取全文", "已读取全文"]);
+  for (const read of reads) {
+    assert.equal(activities.filter(event => event.activityId === read.activityId && !event.outcome).length, 1);
+  }
+  assert.ok(activities.some(event => event.outcome === "已保存工作稿"));
+  assert.ok(!JSON.stringify(activities).includes("FIRST-MARKER"));
 });
 
 test("a long 32k task compacts before continuing instead of shrinking output to one token", async () => {
@@ -460,7 +473,8 @@ test("search, write and submit round-trip through the Rust tool bridge", async (
   assert.ok(result.snapshot, "检索后写文件再提交应交付快照");
   assert.match(result.snapshot.content, /每年十月/);
   assert.ok(events.some((event) => event.type === "tool_request" && event.name === "kb_search"));
-  assert.ok(events.some((event) => event.type === "tool" && event.name === "kb_search"));
+  assert.ok(!events.some((event) => event.type === "tool" && event.name === "kb_search"),
+    "领域工具的活动由 Rust 从请求和结果统一生成");
 });
 
 test("finish_report returns a sidebar report, never a document snapshot", async () => {

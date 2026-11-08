@@ -8,6 +8,7 @@
 //! 本模块不解析聊天正文，不按文件名拼章节，不注册 shell；未提交、超时、取消、
 //! 进程崩溃都不自动合并正文。协议、恢复与离线部署见 `docs/pi-runtime.md`。
 
+mod activity;
 pub(crate) mod capability;
 mod delivery;
 mod materials;
@@ -23,6 +24,7 @@ mod tools;
 mod workspace;
 mod writing_context;
 
+pub(crate) use activity::PiActivity;
 pub(crate) use delivery::{
     DeliveryCheck, DeliveryReport, PiSelection, check_delivery, restore_outside_selection,
     sha256_hex, verify_submission,
