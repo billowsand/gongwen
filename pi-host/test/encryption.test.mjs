@@ -210,8 +210,8 @@ test("Durable JSONL 加密提交后可关闭重开恢复，并继续追加提交
     { fsync: true },
   );
   let storage = await open();
-  await storage.commit([{ type: "conversation", value: { id: 2 } }], BACKGROUND_CONTEXT);
-  await storage.commit([{ type: "entry", value: { id: 3, conversationId: 2, kind: "test", data: { marker } } }], BACKGROUND_CONTEXT);
+  await storage.commit([[{ type: "conversation", value: { id: 2 } }]], () => {}, BACKGROUND_CONTEXT);
+  await storage.commit([[{ type: "entry", value: { id: 3, conversationId: 2, kind: "test", data: { marker } } }]], () => {}, BACKGROUND_CONTEXT);
   await storage.close(BACKGROUND_CONTEXT);
 
   for (const name of fs.readdirSync(space.state)) {
@@ -222,7 +222,7 @@ test("Durable JSONL 加密提交后可关闭重开恢复，并继续追加提交
   storage = await open();
   assert.deepEqual(await storage.conversation(2, BACKGROUND_CONTEXT), { id: 2 });
   assert.equal((await storage.entry(3, BACKGROUND_CONTEXT)).entry.data.marker, marker);
-  await storage.commit([{ type: "entry", value: { id: 4, conversationId: 2, kind: "test", data: "第二次提交" } }], BACKGROUND_CONTEXT);
+  await storage.commit([[{ type: "entry", value: { id: 4, conversationId: 2, kind: "test", data: "第二次提交" } }]], () => {}, BACKGROUND_CONTEXT);
   await storage.close(BACKGROUND_CONTEXT);
 
   storage = await open();

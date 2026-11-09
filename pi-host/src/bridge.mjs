@@ -1,7 +1,8 @@
 //! 工具桥：host 把领域工具与提问转成 `tool_request` / `questions`，按 `callId` 等
 //! Rust 的 `tool_result`。不对外开 MCP 服务；工具名与次数由这里和 Rust 双重限制。
 
-import { Type } from "@earendil-works/pi-ai";
+// 1.5.0 起 pi-ai 不再导出 TypeBox；TypeBox schema 仍是合法 JSON Schema，直接依赖 typebox。
+import { Type } from "typebox";
 import { defineTool } from "@earendil-works/pi-durable";
 import { outputLimitsForChars } from "./read.mjs";
 import { PHASED_TOOL_LIMIT } from "./budget.mjs";

@@ -8,7 +8,8 @@
 //!
 //! 最终交付仍由 `submit_document` 读完整文件并独立校验，不用分块结果代替全文。
 
-import { Type } from "@earendil-works/pi-ai";
+// 1.5.0 起 pi-ai 不再导出 TypeBox；TypeBox schema 仍是合法 JSON Schema，直接依赖 typebox。
+import { Type } from "typebox";
 import { defineTool } from "@earendil-works/pi-durable";
 
 export const MAX_READ_LINES = 8_000;

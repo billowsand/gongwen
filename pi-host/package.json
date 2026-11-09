@@ -1,6 +1,6 @@
 {
   "name": "gongwen-pi-host",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "type": "module",
   "description": "公文助手随包的 Pi Durable 写作宿主机（阶段一）",
@@ -9,9 +9,10 @@
   },
   "main": "src/main.mjs",
   "dependencies": {
-    "@earendil-works/chord": "1.4.0",
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-durable": "1.4.0"
+    "@earendil-works/chord": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-durable": "1.5.0",
+    "typebox": "1.3.27"
   },
   "scripts": {
     "start": "node src/main.mjs",

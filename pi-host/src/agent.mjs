@@ -10,7 +10,8 @@
 
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { Type } from "@earendil-works/pi-ai";
+// 1.5.0 起 pi-ai 不再导出 TypeBox；TypeBox schema 仍是合法 JSON Schema，直接依赖 typebox。
+import { Type } from "typebox";
 import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { BACKGROUND_CONTEXT, withCancel } from "@earendil-works/chord/context";
@@ -19,7 +20,6 @@ import {
   createRegistry,
   defineExtension,
   defineTool,
-  watchEvents,
 } from "@earendil-works/pi-durable";
 import { JsonlStorage } from "@earendil-works/pi-durable/storage/jsonl";
 import { createEditTool, createWriteTool } from "@earendil-works/pi-durable/tools";
@@ -838,17 +838,20 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
           // 不自动无限重启：同一个任务连续被崩溃打断两次就停用，等人工决定。
           restartLimit: 2,
         },
-        onReport: (error, info) => {
-          if (info?.type === "task_parked") {
+        // 1.5.0 起 onReport 收单个 report（kind 分派），task_parked 报告被移除：
+        // 连续被崩溃打断的任务改为明确终结，内置任务报 task_interrupted(reason:
+        // restart_limit)，其余任务报 task_faulted(reason: restart_limit)。
+        onReport: (report) => {
+          if (report.kind === "task_interrupted" && report.reason === "restart_limit") {
             state.parked = "restart_limit";
             emit({
               type: "progress",
               message: "任务连续被中断，宿主已停用自动重跑，需要人工处理。",
             });
-          } else if (info?.type === "task_faulted") {
+          } else if (report.kind === "task_faulted" || report.kind === "task_interrupted") {
             emit({
               type: "progress",
-              message: `任务失败：${String(error?.message ?? error).slice(0, 300)}`,
+              message: `任务失败：${String(report.error?.message ?? report.error).slice(0, 300)}`,
             });
           }
         },
@@ -856,25 +859,8 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       controller.context,
     );
 
-    // 继续上次进程留下的 run（未完成的生成与工具调用）。捕获异常时可能已经没有任何
-    // 待跑任务，这不算失败。
+    // 继续上次进程留下的 run（未完成的生成与工具调用）。
     harness.resume();
-    try {
-      const inspection = await harness.inspect(controller.context);
-      const parked = inspection.tasks.find(
-        (task) => task.state?.kind === "blocked" && task.state.reason === "restart_limit",
-      );
-      if (parked) {
-        state.parked = "restart_limit";
-        throw new AgentError(
-          "这次任务已经连续两次被中断，宿主停用了自动重跑。原件与运行记录都在本机：可以点「从头写」重新开一轮，或在「已中断」卡片上先「接着写」由人工确认一次。",
-          "task_parked",
-        );
-      }
-    } catch (error) {
-      if (error instanceof AgentError) throw error;
-      // inspect 失败不影响后续提交；真正的问题会在 wait 时暴露。
-    }
 
     const root = await harness.root(controller.context, {
       agent: {
@@ -891,24 +877,22 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       },
     });
 
-    stream = await watchEvents(harness, root.id, controller.context);
+    // 1.5.0 起 watchEvents() 被移除：改挂会话视图，每次投递一份 ConversationView
+    // 快照（pi.live + 条目窗口），由 activity 模块 diff 出原 watchEvents 的语义。
+    stream = await root.watch(controller.context, { min: 200, max: 400 });
     const showActivity = observeActivity(config.task, emit);
-    stream.start(async (events) => {
-      for (const event of events) {
-        showActivity(event);
-        if (event.type === "tool_execution_end") {
-          if (event.toolName !== SUBMIT_TOOL_NAME && event.toolName !== REPORT_TOOL_NAME) {
-            candidateScan();
-          }
-        } else if (event.type === "auto_retry_start") {
-          emit({ type: "progress", message: `模型调用失败，正在重试（第 ${event.attempt} 次）` });
-        } else if (event.type === "task_failed") {
-          emit({ type: "progress", message: `任务失败：${event.message}` });
-        } else if (event.type === "message_update") {
-          // 不把 token 流拼成正文交给界面；进度只说明还在写。
-          candidateScan.maybeTick();
-        }
-      }
+    stream.start(async (call) => {
+      if (call.kind !== "value") return;
+      showActivity.update(call.value, {
+        onRetry: (attempt) =>
+          emit({ type: "progress", message: `模型调用失败，正在重试（第 ${attempt} 次）` }),
+        onRunFailure: (failure) =>
+          emit({ type: "progress", message: `任务失败：${failure.detail ?? failure.reason}` }),
+        onToolSettled: (name) => {
+          if (name !== SUBMIT_TOOL_NAME && name !== REPORT_TOOL_NAME) candidateScan();
+        },
+        onStreamTick: () => candidateScan.maybeTick(),
+      });
     });
 
     emit({ type: "progress", message: "正在开始本轮写作…" });
@@ -917,6 +901,16 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       await root.waitForIdle(controller.context);
       if (state.snapshot) return { snapshot: state.snapshot };
       if (state.report) return { report: state.report };
+      // 1.5.0 起 restart-limited 任务不再 park：上一进程把 run 打到 restart_limit /
+      // interrupted 终态时，这里按旧口径报「连续被中断」，Rust 侧映射为 Parked。
+      const failure = showActivity.lastRunFailure;
+      if (failure && (failure.reason === "restart_limit" || failure.reason === "interrupted")) {
+        state.parked = "restart_limit";
+        throw new AgentError(
+          "这次任务已经连续两次被中断，宿主停用了自动重跑。原件与运行记录都在本机：可以点「从头写」重新开一轮，或在「已中断」卡片上先「接着写」由人工确认一次。",
+          "task_parked",
+        );
+      }
     }
     const deliveryId = config.recovery?.continuationId
       ? `${config.runId}:resume:${config.recovery.continuationId}` : config.runId;
@@ -956,6 +950,13 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
         if (state.snapshot) return { snapshot: state.snapshot };
         if (state.report) return { report: state.report };
         if (outcome.value.status === "unanswered") {
+          if (outcome.value.reason === "restart_limit" || outcome.value.reason === "interrupted") {
+            state.parked = "restart_limit";
+            throw new AgentError(
+              "这次任务已经连续两次被中断，宿主停用了自动重跑。原件与运行记录都在本机：可以点「从头写」重新开一轮，或在「已中断」卡片上先「接着写」由人工确认一次。",
+              "task_parked",
+            );
+          }
           throw new AgentError(
             `模型没有完成本轮：${outcome.value.reason}${outcome.value.detail ? `（${JSON.stringify(outcome.value.detail)}）` : ""}`,
             "unanswered",
@@ -1036,6 +1037,13 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
           throw new AgentError("分阶段写作中提前交了清单，已拒绝。", "phase_premature_submit");
         }
         if (outcome.value.status === "unanswered") {
+          if (outcome.value.reason === "restart_limit" || outcome.value.reason === "interrupted") {
+            state.parked = "restart_limit";
+            throw new AgentError(
+              `「${spec.title}」的模型调用连续被中断，宿主停用了自动重跑。已登记的文件与运行记录都在本机，可以点「从头写」重新开一轮。`,
+              "task_parked",
+            );
+          }
           throw new AgentError(
             `模型没有完成「${spec.title}」：${outcome.value.reason}`,
             "unanswered",

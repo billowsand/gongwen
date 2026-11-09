@@ -4,6 +4,8 @@
 
 2026-11-06 安全存储收尾：host 升至 **0.4.0 / 协议 4**。加密工作区中，Rust 与 Node 的 Pi 材料、工作文件、来源、接口缓存、进度、交付和 Durable 会话统一使用 GWA2；Durable 生产状态由 `session.sqlite` 改为 `pi/session/` 下的加密 JSONL。DEK 只经 stdin 的 init 传递。旧协议/旧 host 的中间任务不能续跑，已有交付回执仍可重放。详细边界见 [加密资源全生命周期](encrypted-resource-lifecycle.md)。
 
+2026-11-10 上游升级：`@earendil-works/chord` / `pi-ai` / `pi-durable` 由 1.4.0 升至 **1.5.0**（三包锁定同升），host 升至 **0.4.2 / 协议 4**（协议不变）。`watchEvents()` 上游移除，host 改挂 `Conversation.watch()` 会话视图；`onReport` 改单 report 参数，`task_parked` 报告被移除（restart-limited 任务改为明确终结，映射见下文升级节）。TypeBox 不再由 pi-ai 导出，host 直依赖 `typebox@1.3.27`。升级记录与破坏性变更清单见下文「Pi 1.5 升级」一节。
+
 2026-11-05 退役审查收尾：host 补丁升至 0.3.6（协议仍为 3），常规领域工具额度 60，分阶段按阶段追加到绝对上限 84；常规任务转分阶段后也可追加，拒绝的调用不占用未发出的额度。Rust/host 与实际握手版本由回归对账。旧 0.3.5 中间任务按既有版本保护不能在原工作区接着写，已有成品仍可查看/取回或从头写。验证与本机运行时状态见 [收尾记录](pi-implementation/retirement-fixes-2026-11-05.md)。
 
 > **2026-11-04 用户确认的 Pi 写作取舍（优先于下文历史方案）。** 新任务按 256K 及以上窗口作为主要使用场景，预算采用实际部署容量，取消未知模型 96K 封顶、材料份数与旧短步骤偏好触发的自动细分；材料优先整篇阅读，超限按大章节/大段切分。每次运行提供当前日期、星期、时区及相关组织背景，`current_date` 可重读实时日期，`vocab_search` 支持职能/简介与所属单位。Pi 不执行事实核查、不生成事实疑点或额外 AI 审校清单；全面审校和政策核查技能退出新任务目录。现有文字复核、格式检查、引用保护、授权表单权限、正文基线及精确撤销保留。旧提案和历史记录权限不变。实现与验收见 [写作上下文首版](pi-implementation/writing-context-v1.md)。
@@ -42,8 +44,8 @@ runtime/pi/
 | --- | --- |
 | 平台 | `win-x64`、`linux-arm64`、`linux-x64`、`darwin-arm64`、`darwin-x64`（macOS 用官方 `.tar.gz`） |
 | Node | `22.22.3`（与本机已验版本一致，不跟随 latest） |
-| `@earendil-works/chord` / `pi-ai` / `pi-durable` | `1.4.0` |
-| host | `0.4.0`，协议 `4` |
+| `@earendil-works/chord` / `pi-ai` / `pi-durable` | `1.5.0` |
+| host | `0.4.2`，协议 `4` |
 | lockfile | `pi-host/package-lock.json` 的 SHA-256 写进 manifest |
 
 官方压缩包与 SHA-256（来源 `https://nodejs.org/download/release/v22.22.3/SHASUMS256.txt`）：
@@ -170,7 +172,7 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
   一律当 `linux-*`：Windows x64 → `win-x64`，Linux arm64 / x64 → `linux-arm64` / `linux-x64`，
   macOS arm64 / x64 → `darwin-arm64` / `darwin-x64`（manifest 的平台名也用 `darwin-*`）；
   未知平台明确报「不支持的系统」，不再误接受一份别的平台的运行时；
-- 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.4.0`、协议 `4` 与配置一致；
+- 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.4.2`、协议 `4` 与配置一致；
 - 在执行 Node 前核对 Node 本身的 SHA-256，并检查依赖锁文件哈希；抽查关键入口
   （`host/main.mjs`、`host/package.json`、三个 Pi 包的 `package.json`）的
   SHA-256；不会每帧遍历 `node_modules`（manifest 只在每次开跑定位时读一次）；
@@ -464,6 +466,36 @@ Pi 增加两个只读领域工具：`style_list`（按当前文种列出启用�
   前校验主文件，并把「Running 但没有活动宿主」的轮次纠正为 Interrupted。
 - **路径口径**：资源 AAD 的逻辑路径在 Rust 侧按 realpath 规范化，host 同时接受字面与
   realpath 两种根（配置目录含符号链接/junction、大小写差异时仍能读懂同一批密文）。
-- **已知边界**：pinned `pi-durable` 1.4.0 对「marker 引用的 sidecar 记录缺失」仍会
-  硬失败；JSONL 长会话暂无压缩（现靠 64 MiB 上限明确报错）；Windows 绝对路径 +
+- **已知边界**：pinned `pi-durable` 1.5.0 对「marker 引用的 sidecar 记录缺失」仍会
+  硬失败（1.5.0 未修）；JSONL 长会话暂无压缩（现靠 64 MiB 上限明确报错）；Windows 绝对路径 +
   符号链接的 `resolveInside` 语义未改。
+
+## Pi 1.5 升级（2026-11-10，host 0.4.2 / 协议 4）
+
+`@earendil-works/chord` / `pi-ai` / `pi-durable` 1.4.0 → 1.5.0（2026-11-02 发布），三包锁定同升
+（pi-durable 1.5.0 依赖 chord 1.5.0 + pi-ai 1.5.0 + pi-schema 1.5.0）。host 0.4.1 → 0.4.2，
+协议仍为 4。动机与收益：崩溃后模型请求不再无限重发（run 以 `interrupted` 明确终态）、
+流式工具参数解析 O(n²) 修复、流式提交内存与长会话 CPU 下降、OpenRouter/智谱等网关兼容修复。
+
+host 侧适配的破坏性变更（按上游 1.5.0 CHANGELOG）：
+
+- `watchEvents()` 移除：`agent.mjs` 改挂 `root.watch(context, { min: 200, max: 400 })`，
+  每次投递 `ConversationView`（`pi.live` + 条目窗口）；`activity.mjs` 重写为对连续快照 diff，
+  事件→状态对应：工具槽位 `live.tools`（参数倒查助理条目）、重试看 `live.generation.retry`、
+  失败看 `live.runFailure`、模型状态行看 `live.run` / `live.generation`。
+- `onReport(error, info)` 改为 `onReport(report)`（`report.kind` 分派）；
+  `task_parked` 报告移除：restart-limited 任务改为明确终结——内置任务报
+  `task_interrupted(reason: "restart_limit")`，run 以 `runFailure reason: "restart_limit"` 收尾、
+  inputs 结算 `unanswered`（reason 同上）。host 在恢复路径与 `runDelivery`/`runPhase` 的
+  unanswered 分支把这两种 reason 映射回旧 `task_parked` 错误码，Rust 侧 `Parked` 语义不变。
+- `Type`/`Static` 不再从 pi-ai 导出：host 直依赖 `typebox@1.3.27` 并改从 `typebox` 导入
+  （TypeBox schema 仍是合法 JSON Schema，pi-schema 照常校验）。
+- watch 监听签名统一为单 call 对象（`call.kind === "value"` 取 `call.value`）。
+- `Storage.commit()` 改批签名 `commit(batches, receive, context)`：host 不实现自定义 Storage，
+  仅两处加密测试改为 `commit([[...]], () => {}, ctx)`。
+- `pi.live` 存储升到 v3（加 `run.turns`），1.5 写的 JSONL 会话 1.4 runtime 读不了：
+  随包运行时整体更换，不允许新旧 host 混跑同一工作区（host 版本有 Rust 侧强校验）。
+
+验证：Node `npm test` 122 通过 / 0 失败 / 1 跳过（跳过为公网用例）；darwin-arm64 随包运行时
+已用 `scripts/stage-pi-runtime.sh` 重建。win-x64 / linux-arm64 / linux-x64 / darwin-x64 的
+运行时需在各自平台发布前重建。仍待真机验收：真实模型长会话、崩溃恢复与目标机门槛。
