@@ -1075,9 +1075,9 @@ fn resource_dirs_need_encryption(slot: DataSlot) -> bool {
         let entries = match read_dir_if_exists(&dir) {
             Ok(Some(entries)) => entries,
             Ok(None) => continue,
-            Err(error) => {
+            Err(_error) => {
                 #[cfg(test)]
-                eprintln!("vault-dir-unreadable path={} error={error}", dir.display());
+                eprintln!("vault-dir-unreadable path={} error={_error}", dir.display());
                 return true;
             }
         };
@@ -1192,18 +1192,18 @@ fn directory_has_encrypted_data(path: PathBuf) -> bool {
         let entries = match read_dir_if_exists(&dir) {
             Ok(Some(entries)) => entries,
             Ok(None) => continue,
-            Err(error) => {
+            Err(_error) => {
                 #[cfg(test)]
-                eprintln!("vault-dir-unreadable path={} error={error}", dir.display());
+                eprintln!("vault-dir-unreadable path={} error={_error}", dir.display());
                 return true;
             }
         };
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
-                Err(error) => {
+                Err(_error) => {
                     #[cfg(test)]
-                    eprintln!("vault-entry-unreadable error={error}");
+                    eprintln!("vault-entry-unreadable error={_error}");
                     return true;
                 }
             };
