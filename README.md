@@ -296,7 +296,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-GitHub Actions：CI 在 Windows x64、macOS arm64 与 Linux ARM64（GLIBC 2.28）三个平台执行格式、静态检查和测试；推送 `v*` 标签后自动构建 Windows x64 安装程序、macOS arm64 磁盘映像、Linux ARM64 deb（兼容 Ubuntu 20.04）与 Linux x86_64 的 Arch / Omarchy pacman 包（`pacman -U` 离线安装），连同 SHA-256 校验和创建 Release（macOS 作业拿不到托管 runner 时该磁盘映像可缺省，其余三件套必须齐全）。
+GitHub Actions：CI 在 Windows x64、macOS arm64 与 Linux ARM64（GLIBC 2.28）三个平台执行格式、静态检查和测试；推送 `v*` 标签后自动构建 Windows x64 安装程序并连同 SHA-256 校验和创建 Release。macOS arm64、Linux ARM64 deb 与 Arch / Omarchy pacman 包的打包作业保留在发布工作流里（当前停用），需要时再启用。
 
 ## 许可
 
