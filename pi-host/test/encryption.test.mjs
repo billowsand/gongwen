@@ -211,7 +211,15 @@ test("Durable JSONL 加密提交后可关闭重开恢复，并继续追加提交
   );
   let storage = await open();
   await storage.commit([{ type: "conversation", value: { id: 2 } }], BACKGROUND_CONTEXT);
-  console.error("DEBUG-48-after-commit", storage.mainPath, fs.existsSync(storage.mainPath), space.state);
+  console.error("DEBUG-48-after-commit", storage.mainPath, fs.existsSync(storage.mainPath), space.state, storage.constructor.name, typeof storage.fs?.appendFile);
+  {
+    const pfs = new ProtectedFileSystem({ cwd: path.dirname(space.state), files: space.files });
+    const probePath = path.join(space.state, "probe.txt");
+    const appended = await pfs.appendFile(probePath, Buffer.from("hello\n"), BACKGROUND_CONTEXT);
+    let probeText = "";
+    try { probeText = space.files.readText(probePath); } catch (error) { probeText = `read failed: ${error?.message ?? error}`; }
+    console.error("DEBUG-probe", JSON.stringify(appended), fs.existsSync(probePath), probeText);
+  }
   await storage.commit([{ type: "entry", value: { id: 3, conversationId: 2, kind: "test", data: { marker } } }], BACKGROUND_CONTEXT);
   await storage.close(BACKGROUND_CONTEXT);
 
