@@ -316,17 +316,19 @@ test("分阶段任务作业拒绝中间步骤提前交付，也拒绝未登记 f
   }
 });
 
-for (const [skill, file, key] of [
-  ["gongwen-wiki-frame", "work/frame.json", "themes"],
-  ["gongwen-wiki-write", "work/pages.json", "pages"],
-  ["gongwen-wiki-update", "work/pages.json", "pages"],
+for (const [skill, file, key, content] of [
+  ["gongwen-wiki-frame", "work/frame.json", "themes",
+    JSON.stringify({ themes: [{ name: "安全生产", categories: [{ name: "监督检查", doc_ids: [3] }] }] })],
+  ["gongwen-wiki-write", "work/pages.json", "pages",
+    JSON.stringify({ pages: [{ title: "监督检查", kind: "normal", body: "# 监督检查\n\n闭环整改。", doc_refs: [{ doc_id: 3, note: "整改要求出自本文" }] }] })],
+  ["gongwen-wiki-update", "work/pages.json", "pages",
+    JSON.stringify({ pages: [{ uuid: "u-1", title: "监督检查", kind: "normal", body: "# 监督检查\n\n闭环整改。", change_note: "按 E6 更新", doc_refs: [{ doc_id: 3, note: "整改要求出自本文" }] }] })],
 ]) {
   test(`${skill} 通过真实 Harness 交付维基 JSON`, { timeout: 20_000 }, async () => {
     const space = fixture();
     try {
       const config = makeConfig(space, { skill });
       const { faux, models, model } = backend();
-      const content = JSON.stringify({ [key]: [{ title: "测试提案" }] });
       faux.setResponses([
         call("write", { path: file, content: JSON.stringify(EXTRACT) }),
         call("submit_task", { path: file, summary: "错误的作业形状" }),
@@ -346,6 +348,76 @@ for (const [skill, file, key] of [
     }
   });
 }
+
+test("维基交付结构校验：空依据分类与残缺页面当场打回", () => {
+  const frame = (categories) => JSON.stringify({ themes: [{ name: "安全生产", categories }] });
+  assert.throws(
+    () => validateTaskPayload(frame([{ name: "（待定）", doc_ids: [] }]), "gongwen-wiki-frame"),
+    /doc_ids 必须是至少一个资料编号/,
+  );
+  assert.throws(
+    () => validateTaskPayload(frame([{ name: "监督检查" }]), "gongwen-wiki-frame"),
+    /doc_ids 必须是至少一个资料编号/,
+  );
+  assert.throws(
+    () => validateTaskPayload(frame([]), "gongwen-wiki-frame"),
+    /非空的 categories/,
+  );
+  const page = (overrides) => JSON.stringify({ pages: [{
+    title: "监督检查", kind: "normal", body: "正文",
+    doc_refs: [{ doc_id: 3, note: "支撑" }], ...overrides,
+  }] });
+  assert.throws(
+    () => validateTaskPayload(page({ doc_refs: [] }), "gongwen-wiki-write"),
+    /doc_refs 必须是 1 至 50 条/,
+  );
+  assert.throws(
+    () => validateTaskPayload(page({ kind: "overview" }), "gongwen-wiki-write"),
+    /kind 必须是 normal 或 guide/,
+  );
+  assert.throws(
+    () => validateTaskPayload(page({ body: "  " }), "gongwen-wiki-write"),
+    /缺少正文 body/,
+  );
+  assert.throws(
+    () => validateTaskPayload(page({ uuid: undefined }), "gongwen-wiki-update"),
+    /缺少目标页 uuid/,
+  );
+  assert.throws(
+    () => validateTaskPayload(page({ uuid: "u-1", change_note: "长".repeat(201) }), "gongwen-wiki-update"),
+    /变更说明超过 200 字/,
+  );
+  assert.throws(
+    () => validateTaskPayload(page({ title: "长".repeat(101) }), "gongwen-wiki-write"),
+    /页面标题超过 100 字/,
+  );
+  assert.throws(
+    () => validateTaskPayload(
+      JSON.stringify({ pages: Array.from({ length: 6 }, () => ({
+        title: "监督检查", kind: "normal", body: "正文",
+        doc_refs: [{ doc_id: 3, note: "支撑" }],
+      })) }),
+      "gongwen-wiki-update",
+    ),
+    /一次交付最多 5 页/,
+  );
+  assert.throws(
+    () => validateTaskPayload(
+      JSON.stringify({ themes: [{ name: "安全生产", categories: [
+        { name: "监督检查", doc_ids: Array.from({ length: 51 }, (_, i) => i + 1) },
+      ] }] }),
+      "gongwen-wiki-frame",
+    ),
+    /依据文档超过 50 篇/,
+  );
+  assert.throws(
+    () => validateTaskPayload(page({ body: "正文〔E9〕" }), "gongwen-wiki-write"),
+    /正文标记 〔E9〕 在 doc_refs 里没有对应条目/,
+  );
+  // 合法交付照常通过：整编页不带 uuid，更新页带 uuid。
+  assert.ok(validateTaskPayload(page({}), "gongwen-wiki-write"));
+  assert.ok(validateTaskPayload(page({ uuid: "u-1" }), "gongwen-wiki-update"));
+});
 
 test("任务助手经宿主桥调用维基只读工具后交付", { timeout: 20_000 }, async () => {
   const space = fixture();

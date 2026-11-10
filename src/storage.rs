@@ -252,9 +252,48 @@ pub fn set_test_config_dir_in_current_thread(dir: std::path::PathBuf) {
     TEST_CONFIG_DIR.with(|cell| *cell.borrow_mut() = Some(dir));
 }
 
+/// 进程级配置目录覆盖：只给 ignored 真机评测用。Pi 工具在 process 派生的
+/// 线程上执行，线程局部覆盖到不了那些线程；评测期间必须让工具线程也解析到
+/// 临时目录，否则会去开真实库（加密库按明文读就是「file is not a database」）。
+/// 全局覆盖会影响同进程其他测试，用完必须清回 `None`（用守卫，panic 也要清）。
+#[cfg(test)]
+static TEST_CONFIG_DIR_GLOBAL: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+#[cfg(test)]
+pub fn set_test_config_dir_global(dir: Option<PathBuf>) {
+    *TEST_CONFIG_DIR_GLOBAL
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = dir;
+}
+
+/// 全局覆盖的守卫：离开作用域（含 panic 展开）自动清回。
+#[cfg(test)]
+pub struct TestConfigDirGlobalGuard;
+
+#[cfg(test)]
+impl Drop for TestConfigDirGlobalGuard {
+    fn drop(&mut self) {
+        set_test_config_dir_global(None);
+    }
+}
+
+#[cfg(test)]
+pub fn push_test_config_dir_global(dir: PathBuf) -> TestConfigDirGlobalGuard {
+    set_test_config_dir_global(Some(dir));
+    TestConfigDirGlobalGuard
+}
+
 pub fn config_dir() -> Result<PathBuf> {
     #[cfg(test)]
     if let Some(dir) = TEST_CONFIG_DIR.with(|cell| cell.borrow().clone()) {
+        return Ok(dir);
+    }
+    #[cfg(test)]
+    if let Some(dir) = TEST_CONFIG_DIR_GLOBAL
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+    {
         return Ok(dir);
     }
     let dirs = ProjectDirs::from("cn", "LocalTools", "GongwenAssistant")

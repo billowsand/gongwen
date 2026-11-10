@@ -113,6 +113,14 @@ pub(crate) fn parse_frame_delivery(
             if !category_names.insert(cname.clone()) {
                 return Err(format!("主题「{name}」下分类「{cname}」重复"));
             }
+            // 空依据的分类是「待定」占位壳：技能要求每个分类挂靠实际读到的资料，
+            // 真机评测里模型交过零依据的「（待定）」分类，必须在闸门上拦下。
+            if category.doc_ids.is_empty() {
+                return Err(format!(
+                    "分类「{cname}」没有依据文档；每个分类至少挂靠一篇本次检索到的资料，\
+                     归不进分类的资料不要硬凑分类"
+                ));
+            }
             if category.doc_ids.len() > MAX_DOC_REFS {
                 return Err(format!("分类「{cname}」依据文档超过 {MAX_DOC_REFS} 篇"));
             }
@@ -841,7 +849,7 @@ pub(crate) fn update_pages(
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let listing = snapshot
         .iter()
-        .map(|t| format!("- {}（uuid：{}）", t.title, t.uuid))
+        .map(|t| format!("- {}（uuid：{}，类型：{}）", t.title, t.uuid, t.kind))
         .collect::<Vec<_>>()
         .join("\n");
     let request = format!(
@@ -849,7 +857,7 @@ pub(crate) fn update_pages(
          今天日期：{today}。目标页（正文已作为材料附上）：\n{listing}\n\
          用 kb_search / kb_read 找与这些页面相关、尤其是新入库的文档；\
          维基内现状用 wiki_search / wiki_read / wiki_links 自查互链。\
-         每个 pages[] 原样带回 uuid 与 title，正文给整页新正文。{new_source}",
+         每个 pages[] 原样带回 uuid、title 与 kind（类型不可改），正文给整页新正文。{new_source}",
         pi_skills::WIKI_UPDATE_SKILL,
         snapshot.len(),
     );
@@ -864,8 +872,9 @@ pub(crate) fn update_pages(
                 .collect::<Vec<_>>()
                 .join("\n");
             let text = format!(
-                "# {}\n\n{}\n\n当前版本的依据清单（保留仍支撑本页的依据）：\n{}",
-                t.title, t.current_body, refs
+                "# {}\n\n（本页类型：{}，更新时 kind 保持不变）\n\n{}\n\n\
+                 当前版本的依据清单（保留仍支撑本页的依据）：\n{}",
+                t.title, t.kind, t.current_body, refs
             );
             PiMaterialInput {
                 title: format!("维基页：{}", t.title),
@@ -989,7 +998,7 @@ mod tests {
             r#"{"themes":[
                 {"name":"安全生产","categories":[
                     {"name":"监督检查","doc_ids":[3,7,3]},
-                    {"name":"应急管理","doc_ids":[]}
+                    {"name":"应急管理","doc_ids":[12]}
                 ]},
                 {"name":"政务服务","categories":[{"name":"一网通办","doc_ids":[12]}]}
             ]}"#,
@@ -998,6 +1007,7 @@ mod tests {
         .unwrap();
         assert_eq!(proposal.themes.len(), 2);
         assert_eq!(proposal.themes[0].categories[0].doc_ids, vec![3, 7], "去重");
+        assert_eq!(proposal.themes[0].categories[1].name, "应急管理");
         assert_eq!(proposal.themes[1].categories[0].name, "一网通办");
     }
 
@@ -1021,6 +1031,10 @@ mod tests {
             (
                 "分类重名",
                 "{\"themes\":[{\"name\":\"甲\",\"categories\":[{\"name\":\"x\"},{\"name\":\"x\"}]}]}",
+            ),
+            (
+                "空依据分类",
+                "{\"themes\":[{\"name\":\"甲\",\"categories\":[{\"name\":\"（待定）\",\"doc_ids\":[]}]}]}",
             ),
             (
                 "幽灵文档",

@@ -102,7 +102,11 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 ## 进行中的工作
 
 - **维基知识库（资料库 → 知识库，2026-11-10）**：一、二、三期十个切片全部实现，
-  **待真机验收**。2026-11-11 已复审并修复作业交付、版本溯源、旧提案覆盖与链接等问题。
+  **待真机验收**。2026-11-11 已复审并修复作业交付、版本溯源、旧提案覆盖与链接等问题；
+  同日真机评测（DMXAPI deepseek-v4-flash）跑通归纳→整编→更新全链，评测驱动的修复：
+  空依据分类进闸门、更新作业标明目标页类型、结构上限与〔E编号〕交叉校验前移 host 侧
+  `submit_task`（模型轮内可改正，不再跑完整轮拒收）。ignored 真机评测见
+  `src/pi_agent/wiki_eval.rs`（需 `DMXAPI_API_KEY` + `source scripts/pi-dev.sh`）。
   方案、分期、复审记录及已知差距见 `docs/wiki-knowledge-base-design.md` 第十三节。要点：存储层
   （`src/wiki.rs`，与稿件库同文件独立连接）；框架建立（词库式树编辑 + 大纲导入 +
   `gongwen-wiki-frame` AI 归纳）；页面整编 / 更新（`gongwen-wiki-write` /
