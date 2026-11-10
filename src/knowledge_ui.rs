@@ -1076,6 +1076,18 @@ fn qa_answer_card(app: &mut GongwenApp, ui: &mut egui::Ui, index: usize, turn: &
             .color(theme::text_soft()),
         );
         ui.add_space(4.0);
+        if !turn.wiki_pages.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("维基依据：");
+                for (uuid, title) in &turn.wiki_pages {
+                    if ui.link(format!("《{title}》")).clicked() {
+                        crate::wiki_ui::open_wiki_page(app, uuid);
+                        app.open_page(crate::app::NavPage::Wiki);
+                    }
+                }
+            });
+            ui.add_space(4.0);
+        }
         ui.horizontal(|ui| {
             if theme::icon_button(ui, theme::Icon::Copy, "复制答案").clicked() {
                 ui.ctx().copy_text(turn.answer.clone());

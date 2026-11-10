@@ -973,6 +973,7 @@ impl GongwenApp {
                         question,
                         answer: outcome.answer,
                         references: outcome.references,
+                        wiki_pages: outcome.wiki_pages,
                         warnings: outcome.warnings,
                     }),
                     Err(error) => {

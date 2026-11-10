@@ -162,7 +162,9 @@ fn prepare(
             request.clone(),
             Vec::new(),
         )
-        .task_only(store_path.to_path_buf()),
+        .task_only(store_path.to_path_buf())
+        // 任务助手接入维基：材料整理 / 表单填写可语义导航查知识库条目（只读，不占写作门禁）。
+        .with_wiki_autoload(),
     );
     let run_id = uuid::Uuid::new_v4().to_string();
     let request_id = format!("{kind}-{}", uuid::Uuid::new_v4());

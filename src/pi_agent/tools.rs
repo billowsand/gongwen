@@ -999,6 +999,12 @@ impl PiToolContext {
                 name,
                 "task_search" | "task_read" | "vocab_search" | "current_date"
             )
+            // 任务作业挂了维基库时，开放四个只读维基工具（三期：任务助手接入）。
+            && !(self.wiki.enabled()
+                && matches!(
+                    name,
+                    "wiki_search" | "wiki_read" | "wiki_links" | "wiki_doc_read"
+                ))
         {
             return Err(format!("任务助手作业不开放工具：{name}"));
         }

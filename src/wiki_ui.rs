@@ -1251,6 +1251,11 @@ fn build_link_map(
     map
 }
 
+/// 供其他页面（资料库问答的维基依据等）跳转打开指定维基页。
+pub(crate) fn open_wiki_page(app: &mut GongwenApp, uuid: &str) {
+    open_page(app, uuid);
+}
+
 fn open_page(app: &mut GongwenApp, uuid: &str) {
     let Some(store) = app.wiki_store.as_ref() else {
         return;
