@@ -7,7 +7,7 @@
 
 用户已确认首版：面向 256K 及以上窗口，按实际容量优先整篇材料，超限按大章节切分；每轮提供当前日期/星期/时区及标准组织背景，词库按职能、人员简介及所属单位查询。Pi 新任务不做事实核查、不产生事实疑点清单，全面审校与政策核查技能退出新任务；现有文字复核、格式与引用保护、授权表单权限、基线和精确撤销保留。此口径取代下文 Pi 事实疑点“只提示”的旧表述，不改变旧提案历史的权限。详见 `docs/pi-implementation/writing-context-v1.md`。
 
-2026-11-04 后续：设置页风格学习也已统一到 Pi 的 `gongwen-style-learn`，支持库内/上传样稿，`submit_style` 交独立JSON草稿，用户编辑保存；不走辅助模型、不写正文。普通写作与风格学习按任务类型隔离技能和交付权限，见 `docs/pi-implementation/style-learning-v1.md`。Pi 内置技能共 9 个（6 个写作/提炼 + 2 个任务助手作业 + 1 个风格学习；任务作业见 2026-11-10 条目），全面审校 `gongwen-review` 与政策核查 `gongwen-policy-check` 已退役、只保留历史文件。交付通道按任务类型分四类：正文 `document`（`submit_document`）、清单 `report`（`finish_report`）、独立风格文件 `style`（`submit_style`，只进设置页编辑器、不能写正文）、任务助手 JSON `task`（`submit_task`，只进任务页）。
+2026-11-04 后续：设置页风格学习也已统一到 Pi 的 `gongwen-style-learn`，支持库内/上传样稿，`submit_style` 交独立JSON草稿，用户编辑保存；不走辅助模型、不写正文。普通写作与风格学习按任务类型隔离技能和交付权限，见 `docs/pi-implementation/style-learning-v1.md`。Pi 内置技能共 11 个（6 个写作/提炼 + 2 个任务助手作业 + 1 个风格学习 + 2 个维基知识库作业；任务作业见 2026-11-10 条目，维基作业见 `docs/wiki-knowledge-base-design.md` 第十三节），全面审校 `gongwen-review` 与政策核查 `gongwen-policy-check` 已退役、只保留历史文件。交付通道按任务类型分四类：正文 `document`（`submit_document`）、清单 `report`（`finish_report`）、独立风格文件 `style`（`submit_style`，只进设置页编辑器、不能写正文）、任务助手 JSON `task`（`submit_task`，只进任务页）。
 
 ## 技术栈
 

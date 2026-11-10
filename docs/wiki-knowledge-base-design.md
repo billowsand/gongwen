@@ -193,3 +193,24 @@
 - **遍历成本**：语义下钻由模型自主，预算上限（§6.2）防失控；
 - **审核负担**：每页必审 + 整编一次出多页，审核界面效率是关键（逐页卡片、依据对照、可编辑）；
 - **旧数据**：现有 knowledge_docs 全部保留为资料库，无迁移；「未整编」标记从零开始累积。
+
+## 十三、实施进度（一期）
+
+**一期五个切片已全部实现并提交（2026-11-10），待真机验收**：
+
+| 切片 | 内容 | 提交 |
+|---|---|---|
+| 1 | 存储层：`wiki_nodes` / `wiki_pages` / `wiki_page_versions` / `wiki_links` / `wiki_page_doc_refs` 五表，`WikiStore::open` 走 `storage::apply_db_key`（外键、WAL、busy_timeout 与资料库同一姿势） | `f9641b0` |
+| 2 | 主导航「知识库」改名「资料库」；新增知识库三栏界面（框架树 / 阅读器 / backlinks 栏） | `dfb36d9` |
+| 3 | 维基四只读工具接入 Pi 写作：`wiki_search` / `wiki_read` / `wiki_links` / `wiki_doc_read`，独立额度 12 次/轮；搜索命中进证据、链接只是候选不进证据 | `fb8e31e` |
+| 4 | 框架建立：词库式树编辑（改名/建分类/跨主题移动/删除保护）+ Markdown 大纲导入 + `gongwen-wiki-frame` AI 归纳（提案确认制，同名跳过不覆盖） | `7612b3d` / `2667ad9` |
+| 5 | 页面整编：`gongwen-wiki-write` Pi 作业 + 审核台（左列逐页、右上渲染预览、右下可改正文源；采纳经界面线程 `store.create_page` 写库，版本带来源 run_id 与「审核已修改」标记，退回不落库） | `ba66281` |
+
+出入与已知坑：
+
+- 审核台一期只做「新页审核」；「改页 diff 审核」（`gongwen-wiki-update`）按 §十 分期属二期，未做；
+- `PageProposalSet` 在交付复核时就解析并携带分类 `node_id`，审核台采纳不二次按名猜（跨主题同名分类也能写对）；
+- 两个维基作业（归纳 / 整编）同一时刻互斥；维基作业不占任务助手门禁，反之亦然；
+- 阅读器与审核台预览共用 `wiki_ui::show_page_body`（口径 13 换接点），接入现有预览渲染链时整体替换该函数、链接挂件逻辑保留；
+- `pi-host/src/bridge.mjs` 加了四个域工具（切片 3）→ **发布前必须重建随包 `runtime/pi`**；
+- 待真机验收：真实模型跑归纳与整编、技能评测（`scripts/gongwen-skill-eval.py` 增补维基用例）、Windows / Linux 运行时重建与三平台验收。
