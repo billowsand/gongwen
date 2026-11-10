@@ -2,6 +2,7 @@
 //! 锁文件受控自愈、恢复时会话丢失、字面/realpath 路径口径一致。
 
 import { test } from "node:test";
+import { commitWrites } from "@earendil-works/pi-durable/testing";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -51,11 +52,6 @@ function fixture(slot = "real") {
 
 
 /// 1.4 的 `commit(writes, context)` 与 1.5 的 `commit(batches, receive, context)` 都支持。
-async function commitWrites(storage, writes, context) {
-  if (storage.commit.length >= 3) return storage.commit([writes], () => {}, context);
-  return storage.commit(writes, context);
-}
-
 function staleTemp(dir) {
   return path.join(dir, `.${process.pid}-11111111-2222-4333-8444-555555555555.tmp`);
 }

@@ -93,6 +93,9 @@ pub(super) fn can_add_material(items: &[(String, String, String)], text: &str) -
 
 impl super::GongwenApp {
     pub(crate) fn start_task_fill(&mut self, request: crate::task_ui::FillRequest) {
+        if self.lock_requested {
+            return;
+        }
         if self.task_fill_rx.is_some() {
             self.task_ui.fill_error = Some("上一次识别还没结束，请等待后重试。".into());
             return;
@@ -144,9 +147,10 @@ impl super::GongwenApp {
 
     pub(crate) fn poll_task_fill(&mut self, ctx: &eframe::egui::Context) {
         if let Some(job) = &self.task_fill_job {
-            self.task_ui.fill_progress = Some(job.line());
-            if std::mem::take(&mut self.task_ui.request_stop_fill) {
+            if std::mem::take(&mut self.task_ui.request_stop_fill) || !self.task_ui.fill_busy {
                 job.stop();
+            } else {
+                self.task_ui.fill_progress = Some(job.line());
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
@@ -314,6 +318,9 @@ impl super::GongwenApp {
     }
 
     fn start_task_material(&mut self, material: Material) {
+        if self.lock_requested {
+            return;
+        }
         if self.task_extraction_rx.is_some() {
             self.task_ui.extraction_error = Some("已有材料正在识别，请等待结束后再整理。".into());
             return;
@@ -416,6 +423,25 @@ impl super::GongwenApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_assistant_lock_cancels_both_jobs_and_clears_the_queue() {
+        let mut app = super::super::management_samples::fixture();
+        app.vault_locked = true;
+        let (fill, _, fill_cancel) = TaskJobUi::start();
+        let (extraction, _, extraction_cancel) = TaskJobUi::start();
+        app.task_fill_job = Some(fill);
+        app.task_extraction_job = Some(extraction);
+        app.enqueue_task_materials(vec![("标题".into(), "正文".into(), String::new())]);
+
+        app.request_lock();
+
+        assert!(fill_cancel.load(Ordering::Relaxed));
+        assert!(extraction_cancel.load(Ordering::Relaxed));
+        assert!(app.task_ui.fill_discard && app.task_ui.discard_extraction);
+        assert!(app.task_auto_queue.is_empty());
+    }
+
     #[test]
     fn task_assistant_import_queue_limits_before_cloning_materials() {
         assert!(!can_add_material(&[], &"x".repeat(MAX_SOURCE_BYTES + 1)));

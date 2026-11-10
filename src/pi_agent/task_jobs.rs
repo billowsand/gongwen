@@ -13,6 +13,7 @@
 //! 材料按 Pi 的单文件上限（512 KiB）拆分，最多 20 份、合计 4 MiB；整份原文仍留在
 //! Rust 侧做指纹与证据核对，程序不截断原文。
 
+use super::materials::MAX_MATERIAL_BYTES;
 use super::{
     MaterialRole, PiBridge, PiEvent, PiJob, PiMaterialInput, PiModel, PiOutcome, PiRunLog,
     PiRunRecord, PiRuntime, PiTask, PiToolContext, PiWorkspace, pi_skills,
@@ -27,13 +28,9 @@ use std::sync::{
 };
 use std::time::Duration;
 
-/// 单份材料文件的上限：Pi 的材料快照限制（`materials::MAX_MATERIAL_BYTES`）。
-const MATERIAL_CHUNK_BYTES: usize = 512 * 1024;
-/// 一轮最多几份材料文件：Pi 的 `materials::MAX_MATERIALS`。
-const MAX_MATERIAL_FILES: usize = 20;
-/// 任务作业的运行目录分组：0 留给风格学习，1/2 分别给整理与填写，各自独立清理。
-const EXTRACT_DOC_KEY: u64 = 1;
-const FILL_DOC_KEY: u64 = 2;
+/// 任务作业使用保留的目录键，避开从 1 递增的稿件标签键与风格学习的 0。
+const EXTRACT_DOC_KEY: u64 = u64::MAX;
+const FILL_DOC_KEY: u64 = u64::MAX - 1;
 /// 与写作一致的单轮执行上限。
 const TIMEOUT: Duration = Duration::from_secs(1800);
 
@@ -61,20 +58,13 @@ fn material_files(title: &str, source: &str) -> Result<Vec<PiMaterialInput>, Str
     let mut ranges = Vec::new();
     let mut start = 0usize;
     while start < source.len() {
-        if ranges.len() >= MAX_MATERIAL_FILES {
-            return Err(format!(
-                "材料超过 {} 份（每份 {:.0} KiB），请拆分后再整理",
-                MAX_MATERIAL_FILES,
-                MATERIAL_CHUNK_BYTES as f64 / 1024.0
-            ));
-        }
-        let mut end = (start + MATERIAL_CHUNK_BYTES).min(source.len());
+        let mut end = (start + MAX_MATERIAL_BYTES).min(source.len());
         if end < source.len() {
             // 后退到字符边界，再优先在段落、其次在换行处切开，少切碎一句话。
             while end > start && !source.is_char_boundary(end) {
                 end -= 1;
             }
-            let mut floor = start + MATERIAL_CHUNK_BYTES / 2;
+            let mut floor = start + MAX_MATERIAL_BYTES / 2;
             while floor < end && !source.is_char_boundary(floor) {
                 floor += 1;
             }
@@ -88,7 +78,10 @@ fn material_files(title: &str, source: &str) -> Result<Vec<PiMaterialInput>, Str
         if end <= start {
             return Err("材料里有一段超过单份上限且切不开，请拆分后再整理".into());
         }
-        ranges.push((start, end));
+        // 材料快照拒收纯空白文件。空白仍保留在原文中供证据核对。
+        if !source[start..end].trim().is_empty() {
+            ranges.push((start, end));
+        }
         start = end;
     }
     let total = ranges.len();
@@ -142,6 +135,7 @@ fn prepare(
     request: String,
     materials: Vec<PiMaterialInput>,
     catalog: &pi_skills::Catalog,
+    today: &str,
 ) -> Result<Prepared, String> {
     let JobSpec {
         skill,
@@ -151,7 +145,6 @@ fn prepare(
     let runtime = PiRuntime::locate()?;
     let chat = config.pi_chat().map_err(|error| error.to_string())?;
     let model = crate::ai_panel::pi_job::pi_model(&chat)?;
-    let today = today();
     let (workspace, metas) = PiWorkspace::prepare(
         &super::base_dir()?,
         doc_key,
@@ -184,7 +177,7 @@ fn prepare(
         None,
         &request,
         kind,
-        &today,
+        today,
         Some(skill),
         None,
         metas.clone(),
@@ -203,7 +196,7 @@ fn prepare(
         task: PiTask {
             request,
             kind: kind.to_string(),
-            system_date: today,
+            system_date: today.to_string(),
             skill: Some(skill.to_string()),
             strategy: Default::default(),
             capability: Default::default(),
@@ -267,11 +260,8 @@ pub(crate) fn extract(
     }
     let catalog = pi_skills::load_catalog();
     catalog.resolve(Some(pi_skills::TASK_EXTRACT_SKILL))?;
-    let known = Store::open(&store_path)
-        .map_err(|error| format!("打开任务库失败：{error:#}"))?
-        .list(true)
-        .map_err(|error| format!("读取现有任务失败：{error:#}"))?;
     let materials = material_files(&title, &source)?;
+    let today = today();
     let request = format!(
         "按技能 {} 整理这批材料里的工作事项，最后用 submit_task 交 work/task.json。\
          材料共 {} 份，事实只来自这些材料；用 task_search / task_read 核对已有任务，\
@@ -279,7 +269,6 @@ pub(crate) fn extract(
          今天日期：{today}。材料标题：{title}。",
         pi_skills::TASK_EXTRACT_SKILL,
         materials.len(),
-        today = today(),
         title = title,
     );
     let prepared = prepare(
@@ -293,6 +282,7 @@ pub(crate) fn extract(
         request,
         materials,
         &catalog,
+        &today,
     )?;
     let outcome = run_job(prepared, &config, &cancel, on_progress)?;
     if cancel.load(Ordering::Relaxed) {
@@ -301,7 +291,10 @@ pub(crate) fn extract(
     let PiOutcome::Task(delivery) = outcome else {
         return Err("Pi 没有交回任务整理结果，未采纳。".into());
     };
-    let today = today();
+    // 工具查询实时任务库，复核也应使用交付时的任务列表。
+    let known = Store::open_read_only(&store_path)
+        .and_then(|store| store.list(true))
+        .map_err(|error| format!("读取现有任务失败：{error:#}"))?;
     match extract::parse_task_delivery(&delivery.content, &source, &today, &known)
         .map_err(|error| format!("{error:#}"))?
     {
@@ -337,12 +330,12 @@ pub(crate) fn fill(
         "risks": current.risks,
         "deadline": current.deadline,
     });
+    let today = today();
     let request = format!(
         "按技能 {} 从材料里填写这张任务表单，最后用 submit_task 交 work/task.json。\
          只填六栏，原文没有的留 null；已有值只在与原文冲突时给建议。\
          今天日期：{today}。当前表单值：{values}",
         pi_skills::TASK_FILL_SKILL,
-        today = today(),
     );
     let prepared = prepare(
         &config,
@@ -355,6 +348,7 @@ pub(crate) fn fill(
         request,
         material_files("填写材料", &source)?,
         &catalog,
+        &today,
     )?;
     let outcome = run_job(prepared, &config, &cancel, on_progress)?;
     if cancel.load(Ordering::Relaxed) {
@@ -363,7 +357,6 @@ pub(crate) fn fill(
     let PiOutcome::Task(delivery) = outcome else {
         return Err("Pi 没有交回表单填写结果，未采纳。".into());
     };
-    let today = today();
     match extract::parse_task_delivery(&delivery.content, &source, &today, &[])
         .map_err(|error| format!("{error:#}"))?
     {
@@ -378,13 +371,13 @@ mod tests {
 
     #[test]
     fn material_chunks_respect_pi_limits_and_char_boundaries() {
-        let text = "字".repeat(MATERIAL_CHUNK_BYTES); // 每字 3 字节，超过单份上限
+        let text = "字".repeat(MAX_MATERIAL_BYTES); // 每字 3 字节，超过单份上限
         let files = material_files("材料", &text).unwrap();
         assert!(files.len() >= 2);
         assert!(
             files
                 .iter()
-                .all(|file| file.text.len() <= MATERIAL_CHUNK_BYTES)
+                .all(|file| file.text.len() <= MAX_MATERIAL_BYTES)
         );
         assert_eq!(
             files.iter().map(|file| file.text.len()).sum::<usize>(),
@@ -407,9 +400,12 @@ mod tests {
     }
 
     #[test]
-    fn too_many_chunks_are_rejected() {
-        // 每块约 256 KiB（汉字 3 字节 → 约 87k 字），21 块超过 Pi 的 20 份上限。
-        let text = "字".repeat((MATERIAL_CHUNK_BYTES / 3 / 2) * 21);
-        assert!(material_files("材料", &text).is_err());
+    fn whitespace_only_chunk_does_not_invalidate_material() {
+        let text = format!("{}台账待整理", " ".repeat(MAX_MATERIAL_BYTES));
+        let files = material_files("材料", &text).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].text, "台账待整理");
+        let temp = tempfile::tempdir().unwrap();
+        super::super::materials::write_all(temp.path(), &files).unwrap();
     }
 }

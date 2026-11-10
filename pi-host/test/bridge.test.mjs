@@ -135,7 +135,7 @@ test("cancelling rejects every waiter and is not a success", async () => {
   assert.equal(bridge.pending(), 0);
 });
 
-test("domain tools include every Rust-backed read-only tool plus doc_elements", () => {
+test("writing domain tools exclude the task database", () => {
   const names = DOMAIN_TOOLS.map(([name]) => name);
   for (const name of [
     "kb_search",
@@ -152,7 +152,8 @@ test("domain tools include every Rust-backed read-only tool plus doc_elements", 
   }
   const events = [];
   const tools = createDomainTools(createToolBridge({ emit: (event) => events.push(event) }));
-  assert.equal(tools.length, names.length + 1, "领域工具 + ask_user");
+  const writingNames = names.filter((name) => name !== "task_search" && name !== "task_read");
+  assert.deepEqual(tools.map((tool) => tool.name), [...writingNames, "ask_user"]);
   assert.ok(!names.includes("bash"), "不向模型提供 shell");
   // 风格工具只是读档案，没有写、没有保存、没有第二个模型。
   const styleTools = tools.filter((tool) => ["style_list", "style_read"].includes(tool.name));

@@ -821,6 +821,13 @@ fn task_assistant_dates_must_match_the_source_and_the_nearest_year() {
     // 原文写了年份或完整日期就照原文。
     assert!(date_supported("2027年1月5日启动", "2027-01-05", today));
     assert!(date_supported("截止 2026-11-15", "2026-11-15", today));
+    assert!(!date_supported("2025年12月15日前完成", "2026-12-15", today));
+    assert!(!date_supported("11月5日前完成", "2027-01-05", today));
+    assert!(date_supported(
+        "2025年12月15日启动，12月15日前完成",
+        "2026-12-15",
+        today
+    ));
     // 原文没有这个日期：不认（相对说法如「下周五」不能被换算成某一天）。
     assert!(!date_supported("下周五前发出", "2026-11-06", today));
 }

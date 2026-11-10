@@ -249,11 +249,13 @@ function textResult(value) {
  * 把领域工具注册成 Durable 工具；执行时都走同一座桥。
  *
  * `only` 是可选白名单（工具名数组）：只挂名单里的工具，并同样限制 `ask_user`。
- * 不传时挂全部，保持旧行为。
+ * 不传时挂写作领域工具，任务库工具必须显式列入白名单。
  */
 export function createDomainTools(bridge, { readDocument, readChars, onAnswer, onResult, only } = {}) {
   const allowed = Array.isArray(only) ? new Set(only) : undefined;
-  const tools = DOMAIN_TOOLS.filter(([name]) => !allowed || allowed.has(name)).map(([name, description, parameters]) =>
+  const tools = DOMAIN_TOOLS.filter(([name]) =>
+    allowed ? allowed.has(name) : name !== "task_search" && name !== "task_read",
+  ).map(([name, description, parameters]) =>
     defineTool({
       name,
       description,

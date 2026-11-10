@@ -89,9 +89,8 @@ pub(crate) fn workspace_usage() -> Result<(u64, usize), String> {
 }
 
 /// 清理旧工作区：每个 `doc-*` 下保留最新 `keep_per_doc` 个运行目录，其余只删
-/// 「mtime 超过 `min_age`」且「已接受（写进正文过）」的轮次；`run.json` 读不出的
-/// 孤儿目录额外要求超过 1 小时。Rust 正持着 `rust-owner.lock` 的目录不删，
-/// Running / Interrupted / Failed / Parked / Delivered 也不删——它们是「接着写」的依据。
+/// mtime 超过 `min_age` 的已接受写作轮次、已结束的任务助手作业和孤儿目录。
+/// 孤儿目录额外要求超过 1 小时；仍可续写的稿件轮次与持有 `rust-owner.lock` 的目录保留。
 ///
 /// 清理前同样先纠正「Running 但没有活动宿主」的旧状态；纠正失败直接返回错误，
 /// 不在状态不明时继续删目录。
@@ -149,7 +148,13 @@ pub(crate) fn prune_workspaces(
             }
             match super::recovery::PiRunRecord::read_from(&run_dir) {
                 Ok(record) if record.status == super::recovery::PiRunStatus::Accepted => {}
-                // 有记录但不是「已接受」：这是接着写的依据，不删。
+                Ok(record)
+                    if record.status != super::recovery::PiRunStatus::Running
+                        && record
+                            .skill
+                            .as_deref()
+                            .is_some_and(super::pi_skills::is_task_skill) => {}
+                // 保留其余有记录的轮次，写作可以从中恢复。
                 Ok(_) => continue,
                 // 只有确认 run.json 不存在才算孤儿。损坏、权限错误等不等于没有记录，
                 // 里面仍可能有尚未取回的成品，不能自动删除。
@@ -550,6 +555,36 @@ mod tests {
         assert_eq!((count, freed), (0, 0));
         assert!(other_newest.exists());
         drop(held_lock);
+    }
+
+    #[test]
+    fn prune_can_remove_old_task_jobs_without_removing_recoverable_writing() {
+        let (_config, _reset) = isolated_config_dir();
+        let doc = base_dir().unwrap().join("doc-1");
+        let task = fake_run(
+            &doc,
+            "run-1",
+            super::super::recovery::PiRunStatus::Delivered,
+        );
+        let writing = fake_run(
+            &doc,
+            "run-2",
+            super::super::recovery::PiRunStatus::Delivered,
+        );
+        let mut record = super::super::recovery::PiRunRecord::read_from(&task).unwrap();
+        record.skill = Some(super::super::pi_skills::TASK_EXTRACT_SKILL.into());
+        record
+            .write(&PiWorkspace {
+                root: task.join("workspace"),
+                state: task.join("pi/session"),
+                run: task.clone(),
+                label: record.workspace.clone(),
+            })
+            .unwrap();
+
+        assert_eq!(prune_workspaces(1, std::time::Duration::ZERO).unwrap().0, 1);
+        assert!(!task.exists());
+        assert!(writing.exists());
     }
 
     #[test]

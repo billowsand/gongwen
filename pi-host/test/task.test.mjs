@@ -145,9 +145,12 @@ test("任务交付 JSON 校验 mode、形状与体积上限", () => {
 
   assert.throws(() => validateTaskPayload(JSON.stringify({ ...EXTRACT, mode: "fill" }), "gongwen-task-extract"), /mode/);
   assert.throws(() => validateTaskPayload(JSON.stringify({ mode: "extract" }), "gongwen-task-extract"), /items/);
+  assert.throws(() => validateTaskPayload(JSON.stringify({ ...EXTRACT, items: Array(101).fill(EXTRACT.items[0]) }), "gongwen-task-extract"), /最多 100 条/);
+  assert.throws(() => validateTaskPayload(JSON.stringify({ ...EXTRACT, notes: [42] }), "gongwen-task-extract"), /字符串数组/);
   assert.throws(() => validateTaskPayload(JSON.stringify({ mode: "extract", items: [{ kind: "bogus", evidence: "原文" }] }), "gongwen-task-extract"), /kind/);
   assert.throws(() => validateTaskPayload(JSON.stringify({ mode: "extract", items: [{ kind: "new_task", evidence: "" }] }), "gongwen-task-extract"), /evidence/);
   assert.throws(() => validateTaskPayload(JSON.stringify({ mode: "fill", fields: { name: { value: "台账" } } }), "gongwen-task-fill"), /evidence/);
+  assert.throws(() => validateTaskPayload(JSON.stringify({ mode: "fill", fields: { name: { value: null, evidence: "台账" } } }), "gongwen-task-fill"), /非空字符串/);
   assert.throws(() => validateTaskPayload(JSON.stringify({ mode: "fill", fields: { bogus: null } }), "gongwen-task-fill"), /未知栏目/);
   assert.throws(() => validateTaskPayload(JSON.stringify([]), "gongwen-task-extract"), /JSON 对象/);
   assert.throws(() => validateTaskPayload("x".repeat(TASK_MAX_BYTES + 1), "gongwen-task-extract"), /上限/);

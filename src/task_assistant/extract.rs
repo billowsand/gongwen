@@ -46,7 +46,17 @@ pub fn date_supported(source: &str, date: &str, today: &str) -> bool {
     {
         return true;
     }
-    if !month_days.iter().any(|md| text.contains(md.as_str())) {
+    if !month_days.iter().any(|md| {
+        text.match_indices(md).any(|(start, _)| {
+            let prefix = &text[..start];
+            // 「2025年12月15日」不能当成未写年份的「12月15日」；
+            // 「11月5日」也不能为「1月5日」提供依据。
+            !prefix.ends_with(|c: char| c.is_ascii_digit())
+                && !prefix
+                    .strip_suffix('年')
+                    .is_some_and(|year| year.ends_with(|c: char| c.is_ascii_digit()))
+        })
+    }) {
         return false;
     }
     let nearest = [now.year(), now.year() + 1]

@@ -1079,8 +1079,6 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     // 快照（pi.live + 条目窗口），由 activity 模块 diff 出原 watchEvents 的语义。
     stream = await root.watch(controller.context, { min: 200, max: 400 });
     const showActivity = observeActivity(config.task, emit);
-    // chord 的 watch 监听器在 1.5 收 `{kind:"value", value, ops}` 帧，1.4 直接收
-    // 视图快照；两种形状都接住（本地开发 node_modules 与随包运行时可能不同版本）。
     const activityHooks = {
       onRetry: (attempt) =>
         emit({ type: "progress", message: `模型调用失败，正在重试（第 ${attempt} 次）` }),
@@ -1099,12 +1097,9 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       // 初始帧解析失败只丢一行展示，不阻断本轮。
     }
     stream.start(async (call) => {
-      const value = call && typeof call === "object" && "kind" in call
-        ? call.kind === "value" ? call.value : undefined
-        : call;
-      if (value === undefined) return;
+      if (call.kind !== "value") return;
       try {
-        showActivity.update(value, activityHooks);
+        showActivity.update(call.value, activityHooks);
       } catch {
         // 活动行只是展示：单帧解析失败不能让 watch 以 listener_error 结束，
         // 否则后续进度会静默丢失（交付结论仍由提交 / 结算的竞速保证）。

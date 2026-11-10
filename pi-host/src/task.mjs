@@ -8,6 +8,8 @@
 export const TASK_SUBMIT_TOOL_NAME = "submit_task";
 /** 任务交付 JSON 的上限，与 Rust 侧 `MAX_TASK_DELIVERY_BYTES` 一致。 */
 export const TASK_MAX_BYTES = 2 * 1024 * 1024;
+/** 与 Rust 的 MAX_CANDIDATES 一致。超限时让模型在提交前修正。 */
+const TASK_MAX_CANDIDATES = 100;
 /** 表单填写只认这六栏。 */
 export const TASK_FIELDS = ["name", "owner", "progress", "next_step", "risks", "deadline"];
 /** 材料整理允许的候选类型。 */
@@ -50,6 +52,9 @@ function requireEvidence(value, label) {
 
 function validateExtract(value) {
   if (!Array.isArray(value.items)) throw new Error("材料整理结果必须包含 items 数组");
+  if (value.items.length > TASK_MAX_CANDIDATES) {
+    throw new Error(`items 最多 ${TASK_MAX_CANDIDATES} 条，请合并重复事项`);
+  }
   for (const [index, item] of value.items.entries()) {
     const label = `items 第 ${index + 1} 项`;
     if (!isPlainObject(item)) throw new Error(`${label}必须是对象`);
@@ -58,7 +63,6 @@ function validateExtract(value) {
     }
     requireEvidence(item.evidence, label);
   }
-  if (value.notes !== undefined && !Array.isArray(value.notes)) throw new Error("notes 必须是数组");
 }
 
 function validateFill(value) {
@@ -70,15 +74,14 @@ function validateFill(value) {
     const field = value.fields[key];
     if (field === undefined || field === null) continue;
     if (!isPlainObject(field)) throw new Error(`fields.${key} 必须是 null 或 {value,evidence}`);
-    if (field.value !== undefined && field.value !== null && typeof field.value !== "string") {
-      throw new Error(`fields.${key}.value 必须是字符串或 null`);
+    if (typeof field.value !== "string" || field.value.trim() === "") {
+      throw new Error(`fields.${key}.value 必须是非空字符串，无值时将该栏写成 null`);
     }
     requireEvidence(field.evidence, `fields.${key} `);
   }
-  if (value.others !== undefined && (!Number.isSafeInteger(value.others) || value.others < 0)) {
-    throw new Error("others 必须是非负整数");
+  if (value.others !== undefined && (!Number.isSafeInteger(value.others) || value.others < 0 || value.others > TASK_MAX_CANDIDATES)) {
+    throw new Error(`others 必须是 0 至 ${TASK_MAX_CANDIDATES} 的整数`);
   }
-  if (value.notes !== undefined && !Array.isArray(value.notes)) throw new Error("notes 必须是数组");
 }
 
 /**
@@ -102,6 +105,9 @@ export function validateTaskPayload(text, skill) {
   if (!isPlainObject(value)) throw new Error("任务文件必须是 JSON 对象");
   if (value.mode !== mode) {
     throw new Error(`任务文件的 mode 必须是 "${mode}"，收到 ${JSON.stringify(value.mode ?? null)}`);
+  }
+  if (value.notes !== undefined && (!Array.isArray(value.notes) || value.notes.some(note => typeof note !== "string"))) {
+    throw new Error("notes 必须是字符串数组");
   }
   if (mode === "extract") validateExtract(value);
   else validateFill(value);

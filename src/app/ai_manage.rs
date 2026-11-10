@@ -617,7 +617,7 @@ impl GongwenApp {
             ui,
             "工作区",
             Some(
-                "Pi 的工作区随轮次累积。清理只删已写入正文的旧轮次和孤儿目录，每篇稿件保留最近三轮与还没交付的轮次。",
+                "清理会保留每篇稿件、任务整理和任务填写各自最近三轮。超过七天的已写入正文轮次、已结束的任务助手作业和孤儿目录可清理。",
             ),
             |ui| {
                 ui.label(egui::RichText::new(&usage).color(theme::text_muted()));
@@ -877,7 +877,7 @@ impl GongwenApp {
         });
     }
 
-    /// 清理旧 Pi 工作区：每篇稿件保留最近 3 轮，只删已写入正文的旧轮次与孤儿目录。
+    /// 清理旧 Pi 工作区，保留每组最近 3 轮。
     fn start_pi_workspace_prune(&mut self) {
         if self.pi_workspace_busy {
             return;

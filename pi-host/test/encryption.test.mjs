@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { commitWrites } from "@earendil-works/pi-durable/testing";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -31,11 +32,6 @@ const VECTOR_HEX = "47574132000102030405060708090a0b642232a458006d9d6bec346d276e
 
 /// 直接提交一批写入。仓库里的开发 node_modules 可能是 1.4（`commit(writes, context)`），
 /// 随包运行时是 1.5（`commit(batches, receive, context)`）；按函数参数个数分派。
-async function commitWrites(storage, writes, context) {
-  if (storage.commit.length >= 3) return storage.commit([writes], () => {}, context);
-  return storage.commit(writes, context);
-}
-
 function fixture(slot = "real") {
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "gongwen-pi-encrypted-")));
   const first = slot === "decoy" ? "alt-pi" : "pi";

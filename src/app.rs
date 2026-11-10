@@ -920,9 +920,6 @@ impl GongwenApp {
         self.poll_worker(&ctx);
         self.poll_task_extraction(&ctx);
         self.poll_task_fill(&ctx);
-        if self.task_fill_rx.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        }
         self.poll_writing_tasks(&ctx);
         // 系统文件对话框在后台线程开窗，这里问一次结果；用户挑完再接着做那件事。
         self.poll_file_dialogs(&ctx);
@@ -1153,6 +1150,7 @@ impl GongwenApp {
             return;
         }
         self.cancel_pi_tasks();
+        self.task_auto_queue.clear();
         self.lock_requested = true;
     }
 
@@ -1204,7 +1202,7 @@ impl GongwenApp {
         }
     }
 
-    /// 停掉在跑的 Pi 写作（锁定与关窗共用）：取消标志置位、在途回执作废、
+    /// 停掉在跑的 Pi 作业（锁定与关窗共用）：取消标志置位、在途回执作废、
     /// Pi 子进程由 host 收尾退出。关窗不能在 UI 线程固定睡眠等待。
     pub(crate) fn cancel_pi_tasks(&mut self) {
         for index in 0..self.docs.len() {
@@ -1212,6 +1210,14 @@ impl GongwenApp {
         }
         // 设置页的风格学习与「测试写作能力」也是 Pi 进程：一起取消。
         self.styles_page.cancel_learning();
+        if let Some(job) = &self.task_extraction_job {
+            self.task_ui.discard_extraction = true;
+            job.stop();
+        }
+        if let Some(job) = &self.task_fill_job {
+            self.task_ui.fill_discard = true;
+            job.stop();
+        }
         if let Some(cancel) = &self.pi_calibration_cancel {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }

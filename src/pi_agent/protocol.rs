@@ -8,7 +8,7 @@ use super::materials::PiMaterialMeta;
 /// 直接拒绝新 init，恢复时也不会拿旧 host 去开原工作区。
 pub(crate) const PROTOCOL_VERSION: u32 = 4;
 /// host 版本；运行记录里存一份，恢复时不一致就拒绝在原工作区接着写。
-pub(crate) const HOST_VERSION: &str = "0.5.0";
+pub(crate) const HOST_VERSION: &str = "0.5.1";
 /// 宿主与 Rust 共同对账的领域工具额度：常规上限与分阶段绝对硬上限。
 pub(crate) const MAX_REGULAR_TOOL_CALLS: usize = 60;
 pub(crate) const MAX_TOTAL_TOOL_CALLS: usize = 84;

@@ -875,7 +875,11 @@ impl AppShell {
                         }
                     }
                 } else if app.take_lock_requested() {
-                    if let Err(error) = app.save_before_lock() {
+                    if app.task_extraction_rx.is_some() || app.task_fill_rx.is_some() {
+                        // Pi 的停止由后台收尾，收完结果再释放工作区与密钥。
+                        app.request_lock();
+                        None
+                    } else if let Err(error) = app.save_before_lock() {
                         app.status = format!("锁定前保存失败，工作区仍保持打开：{error:#}");
                         None
                     } else {
