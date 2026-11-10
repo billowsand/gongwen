@@ -22,6 +22,7 @@ pub(crate) enum NavPage {
     ImeTable,
     AiPrompts,
     Knowledge,
+    Wiki,
     Settings,
     Help,
 }
@@ -47,6 +48,7 @@ impl NavPage {
             Self::ImeTable => "ime_table",
             Self::AiPrompts => "ai_prompts",
             Self::Knowledge => "knowledge",
+            Self::Wiki => "wiki",
             Self::Settings => "settings",
             Self::Help => "help",
         }
@@ -62,6 +64,7 @@ impl NavPage {
             "ime_table" => Some(Self::ImeTable),
             "ai_prompts" => Some(Self::AiPrompts),
             "knowledge" => Some(Self::Knowledge),
+            "wiki" => Some(Self::Wiki),
             "settings" => Some(Self::Settings),
             "help" => Some(Self::Help),
             _ => None,
@@ -77,7 +80,8 @@ impl NavPage {
             Self::Lexicon => "公文词表",
             Self::ImeTable => "输入法词表",
             Self::AiPrompts => "AI 管理",
-            Self::Knowledge => "知识库",
+            Self::Knowledge => "资料库",
+            Self::Wiki => "知识库",
             Self::Settings => "设置",
             Self::Help => "使用帮助",
         }
@@ -93,6 +97,7 @@ impl NavPage {
             Self::ImeTable => theme::Icon::Hash,
             Self::AiPrompts => theme::Icon::WandSparkles,
             Self::Knowledge => theme::Icon::PackageOpen,
+            Self::Wiki => theme::Icon::BookmarkCheck,
             Self::Settings => theme::Icon::Settings,
             Self::Help => theme::Icon::HelpCircle,
         }

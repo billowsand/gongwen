@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>公文助手 · 知识库界面设计稿（可点原型）</title>
+<style>
+  :root {
+    --chrome: #f5f4f8;
+    --surface: #ffffff;
+    --page-bg: #faf9fc;
+    --soft-head: #fbfafd;
+    --hover: #f2f0f7;
+    --btn-bg: #eceaf2;
+    --btn-hover: #dfdce8;
+    --newrow: #fdf8ef;
+    --toast-bg: #2a2438;
+    --toast-ink: #ffffff;
+    --ink: #26222e;
+    --ink-2: #5c5666;
+    --ink-3: #8b8496;
+    --line: #e5e2ec;
+    --accent: #6d5ae0;
+    --accent-soft: #efecfc;
+    --accent-hover: #5a48c9;
+    --ok: #1d7f4e;
+    --warn: #b45309;
+    --danger: #b3352c;
+    --danger-soft: #fdeeee;
+    --add-bg: #e8f6ee;
+    --add-line: #1d7f4e;
+    --del-bg: #fdeeee;
+    --del-line: #b3352c;
+    --radius: 9px;
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  }
+  /* 深色：演示「跟随主题」——暗色表下同一套语义变量换值，界面无独立配色 */
+  [data-theme="dark"] {
+    --chrome: #1c1a22;
+    --surface: #262330;
+    --page-bg: #201d29;
+    --soft-head: #2b2837;
+    --hover: #332f40;
+    --btn-bg: #37334a;
+    --btn-hover: #423d58;
+    --newrow: #33301f;
+    --toast-bg: #e8e6ef;
+    --toast-ink: #26222e;
+    --ink: #e9e6f0;
+    --ink-2: #b8b2c6;
+    --ink-3: #8d879c;
+    --line: #3d3850;
+    --accent: #a394f7;
+    --accent-soft: #373354;
+    --accent-hover: #b3a6ff;
+    --ok: #5cc98e;
+    --warn: #d9a05b;
+    --danger: #e0857f;
+    --danger-soft: #4a2f31;
+    --add-bg: #1f3a2c;
+    --del-bg: #43282b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: var(--ink);
+    background: var(--chrome);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; }
+  input, textarea { font: inherit; color: inherit; }
+
+  /* ===== 原型外壳：屏幕切换 ===== */
+  .proto-nav {
+    position: fixed; left: 0; top: 0; bottom: 0; width: 168px;
+    background: #211d2b; color: #cfc9dd; padding: 14px 10px; z-index: 50;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .proto-nav .brand { font-size: 13px; color: #fff; padding: 4px 10px 12px; }
+  .proto-nav .brand small { display: block; color: #8f88a3; font-size: 11px; margin-top: 2px; }
+  .proto-nav button {
+    text-align: left; padding: 8px 10px; border-radius: 7px; font-size: 13px;
+    color: #cfc9dd; transition: background .15s;
+  }
+  .proto-nav button:hover { background: #322c40; }
+  .proto-nav button.on { background: var(--accent); color: #fff; }
+  .proto-nav .note { margin-top: auto; font-size: 11px; color: #8f88a3; padding: 8px 10px; line-height: 1.5; }
+  .screen { display: none; margin-left: 168px; height: 100vh; }
+  .screen.on { display: flex; flex-direction: column; }
+
+  /* ===== 通用组件 ===== */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 13px; border-radius: var(--radius); font-size: 13px;
+    background: var(--btn-bg); color: var(--ink); transition: background .15s; white-space: nowrap;
+  }
+  .btn:hover { background: var(--btn-hover); }
+  .btn.primary { background: var(--accent); color: #fff; }
+  .btn.primary:hover { background: var(--accent-hover); }
+  .btn.ghost { background: transparent; border: 1px solid var(--line); }
+  .btn.ghost:hover { border-color: var(--ink-3); }
+  .btn.danger-ghost { background: transparent; border: 1px solid #e5b8b4; color: var(--danger); }
+  .btn.danger-ghost:hover { background: var(--danger-soft); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; line-height: 1.6;
+    background: var(--btn-bg); color: var(--ink-2); white-space: nowrap;
+  }
+  .badge.accent { background: var(--accent-soft); color: var(--accent); }
+  .badge.ok { background: var(--add-bg); color: var(--ok); }
+  .badge.warn { background: #fdf1e3; color: var(--warn); }
+  .badge.danger { background: var(--danger-soft); color: var(--danger); }
+  .badge.redlink { background: #fdf1e3; color: var(--warn); border: 1px dashed #d8a25e; }
+  .icon-btn {
+    width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 7px; color: var(--ink-2); transition: background .15s; flex: none;
+  }
+  .icon-btn:hover { background: var(--hover); }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+  .empty {
+    padding: 40px 24px; text-align: center; color: var(--ink-3); font-size: 13px; line-height: 2;
+  }
+
+  /* ===== 工具条 ===== */
+  .toolbar {
+    display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+    background: var(--chrome); border-bottom: 1px solid var(--line); flex: none;
+  }
+  .toolbar .spacer { flex: 1; }
+  .search {
+    display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 5px 10px; width: 240px; color: var(--ink-3);
+  }
+  .search input { border: 0; outline: 0; flex: 1; font-size: 13px; background: none; }
+  .inbox-btn { position: relative; }
+  .inbox-btn .count {
+    position: absolute; top: -5px; right: -6px; background: var(--danger); color: #fff;
+    font-size: 10px; min-width: 16px; height: 16px; border-radius: 999px;
+    display: flex; align-items: center; justify-content: center; padding: 0 4px;
+  }
+
+  /* ===== 知识库主界面三栏 ===== */
+  .main3 { display: flex; flex: 1; min-height: 0; }
+  .tree {
+    width: 250px; flex: none; background: var(--surface); border-right: 1px solid var(--line);
+    overflow-y: auto; padding: 10px 8px;
+  }
+  .tree .head { display: flex; align-items: center; justify-content: space-between; padding: 2px 8px 10px; }
+  .tree .head b { font-size: 13px; }
+  .tree .mini { font-size: 11px; color: var(--ink-3); padding: 0 8px 8px; }
+  .tnode { user-select: none; }
+  .tnode > .row {
+    display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 7px;
+    cursor: pointer; font-size: 13px; transition: background .12s;
+  }
+  .tnode > .row:hover { background: var(--hover); }
+  .tnode > .row.sel { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .tnode > .row .caret { width: 14px; flex: none; color: var(--ink-3); font-size: 10px; transition: transform .15s; }
+  .tnode > .row .caret.open { transform: rotate(90deg); }
+  .tnode .kind { font-size: 10px; color: var(--ink-3); flex: none; }
+  .tnode .kids { margin-left: 16px; }
+  .tnode.hidden-kids > .kids { display: none; }
+
+  .reader-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--page-bg); }
+  .reader { flex: 1; overflow-y: auto; padding: 26px 34px 60px; }
+  .reader .crumb { font-size: 12px; color: var(--ink-3); margin-bottom: 10px; display: flex; gap: 6px; align-items: center; }
+  .reader .crumb a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  .reader h1.pagetitle { font-size: 24px; line-height: 1.4; margin-bottom: 8px; }
+  .reader .meta { display: flex; gap: 8px; align-items: center; color: var(--ink-3); font-size: 12px; margin-bottom: 22px; flex-wrap: wrap; }
+  .reader .prose { max-width: 46em; font-size: 14.5px; line-height: 1.9; color: #33303b; }
+  .reader .prose p { margin: 0 0 14px; }
+  .reader .prose h2 { font-size: 17px; margin: 26px 0 10px; }
+  .reader .prose ul { margin: 0 0 14px 22px; }
+  .reader .prose li { margin-bottom: 4px; }
+  .wikilink {
+    color: var(--accent); cursor: pointer; border-bottom: 1px dashed var(--accent);
+    padding: 0 1px; border-radius: 3px;
+  }
+  .wikilink:hover { background: var(--accent-soft); }
+  .wikilink.red { color: var(--warn); border-bottom-color: var(--warn); }
+  .srcmark {
+    color: var(--accent); font-size: 11px; vertical-align: super; cursor: help;
+    padding: 0 2px; border-radius: 3px;
+  }
+  .srcmark:hover { background: var(--accent-soft); }
+
+  .rail {
+    width: 240px; flex: none; background: var(--surface); border-left: 1px solid var(--line);
+    display: flex; flex-direction: column; transition: width .18s;
+  }
+  .rail.collapsed { width: 40px; }
+  .rail.collapsed .rail-body, .rail.collapsed .rail-head span { display: none; }
+  .rail-head {
+    display: flex; align-items: center; gap: 6px; padding: 10px 8px 10px 12px;
+    border-bottom: 1px solid var(--line); font-size: 13px; font-weight: 600; flex: none;
+  }
+  .rail-head .spacer { flex: 1; }
+  .rail-body { overflow-y: auto; padding: 8px; }
+  .backlink { padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; }
+  .backlink:hover { background: var(--hover); }
+  .backlink .from { color: var(--accent); font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+  .backlink .ctx { font-size: 12px; color: var(--ink-2); line-height: 1.5; }
+  .refdoc { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border-radius: 8px; }
+  .refdoc:hover { background: var(--hover); }
+  .refdoc .nm { font-size: 13px; }
+  .refdoc .why { font-size: 12px; color: var(--ink-3); }
+
+  /* 依据提示浮层 */
+  #tip {
+    position: fixed; z-index: 90; display: none; max-width: 320px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+    box-shadow: 0 8px 28px rgba(30,20,60,.14); font-size: 12px; line-height: 1.6;
+  }
+  #tip b { display: block; margin-bottom: 4px; }
+  #tip .q { color: var(--ink-2); border-left: 2px solid var(--line); padding-left: 8px; margin-top: 4px; }
+
+  /* ===== 收件箱 + 审核台 ===== */
+  .inbox { flex: 1; overflow-y: auto; padding: 22px 28px; }
+  .inbox h2, .pagehead h2 { font-size: 18px; margin-bottom: 4px; }
+  .inbox .sub, .pagehead .sub { color: var(--ink-3); font-size: 12.5px; margin-bottom: 18px; }
+  .review-card {
+    display: flex; gap: 14px; align-items: flex-start; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; cursor: pointer; transition: border-color .15s;
+  }
+  .review-card:hover { border-color: var(--accent); }
+  .review-card .thumb { width: 38px; height: 38px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 17px; flex: none; }
+  .review-card .thumb.update { background: var(--add-bg); color: var(--ok); }
+  .review-card .tt { font-weight: 600; margin-bottom: 2px; }
+  .review-card .mm { font-size: 12.5px; color: var(--ink-2); }
+  .review-card .acts { margin-left: auto; display: flex; gap: 6px; flex: none; }
+
+  .review-desk { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .pagehead { padding: 16px 24px 0; flex: none; }
+  .desk { display: flex; flex: 1; min-height: 0; gap: 12px; padding: 14px 24px 20px; }
+  .desk .render, .desk .edit {
+    flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  }
+  .desk .col-head {
+    display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--line);
+    font-size: 12.5px; color: var(--ink-2); flex: none; background: var(--soft-head);
+  }
+  .desk .render-body { flex: 1; overflow-y: auto; padding: 18px 22px; }
+  .desk .render-body .prose { font-size: 14px; }
+  .desk textarea {
+    flex: 1; border: 0; outline: 0; resize: none; padding: 16px 18px; font-family: var(--mono);
+    font-size: 13px; line-height: 1.8; background: var(--surface); color: var(--ink);
+  }
+  .evidence-bar {
+    flex: none; display: flex; gap: 8px; align-items: center; padding: 10px 24px 14px; flex-wrap: wrap;
+  }
+  .evidence-bar .lbl { font-size: 12.5px; color: var(--ink-2); flex: none; }
+  .review-actions {
+    flex: none; display: flex; gap: 8px; align-items: center; padding: 12px 24px;
+    border-top: 1px solid var(--line); background: var(--surface);
+  }
+  .review-actions .hint { color: var(--ink-3); font-size: 12px; }
+
+  /* diff */
+  .diff { font-size: 13px; line-height: 1.8; }
+  .diff .add { background: var(--add-bg); border-radius: 4px; padding: 1px 6px; color: #14532d; display: inline; }
+  .diff .del { background: var(--del-bg); text-decoration: line-through; color: #7f1d1d; border-radius: 4px; padding: 1px 6px; }
+
+  /* ===== 框架建立 ===== */
+  .frame-wrap { flex: 1; overflow-y: auto; padding: 22px 28px; }
+  .frame-layout { display: flex; gap: 14px; align-items: flex-start; }
+  .frame-layout .tree-panel { flex: 1.2; min-width: 0; }
+  .frame-layout .basis-panel { flex: 1; min-width: 0; }
+  .fp-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 8px; font-size: 13px; }
+  .fp-row:hover { background: var(--hover); }
+  .fp-row input { accent-color: var(--accent); }
+  .fp-row .kids { margin-left: 26px; }
+  .fp-row .basis-n { margin-left: auto; font-size: 11px; color: var(--ink-3); flex: none; }
+  .fp-row .mv { color: var(--ink-3); cursor: grab; flex: none; }
+  .fp-row.sel { background: var(--accent-soft); }
+  .fp-row.sel b, .fp-row.sel { color: var(--accent); }
+  .fp-row .row-menu { display: none; gap: 4px; flex: none; }
+  .fp-row:hover .row-menu { display: inline-flex; }
+  .mini-btn {
+    font-size: 11px; padding: 1px 7px; border-radius: 6px; background: var(--btn-bg); color: var(--ink-2);
+  }
+  .mini-btn:hover { background: var(--accent); color: #fff; }
+  .name-input {
+    width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font-size: 14px;
+    background: var(--surface); color: var(--ink); outline: none; margin-top: 4px;
+  }
+  .name-input:focus { border-color: var(--accent); }
+  .theme-switch { padding: 10px; border-top: 1px solid #37324a; margin-top: 8px; }
+  .theme-switch span { font-size: 11px; color: #8f88a3; display: block; margin-bottom: 6px; }
+  .theme-switch div { display: flex; gap: 4px; }
+  .theme-switch button {
+    flex: 1; font-size: 12px; padding: 5px 0; border-radius: 7px; background: #322c40; color: #cfc9dd;
+  }
+  .theme-switch button.on { background: var(--accent); color: #fff; }
+  .basis-item { padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+  .basis-item:last-child { border-bottom: 0; }
+  .basis-item .d { font-weight: 600; }
+  .basis-item .r { color: var(--ink-2); margin-top: 2px; }
+  .basis-item .tags { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
+  .tabs { display: inline-flex; background: var(--btn-bg); border-radius: 9px; padding: 3px; gap: 2px; }
+  .tabs button { padding: 5px 14px; border-radius: 7px; font-size: 13px; color: var(--ink-2); }
+  .tabs button.on { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px rgba(20,10,50,.08); }
+  .paste-area {
+    width: 100%; min-height: 200px; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+    font-family: var(--mono); font-size: 13px; outline: none; background: var(--surface); color: var(--ink); line-height: 1.8;
+  }
+  .paste-area:focus { border-color: var(--accent); }
+
+  /* ===== 版本 ===== */
+  .ver-layout { display: flex; flex: 1; min-height: 0; }
+  .ver-list { width: 260px; flex: none; background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto; padding: 10px; }
+  .ver-item { padding: 10px 12px; border-radius: 9px; cursor: pointer; margin-bottom: 4px; border: 1px solid transparent; }
+  .ver-item:hover { background: var(--hover); }
+  .ver-item.sel { border-color: var(--accent); background: var(--accent-soft); }
+  .ver-item .v { font-weight: 600; font-size: 13px; display: flex; gap: 6px; align-items: center; }
+  .ver-item .w { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }
+  .ver-diff { flex: 1; overflow-y: auto; padding: 22px 30px; background: var(--page-bg); }
+  .ver-diff .panel { padding: 18px 22px; max-width: 52em; }
+
+  /* ===== 资料库 ===== */
+  .kb-wrap { flex: 1; overflow-y: auto; padding: 20px 26px; }
+  .doc-table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .doc-table th, .doc-table td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .doc-table th { background: var(--soft-head); color: var(--ink-2); font-weight: 600; font-size: 12.5px; }
+  .doc-table tr:last-child td { border-bottom: 0; }
+  .doc-table tr.newrow td { background: var(--newrow); }
+  .doc-table input { accent-color: var(--accent); }
+  .rel-chips { display: flex; gap: 4px; flex-wrap: wrap; }
+  .toast {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%); z-index: 99;
+    background: var(--toast-bg); color: var(--toast-ink); padding: 10px 18px; border-radius: 10px; font-size: 13px;
+    box-shadow: 0 10px 30px rgba(20,10,50,.25); opacity: 0; pointer-events: none; transition: opacity .2s;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- ================= 原型屏幕导航 ================= -->
+<nav class="proto-nav">
+  <div class="brand">知识库界面设计稿<small>可点原型 · 示例数据均为合成</small></div>
+  <button class="on" data-screen="s-lib">① 知识库主界面</button>
+  <button data-screen="s-frame">② 框架建立</button>
+  <button data-screen="s-inbox">③ 待审与审核台</button>
+  <button data-screen="s-ver">④ 版本历史</button>
+  <button data-screen="s-docs">⑤ 资料库标记</button>
+  <div class="theme-switch">
+    <span>配色跟随主题演示</span>
+    <div>
+      <button class="on" data-th="light">浅色</button>
+      <button data-th="dark">深色</button>
+    </div>
+  </div>
+  <div class="note">点击各屏内部按钮、链接、树节点均可交互。界面无独立配色：全部颜色取自当前主题的语义变量（含强调色），切主题即整体换色。</div>
+</nav>
+
+<!-- ================= ① 知识库主界面 ================= -->
+<section class="screen on" id="s-lib">
+  <div class="toolbar">
+    <b style="font-size:15px">知识库</b>
+    <span class="badge">维基 · 12 页 · 2 主题</span>
+    <div class="spacer"></div>
+    <div class="search">🔎 <input placeholder="搜索页面（语义检索）…" /></div>
+    <button class="btn ghost" onclick="go('s-frame')">从资料归纳框架</button>
+    <button class="btn ghost" onclick="go('s-frame');toast('切换到「导入大纲」页签')">导入框架</button>
+    <button class="btn ghost" onclick="toast('缺口清单：2 条待建页红链 · 1 个空分类')">缺口清单 <span class="badge warn">3</span></button>
+    <button class="btn primary inbox-btn" onclick="go('s-inbox')">☰ 待审收件箱<span class="count">3</span></button>
+  </div>
+  <div class="main3">
+    <!-- 左：框架树 -->
+    <aside class="tree">
+      <div class="head"><b>分类框架</b><button class="icon-btn" title="框架管理" onclick="toast('框架管理：增删主题/分类、改名（页面链接自动跟随）')">⚙</button></div>
+      <div class="mini">主题 → 分类 → 页面（▣ 为导览页）</div>
+      <div id="tree-root"></div>
+    </aside>
+    <!-- 中：阅读器 -->
+    <div class="reader-wrap">
+      <div class="reader" id="reader"></div>
+    </div>
+    <!-- 右：backlinks -->
+    <aside class="rail" id="rail">
+      <div class="rail-head">被引用<span class="spacer"></span><button class="icon-btn" onclick="document.getElementById('rail').classList.toggle('collapsed')">⇥</button></div>
+      <div class="rail-body" id="rail-body"></div>
+    </aside>
+  </div>
+</section>
+
+<!-- ================= ② 框架建立 ================= -->
+<section class="screen" id="s-frame">
+  <div class="toolbar">
+    <b style="font-size:15px">框架建立</b>
+    <span class="badge">2 主题 · 6 分类 · 依据资料库 24 篇</span>
+    <div class="tabs" style="margin-left:12px">
+      <button class="on" id="tab-ai" onclick="frameTab('ai')">从资料归纳</button>
+      <button id="tab-import" onclick="frameTab('import')">导入大纲</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="search" style="width:180px">🔎 <input placeholder="搜索主题 / 分类" /></div>
+    <button class="btn ghost" onclick="frameAddTheme()">＋ 新增主题</button>
+    <button class="btn ghost" onclick="go('s-lib')">取消</button>
+    <button class="btn primary" onclick="toast('框架已确认生效：可开始整编页面 →');go('s-lib')">确认框架</button>
+  </div>
+  <div class="frame-wrap">
+    <div id="frame-ai">
+      <div class="pagehead" style="padding:0 0 14px">
+        <h2>AI 归纳的框架提案 <span class="badge accent">gongwen-wiki-frame · 依据资料库 24 篇文档</span></h2>
+        <div class="sub">树即提案：直接在树上增删改、拖动调整（与标准词库页同一套树编辑控件）；点节点在右侧看归纳依据并改名。</div>
+      </div>
+      <div class="frame-layout">
+        <div class="panel tree-panel" style="padding:10px 6px" id="frame-tree"></div>
+        <div class="panel basis-panel">
+          <div class="col-head" style="border-bottom:1px solid var(--line)">节点详情 · 归纳依据</div>
+          <div style="padding:12px 14px" id="frame-detail"></div>
+        </div>
+      </div>
+    </div>
+    <div id="frame-import" style="display:none">
+      <div class="pagehead" style="padding:0 0 14px">
+        <h2>导入分类框架</h2>
+        <div class="sub">粘贴 Markdown 层级列表（两级：主题 → 分类）。导入后可用 AI 把资料库文档映射进分类。</div>
+      </div>
+      <textarea class="paste-area"># 机关事务
+- 公文处理
+- 会议管理
+- 印章管理
+# 人事工作
+- 干部考核
+- 职称评审</textarea>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button class="btn primary" onclick="toast('已解析：2 主题 · 6 分类；可继续「映射资料到分类」→')">解析并预览</button>
+        <button class="btn ghost" onclick="toast('AI 映射：24 篇资料中 17 篇可归入分类，7 篇待人工判断')">AI 映射资料到分类</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= ③ 待审与审核台 ================= -->
+<section class="screen" id="s-inbox">
+  <div class="toolbar">
+    <b style="font-size:15px">待审收件箱</b>
+    <span class="badge">每页须人工审核后入库 · 审核中可直接改正文</span>
+    <div class="spacer"></div>
+    <button class="btn ghost" onclick="toast('已处理的建议在「更多」里查看')">已处理</button>
+    <button class="btn ghost" onclick="go('s-lib')">返回知识库</button>
+  </div>
+  <div class="inbox" id="inbox-list">
+    <div class="pagehead" style="padding:0 0 16px">
+      <h2>3 个页面待审核</h2>
+      <div class="sub">来自整编任务 · run 7f3a2c · gongwen-wiki-write</div>
+    </div>
+    <div class="review-card" onclick="openReview(0)">
+      <div class="thumb">✎</div>
+      <div><div class="tt">监督检查 <span class="badge accent">新页</span> <span class="badge">安全生产 / 监督检查</span></div>
+      <div class="mm">正文 1,240 字 · 出链 4（1 条待建）· 依据 3 篇文档</div></div>
+      <div class="acts"><button class="btn primary">审核</button></div>
+    </div>
+    <div class="review-card" onclick="openReview(1)">
+      <div class="thumb update">Δ</div>
+      <div><div class="tt">责任体系 <span class="badge ok">改页</span> <span class="badge">安全生产 / 责任体系</span></div>
+      <div class="mm">变更 2 处 · 依据新增《2026 年考核细则》</div></div>
+      <div class="acts"><button class="btn primary">审核</button></div>
+    </div>
+    <div class="review-card" onclick="openReview(2)">
+      <div class="thumb">✎</div>
+      <div><div class="tt">一网通办 <span class="badge accent">新页</span> <span class="badge">政务服务 / 一网通办</span></div>
+      <div class="mm">正文 980 字 · 出链 2 · 依据 2 篇文档</div></div>
+      <div class="acts"><button class="btn primary">审核</button></div>
+    </div>
+  </div>
+
+  <!-- 审核台（覆盖收件箱区域） -->
+  <div class="review-desk" id="review-desk" style="display:none">
+    <div class="pagehead">
+      <h2 id="rv-title"></h2>
+      <div class="sub" id="rv-sub"></div>
+    </div>
+    <div class="desk">
+      <div class="render">
+        <div class="col-head">版式预览 · 复用现有「对照」渲染（随右侧编辑实时更新）</div>
+        <div class="render-body"><div class="prose" id="rv-render"></div></div>
+      </div>
+      <div class="edit">
+        <div class="col-head">编辑 · Markdown 源码 <span class="badge">可纠正口径</span></div>
+        <textarea id="rv-edit" spellcheck="false"></textarea>
+      </div>
+    </div>
+    <div class="evidence-bar">
+      <span class="lbl">本页依据：</span>
+      <span class="badge">《2026 年度安全生产检查计划》·支撑检查频次与闭环整改</span>
+      <span class="badge">《安全生产责任制实施办法》·支撑职责分工</span>
+      <span class="badge warn">《突发事件总体应急预案》·建议核对响应分级表述</span>
+    </div>
+    <div class="review-actions">
+      <button class="btn ghost" onclick="closeReview()">← 返回收件箱</button>
+      <div class="spacer" style="flex:1"></div>
+      <button class="btn danger-ghost" onclick="toast('已退回：意见将随任务返回，可重新发起整编');closeReview()">退回</button>
+      <button class="btn primary" onclick="toast('已采纳并入库：生成新版本 v1 · 依据文档标记「已用于维基」');closeReview();markDone()">采纳并入库</button>
+    </div>
+  </div>
+</section>
+
+<!-- ================= ④ 版本历史 ================= -->
+<section class="screen" id="s-ver">
+  <div class="toolbar">
+    <b style="font-size:15px">版本历史 · 责任体系</b>
+    <span class="badge">全量保留 · 回滚产生新版本</span>
+    <div class="spacer"></div>
+    <button class="btn ghost" onclick="go('s-lib')">返回知识库</button>
+  </div>
+  <div class="ver-layout">
+    <aside class="ver-list" id="ver-list"></aside>
+    <div class="ver-diff">
+      <div class="panel" id="ver-diff-body"></div>
+      <div style="margin-top:14px;display:flex;gap:8px">
+        <button class="btn primary" onclick="toast('已回滚为 v4 的内容（生成新版本 v6）')">回滚到此版本</button>
+        <button class="btn ghost" onclick="toast('已导出该版本 Markdown')">导出 Markdown</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= ⑤ 资料库标记 ================= -->
+<section class="screen" id="s-docs">
+  <div class="toolbar">
+    <b style="font-size:15px">资料库</b>
+    <span class="badge">原「知识库」改名 · 检索与导入不变</span>
+    <div class="spacer"></div>
+    <button class="btn primary" onclick="toast('已对勾选的 3 篇未整编文档发起整编（gongwen-wiki-write）')">圈选整编（3）</button>
+    <button class="btn ghost" onclick="go('s-lib')">去知识库 →</button>
+  </div>
+  <div class="kb-wrap">
+    <table class="doc-table">
+      <thead><tr><th style="width:32px"></th><th>文档</th><th style="width:110px">文种</th><th style="width:200px">维基状态</th><th>备注</th></tr></thead>
+      <tbody>
+        <tr class="newrow"><td><input type="checkbox" checked></td><td>《2026 年安全生产考核细则》 <span class="badge warn">新导入</span></td><td>通知</td><td><span class="badge warn">未整编</span></td><td><div class="rel-chips"><span class="badge accent">可能关联：责任体系</span><span class="badge accent">监督检查</span></div></td></tr>
+        <tr class="newrow"><td><input type="checkbox" checked></td><td>《政务服务大厅现场管理规范》 <span class="badge warn">新导入</span></td><td>规范</td><td><span class="badge warn">未整编</span></td><td><div class="rel-chips"><span class="badge accent">可能关联：事项标准化</span></div></td></tr>
+        <tr class="newrow"><td><input type="checkbox" checked></td><td>《一网通办年度总结（2025）》 <span class="badge warn">新导入</span></td><td>总结</td><td><span class="badge warn">未整编</span></td><td><div class="rel-chips"><span class="badge accent">可能关联：一网通办</span></div></td></tr>
+        <tr><td><input type="checkbox"></td><td>《安全生产责任制实施办法》</td><td>公函</td><td><span class="badge ok">已用于维基</span></td><td>被 2 页引用 · 责任体系 v3、监督检查 v1</td></tr>
+        <tr><td><input type="checkbox"></td><td>《2026 年度安全生产检查计划》</td><td>通知</td><td><span class="badge ok">已用于维基</span></td><td>被 1 页引用 · 监督检查（审核中）</td></tr>
+        <tr><td><input type="checkbox"></td><td>《突发事件总体应急预案》</td><td>预案</td><td><span class="badge warn">未整编</span></td><td>—</td></tr>
+        <tr><td><input type="checkbox"></td><td>《政务服务事项标准化建设情况的函》</td><td>公函</td><td><span class="badge ok">已用于维基</span></td><td>被 1 页引用 · 事项标准化 v2</td></tr>
+        <tr><td><input type="checkbox"></td><td>《好差评工作制度》</td><td>制度</td><td><span class="badge warn">未整编</span></td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div id="tip"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ================= 屏幕切换 ================= */
+function go(id){
+  const el = document.getElementById(id);
+  if(!el) return;
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('on'));
+  el.classList.add('on');
+  document.querySelectorAll('.proto-nav button[data-screen]').forEach(b=>b.classList.toggle('on', b.dataset.screen===id));
+}
+document.querySelectorAll('.proto-nav button[data-screen]').forEach(b=>b.onclick=()=>go(b.dataset.screen));
+function toast(msg){
+  const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show');
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2400);
+}
+function frameTab(which){
+  document.getElementById('frame-ai').style.display = which==='ai'?'':'none';
+  document.getElementById('frame-import').style.display = which==='import'?'':'none';
+  document.getElementById('tab-ai').classList.toggle('on', which==='ai');
+  document.getElementById('tab-import').classList.toggle('on', which==='import');
+}
+
+/* ================= 示例页面数据（合成） ================= */
+const pages = {
+  'anquan-daolan': {title:'安全生产', crumb:'主题导览页', kind:'guide', ver:'v2 · 2026-11-02',
+    body:`<p>本主题汇集安全生产领域的知识，下辖三个分类：</p>
+    <ul>
+      <li>[[责任体系]]——职责分工、考核与问责</li>
+      <li>[[监督检查]]——检查计划、闭环整改</li>
+      <li>[[应急处置]]——分级响应、指挥体系</li>
+    </ul>
+    <p>跨主题的关联见 [[政务服务]] 主题下的[[一网通办]]（涉及安全监管事项的线上办理）。</p>`},
+  'zeren': {title:'责任体系', crumb:'安全生产 / 责任体系', ver:'v3 · 2026-11-06 · 依据 4 篇',
+    body:`<p>安全生产责任制遵循「党政同责、一岗双责、齐抓共管、失职追责」原则<span class="srcmark" data-tip="t1">〔E1〕</span>。各级单位主要负责人为第一责任人，分管负责人对分管领域负责<span class="srcmark" data-tip="t1">〔E1〕</span>。</p>
+    <h2>考核与问责</h2>
+    <p>年度考核由 [[应急处置|应急管理部门]] 牵头组织，结果分为优秀、合格、不合格三档；不合格单位一年内不得评先评优<span class="srcmark" data-tip="t2">〔E3〕</span>。2026 年起新增[[安全文化]]建设指标<span class="srcmark" data-tip="t3">〔E4〕</span>。</p>
+    <p>问责情形与程序见 [[监督检查]] 中的闭环整改一节。</p>`},
+  'jiancha': {title:'监督检查', crumb:'安全生产 / 监督检查', ver:'v1 · 2026-11-09 · 依据 3 篇',
+    body:`<p>监督检查实行「年度有计划、季度有重点、月度有抽查」的频次安排<span class="srcmark" data-tip="t2">〔E2〕</span>。检查采取「四不两直」方式，结果纳入 [[责任体系|责任制考核]]<span class="srcmark" data-tip="t2">〔E2〕</span>。</p>
+    <h2>闭环整改</h2>
+    <p>问题隐患实行清单化管理，明确整改措施、责任人与时限；重大隐患挂牌督办，整改完成情况报 [[责任体系|考核牵头部门]] 备案<span class="srcmark" data-tip="t2">〔E2〕</span>。</p>`},
+  'yingji': {title:'应急处置', crumb:'安全生产 / 应急处置', ver:'v1 · 2026-10-28 · 依据 2 篇',
+    body:`<p>突发事件按危害程度分为四级响应，由相应层级指挥部统一指挥<span class="srcmark" data-tip="t4">〔E5〕</span>。预案体系包括总体预案、专项预案与现场处置方案。</p>
+    <p>与 [[监督检查|监督检查闭环]] 联动：隐患未整改到位的单位，启动响应时提级管理。</p>`},
+  'zhengwu-daolan': {title:'政务服务', crumb:'主题导览页', kind:'guide', ver:'v1 · 2026-11-01',
+    body:`<p>本主题汇集政务服务领域知识：[[事项标准化]]、[[一网通办]]、[[好差评]]。</p>`},
+  'shixiang': {title:'事项标准化', crumb:'政务服务 / 事项标准化', ver:'v2 · 2026-11-04 · 依据 5 篇',
+    body:`<p>事项标准化要求名称、编码、办事指南「三统一」<span class="srcmark" data-tip="t5">〔E6〕</span>。涉及部门联办的，明确牵头与配合职责<span class="srcmark" data-tip="t5">〔E6〕</span>。</p>
+    <p>办件数据经数据接口与业务系统保持一致，参见 [[一网通办]]。</p>`},
+  'yiwang': {title:'一网通办', crumb:'政务服务 / 一网通办', ver:'草稿待审',
+    body:`<p>一网通办以「一网受理、一次办成」为目标，覆盖法人事项与个人高频事项（本页正在待审收件箱中）。</p>`},
+  'haoping': {title:'好差评', crumb:'政务服务 / 好差评制度', ver:'v1 · 2026-10-30 · 依据 2 篇',
+    body:`<p>「好差评」实行一事一评，差评 100% 回访核实<span class="srcmark" data-tip="t6">〔E7〕</span>。评价结果纳入 [[事项标准化|事项管理]] 的动态调整依据。</p>`},
+};
+
+const backlinks = {
+  'zeren': [['anquan-daolan','…安全生产主题导览列出 责任体系…'],['jiancha','…结果纳入 责任体系 中的责任制考核…']],
+  'jiancha': [['anquan-daolan','…导览：检查计划、闭环整改…'],['zeren','…问责情形与程序见 监督检查 闭环整改一节…'],['yingji','…与 监督检查 闭环联动，提级管理…']],
+  'yingji': [['anquan-daolan','…导览：分级响应、指挥体系…'],['zeren','…年度考核由 应急管理部门 牵头组织…']],
+  'zhengwu-daolan': [['anquan-daolan','…跨主题关联见 政务服务 主题…']],
+  'shixiang': [['zhengwu-daolan','…导览：名称、编码、指南三统一…'],['haoping','…纳入 事项标准化 的动态调整依据…']],
+  'yiwang': [['anquan-daolan','…安全生产主题导览关联 一网通办…'],['zhengwu-daolan','…政务服务主题导览中列出 一网通办…'],['shixiang','…办件数据经接口与 一网通办 保持一致…']],
+  'haoping': [['zhengwu-daolan','…导览：好差评制度…']],
+};
+
+let cur = 'zeren';
+
+/* 把正文里的 [[目标|显示]] / [[目标]] 转成可点内链；目标不存在 → 红链（待建页） */
+function linkify(html){
+  const title2id = Object.fromEntries(Object.entries(pages).map(([id,p])=>[p.title,id]));
+  const span = (t,txt)=>`<span class="wikilink${title2id[t]?'':' red'}" data-to="${title2id[t]||''}">${txt}</span>`;
+  return html
+    .replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g,(m,t,txt)=>span(t,txt))
+    .replace(/\[\[([^\]]+)\]\]/g,(m,t)=>span(t,t));
+}
+
+function renderTree(){
+  const root = document.getElementById('tree-root');
+  root.innerHTML = `
+  ${theme('安全生产','anquan-daolan',`
+    ${cat('责任体系','zeren')}
+    ${cat('监督检查','jiancha')}
+    ${cat('应急处置','yingji')}`)}
+  ${theme('政务服务','zhengwu-daolan',`
+    ${cat('事项标准化','shixiang')}
+    ${cat('一网通办','yiwang','accent')}
+    ${cat('好差评','haoping')}`)}`;
+  root.querySelectorAll('.row[data-pg]').forEach(r=>r.onclick=()=>selectPage(r.dataset.pg));
+}
+function theme(name,pg,kids){return `<div class="tnode"><div class="row" data-pg="${pg}"><span class="caret open">▶</span><b>${name}</b><span class="kind">主题 · ▣</span></div><div class="kids">${kids}</div></div>`}
+function cat(name,pg,badge){return `<div class="row${pg===cur?' sel':''}" data-pg="${pg}"><span class="caret" style="visibility:hidden">▶</span>${name}${badge?` <span class="badge ${badge}">待审</span>`:''}<span class="kind">▣</span></div>`}
+
+function selectPage(pg){ cur=pg; renderTree(); renderReader(); }
+
+function renderReader(){
+  const p = pages[cur];
+  const docs = {'zeren':'4','jiancha':'3','yingji':'2','shixiang':'5','haoping':'2'};
+  document.getElementById('reader').innerHTML = `
+    <div class="crumb"><a onclick="go('s-lib')">知识库</a> / ${p.crumb}</div>
+    <h1 class="pagetitle">${p.title}</h1>
+    <div class="meta">
+      <span class="badge">${p.ver}</span>
+      <span class="badge">版式预览 · 复用现有实时排版渲染</span>
+      ${docs[cur]?`<span class="badge accent">依据 ${docs[cur]} 篇资料</span>`:''}
+      <button class="btn ghost" style="padding:3px 10px;font-size:12px" onclick="go('s-ver')">版本历史</button>
+      <button class="btn ghost" style="padding:3px 10px;font-size:12px" onclick="toast('已对「${p.crumb.split(' / ')[0]}」发起整编（gongwen-wiki-write）')">整编本分类</button>
+    </div>
+    <div class="prose">${linkify(p.body)}</div>
+    <p style="margin-top:26px;color:var(--ink-3);font-size:12px">— 示例正文为合成数据 · <span class="wikilink red" data-to="" style="font-size:12px">安全文化</span> 为待建页红链（点击进入缺口清单）—</p>`;
+  // 内链点击
+  document.querySelectorAll('#reader .wikilink').forEach(a=>a.onclick=()=>{
+    const t=a.dataset.to;
+    if(t && pages[t]) selectPage(t);
+    else toast('「'+(a.textContent.replace(/（.*）/,''))+'」是待建页：已加入缺口清单');
+  });
+  // 来源标记悬停
+  const tips={t1:['《安全生产责任制实施办法》','“坚持党政同责、一岗双责、齐抓共管、失职追责……”'],t2:['《2026 年度安全生产检查计划》','“检查采取四不两直方式，结果纳入责任制考核……”'],t3:['《2026 年安全生产考核细则》','“新增安全文化建设指标，权重不低于 10%……”'],t4:['《突发事件总体应急预案》','“按危害程度分为Ⅰ—Ⅳ级响应……”'],t5:['《政务服务事项标准化建设情况的函》','“实现名称、编码、办事指南三统一……”'],t6:['《好差评工作制度》','“差评 100% 回访核实，整改闭环……”']};
+  document.querySelectorAll('#reader .srcmark').forEach(m=>{
+    m.onmouseenter=e=>{const tp=document.getElementById('tip');const d=tips[m.dataset.tip];tp.innerHTML=`<b>依据 · ${d[0]}</b><span class="q">${d[1]}</span>`;tp.style.display='block';tp.style.left=Math.min(e.clientX,innerWidth-340)+'px';tp.style.top=(e.clientY+14)+'px';};
+    m.onmouseleave=()=>document.getElementById('tip').style.display='none';
+  });
+  renderRail();
+}
+function renderRail(){
+  const bl = backlinks[cur]||[];
+  const lb = document.getElementById('rail-body');
+  lb.innerHTML = bl.length
+    ? bl.map(b=>`<div class="backlink" onclick="selectPage('${b[0]}')"><div class="from">${pages[b[0]].title}</div><div class="ctx">${b[1]}</div></div>`).join('')
+    : `<div class="empty" style="padding:24px 10px">暂未被其他页面引用</div>`;
+}
+
+/* ================= 审核台 ================= */
+const reviews = [
+  {name:'监督检查（新页）', sub:'正文 1,240 字 · 出链 4（1 条待建）· 依据 3 篇', md:
+`# 监督检查
+
+监督检查实行「年度有计划、季度有重点、月度有抽查」的频次安排〔E2〕。检查采取「四不两直」方式，结果纳入 [[责任体系|责任制考核]]〔E2〕。
+
+## 闭环整改
+
+问题隐患实行清单化管理，明确整改措施、责任人与时限；重大隐患挂牌督办，整改完成情况报 [[责任体系|考核牵头部门]] 备案〔E2〕。
+
+> 待建：[[安全文化]]（本年度考核新增指标，建议成页）`},
+  {name:'责任体系（改页 · 变更 2 处）', sub:'依据新增《2026 年安全生产考核细则》', md:
+`# 责任体系
+
+安全生产责任制遵循「党政同责、一岗双责、齐抓共管、失职追责」原则〔E1〕。
+
+## 考核与问责
+
+年度考核由 [[应急处置|应急管理部门]] 牵头组织，结果分为优秀、合格、不合格三档；不合格单位一年内不得评先评优〔E3〕。
+
+- ~~2025 年起新增考核指标~~
+- 2026 年起新增 [[安全文化]] 建设指标〔E4〕`},
+  {name:'一网通办（新页）', sub:'正文 980 字 · 出链 2 · 依据 2 篇', md:
+`# 一网通办
+
+一网通办以「一网受理、一次办成」为目标，覆盖法人事项与个人高频事项〔E5〕。办件数据经数据接口与业务系统保持一致，参见 [[事项标准化]]〔E5〕。
+
+## 覆盖范围
+
+首批纳入 312 个事项，含安全监管、市场准入等高频领域〔E6〕。`},
+];
+let rvIdx = 0;
+function openReview(i){
+  rvIdx=i;
+  document.getElementById('inbox-list').style.display='none';
+  document.getElementById('review-desk').style.display='flex';
+  document.getElementById('rv-title').textContent='审核 · '+reviews[i].name;
+  document.getElementById('rv-sub').textContent=reviews[i].sub+' · run 7f3a2c · gongwen-wiki-write';
+  const ta=document.getElementById('rv-edit'); ta.value=reviews[i].md; renderPreview();
+}
+function closeReview(){
+  document.getElementById('inbox-list').style.display='';
+  document.getElementById('review-desk').style.display='none';
+}
+function renderPreview(){
+  let md=document.getElementById('rv-edit').value;
+  let html=md
+    .replace(/^# (.*)$/m,'<h2 style="font-size:18px;margin:0 0 12px">$1</h2>')
+    .replace(/^## (.*)$/gm,'<h3 style="font-size:15px;margin:16px 0 8px">$1</h3>')
+    .replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g,'<span class="wikilink" style="cursor:default">$2</span>')
+    .replace(/\[\[([^\]]+)\]\]/g,'<span class="wikilink" style="cursor:default">$1</span>')
+    .replace(/^> (.*)$/gm,'<p style="color:var(--warn);background:#fdf6ec;border-radius:6px;padding:6px 10px;font-size:12.5px;margin:8px 0">$1</p>')
+    .replace(/^- ~~(.*?)~~$/gm,'<p><span class="diff"><span class="del">$1</span></span></p>')
+    .replace(/^- (.*)$/gm,'<p>• $1</p>')
+    .replace(/^(?!<[hpcb]|<span)(.+)$/gm,'<p style="margin:0 0 10px">$1</p>');
+  document.getElementById('rv-render').innerHTML=html;
+}
+document.getElementById('rv-edit').addEventListener('input',renderPreview);
+function markDone(){
+  const badge=document.querySelector('.inbox-btn .count');
+  badge.textContent=Math.max(0,parseInt(badge.textContent)-1);
+}
+
+/* ================= 版本历史 ================= */
+const versions=[
+  {v:'v5', w:'2026-11-09 · AI 更新（审核采纳）', sel:false},
+  {v:'v4', w:'2026-11-06 · 人工修改（审核纠正口径）', sel:true},
+  {v:'v3', w:'2026-11-05 · AI 更新（审核采纳）', sel:false},
+  {v:'v2', w:'2026-11-03 · 人工修改', sel:false},
+  {v:'v1', w:'2026-11-02 · AI 整编（审核采纳）', sel:false},
+];
+function renderVersions(){
+  document.getElementById('ver-list').innerHTML=versions.map((x,i)=>
+    `<div class="ver-item${x.sel?' sel':''}" onclick="selVer(${i})"><div class="v">${x.v} ${x.w.includes('人工')?'<span class="badge accent">人工修改</span>':''}</div><div class="w">${x.w}</div></div>`).join('');
+  document.getElementById('ver-diff-body').innerHTML=`
+    <div style="display:flex;gap:8px;margin-bottom:12px"><span class="badge">v3</span>→<span class="badge accent">v4（当前选中）</span><span style="color:var(--ink-3);font-size:12px">1 处变更</span></div>
+    <div class="diff">
+      <p>年度考核由应急管理部门牵头组织，结果分为优秀、合格、不合格三档；<span class="del">不合格单位二年内不得评先评优</span><span class="add">不合格单位一年内不得评先评优</span>〔E3〕。</p>
+      <p style="margin-top:10px;color:var(--ink-3);font-size:12px">审核注记：原文「二年」与《考核细则》不一致，已按原文改为「一年」。</p>
+    </div>`;
+}
+function selVer(i){versions.forEach((x,j)=>x.sel=i===j);renderVersions();}
+
+/* ================= 框架树（复用标准词库页的交互：行内＋菜单 / 右侧详情 / 移动） ================= */
+const frame = {
+  sel: 't1',
+  nodes: [
+    {id:'t1', name:'安全生产', kind:'theme', kids:[
+      {id:'c11', name:'责任体系', basis:['《安全生产责任制实施办法》：明确各级职责分工与考核要求','《2026 年安全生产考核细则》：新增安全文化建设指标'], docs:4},
+      {id:'c12', name:'监督检查', basis:['《2026 年度安全生产检查计划》：检查频次、重点行业、闭环整改'], docs:3},
+      {id:'c13', name:'应急处置', basis:['《突发事件总体应急预案》：分级响应与指挥体系'], docs:2},
+    ]},
+    {id:'t2', name:'政务服务', kind:'theme', kids:[
+      {id:'c21', name:'事项标准化', basis:['《政务服务事项标准化建设情况的函》：三统一要求与数据接口'], docs:5},
+      {id:'c22', name:'一网通办', basis:['《一网通办年度总结（2025）》：覆盖事项与接口对接'], docs:3},
+      {id:'c23', name:'好差评制度', basis:['《好差评工作制度》：一事一评、差评回访'], docs:2},
+    ]},
+  ],
+  suggest: {name:'应急管理', reason:'3 篇安全类文档涉及应急响应，与「应急处置」并列或合并'},
+};
+function findNode(id){ for(const t of frame.nodes){ if(t.id===id) return t; const k=t.kids.find(k=>k.id===id); if(k) return k;} return null; }
+function renderFrame(){
+  const el=document.getElementById('frame-tree');
+  el.innerHTML = frame.nodes.map(t=>`
+    <div class="fp-row${frame.sel===t.id?' sel':''}" onclick="frame.sel='${t.id}';renderFrame()">
+      <b>${t.name}</b><span class="basis-n">${t.kids.length} 分类 · 依据 ${t.kids.reduce((a,k)=>a+k.docs,0)} 篇</span>
+      <span class="row-menu"><button class="mini-btn" onclick="event.stopPropagation();frameAddKid('${t.id}')" title="新增分类">＋</button></span>
+    </div>
+    <div style="margin-left:26px">
+      ${t.kids.map(k=>`
+        <div class="fp-row${frame.sel===k.id?' sel':''}" onclick="frame.sel='${k.id}';renderFrame()">
+          <span class="mv" title="移动（同标准词库页的本级内移动）">⠿</span>${k.name}<span class="basis-n">${k.docs} 篇</span>
+          <span class="row-menu"><button class="mini-btn" onclick="event.stopPropagation();frameMove('${k.id}')" title="移动">↕</button><button class="mini-btn" onclick="event.stopPropagation();frameDel('${k.id}')" title="删除">✕</button></span>
+        </div>`).join('')}
+    </div>`).join('') +
+    (frame.suggest ? `<div class="fp-row" style="color:var(--warn)">
+       <span>💡 建议新增主题：${frame.suggest.name}（${frame.suggest.reason}）</span>
+       <span class="row-menu"><button class="mini-btn" onclick="frameAcceptSug()">采纳</button><button class="mini-btn" onclick="frame.suggest=null;renderFrame()">忽略</button></span>
+     </div>` : '');
+  // 右侧详情
+  const n=findNode(frame.sel)||frame.nodes[0];
+  const isTheme = !!n.kids;
+  document.getElementById('frame-detail').innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <span class="badge ${isTheme?'accent':''}">${isTheme?'主题':'分类'}</span>
+      ${!isTheme?`<span class="badge">归属：${frame.nodes.find(t=>t.kids.includes(n)).name}</span>`:''}
+    </div>
+    <label style="font-size:12px;color:var(--ink-3)">名称（改名后页面链接自动跟随）</label>
+    <input class="name-input" value="${n.name}" onchange="frameRename('${n.id}',this.value)" />
+    ${isTheme
+      ? `<p style="font-size:12.5px;color:var(--ink-2);margin-top:12px">该主题下 ${n.kids.length} 个分类，分类下将整编出导览页与主题页。</p>`
+      : `<div style="margin-top:12px;font-size:12px;color:var(--ink-3)">归纳依据（AI 给出的理由，可逐条核看）</div>
+         ${n.basis.map(b=>`<div class="basis-item" style="border-bottom:1px solid var(--line)"><div class="r">${b}</div></div>`).join('')}
+         <div style="margin-top:10px;display:flex;gap:8px">
+           <button class="btn ghost" style="font-size:12px" onclick="toast('已打开资料映射：该分类下建议挂靠 ${n.docs} 篇文档')">查看资料映射（${n.docs} 篇）</button>
+         </div>`}`;
+}
+function frameRename(id,name){ const n=findNode(id); if(n&&name.trim()){n.name=name.trim();renderFrame();} }
+function frameAddKid(tid){ const name=prompt('新分类名称：'); if(!name) return; const t=frame.nodes.find(t=>t.id===tid); t.kids.push({id:'c'+Date.now(),name,basis:['（人工新增，尚无归纳依据）'],docs:0}); frame.sel=t.kids[t.kids.length-1].id; renderFrame(); }
+function frameAddTheme(){ const name=prompt('新主题名称：'); if(!name) return; frame.nodes.push({id:'t'+Date.now(),name,kind:'theme',kids:[]}); frame.sel=frame.nodes[frame.nodes.length-1].id; renderFrame(); }
+function frameMove(id){ toast('移动：与标准词库页相同的「本级内上移 / 下移」交互'); }
+function frameDel(id){ for(const t of frame.nodes){ const i=t.kids.findIndex(k=>k.id===id); if(i>=0){ if(!confirm('删除该分类？其下页面将回到待整编。')) return; t.kids.splice(i,1); } } renderFrame(); }
+function frameAcceptSug(){ frame.nodes.push({id:'t'+Date.now(),name:frame.suggest.name,kind:'theme',kids:[]}); toast('已采纳建议为主题，可继续补充分类'); frame.suggest=null; renderFrame(); }
+
+/* ================= 主题切换（配色跟随演示） ================= */
+function setTheme(t, btn){
+  document.documentElement.dataset.theme = t==='dark'?'dark':'';
+  const wrap = btn.closest('.theme-switch');
+  wrap.querySelectorAll('button').forEach(b=>b.classList.toggle('on', b===btn));
+}
+document.querySelectorAll('.theme-switch button').forEach(b=>b.addEventListener('click',()=>setTheme(b.dataset.th,b)));
+
+renderTree(); renderReader(); renderVersions(); renderFrame();
+</script>
+</body>
+</html>

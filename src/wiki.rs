@@ -177,12 +177,14 @@ pub(crate) struct WikiStore {
 }
 
 impl WikiStore {
-    // 应用层打开持久库用（界面切片起由 app 持有）；测试走内存库。
-    #[allow(dead_code)]
+    /// 应用层打开持久库（与稿件库同一文件，SQLCipher 自动覆盖）；测试走内存库。
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("无法打开维基知识库 {}", path.display()))?;
-        conn.execute_batch("PRAGMA foreign_keys = ON")?;
+        crate::storage::apply_db_key(&conn)?;
+        // 与知识库连接一致：写作侧可能正持有写事务，界面连接要肯等。
+        conn.busy_timeout(std::time::Duration::from_millis(10_000))?;
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL")?;
         ensure_schema(&conn)?;
         Ok(Self { conn })
     }

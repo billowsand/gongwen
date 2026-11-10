@@ -112,6 +112,7 @@ mod visual_diff;
 mod vocabulary_xlsx;
 #[allow(dead_code)]
 mod wiki;
+mod wiki_ui;
 
 use std::cell::Cell;
 use std::rc::Rc;

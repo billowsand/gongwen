@@ -870,6 +870,7 @@ impl GongwenApp {
                 });
                 self.nav_menu_item(ui, NavPage::AiPrompts);
                 self.nav_menu_item(ui, NavPage::Knowledge);
+                self.nav_menu_item(ui, NavPage::Wiki);
                 ui.separator();
                 // 外观主题在顶栏右端的换肤按钮里。图表样式管的是纸面上的图，
                 // 导出也跟着变，留在菜单里挨着设置。

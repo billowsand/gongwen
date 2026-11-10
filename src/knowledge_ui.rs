@@ -22,7 +22,7 @@ pub(crate) fn knowledge_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
             theme::warn(),
             app.knowledge_error
                 .clone()
-                .unwrap_or_else(|| "知识库不可用。".to_string()),
+                .unwrap_or_else(|| "资料库不可用。".to_string()),
         );
         return;
     }
@@ -119,7 +119,7 @@ fn page_tabs(app: &mut GongwenApp, ui: &mut egui::Ui) {
 
 fn toolbar(app: &mut GongwenApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        ui.heading("知识库");
+        ui.heading("资料库");
         ui.add_space(8.0);
         ui.weak(format!(
             "{} 篇 · {} 个向量切块",
@@ -137,7 +137,7 @@ fn toolbar(app: &mut GongwenApp, ui: &mut egui::Ui) {
                     theme::icon_text_button(theme::Icon::FileUp, "导入文档"),
                 )
                 .on_hover_text(
-                    "选择本机公文加入知识库：Markdown、Word、WPS 另存的 docx、PDF（电子版）等；扫描版 PDF 无法导入",
+                    "选择本机公文加入资料库：Markdown、Word、WPS 另存的 docx、PDF（电子版）等；扫描版 PDF 无法导入",
                 )
                 .clicked()
             {
@@ -234,7 +234,7 @@ fn index_status(app: &mut GongwenApp, ui: &mut egui::Ui) {
 fn doc_tab(app: &mut GongwenApp, ui: &mut egui::Ui) {
     if app.knowledge_docs.is_empty() {
         theme::card().show(ui, |ui| {
-            ui.weak("知识库还是空的。点右上角「导入文档」选本机公文（Word、PDF 电子版、Markdown 等），或到「稿件管理」勾选稿件后用工具栏的「导入到知识库」；导入后再点「建立索引」，就能检索与问答了。");
+            ui.weak("资料库还是空的。点右上角「导入文档」选本机公文（Word、PDF 电子版、Markdown 等），或到「稿件管理」勾选稿件后用工具栏的「导入到资料库」；导入后再点「建立索引」，就能检索与问答了。");
         });
         return;
     }
@@ -510,7 +510,7 @@ fn search_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
                         ui.label("全文检索完全在本机运行，不需要模型服务；「语义检索」仍使用原有 embedding / RAG 服务。");
                     }
                     KnowledgeMode::Qa => {
-                        ui.label("向知识库提问，答案基于库内片段生成并标注出处，可连续追问。");
+                        ui.label("向资料库提问，答案基于库内片段生成并标注出处，可连续追问。");
                     }
                 });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -525,7 +525,7 @@ fn search_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
                 theme::Icon::Reveal,
             ),
             KnowledgeMode::Qa => (
-                "向知识库提问，例如：安全检查多久开展一次？",
+                "向资料库提问，例如：安全检查多久开展一次？",
                 "提问",
                 theme::Icon::Sparkles,
             ),
@@ -577,7 +577,7 @@ fn search_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
             ));
         }
         if app.knowledge_mode == KnowledgeMode::Search {
-            ui.weak("导入及打开知识库时自动建立全文索引；空格分隔多个关键词，双引号查连续原文。语义检索需模型。");
+            ui.weak("导入及打开资料库时自动建立全文索引；空格分隔多个关键词，双引号查连续原文。语义检索需模型。");
         }
         ui.add_space(6.0);
 
@@ -592,9 +592,9 @@ fn search_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
 fn mode_switch(app: &mut GongwenApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.selectable_value(&mut app.knowledge_mode, KnowledgeMode::Search, "检索")
-            .on_hover_text("按相关度列出命中的知识库片段");
+            .on_hover_text("按相关度列出命中的资料库片段");
         ui.selectable_value(&mut app.knowledge_mode, KnowledgeMode::Qa, "问答")
-            .on_hover_text("基于知识库片段生成答案并标注出处，可连续追问");
+            .on_hover_text("基于资料库片段生成答案并标注出处，可连续追问");
     });
 }
 
@@ -821,7 +821,7 @@ fn qa_chat(app: &mut GongwenApp, ui: &mut egui::Ui) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add(theme::icon_text_button(theme::Icon::RotateCcw, "清空对话"))
-                    .on_hover_text("清除全部问答历史，不影响知识库文档")
+                    .on_hover_text("清除全部问答历史，不影响资料库文档")
                     .clicked()
                 {
                     app.knowledge_qa_history.clear();
@@ -842,7 +842,7 @@ fn qa_chat(app: &mut GongwenApp, ui: &mut egui::Ui) {
     }
     if app.knowledge_qa_history.is_empty() {
         if app.knowledge_qa_pending.is_none() {
-            ui.weak("向知识库提问，答案会基于库内文档生成并标注出处。");
+            ui.weak("向资料库提问，答案会基于库内文档生成并标注出处。");
         }
         return;
     }
@@ -1000,7 +1000,7 @@ fn import_dialog(app: &mut GongwenApp, ui: &mut egui::Ui) {
     let dialog = modal::dialog(
         ui.ctx(),
         egui::Id::unique("knowledge_import"),
-        "导入文档到知识库",
+        "导入文档到资料库",
         420.0,
         Dismiss::EscOnly,
         |ui| {
@@ -1053,14 +1053,14 @@ fn delete_confirm(app: &mut GongwenApp, ui: &mut egui::Ui) {
                 .iter()
                 .find(|doc| doc.id == *id)
                 .map_or("这篇文档", |doc| doc.title.as_str());
-            format!("确定把《{}》从知识库删除吗？", truncate_chars(title, 40))
+            format!("确定把《{}》从资料库删除吗？", truncate_chars(title, 40))
         }
-        _ => format!("确定把所选的 {} 篇文档从知识库删除吗？", ids.len()),
+        _ => format!("确定把所选的 {} 篇文档从资料库删除吗？", ids.len()),
     };
     let dialog = modal::dialog(
         ui.ctx(),
         egui::Id::unique("knowledge_delete_confirm"),
-        "删除知识库文档",
+        "删除资料库文档",
         380.0,
         Dismiss::EscOrBackdrop,
         |ui| {

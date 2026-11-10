@@ -214,6 +214,7 @@ impl GongwenApp {
             NavPage::Lexicon,
             NavPage::ImeTable,
             NavPage::Knowledge,
+            NavPage::Wiki,
             NavPage::TaskAssistant,
             NavPage::AiPrompts,
             NavPage::Settings,

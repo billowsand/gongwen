@@ -341,6 +341,11 @@ pub struct GongwenApp {
     /// 知识库存储（与稿件库同一文件，独立连接）。打开失败不阻塞启动。
     pub(crate) knowledge_store: Option<KnowledgeStore>,
     pub(crate) knowledge_error: Option<String>,
+    /// 维基知识库存储（与稿件库同一文件，独立连接）。打开失败不阻塞启动。
+    pub(crate) wiki_store: Option<crate::wiki::WikiStore>,
+    pub(crate) wiki_error: Option<String>,
+    /// 知识库页的界面状态：框架树缓存、当前阅读页、backlinks 栏开合。
+    pub(crate) wiki: crate::wiki_ui::WikiUiState,
     /// 知识库文档列表，按文种过滤。
     pub(crate) knowledge_docs: Vec<knowledge::KnowledgeDocRow>,
     pub(crate) knowledge_chunk_count: i64,
@@ -616,6 +621,14 @@ impl GongwenApp {
             },
             Err(error) => (None, Some(format!("知识库路径获取失败：{error:#}"))),
         };
+        // 维基知识库与稿件库同一文件、独立连接；打开失败同样不阻塞启动。
+        let (wiki_store, wiki_error) = match storage::manuscript_db_path() {
+            Ok(path) => match crate::wiki::WikiStore::open(&path) {
+                Ok(store) => (Some(store), None),
+                Err(error) => (None, Some(format!("知识库（维基）打开失败：{error:#}"))),
+            },
+            Err(error) => (None, Some(format!("知识库路径获取失败：{error:#}"))),
+        };
         // 按当前规则重算外部文件的标题，修正早先导入时识别错的；每次启动都跑，规则不变时不改动。
         let knowledge_title_note = knowledge_store
             .as_mut()
@@ -761,6 +774,9 @@ impl GongwenApp {
             receiver,
             knowledge_store,
             knowledge_error,
+            wiki_store,
+            wiki_error,
+            wiki: Default::default(),
             knowledge_docs: Vec::new(),
             knowledge_chunk_count: 0,
             knowledge_retrieval_elapsed: None,
@@ -1047,6 +1063,11 @@ impl GongwenApp {
                     TabRef::Page(NavPage::Knowledge) => {
                         theme::smartisan::management_page(&mut content_ui, |ui| {
                             crate::knowledge_ui::knowledge_ui(self, ui)
+                        })
+                    }
+                    TabRef::Page(NavPage::Wiki) => {
+                        theme::smartisan::management_page(&mut content_ui, |ui| {
+                            crate::wiki_ui::wiki_ui(self, ui)
                         })
                     }
                     TabRef::Page(NavPage::Settings) => self.settings_ui(&mut content_ui),
