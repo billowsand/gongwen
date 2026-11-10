@@ -137,7 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           asset=runtime.zip
-          curl --fail --location --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+          curl --fail --location --retry 10 --retry-delay 5 --connect-timeout 30 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
             --output "/tmp/${asset}"
           unzip -qo "/tmp/${asset}" -d runtime || {
@@ -267,7 +267,7 @@ jobs:
         run: |
           set -euo pipefail
           asset=runtime.zip
-          curl --fail --location --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+          curl --fail --location --retry 10 --retry-delay 5 --connect-timeout 30 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
             --output "/tmp/${asset}"
           unzip -qo "/tmp/${asset}" -d runtime || {
@@ -403,7 +403,7 @@ jobs:
       - name: Download runtime assets
         run: |
           set -euo pipefail
-          curl --fail --location --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+          curl --fail --location --retry 10 --retry-delay 5 --connect-timeout 30 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/runtime.zip" \
             --output /tmp/runtime.zip
           unzip -qo /tmp/runtime.zip -d runtime || {

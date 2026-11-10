@@ -12,6 +12,12 @@ on:
 permissions:
   contents: read
 
+# 与 release.yml 保持一致：测试作业也要取同一份随包字体，预览 / 稿纸几何断言
+# 依赖真实中文字体度量，缺字体时各平台会落到不同系统字体上而误报。
+env:
+  RUNTIME_RELEASE_TAG: v0.8.2
+  RUNTIME_REPO: billowsand/gongwen-runtime
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -39,8 +45,19 @@ jobs:
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Download bundled fonts for layout tests
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path runtime | Out-Null
+          gh release download $env:RUNTIME_RELEASE_TAG --repo $env:RUNTIME_REPO --pattern runtime.zip --dir runtime --clobber
+          Expand-Archive -Path runtime/runtime.zip -DestinationPath runtime -Force
+          Remove-Item runtime/runtime.zip
+
+      # 串行跑测试：vault 的 DEK 句柄与配置目录是进程级状态，Pi 运行记录、加密资源
+      # 与单实例等用例并行时会互相污染（Windows / macOS runner 上出现过「尚未解锁」
+      # 与 Broken pipe 的伪失败）。整套用例本地串行约 1 分钟，换确定性更值得。
       - name: Test
-        run: cargo test --locked --all-targets
+        run: cargo test --locked --all-targets -- --test-threads=1
 
       - name: Stage bundled Pi runtime
         shell: pwsh
@@ -97,8 +114,20 @@ jobs:
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Download bundled fonts for layout tests
+        run: |
+          set -euo pipefail
+          mkdir -p runtime
+          curl --fail --location --retry 10 --retry-delay 5 --connect-timeout 30 \
+            "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/runtime.zip" \
+            -o /tmp/runtime.zip
+          unzip -qo /tmp/runtime.zip -d runtime
+
+      # 串行跑测试：vault 的 DEK 句柄与配置目录是进程级状态，Pi 运行记录、加密资源
+      # 与单实例等用例并行时会互相污染（Windows / macOS runner 上出现过「尚未解锁」
+      # 与 Broken pipe 的伪失败）。整套用例本地串行约 1 分钟，换确定性更值得。
       - name: Test
-        run: cargo test --locked --all-targets
+        run: cargo test --locked --all-targets -- --test-threads=1
 
       - name: Pi runtime manifest end-to-end
         run: cargo test --locked shipped_pi_runtime_manifest -- --ignored
@@ -164,6 +193,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             ca-certificates \
             curl \
+            unzip \
             git \
             jq \
             xz-utils \
@@ -212,8 +242,20 @@ jobs:
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Download bundled fonts for layout tests
+        run: |
+          set -euo pipefail
+          mkdir -p runtime
+          curl --fail --location --retry 10 --retry-delay 5 --connect-timeout 30 \
+            "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/runtime.zip" \
+            -o /tmp/runtime.zip
+          unzip -qo /tmp/runtime.zip -d runtime
+
+      # 串行跑测试：vault 的 DEK 句柄与配置目录是进程级状态，Pi 运行记录、加密资源
+      # 与单实例等用例并行时会互相污染（Windows / macOS runner 上出现过「尚未解锁」
+      # 与 Broken pipe 的伪失败）。整套用例本地串行约 1 分钟，换确定性更值得。
       - name: Test
-        run: cargo test --locked --all-targets
+        run: cargo test --locked --all-targets -- --test-threads=1
 
       # 端到端校验随包 runtime/pi 的 manifest（默认被 ignored，只在组装过运行时后跑）。
       - name: Pi runtime manifest end-to-end
@@ -325,7 +367,7 @@ jobs:
           # Ubuntu 20.04 的软件源里没有 gh（21.04 起才收录），这里只能走 curl。
           # GitHub 的 Release CDN 偶发 504，按 --retry 的退避只重试 4 次不够
           # （2026-11-08 的 CI 就连续 4 次 504 失败）；放宽到 10 次、覆盖 5xx。
-          curl --fail --location --retry 10 --retry-delay 5 --retry-all-errors \
+          curl --fail --location --retry 10 --retry-delay 5 \
             --connect-timeout 30 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
             --output "/tmp/${asset}"

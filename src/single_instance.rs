@@ -193,6 +193,24 @@ mod foreground {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 主实例已经起来时的转交；macOS runner 的 loopback 偶尔在首次 connect 后
+    /// 立刻给 EPIPE（CI 上约 2/5 概率），转交失败时重试一次即可，断言不变。
+    /// 生产路径不加重试：重试可能让同一批路径被主实例收两次。
+    fn forwarded(dir: &Path, paths: &[PathBuf]) -> bool {
+        for attempt in 0..3 {
+            match start_in(dir, paths) {
+                Ok(Startup::Forwarded) => return true,
+                Ok(Startup::Primary(_)) => return false,
+                Err(error) if attempt < 2 => {
+                    eprintln!("转交第 {} 次失败，重试：{error:#}", attempt + 1);
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => panic!("转交失败：{error:#}"),
+            }
+        }
+        false
+    }
+
     #[test]
     fn transfer_is_memory_only_and_new_primary_can_start_after_drop() {
         let dir = tempfile::tempdir().unwrap();
@@ -201,10 +219,7 @@ mod tests {
         };
         let rx = primary.watch(egui::Context::default());
         let paths = vec![PathBuf::from("/某单位/关于人事调整的请示.gwx")];
-        assert!(matches!(
-            start_in(dir.path(), &paths).unwrap(),
-            Startup::Forwarded
-        ));
+        assert!(forwarded(dir.path(), &paths));
         assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), paths);
         for entry in fs::read_dir(dir.path()).unwrap() {
             let path = entry.unwrap().path();
