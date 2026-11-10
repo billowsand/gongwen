@@ -155,6 +155,52 @@ impl GongwenApp {
         });
     }
 
+    /// 发起「按新资料更新」：给定目标页（uuid + 标题），Pi 读新资料交回
+    /// 整页更新提案；与整编共用进度条、停止与审核台（提案带 uuid，审核台按 diff 展示）。
+    pub(crate) fn start_wiki_update(&mut self, targets: Vec<(String, String)>) {
+        if self.lock_requested {
+            return;
+        }
+        if targets.is_empty() {
+            return;
+        }
+        if self.wiki_write_rx.is_some() || self.wiki_frame_rx.is_some() {
+            self.wiki.write_error = Some("已有维基作业在跑，请等待结束后再发起。".into());
+            return;
+        }
+        let setup: anyhow::Result<(Arc<crate::models::AppConfig>, std::path::PathBuf)> = (|| {
+            Ok((
+                Arc::new(self.config.clone()),
+                crate::storage::manuscript_db_path()?,
+            ))
+        })(
+        );
+        let (config, path) = match setup {
+            Ok(value) => value,
+            Err(error) => {
+                self.wiki.write_error = Some(format!("无法开始更新：{error:#}"));
+                return;
+            }
+        };
+        let (ui, progress, cancel) = TaskJobUi::start();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.wiki_write_rx = Some(rx);
+        self.wiki_write_job = Some(ui);
+        self.wiki.write_error = None;
+        self.wiki.write_progress = Some("正在准备工作区…".to_string());
+        std::thread::spawn(move || {
+            let result = crate::pi_agent::wiki_jobs::update_pages(
+                config,
+                path,
+                targets,
+                cancel,
+                progress_sink(&progress),
+            )
+            .map_err(|error| format!("更新失败，可重试：{error}"));
+            let _ = tx.send(WikiWriteOutput { result });
+        });
+    }
+
     /// 每帧轮询页面整编作业：进度、停止、提案进审核台或失败原因。
     pub(crate) fn poll_wiki_write(&mut self, ctx: &eframe::egui::Context) {
         if let Some(job) = &self.wiki_write_job {

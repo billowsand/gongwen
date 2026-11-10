@@ -396,7 +396,15 @@ fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<Str
                                     ui.small("导览页");
                                 });
                             }
+                            if page.uuid.is_some() {
+                                theme::accent_scope(ui, |ui| {
+                                    ui.small("更新现有页");
+                                });
+                            }
                         });
+                        if !page.change_note.is_empty() {
+                            ui.weak(format!("变更说明：{}", page.change_note));
+                        }
                         if !page.doc_refs.is_empty() {
                             ui.weak(format!(
                                 "本页依据：{}",
@@ -412,12 +420,53 @@ fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<Str
                         }
                         ui.add_space(4.0);
                         let preview_h = (ui.available_height() * 0.45).max(120.0);
-                        ui.weak("预览（渲染的是下方源文本的当前内容）");
-                        egui::ScrollArea::vertical()
-                            .max_height(preview_h)
-                            .show(ui, |ui| {
-                                show_page_body(ui, &review.edit_body, link_map, &mut preview_nav);
-                            });
+                        if let Some(uuid) = page.uuid.clone() {
+                            // 更新提案：diff（库中当前正文 → 源文本当前内容）。
+                            let current = app
+                                .wiki_store
+                                .as_ref()
+                                .and_then(|store| store.get_page(&uuid).ok().flatten());
+                            match current {
+                                Some(current_page) => {
+                                    match line_diff(&current_page.body, &review.edit_body) {
+                                        Some(lines) => diff_view(
+                                            ui,
+                                            &format!(
+                                                "v{} → 提案",
+                                                current_page.meta.current_version
+                                            ),
+                                            &lines,
+                                        ),
+                                        None => {
+                                            ui.weak("当前正文行数太多，算不动 diff；按预览显示。");
+                                            egui::ScrollArea::vertical()
+                                                .max_height(preview_h)
+                                                .show(ui, |ui| {
+                                                    show_page_body(
+                                                        ui,
+                                                        &review.edit_body,
+                                                        link_map,
+                                                        &mut preview_nav,
+                                                    );
+                                                });
+                                        }
+                                    }
+                                }
+                                None => {
+                                    ui.colored_label(
+                                        theme::warn(),
+                                        "读不到本页当前正文（可能已被删除）；请退回本页。",
+                                    );
+                                }
+                            }
+                        } else {
+                            ui.weak("预览（渲染的是下方源文本的当前内容）");
+                            egui::ScrollArea::vertical()
+                                .max_height(preview_h)
+                                .show(ui, |ui| {
+                                    show_page_body(ui, &review.edit_body, link_map, &mut preview_nav);
+                                });
+                        }
                         ui.add_space(4.0);
                         ui.separator();
                         ui.add_space(4.0);
@@ -456,14 +505,34 @@ fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<Str
     } else if reject && let Some(review) = app.wiki.review.as_mut() {
         review_mark_done_advance(review);
     }
+    // 本批处理过当前阅读页时重载正文（采纳后是新版、退回也该重读元数据）。
+    let touched_open = app.wiki.review.as_ref().is_some_and(|review| {
+        review.set.pages.iter().enumerate().any(|(index, page)| {
+            review.done.get(index) == Some(&true)
+                && page.uuid.is_some()
+                && app
+                    .wiki
+                    .open
+                    .as_ref()
+                    .is_some_and(|open| page.uuid.as_deref() == Some(open.meta.uuid.as_str()))
+        })
+    });
+    if touched_open && let Some(uuid) = app.wiki.open.as_ref().map(|open| open.meta.uuid.clone()) {
+        open_page(app, &uuid);
+    }
     // 全部处理完：给结论、清审核台、刷新树（新页面挂进分类）。
     if let Some(review) = &app.wiki.review
         && review.done.iter().all(|done| *done)
     {
         let adopted = review.adopted;
         let total = review.set.pages.len();
+        let action = if review.set.pages.iter().any(|page| page.uuid.is_some()) {
+            "更新"
+        } else {
+            "整编"
+        };
         app.wiki.notice = Some(format!(
-            "整编已处理完：采纳 {adopted} 页、退回 {} 页。",
+            "{action}已处理完：采纳 {adopted} 页、退回 {} 页。",
             total - adopted
         ));
         app.wiki.review = None;
@@ -472,7 +541,8 @@ fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<Str
     }
 }
 
-/// 采纳当前页：把编辑后的正文经 `store.create_page` 写库（建页 + v1）。
+/// 采纳当前页：新建页走 `create_page`（建页 + v1）；更新提案走
+/// `update_page`（以库中现状为准写新版本）。两者都带来源与「审核已修改」标记。
 fn review_adopt(app: &mut GongwenApp) {
     let Some(review) = app.wiki.review.as_mut() else {
         return;
@@ -484,30 +554,61 @@ fn review_adopt(app: &mut GongwenApp) {
         return;
     };
     let body = review.edit_body.clone();
-    let input = crate::wiki::PageInput {
-        title: page.title.clone(),
-        node_id: review.set.node_id,
-        kind: if page.kind == "guide" {
-            "guide"
-        } else {
-            "normal"
-        },
-        body: body.clone(),
-        source_run_id: review.set.run_id.clone(),
-        review_edited: body != review.edit_base,
-        doc_refs: page.doc_refs.clone(),
+    let edited = review.edit_body != review.edit_base;
+    let run_id = review.set.run_id.clone();
+    let node_id = review.set.node_id;
+    let store = app.wiki_store.as_ref();
+    let result = match (&page.uuid, store) {
+        (Some(uuid), Some(store)) => store
+            .get_page(uuid)
+            .map_err(|error| format!("读取目标页失败：{error:#}"))
+            .and_then(|current| current.ok_or_else(|| "目标页已不存在。".to_string()))
+            .and_then(|current| {
+                let input = crate::wiki::PageInput {
+                    title: page.title.clone(),
+                    node_id: current.meta.node_id,
+                    kind: if current.meta.kind == "guide" {
+                        "guide"
+                    } else {
+                        "normal"
+                    },
+                    body: body.clone(),
+                    source_run_id: run_id.clone(),
+                    review_edited: edited,
+                    doc_refs: page.doc_refs.clone(),
+                };
+                store
+                    .update_page(uuid, &input)
+                    .map(|_| ())
+                    .map_err(|error| format!("写新版本失败：{error:#}"))
+            }),
+        (None, Some(store)) => {
+            let input = crate::wiki::PageInput {
+                title: page.title.clone(),
+                node_id,
+                kind: if page.kind == "guide" {
+                    "guide"
+                } else {
+                    "normal"
+                },
+                body,
+                source_run_id: run_id,
+                review_edited: edited,
+                doc_refs: page.doc_refs.clone(),
+            };
+            store
+                .create_page(&input)
+                .map(|_| ())
+                .map_err(|error| format!("采纳失败：{error:#}"))
+        }
+        (_, None) => Err("知识库不可用。".to_string()),
     };
-    let result = app
-        .wiki_store
-        .as_ref()
-        .map(|store| store.create_page(&input).map(|_| ()));
     match result {
-        Some(Ok(())) => {
+        Ok(()) => {
             review.adopted += 1;
             review_mark_done_advance(review);
         }
-        Some(Err(error)) => review.error = Some(format!("采纳失败：{error:#}")),
-        None => review.error = Some("知识库不可用。".into()),
+        Err(message) => review.error = Some(message),
     }
 }
 
@@ -606,42 +707,7 @@ fn version_history_window(app: &mut GongwenApp, ctx: &egui::Context) {
             });
             match (body_a, body_b) {
                 (Some(ref old), Some(ref new)) if a != b => match line_diff(old, new) {
-                    Some(lines) => {
-                        ui.weak(format!(
-                            "v{a} → v{b}：− 删除 {} 行，+ 新增 {} 行",
-                            lines
-                                .iter()
-                                .filter(|l| matches!(l, DiffLine::Del(_)))
-                                .count(),
-                            lines
-                                .iter()
-                                .filter(|l| matches!(l, DiffLine::Add(_)))
-                                .count()
-                        ));
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                for line in &lines {
-                                    match line {
-                                        DiffLine::Same(text) => {
-                                            ui.weak(format!("  {text}"));
-                                        }
-                                        DiffLine::Del(text) => {
-                                            ui.label(
-                                                egui::RichText::new(format!("− {text}"))
-                                                    .color(theme::warn()),
-                                            );
-                                        }
-                                        DiffLine::Add(text) => {
-                                            ui.label(
-                                                egui::RichText::new(format!("+ {text}"))
-                                                    .color(theme::accent_text()),
-                                            );
-                                        }
-                                    }
-                                }
-                            });
-                    }
+                    Some(lines) => diff_view(ui, &format!("v{a} → v{b}"), &lines),
                     None => {
                         ui.weak("两版行数太多，算不动行级 diff；请改选正文较小的版本。");
                     }
@@ -715,6 +781,40 @@ enum DiffLine {
     Same(String),
     Add(String),
     Del(String),
+}
+
+/// 渲染行级 diff 小结 + 清单：删除行红色、新增行主题强调色、相同行弱色。
+fn diff_view(ui: &mut egui::Ui, title: &str, lines: &[DiffLine]) {
+    ui.weak(format!(
+        "{title}：− 删除 {} 行，+ 新增 {} 行",
+        lines
+            .iter()
+            .filter(|l| matches!(l, DiffLine::Del(_)))
+            .count(),
+        lines
+            .iter()
+            .filter(|l| matches!(l, DiffLine::Add(_)))
+            .count()
+    ));
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for line in lines {
+                match line {
+                    DiffLine::Same(text) => {
+                        ui.weak(format!("  {text}"));
+                    }
+                    DiffLine::Del(text) => {
+                        ui.label(egui::RichText::new(format!("− {text}")).color(theme::warn()));
+                    }
+                    DiffLine::Add(text) => {
+                        ui.label(
+                            egui::RichText::new(format!("+ {text}")).color(theme::accent_text()),
+                        );
+                    }
+                }
+            }
+        });
 }
 
 /// 行数乘积上限：动态规划表超此数就不算 diff，由调用方降级提示。
@@ -1265,6 +1365,16 @@ fn reader(
         }
         ui.weak(format!("v{}", page.meta.current_version));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let busy = app.wiki.frame_progress.is_some() || app.wiki.write_progress.is_some();
+            if ui
+                .add_enabled(!busy, theme::icon_text_button(theme::Icon::Refresh, "更新"))
+                .on_hover_text(
+                    "让 AI 按资料库新内容更新本页；提案经 diff 审核（可编辑）后才产生新版本",
+                )
+                .clicked()
+            {
+                app.start_wiki_update(vec![(page.meta.uuid.clone(), page.meta.title.clone())]);
+            }
             if ui
                 .add(theme::icon_text_button(theme::Icon::History, "版本"))
                 .on_hover_text("版本历史：两版对比、回滚（回滚也产生新版本，不丢历史）")

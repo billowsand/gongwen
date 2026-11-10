@@ -13,6 +13,7 @@ use super::{
     PiToolContext, PiWorkspace, pi_skills, run,
 };
 use crate::models::{AppConfig, DraftInput};
+use crate::pi_agent::materials::MaterialRole;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -24,6 +25,8 @@ use std::time::Duration;
 const FRAME_DOC_KEY: u64 = u64::MAX - 2;
 /// 页面整编作业再占一个保留键。
 const WRITE_DOC_KEY: u64 = u64::MAX - 3;
+/// 页面更新作业再占一个保留键。
+const UPDATE_DOC_KEY: u64 = u64::MAX - 4;
 /// 与写作一致的单轮执行上限。
 const TIMEOUT: Duration = Duration::from_secs(1800);
 /// 主题与分类名的字数上限（与导入大纲同一口径）。
@@ -278,22 +281,30 @@ pub(crate) struct PageProposalSet {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PageProposal {
+    /// 更新提案的目标页 UUID；新建页提案为 None。
+    pub uuid: Option<String>,
     pub title: String,
     /// normal 或 guide。
     pub kind: String,
     pub body: String,
+    /// 变更说明（更新提案用，审核台展示）。
+    pub change_note: String,
     /// 依据清单：资料库 doc_id + 支撑说明。
     pub doc_refs: Vec<(i64, String)>,
 }
 
 /// 一次整编作业最多交回几页（与技能红线一致，超限退回重拆）。
 const MAX_PAGES_PER_RUN: usize = 10;
+/// 一次更新作业最多交回几页。
+const MAX_UPDATE_PAGES_PER_RUN: usize = 5;
 /// 单页正文字符上限。
 const MAX_PAGE_BODY_CHARS: usize = 20_000;
 /// 页面标题字数上限。
 const MAX_PAGE_TITLE_CHARS: usize = 100;
 /// 一条依据说明的字数上限。
 const MAX_DOC_NOTE_CHARS: usize = 200;
+/// 变更说明字数上限。
+const MAX_CHANGE_NOTE_CHARS: usize = 200;
 
 /// 交付 JSON 的原始形状（校验后转换成 [`PageProposalSet`]）。
 #[derive(serde::Deserialize)]
@@ -303,9 +314,14 @@ struct RawPages {
 
 #[derive(serde::Deserialize)]
 struct RawPage {
+    /// 更新提案必须原样带回目标页 UUID；新建页交付带 UUID 会被拒。
+    #[serde(default)]
+    uuid: Option<String>,
     title: String,
     kind: String,
     body: String,
+    #[serde(default)]
+    change_note: String,
     #[serde(default)]
     doc_refs: Vec<RawDocRef>,
 }
@@ -351,6 +367,9 @@ pub(crate) fn parse_page_delivery(
     let mut guide_seen = false;
     let mut pages = Vec::new();
     for page in raw.pages {
+        if page.uuid.is_some() {
+            return Err("新建页交付里不应带 uuid；要改已有页请走更新作业".into());
+        }
         let title = page.title.trim().to_string();
         if title.is_empty() {
             return Err("页面标题不能为空".into());
@@ -405,9 +424,11 @@ pub(crate) fn parse_page_delivery(
             }
         }
         pages.push(PageProposal {
+            uuid: None,
             title,
             kind,
             body: page.body,
+            change_note: String::new(),
             doc_refs,
         });
     }
@@ -577,6 +598,281 @@ pub(crate) fn write_pages(
     .map_err(|error| format!("页面提案未通过复核：{error}"))
 }
 
+/// 更新作业的目标页快照（发起时从库里读出，交付复核时对照）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UpdateTarget {
+    pub uuid: String,
+    pub title: String,
+    pub node_id: i64,
+    pub kind: String,
+    pub current_body: String,
+}
+
+/// 页面更新交付的确定性复核：UUID 对应页面存在、标题与类型未改、
+/// 正文非空且与现状确有不同、依据文档真实、更新页数不超上限。
+/// 模型只交回部分目标（认为其余的无需改）是允许的。
+pub(crate) fn parse_update_delivery(
+    content: &str,
+    run_id: String,
+    known_docs: &[i64],
+    targets: &[UpdateTarget],
+) -> Result<PageProposalSet, String> {
+    let raw: RawPages = serde_json::from_str(content)
+        .map_err(|error| format!("页面交付不是合法 JSON（{error}）；应为 {{\"pages\": [...]}}"))?;
+    if raw.pages.is_empty() {
+        return Err("页面交付里没有页面".into());
+    }
+    if raw.pages.len() > MAX_UPDATE_PAGES_PER_RUN {
+        return Err(format!(
+            "一次更新最多 {MAX_UPDATE_PAGES_PER_RUN} 页，本轮交了 {} 页；请分批重试",
+            raw.pages.len()
+        ));
+    }
+    let known: std::collections::HashSet<i64> = known_docs.iter().copied().collect();
+    let mut seen_uuids = std::collections::HashSet::new();
+    let mut pages = Vec::new();
+    let mut node_id = 0i64;
+    for page in raw.pages {
+        let Some(uuid) = page.uuid.map(|u| u.trim().to_string()) else {
+            return Err("更新提案缺 uuid；每个 pages[] 都要带目标页 UUID".into());
+        };
+        if !seen_uuids.insert(uuid.clone()) {
+            return Err(format!("本轮交付里页面 {uuid} 重复"));
+        }
+        let Some(target) = targets.iter().find(|t| t.uuid == uuid) else {
+            return Err(format!("目标页 {uuid} 不在本次发起范围（或已被删除）"));
+        };
+        node_id = target.node_id;
+        let title = page.title.trim().to_string();
+        if title != target.title {
+            return Err(format!(
+                "更新不改标题：目标页是「{}」，交付写的是「{title}」",
+                target.title
+            ));
+        }
+        let kind = page.kind.trim().to_string();
+        if kind != target.kind {
+            return Err(format!(
+                "更新不改页面类型：「{title}」应保持 kind={}",
+                target.kind
+            ));
+        }
+        if page.body.trim().is_empty() {
+            return Err(format!("页面「{title}」正文是空的"));
+        }
+        if page.body.chars().count() > MAX_PAGE_BODY_CHARS {
+            return Err(format!(
+                "页面「{title}」正文超过 {MAX_PAGE_BODY_CHARS} 字，请拆成多页"
+            ));
+        }
+        if page.body == target.current_body {
+            return Err(format!("页面「{title}」的正文与现状逐字相同，没有变化"));
+        }
+        let change_note = page.change_note.trim().to_string();
+        if change_note.chars().count() > MAX_CHANGE_NOTE_CHARS {
+            return Err(format!(
+                "页面「{title}」变更说明超过 {MAX_CHANGE_NOTE_CHARS} 字"
+            ));
+        }
+        let mut doc_refs = Vec::new();
+        for reference in page.doc_refs {
+            if !known.contains(&reference.doc_id) {
+                return Err(format!(
+                    "页面「{title}」依据的文档 {} 不在资料库里；只填 kb_search / kb_read 真实返回的编号",
+                    reference.doc_id
+                ));
+            }
+            if reference.note.chars().count() > MAX_DOC_NOTE_CHARS {
+                return Err(format!(
+                    "页面「{title}」依据说明超过 {MAX_DOC_NOTE_CHARS} 字"
+                ));
+            }
+            let note = reference.note.trim().to_string();
+            if !doc_refs.iter().any(|(id, _)| *id == reference.doc_id) {
+                doc_refs.push((reference.doc_id, note));
+            }
+        }
+        pages.push(PageProposal {
+            uuid: Some(uuid),
+            title,
+            kind,
+            body: page.body,
+            change_note,
+            doc_refs,
+        });
+    }
+    Ok(PageProposalSet {
+        run_id,
+        category: format!("更新 {} 页", pages.len()),
+        node_id,
+        pages,
+    })
+}
+
+/// 按资料库新内容更新已有维基页面：目标页正文以材料附上，Pi 找新资料改写，
+/// 交回通过确定性复核的更新提案集，由用户在审核台看 diff、可编辑后写库。
+pub(crate) fn update_pages(
+    config: Arc<AppConfig>,
+    store_path: PathBuf,
+    targets: Vec<(String, String)>,
+    cancel: Arc<AtomicBool>,
+    mut on_progress: impl FnMut(String),
+) -> Result<PageProposalSet, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已停止更新页面。".into());
+    }
+    if targets.is_empty() {
+        return Err("没有指定要更新的页面。".into());
+    }
+    if targets.len() > MAX_UPDATE_PAGES_PER_RUN {
+        return Err(format!(
+            "一次更新至多 {MAX_UPDATE_PAGES_PER_RUN} 页，本次选了 {} 页",
+            targets.len()
+        ));
+    }
+    let store = crate::wiki::WikiStore::open(&store_path)
+        .map_err(|error| format!("打开维基库失败：{error:#}"))?;
+    let mut snapshot = Vec::new();
+    for (uuid, title) in &targets {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("已停止更新页面。".into());
+        }
+        let page = store
+            .get_page(uuid)
+            .map_err(|error| format!("读取页面「{title}」失败：{error:#}"))?
+            .ok_or_else(|| format!("页面「{title}」已不存在，无法更新"))?;
+        snapshot.push(UpdateTarget {
+            uuid: uuid.clone(),
+            title: page.meta.title.clone(),
+            node_id: page.meta.node_id,
+            kind: page.meta.kind.to_string(),
+            current_body: page.body.clone(),
+        });
+    }
+    let catalog = pi_skills::load_catalog();
+    catalog.resolve(Some(pi_skills::WIKI_UPDATE_SKILL))?;
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let listing = snapshot
+        .iter()
+        .map(|t| format!("- {}（uuid：{}）", t.title, t.uuid))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let request = format!(
+        "按技能 {} 更新 {} 个维基页面，最后用 submit_task 交 work/pages.json。\
+         今天日期：{today}。目标页（正文已作为材料附上）：\n{listing}\n\
+         用 kb_search / kb_read 找与这些页面相关、尤其是新入库的文档；\
+         维基内现状用 wiki_search / wiki_read / wiki_links 自查互链。\
+         每个 pages[] 原样带回 uuid 与 title，正文给整页新正文。",
+        pi_skills::WIKI_UPDATE_SKILL,
+        snapshot.len(),
+    );
+    // 目标页现状作材料：模型在副本上改写，交付整页新正文。
+    let materials: Vec<PiMaterialInput> = snapshot
+        .iter()
+        .map(|t| {
+            let mut text = format!("# {}\n\n{}", t.title, t.current_body);
+            text.truncate(MAX_PAGE_BODY_CHARS + 200);
+            PiMaterialInput {
+                title: format!("维基页：{}", t.title),
+                source: "维基现状".into(),
+                role: MaterialRole::Fact,
+                text,
+            }
+        })
+        .collect();
+    let runtime = PiRuntime::locate()?;
+    let chat = config.pi_chat().map_err(|error| error.to_string())?;
+    let model = crate::ai_panel::pi_job::pi_model(&chat)?;
+    let (workspace, metas) = PiWorkspace::prepare(
+        &super::base_dir()?,
+        UPDATE_DOC_KEY,
+        "",
+        &request,
+        &materials,
+        &catalog,
+        Some(pi_skills::WIKI_UPDATE_SKILL),
+    )?;
+    // 只读全套 + 维基工具：更新要查已有页面与互链现状。
+    let tools = Arc::new(
+        PiToolContext::new(
+            Arc::clone(&config),
+            DraftInput::default(),
+            String::new(),
+            request.clone(),
+            Vec::new(),
+        )
+        .with_wiki_autoload(),
+    );
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let request_id = format!("wiki-update-{run_id}");
+    let record = PiRunRecord::start(
+        run_id.clone(),
+        request_id.clone(),
+        &workspace,
+        "",
+        "",
+        "",
+        &workspace.read_request()?,
+        None,
+        &request,
+        "维基更新",
+        &today,
+        Some(pi_skills::WIKI_UPDATE_SKILL),
+        None,
+        metas.clone(),
+        &config.pi_model.provider_id,
+        &model.model_id,
+    );
+    let record = Arc::new(PiRunLog::open(&workspace, record)?);
+    let label = workspace.label.clone();
+    let outcome = run(
+        PiJob {
+            runtime,
+            workspace,
+            model,
+            task: PiTask {
+                request,
+                kind: "维基更新".to_string(),
+                system_date: today,
+                skill: Some(pi_skills::WIKI_UPDATE_SKILL.to_string()),
+                strategy: Default::default(),
+                capability: Default::default(),
+                selection: None,
+                materials: metas,
+            },
+            before: String::new(),
+            base: String::new(),
+            tools,
+            bridge: Arc::new(PiBridge::default()),
+            record,
+            resume: false,
+            request_id,
+            run_id: run_id.clone(),
+            timeout: TIMEOUT,
+            proxy_env: crate::net::proxy_env(&config.proxy),
+        },
+        Arc::clone(&cancel),
+        |event| match event {
+            PiEvent::Progress(message) | PiEvent::Tool(message) => on_progress(message),
+            PiEvent::Activity(activity) if activity.outcome.is_none() => {
+                on_progress(activity.action)
+            }
+            PiEvent::Strategy(info) => on_progress(info.line()),
+            _ => {}
+        },
+    )
+    .map_err(|error| format!("{error}；工作文件保留在 {label}"))?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已停止更新页面，未采纳本轮结果。".into());
+    }
+    let PiOutcome::Task(delivery) = outcome else {
+        return Err("Pi 没有交回页面更新提案，未采纳。".into());
+    };
+    let known = known_doc_ids(&store_path)?;
+    parse_update_delivery(&delivery.content, run_id, &known, &snapshot)
+        .map_err(|error| format!("页面更新提案未通过复核：{error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,5 +1033,101 @@ mod tests {
                 "{label} 应被拒绝：{content}"
             );
         }
+    }
+
+    fn targets() -> Vec<UpdateTarget> {
+        vec![UpdateTarget {
+            uuid: "u-1".into(),
+            title: "监督检查".into(),
+            node_id: 42,
+            kind: "normal".into(),
+            current_body: "旧正文".into(),
+        }]
+    }
+
+    #[test]
+    fn valid_update_delivery_parses_into_proposal_set() {
+        let set = parse_update_delivery(
+            r##"{"pages":[
+                {"uuid":"u-1","title":"监督检查","kind":"normal","body":"新正文",
+                 "change_note":"按 E12 补充闭环口径","doc_refs":[{"doc_id":12,"note":"新通知"}]}
+            ]}"##,
+            "run-u".into(),
+            &known(),
+            &targets(),
+        )
+        .unwrap();
+        assert_eq!(set.pages.len(), 1);
+        assert_eq!(set.pages[0].uuid.as_deref(), Some("u-1"));
+        assert_eq!(set.pages[0].change_note, "按 E12 补充闭环口径");
+        assert_eq!(set.pages[0].doc_refs, vec![(12, "新通知".to_string())]);
+    }
+
+    #[test]
+    fn update_delivery_rejects_invalid_proposals() {
+        let base = r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"normal","body":"新正文","change_note":"","doc_refs":[]}]}"##;
+        let good = parse_update_delivery(base, "r".into(), &known(), &targets());
+        assert!(good.is_ok(), "{good:?}");
+
+        let cases = [
+            ("不是 JSON", "[]".to_string()),
+            ("空集合", "{\"pages\":[]}".to_string()),
+            (
+                "缺 uuid",
+                r##"{"pages":[{"title":"监督检查","kind":"normal","body":"新正文","doc_refs":[]}]}"##.to_string(),
+            ),
+            (
+                "uuid 不在发起范围",
+                r##"{"pages":[{"uuid":"u-9","title":"监督检查","kind":"normal","body":"新正文","doc_refs":[]}]}"##.to_string(),
+            ),
+            (
+                "改了标题",
+                r##"{"pages":[{"uuid":"u-1","title":"监督监察","kind":"normal","body":"新正文","doc_refs":[]}]}"##.to_string(),
+            ),
+            (
+                "改了类型",
+                r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"guide","body":"新正文","doc_refs":[]}]}"##.to_string(),
+            ),
+            (
+                "正文没有变化",
+                r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"normal","body":"旧正文","doc_refs":[]}]}"##.to_string(),
+            ),
+            (
+                "幽灵依据",
+                r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"normal","body":"新正文","doc_refs":[{"doc_id":999,"note":""}]}]}"##.to_string(),
+            ),
+            (
+                "本轮重复 uuid",
+                r##"{"pages":[
+                    {"uuid":"u-1","title":"监督检查","kind":"normal","body":"甲","doc_refs":[]},
+                    {"uuid":"u-1","title":"监督检查","kind":"normal","body":"乙","doc_refs":[]}
+                ]}"##.to_string(),
+            ),
+        ];
+        for (label, content) in cases {
+            assert!(
+                parse_update_delivery(&content, "r".into(), &known(), &targets()).is_err(),
+                "{label} 应被拒绝：{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_page_delivery_rejects_uuid_bearing_pages() {
+        let content = r##"{"pages":[
+            {"uuid":"u-1","title":"新页","kind":"normal","body":"正文","doc_refs":[]}
+        ]}"##;
+        assert!(
+            parse_page_delivery(
+                content,
+                "监督检查",
+                42,
+                "r".into(),
+                &existing(),
+                &known(),
+                &categories(),
+            )
+            .is_err()
+        );
     }
 }
