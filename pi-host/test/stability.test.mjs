@@ -89,6 +89,7 @@ test("崩溃残留的半截密文临时文件：listDir 跳过、清理后会话
   const space = fixture();
   let storage = await openStorage(space);
   await storage.commit([{ type: "conversation", value: { id: 7 } }], BACKGROUND_CONTEXT);
+  console.error("DEBUG-111-after-commit", storage.mainPath, fs.existsSync(storage.mainPath), space.state);
   await storage.close(BACKGROUND_CONTEXT);
 
   // 模拟写临时文件途中被 SIGKILL：只写了一半封套。

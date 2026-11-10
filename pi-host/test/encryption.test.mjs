@@ -211,6 +211,7 @@ test("Durable JSONL 加密提交后可关闭重开恢复，并继续追加提交
   );
   let storage = await open();
   await storage.commit([{ type: "conversation", value: { id: 2 } }], BACKGROUND_CONTEXT);
+  console.error("DEBUG-48-after-commit", storage.mainPath, fs.existsSync(storage.mainPath), space.state);
   await storage.commit([{ type: "entry", value: { id: 3, conversationId: 2, kind: "test", data: { marker } } }], BACKGROUND_CONTEXT);
   await storage.close(BACKGROUND_CONTEXT);
 

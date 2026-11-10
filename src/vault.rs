@@ -1075,7 +1075,11 @@ fn resource_dirs_need_encryption(slot: DataSlot) -> bool {
         let entries = match read_dir_if_exists(&dir) {
             Ok(Some(entries)) => entries,
             Ok(None) => continue,
-            Err(_) => return true,
+            Err(error) => {
+                #[cfg(test)]
+                eprintln!("vault-dir-unreadable path={} error={error}", dir.display());
+                return true;
+            }
         };
         for entry in entries {
             let entry = match entry {
@@ -1157,10 +1161,20 @@ fn seal_plaintext_file(path: &Path, key: &[u8; DEK_LEN]) -> Result<()> {
 /// 文件是否带密封魔数。这个函数服务于「能否安全当作无加密数据」的探测：
 /// 不存在才是 false；存在但读不出来时保守返回 true，绝不放行重置或明文降级。
 fn sealed_header_at(path: &Path) -> bool {
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
-        Err(_) => return true,
+    // Windows 上刚写完的文件会短暂被 Defender 等进程以独占方式打开，这里把
+    // 「打不开」当成「可能有密文」是 fail-closed，但一次瞬时共享冲突就会让普通
+    // 工作区被判成加密工作区、拒绝明文写入；先短暂重试，仍打不开才按密文处理。
+    let mut attempt = 0;
+    let mut file = loop {
+        match std::fs::File::open(path) {
+            Ok(file) => break file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(_) if attempt < 2 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => return true,
+        }
     };
     let mut head = [0u8; FILE_MAGIC.len()];
     use std::io::Read as _;
@@ -1178,12 +1192,20 @@ fn directory_has_encrypted_data(path: PathBuf) -> bool {
         let entries = match read_dir_if_exists(&dir) {
             Ok(Some(entries)) => entries,
             Ok(None) => continue,
-            Err(_) => return true,
+            Err(error) => {
+                #[cfg(test)]
+                eprintln!("vault-dir-unreadable path={} error={error}", dir.display());
+                return true;
+            }
         };
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
-                Err(_) => return true,
+                Err(error) => {
+                    #[cfg(test)]
+                    eprintln!("vault-entry-unreadable error={error}");
+                    return true;
+                }
             };
             visited += 1;
             if visited > 200_000 {
@@ -1195,6 +1217,12 @@ fn directory_has_encrypted_data(path: PathBuf) -> bool {
                 Ok(meta) if meta.is_dir() => pending.push(path),
                 Ok(meta) if meta.is_file() => {
                     if sealed_header_at(&path) {
+                        #[cfg(test)]
+                        eprintln!(
+                            "vault-sealed-entry path={} size={}",
+                            path.display(),
+                            meta.len()
+                        );
                         return true;
                     }
                 }
