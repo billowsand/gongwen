@@ -113,7 +113,19 @@ test("崩溃残留的半截密文临时文件：listDir 跳过、清理后会话
     } catch (error) {
       main = `read failed: ${error?.message ?? error}`;
     }
-    console.error("DEBUG-111", JSON.stringify({ listing: fs.readdirSync(space.state), head, main }));
+    const found = [];
+    const walk = (dir, depth) => {
+      if (depth > 6 || found.length > 20) return;
+      let entries = [];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full, depth + 1);
+        else if (entry.name === "main.jsonl") found.push(full);
+      }
+    };
+    walk(space.base, 0);
+    console.error("DEBUG-111", JSON.stringify({ cwd: process.cwd(), listing: fs.readdirSync(space.state), head, main, found }));
   }
   assert.deepEqual(reopened, { id: 7 });
   await storage.close(BACKGROUND_CONTEXT);

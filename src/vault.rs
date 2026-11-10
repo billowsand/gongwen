@@ -1216,6 +1216,11 @@ fn directory_has_encrypted_data(path: PathBuf) -> bool {
                 Ok(meta) if meta.file_type().is_symlink() => continue,
                 Ok(meta) if meta.is_dir() => pending.push(path),
                 Ok(meta) if meta.is_file() => {
+                    // 空文件不可能带 GWA 魔数；Windows 上被独占锁住的空锁文件会
+                    // 让 File::open 失败，旧逻辑把它当密文，普通工作区被判成加密。
+                    if meta.len() == 0 {
+                        continue;
+                    }
                     if sealed_header_at(&path) {
                         #[cfg(test)]
                         eprintln!(

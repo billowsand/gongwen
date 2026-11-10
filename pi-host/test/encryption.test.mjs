@@ -233,7 +233,19 @@ test("Durable JSONL 加密提交后可关闭重开恢复，并继续追加提交
     } catch (error) {
       main = `read failed: ${error?.message ?? error}`;
     }
-    console.error("DEBUG-48", JSON.stringify({ listing, head, main }));
+    const found = [];
+    const walk = (dir, depth) => {
+      if (depth > 6 || found.length > 20) return;
+      let entries = [];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full, depth + 1);
+        else if (entry.name === "main.jsonl") found.push(full);
+      }
+    };
+    walk(space.base, 0);
+    console.error("DEBUG-48", JSON.stringify({ cwd: process.cwd(), listing, head, main, found }));
   }
   assert.deepEqual(conversation, { id: 2 });
   assert.equal((await storage.entry(3, BACKGROUND_CONTEXT)).entry.data.marker, marker);
