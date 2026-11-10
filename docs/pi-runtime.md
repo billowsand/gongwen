@@ -45,7 +45,7 @@ runtime/pi/
 | 平台 | `win-x64`、`linux-arm64`、`linux-x64`、`darwin-arm64`、`darwin-x64`（macOS 用官方 `.tar.gz`） |
 | Node | `22.22.3`（与本机已验版本一致，不跟随 latest） |
 | `@earendil-works/chord` / `pi-ai` / `pi-durable` | `1.5.0` |
-| host | `0.4.2`，协议 `4` |
+| host | `0.5.0`，协议 `4` |
 | lockfile | `pi-host/package-lock.json` 的 SHA-256 写进 manifest |
 
 官方压缩包与 SHA-256（来源 `https://nodejs.org/download/release/v22.22.3/SHASUMS256.txt`）：
@@ -172,7 +172,7 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
   一律当 `linux-*`：Windows x64 → `win-x64`，Linux arm64 / x64 → `linux-arm64` / `linux-x64`，
   macOS arm64 / x64 → `darwin-arm64` / `darwin-x64`（manifest 的平台名也用 `darwin-*`）；
   未知平台明确报「不支持的系统」，不再误接受一份别的平台的运行时；
-- 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.4.2`、协议 `4` 与配置一致；
+- 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.5.0`、协议 `4` 与配置一致；
 - 在执行 Node 前核对 Node 本身的 SHA-256，并检查依赖锁文件哈希；抽查关键入口
   （`host/main.mjs`、`host/package.json`、三个 Pi 包的 `package.json`）的
   SHA-256；不会每帧遍历 `node_modules`（manifest 只在每次开跑定位时读一次）；
@@ -186,7 +186,7 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 
 ## 六、所有权、恢复与工作区
 
-### 统一策略、分阶段与阶段成果（当前协议 4 / host 0.4.2；策略语义沿用协议 3）
+### 统一策略、分阶段与阶段成果（当前协议 4 / host 0.5.0；策略语义沿用协议 3）
 
 模型能力档案由「测试写作能力」后台动作生成：四次同题自动 / 分阶段合成写作都经生产 Rust Pi 运行链，
 工具源显式绑定到临时 SQLite 知识库 / 稿件库与空风格源。单轮限时 **300 秒**、四轮总计 **15 分钟**，
@@ -544,3 +544,27 @@ host 侧适配的破坏性变更（按上游 1.5.0 CHANGELOG）：
   必须在各自平台发布前从 `pi-host` 源码重建——**这次重建只覆盖本机 darwin-arm64**。CI / release
   各平台作业都先跑组装 + 无公网验收，再进入打包，不会被旧 `runtime` 顶替。
 - 仍待真机验收：真实模型长会话、崩溃恢复与目标机门槛。
+
+## 任务助手作业（host 0.5.0，协议 4）
+
+任务助手的材料整理与单任务填写自 2026-11-10 起走 Pi，不再是一次性补全调用。
+
+- 两个内置技能：`gongwen-task-extract`（材料 → 任务候选）、`gongwen-task-fill`（单任务表单
+  → 六栏）。它们不进侧栏写作下拉（`Catalog::writing_enabled` 排除），由任务助手页面直接指定；
+  技能管理页仍可停用或覆盖。作业入口 `src/pi_agent/task_jobs.rs`，与风格学习同构：
+  `PiWorkspace::prepare` → `run` → 交付 JSON → Rust 复核。
+- 工具面收窄：只挂 `read` / `write` / `edit` / `record_progress` / `submit_task` 与领域工具
+  `task_search` / `task_read` / `vocab_search` / `current_date`。知识库、稿件库、内网接口、
+  `check_document`、`doc_elements`、风格工具与 `ask_user` 一律不挂；Rust 侧 `PiToolContext`
+  另有一道 `task_only` 白名单。`task_search` / `task_read` 每次调用新开一个只读任务库连接。
+- 交付：`submit_task({path, summary})`，路径在 `work/` 下、`.json`、≤ 2 MiB；`mode` 必须与技能
+  一致；host 写 `final.json` + `receipt.json`（`kind = "task"`），`submitted` 事件与正文交付同一条；
+  分阶段时交付阶段要求先 `record_progress` 登记 `final`（path/sha 与提交一致）。
+- 复核与门禁：`parse_task_delivery` 按 `mode` 复用原有校验——`evidence` 必须逐字出现在原文
+  （只忽略空白与全半角标点）、期限须有原文支撑、候选类型白名单、目标 ID 必须存在于任务库；
+  结果只交任务页，用户采纳才写库。
+- 放开的一次性门禁：不再只注入最近 50 项任务（改用 `task_search`）、材料按 512 KiB 分块
+  （每轮最多 20 份、合计 4 MiB，单份原文上限 4 MiB）、候选上限 100 条、任务作业不占
+  `begin_writing` 写作门禁，可与 Pi 写作并行。
+- 依赖：任务作业需要已选 Pi 写作模型与随包 `runtime/pi`（host 0.5.0）；缺任一项直接报错，
+  不回落到旧起草模型。旧 host（0.4.x）不能用于任务作业，发布必须重建三平台运行时。

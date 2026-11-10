@@ -6,7 +6,8 @@
 //!
 //! 常规与分阶段共用同一个 Durable Harness 与同一份交付权限：分阶段只是宿主按预算
 //! 把长任务拆成几步短任务，中间成果经 `record_progress` 由宿主核验登记，最终仍必须
-//! `submit_document` / `finish_report`。这里没有第二个推理循环，也没有通用流程 DSL。
+//! `submit_document` / `finish_report`（风格作业用 `submit_style`，任务助手作业用
+//! `submit_task`）。这里没有第二个推理循环，也没有通用流程 DSL。
 
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -31,6 +32,7 @@ import {
   readReceipt,
   writeDocumentReceipt,
   writeReportReceipt,
+  writeTaskReceipt,
 } from "./delivery.mjs";
 import { REPORT_TOOL_NAME, SUBMIT_TOOL_NAME, loadSkillIndex, systemPrompt, userPrompt } from "./prompt.mjs";
 
@@ -55,6 +57,7 @@ import { createBoundedReadTool } from "./read.mjs";
 import { observeActivity } from "./activity.mjs";
 
 import { isStyleTask, createSubmitStyleTool } from "./style.mjs";
+import { TASK_MAX_BYTES, TASK_SUBMIT_TOOL_NAME, isTaskTask, validateTaskPayload } from "./task.mjs";
 
 const PROVIDER_ID = "gongwen";
 const CANDIDATE_INTERVAL_MS = 400;
@@ -286,6 +289,117 @@ function createSubmitTool({ guard, limits, state, onSubmitted, emit, deliveryDir
   });
 }
 
+/** 任务作业的交付单元：任务计划里没有 review 阶段，用同一套登记校验补一个 final。 */
+const TASK_FINAL_UNIT = {
+  phase: "review",
+  id: "final",
+  unit: "final",
+  kind: "final",
+  title: "整理结果",
+};
+
+/** 任务助手交付：work/ 下的 JSON，回执 `kind = task`，与正文交付共用 submitted 事件。 */
+export function createSubmitTaskTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId, phase, files }) {
+  return defineTool({
+    name: TASK_SUBMIT_TOOL_NAME,
+    description:
+      "提交本轮的任务整理结果（work/ 下的 JSON 文件，≤ 2 MiB）。材料整理交 items 清单，表单填写交六栏 fields；提交内容在调用时固定，同一轮只认第一次。",
+    parameters: Type.Object({
+      path: Type.String({ description: "work/ 下的 JSON 文件路径" }),
+      summary: Type.String({ description: "一句话说明整理了哪些材料或填了什么" }),
+    }),
+    execute: async (args, api) => {
+      if (!isTaskTask(phase?.task)) {
+        throw new AgentError("当前不是任务助手作业，不能使用 submit_task。", "task_required");
+      }
+      if (phase?.phased && phase.id !== "deliver") {
+        throw new AgentError(
+          `现在还在分阶段整理的「${phase.title ?? phase.id}」这一步，不能提前交付。请先写本步成果并调用 ${RECORD_TOOL_NAME} 登记，最后一步再提交。`,
+          "phase_premature_submit",
+        );
+      }
+      if (phase?.phased && !phase.registry?.has("final")) {
+        throw new AgentError(
+          "整理结果还没有登记：请先把结果写入 work/task.json，调用 record_progress 登记 final，再提交。",
+          "phase_incomplete",
+        );
+      }
+      const read = guard.readSubmission(args.path, { maxFileBytes: Math.min(limits.maxFileBytes, TASK_MAX_BYTES) });
+      if (!read.ok) {
+        throw new AgentError(`提交失败：${read.error.message}`, "submit_invalid");
+      }
+      const { relative, text } = read.value;
+      if (!relative.endsWith(".json")) {
+        throw new AgentError("任务交付必须是 work/ 下的 .json 文件；请把结果写进 work/task.json 后重新提交。", "submit_invalid");
+      }
+      try {
+        validateTaskPayload(text, phase.task.skill);
+      } catch (error) {
+        throw new AgentError(
+          `任务文件校验未通过：${error.message}。请按系统指令里的 JSON 结构改正 work/task.json 后重新提交。`,
+          "submit_invalid",
+        );
+      }
+      if (phase?.phased) {
+        validatePhaseDelivery(phase, guard);
+        const final = phase.registry.get("final");
+        if (!final || final.path !== relative || final.sha256 !== sha256(text)) {
+          throw new AgentError(
+            "提交文件与已登记整理结果不一致：请对最终的 work/task.json 重新调用 record_progress 登记 final，再提交。",
+            "phase_incomplete",
+          );
+        }
+      }
+      const bytes = Buffer.byteLength(text, "utf8");
+      if (bytes > TASK_MAX_BYTES) {
+        throw new AgentError(`任务文件超过上限（${bytes} 字节）`, "submit_too_large");
+      }
+      const hash = sha256(text);
+      const summary = typeof args.summary === "string" ? args.summary.slice(0, 2_000) : "";
+      if (state.snapshot) {
+        if (state.snapshot.path !== relative || state.snapshot.sha256 !== hash) {
+          throw new AgentError("本轮已经提交过另一份结果；同一轮只认第一次提交。", "submit_duplicate");
+        }
+        return {
+          output: [{ type: "text", text: `本轮已提交 ${relative}（${state.snapshot.bytes} 字节），以第一次提交为准。` }],
+        };
+      }
+      // 与正文交付同一顺序：先把内容复制到运行目录并落回执，再发事件。
+      let receipt;
+      try {
+        receipt = writeTaskReceipt(deliveryDir, {
+          runId,
+          requestId,
+          relative,
+          content: text,
+          sha256: hash,
+          bytes,
+          summary,
+          callId: api?.callId ?? "",
+          files,
+        });
+      } catch (error) {
+        throw new AgentError(
+          `提交失败：写不出交付回执（${error instanceof DeliveryError ? error.message : error?.message ?? error}）`,
+          "receipt_failed",
+        );
+      }
+      state.snapshot = { path: relative, content: text, sha256: hash, bytes, summary, receipt };
+      emit({ type: "progress", message: `已提交 ${relative}，等待程序检查` });
+      onSubmitted?.(state.snapshot);
+      return {
+        output: [
+          {
+            type: "text",
+            text: `已提交 ${relative}（${bytes} 字节，sha256 ${hash.slice(0, 12)}…）。不要再修改这个文件。`,
+          },
+        ],
+        control: { terminate: true },
+      };
+    },
+  });
+}
+
 /** 审核 / 找资料的清单：只进侧栏，不产生正文提案。 */
 function createReportTool({ state, emit, deliveryDir, runId, requestId, phase, files }) {
   return defineTool({
@@ -359,6 +473,8 @@ function requiredPhaseUses(phase, spec) {
   const materialUnits = registry.active()
     .filter((record) => record.kind === "distill" || record.kind === "study")
     .map((record) => record.unit);
+  // 任务作业没有提纲与逐节，交付单元只依赖已登记的材料摘记。
+  if (isTaskTask(phase.task) && spec.kind === "final") return materialUnits;
   if (spec.kind === "outline") return materialUnits;
   if (spec.kind === "section") return ["outline", ...materialUnits];
   if (spec.kind === "final") {
@@ -431,8 +547,13 @@ function createRecordTool({ guard, limits, phase, registry, emit, onFatal }) {
       if (!phase?.phased) {
         throw new AgentError("本轮是常规策略，不需要分阶段登记；请直接写完整成品并提交。", "progress_unused");
       }
-      const accepted = phase.spec ?? (phase.id === "deliver" && !phase.report
-        ? phase.plan.phases.find((item) => item.id === "review") : undefined);
+      // 任务计划的交付阶段没有 review 单元；恢复时 phase.spec 可能只剩交付阶段本身，
+      // 也要照常接受 final 登记，否则交付阶段无法补登记。
+      const accepted = isTaskTask(phase.task) && phase.id === "deliver"
+        ? { phase: "review", units: [TASK_FINAL_UNIT], allUnits: [TASK_FINAL_UNIT] }
+        : phase.spec ?? (phase.id === "deliver" && !phase.report
+          ? phase.plan.phases.find((item) => item.id === "review")
+          : undefined);
       const spec = (accepted?.units ?? []).find((unit) => unit.id === args?.unit);
       if (!spec) {
         const available = (accepted?.units ?? []).map((item) => item.id).join("、") || "（无可登记单元）";
@@ -469,7 +590,7 @@ function createRecordTool({ guard, limits, phase, registry, emit, onFatal }) {
         );
       } catch (error) {
         const failure = toAgentError(error);
-        let hint = `本步文件路径应是 work/ 下的文件（建议：${spec.kind === "outline" ? "work/outline.md" : spec.kind === "section" ? `work/sections/${String(spec.index).padStart(2, "0")}.md` : spec.kind === "final" ? "work/final.md" : "work/notes/本步编号.md"}）。当前可用阶段编号：${(accepted?.units ?? []).map((item) => item.id).join("、") || "（无）"}。`;
+        let hint = `本步文件路径应是 work/ 下的文件（建议：${spec.kind === "outline" ? "work/outline.md" : spec.kind === "section" ? `work/sections/${String(spec.index).padStart(2, "0")}.md` : spec.kind === "final" ? (isTaskTask(phase.task) ? "work/task.json" : "work/final.md") : "work/notes/本步编号.md"}）。当前可用阶段编号：${(accepted?.units ?? []).map((item) => item.id).join("、") || "（无）"}。`;
         if (Number.isInteger(spec.sourceLine) && spec.file) {
           hint = `本单元已有原文行号。请直接将 sources 改为 [{path:${JSON.stringify(spec.file)},fromLine:${spec.sourceLine},toLine:${spec.sourceLine}}]，并删除 quote；不要自行重打原句。宿主会从该原文件行提取原文，仍会检查材料范围、来源角色和哈希。`;
         } else if (spec.kind === "distill" && spec.file) {
@@ -540,6 +661,20 @@ function createExtension({
       createBoundedReadTool({guard,maxFileBytes:limits.maxFileBytes,maxChars:readChars}),
       createWriteTool(),createEditTool(),createRecordTool({guard,limits,phase,registry,emit,onFatal}),
       createSubmitStyleTool({guard,limits,state,onSubmitted,deliveryDir,runId,requestId,phase,files,validateCoverage:validatePhaseDelivery}),
+    ]});
+  }
+  if (isTaskTask(phase.task)) {
+    return defineExtension({ name: "gongwen-writing", tools: [
+      // 任务作业只挂任务检索、词库、日期与文件工具；知识库 / 稿件 / 接口 / 提问一律不挂。
+      ...createDomainTools(bridge, {
+        only: ["task_search", "task_read", "vocab_search", "current_date"],
+        readChars,
+      }),
+      createBoundedReadTool({ guard, maxFileBytes: limits.maxFileBytes, maxChars: readChars }),
+      createWriteTool(),
+      createEditTool(),
+      createRecordTool({ guard, limits, phase, registry, emit, onFatal }),
+      createSubmitTaskTool({ guard, limits, state, onSubmitted, emit, deliveryDir, runId, requestId, phase, files }),
     ]});
   }
   const tools = [
@@ -729,7 +864,10 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
   if (config.recovery?.resume) {
     const receipt = readReceipt(deliveryDir, config.runId, files);
     if (receipt) {
-      if ((receipt.kind === "style") !== isStyleTask(config.task)) {
+      const expectedKinds = isStyleTask(config.task)
+        ? ["style"]
+        : isTaskTask(config.task) ? ["task"] : ["document", "report"];
+      if (!expectedKinds.includes(receipt.kind)) {
         throw new AgentError("交付回执的产物类型与本轮任务不一致，已拒绝恢复。", "receipt_kind_mismatch");
       }
       if (receipt.requestId !== config.requestId) {
@@ -849,7 +987,10 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
   const toolQuota = createToolQuota({ mode: decision.mode, toolBudget: decision.toolBudget, bridge });
   const grantTools = (count) => toolQuota.grant(count);
   onBridge?.(bridge);
-  const candidateScan = makeCandidateScanner({ guard, state, emit, limits: config.limits });
+  // 任务作业的 work/ 里只有 JSON，候选稿预览没有意义，也不该把任务 JSON 当成正文提案。
+  const candidateScan = isTaskTask(config.task)
+    ? Object.assign(() => {}, { maybeTick: () => {} })
+    : makeCandidateScanner({ guard, state, emit, limits: config.limits });
 
   try {
     const built = models && model ? { models, model } : buildModels(config);
@@ -938,20 +1079,28 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     // 快照（pi.live + 条目窗口），由 activity 模块 diff 出原 watchEvents 的语义。
     stream = await root.watch(controller.context, { min: 200, max: 400 });
     const showActivity = observeActivity(config.task, emit);
-    stream.start(async (call) => {
-      if (call.kind !== "value") return;
+    // 1.5 的 WatchHandle.start 直接把 `(value, ops, context)` 交给监听器，
+    // 不再是 1.4 的 `{kind: "value"}` 事件对象；把视图快照交给活动行即可。
+    const activityHooks = {
+      onRetry: (attempt) =>
+        emit({ type: "progress", message: `模型调用失败，正在重试（第 ${attempt} 次）` }),
+      onRunFailure: (failure) =>
+        emit({ type: "progress", message: `任务失败：${failure.detail ?? failure.reason ?? "原因不明"}` }),
+      // 每个工具槽位结束都刷新候选稿（提交 / 清单工具不刷新），不只是文件类工具。
+      onToolSettled: (name) => {
+        if (name !== SUBMIT_TOOL_NAME && name !== REPORT_TOOL_NAME && name !== TASK_SUBMIT_TOOL_NAME) candidateScan();
+      },
+      onStreamTick: () => candidateScan.maybeTick(),
+    };
+    // start 不会补发当前帧：先按获取时的视图把初始状态画出来，之后的提交逐帧更新。
+    try {
+      showActivity.update(stream.value, activityHooks);
+    } catch {
+      // 初始帧解析失败只丢一行展示，不阻断本轮。
+    }
+    stream.start(async (value) => {
       try {
-        showActivity.update(call.value, {
-          onRetry: (attempt) =>
-            emit({ type: "progress", message: `模型调用失败，正在重试（第 ${attempt} 次）` }),
-          onRunFailure: (failure) =>
-            emit({ type: "progress", message: `任务失败：${failure.detail ?? failure.reason ?? "原因不明"}` }),
-          // 每个工具槽位结束都刷新候选稿（提交 / 清单工具不刷新），不只是文件类工具。
-          onToolSettled: (name) => {
-            if (name !== SUBMIT_TOOL_NAME && name !== REPORT_TOOL_NAME) candidateScan();
-          },
-          onStreamTick: () => candidateScan.maybeTick(),
-        });
+        showActivity.update(value, activityHooks);
       } catch {
         // 活动行只是展示：单帧解析失败不能让 watch 以 listener_error 结束，
         // 否则后续进度会静默丢失（交付结论仍由提交 / 结算的竞速保证）。
@@ -986,6 +1135,8 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
           type: "input",
           content: attempt > 0 && isStyleTask(config.task)
             ? "继续读取work/中的文件，完成风格JSON文件并用submit_style提交。不得使用submit_document或finish_report，不要只在聊天中说完成。"
+            : attempt > 0 && isTaskTask(config.task)
+            ? "继续读取work/中的文件，完成任务JSON并用submit_task提交。不得使用submit_document或finish_report，不要只在聊天中说完成。"
             : attempt === 0 && firstContent
             ? firstContent
             : attempt === 0 ? userPrompt(config.task) :

@@ -20,6 +20,7 @@ pub(crate) mod sealed_tree;
 pub(crate) mod skills;
 mod strategy;
 pub(crate) mod style_learning;
+pub(crate) mod task_jobs;
 mod tools;
 mod workspace;
 mod writing_context;

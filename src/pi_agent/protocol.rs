@@ -8,7 +8,7 @@ use super::materials::PiMaterialMeta;
 /// 直接拒绝新 init，恢复时也不会拿旧 host 去开原工作区。
 pub(crate) const PROTOCOL_VERSION: u32 = 4;
 /// host 版本；运行记录里存一份，恢复时不一致就拒绝在原工作区接着写。
-pub(crate) const HOST_VERSION: &str = "0.4.2";
+pub(crate) const HOST_VERSION: &str = "0.5.0";
 /// 宿主与 Rust 共同对账的领域工具额度：常规上限与分阶段绝对硬上限。
 pub(crate) const MAX_REGULAR_TOOL_CALLS: usize = 60;
 pub(crate) const MAX_TOTAL_TOOL_CALLS: usize = 84;
@@ -19,6 +19,8 @@ pub(crate) const MAX_HOST_LINE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_EVENTS: usize = 50_000;
 /// 交付的 Markdown 上限。
 pub(crate) const MAX_DELIVERY_BYTES: usize = 8 * 1024 * 1024;
+/// 任务助手交付的 JSON 上限（候选 / 表单填写）。与 host 的 `submit_task` 一致。
+pub(crate) const MAX_TASK_DELIVERY_BYTES: usize = 2 * 1024 * 1024;
 /// 侧栏候选稿上限。超过这个数的候选不往前端送，避免界面被大文件拖住。
 pub(crate) const MAX_CANDIDATE_BYTES: usize = 2 * 1024 * 1024;
 /// 进度、错误这类短文本的显示上限。

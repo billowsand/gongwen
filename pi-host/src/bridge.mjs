@@ -69,6 +69,13 @@ export const DOMAIN_TOOLS = [
   ["style_read", "按 id 读一份写法风格档案（只读；只学写法，不搬用其中单位、人员、日期、数字与结论）", Type.Object({
     id: Type.String({ description: "style_list 返回的档案 id" }),
   })],
+  ["task_search", "按名称、进展、下一步、负责人搜索任务，返回 id、名称、状态、负责人、期限与下一步", Type.Object({
+    query: Type.String({ description: "要查的任务名称、进展、下一步或负责人关键词" }),
+    limit: Type.Optional(Type.Number({ description: "最多返回几项，1–20" })),
+  })],
+  ["task_read", "读一项任务的完整记录（含进展、下一步、风险、期限、分类、状态）", Type.Object({
+    id: Type.String({ description: "task_search 返回的任务 id" }),
+  })],
 ];
 
 export class BridgeError extends Error {
@@ -238,9 +245,15 @@ function textResult(value) {
   return { output: [{ type: "text", text: JSON.stringify(value) }] };
 }
 
-/** 把领域工具注册成 Durable 工具；执行时都走同一座桥。 */
-export function createDomainTools(bridge, { readDocument, readChars, onAnswer, onResult } = {}) {
-  const tools = DOMAIN_TOOLS.map(([name, description, parameters]) =>
+/**
+ * 把领域工具注册成 Durable 工具；执行时都走同一座桥。
+ *
+ * `only` 是可选白名单（工具名数组）：只挂名单里的工具，并同样限制 `ask_user`。
+ * 不传时挂全部，保持旧行为。
+ */
+export function createDomainTools(bridge, { readDocument, readChars, onAnswer, onResult, only } = {}) {
+  const allowed = Array.isArray(only) ? new Set(only) : undefined;
+  const tools = DOMAIN_TOOLS.filter(([name]) => !allowed || allowed.has(name)).map(([name, description, parameters]) =>
     defineTool({
       name,
       description,
@@ -264,7 +277,7 @@ export function createDomainTools(bridge, { readDocument, readChars, onAnswer, o
       },
     }),
   );
-  tools.push(
+  if (!allowed || allowed.has("ask_user")) tools.push(
     defineTool({
       name: "ask_user",
       description:

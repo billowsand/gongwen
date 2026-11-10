@@ -74,6 +74,13 @@ impl GongwenApp {
                 doc.ai_panel.finish(TurnState::Failed(reason.clone()));
                 self.status = reason;
             }
+            PiOutcome::Task(_) => {
+                doc.ai_review_baseline = None;
+                let reason =
+                    format!("{prefix}收到任务助手的交付，这一轮不是写作用途，正文未改变。");
+                doc.ai_panel.finish(TurnState::Failed(reason.clone()));
+                self.status = reason;
+            }
             PiOutcome::Report(report) => {
                 let notes = report.confirmed;
                 if let Some(turn) = doc.ai_panel.running_turn_mut() {

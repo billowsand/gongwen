@@ -61,9 +61,21 @@ impl Store {
         conn.execute_batch(DDL).context("初始化任务助手表失败")?;
         migrate_task_columns(&conn)?;
         migrate_source_columns(&conn)?;
+        Ok(Self::wrap(conn))
+    }
+    /// 只读打开（Pi 任务检索用）：不建表、不补列，避免把只读查询变成写事务。
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .context("只读打开任务助手数据库失败")?;
+        crate::storage::apply_db_key(&conn)?;
+        conn.busy_timeout(std::time::Duration::from_millis(10_000))
+            .context("设置任务数据库等待时间失败")?;
+        Ok(Self::wrap(conn))
+    }
+    fn wrap(conn: Connection) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let instance = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(Self { conn, instance })
+        Self { conn, instance }
     }
     /// 数据代号：本连接累计改动行数随任何写入增长（含回滚的写入，只会多刷新一次）。
     /// 界面按它判断缓存是否过期，代号不变的帧不查库。
@@ -72,6 +84,39 @@ impl Store {
     }
     pub fn list(&self, include_closed: bool) -> Result<Vec<Task>> {
         load_tasks(&self.conn, include_closed)
+    }
+    /// 任务作业的只读检索：匹配名称、分类、进展、下一步、风险与负责人。
+    ///
+    /// 只返回未归档、未删除的任务；空查询直接给出最近更新的几项。个人任务量小，
+    /// 这里在内存里筛，不为一个只读工具再加索引与迁移。
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Task>> {
+        let query = query.trim();
+        let mut tasks = self.list(false)?;
+        if !query.is_empty() {
+            let terms: Vec<&str> = query.split_whitespace().collect();
+            tasks.retain(|t| {
+                let haystack = [
+                    t.name.as_str(),
+                    t.category.as_str(),
+                    t.progress.as_str(),
+                    t.next_step.as_str(),
+                    t.risks.as_str(),
+                    t.owner_name.as_str(),
+                ];
+                terms
+                    .iter()
+                    .all(|term| haystack.iter().any(|value| value.contains(term)))
+            });
+        }
+        tasks.truncate(limit.clamp(1, 20));
+        Ok(tasks)
+    }
+    /// 按 id 读一项任务；已删除的当作不存在。
+    pub fn get(&self, id: &str) -> Result<Option<Task>> {
+        Ok(self
+            .list(true)?
+            .into_iter()
+            .find(|task| task.id == id && !task.deleted))
     }
     pub fn save(&mut self, t: &Task, action: &str, detail: &str) -> Result<()> {
         valid_task(t).map_err(anyhow::Error::msg)?;

@@ -1,4 +1,4 @@
-use super::extract::{MAX_OUTPUT_BYTES, auto_title, parse_fill, prompt_fill};
+use super::extract::{MAX_OUTPUT_BYTES, auto_title, parse_fill};
 use super::*;
 use tempfile::tempdir;
 
@@ -463,7 +463,7 @@ fn task_assistant_fill_rejects_protocol_and_keeps_only_eligible_context() {
         "不是JSON",
         r#"{"fields":{},"others":0,"extra":1}"#,
         r#"{"fields":{"status":null},"others":0}"#,
-        r#"{"fields":{},"others":31}"#,
+        r#"{"fields":{},"others":101}"#,
     ] {
         assert!(parse_fill(raw, "原文", "2026-10-29").is_err());
     }
@@ -476,15 +476,9 @@ fn task_assistant_fill_rejects_protocol_and_keeps_only_eligible_context() {
 }
 
 #[test]
-fn task_assistant_fill_prompt_has_today_and_only_six_fields() {
-    let mut tasks = (0..60)
-        .map(|i| task(&format!("上下文{i}")))
-        .collect::<Vec<_>>();
-    tasks[0].deleted = true;
-    tasks[1].archived = true;
-    let (system, user) = prompt_fill("交办原文", "2026-10-28", &task("当前任务"));
-    assert!(user.contains("2026-10-28") && user.contains("当前任务") && user.contains("交办原文"));
-    assert!(!user.contains("专项协调") && tasks.iter().all(|t| !user.contains(&t.id)));
+fn task_fill_skill_covers_the_six_fields_and_delivery_contract() {
+    use crate::pi_agent::skills;
+    let text = skills::builtin_text(skills::TASK_FILL_SKILL).expect("填写技能已内置");
     for field in [
         "name",
         "owner",
@@ -493,11 +487,11 @@ fn task_assistant_fill_prompt_has_today_and_only_six_fields() {
         "risks",
         "deadline",
     ] {
-        assert!(system.contains(field));
+        assert!(text.contains(field), "技能缺少字段 {field}");
     }
-    assert!(
-        !system.contains("goal") && !system.contains("collaborators") && system.contains("下周")
-    );
+    assert!(text.contains("submit_task"));
+    assert!(text.contains("evidence"));
+    assert!(!text.contains("collaborators"));
 }
 
 #[test]
@@ -1088,4 +1082,63 @@ fn owner_identity_round_trips_and_legacy_binding_never_overwrites_it() {
     let restored = store.list(false).unwrap().remove(0);
     assert_eq!(restored.owner_identity, task.owner_identity);
     assert_ne!(restored.owner_identity, entries[0].identity);
+}
+
+#[test]
+fn task_delivery_dispatches_by_mode_and_keeps_the_same_guards() {
+    let source = "办公室牵头编制台账，11月20日前完成；责任人李四。";
+    let today = "2026-11-10";
+    let extract = r#"{"mode":"extract","items":[{"kind":"new_task","task_id":null,"name":"编制台账","owner":"李四","progress":null,"next_step":null,"risks":null,"deadline":"2026-11-20","speaker":null,"about":null,"note":null,"evidence":"办公室牵头编制台账"}],"notes":[]}"#;
+    match super::extract::parse_task_delivery(extract, source, today, &[]).unwrap() {
+        super::extract::TaskDelivery::Extract(items) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].deadline.as_deref(), Some("2026-11-20"));
+        }
+        _ => panic!("mode=extract 必须解析成候选"),
+    }
+    let fill = r#"{"mode":"fill","fields":{"name":{"value":"编制台账","evidence":"编制台账"}},"others":0,"notes":[]}"#;
+    match super::extract::parse_task_delivery(fill, source, today, &[]).unwrap() {
+        super::extract::TaskDelivery::Fill(fill) => {
+            assert_eq!(fill.name.unwrap().value, "编制台账");
+        }
+        _ => panic!("mode=fill 必须解析成表单填写"),
+    }
+    // 缺 mode、证据不在原文里、日期没有原文支撑，都照旧拒绝。
+    assert!(super::extract::parse_task_delivery(r#"{"items":[]}"#, source, today, &[]).is_err());
+    let alien = extract.replace("办公室牵头编制台账", "材料里没有这句");
+    assert!(super::extract::parse_task_delivery(&alien, source, today, &[]).is_err());
+    let far_date = extract.replace("2026-11-20", "2027-03-01");
+    let items = match super::extract::parse_task_delivery(&far_date, source, today, &[]).unwrap() {
+        super::extract::TaskDelivery::Extract(items) => items,
+        _ => panic!("mode=extract 必须解析成候选"),
+    };
+    let checked = super::extract::check_proposal_dates(items, source, today);
+    assert!(checked[0].deadline.is_none(), "原文没有的日期必须被清空");
+}
+
+#[test]
+fn task_store_search_filters_and_caps_results() {
+    let mut store = Store::open(":memory:").unwrap();
+    let mut first = task("台账整理");
+    first.progress = "已完成汇总".into();
+    store.save(&first, "创建", "").unwrap();
+    let mut second = task("专项检查");
+    second.owner_name = "李四".into();
+    store.save(&second, "创建", "").unwrap();
+    let closed = task("台账归档");
+    store.save(&closed, "创建", "").unwrap();
+    store.soft_delete(&closed.id).unwrap();
+
+    assert_eq!(
+        store.search("台账", 20).unwrap().len(),
+        1,
+        "已删除任务不进检索"
+    );
+    let by_owner = store.search("李四", 20).unwrap();
+    assert_eq!(by_owner.len(), 1);
+    assert_eq!(by_owner[0].name, "专项检查");
+    assert_eq!(store.search("", 20).unwrap().len(), 2);
+    assert_eq!(store.search("", 1).unwrap().len(), 1);
+    assert_eq!(store.get(&first.id).unwrap().unwrap().name, "台账整理");
+    assert!(store.get("no-such").unwrap().is_none());
 }

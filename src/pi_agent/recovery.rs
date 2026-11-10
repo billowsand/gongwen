@@ -862,7 +862,8 @@ pub(crate) fn read_receipt(run_dir: &Path, run_id: &str) -> Result<Option<PiRece
         return Err("Pi 交付回执缺少本轮的输入标识，已拒绝。".into());
     }
     match receipt.kind.as_str() {
-        "document" | "style" => {
+        // 三种文件型交付：正文 Markdown、风格 JSON、任务助手 JSON。
+        "document" | "style" | "task" => {
             if !super::delivery::safe_work_path(&receipt.path) {
                 return Err("Pi 交付回执里的成品路径不合法，已拒绝。".into());
             }
@@ -889,13 +890,13 @@ pub(crate) fn read_receipt(run_dir: &Path, run_id: &str) -> Result<Option<PiRece
 
 /// 回执指向的成品快照。只读 `pi/final.md`，不读模型可写的 `work/`。
 pub(crate) fn read_snapshot(run_dir: &Path, receipt: &PiReceipt) -> Result<String, String> {
-    if !matches!(receipt.kind.as_str(), "document" | "style") {
+    if !matches!(receipt.kind.as_str(), "document" | "style" | "task") {
         return Err("这份回执不是文件交付。".into());
     }
-    let file = if receipt.kind == "style" {
-        "final.json"
-    } else {
+    let file = if receipt.kind == "document" {
         "final.md"
+    } else {
+        "final.json"
     };
     let bytes = read_bounded(&run_dir.join(file), MAX_SNAPSHOT_BYTES)?;
     let text =

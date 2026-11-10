@@ -239,6 +239,9 @@ pub struct GongwenApp {
     task_extraction_rx:
         Option<std::sync::mpsc::Receiver<anyhow::Result<task_assistant::Extraction>>>,
     task_fill_rx: Option<std::sync::mpsc::Receiver<task_assistant::TaskFillOutput>>,
+    /// 材料整理 / 表单填写的进度与停止信号（后台 Pi 作业）。
+    task_extraction_job: Option<task_assistant::TaskJobUi>,
+    task_fill_job: Option<task_assistant::TaskJobUi>,
     task_auto_queue: VecDeque<(String, String, String)>,
     manuscript_error: Option<String>,
     manuscript_filter: ManuscriptFilter,
@@ -693,6 +696,8 @@ impl GongwenApp {
             task_ui: crate::task_ui::State::default(),
             task_extraction_rx: None,
             task_fill_rx: None,
+            task_extraction_job: None,
+            task_fill_job: None,
             task_auto_queue: VecDeque::new(),
             manuscript_error,
             manuscript_filter: ManuscriptFilter::default(),

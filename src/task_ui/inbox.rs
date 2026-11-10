@@ -350,7 +350,7 @@ fn material(
         ui.label(egui::RichText::new("粘贴材料").strong());
         theme::caption(
             ui,
-            "通知、纪要、周报都可以。模型只提出建议，不会直接改任务，每条建议都要人核对后采纳。",
+            "通知、纪要、周报都可以。Pi 只提出建议，不会直接改任务，每条建议都要人核对后采纳。",
         );
         ui.add_space(4.0);
         ui.add(theme::field(
@@ -381,13 +381,19 @@ fn material(
         ui.horizontal_wrapped(|ui| {
             if state.extraction_busy {
                 theme::spinner(ui, 14.0, theme::accent());
-                theme::caption(ui, "正在后台识别，完成前数据库恢复会保持禁用。");
+                theme::caption(ui, "Pi 正在后台整理材料；完成前数据库恢复会保持禁用。");
                 if !state.discard_extraction {
-                    if ui.button("取消本次结果").clicked() {
+                    if ui.button("停止").clicked() {
                         state.discard_extraction = true;
+                        state.request_stop_extraction = true;
                     }
                 } else {
-                    theme::caption(ui, "已取消，等当前请求结束后释放。");
+                    theme::caption(ui, "已请求停止，等这一轮收手。");
+                }
+                if let Some(progress) = state.extraction_progress.as_deref()
+                    && !progress.trim().is_empty()
+                {
+                    theme::caption(ui, progress);
                 }
             } else if theme::primary_icon_button_enabled(
                 ui,

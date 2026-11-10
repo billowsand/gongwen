@@ -88,6 +88,8 @@ pub(super) fn fixture() -> GongwenApp {
         task_ui: crate::task_ui::State::default(),
         task_extraction_rx: None,
         task_fill_rx: None,
+        task_extraction_job: None,
+        task_fill_job: None,
         task_auto_queue: Default::default(),
         manuscript_error,
         manuscript_filter: ManuscriptFilter::default(),

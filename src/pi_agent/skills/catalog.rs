@@ -1,4 +1,4 @@
-//! 有效 Pi 技能目录：内置八份 + 用户目录覆盖 + 停用清单。
+//! 有效 Pi 技能目录：内置九份 + 用户目录覆盖 + 停用清单。
 
 use super::parser;
 use super::store;
@@ -48,16 +48,22 @@ impl Catalog {
             .collect()
     }
 
+    /// 写作技能列表：排除风格学习与任务助手的作业技能，它们各有自己的入口。
     pub(crate) fn writing_enabled(&self) -> Vec<&Entry> {
         self.enabled()
             .into_iter()
-            .filter(|entry| entry.name != super::STYLE_SKILL)
+            .filter(|entry| entry.name != super::STYLE_SKILL && !super::is_task_skill(&entry.name))
             .collect()
     }
 
     pub(crate) fn resolve_writing(&self, selected: Option<&str>) -> Result<Option<String>, String> {
         if selected == Some(super::STYLE_SKILL) {
             return Err("风格学习请从「AI 管理 → 风格」选择样稿开始，不写正文。".into());
+        }
+        if let Some(selected) = selected
+            && super::is_task_skill(selected)
+        {
+            return Err("任务助手的整理技能只从任务助手页面启动，不写正文。".into());
         }
         if self.writing_enabled().is_empty() {
             return Err("没有启用的写作技能，请先到技能管理启用。".into());
@@ -290,7 +296,7 @@ mod tests {
     fn builtins_are_listed_with_chinese_labels_and_catalog_can_be_empty() {
         let _dir = ConfigDir::new();
         let catalog = load();
-        assert_eq!(catalog.enabled().len(), 7);
+        assert_eq!(catalog.enabled().len(), 9);
         assert_eq!(catalog.label_for("gongwen-draft"), "起草");
         assert_eq!(catalog.label_for("gongwen-research"), "研究报告");
         assert_eq!(catalog.label_for("gongwen-reply"), "复函");
@@ -300,9 +306,9 @@ mod tests {
             store::set_enabled(name, false).unwrap();
         }
         let catalog = load();
-        assert_eq!(catalog.enabled().len(), 4);
+        assert_eq!(catalog.enabled().len(), 6);
         store::set_enabled("gongwen-imitate", true).unwrap();
-        assert_eq!(load().enabled().len(), 5);
+        assert_eq!(load().enabled().len(), 7);
         assert_eq!(
             load().resolve(Some("gongwen-imitate")),
             Ok(Some("gongwen-imitate".into()))

@@ -5,6 +5,8 @@
 //! 1 token，再加 10% 余量；不引入分词器、不联网。策略依据任务规模与窗口，不按模型
 //! 名称、参数量或某个固定窗口阈值猜能力。
 
+import { isTaskTask } from "./task.mjs";
+
 /** 固定指令、技能索引与三条红线的预留。 */
 export const INSTRUCTION_RESERVE = 5_000;
 /** 安全余量。 */
@@ -81,10 +83,10 @@ export function taskEstimate(config) {
   };
 }
 
-/** 报告型任务：只交侧栏清单，不生成正文。 */
+/** 报告型任务：不期待正文输出（只交清单 / 风格档案 / 任务 JSON）。 */
 export function isReportTask(task) {
   const skill = typeof task?.skill === "string" ? task.skill : "";
-  return skill === "gongwen-extract" || skill === "gongwen-style-learn";
+  return skill === "gongwen-extract" || skill === "gongwen-style-learn" || isTaskTask(task);
 }
 
 /**

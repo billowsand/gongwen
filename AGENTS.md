@@ -39,8 +39,10 @@
   - 旧 `dict.qj`、`lm.qj`、辅码与拼音学习数据不再使用，也不再随安装包分发。
 - 模型接入：本机 LM Studio / Ollama，走 OpenAI 兼容接口（`src/lmstudio.rs`、
   `src/rag.rs`、`src/rag_client.rs`）。**2026-11-05 起模型通道收敛为两个用途**：
-  写作模型（Pi，`pi_model`）同时服务知识库问答、检索重排、数据接口 AI 调用与任务助手识别
-  （`AppConfig::aux_chat`）；文字复核（`revise_model`）是唯一保留的专门小模型。
+  写作模型（Pi，`pi_model`）同时服务知识库问答、检索重排、数据接口 AI 调用
+  （`AppConfig::aux_chat`）；**任务助手的材料整理与表单填写自 2026-11-10 起走 Pi 作业**
+  （`src/pi_agent/task_jobs.rs`，技能 `gongwen-task-extract` / `gongwen-task-fill`，
+  交付 `submit_task`），不再走一次性调用；文字复核（`revise_model`）是唯一保留的专门小模型。
   「辅助模型」设置已删除，`draft_model` 只作旧配置兼容回落。
 
 ## 常用命令
@@ -154,10 +156,18 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   风格学习三个用例，退役的政策核查用例删除。
 - **AI 模型通道统一（2026-11-05，已完成，待真机验收）**：用户拍板把模型收敛为两个用途——
   写作模型（Pi）与文字复核小模型。删除「辅助模型」设置；知识库问答、检索重排、数据接口 AI
-  调用、任务助手识别统一走 `AppConfig::aux_chat`（Pi，旧配置回落 `draft_model`）；文字复核
+  调用统一走 `AppConfig::aux_chat`（Pi，旧配置回落 `draft_model`）；任务助手随后改走
+  Pi 作业；文字复核
   只留启用/模型/检查器（送检范围、超时、窗口用程序默认值）；Pi 新增只读数据接口工具
   `api_search` / `api_call`。方案、决策与实施记录见
   `docs/ai-model-unification-design.md`；Pi host 源码已改，发布前需重建随包 `runtime/pi`。
+- **任务助手 AI 全面转 Pi 智能体（2026-11-10，已实现，待真机验收）**：材料整理与单任务
+  填写都改由 Pi 作业执行（host 0.5.0、协议仍 4），新增内置技能 `gongwen-task-extract` /
+  `gongwen-task-fill`、交付通道 `submit_task`（`kind = task`，JSON）与只读工具
+  `task_search` / `task_read`；随之放开单次调用的门禁：不再只注入最近 50 项任务、材料按
+  512 KiB 分块最多 4 MiB、候选上限 100 条、任务作业不占写作门禁（可与 Pi 写作并行）。
+  证据、日期、候选类型与目标 ID 的确定性复核不变；未配 Pi 模型或运行时缺失时任务助手
+  不可用。改前读 `docs/pi-runtime.md`「任务助手作业」一节。
 - **Pi 可靠性与写入体验第二轮（2026-11-05，已完成，待真机验收）**：按
   `docs/pi-implementation/reliability-review-2026-11-05.md` 修复——数据接口禁跟随重定向、
   清理只删真孤儿、接口截断如实上报、独立复核不依赖写作配置；停止后域工具在阶段边界收手、
@@ -488,7 +498,7 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 
 本轮按用户确认继续收口「敏感明文不落盘，必须释放时明确确认」：数据库迁移残留可恢复且清理失败阻止成功；普通模式记住密码禁用、旧明文密码清理，首次跳过锁需确认风险；进程转交改为仅本机回环通信，不写业务路径收件文件。Pi 工作文件/技能快照及用户技能的名称和内容一起进加密容器，接口定义合并为中性 `apis/services.json`。花脸稿预览、直接打印和另存排版进内存；CUPS 经 stdin、Windows 从字节解析，不再生成送打缓存；复制/剪切先确认外部剪贴板风险。
 
-全量备份**直接采用新版加密 7z，不保留旧 ZIP 恢复兼容**（用户确认此前未使用）。备份要求已启用应用锁并完成加密，独立备份密码保护内容和文件名，内部数据保留应用锁密文；恢复只向暂存目录写密文，恢复后重新解锁。稿件 `.gwx` 的旧 ZIP 导入兼容继续保留，不能混同两类格式。Pi host 当前为 0.4.2（2026-11-10 随上游 chord/pi-ai/pi-durable 1.4.0→1.5.0 升级，协议仍为 4）；旧 host 不支持隐名文件树，发布必须重建随包运行时。实施与验收见 `docs/security-hardening-2026-11-07.md`，升级记录见 `docs/pi-runtime.md`「Pi 1.5 升级」一节。同日复核又修了 host 侧 1.5 适配缺陷（恢复路径 Parked 判定竞态、`task_interrupted` 报告文案与 tool/compaction 级误判、候选稿刷新语义、工具槽位跟踪清理），并补了「host/协议版本四处对账」与 14 条会话视图/报告映射回归用例；本机 darwin-arm64 运行时已按修复后源码重建（manifest 13796 文件），其余平台发布前照旧从 `pi-host` 源码重建。
+全量备份**直接采用新版加密 7z，不保留旧 ZIP 恢复兼容**（用户确认此前未使用）。备份要求已启用应用锁并完成加密，独立备份密码保护内容和文件名，内部数据保留应用锁密文；恢复只向暂存目录写密文，恢复后重新解锁。稿件 `.gwx` 的旧 ZIP 导入兼容继续保留，不能混同两类格式。Pi host 当前为 0.5.0（2026-11-10 新增任务助手作业后升版，协议仍为 4；此前 0.4.2 随上游 chord/pi-ai/pi-durable 1.4.0→1.5.0 升级）；旧 host 不支持隐名文件树，发布必须重建随包运行时。实施与验收见 `docs/security-hardening-2026-11-07.md`，升级记录见 `docs/pi-runtime.md`「Pi 1.5 升级」一节。同日复核又修了 host 侧 1.5 适配缺陷（恢复路径 Parked 判定竞态、`task_interrupted` 报告文案与 tool/compaction 级误判、候选稿刷新语义、工具槽位跟踪清理），并补了「host/协议版本四处对账」与 14 条会话视图/报告映射回归用例；本机 darwin-arm64 运行时已按修复后源码重建（manifest 13796 文件），其余平台发布前照旧从 `pi-host` 源码重建。
 
 ## 独立密码加密导出（2026-11-07）
 

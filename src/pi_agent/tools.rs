@@ -629,6 +629,10 @@ pub(crate) struct PiToolContext {
     /// 无法中途 abort，这里只按取消边界处理：阶段之间尽快收手，迟到结果不写证据、
     /// 不算成功；资源叠加由 `ToolSlot` 兜底。
     cancel: OnceLock<Arc<AtomicBool>>,
+    /// 任务助手作业：只开放只读任务工具与词库/日期，拒绝知识库、稿件库、接口与正文工具。
+    task_only: bool,
+    /// 任务数据库路径；只有任务作业才有。
+    task_db: Option<std::path::PathBuf>,
 }
 
 /// 一个在途工具槽位。停止后的慢工具要跑完当前请求才会返回，反复停止重开时用槽位
@@ -761,6 +765,8 @@ impl PiToolContext {
             styles: sources.styles,
             evidence: Arc::new(Mutex::new(Vec::new())),
             seq: Arc::new(AtomicUsize::new(0)),
+            task_only: false,
+            task_db: None,
             cancel: OnceLock::new(),
         }
     }
@@ -777,6 +783,16 @@ impl PiToolContext {
         if let Ok(mut cache) = self.api_cache.lock() {
             cache.set_dir(dir);
         }
+        self
+    }
+
+    /// 任务助手作业的工具面：只留任务检索、词库与日期，其余工具一律拒绝。
+    ///
+    /// 任务材料已经在工作区里，不需要也不允许读知识库、稿件库或内网接口，
+    /// 也不碰公文正文与表单要素。
+    pub(crate) fn task_only(mut self, db: std::path::PathBuf) -> Self {
+        self.task_only = true;
+        self.task_db = Some(db);
         self
     }
 
@@ -847,6 +863,8 @@ impl PiToolContext {
                 | "doc_elements"
                 | "style_list"
                 | "style_read"
+                | "task_search"
+                | "task_read"
         )
     }
 
@@ -916,6 +934,14 @@ impl PiToolContext {
         let args = args
             .as_object()
             .ok_or_else(|| "工具参数必须是 JSON 对象".to_string())?;
+        if self.task_only
+            && !matches!(
+                name,
+                "task_search" | "task_read" | "vocab_search" | "current_date"
+            )
+        {
+            return Err(format!("任务助手作业不开放工具：{name}"));
+        }
         // 在途槽位是资源兜底：HTTP 请求无法从外部 abort，停掉的旧任务仍可能占着线程、
         // 连接和模型额度；限流后反复停止重开不会无限叠加。
         let _slot = ToolSlot::acquire(self)?;
@@ -933,6 +959,8 @@ impl PiToolContext {
             "doc_elements" => Ok(self.doc_elements()),
             "style_list" => self.style_list(),
             "style_read" => self.style_read(args),
+            "task_search" => self.task_search(args),
+            "task_read" => self.task_read(args),
             other => Err(format!("未知工具：{other}")),
         };
         // dispatch 返回后再看一次：慢工具可能在停止之后才返回，即使成功也不能当成
@@ -1268,6 +1296,61 @@ impl PiToolContext {
         }))
     }
 
+    /// 任务作业的任务库连接：每次调用新开一个短连接，不跨线程共享 rusqlite 连接。
+    fn task_store(&self) -> Result<crate::task_assistant::Store, String> {
+        let path = self
+            .task_db
+            .as_ref()
+            .ok_or_else(|| "本作业没有任务库".to_string())?;
+        crate::task_assistant::Store::open_read_only(path)
+            .map_err(|e| format!("打开任务库失败：{e:#}"))
+    }
+
+    /// 检索现有任务：模型据此判断材料讲的是已有任务还是新工作。
+    fn task_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let limit = usize_arg(args, "limit", 20);
+        let store = self.task_store()?;
+        let tasks = store
+            .search(query, limit)
+            .map_err(|e| format!("检索任务失败：{e:#}"))?;
+        let items: Vec<Value> = tasks.iter().map(task_brief).collect();
+        let total = tasks.len();
+        Ok(serde_json::json!({
+            "items": items,
+            "returned": total,
+            "note": "现有任务摘要。task_id 只能填这里或 task_read 返回的 id；查不到就按新任务处理。",
+        }))
+    }
+
+    /// 读一项任务的完整记录，供模型核对进展、下一步与风险。
+    fn task_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        let id = required_str(args, "id")?;
+        let store = self.task_store()?;
+        let task = store
+            .get(&id)
+            .map_err(|e| format!("读任务失败：{e:#}"))?
+            .ok_or_else(|| format!("找不到任务 {id}"))?;
+        Ok(serde_json::json!({
+            "id": task.id,
+            "name": task.name,
+            "category": task.category,
+            "status": task.status.as_str(),
+            "owner": task.owner_name,
+            "deadline": task.deadline,
+            "progress": task.progress,
+            "next_step": task.next_step,
+            "risks": task.risks,
+            "needs_review": task.needs_review,
+            "parent_id": task.parent_id,
+            "updated_at": task.updated_at,
+        }))
+    }
+
     fn vocab_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
         // 词库查询在内存里，但同样走取消边界：停止后不再继续回结果。
         self.check_cancel()?;
@@ -1463,6 +1546,18 @@ impl PiKnowledge for DisabledKnowledge {
     fn read(&self, _doc_id: i64) -> Result<Option<(String, String)>, String> {
         Err("知识库未启用".into())
     }
+}
+
+/// 任务检索结果的一行：只带模型判断目标所需的最短信息。
+fn task_brief(task: &crate::task_assistant::Task) -> Value {
+    serde_json::json!({
+        "id": task.id,
+        "name": task.name,
+        "status": task.status.as_str(),
+        "owner": task.owner_name,
+        "deadline": task.deadline,
+        "next_step": task.next_step,
+    })
 }
 
 fn required_str(args: &Map<String, Value>, name: &str) -> Result<String, String> {

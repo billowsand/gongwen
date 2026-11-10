@@ -1,7 +1,8 @@
 //! 交付回执与不可变成品快照。
 //!
-//! host 在调用 `submit_document` / `finish_report` 时先把成品复制到运行目录（模型
-//! 不可写），写 `final.md` 与 `receipt.json`，再向 Rust 发事件。这样进程在「快照落盘、
+//! host 在调用 `submit_document` / `submit_style` / `submit_task` / `finish_report`
+//! 时先把成品复制到运行目录（模型不可写），写 `final.md` / `final.json` 与
+//! `receipt.json`，再向 Rust 发事件。这样进程在「快照落盘、
 //! 事件发送、界面装上提案」任意点崩溃，重开时都能用回执交回同一份产物，不会重新生成，
 //! 也不会从模型可写的 `work/` 重读。
 //!
@@ -21,6 +22,14 @@ const TITLE_MAX = 2_000;
 const DETAIL_MAX = 4_000;
 const SEVERITY_MAX = 50;
 const SUMMARY_MAX = 2_000;
+
+/** 文件型交付（正文、风格、任务 JSON）共用快照校验；清单单独一条路径。 */
+const FILE_KINDS = ["document", "style", "task"];
+
+/** 文件型交付的不可变快照文件名。 */
+function snapshotName(kind) {
+  return kind === "document" ? "final.md" : "final.json";
+}
 
 export class DeliveryError extends Error {
   constructor(message, code = "delivery_failed") {
@@ -62,6 +71,33 @@ export function writeDocumentReceipt(deliveryDir, { runId, requestId, relative, 
     runId,
     requestId,
     kind,
+    path: relative,
+    sha256,
+    bytes,
+    summary: clamp(summary, SUMMARY_MAX),
+    callId: clamp(callId, 200),
+    items: [],
+    at: nowIso(),
+  };
+  writeJson(path.join(deliveryDir, "receipt.json"), receipt, files);
+  return receipt;
+}
+
+/**
+ * 写任务助手交付：`final.json` 是调用时的任务 JSON（不是之后文件的样子），回执
+ * `kind = task`，与正文交付共用 `submitted` 事件和恢复路径。任务 JSON 本身由
+ * `task.mjs` 校验，这里只负责落盘与体积上限。
+ */
+export function writeTaskReceipt(deliveryDir, { runId, requestId, relative, content, sha256, bytes, summary, callId, files = plaintextFiles }) {
+  if (typeof deliveryDir !== "string" || deliveryDir === "") {
+    throw new DeliveryError("缺少交付目录，已拒绝交付", "receipt_no_dir");
+  }
+  files.atomicWrite(path.join(deliveryDir, "final.json"), content);
+  const receipt = {
+    version: RECEIPT_VERSION,
+    runId,
+    requestId,
+    kind: "task",
     path: relative,
     sha256,
     bytes,
@@ -143,8 +179,8 @@ export function readReceipt(deliveryDir, runId, files = plaintextFiles) {
   if (receipt.runId !== runId) {
     throw new DeliveryError("交付回执属于另一轮运行，已拒绝", "receipt_run_mismatch");
   }
-  if (["document", "style"].includes(receipt.kind)) {
-    const final = path.join(deliveryDir, receipt.kind === "style" ? "final.json" : "final.md");
+  if (FILE_KINDS.includes(receipt.kind)) {
+    const final = path.join(deliveryDir, snapshotName(receipt.kind));
     let text;
     try {
       const size = files.info(final).size;
@@ -171,19 +207,19 @@ export function readReceipt(deliveryDir, runId, files = plaintextFiles) {
 
 /** 回执指向的不可变成品全文。 */
 export function readReceiptDocument(deliveryDir, receipt, files = plaintextFiles) {
-  if (!["document", "style"].includes(receipt?.kind)) {
-    throw new DeliveryError("这份回执不是正文交付", "receipt_kind");
+  if (!FILE_KINDS.includes(receipt?.kind)) {
+    throw new DeliveryError("这份回执不是文件交付", "receipt_kind");
   }
-  const file = path.join(deliveryDir, receipt.kind === "style" ? "final.json" : "final.md");
+  const file = path.join(deliveryDir, snapshotName(receipt.kind));
   if (files.info(file).size > 8 * 1024 * 1024) {
     throw new DeliveryError("成品快照超过读取上限", "receipt_snapshot");
   }
   return files.readText(file, 8 * 1024 * 1024);
 }
 
-/** 回执给 Rust 的事件（正文 / 清单两种形态）。 */
+/** 回执给 Rust 的事件（文件交付 / 清单两种形态）。 */
 export function receiptEvents(deliveryDir, receipt, files = plaintextFiles) {
-  if (["document", "style"].includes(receipt.kind)) {
+  if (FILE_KINDS.includes(receipt.kind)) {
     const content = readReceiptDocument(deliveryDir, receipt, files);
     return [
       {

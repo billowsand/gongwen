@@ -63,12 +63,26 @@ pub(crate) const FILES: &[(&str, &str, &str)] = &[
     skill_file!("gongwen-reply", "references/incoming-letter.md"),
     skill_file!("gongwen-extract", "SKILL.md"),
     skill_file!("gongwen-extract", "references/extraction-checklist.md"),
+    skill_file!("gongwen-task-extract", "SKILL.md"),
+    skill_file!("gongwen-task-extract", "references/candidate-kinds.md"),
+    skill_file!("gongwen-task-fill", "SKILL.md"),
+    skill_file!("gongwen-task-fill", "references/form-fields.md"),
     skill_file!("gongwen-policy-check", "SKILL.md"),
     skill_file!("gongwen-policy-check", "references/citation-check.md"),
 ];
 
 /// 内置技能目录名，同时是 frontmatter 的 name。顺序就是管理页里的固定顺序。
 pub(crate) const STYLE_SKILL: &str = "gongwen-style-learn";
+/// 任务助手的两份作业技能：材料整理与单任务填写。
+///
+/// 它们不是写作技能，不进侧栏写作下拉；由任务助手页面直接指定，交付走
+/// `submit_task`（JSON 回执，`kind = task`），不写公文正文。
+pub(crate) const TASK_EXTRACT_SKILL: &str = "gongwen-task-extract";
+pub(crate) const TASK_FILL_SKILL: &str = "gongwen-task-fill";
+
+pub(crate) fn is_task_skill(name: &str) -> bool {
+    matches!(name, TASK_EXTRACT_SKILL | TASK_FILL_SKILL)
+}
 
 pub(crate) const BUILTINS: &[&str] = &[
     "gongwen-draft",
@@ -77,6 +91,8 @@ pub(crate) const BUILTINS: &[&str] = &[
     "gongwen-research",
     "gongwen-reply",
     "gongwen-extract",
+    TASK_EXTRACT_SKILL,
+    TASK_FILL_SKILL,
     STYLE_SKILL,
 ];
 
@@ -94,6 +110,8 @@ pub(crate) fn builtin_label(name: &str) -> Option<&'static str> {
         "gongwen-research" => Some("研究报告"),
         "gongwen-reply" => Some("复函"),
         "gongwen-extract" => Some("要点提炼"),
+        TASK_EXTRACT_SKILL => Some("任务材料整理"),
+        TASK_FILL_SKILL => Some("任务表单填写"),
         "gongwen-policy-check" => Some("政策依据核对"),
         _ => None,
     }
@@ -152,7 +170,7 @@ mod tests {
 
     #[test]
     fn active_builtin_skills_are_valid_standard_skills() {
-        assert_eq!(BUILTINS.len(), 7);
+        assert_eq!(BUILTINS.len(), 9);
         for name in BUILTINS {
             let text = builtin_text(name).unwrap_or_else(|| panic!("{name} 缺 SKILL.md"));
             let parsed = parser::parse(name, text).unwrap_or_else(|error| panic!("{error}"));
@@ -163,6 +181,7 @@ mod tests {
             assert!(
                 text.contains("submit_document")
                     || text.contains("finish_report")
+                    || text.contains("submit_task")
                     || text.contains("submit_style")
             );
             assert!(builtin_label(name).is_some());

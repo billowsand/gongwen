@@ -1,7 +1,8 @@
 //! 任务助手的模型评测：拿真实模型跑一遍「单任务填写」与「批量材料整理」整条链。
 //!
-//! 走的是产品代码本身：`prompt_fill` / `prompt` → `lmstudio::generate` →
-//! `parse_fill` / `parse_response` → `apply_fill`（含标准词库负责人匹配）。用例在
+//! 走的是产品代码本身：`pi_agent::task_jobs::fill` / `extract`（真实的 Pi host、
+//! 技能快照、`submit_task` 交付与确定性复核）→ `apply_fill`（含标准词库负责人匹配）。
+//! 需要本机 Pi 运行时（`scripts/pi-dev.sh`）与可用的写作模型。用例在
 //! `tests/fixtures/task-eval/cases.json`，报告写到 `tmp/task-eval/`。默认连本机 LM Studio：
 //!
 //! ```text
@@ -11,9 +12,9 @@
 //!
 //! `GONGWEN_TASK_EVAL_ONLY` 可填用例 id 前缀（如 `F05`、`B`）只跑一部分。
 use super::{State, apply_fill};
-use crate::models::{LmStudioConfig, VocabularyCategory, VocabularyEntry};
+use crate::models::{AppConfig, ModelRef, ProviderConfig, VocabularyCategory, VocabularyEntry};
+use crate::task_assistant::Store;
 use crate::task_assistant::Task;
-use crate::task_assistant::extract::{parse_fill, parse_response, prompt, prompt_fill};
 use serde::Deserialize;
 use serde_json::Value;
 use std::fmt::Write as _;
@@ -119,18 +120,38 @@ fn vocabulary(v: &Vocab) -> Vec<VocabularyEntry> {
     out
 }
 
-fn config(max_tokens: u32) -> LmStudioConfig {
-    LmStudioConfig {
+/// 评测用的应用配置：环境变量里的地址与模型当成一个 Pi 提供商。
+fn config() -> AppConfig {
+    let mut config = AppConfig::default();
+    config.providers.push(ProviderConfig {
+        id: "eval".into(),
+        name: "评测服务".into(),
         base_url: std::env::var("GONGWEN_TASK_EVAL_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:12345/v1".into()),
+        ..Default::default()
+    });
+    config.pi_model = ModelRef {
+        provider_id: "eval".into(),
         model: std::env::var("GONGWEN_TASK_EVAL_MODEL")
             .unwrap_or_else(|_| "qwen/qwen3.5-9b".into()),
-        // 与产品里 `start_task_fill` / `start_task_material` 的取值一致。
-        temperature: 0.0,
-        max_tokens,
-        timeout_seconds: 300,
-        ..Default::default()
+    };
+    config
+}
+
+/// 每个用例一个临时任务库：任务检索工具读的就是它，跑完随临时目录留着便于复盘。
+fn temp_store(tasks: &[Task]) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("gongwen-task-eval-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("建评测临时目录");
+    let path = dir.join("manuscripts.db");
+    let mut store = Store::open(&path).expect("打开评测任务库");
+    for task in tasks {
+        store.save(task, "评测建库", "").expect("写入评测任务");
     }
+    path
+}
+
+fn cancelled() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
 }
 
 /// `present` / `absent` / `contains:片段` 三种写法。
@@ -168,25 +189,26 @@ fn run_fill(case: &FillCase, today: &str, vocab: &[VocabularyEntry]) -> Outcome 
         checks: Vec::new(),
         raw: String::new(),
     };
-    let (system, user) = prompt_fill(&case.text, today, &draft);
+    let _ = today;
     let start = Instant::now();
-    let raw = crate::lmstudio::generate(&config(4096), &system, &user);
+    let done = crate::pi_agent::task_jobs::fill(
+        std::sync::Arc::new(config()),
+        temp_store(&[]),
+        case.text.clone(),
+        draft.clone(),
+        cancelled(),
+        |_| {},
+    );
     outcome.seconds = start.elapsed().as_secs_f64();
-    let raw = match raw {
-        Ok(raw) => raw,
+    let done = match done {
+        Ok(done) => done,
         Err(e) => {
-            outcome.error = Some(format!("模型调用失败：{e:#}"));
+            outcome.error = Some(format!("Pi 作业失败：{e}"));
             return outcome;
         }
     };
-    outcome.raw = raw.clone();
-    let fill = match parse_fill(&raw, &case.text, today) {
-        Ok(fill) => fill,
-        Err(e) => {
-            outcome.error = Some(format!("协议解析失败：{e:#}"));
-            return outcome;
-        }
-    };
+    outcome.raw = format!("作业交付 1 份表单；丢弃 {} 栏", done.fill.dropped);
+    let fill = done.fill;
     let (others, dropped) = (fill.others, fill.dropped);
     let mut state = State {
         fill_text: case.text.clone(),
@@ -263,26 +285,27 @@ fn run_batch(case: &BatchCase, today: &str) -> Outcome {
         checks: Vec::new(),
         raw: String::new(),
     };
-    let (system, user) = prompt(&case.title, &case.text, &tasks, today);
+    let _ = today;
     let start = Instant::now();
-    let raw = crate::lmstudio::generate(&config(8192), &system, &user);
+    let done = crate::pi_agent::task_jobs::extract(
+        std::sync::Arc::new(config()),
+        temp_store(&tasks),
+        case.title.clone(),
+        case.text.clone(),
+        cancelled(),
+        |_| {},
+    );
     outcome.seconds = start.elapsed().as_secs_f64();
-    let raw = match raw {
-        Ok(raw) => raw,
+    let done = match done {
+        Ok(done) => done,
         Err(e) => {
-            outcome.error = Some(format!("模型调用失败：{e:#}"));
+            outcome.error = Some(format!("Pi 作业失败：{e}"));
             return outcome;
         }
     };
-    outcome.raw = raw.clone();
-    // 与产品里 `start_task_material` 一样：解析后再按原文核对期限。
-    let items = match parse_response(&raw, &case.text, &tasks) {
-        Ok(items) => crate::task_assistant::extract::check_proposal_dates(items, &case.text, today),
-        Err(e) => {
-            outcome.error = Some(format!("协议解析失败：{e:#}"));
-            return outcome;
-        }
-    };
+    outcome.raw = format!("作业交付 {} 条候选", done.proposals.len());
+    // 作业内部已按原文核对期限（`check_proposal_dates`）。
+    let items = done.proposals;
     let kinds = items.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>();
     let ids = items
         .iter()
@@ -383,6 +406,9 @@ fn report(model: &str, fill: &[Outcome], batch: &[Outcome]) -> String {
 #[test]
 #[ignore = "连真实模型评测任务助手，需本机 LM Studio 或 GONGWEN_TASK_EVAL_URL"]
 fn task_assistant_model_eval() {
+    // 评测会启动真实 Pi 作业：工作区写到临时配置目录，不碰用户的 Pi 目录与任务库。
+    let config_dir = tempfile::tempdir().expect("建评测配置目录");
+    crate::storage::set_test_config_dir(Some(config_dir.path().to_path_buf()));
     let cases: Cases =
         serde_json::from_str(include_str!("../../tests/fixtures/task-eval/cases.json"))
             .expect("评测用例格式不对");
@@ -410,11 +436,12 @@ fn task_assistant_model_eval() {
         );
         batch.push(o);
     }
-    let model = config(0).model;
+    let model = config().pi_model.model.clone();
     let md = report(&model, &fill, &batch);
     let dir = std::path::Path::new("tmp/task-eval");
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join(format!("{}.md", model.replace(['/', ':'], "_")));
     std::fs::write(&path, &md).unwrap();
     println!("报告：{}", path.display());
+    crate::storage::set_test_config_dir(None);
 }

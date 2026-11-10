@@ -191,3 +191,156 @@ test("the production host path submits through a local OpenAI-compatible endpoin
     server.close();
   }
 });
+
+test("the production host path delivers a task JSON through submit_task", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "gongwen-pi-task-e2e-"));
+  const workspaceRoot = path.join(base, "workspace");
+  fs.mkdirSync(path.join(workspaceRoot, "input", "materials"), { recursive: true });
+  fs.mkdirSync(path.join(workspaceRoot, "work"), { recursive: true });
+  fs.mkdirSync(path.join(workspaceRoot, "skills", "gongwen-markdown"), { recursive: true });
+  fs.mkdirSync(path.join(workspaceRoot, "skills", "pi-skills", "gongwen-task-extract"), { recursive: true });
+  fs.writeFileSync(path.join(workspaceRoot, "input", "current.md"), "");
+  fs.writeFileSync(path.join(workspaceRoot, "input", "request.md"), "整理本周材料。\n");
+  fs.writeFileSync(path.join(workspaceRoot, "input", "materials", "01.md"), "办公室负责本周完成台账整理。\n");
+  fs.writeFileSync(path.join(workspaceRoot, "input", "materials", "index.json"), "[]");
+  fs.writeFileSync(path.join(workspaceRoot, "skills", "pi-skills", "gongwen-task-extract", "SKILL.md"), "# 整理任务材料\n");
+  const deliveryDir = path.join(base, "run");
+  fs.mkdirSync(deliveryDir, { recursive: true });
+
+  const payload = JSON.stringify({
+    mode: "extract",
+    items: [{
+      kind: "new_task",
+      task_id: null,
+      name: "台账整理",
+      owner: "李四",
+      progress: null,
+      next_step: null,
+      risks: null,
+      deadline: null,
+      speaker: null,
+      about: null,
+      note: null,
+      evidence: "办公室负责本周完成台账整理",
+    }],
+    notes: [],
+  });
+  const server = http.createServer((req, res) => {
+    if (!req.url.endsWith("/chat/completions")) {
+      res.writeHead(404).end();
+      return;
+    }
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const parsed = JSON.parse(body || "{}");
+      const toolNames = (parsed.messages ?? []).flatMap((message) =>
+        (message.tool_calls ?? []).map((call) => call.function?.name),
+      );
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+      });
+      if (!toolNames.includes("write")) {
+        toolCallResponse(res, "write", { path: "work/task.json", content: payload });
+      } else if (!toolNames.includes("submit_task")) {
+        toolCallResponse(res, "submit_task", { path: "work/task.json", summary: "整理台账事项" });
+      } else {
+        sse(res, completionChunk([{ index: 0, delta: { role: "assistant", content: "已提交。" }, finish_reason: null }]));
+        sse(res, completionChunk([{ index: 0, delta: {}, finish_reason: "stop" }], {
+          prompt_tokens: 10,
+          completion_tokens: 3,
+          total_tokens: 13,
+        }));
+        res.write("data: [DONE]\n\n");
+        res.end();
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  const baseUrl = `http://127.0.0.1:${port}/v1`;
+  try {
+    const hostDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+    const child = spawn(process.execPath, [path.join(hostDir, "src", "main.mjs")], {
+      cwd: hostDir,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (chunk) => {
+      out += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      err += chunk;
+    });
+    child.stdin.write(
+      `${JSON.stringify({
+        type: "init",
+        protocol: PROTOCOL_VERSION,
+        requestId: "req-task-e2e",
+        runId: "run-task-e2e",
+        workspace: {
+          root: workspaceRoot,
+          state: path.join(deliveryDir, "session"),
+          delivery: deliveryDir,
+          current: "input/current.md",
+          request: "input/request.md",
+          skills: "skills/gongwen-markdown",
+          piSkills: "skills/pi-skills",
+        },
+        model: {
+          baseUrl,
+          apiKey: "sk-task-secret",
+          modelId: "stub-model",
+          contextWindow: 262144,
+          maxTokens: 4096,
+          reasoning: false,
+        },
+        task: {
+          request: "整理本周材料。",
+          kind: "任务整理",
+          skill: "gongwen-task-extract",
+          systemDate: "2026-11-10",
+          materials: [{
+            file: "input/materials/01.md",
+            title: "本周材料",
+            source: "粘贴",
+            role: "fact",
+            sha256: "0".repeat(64),
+            bytes: 36,
+          }],
+        },
+      })}\n`,
+    );
+    const exitCode = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill();
+        reject(new Error(`host 超时。stdout:\n${out}\nstderr:\n${err}`));
+      }, 60_000);
+      child.on("exit", (code) => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+    const events = out
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const submitted = events.find((event) => event.type === "submitted");
+    assert.ok(submitted, `应当有 submitted 事件：${out}\n${err}`);
+    assert.equal(submitted.path, "work/task.json");
+    assert.match(submitted.content, /"mode":"extract"/);
+    assert.ok(events.some((event) => event.type === "completed" && event.submitted === true));
+    assert.equal(exitCode, 0);
+    const receipt = JSON.parse(fs.readFileSync(path.join(deliveryDir, "receipt.json"), "utf8"));
+    assert.equal(receipt.kind, "task");
+    assert.equal(fs.readFileSync(path.join(deliveryDir, "final.json"), "utf8"), payload);
+    assert.equal(fs.existsSync(path.join(deliveryDir, "final.md")), false);
+  } finally {
+    server.close();
+  }
+});

@@ -3,6 +3,11 @@
 > 2026-11-04。状态：**设计，待用户确认**。本文只写核实结论与方案，不改代码。
 > 核实基线 `8d3217f`（工作区干净），三方独立审计报告在 `tmp/ai-audit/`：
 > `model-matrix.md`（调用矩阵）、`element-extraction.md`（要素抽取）、`pi-capability.md`（Pi 能力边界）。
+> **2026-11-10 修订**：任务助手的材料整理与表单填写已改为 Pi 智能体作业（技能
+> `gongwen-task-extract` / `gongwen-task-fill`，交付 `submit_task`），不再走本文所述
+> `aux_chat` 一次性调用；本文其余内容保留为当时的决策记录。见 `docs/pi-runtime.md`
+> 「任务助手作业」与 `docs/personal-task-assistant.md`。
+
 > 背景：侧栏新任务已统一走 Pi（第五阶段），但知识库问答、数据接口、任务助手、要素抽取等
 > 旁路功能仍挂在旧的「辅助模型」通道上，形成「一套 Pi + 一套旧辅助模型 + 一套文字复核」的过渡形态。
 

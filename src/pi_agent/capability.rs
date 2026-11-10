@@ -620,7 +620,7 @@ pub(crate) fn run_paired_calibration(
         let technical_success = matches!(outcome, Ok(PiOutcome::Document(_)));
         let content = match &outcome {
             Ok(PiOutcome::Document(delivery)) => Some(delivery.content.clone()),
-            Ok(PiOutcome::Report(_) | PiOutcome::Style(_)) | Err(_) => None,
+            Ok(PiOutcome::Report(_) | PiOutcome::Style(_) | PiOutcome::Task(_)) | Err(_) => None,
         };
         let tools_ok = tools.evidence().iter().any(|item| item.tool == "kb_search")
             && tools.evidence().iter().any(|item| item.tool == "kb_read")

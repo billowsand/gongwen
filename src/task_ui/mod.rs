@@ -112,6 +112,12 @@ pub(crate) struct State {
     pub extraction_error: Option<String>,
     pub request_fill: Option<FillRequest>,
     pub fill_text: String,
+    /// 后台 Pi 作业的最近一条进度；没有作业时为空。
+    pub extraction_progress: Option<String>,
+    pub fill_progress: Option<String>,
+    /// 界面请求停止后台作业；应用层每帧读一次并置停止信号。
+    pub request_stop_extraction: bool,
+    pub request_stop_fill: bool,
     pub fill_busy: bool,
     pub fill_discard: bool,
     pub fill_error: Option<String>,
@@ -182,6 +188,8 @@ impl State {
     fn clear_fill(&mut self) {
         self.request_fill = None;
         self.fill_text.clear();
+        self.fill_progress = None;
+        self.request_stop_fill = false;
         self.fill_busy = false;
         self.fill_discard = false;
         self.fill_error = None;

@@ -86,7 +86,10 @@ fn apply_from(
         None => source.to_owned(),
     };
     if combined.len() > MAX_SOURCE_BYTES {
-        state.fill_error = Some("多次填写的来源合计超过 1 MB，请先保存或撤销后分批整理。".into());
+        state.fill_error = Some(format!(
+            "多次填写的来源合计超过 {} MiB，请先保存或撤销后分批整理。",
+            MAX_SOURCE_BYTES / (1024 * 1024)
+        ));
         return;
     }
     prune_marks(state, draft);
@@ -244,8 +247,9 @@ fn card(ui: &mut egui::Ui, draft: &mut Task, state: &mut State) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if state.fill_busy {
                     theme::spinner(ui, 14.0, theme::accent());
-                    if ui.small_button("取消").clicked() {
+                    if ui.small_button("停止").clicked() {
                         state.fill_discard = true;
+                        state.request_stop_fill = true;
                     }
                 } else if theme::primary_icon_button_enabled(
                     ui,
@@ -275,8 +279,14 @@ fn card(ui: &mut egui::Ui, draft: &mut Task, state: &mut State) {
             input.request_focus();
         }
         theme::caption(ui, "AI 只填空白栏；已有内容的栏给出建议，保存前都可改。");
+        if state.fill_busy
+            && let Some(progress) = state.fill_progress.as_deref()
+            && !progress.trim().is_empty()
+        {
+            theme::caption(ui, progress);
+        }
         if state.fill_discard {
-            theme::caption(ui, "已取消本次结果，等待请求结束。");
+            theme::caption(ui, "已请求停止，等这一轮收手。");
         }
         if let Some(e) = &state.fill_error {
             ui.colored_label(theme::warn(), e);

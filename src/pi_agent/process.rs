@@ -424,6 +424,8 @@ pub(crate) enum PiOutcome {
     Document(PiDelivery),
     /// 独立风格文件，只能由风格设置页接收；不能写正文。
     Style(PiDelivery),
+    /// 任务助手的结构化交付（候选清单或表单填写），只由任务助手页面接收。
+    Task(PiDelivery),
     Report(PiReport),
 }
 
@@ -439,6 +441,7 @@ fn builtin_delivery_kind(skill: Option<&str>) -> Option<&'static str> {
         "gongwen-draft" | "gongwen-revise" | "gongwen-imitate" | "gongwen-research"
         | "gongwen-reply" => Some("document"),
         "gongwen-extract" => Some("report"),
+        super::pi_skills::TASK_EXTRACT_SKILL | super::pi_skills::TASK_FILL_SKILL => Some("task"),
         super::pi_skills::STYLE_SKILL => Some("style"),
         _ => None,
     }
@@ -502,6 +505,19 @@ pub(crate) fn run(
         && job.task.kind != "风格档案"
     {
         return Err("风格学习只能提交独立风格档案，不能作为正文任务运行。".into());
+    }
+    if job
+        .task
+        .skill
+        .as_deref()
+        .is_some_and(super::pi_skills::is_task_skill)
+    {
+        if job.task.selection.is_some() {
+            return Err("任务助手作业没有选区，不能按正文选区运行。".into());
+        }
+        if job.task.materials.is_empty() {
+            return Err("任务助手作业至少需要一份材料。".into());
+        }
     }
     // 覆盖 Rust 侧的准备完成后更新、host 退出后落盘窗口；Node 自己另持 SQLite 锁，
     // 即使 Rust 崩溃而 host 尚存，也不能同时打开 Durable 库。
@@ -1241,7 +1257,21 @@ pub(crate) fn run(
                 };
                 let style_task = job.task.skill.as_deref() == Some(super::pi_skills::STYLE_SKILL)
                     && job.task.kind == "风格档案";
-                let expected_kind = if style_task { "style" } else { "document" };
+                let task_job = job
+                    .task
+                    .skill
+                    .as_deref()
+                    .is_some_and(super::pi_skills::is_task_skill);
+                let expected_kind = if style_task {
+                    "style"
+                } else if task_job {
+                    "task"
+                } else {
+                    "document"
+                };
+                if task_job && content.len() > super::protocol::MAX_TASK_DELIVERY_BYTES {
+                    return Err("任务助手交付的 JSON 超过上限，已拒绝。".into());
+                }
                 let historical_replay = job.resume
                     && recovered
                     && preexisting_receipt.as_ref().is_some_and(|prior| {
@@ -1291,6 +1321,18 @@ pub(crate) fn run(
                     if is_style {
                         super::style_learning::validate_draft(&content)?;
                     }
+                    // 任务交付的语义校验（证据、日期、候选类型、目标 ID）在任务适配器里，
+                    // 这里只挡「不是 JSON 对象」这类一眼可见的坏交付。
+                    let is_task = submission.receipt.kind == "task";
+                    if is_task {
+                        if content.len() > super::protocol::MAX_TASK_DELIVERY_BYTES {
+                            return Err("任务助手交付的 JSON 超过上限，已拒绝。".into());
+                        }
+                        match serde_json::from_str::<serde_json::Value>(&content) {
+                            Ok(serde_json::Value::Object(_)) => {}
+                            _ => return Err("任务助手交付的不是 JSON 对象，已拒绝。".into()),
+                        }
+                    }
                     // 完成事件之后仍须确认进程正常退出，不能接受“先报成功再崩溃”。
                     successful_exit(&mut guard, &cancel)?;
                     // 成品要直接写进正文：修改前基线必须确实在盘上，撤销才有准确的原稿。
@@ -1317,6 +1359,8 @@ pub(crate) fn run(
                     };
                     return Ok(if is_style {
                         PiOutcome::Style(delivery)
+                    } else if is_task {
+                        PiOutcome::Task(delivery)
                     } else {
                         PiOutcome::Document(delivery)
                     });
@@ -1692,6 +1736,19 @@ rl.on("line", (line) => {
       emit({type:"submitted",path:"work/style.json",summary:"风格",content:text,sha256:hash,bytes:Buffer.byteLength(text)});
       emit({type:"completed",submitted:true});
       setTimeout(()=>process.exit(0),20);
+      return;
+    }
+    if (mode === "task") {
+      const text = JSON.stringify({ mode: "extract", items: [{ kind: "new_task", task_id: null, name: "台账整理", owner: "李四", progress: null, next_step: null, risks: null, deadline: null, speaker: null, about: null, note: null, evidence: "办公室负责本周完成台账整理" }], notes: [] });
+      const hash = createHash("sha256").update(text, "utf8").digest("hex");
+      fs.writeFileSync(path.join(delivery(), "final.json"), text);
+      fs.writeFileSync(path.join(delivery(), "receipt.json"), JSON.stringify({
+        version: 1, runId: init.runId, requestId: init.requestId, kind: "task",
+        path: "work/task.json", sha256: hash, bytes: Buffer.byteLength(text), summary: "任务", callId: "t1",
+      }));
+      emit({ type: "submitted", path: "work/task.json", summary: "任务", content: text, sha256: hash, bytes: Buffer.byteLength(text) });
+      emit({ type: "completed", submitted: true });
+      setTimeout(() => process.exit(0), 20);
       return;
     }
     if (mode === "capability") {
@@ -2092,6 +2149,70 @@ rl.on("line", (line) => {
         )
         .unwrap_err();
         assert!(error.contains("没有提交成品"), "{error}");
+    }
+
+    #[test]
+    fn task_job_delivery_is_a_task_json_outcome() {
+        if !node_available() {
+            eprintln!("跳过：本机没有 Node");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut task_job = job(temp.path(), "task");
+        task_job.task.skill = Some(crate::pi_agent::pi_skills::TASK_EXTRACT_SKILL.into());
+        task_job.task.kind = "任务整理".into();
+        task_job.task.materials = vec![super::super::materials::PiMaterialMeta {
+            file: "input/materials/01.md".into(),
+            title: "本周材料".into(),
+            source: "测试夹具".into(),
+            role: crate::pi_agent::MaterialRole::Fact,
+            sha256: "0".repeat(64),
+            bytes: 32,
+        }];
+        let outcome = outcome(task_job, Arc::new(AtomicBool::new(false)), |_| {}).unwrap();
+        let PiOutcome::Task(delivery) = outcome else {
+            panic!("任务作业必须交回 PiOutcome::Task");
+        };
+        assert_eq!(delivery.path, "work/task.json");
+        assert_eq!(delivery.summary, "任务");
+        let payload: serde_json::Value = serde_json::from_str(&delivery.content).unwrap();
+        assert_eq!(payload["mode"], "extract");
+        assert_eq!(
+            payload["items"][0]["evidence"],
+            "办公室负责本周完成台账整理"
+        );
+        assert!(
+            delivery.fact_sources.is_empty(),
+            "任务作业不重复收集事实来源"
+        );
+    }
+
+    #[test]
+    fn task_job_requires_materials_and_rejects_body_selection() {
+        if !node_available() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut task_job = job(temp.path(), "task");
+        task_job.task.skill = Some(crate::pi_agent::pi_skills::TASK_EXTRACT_SKILL.into());
+        task_job.task.kind = "任务整理".into();
+        let error = outcome(task_job, Arc::new(AtomicBool::new(false)), |_| {}).unwrap_err();
+        assert!(error.contains("至少需要一份材料"), "{error}");
+
+        let mut selected = job(temp.path(), "task");
+        selected.task.skill = Some(crate::pi_agent::pi_skills::TASK_FILL_SKILL.into());
+        selected.task.kind = "任务填写".into();
+        selected.task.materials = vec![super::super::materials::PiMaterialMeta {
+            file: "input/materials/01.md".into(),
+            title: "材料".into(),
+            source: "测试夹具".into(),
+            role: crate::pi_agent::MaterialRole::Fact,
+            sha256: "0".repeat(64),
+            bytes: 8,
+        }];
+        selected.task.selection = Some(PiSelection { start: 0, end: 1 });
+        let error = outcome(selected, Arc::new(AtomicBool::new(false)), |_| {}).unwrap_err();
+        assert!(error.contains("没有选区"), "{error}");
     }
 
     #[test]

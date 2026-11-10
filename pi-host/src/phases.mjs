@@ -2,11 +2,12 @@
 //!
 //! 这里没有通用流程 DSL、没有分支图，也不替模型写作。阶段只有固定的几种，按任务
 //! 裁剪；每一步都由同一套 Durable Harness 执行，中间成果只能经 `record_progress`
-//! 由宿主核验后登记，最终仍必须 `submit_document` / `finish_report`。
+//! 由宿主核验后登记，最终仍必须 `submit_document` / `finish_report` / `submit_task`。
 
 import { chunkChars } from "./budget.mjs";
 import { MAX_QUOTE_CHARS, ProgressError } from "./progress.mjs";
 import { isStyleTask } from "./style.mjs";
+import { isTaskTask, taskMode } from "./task.mjs";
 import { writingContextBlock } from "./prompt.mjs";
 
 export const RECORD_TOOL_NAME = "record_progress";
@@ -96,6 +97,7 @@ function roleLabel(role) {
  *
  * 文档任务：提炼（有材料时）→ 提纲 → 逐节写作 → 合稿检查 → 交付。
  * 报告 / 提炼任务：提炼（有材料时）→ 交付。
+ * 任务助手作业：提炼（有材料时）→ 交付整理结果。
  * 局部修改：只有交付。
  */
 export function buildPlan({ config, decision, guard }) {
@@ -139,6 +141,12 @@ export function buildPlan({ config, decision, guard }) {
   const phases = [];
   if (chunks.length + studies.length > 0) {
     phases.push({ id: "distill", title: "提炼材料", units: [...chunks, ...studies] });
+  }
+  // 任务作业：有材料时先提炼，最后只交整理结果；没有提纲 / 逐节 / 合稿阶段。
+  // 交付阶段不是 report：宿主会要求先登记 final（work/task.json）再 submit_task。
+  if (isTaskTask(task)) {
+    phases.push({ id: "deliver", title: "交付整理结果", final: true });
+    return { phases, sections: chunks, materials };
   }
   if (estimate.report) {
     phases.push({ id: "deliver", title: "交付清单", final: true, report: true });
@@ -375,6 +383,26 @@ ${header}
    ${recordExample(phase.units[0])}
 outline 与全部章节单元会由宿主自动登记为依赖，通常不填 uses。
 不要调用 submit_document。${correction}${retry}`;
+  }
+
+  if (isTaskTask(task)) {
+    const notes = registry.active()
+      .filter((record) => record.kind === "distill" || record.kind === "study")
+      .map((record) => record.path);
+    const mode = taskMode(task);
+    return `${commonBlock(decision)}
+
+## 最后一步：交付整理结果
+${header}
+
+读取已登记的材料摘记：${notes.join("、") || "input/materials 下的本轮材料"}，按用户要求合并成一份结果。
+${mode === "fill"
+  ? "只填 name / owner / progress / next_step / risks / deadline 六栏，每栏 null 或 {value,evidence}；原文没有的栏目写 null。"
+  : "每条候选都要带原文连续摘录 evidence；原文没有的字段写 null，不编造人员、日期、数字、结论。"}
+把结果写入 work/task.json，先登记 final：
+  record_progress({ phase: "review", unit: "final", path: "work/task.json", summary: "整理完成" })
+再调用 submit_task({ path: "work/task.json", summary: "一句话说明整理了什么" })。
+不要调用 submit_document / finish_report，不要在聊天里贴 JSON 或声称已经修改任务。${correction}${retry}`;
   }
 
   if (isStyleTask(task)) return `${commonBlock(decision)}
