@@ -796,26 +796,6 @@ fn write_path_impl(
             let decoy_sealed = slot_has_encrypted_data(DataSlot::Decoy);
             let ordinary =
                 matches!(probe, Probe::Absent | Probe::Skipped) && !real_sealed && !decoy_sealed;
-            #[cfg(test)]
-            if !ordinary {
-                let dir = crate::storage::config_dir().ok();
-                let entries = dir
-                    .as_ref()
-                    .and_then(|dir| std::fs::read_dir(dir).ok())
-                    .map(|reader| {
-                        reader
-                            .flatten()
-                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                            .collect::<Vec<_>>()
-                    });
-                eprintln!(
-                    "vault-write-denied path={} probe={probe:?} real_sealed={real_sealed} \
-                     decoy_sealed={decoy_sealed} testdir={} config={:?} entries={entries:?}",
-                    path.display(),
-                    crate::storage::has_test_config_dir(),
-                    dir,
-                );
-            }
             // 很多测试只给受控写层一个独立临时目录，不覆盖线程局部配置目录。
             // 这种目录外写入不应受开发机真实工作区是否加锁影响；显式设置了测试
             // 配置目录的用例（包括锁定拒写测试）仍完整执行上面的生产判定。
@@ -1075,11 +1055,7 @@ fn resource_dirs_need_encryption(slot: DataSlot) -> bool {
         let entries = match read_dir_if_exists(&dir) {
             Ok(Some(entries)) => entries,
             Ok(None) => continue,
-            Err(_error) => {
-                #[cfg(test)]
-                eprintln!("vault-dir-unreadable path={} error={_error}", dir.display());
-                return true;
-            }
+            Err(_) => return true,
         };
         for entry in entries {
             let entry = match entry {
@@ -1192,20 +1168,12 @@ fn directory_has_encrypted_data(path: PathBuf) -> bool {
         let entries = match read_dir_if_exists(&dir) {
             Ok(Some(entries)) => entries,
             Ok(None) => continue,
-            Err(_error) => {
-                #[cfg(test)]
-                eprintln!("vault-dir-unreadable path={} error={_error}", dir.display());
-                return true;
-            }
+            Err(_) => return true,
         };
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
-                Err(_error) => {
-                    #[cfg(test)]
-                    eprintln!("vault-entry-unreadable error={_error}");
-                    return true;
-                }
+                Err(_) => return true,
             };
             visited += 1;
             if visited > 200_000 {
@@ -1222,12 +1190,6 @@ fn directory_has_encrypted_data(path: PathBuf) -> bool {
                         continue;
                     }
                     if sealed_header_at(&path) {
-                        #[cfg(test)]
-                        eprintln!(
-                            "vault-sealed-entry path={} size={}",
-                            path.display(),
-                            meta.len()
-                        );
                         return true;
                     }
                 }

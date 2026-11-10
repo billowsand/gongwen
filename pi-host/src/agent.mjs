@@ -1079,8 +1079,8 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     // 快照（pi.live + 条目窗口），由 activity 模块 diff 出原 watchEvents 的语义。
     stream = await root.watch(controller.context, { min: 200, max: 400 });
     const showActivity = observeActivity(config.task, emit);
-    // 1.5 的 WatchHandle.start 直接把 `(value, ops, context)` 交给监听器，
-    // 不再是 1.4 的 `{kind: "value"}` 事件对象；把视图快照交给活动行即可。
+    // chord 的 watch 监听器在 1.5 收 `{kind:"value", value, ops}` 帧，1.4 直接收
+    // 视图快照；两种形状都接住（本地开发 node_modules 与随包运行时可能不同版本）。
     const activityHooks = {
       onRetry: (attempt) =>
         emit({ type: "progress", message: `模型调用失败，正在重试（第 ${attempt} 次）` }),
@@ -1098,7 +1098,11 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     } catch {
       // 初始帧解析失败只丢一行展示，不阻断本轮。
     }
-    stream.start(async (value) => {
+    stream.start(async (call) => {
+      const value = call && typeof call === "object" && "kind" in call
+        ? call.kind === "value" ? call.value : undefined
+        : call;
+      if (value === undefined) return;
       try {
         showActivity.update(value, activityHooks);
       } catch {

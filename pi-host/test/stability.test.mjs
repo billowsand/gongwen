@@ -49,6 +49,13 @@ function fixture(slot = "real") {
   return { base, root, state, delivery, encryption, files };
 }
 
+
+/// 1.4 的 `commit(writes, context)` 与 1.5 的 `commit(batches, receive, context)` 都支持。
+async function commitWrites(storage, writes, context) {
+  if (storage.commit.length >= 3) return storage.commit([writes], () => {}, context);
+  return storage.commit(writes, context);
+}
+
 function staleTemp(dir) {
   return path.join(dir, `.${process.pid}-11111111-2222-4333-8444-555555555555.tmp`);
 }
@@ -88,8 +95,7 @@ const openStorage = (space) =>
 test("崩溃残留的半截密文临时文件：listDir 跳过、清理后会话仍可打开", async () => {
   const space = fixture();
   let storage = await openStorage(space);
-  await storage.commit([{ type: "conversation", value: { id: 7 } }], BACKGROUND_CONTEXT);
-  console.error("DEBUG-111-after-commit", storage.mainPath, fs.existsSync(storage.mainPath), space.state);
+  await commitWrites(storage, [{ type: "conversation", value: { id: 7 } }], BACKGROUND_CONTEXT);
   await storage.close(BACKGROUND_CONTEXT);
 
   // 模拟写临时文件途中被 SIGKILL：只写了一半封套。
@@ -102,32 +108,7 @@ test("崩溃残留的半截密文临时文件：listDir 跳过、清理后会话
   assert.equal(listed.some((entry) => entry.name === path.basename(partial)), false);
   // 2) 未清理时也能打开（recover 的 listDir 会跳过它）。
   storage = await openStorage(space);
-  const reopened = await storage.conversation(7, BACKGROUND_CONTEXT);
-  if (reopened === undefined) {
-    const mainPath = path.join(space.state, "main.jsonl");
-    let main = "";
-    let head = "";
-    try {
-      main = space.files.readText(mainPath);
-      head = fs.readFileSync(mainPath).subarray(0, 8).toString("hex");
-    } catch (error) {
-      main = `read failed: ${error?.message ?? error}`;
-    }
-    const found = [];
-    const walk = (dir, depth) => {
-      if (depth > 6 || found.length > 20) return;
-      let entries = [];
-      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-      for (const entry of entries) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) walk(full, depth + 1);
-        else if (entry.name === "main.jsonl") found.push(full);
-      }
-    };
-    walk(space.base, 0);
-    console.error("DEBUG-111", JSON.stringify({ cwd: process.cwd(), listing: fs.readdirSync(space.state), head, main, found }));
-  }
-  assert.deepEqual(reopened, { id: 7 });
+  assert.deepEqual(await storage.conversation(7, BACKGROUND_CONTEXT), { id: 7 });
   await storage.close(BACKGROUND_CONTEXT);
   // 3) 启动清理会删掉它。
   assert.equal(cleanStaleTemps(space.state), 1);

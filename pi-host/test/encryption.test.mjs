@@ -28,6 +28,14 @@ const VECTOR_PLAIN = Buffer.from("# 保密正文\n", "utf8");
 const VECTOR_LOGICAL = "pi/runs/run-1/final.md";
 const VECTOR_HEX = "47574132000102030405060708090a0b642232a458006d9d6bec346d276e72cd4dea0db75b75f3a33f98214e5db4d3";
 
+
+/// 直接提交一批写入。仓库里的开发 node_modules 可能是 1.4（`commit(writes, context)`），
+/// 随包运行时是 1.5（`commit(batches, receive, context)`）；按函数参数个数分派。
+async function commitWrites(storage, writes, context) {
+  if (storage.commit.length >= 3) return storage.commit([writes], () => {}, context);
+  return storage.commit(writes, context);
+}
+
 function fixture(slot = "real") {
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "gongwen-pi-encrypted-")));
   const first = slot === "decoy" ? "alt-pi" : "pi";
@@ -210,26 +218,8 @@ test("Durable JSONL 加密提交后可关闭重开恢复，并继续追加提交
     { fsync: true },
   );
   let storage = await open();
-  console.error("DEBUG-commit-source", Object.getPrototypeOf(storage).commit.toString().slice(0, 160).replace(/\s+/g, " "));
-  {
-    const original = storage.fs.appendFile.bind(storage.fs);
-    storage.fs.appendFile = async (target, content, context) => {
-      const result = await original(target, content, context);
-      console.error("DEBUG-append", target, typeof content === "string" ? content.length : content?.length, JSON.stringify(result), fs.existsSync(target));
-      return result;
-    };
-  }
-  await storage.commit([{ type: "conversation", value: { id: 2 } }], BACKGROUND_CONTEXT);
-  console.error("DEBUG-48-after-commit", storage.mainPath, fs.existsSync(storage.mainPath), space.state, storage.constructor.name, typeof storage.fs?.appendFile);
-  {
-    const pfs = new ProtectedFileSystem({ cwd: path.dirname(space.state), files: space.files });
-    const probePath = path.join(space.state, "probe.txt");
-    const appended = await pfs.appendFile(probePath, Buffer.from("hello\n"), BACKGROUND_CONTEXT);
-    let probeText = "";
-    try { probeText = space.files.readText(probePath); } catch (error) { probeText = `read failed: ${error?.message ?? error}`; }
-    console.error("DEBUG-probe", JSON.stringify(appended), fs.existsSync(probePath), probeText);
-  }
-  await storage.commit([{ type: "entry", value: { id: 3, conversationId: 2, kind: "test", data: { marker } } }], BACKGROUND_CONTEXT);
+  await commitWrites(storage, [{ type: "conversation", value: { id: 2 } }], BACKGROUND_CONTEXT);
+  await commitWrites(storage, [{ type: "entry", value: { id: 3, conversationId: 2, kind: "test", data: { marker } } }], BACKGROUND_CONTEXT);
   await storage.close(BACKGROUND_CONTEXT);
 
   for (const name of fs.readdirSync(space.state)) {
@@ -238,35 +228,9 @@ test("Durable JSONL 加密提交后可关闭重开恢复，并继续追加提交
     assert.equal(raw.includes(Buffer.from(marker)), false, name);
   }
   storage = await open();
-  const conversation = await storage.conversation(2, BACKGROUND_CONTEXT);
-  if (conversation === undefined) {
-    const mainPath = path.join(space.state, "main.jsonl");
-    const listing = fs.readdirSync(space.state);
-    let main = "";
-    let head = "";
-    try {
-      main = space.files.readText(mainPath);
-      head = fs.readFileSync(mainPath).subarray(0, 8).toString("hex");
-    } catch (error) {
-      main = `read failed: ${error?.message ?? error}`;
-    }
-    const found = [];
-    const walk = (dir, depth) => {
-      if (depth > 6 || found.length > 20) return;
-      let entries = [];
-      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-      for (const entry of entries) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) walk(full, depth + 1);
-        else if (entry.name === "main.jsonl") found.push(full);
-      }
-    };
-    walk(space.base, 0);
-    console.error("DEBUG-48", JSON.stringify({ cwd: process.cwd(), listing, head, main, found }));
-  }
-  assert.deepEqual(conversation, { id: 2 });
+  assert.deepEqual(await storage.conversation(2, BACKGROUND_CONTEXT), { id: 2 });
   assert.equal((await storage.entry(3, BACKGROUND_CONTEXT)).entry.data.marker, marker);
-  await storage.commit([{ type: "entry", value: { id: 4, conversationId: 2, kind: "test", data: "第二次提交" } }], BACKGROUND_CONTEXT);
+  await commitWrites(storage, [{ type: "entry", value: { id: 4, conversationId: 2, kind: "test", data: "第二次提交" } }], BACKGROUND_CONTEXT);
   await storage.close(BACKGROUND_CONTEXT);
 
   storage = await open();
