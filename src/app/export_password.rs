@@ -123,7 +123,11 @@ impl PasswordSettings {
             ui.horizontal(|ui| {
                 ui.label("新导出密码");
                 ui.add(egui::TextEdit::singleline(&mut *self.password).password(!self.show).desired_width(260.0));
-                if ui.button("随机生成").clicked() {
+                if ui
+                    .button("随机生成")
+                    .on_hover_text("按音节拼读的三个词，含大小写字母、数字与符号，便于口述与记忆")
+                    .clicked()
+                {
                     *self.password = crate::export::protection::generated_password();
                     *self.confirm = self.password.to_string();
                     self.show = true;

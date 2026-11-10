@@ -305,14 +305,66 @@ pub(crate) fn validate_password(password: &str) -> Result<()> {
     Ok(())
 }
 
+/// 随机导出密码：按音节拼读，混入大小写、数字与符号，便于口述与手抄。
+///
+/// 不用「随机字节转十六进制」：那种串既没有拼读规则，也抄不准。这里每次
+/// 生成三个可拼读的音节词（辅音/双字母起首 + 元音 [+ 词末尾辅音]），
+/// 词间插符号与数字，形状类似 `Varen#Millu72Tako`；最后整体过一遍导出密码
+/// 强度校验，不合格就重来。规则只有一处：[`crate::password_policy::validate_export`]。
 pub(crate) fn generated_password() -> String {
+    let mut rng = rand::rng();
     loop {
-        let bytes: [u8; 24] = rand::rng().random();
-        let password: String = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>() + "!G";
+        let password = pronounceable_password(&mut rng);
         if crate::password_policy::validate_export(&password).is_ok() {
             return password;
         }
     }
+}
+
+/// 音节素材：辅音（含常见双字母组合）、元音、尾辅音。
+const ONSETS: &[&str] = &[
+    "b", "d", "f", "g", "k", "l", "m", "n", "p", "r", "s", "t", "v", "z", "br", "dr", "fr", "gr",
+    "kl", "pl", "st", "tr", "ch", "sh", "th",
+];
+const VOWELS: &[char] = &['a', 'e', 'i', 'o', 'u'];
+/// 约四成五的词在词末加一个尾辅音，读起来有节奏，也不至于太长。
+const CODAS: &[&str] = &["n", "r", "l", "s", "m", "k", "t"];
+/// 只收在文本框、阅读器、解压工具里都不会引发转义歧义的符号。
+const SYMBOLS: &[char] = &['!', '#', '%', '&', '*', '+', '=', '?', '@', '~', '^', '-'];
+
+/// 生成一个「三词 + 两组分隔」的口令，每词首字母大写。
+///
+/// 每词两个音节；尾辅音只加在词末，避免「辅音 + 双字母起首」拼出
+/// `tratm` 这类读不出来的连缀。
+fn pronounceable_password(rng: &mut impl Rng) -> String {
+    let mut out = String::new();
+    for word in 0..3 {
+        match word {
+            1 => out.push(SYMBOLS[rng.random_range(0..SYMBOLS.len())]),
+            2 => {
+                for _ in 0..rng.random_range(2..=3) {
+                    out.push(char::from(b'0' + rng.random_range(0..10u8)));
+                }
+                out.push(SYMBOLS[rng.random_range(0..SYMBOLS.len())]);
+            }
+            _ => {}
+        }
+        let mut syllables = String::new();
+        for _ in 0..2 {
+            syllables.push_str(ONSETS[rng.random_range(0..ONSETS.len())]);
+            syllables.push(VOWELS[rng.random_range(0..VOWELS.len())]);
+        }
+        if rng.random_bool(0.45) {
+            syllables.push_str(CODAS[rng.random_range(0..CODAS.len())]);
+        }
+        // 首字母大写：既满足「含大写字母」，也让三个词一眼可分。
+        let mut chars = syllables.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -341,6 +393,52 @@ mod tests {
         fn drop(&mut self) {
             crate::vault::clear_key_handle();
             crate::storage::set_test_config_dir(None);
+        }
+    }
+
+    #[test]
+    fn generated_password_is_pronounceable_and_meets_export_rules() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(2026_1110);
+        for _ in 0..500 {
+            let password = pronounceable_password(&mut rng);
+            crate::password_policy::validate_export(&password)
+                .unwrap_or_else(|error| panic!("生成的口令不合规：{password}：{error}"));
+            assert!(
+                (16..=26).contains(&password.chars().count()),
+                "长度异常：{password}"
+            );
+            for category in ["upper", "lower", "digit", "symbol"] {
+                let present = password.chars().any(|ch| match category {
+                    "upper" => ch.is_ascii_uppercase(),
+                    "lower" => ch.is_ascii_lowercase(),
+                    "digit" => ch.is_ascii_digit(),
+                    _ => !ch.is_ascii_alphanumeric(),
+                });
+                assert!(present, "缺 {category}：{password}");
+            }
+
+            // 拼读规则：元音占字母的四分之一以上，且不出现 4 个连续辅音。
+            let letters = password
+                .chars()
+                .filter(char::is_ascii_alphabetic)
+                .map(|ch| ch.to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            let vowels = letters.iter().filter(|ch| "aeiou".contains(**ch)).count();
+            assert!(vowels * 4 >= letters.len(), "元音太少：{password}");
+            let mut run = 0;
+            for ch in &letters {
+                run = if "aeiou".contains(*ch) { 0 } else { run + 1 };
+                assert!(run < 4, "辅音连缀过长：{password}");
+            }
+        }
+    }
+
+    #[test]
+    fn generated_password_survives_full_export_validation() {
+        for _ in 0..50 {
+            let password = generated_password();
+            assert!(validate_password(&password).is_ok(), "{password}");
         }
     }
 
