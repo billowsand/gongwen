@@ -581,8 +581,7 @@ jobs:
           cd release-assets
           missing=0
           for pattern in 'gongwen-assistant-*-win-x64-setup.exe' \
-                         'gongwen-assistant_*_arm64.deb' \
-                         'gongwen-assistant-*-x86_64.pkg.tar.zst'; do
+                         'gongwen-assistant-*-win-x64-setup.exe.sha256'; do
             if ! compgen -G "$pattern" > /dev/null; then
               echo "::error::缺少必需资产：$pattern"
               missing=1
@@ -590,9 +589,6 @@ jobs:
           done
           if [ "$missing" -ne 0 ]; then
             exit 1
-          fi
-          if ! compgen -G 'gongwen-assistant-*-macos-arm64.dmg' > /dev/null; then
-            echo "::warning::macOS 磁盘映像没构建成功（托管 runner 紧张），本次发布不含该资产"
           fi
           # 版本更新说明随源码一起提交，发布时直接取用。
           # --generate-notes 产出的正文只有一行 changelog 链接，等于什么都没写，
