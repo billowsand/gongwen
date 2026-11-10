@@ -220,7 +220,21 @@ test("Durable JSONL 加密提交后可关闭重开恢复，并继续追加提交
     assert.equal(raw.includes(Buffer.from(marker)), false, name);
   }
   storage = await open();
-  assert.deepEqual(await storage.conversation(2, BACKGROUND_CONTEXT), { id: 2 });
+  const conversation = await storage.conversation(2, BACKGROUND_CONTEXT);
+  if (conversation === undefined) {
+    const mainPath = path.join(space.state, "main.jsonl");
+    const listing = fs.readdirSync(space.state);
+    let main = "";
+    let head = "";
+    try {
+      main = space.files.readText(mainPath);
+      head = fs.readFileSync(mainPath).subarray(0, 8).toString("hex");
+    } catch (error) {
+      main = `read failed: ${error?.message ?? error}`;
+    }
+    console.error("DEBUG-48", JSON.stringify({ listing, head, main }));
+  }
+  assert.deepEqual(conversation, { id: 2 });
   assert.equal((await storage.entry(3, BACKGROUND_CONTEXT)).entry.data.marker, marker);
   await storage.commit([{ type: "entry", value: { id: 4, conversationId: 2, kind: "test", data: "第二次提交" } }], BACKGROUND_CONTEXT);
   await storage.close(BACKGROUND_CONTEXT);

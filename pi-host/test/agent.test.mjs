@@ -111,6 +111,16 @@ function fakeBackend() {
   return { faux, models, model };
 }
 
+/// 慢速流式后端：活动行与候选稿由会话视图的异步提交帧驱动；瞬间跑完的 faux
+/// 在慢速 runner（macOS CI）上可能一帧都收不到，这两个用例需要真实帧。
+function streamingBackend() {
+  const faux = fauxProvider({ provider: "faux-streaming", tokensPerSecond: 20 });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const model = faux.getModel();
+  return { faux, models, model };
+}
+
 test("同轮批量工具经真实 Durable harness 顺序往返后完成正文与回执交付", { timeout: 15_000 }, async () => {
   const workspace = makeWorkspace();
   const config = makeConfig(workspace);
@@ -161,7 +171,7 @@ test("budgeted read and kb/ms full reads survive Durable Harness output limits",
   const longText = `FIRST-MARKER${"中".repeat(35_000)}MIDDLE-MARKER${"文".repeat(35_000)}LAST-MARKER`;
   fs.writeFileSync(path.join(workspace.root, "input", "long.md"), longText);
   fs.writeFileSync(path.join(workspace.root, "input", "line-heavy.md"), `${"\n".repeat(3_000)}LINE-TAIL-MARKER\n`);
-  const { faux, models, model } = fakeBackend();
+  const { faux, models, model } = streamingBackend();
   const final = "# 完成\n\n已读取材料。\n";
   const assertDeliveredText = (context, markers, label) => {
     const messages = JSON.stringify(context);
@@ -316,7 +326,7 @@ test("plain completion is reminded but never silently promoted into a document",
 test("a written file submitted through submit_document becomes the delivered snapshot", async () => {
   const workspace = makeWorkspace();
   const config = makeConfig(workspace);
-  const { faux, models, model } = fakeBackend();
+  const { faux, models, model } = streamingBackend();
   faux.setResponses([
     fauxAssistantMessage(
       [fauxToolCall("write", { path: "work/final.md", content: "# 成品\n\n改短后的正文。\n" })],

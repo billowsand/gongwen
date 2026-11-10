@@ -101,7 +101,20 @@ test("崩溃残留的半截密文临时文件：listDir 跳过、清理后会话
   assert.equal(listed.some((entry) => entry.name === path.basename(partial)), false);
   // 2) 未清理时也能打开（recover 的 listDir 会跳过它）。
   storage = await openStorage(space);
-  assert.deepEqual(await storage.conversation(7, BACKGROUND_CONTEXT), { id: 7 });
+  const reopened = await storage.conversation(7, BACKGROUND_CONTEXT);
+  if (reopened === undefined) {
+    const mainPath = path.join(space.state, "main.jsonl");
+    let main = "";
+    let head = "";
+    try {
+      main = space.files.readText(mainPath);
+      head = fs.readFileSync(mainPath).subarray(0, 8).toString("hex");
+    } catch (error) {
+      main = `read failed: ${error?.message ?? error}`;
+    }
+    console.error("DEBUG-111", JSON.stringify({ listing: fs.readdirSync(space.state), head, main }));
+  }
+  assert.deepEqual(reopened, { id: 7 });
   await storage.close(BACKGROUND_CONTEXT);
   // 3) 启动清理会删掉它。
   assert.equal(cleanStaleTemps(space.state), 1);

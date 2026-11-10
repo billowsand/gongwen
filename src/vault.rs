@@ -791,9 +791,31 @@ fn write_path_impl(
         None => {
             // 与启动闸门使用同一判定：只有明确的普通工作区可以写明文；
             // 已启用锁、锁文件损坏或任一槽残留密文时，无密钥一律 fail-closed。
-            let ordinary = matches!(Vault::probe(), Probe::Absent | Probe::Skipped)
-                && !slot_has_encrypted_data(DataSlot::Real)
-                && !slot_has_encrypted_data(DataSlot::Decoy);
+            let probe = Vault::probe();
+            let real_sealed = slot_has_encrypted_data(DataSlot::Real);
+            let decoy_sealed = slot_has_encrypted_data(DataSlot::Decoy);
+            let ordinary =
+                matches!(probe, Probe::Absent | Probe::Skipped) && !real_sealed && !decoy_sealed;
+            #[cfg(test)]
+            if !ordinary {
+                let dir = crate::storage::config_dir().ok();
+                let entries = dir
+                    .as_ref()
+                    .and_then(|dir| std::fs::read_dir(dir).ok())
+                    .map(|reader| {
+                        reader
+                            .flatten()
+                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                    });
+                eprintln!(
+                    "vault-write-denied path={} probe={probe:?} real_sealed={real_sealed} \
+                     decoy_sealed={decoy_sealed} testdir={} config={:?} entries={entries:?}",
+                    path.display(),
+                    crate::storage::has_test_config_dir(),
+                    dir,
+                );
+            }
             // 很多测试只给受控写层一个独立临时目录，不覆盖线程局部配置目录。
             // 这种目录外写入不应受开发机真实工作区是否加锁影响；显式设置了测试
             // 配置目录的用例（包括锁定拒写测试）仍完整执行上面的生产判定。
