@@ -271,6 +271,30 @@ fn search_hits_title_and_body() {
 }
 
 #[test]
+fn parse_frame_outline_variants() {
+    // 标题式与列表式等价；混排时列表分类可跟在标题主题后。
+    let heading =
+        parse_frame_outline("# 安全生产\n## 监督检查\n## 应急管理\n# 政务服务\n").unwrap();
+    assert_eq!(heading.len(), 2);
+    assert_eq!(heading[0].name, "安全生产");
+    assert_eq!(heading[0].categories, vec!["监督检查", "应急管理"]);
+    assert!(heading[1].categories.is_empty());
+    let list = parse_frame_outline("- 安全生产\n  - 监督检查\n  - 应急管理\n- 政务服务\n").unwrap();
+    assert_eq!(list, heading);
+    let mixed = parse_frame_outline("# 安全生产\n  - 监督检查\n").unwrap();
+    assert_eq!(mixed[0].categories, vec!["监督检查"]);
+
+    assert!(parse_frame_outline("").is_err());
+    assert!(parse_frame_outline("随便一行\n").is_err());
+    assert!(parse_frame_outline("### 三级\n").is_err());
+    assert!(parse_frame_outline("- 甲\n    - 太深\n").is_err());
+    assert!(parse_frame_outline("## 孤儿分类\n").is_err());
+    assert!(parse_frame_outline("# 重复\n# 重复\n").is_err());
+    assert!(parse_frame_outline("# 甲\n- 乙\n- 乙\n").is_err());
+    assert!(parse_frame_outline(&format!("# {}\n", "长".repeat(61))).is_err());
+}
+
+#[test]
 fn parse_wikilinks_variants() {
     // [[ ]] 目标为空，跳过；其余按序解析。
     let links = parse_wikilinks("见 [[甲]]、[[乙|乙页面]] 与 [[ ]] 以及 [[丙]]。");

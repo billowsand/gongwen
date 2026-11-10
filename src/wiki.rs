@@ -766,6 +766,110 @@ fn write_links(tx: &rusqlite::Transaction, from_uuid: &str, body: &str) -> Resul
     Ok(())
 }
 
+/// 框架导入大纲：一个主题与它名下的分类（两级，不更深）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutlineTheme {
+    pub name: String,
+    pub categories: Vec<String>,
+}
+
+/// 把用户粘贴的 Markdown 大纲解析成两级框架。
+///
+/// 支持两种写法、可混排：标题式（`# 主题` / `## 分类`）与列表式
+/// （`- 主题` / 缩进一格的 `- 分类`）。第三级直接报错；完全解析不出
+/// 任何主题也报错。重名主题、主题内重名分类在这里就拦下。
+pub(crate) fn parse_frame_outline(text: &str) -> Result<Vec<OutlineTheme>, String> {
+    let mut themes: Vec<OutlineTheme> = Vec::new();
+    let mut list_theme: Option<usize> = None;
+    for raw in text.lines() {
+        let line = raw.trim_end();
+        if line.trim().is_empty() {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            let level = trimmed.chars().take_while(|c| *c == '#').count();
+            let name = trimmed[level..].trim().trim_matches('*').trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            match level {
+                1 => {
+                    themes.push(OutlineTheme {
+                        name,
+                        categories: Vec::new(),
+                    });
+                    // 混排时允许标题主题后面接列表式分类。
+                    list_theme = Some(themes.len() - 1);
+                }
+                2 => {
+                    let Some(theme) = themes.last_mut() else {
+                        return Err(format!("「{name}」前面没有一级主题（# 主题）"));
+                    };
+                    if theme.categories.contains(&name) {
+                        return Err(format!("主题「{}」下分类「{name}」重复", theme.name));
+                    }
+                    theme.categories.push(name);
+                }
+                _ => return Err("框架只分两级（主题 → 分类），不支持三级标题".into()),
+            }
+            continue;
+        }
+        // 列表式：按缩进深度定层级（0 = 主题，1 = 分类，更深拒绝）。
+        let body = line.trim_start();
+        let Some(item) = body.strip_prefix("- ") else {
+            return Err(format!("认不出这一行（要用 # / ## 或 - 列表）：{line}"));
+        };
+        let depth = (line.len() - body.len()) / 2;
+        let name = item.trim().trim_matches('*').trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        match depth {
+            0 => {
+                themes.push(OutlineTheme {
+                    name,
+                    categories: Vec::new(),
+                });
+                list_theme = Some(themes.len() - 1);
+            }
+            1 => {
+                let Some(index) = list_theme else {
+                    return Err(format!("「{name}」前面没有一级主题（- 主题）"));
+                };
+                if themes[index].categories.contains(&name) {
+                    return Err(format!(
+                        "主题「{}」下分类「{name}」重复",
+                        themes[index].name
+                    ));
+                }
+                themes[index].categories.push(name);
+            }
+            _ => return Err("框架只分两级（主题 → 分类），列表缩进不要深于一层".into()),
+        }
+    }
+    if themes.is_empty() {
+        return Err(
+            "没有解析出任何主题；用 `# 主题` / `## 分类` 或 `- 主题` / 缩进 `- 分类` 写".into(),
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    for theme in &themes {
+        if theme.name.chars().count() > 60 {
+            return Err(format!("主题名超过 60 字：{}", theme.name));
+        }
+        if !seen.insert(theme.name.clone()) {
+            return Err(format!("主题「{}」重复", theme.name));
+        }
+        for category in &theme.categories {
+            if category.chars().count() > 60 {
+                return Err(format!("分类名超过 60 字：{category}"));
+            }
+        }
+    }
+    Ok(themes)
+}
+
 /// 解析正文里的 `[[目标]]` 与 `[[目标|显示]]`（支持嵌套 `[` 的标题不做转义，
 /// 公文标题不含 `]`，扫描即可）。
 pub(crate) fn parse_wikilinks(body: &str) -> Vec<RawLink> {

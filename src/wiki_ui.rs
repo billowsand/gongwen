@@ -9,10 +9,10 @@ use std::collections::HashMap;
 
 use crate::app::GongwenApp;
 use crate::theme;
-use crate::wiki::{Backlink, WikiPageMeta, WikiTree};
+use crate::wiki::{Backlink, OutlineTheme, WikiPageMeta, WikiTree};
 use eframe::egui;
 
-/// 知识库页的界面状态：框架树缓存、当前阅读页、backlinks 栏开合。
+/// 知识库页的界面状态：框架树缓存、当前阅读页、backlinks 栏开合、框架编辑。
 #[derive(Default)]
 pub(crate) struct WikiUiState {
     /// 框架树缓存（list_tree 结果）。
@@ -28,6 +28,30 @@ pub(crate) struct WikiUiState {
     backlinks: Vec<Backlink>,
     /// 右侧 backlinks 栏是否展开。
     backlinks_open: bool,
+    /// 树编辑选中的框架节点 id（改名 / 移动 / 删除的对象）。
+    selected_node: Option<i64>,
+    /// 选中节点的名称编辑框内容。
+    node_name_edit: String,
+    /// 「新建主题 / 在主题下建分类」的名称输入。
+    new_node_name: String,
+    /// 「导入框架」对话框开关与粘贴内容。
+    import_open: bool,
+    import_text: String,
+    /// 最近一次框架操作的提示（成功说明或失败原因）。
+    notice: Option<String>,
+}
+
+/// 框架里找到一个节点：名字、是不是主题、所属主题 id。
+fn find_node(tree: &[WikiTree], id: i64) -> Option<(String, bool, i64)> {
+    for t in tree {
+        if t.theme.id == id {
+            return Some((t.theme.name.clone(), true, t.theme.id));
+        }
+        if let Some(c) = t.categories.iter().find(|c| c.id == id) {
+            return Some((c.name.clone(), false, t.theme.id));
+        }
+    }
+    None
 }
 
 /// 页面入口。
@@ -74,6 +98,138 @@ pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
     if let Some(uuid) = nav {
         open_page(app, &uuid);
     }
+    import_window(app, ui.ctx());
+}
+
+/// 导入框架对话框：粘贴 Markdown 大纲（# 主题 / ## 分类，或 - 列表两级），
+/// 实时预览解析结果，确认后写库——与现有节点同名的跳过，不覆盖已有框架。
+fn import_window(app: &mut GongwenApp, ctx: &egui::Context) {
+    if !app.wiki.import_open {
+        return;
+    }
+    let mut open = true;
+    let mut close = false;
+    let mut done = false;
+    egui::Window::new("导入框架")
+        .collapsible(false)
+        .resizable(true)
+        .default_width(460.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.weak("粘贴 Markdown 大纲：# 主题、## 分类（或 - 主题、缩进 - 分类），只分两级。");
+            ui.add(
+                egui::TextEdit::multiline(&mut app.wiki.import_text)
+                    .desired_rows(10)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("# 安全生产\n## 监督检查\n## 应急管理\n# 政务服务\n……"),
+            );
+            ui.add_space(4.0);
+            let parsed = crate::wiki::parse_frame_outline(&app.wiki.import_text);
+            match &parsed {
+                Ok(themes) => {
+                    ui.weak(format!("解析出 {} 个主题：", themes.len()));
+                    egui::ScrollArea::vertical()
+                        .max_height(180.0)
+                        .show(ui, |ui| {
+                            for theme in themes {
+                                ui.label(format!(
+                                    "{}（{} 个分类）",
+                                    theme.name,
+                                    theme.categories.len()
+                                ));
+                                for category in &theme.categories {
+                                    ui.weak(format!("　├ {}", category));
+                                }
+                            }
+                        });
+                }
+                Err(error) => {
+                    ui.colored_label(theme::warn(), format!("还不能导入：{error}"));
+                }
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(parsed.is_ok(), egui::Button::new("确认导入"))
+                    .clicked()
+                {
+                    done = true;
+                }
+                if ui.button("取消").clicked() {
+                    close = true;
+                }
+            });
+        });
+    if close {
+        open = false;
+    }
+    if done && let Ok(themes) = parsed_themes(app) {
+        let mut created = 0usize;
+        let mut skipped = 0usize;
+        if let Some(store) = app.wiki_store.as_ref() {
+            for OutlineTheme { name, categories } in themes {
+                let existing = app
+                    .wiki
+                    .tree
+                    .iter()
+                    .find(|t| t.theme.name == name)
+                    .map(|t| t.theme.id);
+                let theme_id = match existing {
+                    Some(id) => {
+                        skipped += 1;
+                        id
+                    }
+                    None => match store.create_theme(&name) {
+                        Ok(id) => {
+                            created += 1;
+                            id
+                        }
+                        Err(error) => {
+                            app.wiki.notice = Some(format!("导入「{name}」失败：{error:#}"));
+                            break;
+                        }
+                    },
+                };
+                let existing_categories: Vec<String> = app
+                    .wiki
+                    .tree
+                    .iter()
+                    .find(|t| t.theme.id == theme_id)
+                    .map(|t| t.categories.iter().map(|c| c.name.clone()).collect())
+                    .unwrap_or_default();
+                for category in categories {
+                    if existing_categories.contains(&category) {
+                        skipped += 1;
+                        continue;
+                    }
+                    match store.create_category(theme_id, &category) {
+                        Ok(_) => created += 1,
+                        Err(error) => {
+                            app.wiki.notice =
+                                Some(format!("导入分类「{category}」失败：{error:#}"));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if app.wiki.notice.is_none() {
+            app.wiki.notice = Some(format!(
+                "已导入 {created} 个节点（同名跳过 {skipped} 个）。"
+            ));
+        }
+        app.wiki.tree_dirty = true;
+        app.wiki.import_open = false;
+        app.wiki.import_text.clear();
+    } else if !open {
+        app.wiki.import_open = false;
+    }
+}
+
+/// 导入解析结果（确认时重解析一次，以对话框里看到的那份为准）。
+fn parsed_themes(app: &GongwenApp) -> Result<Vec<OutlineTheme>, String> {
+    crate::wiki::parse_frame_outline(&app.wiki.import_text)
 }
 
 // ── 缓存与链接解析 ──────────────────────────────────────────────────────────
@@ -165,41 +321,196 @@ fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) 
     ui.horizontal(|ui| {
         ui.heading("知识框架");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.weak(format!("{} 个主题", app.wiki.tree.len()));
+            if ui
+                .add(theme::icon_text_button(theme::Icon::FileUp, "导入框架"))
+                .on_hover_text("粘贴 Markdown 大纲（# 主题 / ## 分类）批量建框架")
+                .clicked()
+            {
+                app.wiki.import_open = true;
+            }
         });
     });
+    // 新建主题：输入 + 建（复用标准词库页的「行内输入即建」交互）。
+    ui.horizontal(|ui| {
+        let edit = egui::TextEdit::singleline(&mut app.wiki.new_node_name)
+            .desired_width(140.0)
+            .hint_text("新主题名称");
+        let resp = ui.add(edit);
+        let name = app.wiki.new_node_name.trim().to_string();
+        let create = ui
+            .add_enabled(!name.is_empty(), egui::Button::new("建主题"))
+            .clicked()
+            || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+        if create {
+            if let Some(store) = app.wiki_store.as_ref() {
+                match store.create_theme(&name) {
+                    Ok(id) => {
+                        app.wiki.notice = Some(format!("已建主题「{name}」。"));
+                        app.wiki.tree_dirty = true;
+                        app.wiki.selected_node = Some(id);
+                        app.wiki.node_name_edit = name.clone();
+                    }
+                    Err(error) => app.wiki.notice = Some(format!("建主题失败：{error:#}")),
+                }
+            }
+            app.wiki.new_node_name.clear();
+        }
+    });
+    if let Some(notice) = &app.wiki.notice {
+        ui.weak(notice);
+    }
     ui.add_space(4.0);
     if app.wiki.tree.is_empty() {
-        ui.weak("还没有知识框架。框架建立（从资料归纳 / 导入大纲）将在后续切片接入。");
+        ui.weak("还没有知识框架：先建主题，或点右上角「导入框架」粘贴大纲；「从资料归纳」随后续切片接入。");
         return;
     }
+    node_edit_strip(app, ui);
+    ui.add_space(2.0);
     egui::ScrollArea::vertical().show(ui, |ui| {
         for t in &app.wiki.tree {
-            let theme_selected = app
-                .wiki
-                .open
-                .as_ref()
-                .is_some_and(|p| t.theme_guide.as_deref() == Some(p.meta.uuid.as_str()));
-            if tree_row(ui, &t.theme.name, theme_selected).clicked()
-                && let Some(g) = &t.theme_guide
-            {
-                *nav = Some(g.clone());
+            let theme_selected = app.wiki.selected_node == Some(t.theme.id);
+            if tree_row(ui, &t.theme.name, theme_selected).clicked() {
+                app.wiki.selected_node = Some(t.theme.id);
+                app.wiki.node_name_edit = t.theme.name.clone();
+            }
+            // 主题名下的页面（含导览页）排在分类前面。
+            for m in app.wiki.pages.get(&t.theme.id).into_iter().flatten() {
+                page_row(app, ui, m, nav);
             }
             for c in &t.categories {
-                tree_row(ui, &format!("　{}", c.name), false);
+                let category_selected = app.wiki.selected_node == Some(c.id);
+                if tree_row(ui, &format!("　{}", c.name), category_selected).clicked() {
+                    app.wiki.selected_node = Some(c.id);
+                    app.wiki.node_name_edit = c.name.clone();
+                }
                 for m in app.wiki.pages.get(&c.id).into_iter().flatten() {
-                    let label = if m.kind == "guide" {
-                        format!("　　{}（导览）", m.title)
-                    } else {
-                        format!("　　{}", m.title)
-                    };
-                    if tree_row(ui, &label, page_selected(app, &m.uuid)).clicked() {
-                        *nav = Some(m.uuid.clone());
-                    }
+                    page_row(app, ui, m, nav);
                 }
             }
         }
     });
+}
+
+/// 树里选中节点的编辑条：改名、分类跨主题移动、删除、在主题下建分类。
+/// 交互复用标准词库页（口径 15）：行内输入 + 明确按钮，存储层守卫兜底。
+fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
+    let Some(id) = app.wiki.selected_node else {
+        return;
+    };
+    let Some((name, is_theme, theme_id)) = find_node(&app.wiki.tree, id) else {
+        app.wiki.selected_node = None;
+        return;
+    };
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.label(if is_theme { "主题" } else { "分类" });
+            ui.add(egui::TextEdit::singleline(&mut app.wiki.node_name_edit).desired_width(120.0));
+            let new_name = app.wiki.node_name_edit.trim().to_string();
+            if ui
+                .add_enabled(
+                    !new_name.is_empty() && new_name != name,
+                    egui::Button::new("改名"),
+                )
+                .clicked()
+                && let Some(store) = app.wiki_store.as_ref()
+            {
+                match store.rename_node(id, &new_name) {
+                    Ok(()) => {
+                        app.wiki.notice = Some(format!("「{name}」已改名为「{new_name}」。"));
+                        app.wiki.tree_dirty = true;
+                    }
+                    Err(error) => app.wiki.notice = Some(format!("改名失败：{error:#}")),
+                }
+            }
+        });
+        if is_theme {
+            ui.horizontal(|ui| {
+                let edit = egui::TextEdit::singleline(&mut app.wiki.new_node_name)
+                    .desired_width(120.0)
+                    .hint_text("分类名称");
+                let resp = ui.add(edit);
+                let category = app.wiki.new_node_name.trim().to_string();
+                let create = ui
+                    .add_enabled(!category.is_empty(), egui::Button::new("建分类"))
+                    .clicked()
+                    || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                if create {
+                    if let Some(store) = app.wiki_store.as_ref() {
+                        match store.create_category(id, &category) {
+                            Ok(cid) => {
+                                app.wiki.notice = Some(format!("已建分类「{category}」。"));
+                                app.wiki.tree_dirty = true;
+                                app.wiki.selected_node = Some(cid);
+                                app.wiki.node_name_edit = category.clone();
+                            }
+                            Err(error) => app.wiki.notice = Some(format!("建分类失败：{error:#}")),
+                        }
+                    }
+                    app.wiki.new_node_name.clear();
+                }
+            });
+        } else {
+            // 分类跨主题移动。
+            ui.horizontal(|ui| {
+                ui.label("移到主题");
+                let current = theme_id;
+                let mut target = current;
+                egui::ComboBox::from_id_salt("wiki_move_theme")
+                    .selected_text(
+                        app.wiki
+                            .tree
+                            .iter()
+                            .find(|t| t.theme.id == current)
+                            .map(|t| t.theme.name.as_str())
+                            .unwrap_or(""),
+                    )
+                    .show_ui(ui, |ui| {
+                        for t in &app.wiki.tree {
+                            ui.selectable_value(&mut target, t.theme.id, &t.theme.name);
+                        }
+                    });
+                if target != current
+                    && ui.button("移过去").clicked()
+                    && let Some(store) = app.wiki_store.as_ref()
+                {
+                    match store.move_category(id, target) {
+                        Ok(()) => {
+                            app.wiki.notice = Some(format!("已把「{name}」移走。"));
+                            app.wiki.tree_dirty = true;
+                        }
+                        Err(error) => app.wiki.notice = Some(format!("移动失败：{error:#}")),
+                    }
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .button(egui::RichText::new("删除节点").color(theme::warn()))
+                .clicked()
+                && let Some(store) = app.wiki_store.as_ref()
+            {
+                match store.delete_node(id) {
+                    Ok(()) => {
+                        app.wiki.notice = Some(format!("已删除「{name}」。"));
+                        app.wiki.selected_node = None;
+                        app.wiki.tree_dirty = true;
+                    }
+                    Err(error) => app.wiki.notice = Some(format!("删不掉：{error:#}")),
+                }
+            }
+        });
+    });
+}
+
+fn page_row(app: &GongwenApp, ui: &mut egui::Ui, m: &WikiPageMeta, nav: &mut Option<String>) {
+    let label = if m.kind == "guide" {
+        format!("　　{}（导览）", m.title)
+    } else {
+        format!("　　{}", m.title)
+    };
+    if tree_row(ui, &label, page_selected(app, &m.uuid)).clicked() {
+        *nav = Some(m.uuid.clone());
+    }
 }
 
 fn page_selected(app: &GongwenApp, uuid: &str) -> bool {
