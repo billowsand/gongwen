@@ -106,6 +106,84 @@ impl GongwenApp {
     }
 }
 
+/// 「圈选未整编资料反向整编」对话框状态。
+pub(crate) struct WikiCircleState {
+    /// 圈选的资料（doc_id, 标题）。
+    pub(crate) docs: Vec<(i64, String)>,
+    /// 目标分类节点（知识库框架里选）。
+    pub(crate) category: Option<i64>,
+    /// 发起失败的即时提示。
+    pub(crate) error: Option<String>,
+}
+
+/// 新资料关联提示：一篇新入库资料 + 维基检索命中的候选页。
+#[derive(Debug, Clone)]
+pub(crate) struct WikiDocTip {
+    pub(crate) doc_title: String,
+    /// (页面 uuid, 标题)，至多 3 条。
+    pub(crate) hits: Vec<(String, String)>,
+}
+
+impl GongwenApp {
+    /// 刷新资料文档的维基状态（「维基」列：已用于维基 N 页 / 未整编）。
+    pub(crate) fn refresh_wiki_doc_status(&mut self) {
+        self.wiki_doc_status = self
+            .wiki_store
+            .as_ref()
+            .and_then(|store| store.doc_wiki_status().ok())
+            .unwrap_or_default();
+    }
+
+    /// 发现新入库资料：会话基线之外的新 doc_id，用标题去维基检索，
+    /// 命中就挂一条「按新资料更新」提示（一次一条， dismissed 后不再烦）。
+    pub(crate) fn detect_new_docs_for_wiki(&mut self) {
+        if self.wiki_store.is_none() || self.knowledge_docs.is_empty() {
+            return;
+        }
+        let current: std::collections::HashSet<i64> =
+            self.knowledge_docs.iter().map(|doc| doc.id).collect();
+        if self.wiki_seen_doc_ids.is_empty() {
+            // 首次刷新只建基线：存量资料不当新资料。
+            self.wiki_seen_doc_ids = current;
+            return;
+        }
+        let fresh: Vec<i64> = current
+            .iter()
+            .copied()
+            .filter(|id| !self.wiki_seen_doc_ids.contains(id))
+            .collect();
+        self.wiki_seen_doc_ids = current;
+        if self.wiki_new_doc_tip.is_some() {
+            return;
+        }
+        for id in fresh {
+            if self.wiki_prompted_doc_ids.contains(&id) {
+                continue;
+            }
+            let Some(doc) = self.knowledge_docs.iter().find(|doc| doc.id == id) else {
+                continue;
+            };
+            self.wiki_prompted_doc_ids.insert(id);
+            let Some(store) = self.wiki_store.as_ref() else {
+                return;
+            };
+            let hits = store
+                .search(&doc.title, 3)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|hit| (hit.uuid, hit.title))
+                .collect::<Vec<_>>();
+            if !hits.is_empty() {
+                self.wiki_new_doc_tip = Some(WikiDocTip {
+                    doc_title: doc.title.clone(),
+                    hits,
+                });
+                break;
+            }
+        }
+    }
+}
+
 /// 页面整编作业的输出：通过确定性复核的页面提案集，或失败原因。
 pub(crate) struct WikiWriteOutput {
     pub(crate) result: Result<crate::pi_agent::wiki_jobs::PageProposalSet, String>,
@@ -147,6 +225,61 @@ impl GongwenApp {
                 path,
                 theme,
                 category,
+                Vec::new(),
+                cancel,
+                progress_sink(&progress),
+            )
+            .map_err(|error| format!("整编失败，可重试：{error}"));
+            let _ = tx.send(WikiWriteOutput { result });
+        });
+    }
+
+    /// 圈选资料反向发起整编：与「整编此分类」同一条作业链，额外把圈选的
+    /// doc_id 作为优先资料提示交给 Pi。
+    pub(crate) fn start_wiki_write_docs(
+        &mut self,
+        theme: String,
+        category: String,
+        doc_hints: Vec<i64>,
+    ) {
+        if self.lock_requested || doc_hints.is_empty() {
+            return;
+        }
+        if self.wiki_write_rx.is_some() || self.wiki_frame_rx.is_some() {
+            if let Some(state) = self.wiki_circle.as_mut() {
+                state.error = Some("已有维基作业在跑，请等待结束后再发起。".into());
+            }
+            return;
+        }
+        let setup: anyhow::Result<(Arc<crate::models::AppConfig>, std::path::PathBuf)> = (|| {
+            Ok((
+                Arc::new(self.config.clone()),
+                crate::storage::manuscript_db_path()?,
+            ))
+        })(
+        );
+        let (config, path) = match setup {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(state) = self.wiki_circle.as_mut() {
+                    state.error = Some(format!("无法开始整编：{error:#}"));
+                }
+                return;
+            }
+        };
+        let (ui, progress, cancel) = TaskJobUi::start();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.wiki_write_rx = Some(rx);
+        self.wiki_write_job = Some(ui);
+        self.wiki.write_error = None;
+        self.wiki.write_progress = Some("正在准备工作区…".to_string());
+        std::thread::spawn(move || {
+            let result = crate::pi_agent::wiki_jobs::write_pages(
+                config,
+                path,
+                theme,
+                category,
+                doc_hints,
                 cancel,
                 progress_sink(&progress),
             )

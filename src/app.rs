@@ -79,6 +79,7 @@ pub(crate) use versioning::{
     VersionCommitDraft, VersionDiffState, VersionScope, VersionSwitchPrompt, VersionTarget,
 };
 pub(crate) use widgets::*;
+pub(crate) use wiki::WikiCircleState;
 
 #[derive(Debug, Clone)]
 pub(crate) struct VocabularyMoveDraft {
@@ -353,6 +354,15 @@ pub struct GongwenApp {
     /// 维基页面整编作业：接收端与停止句柄（提案进审核台）。
     pub(crate) wiki_write_rx: Option<std::sync::mpsc::Receiver<crate::app::wiki::WikiWriteOutput>>,
     pub(crate) wiki_write_job: Option<crate::app::task_assistant::TaskJobUi>,
+    /// 资料文档的维基状态：doc_id → 引用它的页面数（当前版本），列表「维基」列用。
+    pub(crate) wiki_doc_status: std::collections::HashMap<i64, i64>,
+    /// 新资料关联提示：会话基线（首次刷新建立，不把存量当新资料）、已提示集合、
+    /// 当前待显示的一条提示（新资料 → 可能关联的维基页）。
+    pub(crate) wiki_seen_doc_ids: std::collections::HashSet<i64>,
+    pub(crate) wiki_prompted_doc_ids: std::collections::HashSet<i64>,
+    pub(crate) wiki_new_doc_tip: Option<crate::app::wiki::WikiDocTip>,
+    /// 「圈选未整编资料反向整编」对话框状态（None = 关）。
+    pub(crate) wiki_circle: Option<crate::app::wiki::WikiCircleState>,
     /// 知识库文档列表，按文种过滤。
     pub(crate) knowledge_docs: Vec<knowledge::KnowledgeDocRow>,
     pub(crate) knowledge_chunk_count: i64,
@@ -722,6 +732,11 @@ impl GongwenApp {
             wiki_frame_job: None,
             wiki_write_rx: None,
             wiki_write_job: None,
+            wiki_doc_status: std::collections::HashMap::new(),
+            wiki_seen_doc_ids: std::collections::HashSet::new(),
+            wiki_prompted_doc_ids: std::collections::HashSet::new(),
+            wiki_new_doc_tip: None,
+            wiki_circle: None,
             task_auto_queue: VecDeque::new(),
             manuscript_error,
             manuscript_filter: ManuscriptFilter::default(),

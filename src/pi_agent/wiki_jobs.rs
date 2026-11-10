@@ -447,6 +447,8 @@ pub(crate) fn write_pages(
     store_path: PathBuf,
     theme: String,
     category: String,
+    // 圈选资料提示：从资料库反向发起整编时，优先读这些 doc_id（kb_read 按编号读）。
+    doc_hints: Vec<i64>,
     cancel: Arc<AtomicBool>,
     mut on_progress: impl FnMut(String),
 ) -> Result<PageProposalSet, String> {
@@ -473,11 +475,23 @@ pub(crate) fn write_pages(
     let catalog = pi_skills::load_catalog();
     catalog.resolve(Some(pi_skills::WIKI_WRITE_SKILL))?;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let hint_line = if doc_hints.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " 用户已从资料库圈选这些资料，优先用 kb_read 按编号读：{}。",
+            doc_hints
+                .iter()
+                .map(|id| format!("E{id}"))
+                .collect::<Vec<_>>()
+                .join("、"),
+        )
+    };
     let request = format!(
         "按技能 {} 为主题「{theme}」下的分类「{category}」整编维基页面，\
          最后用 submit_task 交 work/pages.json。今天日期：{today}。\
          该分类{guide_hint}。资料用 kb_search / kb_read 找与「{category}」相关的文档；\
-         已有维基页用 wiki_search / wiki_links 查，便于互相链接。",
+         已有维基页用 wiki_search / wiki_links 查，便于互相链接。{hint_line}",
         pi_skills::WIKI_WRITE_SKILL,
         guide_hint = if has_guide {
             "已有导览页，本轮不要再交 guide 页"

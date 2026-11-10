@@ -50,6 +50,7 @@ pub(crate) fn knowledge_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
         ui.colored_label(theme::warn(), hint);
         ui.add_space(4.0);
     }
+    wiki_new_doc_tip_strip(app, ui);
 
     // 文档与检索问答分两个子页签，各占满整页高度：放在一页里时列表只分到
     // 下半截，文档一多就只能在一条窄缝里滚。
@@ -62,7 +63,149 @@ pub(crate) fn knowledge_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
     import_dialog(app, ui);
     delete_confirm(app, ui);
     rename_dialog(app, ui);
+    wiki_circle_dialog(app, ui.ctx());
     local_original_window(ui.ctx());
+}
+
+/// 新资料关联提示：新入库的资料在维基检索里有命中时，给一条「按新资料更新」
+/// 入口（dismiss 后不再提示；圈选整编见列表上方的「圈选整编」）。
+fn wiki_new_doc_tip_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
+    let Some(tip) = app.wiki_new_doc_tip.clone() else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        let pages = tip
+            .hits
+            .iter()
+            .map(|(_, title)| title.as_str())
+            .collect::<Vec<_>>()
+            .join("、");
+        ui.weak(format!(
+            "新资料《{}》可能关联维基页：{pages}",
+            tip.doc_title
+        ));
+        if ui
+            .button("按新资料更新")
+            .on_hover_text("发起维基页面更新：AI 读这篇资料，对关联页出 diff 提案，审核后才写库")
+            .clicked()
+        {
+            app.start_wiki_update(tip.hits.clone());
+            app.wiki_new_doc_tip = None;
+            app.open_page(crate::app::NavPage::Wiki);
+        }
+        if ui.small_button("知道了").clicked() {
+            app.wiki_new_doc_tip = None;
+        }
+    });
+    ui.add_space(4.0);
+}
+
+/// 「圈选未整编资料反向整编」对话框：选一个知识库分类，把勾选的资料作为
+/// 优先读物交给维基整编作业。
+fn wiki_circle_dialog(app: &mut GongwenApp, ctx: &egui::Context) {
+    if app.wiki_circle.is_none() {
+        return;
+    }
+    if app.wiki_store.is_none() {
+        app.wiki_circle = None;
+        return;
+    }
+    let mut open = true;
+    let mut close = false;
+    let mut start = false;
+    egui::Window::new("圈选资料整编")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(440.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let Some(state) = app.wiki_circle.as_mut() else {
+                return;
+            };
+            ui.weak(format!(
+                "把勾选的 {} 篇资料交给维基：选一个分类，AI 优先读这些资料整编页面（仍需审核）。",
+                state.docs.len()
+            ));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("整编到分类");
+                let options: Vec<(i64, String)> = app
+                    .wiki_store
+                    .as_ref()
+                    .map(|store| {
+                        store
+                            .list_tree()
+                            .unwrap_or_default()
+                            .iter()
+                            .flat_map(|t| {
+                                t.categories
+                                    .iter()
+                                    .map(|c| (c.id, format!("{} / {}", t.theme.name, c.name)))
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut selected = state.category.unwrap_or(0);
+                egui::ComboBox::from_id_salt("wiki_circle_category")
+                    .selected_text(
+                        options
+                            .iter()
+                            .find(|(id, _)| Some(*id) == state.category)
+                            .map(|(_, label)| label.clone())
+                            .unwrap_or_else(|| "选一个分类".into()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (id, label) in &options {
+                            ui.selectable_value(&mut selected, *id, label);
+                        }
+                    });
+                state.category = (selected != 0).then_some(selected);
+            });
+            if let Some(error) = &state.error {
+                ui.colored_label(theme::warn(), error);
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(state.category.is_some(), egui::Button::new("发起整编"))
+                    .clicked()
+                {
+                    start = true;
+                }
+                if ui.button("取消").clicked() {
+                    close = true;
+                }
+            });
+        });
+    if !open || close {
+        app.wiki_circle = None;
+        return;
+    }
+    if start {
+        let (docs, category) = app
+            .wiki_circle
+            .as_ref()
+            .map(|state| (state.docs.clone(), state.category))
+            .unwrap_or_default();
+        if let (Some(node_id), Some(store)) = (category, app.wiki_store.as_ref()) {
+            let Ok(tree) = store.list_tree() else {
+                return;
+            };
+            let target = tree.iter().find_map(|t| {
+                t.categories
+                    .iter()
+                    .find(|c| c.id == node_id)
+                    .map(|c| (t.theme.name.clone(), c.name.clone()))
+            });
+            if let Some((theme, category)) = target {
+                let doc_hints = docs.iter().map(|(id, _)| *id).collect();
+                app.start_wiki_write_docs(theme, category, doc_hints);
+                app.wiki_circle = None;
+                app.open_page(crate::app::NavPage::Wiki);
+            }
+        }
+    }
 }
 
 /// 知识库页的子页签。
@@ -325,6 +468,26 @@ fn doc_list_bar(app: &mut GongwenApp, ui: &mut egui::Ui, visible_ids: &[i64]) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
+                .button(format!("圈选整编（{}）", selected.len()))
+                .on_hover_text("把勾选的资料交给维基：选一个分类，AI 优先读这些资料整编页面")
+                .clicked()
+            {
+                let docs = selected
+                    .iter()
+                    .filter_map(|id| {
+                        app.knowledge_docs
+                            .iter()
+                            .find(|doc| doc.id == *id)
+                            .map(|doc| (doc.id, doc.title.clone()))
+                    })
+                    .collect();
+                app.wiki_circle = Some(crate::app::WikiCircleState {
+                    docs,
+                    category: None,
+                    error: None,
+                });
+            }
+            if ui
                 .add(theme::warning_icon_button(
                     theme::Icon::Trash,
                     &format!("删除所选（{}）", selected.len()),
@@ -355,6 +518,7 @@ fn doc_table(
     const ROW_HEIGHT: f32 = 28.0;
     let busy = app.knowledge_busy;
     let docs = &app.knowledge_docs;
+    let wiki_status = &app.wiki_doc_status;
     let selected = &mut app.knowledge_list.selected;
     let mut action = None;
     TableBuilder::new(ui)
@@ -366,6 +530,7 @@ fn doc_table(
         .column(Column::exact(96.0)) // 文种
         .column(Column::remainder().at_least(160.0).clip(true)) // 标题
         .column(Column::exact(72.0)) // 块数 / 索引状态
+        .column(Column::exact(76.0)) // 维基：未整编 / 已用于维基
         .column(Column::exact(96.0)) // 更新
         .column(Column::exact(72.0)) // 操作
         .header(ROW_HEIGHT, |mut header| {
@@ -402,6 +567,10 @@ fn doc_table(
             header.col(|ui| {
                 theme::smartisan::ledger_header(ui);
                 centered_header(ui, "块数");
+            });
+            header.col(|ui| {
+                theme::smartisan::ledger_header(ui);
+                centered_header(ui, "维基");
             });
             header.col(|ui| {
                 theme::smartisan::ledger_header(ui);
@@ -453,6 +622,26 @@ fn doc_table(
                     } else {
                         centered_cell_text(ui, egui::RichText::new("未建向量"))
                             .on_hover_text("全文索引自动建立；语义检索与问答需另建向量索引");
+                    }
+                });
+                row.col(|ui| {
+                    // 「已用于维基」由 wiki_doc_refs（各页当前版本）派生；0/无记录 = 未整编。
+                    match wiki_status.get(&doc.id) {
+                        Some(count) if *count > 0 => {
+                            centered_cell_text(
+                                ui,
+                                egui::RichText::new(format!("已用 {count} 页"))
+                                    .color(theme::accent_text()),
+                            )
+                            .on_hover_text("已被维基页面引用的资料");
+                        }
+                        _ => {
+                            centered_cell_text(
+                                ui,
+                                egui::RichText::new("未整编").color(theme::warn()),
+                            )
+                            .on_hover_text("还没被维基页面引用；可勾选后用「圈选整编」交给知识库");
+                        }
                     }
                 });
                 row.col(|ui| {

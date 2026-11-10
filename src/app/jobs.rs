@@ -998,6 +998,10 @@ impl GongwenApp {
         self.knowledge_indexed_manuscripts = store.indexed_manuscript_ids().unwrap_or_default();
         self.knowledge_embed_models = store.distinct_embed_models().unwrap_or_default();
         self.knowledge_unindexed = store.unindexed_doc_ids().map_or(0, |ids| ids.len());
+        // 维基侧派生状态：资料「已用于维基」标记 + 新资料关联提示。
+        // store 的可变借用到此为止（NLL），下面可以安全改 self。
+        self.refresh_wiki_doc_status();
+        self.detect_new_docs_for_wiki();
     }
 
     /// 库内是否存在与当前配置不同的 embedding 模型。换模型后维度多半不同，
