@@ -585,6 +585,71 @@ function toAgentError(error) {
   return error;
 }
 
+/** run 级任务（生成任务）的名字；只有它被连续中断才是旧口径的整轮「已中断」。 */
+const RUN_TASK_KIND = "pi.generation";
+
+/** 报告里的错误对象转成一行可读文本；没有可用详情时返回空串，避免侧栏出现「undefined」。 */
+function errorText(error) {
+  if (typeof error === "string") return error.trim();
+  const message = error?.message;
+  return typeof message === "string" ? message.trim() : "";
+}
+
+/**
+ * 把 1.5.0 的 `task_interrupted` / `task_faulted` 报告翻成侧栏提示。
+ *
+ * `task_parked` 报告已移除：restart-limited 任务改为明确终结。只有 run 级任务
+ * （`pi.generation`）被连续中断才映射回旧口径的 Parked；tool（`pi.tool`）、
+ * compaction（`pi.compaction`）级中断由本轮自己收尾（工具错误结果 / 上下文压缩失败），
+ * 不能把整轮误判成停用。返回 `undefined` 表示这条报告不需要提示。
+ */
+export function describeReport(report) {
+  const kind = report?.kind;
+  const reason = report?.reason;
+  const taskKind = report?.task?.kind;
+  if (kind === "task_interrupted") {
+    if (taskKind !== RUN_TASK_KIND) return undefined;
+    if (reason === "restart_limit") {
+      return { parked: true, message: "任务连续被中断，宿主已停用了自动重跑，需要人工处理。" };
+    }
+    return {
+      parked: true,
+      message: "模型回答时宿主反复被中断，本轮无法自动重跑，需要人工确认后再接着写。",
+    };
+  }
+  if (kind === "task_faulted") {
+    const text = errorText(report?.error);
+    const message = text
+      ? `任务失败：${text.slice(0, 300)}`
+      : reason === "restart_limit"
+        ? "任务失败：连续被中断，宿主已停用自动重跑。"
+        : "任务失败：宿主没有提供错误详情。";
+    return { parked: false, message };
+  }
+  return undefined;
+}
+
+/**
+ * 恢复判定用的最终 `pi.live.runFailure`：在 Session 线上原子附加一个观察者读第一份视图，
+ * 读到的是已提交的最新文档，不依赖 watch 监听器的微任务投递顺序。读不出时返回
+ * undefined，由活动模块记录的回退值兜底。
+ */
+export async function readRunFailure(harness, conversation, context) {
+  let observation;
+  try {
+    observation = await harness.observeConversation(
+      conversation.id,
+      { advance() {}, end() {} },
+      context,
+    );
+    return observation.value?.docs?.["pi.live"]?.runFailure;
+  } catch {
+    return undefined;
+  } finally {
+    observation?.detach();
+  }
+}
+
 /** progress.json 的读取上限；与 ProgressRegistry 的默认上限一致。 */
 const PROGRESS_MAX_BYTES = 8 * 1024 * 1024;
 
@@ -840,20 +905,12 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
         },
         // 1.5.0 起 onReport 收单个 report（kind 分派），task_parked 报告被移除：
         // 连续被崩溃打断的任务改为明确终结，内置任务报 task_interrupted(reason:
-        // restart_limit)，其余任务报 task_faulted(reason: restart_limit)。
+        // restart_limit / interrupted)，其余任务报 task_faulted(reason: restart_limit)。
         onReport: (report) => {
-          if (report.kind === "task_interrupted" && report.reason === "restart_limit") {
-            state.parked = "restart_limit";
-            emit({
-              type: "progress",
-              message: "任务连续被中断，宿主已停用自动重跑，需要人工处理。",
-            });
-          } else if (report.kind === "task_faulted" || report.kind === "task_interrupted") {
-            emit({
-              type: "progress",
-              message: `任务失败：${String(report.error?.message ?? report.error).slice(0, 300)}`,
-            });
-          }
+          const described = describeReport(report);
+          if (!described) return;
+          if (described.parked) state.parked = "restart_limit";
+          emit({ type: "progress", message: described.message });
         },
       },
       controller.context,
@@ -883,16 +940,22 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     const showActivity = observeActivity(config.task, emit);
     stream.start(async (call) => {
       if (call.kind !== "value") return;
-      showActivity.update(call.value, {
-        onRetry: (attempt) =>
-          emit({ type: "progress", message: `模型调用失败，正在重试（第 ${attempt} 次）` }),
-        onRunFailure: (failure) =>
-          emit({ type: "progress", message: `任务失败：${failure.detail ?? failure.reason}` }),
-        onToolSettled: (name) => {
-          if (name !== SUBMIT_TOOL_NAME && name !== REPORT_TOOL_NAME) candidateScan();
-        },
-        onStreamTick: () => candidateScan.maybeTick(),
-      });
+      try {
+        showActivity.update(call.value, {
+          onRetry: (attempt) =>
+            emit({ type: "progress", message: `模型调用失败，正在重试（第 ${attempt} 次）` }),
+          onRunFailure: (failure) =>
+            emit({ type: "progress", message: `任务失败：${failure.detail ?? failure.reason ?? "原因不明"}` }),
+          // 每个工具槽位结束都刷新候选稿（提交 / 清单工具不刷新），不只是文件类工具。
+          onToolSettled: (name) => {
+            if (name !== SUBMIT_TOOL_NAME && name !== REPORT_TOOL_NAME) candidateScan();
+          },
+          onStreamTick: () => candidateScan.maybeTick(),
+        });
+      } catch {
+        // 活动行只是展示：单帧解析失败不能让 watch 以 listener_error 结束，
+        // 否则后续进度会静默丢失（交付结论仍由提交 / 结算的竞速保证）。
+      }
     });
 
     emit({ type: "progress", message: "正在开始本轮写作…" });
@@ -903,7 +966,9 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
       if (state.report) return { report: state.report };
       // 1.5.0 起 restart-limited 任务不再 park：上一进程把 run 打到 restart_limit /
       // interrupted 终态时，这里按旧口径报「连续被中断」，Rust 侧映射为 Parked。
-      const failure = showActivity.lastRunFailure;
+      // 判定不能只读活动模块的 lastRunFailure（由 watch 监听器异步填充、经 queueMicrotask
+      // 投递，waitForIdle 返回时未必已到）：直接读最终会话视图，活动模块的值只作回退。
+      const failure = (await readRunFailure(harness, root, controller.context)) ?? showActivity.lastRunFailure;
       if (failure && (failure.reason === "restart_limit" || failure.reason === "interrupted")) {
         state.parked = "restart_limit";
         throw new AgentError(

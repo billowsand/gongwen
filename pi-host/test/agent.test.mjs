@@ -10,7 +10,7 @@ import {
   fauxText,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { AgentError, findHandNumberedHeadings, runAgentJob, writingCompaction } from "../src/agent.mjs";
+import { AgentError, describeReport, findHandNumberedHeadings, readRunFailure, runAgentJob, writingCompaction } from "../src/agent.mjs";
 import { PROTOCOL_VERSION, validateInit } from "../src/protocol.mjs";
 import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 import { outputLimitsForChars } from "../src/read.mjs";
@@ -525,4 +525,66 @@ test("a report and a submitted document cannot both be delivered", async () => {
   const result = await runAgentJob({ config, models, model, emit: () => {} });
   assert.equal(result.snapshot, undefined, "清单已经终止本轮，不能再交正文");
   assert.ok(result.report);
+});
+
+test("1.5.0 报告翻译：只有 run 级 task_interrupted 算整轮停用", () => {
+  const generation = { id: "task-1", kind: "pi.generation", conversationId: "c1" };
+  const tool = { id: "task-2", kind: "pi.tool", conversationId: "c1" };
+
+  const parked = describeReport({ kind: "task_interrupted", reason: "restart_limit", restarts: 2, task: generation, error: undefined });
+  assert.equal(parked?.parked, true);
+  assert.match(parked?.message ?? "", /连续被中断/);
+  assert.doesNotMatch(parked?.message ?? "", /undefined/);
+
+  const interrupted = describeReport({ kind: "task_interrupted", reason: "interrupted", restarts: 2, task: generation, error: undefined });
+  assert.equal(interrupted?.parked, true, "模型回答时反复崩溃同样按旧口径停用");
+  assert.doesNotMatch(interrupted?.message ?? "", /undefined/);
+
+  assert.equal(
+    describeReport({ kind: "task_interrupted", reason: "restart_limit", restarts: 2, task: tool, error: undefined }),
+    undefined,
+    "tool 级中断不能把整轮误判成 Parked",
+  );
+  assert.equal(
+    describeReport({ kind: "task_interrupted", reason: "restart_limit", restarts: 2, task: { ...tool, kind: "pi.compaction" }, error: undefined }),
+    undefined,
+    "compaction 级中断也不停用整轮",
+  );
+});
+
+test("1.5.0 报告翻译：task_faulted 没有可读错误时也不出现 undefined", () => {
+  const task = { id: "task-3", kind: "pi.tool", conversationId: "c1" };
+  for (const error of [undefined, null, {}, new Error(""), ""]) {
+    const described = describeReport({ kind: "task_faulted", reason: "threw", task, error });
+    assert.equal(described?.parked, false);
+    assert.match(described?.message ?? "", /^任务失败：/);
+    assert.doesNotMatch(described?.message ?? "", /undefined/);
+  }
+  assert.match(
+    describeReport({ kind: "task_faulted", reason: "threw", task, error: new Error("工具参数非法") })?.message ?? "",
+    /工具参数非法/,
+  );
+  assert.equal(describeReport({ kind: "storage_failed", error: new Error("磁盘掉了") }), undefined, "其它报告不提示");
+});
+
+test("恢复判定直接读会话视图的 runFailure，并释放观察者", async () => {
+  const failure = { taskId: "task-9", inputs: [], reason: "restart_limit", detail: "截断 2 次" };
+  let detached = 0;
+  const harness = {
+    observeConversation: async (id, observer, context) => {
+      assert.equal(id, "conversation-1");
+      assert.deepEqual(Object.keys(observer), ["advance", "end"]);
+      assert.ok(context);
+      return { value: { entries: [], docs: { "pi.live": { runFailure: failure } } }, detach: () => { detached += 1; } };
+    },
+  };
+  assert.equal(await readRunFailure(harness, { id: "conversation-1" }, {}), failure);
+  assert.equal(detached, 1, "读一次就要 detach，不能长期占用视图挂载");
+});
+
+test("会话视图读不出时恢复判定回退到 undefined，不抛错", async () => {
+  const broken = { observeConversation: async () => { throw new Error("session closed"); } };
+  assert.equal(await readRunFailure(broken, { id: "c" }, {}), undefined);
+  const empty = { observeConversation: async () => ({ value: { docs: {} }, detach: () => {} }) };
+  assert.equal(await readRunFailure(empty, { id: "c" }, {}), undefined);
 });
