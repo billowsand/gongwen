@@ -456,6 +456,8 @@ impl ManuscriptStore {
         print_trace::ensure_schema(&self.conn)?;
         // 资源对象（图片/PDF 插图/图表缓存）与稿件同库；幂等建表，不单开档位。
         crate::resources::ensure_schema(&self.conn)?;
+        // 维基知识库（框架/页面/版本/链接/资料引用）：同样幂等建表。
+        crate::wiki::ensure_schema(&self.conn)?;
         Ok(())
     }
 

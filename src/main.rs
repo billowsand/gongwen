@@ -108,7 +108,10 @@ mod version;
 mod version_link;
 mod version_pair_view;
 mod visual_diff;
+// 维基知识库存储层（一期切片 1 先行落地；界面/工具/智能体切片接入后移除 allow）。
 mod vocabulary_xlsx;
+#[allow(dead_code)]
+mod wiki;
 
 use std::cell::Cell;
 use std::rc::Rc;
