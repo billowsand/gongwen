@@ -49,6 +49,14 @@ pub(crate) struct WikiUiState {
     pub(crate) review: Option<ReviewState>,
     /// 审核台窗口开关：关闭窗口不丢提案，树上方有入口可 reopen。
     pub(crate) review_open: bool,
+    /// 版本历史窗口：A/B 两版行级对比、回滚（回滚也产生新版本）。
+    history_open: bool,
+    /// 对比的 A（旧）/ B（新）版本号。
+    history_a: Option<i64>,
+    history_b: Option<i64>,
+    /// 回滚二次确认开关与失败原因。
+    history_confirm_rollback: bool,
+    history_error: Option<String>,
     /// 最近一次框架操作的提示（成功说明或失败原因）。
     notice: Option<String>,
 }
@@ -160,6 +168,7 @@ pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
     import_window(app, ui.ctx());
     frame_proposal_window(app, ui.ctx());
     review_desk(app, ui.ctx(), &link_map);
+    version_history_window(app, ui.ctx());
 }
 
 /// 「从资料归纳」的进度、停止与错误提示，贴在树上方。
@@ -511,6 +520,248 @@ fn review_mark_done_advance(review: &mut ReviewState) {
     if let Some(next) = review.done.iter().position(|done| !*done) {
         review.select(next);
     }
+}
+
+/// 版本历史窗口：顶部 A/B 两版选择 + 行级 diff（红删主题增），
+/// 底部回滚（二次确认；回滚产生新版本，历史不丢）。
+fn version_history_window(app: &mut GongwenApp, ctx: &egui::Context) {
+    if !app.wiki.history_open {
+        return;
+    }
+    let Some(page) = app.wiki.open.clone() else {
+        app.wiki.history_open = false;
+        return;
+    };
+    let uuid = page.meta.uuid.clone();
+    let mut open = true;
+    let mut rollback = false;
+    egui::Window::new(format!("版本历史 · {}", page.meta.title))
+        .collapsible(false)
+        .resizable(true)
+        .default_width(720.0)
+        .default_height(480.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let versions = app
+                .wiki_store
+                .as_ref()
+                .map(|store| store.list_versions(&uuid).unwrap_or_default())
+                .unwrap_or_default();
+            if versions.is_empty() {
+                ui.weak("还没有版本记录。");
+                return;
+            }
+            // 版本清单：版本号、时间、来源、是否经人工修改。
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for v in &versions {
+                        let current = v.version == page.meta.current_version;
+                        let edited = if v.review_edited {
+                            " · 人工修改"
+                        } else {
+                            ""
+                        };
+                        let label = format!(
+                            "v{}{} · {}{edited}",
+                            v.version,
+                            if current { "（当前）" } else { "" },
+                            v.created_at
+                        );
+                        ui.weak(label)
+                            .on_hover_text(format!("来源：{}", v.source_run_id));
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            let mut a = app.wiki.history_a.unwrap_or(page.meta.current_version);
+            let mut b = app.wiki.history_b.unwrap_or(page.meta.current_version);
+            ui.horizontal(|ui| {
+                ui.label("对比");
+                egui::ComboBox::from_id_salt("wiki_hist_a")
+                    .selected_text(format!("v{a}"))
+                    .show_ui(ui, |ui| {
+                        for v in &versions {
+                            ui.selectable_value(&mut a, v.version, format!("v{}", v.version));
+                        }
+                    });
+                ui.label("→");
+                egui::ComboBox::from_id_salt("wiki_hist_b")
+                    .selected_text(format!("v{b}"))
+                    .show_ui(ui, |ui| {
+                        for v in &versions {
+                            ui.selectable_value(&mut b, v.version, format!("v{}", v.version));
+                        }
+                    });
+            });
+            app.wiki.history_a = Some(a);
+            app.wiki.history_b = Some(b);
+            ui.add_space(4.0);
+            ui.separator();
+            let (body_a, body_b) = app.wiki_store.as_ref().map_or((None, None), |store| {
+                (
+                    store.get_version_body(&uuid, a).ok().flatten(),
+                    store.get_version_body(&uuid, b).ok().flatten(),
+                )
+            });
+            match (body_a, body_b) {
+                (Some(ref old), Some(ref new)) if a != b => match line_diff(old, new) {
+                    Some(lines) => {
+                        ui.weak(format!(
+                            "v{a} → v{b}：− 删除 {} 行，+ 新增 {} 行",
+                            lines
+                                .iter()
+                                .filter(|l| matches!(l, DiffLine::Del(_)))
+                                .count(),
+                            lines
+                                .iter()
+                                .filter(|l| matches!(l, DiffLine::Add(_)))
+                                .count()
+                        ));
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for line in &lines {
+                                    match line {
+                                        DiffLine::Same(text) => {
+                                            ui.weak(format!("  {text}"));
+                                        }
+                                        DiffLine::Del(text) => {
+                                            ui.label(
+                                                egui::RichText::new(format!("− {text}"))
+                                                    .color(theme::warn()),
+                                            );
+                                        }
+                                        DiffLine::Add(text) => {
+                                            ui.label(
+                                                egui::RichText::new(format!("+ {text}"))
+                                                    .color(theme::accent_text()),
+                                            );
+                                        }
+                                    }
+                                }
+                            });
+                    }
+                    None => {
+                        ui.weak("两版行数太多，算不动行级 diff；请改选正文较小的版本。");
+                    }
+                },
+                (Some(_), Some(_)) => {
+                    ui.weak("A 与 B 是同一版本，无差异。");
+                }
+                _ => {
+                    ui.colored_label(theme::warn(), "读取版本正文失败。");
+                }
+            }
+            ui.add_space(4.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                if !app.wiki.history_confirm_rollback {
+                    if ui
+                        .add_enabled(
+                            b != page.meta.current_version,
+                            egui::Button::new(format!("回滚到 v{b}")),
+                        )
+                        .on_hover_text("以 v{b} 的内容生成一个新版本，历史版本全部保留")
+                        .clicked()
+                    {
+                        app.wiki.history_confirm_rollback = true;
+                    }
+                } else {
+                    ui.colored_label(
+                        theme::warn(),
+                        format!(
+                            "确认把本页回滚到 v{b}？当前 v{} 会保留为历史。",
+                            page.meta.current_version
+                        ),
+                    );
+                    if ui.button("确认回滚").clicked() {
+                        rollback = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        app.wiki.history_confirm_rollback = false;
+                    }
+                }
+            });
+            if let Some(error) = &app.wiki.history_error {
+                ui.colored_label(theme::warn(), error);
+            }
+        });
+    if !open {
+        app.wiki.history_open = false;
+    }
+    if rollback {
+        app.wiki.history_confirm_rollback = false;
+        let target = app.wiki.history_b.unwrap_or(0);
+        match app
+            .wiki_store
+            .as_ref()
+            .map(|store| store.rollback(&uuid, target))
+        {
+            Some(Ok(_)) => {
+                app.wiki.notice = Some(format!("已回滚到 v{target}（产生新版本，历史保留）。"));
+                app.wiki.history_open = false;
+                app.wiki.tree_dirty = true;
+                open_page(app, &uuid);
+            }
+            Some(Err(error)) => app.wiki.history_error = Some(format!("回滚失败：{error:#}")),
+            None => app.wiki.history_error = Some("知识库不可用。".into()),
+        }
+    }
+}
+
+/// 行级 diff 的一行：相同 / 新增（B 有 A 无）/ 删除（A 有 B 无）。
+enum DiffLine {
+    Same(String),
+    Add(String),
+    Del(String),
+}
+
+/// 行数乘积上限：动态规划表超此数就不算 diff，由调用方降级提示。
+const DIFF_MAX_CELLS: usize = 4_000_000;
+
+/// 行级 diff（LCS 动态规划）：语义同 `diff` 的「最短编辑脚本」。
+/// 维基正文单页至多两万字符，正常远低于此上限。
+fn line_diff(old: &str, new: &str) -> Option<Vec<DiffLine>> {
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    if a.len().saturating_mul(b.len()) > DIFF_MAX_CELLS {
+        return None;
+    }
+    let (n, m) = (a.len(), b.len());
+    // dp[i][j] = a[i..] 与 b[j..] 的最长公共子序列长度。
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if a[i] == b[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let mut lines = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if a[i] == b[j] {
+            lines.push(DiffLine::Same(a[i].to_string()));
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            lines.push(DiffLine::Del(a[i].to_string()));
+            i += 1;
+        } else {
+            lines.push(DiffLine::Add(b[j].to_string()));
+            j += 1;
+        }
+    }
+    for rest in &a[i..] {
+        lines.push(DiffLine::Del((*rest).to_string()));
+    }
+    for rest in &b[j..] {
+        lines.push(DiffLine::Add((*rest).to_string()));
+    }
+    Some(lines)
 }
 
 /// 导入框架对话框：粘贴 Markdown 大纲（# 主题 / ## 分类，或 - 列表两级），
@@ -1014,6 +1265,18 @@ fn reader(
         }
         ui.weak(format!("v{}", page.meta.current_version));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(theme::icon_text_button(theme::Icon::History, "版本"))
+                .on_hover_text("版本历史：两版对比、回滚（回滚也产生新版本，不丢历史）")
+                .clicked()
+            {
+                app.wiki.history_open = true;
+                app.wiki.history_confirm_rollback = false;
+                app.wiki.history_error = None;
+                let current = page.meta.current_version;
+                app.wiki.history_b = Some(current);
+                app.wiki.history_a = (current > 1).then_some(current - 1);
+            }
             let icon = if app.wiki.backlinks_open {
                 theme::Icon::PanelClose
             } else {
@@ -1210,4 +1473,57 @@ fn backlinks_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<Stri
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DIFF_MAX_CELLS, DiffLine, line_diff};
+
+    fn kinds(lines: &[DiffLine]) -> String {
+        lines
+            .iter()
+            .map(|line| match line {
+                DiffLine::Same(_) => '=',
+                DiffLine::Add(_) => '+',
+                DiffLine::Del(_) => '-',
+            })
+            .collect()
+    }
+
+    #[test]
+    fn line_diff_marks_added_and_removed_lines() {
+        let lines = line_diff("甲\n乙\n丙", "甲\n丁\n丙").expect("小文本应出 diff");
+        assert_eq!(kinds(&lines), "=-+=");
+        let same: Vec<&str> = lines
+            .iter()
+            .filter_map(|line| match line {
+                DiffLine::Same(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(same, vec!["甲", "丙"]);
+    }
+
+    #[test]
+    fn line_diff_handles_pure_growth_at_tail() {
+        let lines = line_diff("甲", "甲\n乙\n丙").expect("小文本应出 diff");
+        assert_eq!(kinds(&lines), "=++");
+    }
+
+    #[test]
+    fn line_diff_empty_old_is_all_adds() {
+        let lines = line_diff("", "甲\n乙").expect("小文本应出 diff");
+        assert_eq!(kinds(&lines), "++");
+    }
+
+    #[test]
+    fn line_diff_bails_out_on_huge_inputs() {
+        let old: Vec<String> = (0..DIFF_MAX_CELLS / 100 + 2)
+            .map(|i| format!("行{i}"))
+            .collect();
+        let new: Vec<String> = (0..DIFF_MAX_CELLS / 100 + 2)
+            .map(|i| format!("列{i}"))
+            .collect();
+        assert!(line_diff(&old.join("\n"), &new.join("\n")).is_none());
+    }
 }
