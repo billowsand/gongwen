@@ -22,6 +22,7 @@ mod strategy;
 pub(crate) mod style_learning;
 pub(crate) mod task_jobs;
 mod tools;
+pub(crate) mod wiki_jobs;
 mod workspace;
 mod writing_context;
 

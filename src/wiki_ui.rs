@@ -37,6 +37,11 @@ pub(crate) struct WikiUiState {
     /// 「导入框架」对话框开关与粘贴内容。
     import_open: bool,
     import_text: String,
+    /// 「从资料归纳」作业：进度行、停止请求、失败原因与待确认提案。
+    pub(crate) frame_progress: Option<String>,
+    pub(crate) request_stop_frame: bool,
+    pub(crate) frame_error: Option<String>,
+    pub(crate) frame_proposal: Option<crate::pi_agent::wiki_jobs::FrameProposal>,
     /// 最近一次框架操作的提示（成功说明或失败原因）。
     notice: Option<String>,
 }
@@ -99,6 +104,135 @@ pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
         open_page(app, &uuid);
     }
     import_window(app, ui.ctx());
+    frame_proposal_window(app, ui.ctx());
+}
+
+/// 「从资料归纳」的进度、停止与错误提示，贴在树上方。
+fn frame_job_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
+    if let Some(progress) = &app.wiki.frame_progress {
+        ui.horizontal(|ui| {
+            ui.weak(progress);
+            if ui.button("停止").clicked() {
+                app.wiki.request_stop_frame = true;
+            }
+        });
+    }
+    if app.wiki.frame_error.is_some() {
+        let error = app.wiki.frame_error.clone().unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.colored_label(theme::warn(), &error);
+            if ui.small_button("知道了").clicked() {
+                app.wiki.frame_error = None;
+            }
+        });
+    }
+}
+
+/// 框架提案确认窗：树形预览归纳结果，确认后写入（同名跳过），丢弃则不落库。
+fn frame_proposal_window(app: &mut GongwenApp, ctx: &egui::Context) {
+    let Some(proposal) = app.wiki.frame_proposal.clone() else {
+        return;
+    };
+    let mut open = true;
+    let mut accepted = false;
+    let mut discarded = false;
+    egui::Window::new("框架提案 · 待确认")
+        .collapsible(false)
+        .resizable(true)
+        .default_width(480.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.weak(
+                "AI 归纳的框架只是提案：确认前可在下方核对，写入时与现有框架同名的节点自动跳过。",
+            );
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for theme in &proposal.themes {
+                        ui.label(egui::RichText::new(&theme.name).strong());
+                        for category in &theme.categories {
+                            let basis = if category.doc_ids.is_empty() {
+                                String::new()
+                            } else {
+                                format!("（依据 {} 篇）", category.doc_ids.len())
+                            };
+                            ui.weak(format!("　├ {}{basis}", category.name));
+                        }
+                    }
+                });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("写入框架").clicked() {
+                    accepted = true;
+                }
+                if ui.button("丢弃").clicked() {
+                    discarded = true;
+                }
+            });
+        });
+    if accepted {
+        let mut created = 0usize;
+        let mut skipped = 0usize;
+        if let Some(store) = app.wiki_store.as_ref() {
+            for theme in &proposal.themes {
+                let theme_id = match app
+                    .wiki
+                    .tree
+                    .iter()
+                    .find(|t| t.theme.name == theme.name)
+                    .map(|t| t.theme.id)
+                {
+                    Some(id) => {
+                        skipped += 1;
+                        id
+                    }
+                    None => match store.create_theme(&theme.name) {
+                        Ok(id) => {
+                            created += 1;
+                            id
+                        }
+                        Err(error) => {
+                            app.wiki.notice =
+                                Some(format!("写入主题「{}」失败：{error:#}", theme.name));
+                            break;
+                        }
+                    },
+                };
+                let existing: Vec<String> = app
+                    .wiki
+                    .tree
+                    .iter()
+                    .find(|t| t.theme.id == theme_id)
+                    .map(|t| t.categories.iter().map(|c| c.name.clone()).collect())
+                    .unwrap_or_default();
+                for category in &theme.categories {
+                    if existing.contains(&category.name) {
+                        skipped += 1;
+                        continue;
+                    }
+                    match store.create_category(theme_id, &category.name) {
+                        Ok(_) => created += 1,
+                        Err(error) => {
+                            app.wiki.notice =
+                                Some(format!("写入分类「{}」失败：{error:#}", category.name));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if app.wiki.notice.is_none() {
+            app.wiki.notice = Some(format!(
+                "框架提案已写入：新建 {created} 个节点（同名跳过 {skipped} 个）。"
+            ));
+        }
+        app.wiki.tree_dirty = true;
+        app.wiki.frame_proposal = None;
+    } else if discarded || !open {
+        app.wiki.frame_proposal = None;
+    }
 }
 
 /// 导入框架对话框：粘贴 Markdown 大纲（# 主题 / ## 分类，或 - 列表两级），
@@ -328,8 +462,20 @@ fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) 
             {
                 app.wiki.import_open = true;
             }
+            let busy = app.wiki.frame_progress.is_some();
+            if ui
+                .add_enabled(
+                    !busy,
+                    theme::icon_text_button(theme::Icon::Sparkles, "从资料归纳"),
+                )
+                .on_hover_text("让 AI 浏览资料库，归纳两级框架提案；确认后才写入")
+                .clicked()
+            {
+                app.start_wiki_frame();
+            }
         });
     });
+    frame_job_strip(app, ui);
     // 新建主题：输入 + 建（复用标准词库页的「行内输入即建」交互）。
     ui.horizontal(|ui| {
         let edit = egui::TextEdit::singleline(&mut app.wiki.new_node_name)
@@ -361,7 +507,7 @@ fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) 
     }
     ui.add_space(4.0);
     if app.wiki.tree.is_empty() {
-        ui.weak("还没有知识框架：先建主题，或点右上角「导入框架」粘贴大纲；「从资料归纳」随后续切片接入。");
+        ui.weak("还没有知识框架：先建主题、点右上角「导入框架」粘贴大纲，或「从资料归纳」让 AI 提一份框架。");
         return;
     }
     node_edit_strip(app, ui);

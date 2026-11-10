@@ -442,6 +442,7 @@ fn builtin_delivery_kind(skill: Option<&str>) -> Option<&'static str> {
         | "gongwen-reply" => Some("document"),
         "gongwen-extract" => Some("report"),
         super::pi_skills::TASK_EXTRACT_SKILL | super::pi_skills::TASK_FILL_SKILL => Some("task"),
+        super::pi_skills::WIKI_FRAME_SKILL => Some("task"),
         super::pi_skills::STYLE_SKILL => Some("style"),
         _ => None,
     }
@@ -518,6 +519,15 @@ pub(crate) fn run(
         if job.task.materials.is_empty() {
             return Err("任务助手作业至少需要一份材料。".into());
         }
+    }
+    if job
+        .task
+        .skill
+        .as_deref()
+        .is_some_and(super::pi_skills::is_wiki_skill)
+        && job.task.selection.is_some()
+    {
+        return Err("维基知识库作业没有选区，不能按正文选区运行。".into());
     }
     // 覆盖 Rust 侧的准备完成后更新、host 退出后落盘窗口；Node 自己另持 SQLite 锁，
     // 即使 Rust 崩溃而 host 尚存，也不能同时打开 Durable 库。
@@ -1262,15 +1272,21 @@ pub(crate) fn run(
                     .skill
                     .as_deref()
                     .is_some_and(super::pi_skills::is_task_skill);
+                let job_delivery = task_job
+                    || job
+                        .task
+                        .skill
+                        .as_deref()
+                        .is_some_and(super::pi_skills::is_wiki_skill);
                 let expected_kind = if style_task {
                     "style"
-                } else if task_job {
+                } else if job_delivery {
                     "task"
                 } else {
                     "document"
                 };
-                if task_job && content.len() > super::protocol::MAX_TASK_DELIVERY_BYTES {
-                    return Err("任务助手交付的 JSON 超过上限，已拒绝。".into());
+                if job_delivery && content.len() > super::protocol::MAX_TASK_DELIVERY_BYTES {
+                    return Err("作业交付的 JSON 超过上限，已拒绝。".into());
                 }
                 let historical_replay = job.resume
                     && recovered

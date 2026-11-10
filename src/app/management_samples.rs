@@ -158,6 +158,8 @@ pub(super) fn fixture() -> GongwenApp {
         wiki_store: None,
         wiki_error: None,
         wiki: Default::default(),
+        wiki_frame_rx: None,
+        wiki_frame_job: None,
         knowledge_docs: Vec::new(),
         knowledge_chunk_count: 0,
         knowledge_retrieval_elapsed: None,

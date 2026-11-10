@@ -39,13 +39,13 @@ pub(super) struct TaskFillOutput {
 }
 
 /// 一轮后台作业的进度与停止信号。界面每帧读一次进度，停止只置标志。
-pub(super) struct TaskJobUi {
+pub(crate) struct TaskJobUi {
     progress: Arc<Mutex<String>>,
     cancel: Arc<AtomicBool>,
 }
 
 impl TaskJobUi {
-    fn start() -> (Self, Arc<Mutex<String>>, Arc<AtomicBool>) {
+    pub(super) fn start() -> (Self, Arc<Mutex<String>>, Arc<AtomicBool>) {
         let progress = Arc::new(Mutex::new(String::new()));
         let cancel = Arc::new(AtomicBool::new(false));
         let ui = Self {
@@ -70,7 +70,7 @@ impl TaskJobUi {
 }
 
 /// 进度写入：后台线程只改这一格字符串，界面每帧读。
-fn progress_sink(progress: &Arc<Mutex<String>>) -> impl FnMut(String) + 'static {
+pub(super) fn progress_sink(progress: &Arc<Mutex<String>>) -> impl FnMut(String) + 'static {
     let slot = Arc::clone(progress);
     move |line: String| {
         if let Ok(mut current) = slot.lock() {

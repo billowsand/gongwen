@@ -48,11 +48,15 @@ impl Catalog {
             .collect()
     }
 
-    /// 写作技能列表：排除风格学习与任务助手的作业技能，它们各有自己的入口。
+    /// 写作技能列表：排除风格学习与任务 / 维基的作业技能，它们各有自己的入口。
     pub(crate) fn writing_enabled(&self) -> Vec<&Entry> {
         self.enabled()
             .into_iter()
-            .filter(|entry| entry.name != super::STYLE_SKILL && !super::is_task_skill(&entry.name))
+            .filter(|entry| {
+                entry.name != super::STYLE_SKILL
+                    && !super::is_task_skill(&entry.name)
+                    && !super::is_wiki_skill(&entry.name)
+            })
             .collect()
     }
 
@@ -64,6 +68,11 @@ impl Catalog {
             && super::is_task_skill(selected)
         {
             return Err("任务助手的整理技能只从任务助手页面启动，不写正文。".into());
+        }
+        if let Some(selected) = selected
+            && super::is_wiki_skill(selected)
+        {
+            return Err("维基知识库的作业技能只从知识库页面启动，不写正文。".into());
         }
         if self.writing_enabled().is_empty() {
             return Err("没有启用的写作技能，请先到技能管理启用。".into());
@@ -296,7 +305,7 @@ mod tests {
     fn builtins_are_listed_with_chinese_labels_and_catalog_can_be_empty() {
         let _dir = ConfigDir::new();
         let catalog = load();
-        assert_eq!(catalog.enabled().len(), 9);
+        assert_eq!(catalog.enabled().len(), 10);
         assert_eq!(catalog.label_for("gongwen-draft"), "起草");
         assert_eq!(catalog.label_for("gongwen-research"), "研究报告");
         assert_eq!(catalog.label_for("gongwen-reply"), "复函");
@@ -306,9 +315,9 @@ mod tests {
             store::set_enabled(name, false).unwrap();
         }
         let catalog = load();
-        assert_eq!(catalog.enabled().len(), 6);
+        assert_eq!(catalog.enabled().len(), 7);
         store::set_enabled("gongwen-imitate", true).unwrap();
-        assert_eq!(load().enabled().len(), 7);
+        assert_eq!(load().enabled().len(), 8);
         assert_eq!(
             load().resolve(Some("gongwen-imitate")),
             Ok(Some("gongwen-imitate".into()))

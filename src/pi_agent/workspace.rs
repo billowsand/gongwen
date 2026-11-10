@@ -153,7 +153,7 @@ pub(crate) fn prune_workspaces(
                         && record
                             .skill
                             .as_deref()
-                            .is_some_and(super::pi_skills::is_task_skill) => {}
+                            .is_some_and(super::pi_skills::is_job_skill) => {}
                 // 保留其余有记录的轮次，写作可以从中恢复。
                 Ok(_) => continue,
                 // 只有确认 run.json 不存在才算孤儿。损坏、权限错误等不等于没有记录，
