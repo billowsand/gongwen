@@ -84,6 +84,13 @@ pub(crate) struct Backlink {
     pub text: String,
 }
 
+/// 红链缺口：同一个未建页目标（to_title）被哪些页面引用。
+#[derive(Debug, Clone)]
+pub(crate) struct RedLinkGap {
+    pub title: String,
+    pub refs: Vec<Backlink>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WikiSearchHit {
     pub uuid: String,
@@ -372,6 +379,12 @@ impl WikiStore {
         insert_doc_refs(&tx, &uuid, version_id, &input.doc_refs)?;
         write_fts(&tx, seq, &input.title, &input.body)?;
         write_links(&tx, &uuid, &input.body)?;
+        // 缺口补齐：既有正文里指向本页标题的红链，随建页解析为页面链接。
+        tx.execute(
+            "UPDATE wiki_links SET to_page=?1, to_node=NULL, resolved=1, to_title=''
+             WHERE resolved=0 AND to_title=?2",
+            params![uuid, input.title.trim()],
+        )?;
         tx.commit()?;
         Ok(uuid)
     }
@@ -589,6 +602,38 @@ impl WikiStore {
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// 红链缺口：未建页目标按标题聚合（缺口清单的数据源）。
+    pub fn red_link_gaps(&self) -> Result<Vec<RedLinkGap>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.to_title, p.uuid, p.title, l.link_text FROM wiki_links l
+             JOIN wiki_pages p ON p.uuid = l.from_page
+             WHERE l.resolved = 0
+             ORDER BY l.to_title, p.title",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                Backlink {
+                    from_uuid: r.get(1)?,
+                    from_title: r.get(2)?,
+                    text: r.get(3)?,
+                },
+            ))
+        })?;
+        let mut gaps: Vec<RedLinkGap> = Vec::new();
+        for row in rows {
+            let (title, link) = row?;
+            match gaps.last_mut() {
+                Some(gap) if gap.title == title => gap.refs.push(link),
+                _ => gaps.push(RedLinkGap {
+                    title,
+                    refs: vec![link],
+                }),
+            }
+        }
+        Ok(gaps)
     }
 
     /// 语义检索：jieba 分词后 FTS 匹配（标题 + 正文），空查询返回空。

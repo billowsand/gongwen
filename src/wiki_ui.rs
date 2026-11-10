@@ -57,6 +57,15 @@ pub(crate) struct WikiUiState {
     /// 回滚二次确认开关与失败原因。
     history_confirm_rollback: bool,
     history_error: Option<String>,
+    /// 缺口清单：红链聚合（树缓存重建时刷新）与窗口开关。
+    gaps: Vec<crate::wiki::RedLinkGap>,
+    gap_open: bool,
+    /// 「从缺口建页」对话框：标题来自红链，归属手选分类。
+    create_open: bool,
+    create_title: String,
+    create_node: Option<i64>,
+    create_body: String,
+    create_error: Option<String>,
     /// 最近一次框架操作的提示（成功说明或失败原因）。
     notice: Option<String>,
 }
@@ -169,6 +178,8 @@ pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
     frame_proposal_window(app, ui.ctx());
     review_desk(app, ui.ctx(), &link_map);
     version_history_window(app, ui.ctx());
+    gap_window(app, ui.ctx());
+    create_page_window(app, ui.ctx());
 }
 
 /// 「从资料归纳」的进度、停止与错误提示，贴在树上方。
@@ -864,6 +875,184 @@ fn line_diff(old: &str, new: &str) -> Option<Vec<DiffLine>> {
     Some(lines)
 }
 
+/// 缺口清单：待建页红链（可直接建页补齐，建页后旧红链自动解析）与
+/// 无页面覆盖的分类（可一键发起整编）。
+fn gap_window(app: &mut GongwenApp, ctx: &egui::Context) {
+    if !app.wiki.gap_open {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("缺口清单")
+        .collapsible(false)
+        .resizable(true)
+        .default_width(460.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let gaps = app.wiki.gaps.clone();
+            let empty = empty_categories(app);
+            if gaps.is_empty() && empty.is_empty() {
+                ui.weak("没有缺口：红链都有落点，分类都有页面。");
+                return;
+            }
+            if !gaps.is_empty() {
+                ui.label(egui::RichText::new("待建页（正文里的红链）").strong());
+                for gap in &gaps {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&gap.title).strong());
+                        let sources = gap
+                            .refs
+                            .iter()
+                            .map(|link| link.from_title.as_str())
+                            .collect::<Vec<_>>()
+                            .join("、");
+                        ui.weak(format!("被 {} 页引用", gap.refs.len()))
+                            .on_hover_text(format!("引用来源：{sources}"));
+                        if ui.button("建此页").clicked() {
+                            app.wiki.create_open = true;
+                            app.wiki.create_title = gap.title.clone();
+                            app.wiki.create_node = None;
+                            app.wiki.create_body = String::new();
+                            app.wiki.create_error = None;
+                        }
+                    });
+                }
+                ui.add_space(6.0);
+            }
+            if !empty.is_empty() {
+                ui.label(egui::RichText::new("还没有页面的分类").strong());
+                for (theme, category, id) in &empty {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{theme} / {category}"));
+                        if ui.button("整编此分类").clicked() {
+                            app.start_wiki_write(theme.clone(), category.clone());
+                            app.wiki.gap_open = false;
+                        }
+                        let _ = id;
+                    });
+                }
+            }
+        });
+    if !open {
+        app.wiki.gap_open = false;
+    }
+}
+
+/// 「从缺口建页」对话框：标题固定（红链目标），归属手选分类，正文人工撰写；
+/// 写库后指向该标题的既有红链自动解析为页面链接。
+fn create_page_window(app: &mut GongwenApp, ctx: &egui::Context) {
+    if !app.wiki.create_open {
+        return;
+    }
+    let mut open = true;
+    let mut create = false;
+    egui::Window::new("建页（缺口补齐）")
+        .collapsible(false)
+        .resizable(true)
+        .default_width(520.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("标题");
+                ui.label(egui::RichText::new(&app.wiki.create_title).strong());
+            });
+            ui.horizontal(|ui| {
+                ui.label("归属分类");
+                let options: Vec<(i64, String)> = app
+                    .wiki
+                    .tree
+                    .iter()
+                    .flat_map(|t| {
+                        t.categories
+                            .iter()
+                            .map(|c| (c.id, format!("{} / {}", t.theme.name, c.name)))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                let mut selected = app.wiki.create_node.unwrap_or(0);
+                egui::ComboBox::from_id_salt("wiki_create_node")
+                    .selected_text(
+                        options
+                            .iter()
+                            .find(|(id, _)| Some(*id) == app.wiki.create_node)
+                            .map(|(_, label)| label.clone())
+                            .unwrap_or_else(|| "选一个分类".into()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (id, label) in &options {
+                            ui.selectable_value(&mut selected, *id, label);
+                        }
+                    });
+                app.wiki.create_node = (selected != 0).then_some(selected);
+            });
+            ui.weak("正文写法与公文一致，可用 [[页面链接]]；来源记为「人工建页」。");
+            ui.add(
+                egui::TextEdit::multiline(&mut app.wiki.create_body)
+                    .desired_rows(10)
+                    .desired_width(f32::INFINITY),
+            );
+            if let Some(error) = &app.wiki.create_error {
+                ui.colored_label(theme::warn(), error);
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(app.wiki.create_node.is_some(), egui::Button::new("创建"))
+                    .clicked()
+                {
+                    create = true;
+                }
+                if ui.button("取消").clicked() {
+                    app.wiki.create_open = false;
+                }
+            });
+        });
+    if !open {
+        app.wiki.create_open = false;
+    }
+    if create && let (Some(node_id), Some(store)) = (app.wiki.create_node, app.wiki_store.as_ref())
+    {
+        let input = crate::wiki::PageInput {
+            title: app.wiki.create_title.clone(),
+            node_id,
+            kind: "normal",
+            body: app.wiki.create_body.clone(),
+            source_run_id: "manual".into(),
+            review_edited: false,
+            doc_refs: Vec::new(),
+        };
+        match store.create_page(&input) {
+            Ok(uuid) => {
+                app.wiki.notice = Some(format!("已建页「{}」。", input.title));
+                app.wiki.create_open = false;
+                app.wiki.tree_dirty = true;
+                open_page(app, &uuid);
+            }
+            Err(error) => app.wiki.create_error = Some(format!("建页失败：{error:#}")),
+        }
+    }
+}
+
+/// 还没有任何页面（含导览页）的分类：theme、category、node_id。
+fn empty_categories(app: &GongwenApp) -> Vec<(String, String, i64)> {
+    app.wiki
+        .tree
+        .iter()
+        .flat_map(|t| {
+            t.categories
+                .iter()
+                .filter(|c| {
+                    app.wiki
+                        .pages
+                        .get(&c.id)
+                        .is_none_or(|pages| pages.is_empty())
+                })
+                .map(|c| (t.theme.name.clone(), c.name.clone(), c.id))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// 导入框架对话框：粘贴 Markdown 大纲（# 主题 / ## 分类，或 - 列表两级），
 /// 实时预览解析结果，确认后写库——与现有节点同名的跳过，不覆盖已有框架。
 fn import_window(app: &mut GongwenApp, ctx: &egui::Context) {
@@ -1017,6 +1206,7 @@ fn rebuild_cache(app: &mut GongwenApp) {
     }
     app.wiki.tree = tree;
     app.wiki.pages = pages;
+    app.wiki.gaps = store.red_link_gaps().unwrap_or_default();
 }
 
 /// 链接跳转目标：已建页、框架节点（导览页或待建导览）。解析表里没有的目标
@@ -1118,6 +1308,19 @@ fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) 
                 app.wiki.review_open = true;
             }
         }
+    }
+    // 缺口入口：待建页红链 + 无页面覆盖的分类。
+    let gap_count = app.wiki.gaps.len() + empty_categories(app).len();
+    if gap_count > 0
+        && ui
+            .add(theme::icon_text_button(
+                theme::Icon::List,
+                &format!("缺口（{gap_count}）"),
+            ))
+            .on_hover_text("待建页红链与还没有页面的分类")
+            .clicked()
+    {
+        app.wiki.gap_open = true;
     }
     // 新建主题：输入 + 建（复用标准词库页的「行内输入即建」交互）。
     ui.horizontal(|ui| {

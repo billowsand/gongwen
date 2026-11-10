@@ -123,6 +123,36 @@ fn red_link_unresolved() {
 }
 
 #[test]
+fn red_link_gaps_group_unresolved_targets() {
+    let s = store();
+    let (_, c) = seed_frame(&s);
+    let a = s
+        .create_page(&page("甲页", c, "normal", "见 [[安全文化]]。"))
+        .unwrap();
+    let b = s
+        .create_page(&page(
+            "乙页",
+            c,
+            "normal",
+            "也见 [[安全文化]]，以及 [[责任体系]]。",
+        ))
+        .unwrap();
+    let _ = (a, b);
+    let gaps = s.red_link_gaps().unwrap();
+    assert_eq!(gaps.len(), 2, "两个不同的未建目标");
+    let culture = gaps.iter().find(|g| g.title == "安全文化").unwrap();
+    assert_eq!(culture.refs.len(), 2, "同一目标按标题聚合");
+    let duty = gaps.iter().find(|g| g.title == "责任体系").unwrap();
+    assert_eq!(duty.refs.len(), 1);
+    // 建页之后红链消失（链接按标题重新解析为页面）。
+    s.create_page(&page("安全文化", c, "normal", "内容。"))
+        .unwrap();
+    let gaps = s.red_link_gaps().unwrap();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].title, "责任体系");
+}
+
+#[test]
 fn duplicate_title_and_guide_rejected() {
     let s = store();
     let (_, c) = seed_frame(&s);
