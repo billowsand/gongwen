@@ -49,7 +49,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path runtime | Out-Null
-          gh release download $env:RUNTIME_RELEASE_TAG --repo $env:RUNTIME_REPO --pattern runtime.zip --dir runtime --clobber
+          # gh 需要显式凭据；公开 release 资产直接走 curl，和 Linux / macOS 作业一致。
+          curl.exe --fail --location --retry 10 --retry-delay 5 --connect-timeout 30 `
+            "https://github.com/$env:RUNTIME_REPO/releases/download/$env:RUNTIME_RELEASE_TAG/runtime.zip" `
+            --output runtime/runtime.zip
           Expand-Archive -Path runtime/runtime.zip -DestinationPath runtime -Force
           Remove-Item runtime/runtime.zip
 
