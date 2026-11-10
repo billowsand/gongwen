@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
+  HOST_VERSION,
   PROTOCOL_VERSION,
   ProtocolError,
   createEmitter,
@@ -9,6 +11,11 @@ import {
   validateInit,
 } from "../src/protocol.mjs";
 import { Readable } from "node:stream";
+
+/** 读仓库内的 JSON 文件；路径按测试文件位置解析，不依赖当前工作目录。 */
+function readRepoJson(relative) {
+  return JSON.parse(fs.readFileSync(new URL(relative, import.meta.url), "utf8"));
+}
 
 function baseInit(overrides = {}) {
   return {
@@ -117,5 +124,65 @@ test("malformed init errors do not echo credential fragments", async () => {
   await assert.rejects(
     () => readJsonLines(stream, { onValue: () => true }),
     (error) => error instanceof ProtocolError && !error.message.includes(secret) && !error.message.includes("apiKey"),
+  );
+});
+
+// 版本对账：`packaging/pi-runtime.json`、host 的 `package.json` / lockfile 与
+// `protocol.mjs`、Rust `src/pi_agent/protocol.rs` 必须描述同一套版本。升级 Pi 依赖、
+// 改 host 或协议时只要漏改一处，这里直接失败——随包运行时不允许悄悄带旧版本。
+// （运行时 manifest 与打包配置的哈希对账仍由 scripts/pi-runtime-verify.mjs 与 Rust
+// 的 shipped_pi_runtime_manifest 覆盖，本用例只守源码侧的版本常量与依赖声明。）
+test("host 版本与协议在 protocol.mjs、打包配置、package.json/lock 与 Rust 四处一致", () => {
+  const packageJson = readRepoJson("../package.json");
+  const packageLock = readRepoJson("../package-lock.json");
+  const runtime = readRepoJson("../../packaging/pi-runtime.json");
+  const rust = fs.readFileSync(new URL("../../src/pi_agent/protocol.rs", import.meta.url), "utf8");
+
+  // 1) host 版本：Node 常量是当前版本的唯一来源，Rust / 打包配置 / 包清单都要跟它一致。
+  assert.match(
+    rust,
+    new RegExp(`HOST_VERSION: &str = "${HOST_VERSION}"`),
+    "Rust src/pi_agent/protocol.rs 的 HOST_VERSION 与 host 不一致",
+  );
+  assert.equal(runtime.host.version, HOST_VERSION, "packaging/pi-runtime.json 的 host.version 漏改");
+  assert.equal(packageJson.version, HOST_VERSION, "pi-host/package.json 的 version 漏改");
+  assert.equal(packageLock.version, HOST_VERSION, "package-lock.json 根 version 漏改");
+  assert.equal(packageLock.packages[""].version, HOST_VERSION, "package-lock.json packages[\"\"].version 漏改");
+
+  // 2) 协议版本：Node / Rust / 打包配置三处必须同时改，任何一处不一致都要拦下。
+  const rustProtocol = rust.match(/PROTOCOL_VERSION: u32 = (\d+)/)?.[1];
+  assert.ok(rustProtocol, "Rust src/pi_agent/protocol.rs 缺少 PROTOCOL_VERSION 常量");
+  assert.equal(Number(rustProtocol), PROTOCOL_VERSION, "Rust 协议版本与 host 不一致");
+  assert.equal(runtime.host.protocol, PROTOCOL_VERSION, "packaging/pi-runtime.json 的 host.protocol 漏改");
+
+  // 3) Pi 三包：打包配置、package.json 精确版本、lockfile 实际装到的版本必须完全一致。
+  const piPackages = ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"];
+  assert.deepEqual(
+    Object.keys(runtime.pi).sort(),
+    [...piPackages].sort(),
+    "packaging/pi-runtime.json 的 pi 依赖表必须正好是 chord / pi-ai / pi-durable 三包",
+  );
+  for (const name of piPackages) {
+    const declared = packageJson.dependencies?.[name];
+    assert.equal(typeof declared, "string", `pi-host/package.json 没有声明 ${name}`);
+    assert.match(declared, /^\d+\.\d+\.\d+$/, `${name} 必须锁定精确版本，不能用范围`);
+    assert.equal(packageLock.packages[""]?.dependencies?.[name], declared, `${name} 的 lockfile 根依赖与 package.json 不一致`);
+    assert.equal(
+      packageLock.packages[`node_modules/${name}`]?.version,
+      declared,
+      `${name} 的 lockfile 实际版本与 package.json 不一致（先 npm install 再提交 lockfile）`,
+    );
+    assert.equal(runtime.pi[name], declared, `${name} 的打包配置版本与 package.json 不一致`);
+  }
+
+  // 4) TypeBox 自 pi-ai 1.5 起不再从上游导出，host 直依赖它：必须精确锁定且已装进 lockfile。
+  const typebox = packageJson.dependencies?.typebox;
+  assert.equal(typeof typebox, "string", "pi-host/package.json 缺少 typebox 直依赖");
+  assert.match(typebox, /^\d+\.\d+\.\d+$/, "typebox 必须锁定精确版本");
+  assert.equal(packageLock.packages[""]?.dependencies?.typebox, typebox, "typebox 的 lockfile 根依赖与 package.json 不一致");
+  assert.equal(
+    packageLock.packages["node_modules/typebox"]?.version,
+    typebox,
+    "typebox 的 lockfile 实际版本与 package.json 不一致",
   );
 });

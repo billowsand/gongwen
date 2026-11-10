@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 组装随包 Pi 运行时（Linux ARM64 / x64、macOS arm64 / x64）：固定 Node 22.22.3
-# + Pi 1.4.0 host + 生产依赖。
+# + Pi host 与生产依赖（Node / Pi 三包 / host / 协议版本以 packaging/pi-runtime.json 为准）。
 #
 # 用法：
 #   scripts/stage-pi-runtime.sh --platform linux-arm64|linux-x64|darwin-arm64|darwin-x64 \

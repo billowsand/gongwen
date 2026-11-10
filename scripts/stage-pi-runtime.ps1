@@ -1,4 +1,5 @@
-﻿# 组装随包 Pi 运行时（Windows x64）：固定 Node 22.22.3 + Pi 1.4.0 host + 生产依赖。
+﻿# 组装随包 Pi 运行时（Windows x64）：固定 Node 22.22.3 + Pi host 与生产依赖
+# （Node / Pi 三包 / host / 协议版本以 packaging/pi-runtime.json 为准）。
 #
 # 只做构建期工作：校验官方 Node 压缩包的 SHA256 后才解包；用该 Node 自带的 npm
 # 跑 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund`；最后写 manifest、

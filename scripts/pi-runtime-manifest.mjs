@@ -52,6 +52,36 @@ if (!fs.existsSync(lockfile)) {
   process.exit(1);
 }
 
+// 版本必须取自**组装出来的 host 本身**，不能直接抄 config：升级时若改了
+// packaging/pi-runtime.json 却漏改 pi-host 源码，直接抄配置会让 manifest「看起来正确」，
+// 直到运行期握手（Rust 比对 ready.hostVersion）或离线验收才暴露。这里在构建期就失败。
+const hostDir = path.join(runtimeDir, "host");
+const hostPackageFile = path.join(hostDir, "package.json");
+const hostProtocolFile = path.join(hostDir, "protocol.mjs");
+for (const file of [hostPackageFile, hostProtocolFile]) {
+  if (!fs.existsSync(file)) {
+    process.stderr.write(`缺少 host 文件，无法核对版本：${file}\n`);
+    process.exit(1);
+  }
+}
+const builtHostPackage = JSON.parse(fs.readFileSync(hostPackageFile, "utf8"));
+const builtHostProtocol = fs.readFileSync(hostProtocolFile, "utf8");
+const builtHostVersion = builtHostProtocol.match(/export const HOST_VERSION = "([^"]+)";/)?.[1];
+const builtProtocolVersion = Number(builtHostProtocol.match(/export const PROTOCOL_VERSION = (\d+);/)?.[1]);
+if (builtHostVersion !== config.host.version || builtHostPackage.version !== config.host.version) {
+  process.stderr.write(
+    `host 源码版本与 packaging/pi-runtime.json 不一致：protocol.mjs=${builtHostVersion ?? "未知"}、` +
+      `package.json=${builtHostPackage.version ?? "未知"}，配置要求 ${config.host.version}。请同步 host 源码后再组装。\n`,
+  );
+  process.exit(1);
+}
+if (!Number.isInteger(builtProtocolVersion) || builtProtocolVersion !== config.host.protocol) {
+  process.stderr.write(
+    `host 协议版本与 packaging/pi-runtime.json 不一致：protocol.mjs=${builtProtocolVersion}，配置要求 ${config.host.protocol}。\n`,
+  );
+  process.exit(1);
+}
+
 const manifest = {
   schema: 1,
   source: "npm-ci",
@@ -64,8 +94,8 @@ const manifest = {
   },
   pi: config.pi,
   host: {
-    version: config.host.version,
-    protocol: config.host.protocol,
+    version: builtHostVersion,
+    protocol: builtProtocolVersion,
     main: config.host.main,
     lockfileSha256: sha256(lockfile),
   },

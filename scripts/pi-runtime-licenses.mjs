@@ -54,6 +54,32 @@ function readPackage(dir) {
     fs.copyFileSync(path.join(dir, entry.name), path.join(target, entry.name));
     copied += 1;
   }
+  // 有的包把许可原文放在 LICENSES/ 子目录，且文件名带前缀（不保证以 LICENSE 开头），
+  // 例如 @earendil-works/pi-schema 内置的 LICENSES/typebox-LICENSE。
+  let nestedDirs = [];
+  try {
+    nestedDirs = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^licen[cs]es$/i.test(entry.name))
+      .map((entry) => path.join(dir, entry.name));
+  } catch {
+    nestedDirs = [];
+  }
+  for (const nested of nestedDirs) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(nested, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (copied >= 3) break;
+      if (!entry.isFile() || !/LICEN[CS]E|COPYING|NOTICE|UNLICENSE/i.test(entry.name)) continue;
+      fs.mkdirSync(target, { recursive: true });
+      fs.copyFileSync(path.join(nested, entry.name), path.join(target, entry.name));
+      copied += 1;
+    }
+  }
 }
 
 function walk(dir, depth) {

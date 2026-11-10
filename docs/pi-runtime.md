@@ -138,8 +138,8 @@ runtime\pi\node.exe scripts\pi-offline-acceptance.mjs --runtime .\runtime\pi
 
 本机已对 Windows x64 组装运行时实测通过（4 次模型调用、回执重放 0 次新调用）。Linux 骨架已进
 CI（buster 作业组装 `linux-arm64` 运行时 + 离线验收 + Pi 的 Rust 进程 / 锁 / 交付测试），
-**Linux 真机整链仍待验**；macOS 的组装、离线验收与打包脚本已按 darwin 分支补齐，尚未在真机与
-发布环境验证。本机结果不能代替真机验收。
+**Linux 真机整链仍待验**；macOS 的组装与离线验收已在本机 darwin-arm64 实际跑通（数字见
+「Pi 1.5 升级」节），但装到干净 Mac 上的整链与发布环境仍未验证。本机结果不能代替真机验收。
 
 ## 四、打包接入
 
@@ -186,7 +186,7 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 
 ## 六、所有权、恢复与工作区
 
-### 统一策略、分阶段与阶段成果（当前协议 4 / host 0.4.0；策略语义沿用协议 3）
+### 统一策略、分阶段与阶段成果（当前协议 4 / host 0.4.2；策略语义沿用协议 3）
 
 模型能力档案由「测试写作能力」后台动作生成：四次同题自动 / 分阶段合成写作都经生产 Rust Pi 运行链，
 工具源显式绑定到临时 SQLite 知识库 / 稿件库与空风格源。单轮限时 **300 秒**、四轮总计 **15 分钟**，
@@ -432,7 +432,7 @@ Pi 增加两个只读领域工具：`style_list`（按当前文种列出启用�
 - **manifest 较大**（约 2.6 MB）：启动时解析一次，不在每帧或每个工具调用重复读。
 - **工作区自动清理规则见第六节**：只删已写入正文或超期孤儿目录；其余目录保留以支撑「接着写」，不会无提示整目录回收。
 
-## 风格学习的独立文件交付（当前 host 0.4.0）
+## 风格学习的独立文件交付（当前 host 0.4.2）
 
 设置页通过同一 `PiJob` / `run` / Durable Harness 执行 `gongwen-style-learn`，任务文种标识为“风格档案”。
 风格任务只注册文件、阶段登记及 `submit_style`，不注册正文提交、表单、知识库或写作模型工具。
@@ -496,6 +496,51 @@ host 侧适配的破坏性变更（按上游 1.5.0 CHANGELOG）：
 - `pi.live` 存储升到 v3（加 `run.turns`），1.5 写的 JSONL 会话 1.4 runtime 读不了：
   随包运行时整体更换，不允许新旧 host 混跑同一工作区（host 版本有 Rust 侧强校验）。
 
-验证：Node `npm test` 122 通过 / 0 失败 / 1 跳过（跳过为公网用例）；darwin-arm64 随包运行时
-已用 `scripts/stage-pi-runtime.sh` 重建。win-x64 / linux-arm64 / linux-x64 / darwin-x64 的
-运行时需在各自平台发布前重建。仍待真机验收：真实模型长会话、崩溃恢复与目标机门槛。
+验证（2026-11-10，本机 macOS darwin-arm64 实测）：
+
+- **Node 测试**：升级提交时 `cd pi-host && npm test` 为 **123 项 / 122 通过 / 0 失败 / 1 跳过**
+  （跳过的是需要公网的真实模型用例）；本次 1.5 升级一共新增 **15 条用例**——1 条「host 版本与
+  协议在 `protocol.mjs`、打包配置、`package.json`/lock 与 Rust 四处一致」的版本对账用例
+  （`pi-host/test/protocol.test.mjs`）+ 14 条会话视图与报告映射回归，合计 **138 项 / 137 通过 /
+  0 失败 / 1 跳过**。版本对账用例保证：改 host 版本或协议时漏改 `packaging/pi-runtime.json`、
+  `pi-host/package.json`、lockfile 或 Rust 常量会直接失败；已用「把配置改回 0.4.1」「把协议改成
+  5」两种人为漂移验证过它确实能拦住。
+- **构建期护栏**：`scripts/pi-runtime-manifest.mjs` 不再直接抄 `packaging/pi-runtime.json` 的
+  版本写 manifest，而是读取组装出来的 `host/package.json` 与 `host/protocol.mjs` 常量再核对；
+  这样「配置改了、host 源码漏改」会在**组装阶段**直接失败，而不是等到运行期握手才报错
+  （已用 host 0.4.1 / 协议 5 两种人为漂移验证）。
+- **无公网验收**：`./runtime/pi/bin/node scripts/pi-offline-acceptance.mjs --runtime ./runtime/pi`
+  PASS——Node 22.22.3 · host 0.4.2 · 13796 文件 · 常规模型调用 4 次 · 回执重放 0 次新调用 ·
+  分阶段模型调用 9 次（重建修复后的 host 源码后重跑，见「运行时重建」）。
+- **依赖安全**：`cd pi-host && npm audit --omit=dev` 为 **0 漏洞**（依赖树 94 个节点；无 high /
+  critical / moderate / low）。运行时 `host/node_modules` 实测：`typebox@1.3.27`、
+  `@earendil-works/pi-schema@1.5.0`、`ws@8.21.0`。
+- **ws / esbuild 说明**：chord 1.5.0 把 `ws@8.21.0`、`esbuild@0.28.2` 声明为**精确的可选
+  peerDependency**（`peerDependenciesMeta` 两者都是 optional）。ws 仍被 `@google/genai`
+  （依赖 `^8.18.0`）和 `openai`（peer `^8.21.0`）需要，lockfile 从 8.22.1 收敛到 8.21.0 是满足
+  chord 精确 peer 的结果，不是异常降级；esbuild 没有其它依赖需要，未安装。两者只在 chord 的
+  `dist/next-node/` 里被静态 import，而 `dist/next-node/` 不在任何导出入口的导入链上；host 只
+  import `@earendil-works/chord/context`、`pi-ai` 的 `models` / `api/*`、`pi-durable` 根与
+  `env` / `storage/jsonl` / `tools` 子路径、`typebox`。升级核查时用 ESM resolve 记录 host
+  导入链共 **551 个模块，无 ws / esbuild**，chord 与 pi-durable 根入口均可正常加载。
+- **Node 归档**：五个平台的归档文件名与 SHA-256 均与官方 `SHASUMS256.txt`
+  （`https://nodejs.org/download/release/v22.22.3/SHASUMS256.txt`）核对一致；本次未改 Node
+  版本，哈希沿用。
+- **许可证**：`licenses/DEPENDENCIES.json` 覆盖全部生产依赖（94 条按 name@version 去重后
+  93 条，无重复），`licenses/deps/` 收录各包随附的许可原文。本次给收集脚本补上对 `LICENSES/`
+  子目录的处理；**重建运行时后产物已含 `licenses/deps/earendil-works__pi-schema@1.5.0/
+  typebox-LICENSE`**（1094 字节，来自 pi-schema 的 `LICENSES/typebox-LICENSE`）。上游
+  `@earendil-works` 各包自身没有随包提供 LICENSE 原文文件，对应 deps 目录只能留空，仅
+  `DEPENDENCIES.json` 记录 MIT（上游打包所致，不伪造原文）。
+- **运行时重建**：2026-11-10 08:14（Asia/Shanghai）按**修复后的 host 源码**（`activity.mjs` /
+  `agent.mjs`，含会话视图与报告映射修复）重建 darwin-arm64 运行时：16 个
+  `pi-host/src/*.mjs` 覆盖进 `runtime/pi/host/`（`host/package.json` 与 staging 产物结构一致：
+  version 0.4.2、dependencies 三包 1.5.0 + typebox 1.3.27、engines 不变），重跑许可证收集与
+  manifest 生成。manifest 文件数 **13795 → 13796**（新增 pi-schema 许可原文一条），
+  `node scripts/pi-runtime-verify.mjs runtime/pi darwin-arm64` **PASS**（host 0.4.2 / 协议 4，
+  13796 文件全哈希），离线验收 **PASS**（常规 4 次 / 分阶段 9 次模型调用、回执重放 0 次）。
+  `host/activity.mjs`、`host/agent.mjs` 与 `pi-host/src/` 同文件逐字节一致，manifest 里的
+  sha256 / bytes 与磁盘一致。其余平台（win-x64 / linux-arm64 / linux-x64 / darwin-x64）的运行时
+  必须在各自平台发布前从 `pi-host` 源码重建——**这次重建只覆盖本机 darwin-arm64**。CI / release
+  各平台作业都先跑组装 + 无公网验收，再进入打包，不会被旧 `runtime` 顶替。
+- 仍待真机验收：真实模型长会话、崩溃恢复与目标机门槛。
