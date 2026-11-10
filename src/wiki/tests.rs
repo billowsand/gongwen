@@ -306,6 +306,25 @@ fn search_hits_title_and_body() {
 }
 
 #[test]
+fn search_tolerates_quotes_in_query() {
+    let s = store();
+    let (_, c) = seed_frame(&s);
+    s.create_page(&page("监督检查", c, "normal", "坚持“四不两直”与闭环整改。"))
+        .unwrap();
+    // 用户输入带引号时，jieba 会切出引号词；它不能把 MATCH 变成 FTS5 语法错误。
+    let hits = s
+        .search("“四不两直”", 10)
+        .expect("带引号的检索不应报 FTS 语法错误");
+    assert!(!hits.is_empty());
+    // 只有引号（切不出实词）返回空，而不是报错。
+    assert!(
+        s.search("\"", 10)
+            .expect("只输入引号也应正常返回")
+            .is_empty()
+    );
+}
+
+#[test]
 fn parse_frame_outline_variants() {
     // 标题式与列表式等价；混排时列表分类可跟在标题主题后。
     let heading =
@@ -457,4 +476,195 @@ fn frame_mapping_rolls_back_and_deleted_page_sources_remain_auditable() {
     assert!(s.page_has_missing_sources(&uuid).unwrap());
     assert_eq!(s.search("条目", 10).unwrap().len(), 1);
     assert!(s.search_for_evidence("条目", 10).unwrap().is_empty());
+}
+
+#[test]
+fn node_creation_resolves_red_links_and_protects_the_guide_page() {
+    let s = store();
+    let (theme, category) = seed_frame(&s);
+    // 先有正文里的红链（此时还没有同名分类），再建同名分类：
+    // 与建页补齐缺口同一规则，链接应立刻解析到节点。
+    let src = s
+        .create_page(&page("源页", category, "normal", "见 [[应急管理]]。"))
+        .unwrap();
+    assert!(!s.outgoing_links(&src).unwrap()[0].resolved);
+    let node = s.create_category(theme, "应急管理").unwrap();
+    let link = s.outgoing_links(&src).unwrap()[0].clone();
+    assert_eq!(link.to_node, Some(node));
+    assert!(link.resolved);
+    assert!(s.red_link_gaps().unwrap().is_empty());
+    // 该分类建导览页后，指向节点的链接就是导览页的反链：删除保护必须生效。
+    let guide = s
+        .create_page(&page("应急管理导览", node, "guide", "导览"))
+        .unwrap();
+    assert_eq!(s.backlinks(&guide).unwrap()[0].from_uuid, src);
+    assert!(s.delete_page(&guide).is_err());
+}
+
+#[test]
+fn deleting_a_node_rebinds_links_to_a_later_page_of_the_same_title() {
+    let s = store();
+    let (theme, category) = seed_frame(&s);
+    let node = s.create_category(theme, "临时分类").unwrap();
+    let src = s
+        .create_page(&page("源页", category, "normal", "见 [[临时分类]]。"))
+        .unwrap();
+    assert_eq!(s.outgoing_links(&src).unwrap()[0].to_node, Some(node));
+    // 后来建了同名页面：既有的节点链接不会被抢走（按 uuid 稳定）。
+    let later = s
+        .create_page(&page("临时分类", category, "normal", "内容"))
+        .unwrap();
+    assert_eq!(s.outgoing_links(&src).unwrap()[0].to_node, Some(node));
+    // 删掉节点后按标题退回解析：同名页面存在，链接应落到页面而不是永久红链。
+    s.delete_node(node).unwrap();
+    let link = s.outgoing_links(&src).unwrap()[0].clone();
+    assert_eq!(link.to_page.as_deref(), Some(later.as_str()));
+    assert!(link.resolved);
+}
+
+#[test]
+fn pages_without_evidence_are_not_auto_evidence() {
+    let s = store();
+    let (_, category) = seed_frame(&s);
+    // 人工建页没有依据：人工能读，但不能进问答 / Pi 的自动取证。
+    let manual = s
+        .create_page(&page("人工页", category, "normal", "台账要闭环。"))
+        .unwrap();
+    assert!(!s.page_evidence_ready(&manual).unwrap());
+    assert_eq!(s.search("台账", 10).unwrap().len(), 1);
+    assert!(s.search_for_evidence("台账", 10).unwrap().is_empty());
+    // 补上一条现存依据后进入自动取证。
+    s.conn
+        .execute(
+            "INSERT INTO knowledge_docs(id, source, created_at, updated_at) VALUES (7, 'markdown', '', '')",
+            [],
+        )
+        .unwrap();
+    let mut input = page("人工页", category, "normal", "台账要闭环。");
+    input.doc_refs = vec![(7, "支撑要点".into())];
+    s.update_page(&manual, &input).unwrap();
+    assert!(s.page_evidence_ready(&manual).unwrap());
+    assert_eq!(s.search_for_evidence("台账", 10).unwrap().len(), 1);
+}
+
+#[test]
+fn repeated_links_do_not_inflate_backlinks_or_gaps() {
+    let s = store();
+    let (_, category) = seed_frame(&s);
+    let target = s
+        .create_page(&page("责任体系", category, "normal", "内容"))
+        .unwrap();
+    let source = s
+        .create_page(&page(
+            "源页",
+            category,
+            "normal",
+            "[[责任体系]] 与 [[责任体系]]，另见 [[安全文化]]、[[安全文化]]。",
+        ))
+        .unwrap();
+    assert_eq!(s.backlinks(&target).unwrap().len(), 1);
+    let gaps = s.red_link_gaps().unwrap();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].title, "安全文化");
+    assert_eq!(gaps[0].refs.len(), 1);
+    let _ = source;
+}
+
+#[test]
+fn wikilinks_do_not_span_lines() {
+    // 跨行不是合法页面链接：既不能存成带换行的标题，也不能扫到文末。
+    assert!(parse_wikilinks("见 [[甲\n乙]] 与 [[正常]]").len() == 1);
+    assert_eq!(
+        parse_wikilinks("见 [[甲\n乙]] 与 [[正常]]")[0].target,
+        "正常"
+    );
+    // 未闭合的 `[[` 只跳过本行，不影响后面的链接。
+    let links = parse_wikilinks("[[未闭合\n[[正常]]");
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].target, "正常");
+}
+
+#[test]
+fn page_title_and_body_limits_are_enforced_by_storage() {
+    let s = store();
+    let (_, category) = seed_frame(&s);
+    let long_title = "题".repeat(101);
+    assert!(
+        s.create_page(&page(&long_title, category, "normal", "正文"))
+            .is_err()
+    );
+    let long_body = "文".repeat(20_001);
+    assert!(
+        s.create_page(&page("合规", category, "normal", &long_body))
+            .is_err()
+    );
+}
+
+#[test]
+fn apply_frame_refuses_ambiguous_duplicate_nodes() {
+    let s = store();
+    s.create_theme("重复主题").unwrap();
+    s.create_theme("重复主题").unwrap();
+    let proposal = FrameTheme {
+        name: "重复主题".into(),
+        categories: vec![FrameCategory {
+            name: "分类".into(),
+            doc_ids: Vec::new(),
+        }],
+    };
+    assert!(
+        s.apply_frame(std::slice::from_ref(&proposal))
+            .unwrap_err()
+            .to_string()
+            .contains("多个同名主题")
+    );
+}
+
+#[test]
+fn frame_outline_rejects_bad_indentation_and_oversized_frames() {
+    // 1 空格、Tab 都不是合法的两级缩进，不能静默当成一级主题。
+    assert!(parse_frame_outline("- 甲\n - 乙\n").is_err());
+    assert!(parse_frame_outline("- 甲\n\t- 乙\n").is_err());
+    // 与 AI 归纳同一规模上限。
+    let mut too_many_themes = String::new();
+    for i in 0..=MAX_FRAME_THEMES {
+        too_many_themes.push_str(&format!("# 主题{i}\n"));
+    }
+    assert!(parse_frame_outline(&too_many_themes).is_err());
+    let mut too_many_categories = String::from("# 主题\n");
+    for i in 0..=MAX_FRAME_CATEGORIES_PER_THEME {
+        too_many_categories.push_str(&format!("## 分类{i}\n"));
+    }
+    assert!(parse_frame_outline(&too_many_categories).is_err());
+}
+
+#[test]
+fn rename_page_keeps_identity_and_resolves_new_title_links() {
+    let s = store();
+    let (_, category) = seed_frame(&s);
+    let target = s
+        .create_page(&page("旧标题", category, "normal", "正文内容。"))
+        .unwrap();
+    let source = s
+        .create_page(&page("源页", category, "normal", "见 [[旧标题]]。"))
+        .unwrap();
+    let new_linker = s
+        .create_page(&page("新页", category, "normal", "见 [[新标题]]。"))
+        .unwrap();
+    assert!(!s.outgoing_links(&new_linker).unwrap()[0].resolved);
+
+    s.rename_page(&target, "新标题").unwrap();
+
+    // 旧链接按 UUID 跟随改名，新标题的红链自动解析为同一页。
+    let old_link = s.outgoing_links(&source).unwrap()[0].clone();
+    assert_eq!(old_link.to_page.as_deref(), Some(target.as_str()));
+    let new_link = s.outgoing_links(&new_linker).unwrap()[0].clone();
+    assert_eq!(new_link.to_page.as_deref(), Some(target.as_str()));
+    // 标题与全文索引都换了，按新标题能搜到。
+    assert_eq!(s.page_by_title("新标题").unwrap().unwrap().uuid, target);
+    assert!(s.page_by_title("旧标题").unwrap().is_none());
+    let hits = s.search("新标题", 10).unwrap();
+    assert!(hits.iter().any(|hit| hit.uuid == target));
+    // 新标题与现有页面重名时拒绝。
+    assert!(s.rename_page(&target, "源页").is_err());
 }

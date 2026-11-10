@@ -1289,6 +1289,14 @@ impl PiToolContext {
         self.wiki_enabled()?;
         let uuid = required_str(args, "page_id")?;
         let doc_id = int_arg(args, "doc_id")?;
+        // 与 wiki_read 同一门槛：无可用依据的页面（人工建页、依据已删/待复核）
+        // 不能借「按页的依据清单读原文」绕过自动取证排除。这里只需要判断可用性，
+        // 正文读出来只为复用同一套判断，不登记为证据。
+        match self.wiki.read(&uuid) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(format!("维基里没有这个页面（page_id={uuid}）")),
+            Err(error) => return Err(error),
+        }
         let refs = self.wiki.doc_refs(&uuid)?;
         let Some((_, note)) = refs.iter().find(|(id, _)| *id == doc_id) else {
             return Err(format!(
@@ -1924,16 +1932,23 @@ impl PiWiki for WikiArchives {
 
     fn read(&self, uuid: &str) -> Result<Option<(String, String)>, String> {
         let store = self.open()?;
-        if store
-            .page_has_missing_sources(uuid)
+        let page = store.get_page(uuid).map_err(|error| format!("{error:#}"))?;
+        let Some(page) = page else {
+            return Ok(None);
+        };
+        // 自动取证只认「至少一条依据且依据都还在」的页面：无依据的人工建页、
+        // 依据已删除/替换的待复核页都不允许进证据台账（只能人工阅读）。
+        if !store
+            .page_evidence_ready(uuid)
             .map_err(|error| format!("{error:#}"))?
         {
-            return Err("此页的依据已删除或替换，待人工复核；请检索资料库原文。".into());
+            return Err(
+                "此页没有可用依据（未登记依据，或依据已删除/替换待复核），不能作为自动取证；\
+                 请改用资料库原文，或先补依据/等人工复核完成。"
+                    .into(),
+            );
         }
-        store
-            .get_page(uuid)
-            .map(|page| page.map(|page| (page.meta.title, page.body)))
-            .map_err(|error| format!("{error:#}"))
+        Ok(Some((page.meta.title, page.body)))
     }
 
     fn links(&self, uuid: &str) -> Result<Vec<PiWikiLinkInfo>, String> {

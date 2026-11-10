@@ -881,6 +881,7 @@ impl AppShell {
                         || app.wiki_write_rx.is_some()
                     {
                         // Pi 的停止由后台收尾，收完结果再释放工作区与密钥。
+                        app.status = "正在等待维基作业结束后锁定…".into();
                         app.request_lock();
                         None
                     } else if let Err(error) = app.save_before_lock() {

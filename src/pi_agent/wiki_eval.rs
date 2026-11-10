@@ -8,16 +8,20 @@
 //! export DMXAPI_API_KEY=...        # 或任何 OpenAI 兼容服务商的密钥
 //! source scripts/pi-dev.sh         # 准备 GONGWEN_PI_RUNTIME_DIR / GONGWEN_PI_NODE
 //! # 可选：GONGWEN_WIKI_EVAL_BASE 覆盖服务商地址，GONGWEN_WIKI_EVAL_MODEL 覆盖模型名
+//! # 可选：GONGWEN_WIKI_EVAL_MATERIAL_DIR 指向一批真实资料所在目录（只读 .md），
+//! #       设了就在内置种子资料之外再跑一条「真实资料」全链；
+//! #       GONGWEN_WIKI_EVAL_MATERIAL_FILES 可用逗号指定文件名（默认常挑的几篇见下）。
 //! cargo test --locked wiki_real_model -- --ignored --nocapture
 //! ```
 //!
-//! 测试把配置目录重定向到独立临时目录（线程局部），资料库、维基库与
+//! 测试把配置目录重定向到独立临时目录（线程局部 + 进程级），资料库、维基库与
 //! Pi 工作区全部落在里面，不碰本机真实数据；结束后保留目录供检查。
 
 use super::wiki_jobs::{induce_frame, update_pages, write_pages};
 use crate::knowledge::{KnowledgeImportItem, KnowledgeSource, KnowledgeStore, NewKnowledgeChunk};
 use crate::models::{AppConfig, ModelRef, ProviderConfig, TemplateKind};
 use crate::wiki::{PageInput, WikiStore};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -104,6 +108,16 @@ const UPDATE_DOC: (&str, &str) = (
      回头看安排在2026年9月。",
 );
 
+/// 真实资料目录里默认优先挑的几篇（同属《Project Maven》主题，便于归纳出
+/// 一条连贯的两级框架）；找不到时退回目录里按名字排序的前几篇 .md。
+const DEFAULT_MATERIAL_FILES: [&str; 5] = [
+    "maven-bureaucracy-analysis.md",
+    "maven-china-narrative-analysis.md",
+    "maven-data-governance-analysis.md",
+    "maven-intelligence-analysis-insights.md",
+    "maven-narrative-to-action.md",
+];
+
 fn eval_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -173,18 +187,93 @@ fn eval_config() -> Arc<AppConfig> {
     Arc::new(config)
 }
 
-/// 真机全链：归纳框架 → 采纳框架 → 整编分类页面 → 采纳页面 →
-/// 补一篇新资料 → 更新页面 → 采纳更新。每一步都过确定性复核，
-/// 任何一步被复核拦下或模型没交回交付，测试直接失败并保留现场。
-#[test]
-#[ignore = "真机评测：需要 DMXAPI_API_KEY 与 pi-dev 运行时，默认不跑"]
-fn wiki_real_model_end_to_end() {
-    for var in ["GONGWEN_PI_RUNTIME_DIR", "GONGWEN_PI_NODE"] {
-        if eval_env(var).is_none() {
-            panic!("缺少环境变量 {var}；先 source scripts/pi-dev.sh");
+/// 从外部目录读评测资料：优先 `GONGWEN_WIKI_EVAL_MATERIAL_FILES` 指定文件，
+/// 其次默认常挑的几篇，最后退回目录内按名字排序的 .md（至少两篇）。
+fn load_material_docs(dir: &Path) -> Vec<(String, String)> {
+    const MAX_BYTES: u64 = 512 * 1024;
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Some(list) = eval_env("GONGWEN_WIKI_EVAL_MATERIAL_FILES") {
+        for name in list.split(',') {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let path = dir.join(name);
+            assert!(path.is_file(), "评测资料文件不存在：{}", path.display());
+            paths.push(path);
         }
     }
-    let dir = std::env::temp_dir().join(format!("gongwen_wiki_eval_{}", std::process::id()));
+    if paths.is_empty() {
+        for name in DEFAULT_MATERIAL_FILES {
+            let path = dir.join(name);
+            if path.is_file() {
+                paths.push(path);
+            }
+        }
+    }
+    if paths.len() < 2 {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("读不到评测资料目录 {}：{error}", dir.display()))
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            })
+            .collect();
+        found.sort();
+        paths = found;
+    }
+    assert!(
+        paths.len() >= 2,
+        "真实资料评测至少需要两篇 .md：{} 下只找到 {} 篇",
+        dir.display(),
+        paths.len()
+    );
+    paths
+        .iter()
+        .map(|path| {
+            let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            assert!(
+                bytes <= MAX_BYTES,
+                "评测资料过大（{bytes} 字节）：{}",
+                path.display()
+            );
+            let content = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("读不到 {}：{error}", path.display()));
+            let title = content
+                .lines()
+                .find_map(|line| line.strip_prefix("# ").map(str::trim))
+                .filter(|title| !title.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .map(|stem| stem.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "评测资料".to_string())
+                });
+            (title, content)
+        })
+        .collect()
+}
+
+/// 一条完整链的统计，供两个用例做各自的断言语境。
+struct ChainReport {
+    pages: usize,
+    updated: bool,
+    updated_refs: Vec<i64>,
+}
+
+/// 跑一条「种子资料 → 归纳框架 → 整编并采纳 → （可选）补新资料并更新采纳」
+/// 的真机链，最后做一轮确定性治理检查（依据删除后页面进需复核、退出自动取证）。
+fn run_chain(
+    tag: &str,
+    seed_docs: &[(String, String)],
+    update_doc: Option<&(String, String)>,
+) -> ChainReport {
+    let dir =
+        std::env::temp_dir().join(format!("gongwen_wiki_eval_{}_{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     crate::storage::set_test_config_dir_in_current_thread(dir.clone());
@@ -192,20 +281,20 @@ fn wiki_real_model_end_to_end() {
     // 必须再挂进程级覆盖，否则工具会去开本机真实库（加密库按明文读直接报
     // 「file is not a database」——第二轮评测就是这样失败的）。
     let _global = crate::storage::push_test_config_dir_global(dir.clone());
-    eprintln!("评测目录：{}", dir.display());
+    eprintln!("[{tag}] 评测目录：{}", dir.display());
+    eprintln!("[{tag}] 种子资料 {} 篇", seed_docs.len());
 
     let store_path = crate::storage::manuscript_db_path().unwrap();
     let mut kb = KnowledgeStore::open(&store_path).unwrap();
     let mut doc_ids = Vec::new();
-    for (title, content) in SEED_DOCS {
+    for (title, content) in seed_docs {
         doc_ids.push(seed_doc(&mut kb, title, content));
     }
-    eprintln!("已入库 {} 篇评测资料：{doc_ids:?}", doc_ids.len());
     drop(kb);
 
     let config = eval_config();
     let cancel = Arc::new(AtomicBool::new(false));
-    let progress = |line: String| eprintln!("[pi] {line}");
+    let progress = |line: String| eprintln!("[{tag}] {line}");
 
     // ① 归纳框架。
     let frame = induce_frame(
@@ -234,21 +323,21 @@ fn wiki_real_model_end_to_end() {
     }
     assert!(categories > 0, "框架提案没有分类");
     eprintln!(
-        "① 框架：{} 个主题 / {categories} 个分类",
+        "[{tag}] ① 框架：{} 个主题 / {categories} 个分类",
         frame.themes.len()
     );
 
     // 采纳框架（与界面「确认入库」同一条路径）。
     let wiki = WikiStore::open(&store_path).unwrap();
     let (created, reused) = wiki.apply_frame(&frame.themes).unwrap();
-    eprintln!("① 框架入库：新建 {created} 个节点，复用 {reused} 个节点");
+    eprintln!("[{tag}] ① 框架入库：新建 {created} 个节点，复用 {reused} 个节点");
     let tree = wiki.list_tree().unwrap();
     let (node_id, node_name) = tree
         .iter()
         .flat_map(|t| t.categories.iter().map(move |c| (c.id, c.name.as_str())))
         .next()
         .expect("框架里没有分类节点");
-    eprintln!("② 整编目标分类：「{node_name}」(node {node_id})");
+    eprintln!("[{tag}] ② 整编目标分类：「{node_name}」(node {node_id})");
 
     // ② 整编该分类的页面（含导览页）。
     let proposal = write_pages(
@@ -287,7 +376,7 @@ fn wiki_real_model_end_to_end() {
             .unwrap_or_else(|error| panic!("采纳页面「{}」失败：{error:#}", page.title));
         adopted.push((uuid, page.title.clone(), page.kind.clone()));
         eprintln!(
-            "② 采纳页面「{}」（{}，依据 {} 篇）",
+            "[{tag}] ② 采纳页面「{}」（{}，依据 {} 篇）",
             page.title,
             page.kind,
             page.doc_refs.len()
@@ -298,55 +387,167 @@ fn wiki_real_model_end_to_end() {
         "整编提案里没有导览页"
     );
 
-    // ③ 补一篇口径更新的新资料，跑更新作业。
-    let mut kb = KnowledgeStore::open(&store_path).unwrap();
-    let new_doc = seed_doc(&mut kb, UPDATE_DOC.0, UPDATE_DOC.1);
-    drop(kb);
-    eprintln!("③ 新资料入库：E{new_doc}「{}」", UPDATE_DOC.0);
-    let (uuid, title, _) = adopted
-        .iter()
-        .find(|(_, _, kind)| kind == "normal")
-        .cloned()
-        .unwrap_or_else(|| adopted[0].clone());
-    let updates = update_pages(
-        Arc::clone(&config),
-        store_path.clone(),
-        vec![(uuid.clone(), title.clone())],
-        Some(new_doc),
-        Arc::clone(&cancel),
-        progress,
-    )
-    .expect("页面更新未通过复核");
-    assert!(!updates.pages.is_empty(), "更新提案没有页面");
-    let update = &updates.pages[0];
-    assert_eq!(update.uuid.as_deref(), Some(uuid.as_str()));
-    assert!(update.base_version.is_some(), "更新提案缺 base_version");
-    assert_ne!(update.body, "", "更新正文为空");
-    wiki.update_page(
-        &uuid,
-        &PageInput {
-            title: update.title.clone(),
-            node_id: updates.node_id,
-            kind: if update.kind == "guide" {
-                "guide"
-            } else {
-                "normal"
+    // ③ 可选：补一篇口径更新的新资料，跑更新作业并采纳。
+    let mut updated = false;
+    let mut updated_refs: Vec<i64> = Vec::new();
+    let mut update_uuid = None;
+    if let Some((title, content)) = update_doc {
+        let mut kb = KnowledgeStore::open(&store_path).unwrap();
+        let new_doc = seed_doc(&mut kb, title, content);
+        drop(kb);
+        eprintln!("[{tag}] ③ 新资料入库：E{new_doc}「{title}」");
+        let (uuid, page_title, _) = adopted
+            .iter()
+            .find(|(_, _, kind)| kind == "normal")
+            .cloned()
+            .unwrap_or_else(|| adopted[0].clone());
+        let before = wiki.get_page(&uuid).unwrap().expect("更新前页面不见了");
+        let updates = update_pages(
+            Arc::clone(&config),
+            store_path.clone(),
+            vec![(uuid.clone(), page_title.clone())],
+            Some(new_doc),
+            Arc::clone(&cancel),
+            progress,
+        )
+        .expect("页面更新未通过复核");
+        assert!(!updates.pages.is_empty(), "更新提案没有页面");
+        let update = &updates.pages[0];
+        assert_eq!(update.uuid.as_deref(), Some(uuid.as_str()));
+        // 基线必须是发起时读到的当前版本，采纳时拿到的是这一版，防止陈旧覆盖。
+        assert_eq!(
+            update.base_version,
+            Some(before.meta.current_version),
+            "更新提案的 base_version 不是发起时的当前版本"
+        );
+        assert_ne!(update.body, before.body, "更新正文与更新前逐字相同");
+        assert!(
+            update.doc_refs.iter().any(|(id, _)| *id == new_doc),
+            "更新提案没有把新资料 E{new_doc} 写进依据清单"
+        );
+        updated_refs = update.doc_refs.iter().map(|(id, _)| *id).collect();
+        wiki.update_page(
+            &uuid,
+            &PageInput {
+                title: update.title.clone(),
+                node_id: updates.node_id,
+                kind: if update.kind == "guide" {
+                    "guide"
+                } else {
+                    "normal"
+                },
+                body: update.body.clone(),
+                source_run_id: updates.run_id.clone(),
+                review_edited: false,
+                doc_refs: update.doc_refs.clone(),
+                base_version: update.base_version,
             },
-            body: update.body.clone(),
-            source_run_id: updates.run_id.clone(),
-            review_edited: false,
-            doc_refs: update.doc_refs.clone(),
-            base_version: update.base_version,
-        },
-    )
-    .expect("采纳更新失败");
-    let page = wiki.get_page(&uuid).unwrap().expect("页面不见了");
-    let versions = wiki.list_versions(&uuid).unwrap();
-    assert_eq!(versions.len(), 2, "采纳更新后应有两个版本");
-    eprintln!(
-        "③ 采纳更新「{title}」：v1 → v{}，变更说明：{}",
-        page.meta.current_version, update.change_note
+        )
+        .expect("采纳更新失败");
+        let page = wiki.get_page(&uuid).unwrap().expect("页面不见了");
+        let versions = wiki.list_versions(&uuid).unwrap();
+        assert_eq!(versions.len(), 2, "采纳更新后应有两个版本");
+        eprintln!(
+            "[{tag}] ③ 采纳更新「{page_title}」：v1 → v{}，变更说明：{}",
+            page.meta.current_version, update.change_note
+        );
+        updated = true;
+        update_uuid = Some(uuid);
+    }
+
+    // ④ 确定性治理检查（不依赖模型）：资料删除后，引用它的页面必须进
+    // 「需复核」并退出问答 / Pi 自动取证（人工阅读仍可用）。
+    let (check_uuid, _check_title) = adopted
+        .iter()
+        .find(|(uuid, _, kind)| *kind == "normal" && update_uuid.as_deref() != Some(uuid.as_str()))
+        .map(|(uuid, title, _)| (uuid.clone(), title.clone()))
+        .or_else(|| adopted.first().map(|(u, t, _)| (u.clone(), t.clone())))
+        .expect("没有可检查的页面");
+    let refs = wiki.page_doc_refs(&check_uuid).unwrap();
+    assert!(!refs.is_empty(), "采纳页面没有依据");
+    let victim = refs[0].0;
+    let before_search = wiki.search(adopted[0].1.as_str(), 10).unwrap();
+    assert!(!before_search.is_empty(), "采纳后的页面应能被检索到");
+    let mut kb = KnowledgeStore::open(&store_path).unwrap();
+    kb.delete_documents(&[victim]).expect("删除资料失败");
+    drop(kb);
+    assert!(
+        wiki.pages_needing_review()
+            .unwrap()
+            .iter()
+            .any(|(uuid, _)| *uuid == check_uuid),
+        "依据被删除的页面没有进入需复核清单"
     );
+    assert!(
+        !wiki.page_evidence_ready(&check_uuid).unwrap(),
+        "依据被删除的页面仍在自动取证范围"
+    );
+    let after_title = wiki
+        .get_page(&check_uuid)
+        .unwrap()
+        .map(|page| page.meta.title)
+        .unwrap_or_default();
+    assert!(
+        wiki.search_for_evidence(&after_title, 10)
+            .unwrap()
+            .iter()
+            .all(|hit| hit.uuid != check_uuid),
+        "需复核页面仍被 search_for_evidence 召回"
+    );
+    eprintln!("[{tag}] ④ 治理检查：删除 E{victim} 后页面进入需复核并退出自动取证");
+
     assert!(!cancel.load(Ordering::Relaxed));
-    eprintln!("真机全链通过；现场保留在 {}", dir.display());
+    eprintln!("[{tag}] 真机全链通过；现场保留在 {}", dir.display());
+    ChainReport {
+        pages: adopted.len(),
+        updated,
+        updated_refs,
+    }
+}
+
+/// 真机全链：归纳框架 → 采纳框架 → 整编分类页面 → 采纳页面 →
+/// 补一篇新资料 → 更新页面 → 采纳更新。每一步都过确定性复核，
+/// 任何一步被复核拦下或模型没交回交付，测试直接失败并保留现场。
+///
+/// 设了 `GONGWEN_WIKI_EVAL_MATERIAL_DIR` 时，再用该目录里的真实资料跑一条
+/// 同样的链（只读 .md，不修改原文件），验证治理链在真实资料上同样成立。
+#[test]
+#[ignore = "真机评测：需要 DMXAPI_API_KEY 与 pi-dev 运行时，默认不跑"]
+fn wiki_real_model_end_to_end() {
+    for var in ["GONGWEN_PI_RUNTIME_DIR", "GONGWEN_PI_NODE"] {
+        if eval_env(var).is_none() {
+            panic!("缺少环境变量 {var}；先 source scripts/pi-dev.sh");
+        }
+    }
+    let seed: Vec<(String, String)> = SEED_DOCS
+        .iter()
+        .map(|(title, body)| ((*title).to_string(), (*body).to_string()))
+        .collect();
+    let update_doc = (UPDATE_DOC.0.to_string(), UPDATE_DOC.1.to_string());
+    let builtin = run_chain("builtin", &seed, Some(&update_doc));
+    assert!(builtin.pages >= 2, "整编只采纳了 {} 页", builtin.pages);
+    assert!(builtin.updated, "内置链没有跑更新环节");
+    assert!(!builtin.updated_refs.is_empty(), "更新后的依据清单是空的");
+
+    if let Some(dir) = eval_env("GONGWEN_WIKI_EVAL_MATERIAL_DIR") {
+        let docs = load_material_docs(Path::new(&dir));
+        eprintln!(
+            "真实资料链：{} 篇，前 {} 篇作种子、最后一篇作新资料",
+            docs.len(),
+            docs.len() - 1
+        );
+        let (seed, update) = docs.split_at(docs.len() - 1);
+        let report = run_chain("materials", seed, Some(&update[0]));
+        assert!(
+            report.pages >= 2,
+            "真实资料整编只采纳了 {} 页",
+            report.pages
+        );
+        assert!(report.updated, "真实资料链没有跑更新环节");
+    } else {
+        eprintln!(
+            "未设置 GONGWEN_WIKI_EVAL_MATERIAL_DIR，跳过真实资料链；\
+             可用它指向一批 .md 资料目录（如 /Users/ours/Documents/req/11-material）"
+        );
+    }
 }

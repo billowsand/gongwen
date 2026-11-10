@@ -489,6 +489,11 @@ impl GongwenApp {
             Err(error) => (None, Some(format!("维基库打开失败：{error:#}"))),
         };
         self.wiki = crate::wiki_ui::WikiUiState::default();
+        // 恢复失败后重置会话状态：晚到的作业结果不能写进重置后的审核台。
+        self.wiki_frame_rx = None;
+        self.wiki_frame_job = None;
+        self.wiki_write_rx = None;
+        self.wiki_write_job = None;
         self.wiki_doc_status.clear();
         self.wiki_seen_doc_ids = None;
         self.wiki_new_doc_tip = None;

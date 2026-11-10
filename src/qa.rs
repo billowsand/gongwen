@@ -64,7 +64,7 @@ pub fn qa_answer(
     question: &str,
     kind_filter: Option<TemplateKind>,
 ) -> anyhow::Result<QaOutcome> {
-    let wiki_pages = load_wiki_pages(db_path, question);
+    let (wiki_pages, wiki_warning) = load_wiki_pages(db_path, question);
     let (chunks, mut warnings) = match rag::retrieve(config, chat, db_path, question, kind_filter) {
         Ok(outcome) => (outcome.chunks, outcome.warnings),
         Err(error) if !wiki_pages.is_empty() => (
@@ -73,6 +73,11 @@ pub fn qa_answer(
         ),
         Err(error) => return Err(error),
     };
+    // 维基层打不开 / 检索报错不能静默当成「维基没有相关内容」：用户要知道
+    // 本轮降级成了纯资料库问答。
+    if let Some(warning) = wiki_warning {
+        warnings.push(warning);
+    }
     if chunks.is_empty() && wiki_pages.is_empty() {
         warnings.push("维基与资料库均未找到相关依据。".into());
     }
@@ -95,12 +100,28 @@ pub fn qa_answer(
 
 /// 按提问检索维基页并读出正文（截断）。库打不开 / 检索失败都按未接入处理，
 /// 问答回落纯资料库模式。
-fn load_wiki_pages(db_path: &Path, question: &str) -> Vec<(String, String, String)> {
-    let Ok(store) = crate::wiki::WikiStore::open(db_path) else {
-        return Vec::new();
+/// 返回值第二项是维基层的降级原因（打不开 / 检索失败），供 warnings 展示。
+fn load_wiki_pages(
+    db_path: &Path,
+    question: &str,
+) -> (Vec<(String, String, String)>, Option<String>) {
+    let store = match crate::wiki::WikiStore::open(db_path) {
+        Ok(store) => store,
+        Err(error) => {
+            return (
+                Vec::new(),
+                Some(format!("维基库打开失败，本轮仅用资料库：{error:#}")),
+            );
+        }
     };
-    let Ok(hits) = store.search_for_evidence(question, MAX_WIKI_PAGES) else {
-        return Vec::new();
+    let hits = match store.search_for_evidence(question, MAX_WIKI_PAGES) {
+        Ok(hits) => hits,
+        Err(error) => {
+            return (
+                Vec::new(),
+                Some(format!("维基检索失败，本轮仅用资料库：{error:#}")),
+            );
+        }
     };
     let mut pages = Vec::new();
     for hit in hits {
@@ -113,7 +134,7 @@ fn load_wiki_pages(db_path: &Path, question: &str) -> Vec<(String, String, Strin
             pages.push((page.meta.uuid, page.meta.title, body));
         }
     }
-    pages
+    (pages, None)
 }
 
 /// 系统提示词：先维基页面（已审核条目）后知识库片段，不得编造，引用注明出处。

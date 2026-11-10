@@ -101,6 +101,16 @@ pub(crate) struct WikiSearchHit {
 /// 资料文档的维基状态：doc_id → 引用它的页面数（0 = 未整编）。
 pub(crate) type DocWikiStatus = HashMap<i64, i64>;
 
+/// 一次检索最多取前多少个分词去匹配 FTS5（问题可以很长，只取开头这些词）。
+const MAX_QUERY_TERMS: usize = 32;
+
+/// 与 Pi 作业闸门一致的结构上限；人工建页/改名也走同一口径，避免绕过检查。
+const MAX_NODE_NAME_CHARS: usize = 60;
+const MAX_PAGE_TITLE_CHARS: usize = 100;
+const MAX_PAGE_BODY_CHARS: usize = 20_000;
+const MAX_FRAME_THEMES: usize = 30;
+const MAX_FRAME_CATEGORIES_PER_THEME: usize = 20;
+
 const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS wiki_nodes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -234,39 +244,49 @@ impl WikiStore {
 
     /// 将用户确认的一整份框架合并入库。已有同名节点保留身份。
     pub fn apply_frame(&self, themes: &[FrameTheme]) -> Result<(usize, usize)> {
+        anyhow::ensure!(
+            themes.len() <= MAX_FRAME_THEMES,
+            "框架主题超过 {MAX_FRAME_THEMES} 个，请拆分后再确认"
+        );
         let tx = self.conn.unchecked_transaction()?;
         let mut created = 0;
         let mut reused = 0;
         for theme in themes {
-            let existing = tx
-                .query_row(
-                    "SELECT id FROM wiki_nodes WHERE kind='theme' AND name=?1 ORDER BY id",
-                    [&theme.name],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            let theme_name = theme.name.trim();
+            anyhow::ensure!(!theme_name.is_empty(), "主题名不能为空");
+            anyhow::ensure!(
+                theme_name.chars().count() <= MAX_NODE_NAME_CHARS,
+                "主题名超过 {MAX_NODE_NAME_CHARS} 字：{theme_name}"
+            );
+            anyhow::ensure!(
+                theme.categories.len() <= MAX_FRAME_CATEGORIES_PER_THEME,
+                "主题「{theme_name}」下分类超过 {MAX_FRAME_CATEGORIES_PER_THEME} 个，请拆分后再确认"
+            );
+            let existing = unique_node_id(&tx, None, "theme", theme_name)?;
             let theme_id = if let Some(id) = existing {
                 reused += 1;
                 id
             } else {
                 created += 1;
-                self.create_theme(&theme.name)?
+                self.create_theme(theme_name)?
             };
+            rebind_unresolved(&tx, theme_name)?;
             for category in &theme.categories {
-                let existing = tx
-                    .query_row(
-                        "SELECT id FROM wiki_nodes WHERE parent_id=?1 AND name=?2 ORDER BY id",
-                        params![theme_id, category.name],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
+                let category_name = category.name.trim();
+                anyhow::ensure!(!category_name.is_empty(), "分类名不能为空");
+                anyhow::ensure!(
+                    category_name.chars().count() <= MAX_NODE_NAME_CHARS,
+                    "分类名超过 {MAX_NODE_NAME_CHARS} 字：{category_name}"
+                );
+                let existing = unique_node_id(&tx, Some(theme_id), "category", category_name)?;
                 let node = if let Some(id) = existing {
                     reused += 1;
                     id
                 } else {
                     created += 1;
-                    self.create_category(theme_id, &category.name)?
+                    self.create_category(theme_id, category_name)?
                 };
+                rebind_unresolved(&tx, category_name)?;
                 for doc_id in &category.doc_ids {
                     tx.execute(
                         "INSERT OR IGNORE INTO wiki_category_docs(node_id, doc_id) VALUES (?1, ?2)",
@@ -290,17 +310,24 @@ impl WikiStore {
     }
 
     pub fn create_theme(&self, name: &str) -> Result<i64> {
+        let name = name.trim();
+        validate_node_name(name)?;
         let now = Self::now();
         self.conn.execute(
             "INSERT INTO wiki_nodes (parent_id, name, kind, created_at, updated_at)
              VALUES (NULL, ?1, 'theme', ?2, ?2)",
-            params![name.trim(), now],
+            params![name, now],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        // 先有红链、后建同名主题：未解析链接立刻指向这个节点（与建页同一条规则）。
+        rebind_unresolved(&self.conn, name)?;
+        Ok(id)
     }
 
     /// 新建分类，必须挂在某个主题下（两级框架，分类下不再分层）。
     pub fn create_category(&self, theme_id: i64, name: &str) -> Result<i64> {
+        let name = name.trim();
+        validate_node_name(name)?;
         let kind: Option<String> = self
             .conn
             .query_row(
@@ -318,16 +345,22 @@ impl WikiStore {
         self.conn.execute(
             "INSERT INTO wiki_nodes (parent_id, name, kind, created_at, updated_at)
              VALUES (?1, ?2, 'category', ?3, ?3)",
-            params![theme_id, name.trim(), now],
+            params![theme_id, name, now],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        rebind_unresolved(&self.conn, name)?;
+        Ok(id)
     }
 
     pub fn rename_node(&self, id: i64, name: &str) -> Result<()> {
-        self.conn.execute(
+        let name = name.trim();
+        validate_node_name(name)?;
+        let changed = self.conn.execute(
             "UPDATE wiki_nodes SET name = ?1, updated_at = ?2 WHERE id = ?3",
-            params![name.trim(), Self::now(), id],
+            params![name, Self::now(), id],
         )?;
+        anyhow::ensure!(changed == 1, "节点已不存在");
+        rebind_unresolved(&self.conn, name)?;
         Ok(())
     }
 
@@ -346,11 +379,14 @@ impl WikiStore {
     /// 删除节点：分类下无页面、主题下无分类且无页面时才允许；
     /// 页面必须先移走或删除（程序把关，防止页面悬空）。
     pub fn delete_node(&self, id: i64) -> Result<()> {
-        let kind: String = self.conn.query_row(
-            "SELECT kind FROM wiki_nodes WHERE id=?1",
-            params![id],
-            |r| r.get(0),
-        )?;
+        let (kind, name): (String, String) = self
+            .conn
+            .query_row(
+                "SELECT kind, name FROM wiki_nodes WHERE id=?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .context("节点已不存在")?;
         if kind == "theme" {
             let cats: i64 = self.conn.query_row(
                 "SELECT COUNT(*) FROM wiki_nodes WHERE parent_id=?1",
@@ -371,12 +407,15 @@ impl WikiStore {
         }
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
-            "UPDATE wiki_links SET to_node=NULL, resolved=0,
-               to_title=COALESCE(NULLIF(to_title,''),(SELECT name FROM wiki_nodes WHERE id=?1))
+            "UPDATE wiki_links SET to_node=NULL, to_page=NULL, resolved=0,
+               to_title=COALESCE(NULLIF(to_title,''), ?2)
              WHERE to_node=?1",
-            [id],
+            params![id, name],
         )?;
         tx.execute("DELETE FROM wiki_nodes WHERE id=?1", [id])?;
+        // 节点没了，指向它的链接退回按标题解析：有同名页面就落到页面（与 write_links
+        // 的「页面优先」一致），没有就保持红链。
+        rebind_unresolved(&tx, &name)?;
         tx.commit()?;
         Ok(())
     }
@@ -481,6 +520,47 @@ impl WikiStore {
     /// 更新页面：落一个新版本（全量快照），链接边与全文索引重建。
     pub fn update_page(&self, uuid: &str, input: &PageInput) -> Result<i64> {
         self.write_new_version(uuid, input, true)
+    }
+
+    /// 页面改名：只改显示标题（页面身份是 UUID，链接按 UUID 稳定跟随），
+    /// 不产生新版本；全文索引重建，未解析的 `[[新标题]]` 红链随解析为页面。
+    pub fn rename_page(&self, uuid: &str, title: &str) -> Result<()> {
+        let title = title.trim();
+        anyhow::ensure!(!title.is_empty(), "页面标题不能为空");
+        anyhow::ensure!(
+            title.chars().count() <= MAX_PAGE_TITLE_CHARS,
+            "页面标题超过 {MAX_PAGE_TITLE_CHARS} 字"
+        );
+        let tx = self.conn.unchecked_transaction()?;
+        let old = self
+            .get_page(uuid)?
+            .with_context(|| format!("页面不存在：{uuid}"))?;
+        if old.meta.title != title {
+            if self
+                .page_by_title(title)?
+                .is_some_and(|other| other.uuid != uuid)
+            {
+                anyhow::bail!("已存在同名页面「{title}」");
+            }
+            tx.execute(
+                "UPDATE wiki_pages SET title=?1, updated_at=?2 WHERE uuid=?3",
+                params![title, Self::now(), uuid],
+            )?;
+            let seq: i64 = tx.query_row(
+                "SELECT seq FROM wiki_pages WHERE uuid=?1",
+                params![uuid],
+                |r| r.get(0),
+            )?;
+            write_fts(&tx, seq, title, &old.body)?;
+            // 与建页 / 更新页同一条补齐规则：指向新标题的红链现在有落点了。
+            tx.execute(
+                "UPDATE wiki_links SET to_page=?1, to_node=NULL, resolved=1
+                 WHERE resolved=0 AND to_title=?2",
+                params![uuid, title],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     fn write_new_version(&self, uuid: &str, input: &PageInput, check_docs: bool) -> Result<i64> {
@@ -675,13 +755,14 @@ impl WikiStore {
         Ok(())
     }
 
-    /// 页面的入链（backlinks）。
+    /// 页面的入链（backlinks）。同一来源页重复引用同一目标只算一条。
     pub fn backlinks(&self, uuid: &str) -> Result<Vec<Backlink>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.uuid, p.title, l.link_text FROM wiki_links l
+            "SELECT p.uuid, p.title, MIN(l.link_text) FROM wiki_links l
              JOIN wiki_pages p ON p.uuid = l.from_page
              JOIN wiki_pages target ON target.uuid=?1
              WHERE l.to_page=?1 OR (target.kind='guide' AND l.to_node=target.node_id)
+             GROUP BY p.uuid, p.title
              ORDER BY p.title",
         )?;
         let rows = stmt.query_map(params![uuid], |r| {
@@ -713,11 +794,13 @@ impl WikiStore {
     }
 
     /// 红链缺口：未建页目标按标题聚合（缺口清单的数据源）。
+    /// 同一来源页重复引用同一目标只算一处，免得「被 N 页引用」虚高。
     pub fn red_link_gaps(&self) -> Result<Vec<RedLinkGap>> {
         let mut stmt = self.conn.prepare(
-            "SELECT l.to_title, p.uuid, p.title, l.link_text FROM wiki_links l
+            "SELECT l.to_title, p.uuid, p.title, MIN(l.link_text) FROM wiki_links l
              JOIN wiki_pages p ON p.uuid = l.from_page
              WHERE l.resolved = 0
+             GROUP BY l.to_title, p.uuid, p.title
              ORDER BY l.to_title, p.title",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -764,18 +847,30 @@ impl WikiStore {
         if words.is_empty() {
             return Ok(Vec::new());
         }
+        // FTS5 的字符串字面量里双引号要写成两个；分词结果可能带引号（用户输入
+        // `"四不两直"` 这类），不转义会让整条 MATCH 变成语法错误，检索直接失败。
+        // 同时只取前若干个词：问答问题可以很长，词太多既无助于命中，也会把
+        // FTS5 表达式撑得很大。
         let phrase = words
             .iter()
-            .map(|w| format!("\"{w}\""))
+            .take(MAX_QUERY_TERMS)
+            .map(|w| format!("\"{}\"", w.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(" OR ");
         let sql = "SELECT p.uuid, p.title, p.node_id FROM wiki_fts f
              JOIN wiki_pages p ON p.seq = f.rowid
-             WHERE wiki_fts MATCH ?1 AND (NOT ?3 OR NOT EXISTS (
-                SELECT 1 FROM wiki_page_versions v
-                JOIN wiki_doc_refs r ON r.version_id=v.id
-                LEFT JOIN knowledge_docs d ON d.id=r.doc_id
-                WHERE v.page_id=p.uuid AND v.version=p.current_version AND d.id IS NULL
+             WHERE wiki_fts MATCH ?1 AND (NOT ?3 OR (
+                EXISTS (
+                    SELECT 1 FROM wiki_page_versions ev
+                    JOIN wiki_doc_refs er ON er.version_id=ev.id
+                    WHERE ev.page_id=p.uuid AND ev.version=p.current_version
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM wiki_page_versions v
+                    JOIN wiki_doc_refs r ON r.version_id=v.id
+                    LEFT JOIN knowledge_docs d ON d.id=r.doc_id
+                    WHERE v.page_id=p.uuid AND v.version=p.current_version AND d.id IS NULL
+                )
              )) ORDER BY rank LIMIT ?2";
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params![phrase, limit as i64, evidence_only], |r| {
@@ -863,6 +958,25 @@ impl WikiStore {
         )?)
     }
 
+    /// 能否作为自动取证来源：当前版本至少登记了一条依据，且这些资料都还在。
+    /// 人工建的无依据页只能人工阅读；补上依据（例如走更新作业）后才进入自动取证，
+    /// 否则「每页有依据」的溯源口径会被一条手工正文绕开。
+    pub fn page_evidence_ready(&self, uuid: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (
+               SELECT 1 FROM wiki_pages p
+               JOIN wiki_page_versions v ON v.page_id=p.uuid AND v.version=p.current_version
+               JOIN wiki_doc_refs r ON r.version_id=v.id
+               LEFT JOIN knowledge_docs d ON d.id=r.doc_id
+               WHERE p.uuid=?1
+               GROUP BY p.uuid
+               HAVING COUNT(r.id) > 0 AND COUNT(d.id) = COUNT(r.id)
+             )",
+            [uuid],
+            |r| r.get(0),
+        )?)
+    }
+
     /// 当前依据已被移除的页面。保留历史引用，以便人工复核。
     pub fn pages_needing_review(&self) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
@@ -900,9 +1014,101 @@ fn box_kind(kind: &str) -> &'static str {
     }
 }
 
+/// 节点名与 Pi 作业、导入大纲同一口径：非空、不超过 60 字。
+fn validate_node_name(name: &str) -> Result<()> {
+    anyhow::ensure!(!name.is_empty(), "名称不能为空");
+    anyhow::ensure!(
+        name.chars().count() <= MAX_NODE_NAME_CHARS,
+        "名称超过 {MAX_NODE_NAME_CHARS} 字：{name}"
+    );
+    Ok(())
+}
+
+/// 按名字找一个唯一节点：同名节点有多个时明确报错，不按 id 顺序静默挑一个。
+/// `parent` 为 None 表示找主题（主题总在顶层）。
+fn unique_node_id(
+    conn: &Connection,
+    parent: Option<i64>,
+    kind: &str,
+    name: &str,
+) -> Result<Option<i64>> {
+    let mut ids = Vec::new();
+    match parent {
+        Some(parent) => {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM wiki_nodes WHERE parent_id=?1 AND kind=?2 AND name=?3 ORDER BY id",
+            )?;
+            let rows = stmt.query_map(params![parent, kind, name], |r| r.get::<_, i64>(0))?;
+            for row in rows {
+                ids.push(row?);
+            }
+        }
+        None => {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM wiki_nodes WHERE parent_id IS NULL AND kind=?1 AND name=?2 ORDER BY id",
+            )?;
+            let rows = stmt.query_map(params![kind, name], |r| r.get::<_, i64>(0))?;
+            for row in rows {
+                ids.push(row?);
+            }
+        }
+    }
+    anyhow::ensure!(
+        ids.len() <= 1,
+        "已有多个同名{}「{name}」，先在知识库页改名后再确认",
+        if kind == "theme" { "主题" } else { "分类" }
+    );
+    Ok(ids.into_iter().next())
+}
+
+/// 把仍未解析的 `[[标题]]` 边重新落点：页面优先，其次是唯一同名框架节点。
+/// 与 `write_links` 的解析顺序一致，用于节点建立 / 改名 / 删除后的回填。
+fn rebind_unresolved(conn: &Connection, title: &str) -> Result<()> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Ok(());
+    }
+    let page: Option<String> = conn
+        .query_row("SELECT uuid FROM wiki_pages WHERE title=?1", [title], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if let Some(uuid) = page {
+        conn.execute(
+            "UPDATE wiki_links SET to_page=?1, to_node=NULL, resolved=1
+             WHERE resolved=0 AND to_title=?2",
+            params![uuid, title],
+        )?;
+        return Ok(());
+    }
+    let node: Option<i64> = conn
+        .query_row(
+            "SELECT MIN(id) FROM wiki_nodes WHERE name=?1 HAVING COUNT(*)=1",
+            [title],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = node {
+        conn.execute(
+            "UPDATE wiki_links SET to_page=NULL, to_node=?1, resolved=1
+             WHERE resolved=0 AND to_title=?2",
+            params![id, title],
+        )?;
+    }
+    Ok(())
+}
+
 fn validate_page(tx: &rusqlite::Transaction, input: &PageInput, check_docs: bool) -> Result<()> {
     anyhow::ensure!(!input.title.trim().is_empty(), "页面标题不能为空");
+    anyhow::ensure!(
+        input.title.trim().chars().count() <= MAX_PAGE_TITLE_CHARS,
+        "页面标题超过 {MAX_PAGE_TITLE_CHARS} 字"
+    );
     anyhow::ensure!(!input.body.trim().is_empty(), "页面正文不能为空");
+    anyhow::ensure!(
+        input.body.chars().count() <= MAX_PAGE_BODY_CHARS,
+        "页面正文超过 {MAX_PAGE_BODY_CHARS} 字，请拆成多页"
+    );
     let node: String = tx
         .query_row(
             "SELECT kind FROM wiki_nodes WHERE id=?1",
@@ -1077,7 +1283,20 @@ pub(crate) fn parse_frame_outline(text: &str) -> Result<Vec<OutlineTheme>, Strin
         let Some(item) = body.strip_prefix("- ") else {
             return Err(format!("认不出这一行（要用 # / ## 或 - 列表）：{line}"));
         };
-        let depth = (line.len() - body.len()) / 2;
+        let indent = &line[..line.len() - body.len()];
+        if indent.contains('\t') {
+            return Err(format!("列表缩进用两个空格一级，不要用 Tab：{line}"));
+        }
+        let indent_chars = indent.chars().count();
+        if indent_chars % 2 != 0 {
+            return Err(format!(
+                "列表缩进用两个空格一级，当前缩进是 {indent_chars} 个空格：{line}"
+            ));
+        }
+        let depth = indent_chars / 2;
+        if depth > 1 {
+            return Err("框架只分两级（主题 → 分类），列表缩进不要深于一层".into());
+        }
         let name = item.trim().trim_matches('*').trim().to_string();
         if name.is_empty() {
             continue;
@@ -1090,7 +1309,7 @@ pub(crate) fn parse_frame_outline(text: &str) -> Result<Vec<OutlineTheme>, Strin
                 });
                 list_theme = Some(themes.len() - 1);
             }
-            1 => {
+            _ => {
                 let Some(index) = list_theme else {
                     return Err(format!("「{name}」前面没有一级主题（- 主题）"));
                 };
@@ -1102,7 +1321,6 @@ pub(crate) fn parse_frame_outline(text: &str) -> Result<Vec<OutlineTheme>, Strin
                 }
                 themes[index].categories.push(name);
             }
-            _ => return Err("框架只分两级（主题 → 分类），列表缩进不要深于一层".into()),
         }
     }
     if themes.is_empty() {
@@ -1110,17 +1328,31 @@ pub(crate) fn parse_frame_outline(text: &str) -> Result<Vec<OutlineTheme>, Strin
             "没有解析出任何主题；用 `# 主题` / `## 分类` 或 `- 主题` / 缩进 `- 分类` 写".into(),
         );
     }
+    if themes.len() > MAX_FRAME_THEMES {
+        return Err(format!(
+            "主题超过 {MAX_FRAME_THEMES} 个，请拆分后再导入（与 AI 归纳同一上限）"
+        ));
+    }
     let mut seen = std::collections::HashSet::new();
     for theme in &themes {
-        if theme.name.chars().count() > 60 {
-            return Err(format!("主题名超过 60 字：{}", theme.name));
+        if theme.name.chars().count() > MAX_NODE_NAME_CHARS {
+            return Err(format!(
+                "主题名超过 {MAX_NODE_NAME_CHARS} 字：{}",
+                theme.name
+            ));
         }
         if !seen.insert(theme.name.clone()) {
             return Err(format!("主题「{}」重复", theme.name));
         }
+        if theme.categories.len() > MAX_FRAME_CATEGORIES_PER_THEME {
+            return Err(format!(
+                "主题「{}」下分类超过 {MAX_FRAME_CATEGORIES_PER_THEME} 个，请拆分后再导入",
+                theme.name
+            ));
+        }
         for category in &theme.categories {
-            if category.chars().count() > 60 {
-                return Err(format!("分类名超过 60 字：{category}"));
+            if category.chars().count() > MAX_NODE_NAME_CHARS {
+                return Err(format!("分类名超过 {MAX_NODE_NAME_CHARS} 字：{category}"));
             }
         }
     }
@@ -1144,10 +1376,20 @@ pub(crate) fn wikilink_spans(body: &str) -> Vec<(std::ops::Range<usize>, RawLink
         if bytes[i] == b'[' && bytes[i + 1] == b'[' {
             let start = i + 2;
             let mut j = start;
-            while j + 1 < bytes.len() && !(bytes[j] == b']' && bytes[j + 1] == b']') {
+            // 链接必须写在同一行内：跨行的 `[[` 会一路扫到文末，既不是合法页面名，
+            // 也会让每个未闭合的 `[[` 重复扫描后半篇（阅读器每帧解析，长正文会卡）。
+            let mut closed = false;
+            while j + 1 < bytes.len() {
+                if bytes[j] == b'\n' {
+                    break;
+                }
+                if bytes[j] == b']' && bytes[j + 1] == b']' {
+                    closed = true;
+                    break;
+                }
                 j += 1;
             }
-            if j + 1 < bytes.len() {
+            if closed {
                 let inner = &body[start..j];
                 let (target, text) = match inner.split_once('|') {
                     Some((t, x)) => (t.trim(), x.trim()),
@@ -1165,6 +1407,9 @@ pub(crate) fn wikilink_spans(body: &str) -> Vec<(std::ops::Range<usize>, RawLink
                 i = j + 2;
                 continue;
             }
+            // 本行没闭合：从行尾继续，不再反复重扫同一段未闭合文本。
+            i = j.max(i + 1);
+            continue;
         }
         i += 1;
     }

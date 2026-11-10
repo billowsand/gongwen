@@ -24,8 +24,12 @@ pub(crate) struct WikiUiState {
     tree_dirty: bool,
     /// 当前阅读页（含正文与当前版本元数据）。
     open: Option<crate::wiki::WikiPage>,
-    /// 当前页的入链（backlinks）。
+    /// 当前页的入链（backlinks）与已解析的链接跳转表（打开页面时算一次）。
     backlinks: Vec<Backlink>,
+    open_links: HashMap<String, LinkTarget>,
+    /// 当前页当前版本的依据清单与「依据已失效」标记（打开页面时算一次，阅读器不每帧查库）。
+    doc_refs: Vec<(i64, String)>,
+    missing_sources: bool,
     /// 右侧 backlinks 栏是否展开。
     backlinks_open: bool,
     /// 树编辑选中的框架节点 id（改名 / 移动 / 删除的对象）。
@@ -33,8 +37,12 @@ pub(crate) struct WikiUiState {
     move_target: Option<(i64, i64)>,
     /// 选中节点的名称编辑框内容。
     node_name_edit: String,
-    /// 「新建主题 / 在主题下建分类」的名称输入。
+    /// 「新建主题」的名称输入。
     new_node_name: String,
+    /// 「在主题下新建分类」的名称输入（与新建主题分开，避免误建错层级）。
+    new_category_name: String,
+    /// 框架树缓存读取失败的原因（失败时保留脏标记，下帧重试）。
+    cache_error: Option<String>,
     /// 「导入框架」对话框开关与粘贴内容。
     import_open: bool,
     import_text: String,
@@ -52,14 +60,17 @@ pub(crate) struct WikiUiState {
     pub(crate) review_open: bool,
     /// 版本历史窗口：A/B 两版行级对比、回滚（回滚也产生新版本）。
     history_open: bool,
+    /// 版本历史窗口当前绑定的页面 UUID：切页时重置 A/B，避免串页回滚。
+    history_uuid: Option<String>,
     /// 对比的 A（旧）/ B（新）版本号。
     history_a: Option<i64>,
     history_b: Option<i64>,
     /// 回滚二次确认开关与失败原因。
     history_confirm_rollback: bool,
     history_error: Option<String>,
-    /// 缺口清单：红链聚合（树缓存重建时刷新）与窗口开关。
+    /// 缺口清单：红链聚合与「需复核」页（树缓存重建时刷新）及窗口开关。
     gaps: Vec<crate::wiki::RedLinkGap>,
+    needs_review: Vec<(String, String)>,
     gap_open: bool,
     /// 「从缺口建页」对话框：标题来自红链，归属手选分类。
     create_open: bool,
@@ -67,8 +78,21 @@ pub(crate) struct WikiUiState {
     create_node: Option<i64>,
     create_body: String,
     create_error: Option<String>,
+    /// 页面改名 / 删除对话框（页面身份是 UUID；删除要过反链保护）。
+    page_op_open: bool,
+    page_op_uuid: String,
+    page_op_rename: String,
+    page_op_confirm_delete: bool,
+    page_op_error: Option<String>,
     /// 最近一次框架操作的提示（成功说明或失败原因）。
     notice: Option<String>,
+}
+
+impl WikiUiState {
+    /// 资料库增删后让知识库页下一帧重读框架、页面与缺口缓存。
+    pub(crate) fn invalidate(&mut self) {
+        self.tree_dirty = true;
+    }
 }
 
 /// 整编审核台：一批待审页面提案 + 逐页处理状态 + 编辑缓冲。
@@ -85,8 +109,22 @@ pub(crate) struct ReviewState {
     /// 编辑框载入时的原始正文；与当前内容不同即「审核已修改」。
     pub(crate) edit_base: String,
     drafts: HashMap<usize, String>,
+    /// 更新提案的 diff 缓存：正文/版本/编辑内容不变时不重算 LCS（大页每帧重算会卡）。
+    diff: Option<ReviewDiffCache>,
+    /// 上一次采纳/退回的时间：双击的第二次点击会落在同一位置的按钮上，
+    /// 必须挡住，否则第二页还没被审阅就被入库。
+    last_action: Option<std::time::Instant>,
     /// 采纳/写库失败的即时提示。
     pub(crate) error: Option<String>,
+}
+
+/// 更新提案的 diff 缓存（审核台切换页面或编辑正文会使它失效）。
+struct ReviewDiffCache {
+    uuid: String,
+    version: i64,
+    current: String,
+    edit: String,
+    lines: Option<Vec<DiffLine>>,
 }
 
 impl ReviewState {
@@ -103,9 +141,24 @@ impl ReviewState {
             edit_body: body.clone(),
             edit_base: body,
             drafts: HashMap::new(),
+            diff: None,
+            last_action: None,
             set,
             error: None,
         }
+    }
+
+    /// 双击防抖：一次点击只处理一页。400ms 覆盖 egui 的双击间隔。
+    fn action_allowed(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if self
+            .last_action
+            .is_some_and(|at| now.duration_since(at) < std::time::Duration::from_millis(400))
+        {
+            return false;
+        }
+        self.last_action = Some(now);
+        true
     }
 
     fn select(&mut self, index: usize) {
@@ -152,15 +205,21 @@ pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui, numbering: &Numbe
         return;
     }
     if !app.wiki.tree_loaded || app.wiki.tree_dirty {
-        rebuild_cache(app);
-        if let Some(uuid) = app.wiki.open.as_ref().map(|page| page.meta.uuid.clone()) {
-            open_page(app, &uuid);
+        // 读取失败时保留脏标记，下帧重试；不能把空缓存当成「框架为空」。
+        if rebuild_cache(app) {
+            if let Some(uuid) = app.wiki.open.as_ref().map(|page| page.meta.uuid.clone()) {
+                open_page(app, &uuid);
+            }
+            app.wiki.tree_loaded = true;
+            app.wiki.tree_dirty = false;
         }
-        app.wiki.tree_loaded = true;
-        app.wiki.tree_dirty = false;
     }
-    // 链接解析表：标题 → 跳转目标。每帧从缓存重建（条目量级为数十，代价可忽略）。
-    let link_map = build_link_map(&app.wiki.tree, &app.wiki.pages);
+    // 链接解析表只给审核/预览用；审核台没开时不重建。
+    let link_map = if app.wiki.review_open {
+        build_link_map(&app.wiki.tree, &app.wiki.pages)
+    } else {
+        HashMap::new()
+    };
 
     let height = ui.available_height();
     let rail_w = if app.wiki.backlinks_open { 210.0 } else { 0.0 };
@@ -192,6 +251,7 @@ pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui, numbering: &Numbe
     version_history_window(app, ui.ctx());
     gap_window(app, ui.ctx());
     create_page_window(app, ui.ctx());
+    page_op_window(app, ui.ctx());
 }
 
 /// 「从资料归纳」的进度、停止与错误提示，贴在树上方。
@@ -317,6 +377,7 @@ fn review_desk(
     let mut open = true;
     let mut adopt = false;
     let mut reject = false;
+    let mut reject_all = false;
     let mut preview_nav: Option<String> = None;
     let mut preview_doc = None;
     egui::Window::new("整编审核")
@@ -331,12 +392,21 @@ fn review_desk(
                 return;
             };
             let pending = review.done.iter().filter(|done| !**done).count();
-            ui.weak(format!(
-                "分类「{}」 · 待审 {pending}/{} 页 · 作业 {}",
-                review.set.category,
-                review.set.pages.len(),
-                review.set.run_id
-            ));
+            ui.horizontal(|ui| {
+                ui.weak(format!(
+                    "分类「{}」 · 待审 {pending}/{} 页 · 作业 {}",
+                    review.set.category,
+                    review.set.pages.len(),
+                    review.set.run_id
+                ));
+                if ui
+                    .small_button("全部退回")
+                    .on_hover_text("放弃本批提案，不写库；之后可重新发起整编或更新")
+                    .clicked()
+                {
+                    reject_all = true;
+                }
+            });
             ui.weak("页面只是 AI 提案：逐页核对，正文可直接改；只有点「采纳本页」才会写库。");
             ui.separator();
             ui.horizontal(|ui| {
@@ -410,16 +480,32 @@ fn review_desk(
                                     if page.base_version != Some(current_page.meta.current_version) {
                                         ui.colored_label(theme::warn(), "页面版本已变化，请退回并按当前版本重新发起。");
                                     }
-                                    match line_diff(&current_page.body, &review.edit_body) {
-                                        Some(lines) => diff_view(
-                                            ui,
-                                            &format!(
-                                                "v{} → 提案",
-                                                current_page.meta.current_version
-                                            ),
-                                            &lines,
-                                        ),
-                                        None => {
+                                    // diff 只在（页面、版本、编辑内容）变化时重算：
+                                    // 2 万字正文的 LCS 每帧跑一次会明显卡输入。
+                                    let stale = review.diff.as_ref().is_none_or(|cache| {
+                                        cache.uuid != uuid
+                                            || cache.version != current_page.meta.current_version
+                                            || cache.current != current_page.body
+                                            || cache.edit != review.edit_body
+                                    });
+                                    if stale {
+                                        review.diff = Some(ReviewDiffCache {
+                                            uuid: uuid.clone(),
+                                            version: current_page.meta.current_version,
+                                            current: current_page.body.clone(),
+                                            edit: review.edit_body.clone(),
+                                            lines: line_diff(&current_page.body, &review.edit_body),
+                                        });
+                                    }
+                                    let version_label = format!(
+                                        "v{} → 提案",
+                                        current_page.meta.current_version
+                                    );
+                                    match review.diff.as_ref().map(|cache| &cache.lines) {
+                                        Some(Some(lines)) => {
+                                            diff_view(ui, &version_label, lines, preview_h)
+                                        }
+                                        Some(None) => {
                                             ui.weak("当前正文行数太多，算不动 diff；按预览显示。");
                                             egui::ScrollArea::vertical()
                                                 .max_height(preview_h)
@@ -434,6 +520,7 @@ fn review_desk(
                                                     );
                                                 });
                                         }
+                                        None => {}
                                     }
                                 }
                                 None => {
@@ -487,9 +574,20 @@ fn review_desk(
     if let Some(uuid) = preview_nav {
         open_page(app, &uuid);
     }
-    if adopt {
+    if reject_all {
+        // 放弃本批：全部标记为已处理但不采纳；全部处理完的收尾逻辑会清空审核台。
+        if let Some(review) = app.wiki.review.as_mut() {
+            for done in review.done.iter_mut() {
+                *done = true;
+            }
+            review.error = None;
+        }
+    } else if adopt {
         review_adopt(app);
-    } else if reject && let Some(review) = app.wiki.review.as_mut() {
+    } else if reject
+        && let Some(review) = app.wiki.review.as_mut()
+        && review.action_allowed()
+    {
         review_mark_done_advance(review);
     }
     // 全部处理完：给结论、清审核台、刷新树（新页面挂进分类）。
@@ -520,6 +618,10 @@ fn review_adopt(app: &mut GongwenApp) {
         return;
     };
     if review.done.get(review.selected) == Some(&true) {
+        return;
+    }
+    // 防双击：采纳后选中项会移到下一页、按钮位置不变，未防抖会把下一页也采纳。
+    if !review.action_allowed() {
         return;
     }
     let Some(page) = review.set.pages.get(review.selected).cloned() else {
@@ -614,6 +716,16 @@ fn version_history_window(app: &mut GongwenApp, ctx: &egui::Context) {
         return;
     };
     let uuid = page.meta.uuid.clone();
+    // 版本窗跟随当前阅读页：换页后 A/B 必须重置，否则会把上一页选过的版本号
+    // 套到这一页上，甚至回滚到本页没选过的版本。
+    if app.wiki.history_uuid.as_deref() != Some(uuid.as_str()) {
+        app.wiki.history_uuid = Some(uuid.clone());
+        app.wiki.history_a =
+            (page.meta.current_version > 1).then_some(page.meta.current_version - 1);
+        app.wiki.history_b = Some(page.meta.current_version);
+        app.wiki.history_confirm_rollback = false;
+        app.wiki.history_error = None;
+    }
     let mut open = true;
     let mut rollback = false;
     egui::Window::new(format!("版本历史 · {}", page.meta.title))
@@ -687,7 +799,12 @@ fn version_history_window(app: &mut GongwenApp, ctx: &egui::Context) {
             });
             match (body_a, body_b) {
                 (Some(ref old), Some(ref new)) if a != b => match line_diff(old, new) {
-                    Some(lines) => diff_view(ui, &format!("v{a} → v{b}"), &lines),
+                    Some(lines) => diff_view(
+                        ui,
+                        &format!("v{a} → v{b}"),
+                        &lines,
+                        (ui.available_height() * 0.6).max(120.0),
+                    ),
                     None => {
                         ui.weak("两版行数太多，算不动行级 diff；请改选正文较小的版本。");
                     }
@@ -765,7 +882,7 @@ enum DiffLine {
 }
 
 /// 渲染行级 diff 小结 + 清单：删除行红色、新增行主题强调色、相同行弱色。
-fn diff_view(ui: &mut egui::Ui, title: &str, lines: &[DiffLine]) {
+fn diff_view(ui: &mut egui::Ui, title: &str, lines: &[DiffLine], max_height: f32) {
     ui.weak(format!(
         "{title}：− 删除 {} 行，+ 新增 {} 行",
         lines
@@ -778,6 +895,7 @@ fn diff_view(ui: &mut egui::Ui, title: &str, lines: &[DiffLine]) {
             .count()
     ));
     egui::ScrollArea::vertical()
+        .max_height(max_height)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for line in lines {
@@ -860,62 +978,90 @@ fn gap_window(app: &mut GongwenApp, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            let gaps = app.wiki.gaps.clone();
-            let empty = empty_categories(app);
-            let missing = app
-                .wiki_store
-                .as_ref()
-                .and_then(|store| store.pages_needing_review().ok())
-                .unwrap_or_default();
-            if gaps.is_empty() && empty.is_empty() && missing.is_empty() {
-                ui.weak("没有缺口：红链都有落点，分类都有页面。");
-                return;
-            }
-            if !missing.is_empty() {
-                ui.strong("需复核（依据资料已删除或替换）");
-                for (uuid, title) in missing {
-                    if ui.link(title).clicked() {
-                        nav = Some(uuid);
+            // 缺口可能很多：整个清单放进有高度上限的滚动区，否则后面的条目
+            // 会被窗口裁掉且无法滚动。
+            egui::ScrollArea::vertical()
+                .max_height((ui.available_height() - 12.0).max(220.0))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let gaps = app.wiki.gaps.clone();
+                    let empty = empty_categories(app);
+                    let missing = app.wiki.needs_review.clone();
+                    let no_guide = nodes_without_guide(app);
+                    if gaps.is_empty()
+                        && empty.is_empty()
+                        && missing.is_empty()
+                        && no_guide.is_empty()
+                    {
+                        ui.weak("没有缺口：红链都有落点，分类都有条目页，节点都有导览页。");
+                        return;
                     }
-                }
-            }
-            if !gaps.is_empty() {
-                ui.label(egui::RichText::new("待建页（正文里的红链）").strong());
-                for gap in &gaps {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&gap.title).strong());
-                        let sources = gap
-                            .refs
-                            .iter()
-                            .map(|link| link.from_title.as_str())
-                            .collect::<Vec<_>>()
-                            .join("、");
-                        ui.weak(format!("被 {} 页引用", gap.refs.len()))
-                            .on_hover_text(format!("引用来源：{sources}"));
-                        if ui.button("建此页").clicked() {
-                            app.wiki.create_open = true;
-                            app.wiki.create_title = gap.title.clone();
-                            app.wiki.create_node = None;
-                            app.wiki.create_body = String::new();
-                            app.wiki.create_error = None;
+                    if !missing.is_empty() {
+                        ui.strong("需复核（依据资料已删除或替换）");
+                        for (uuid, title) in &missing {
+                            if ui.link(title).clicked() {
+                                nav = Some(uuid.clone());
+                            }
                         }
-                    });
-                }
-                ui.add_space(6.0);
-            }
-            if !empty.is_empty() {
-                ui.label(egui::RichText::new("还没有页面的分类").strong());
-                for (theme, category, id) in &empty {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{theme} / {category}"));
-                        if ui.button("整编此分类").clicked()
-                            && app.start_wiki_write(*id, Vec::new())
-                        {
-                            app.wiki.gap_open = false;
+                        ui.add_space(6.0);
+                    }
+                    if !no_guide.is_empty() {
+                        ui.label(egui::RichText::new("缺导览页的节点").strong());
+                        for (theme, category, id) in &no_guide {
+                            ui.horizontal(|ui| {
+                                let label = if theme.is_empty() {
+                                    format!("{category}（主题）")
+                                } else {
+                                    format!("{theme} / {category}")
+                                };
+                                ui.label(label);
+                                if ui.button("整编导览").clicked()
+                                    && app.start_wiki_write(*id, Vec::new())
+                                {
+                                    app.wiki.gap_open = false;
+                                }
+                            });
                         }
-                    });
-                }
-            }
+                        ui.add_space(6.0);
+                    }
+                    if !gaps.is_empty() {
+                        ui.label(egui::RichText::new("待建页（正文里的红链）").strong());
+                        for gap in &gaps {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(&gap.title).strong());
+                                let sources = gap
+                                    .refs
+                                    .iter()
+                                    .map(|link| link.from_title.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("、");
+                                ui.weak(format!("被 {} 页引用", gap.refs.len()))
+                                    .on_hover_text(format!("引用来源：{sources}"));
+                                if ui.button("建此页").clicked() {
+                                    app.wiki.create_open = true;
+                                    app.wiki.create_title = gap.title.clone();
+                                    app.wiki.create_node = None;
+                                    app.wiki.create_body = String::new();
+                                    app.wiki.create_error = None;
+                                }
+                            });
+                        }
+                        ui.add_space(6.0);
+                    }
+                    if !empty.is_empty() {
+                        ui.label(egui::RichText::new("还没有条目页的分类").strong());
+                        for (theme, category, id) in &empty {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("{theme} / {category}"));
+                                if ui.button("整编此分类").clicked()
+                                    && app.start_wiki_write(*id, Vec::new())
+                                {
+                                    app.wiki.gap_open = false;
+                                }
+                            });
+                        }
+                    }
+                });
         });
     if let Some(uuid) = nav {
         open_page(app, &uuid);
@@ -974,7 +1120,9 @@ fn create_page_window(app: &mut GongwenApp, ctx: &egui::Context) {
                     });
                 app.wiki.create_node = (selected != 0).then_some(selected);
             });
-            ui.weak("正文写法与公文一致，可用 [[页面链接]]；来源记为「人工建页」。");
+            ui.weak(
+                "正文写法与公文一致，可用 [[页面链接]]；来源记为「人工建页」。                 人工建页没有资料依据，只供人工阅读，不参与问答/写作自动取证；                 需要作为知识被引用时，请再走一次页面更新补上依据。",
+            );
             ui.add(
                 egui::TextEdit::multiline(&mut app.wiki.create_body)
                     .desired_rows(10)
@@ -1022,6 +1170,121 @@ fn create_page_window(app: &mut GongwenApp, ctx: &egui::Context) {
     }
 }
 
+/// 页面改名 / 删除：改名按 UUID 跟随（不产生新版本），删除要先过反链保护，
+/// 并把确认后的删除交给存储层再次判定。
+fn page_op_window(app: &mut GongwenApp, ctx: &egui::Context) {
+    if !app.wiki.page_op_open {
+        return;
+    }
+    let uuid = app.wiki.page_op_uuid.clone();
+    if uuid.is_empty() {
+        app.wiki.page_op_open = false;
+        return;
+    }
+    let mut open = true;
+    let mut rename = false;
+    let mut delete = false;
+    egui::Window::new("页面改名与删除")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(460.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.weak(
+                "页面身份按 UUID 保存：改名不会断开任何链接，也不产生新版本；                 删除前必须先解除其他页面对本页的引用。",
+            );
+            ui.horizontal(|ui| {
+                ui.label("标题");
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.wiki.page_op_rename)
+                        .desired_width(280.0),
+                );
+            });
+            if let Some(error) = &app.wiki.page_op_error {
+                ui.colored_label(theme::warn(), error);
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !app.wiki.page_op_rename.trim().is_empty(),
+                        egui::Button::new("改名"),
+                    )
+                    .clicked()
+                {
+                    rename = true;
+                }
+                if ui
+                    .button(egui::RichText::new("删除本页").color(theme::warn()))
+                    .clicked()
+                {
+                    app.wiki.page_op_confirm_delete = true;
+                }
+                if ui.button("取消").clicked() {
+                    app.wiki.page_op_open = false;
+                }
+            });
+            if app.wiki.page_op_confirm_delete {
+                ui.add_space(4.0);
+                ui.colored_label(
+                    theme::warn(),
+                    "确认删除？本页的全部版本历史会一起删除，不能恢复。",
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(egui::RichText::new("确认删除").color(theme::warn()))
+                        .clicked()
+                    {
+                        delete = true;
+                    }
+                    if ui.button("取消删除").clicked() {
+                        app.wiki.page_op_confirm_delete = false;
+                    }
+                });
+            }
+        });
+    if !open {
+        app.wiki.page_op_open = false;
+    }
+    if rename {
+        let title = app.wiki.page_op_rename.trim().to_string();
+        let result = app
+            .wiki_store
+            .as_ref()
+            .map(|store| store.rename_page(&uuid, &title))
+            .unwrap_or_else(|| Err(anyhow::anyhow!("知识库不可用")));
+        match result {
+            Ok(()) => {
+                app.wiki.notice = Some(format!("页面已改名为「{title}」。"));
+                app.wiki.page_op_open = false;
+                app.wiki.tree_dirty = true;
+                open_page(app, &uuid);
+            }
+            Err(error) => app.wiki.page_op_error = Some(format!("改名失败：{error:#}")),
+        }
+    } else if delete {
+        let result = app
+            .wiki_store
+            .as_ref()
+            .map(|store| store.delete_page(&uuid))
+            .unwrap_or_else(|| Err(anyhow::anyhow!("知识库不可用")));
+        match result {
+            Ok(()) => {
+                app.wiki.notice = Some("页面已删除（含全部版本历史）。".into());
+                app.wiki.page_op_open = false;
+                app.wiki.open = None;
+                app.wiki.doc_refs = Vec::new();
+                app.wiki.missing_sources = false;
+                app.wiki.backlinks = Vec::new();
+                app.wiki.tree_dirty = true;
+                app.knowledge_dirty = true;
+            }
+            Err(error) => app.wiki.page_op_error = Some(format!("删除失败：{error:#}")),
+        }
+    }
+}
+
 /// 还没有任何页面（含导览页）的分类：theme、category、node_id。
 fn empty_categories(app: &GongwenApp) -> Vec<(String, String, i64)> {
     app.wiki
@@ -1031,15 +1294,32 @@ fn empty_categories(app: &GongwenApp) -> Vec<(String, String, i64)> {
             t.categories
                 .iter()
                 .filter(|c| {
+                    // 只有导览页不算「有覆盖」：导览本身不承载条目知识。
                     app.wiki
                         .pages
                         .get(&c.id)
-                        .is_none_or(|pages| pages.is_empty())
+                        .is_none_or(|pages| !pages.iter().any(|page| page.kind == "normal"))
                 })
                 .map(|c| (t.theme.name.clone(), c.name.clone(), c.id))
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// 还没有导览页的主题/分类：(主题名, 节点名, 节点 id)；主题项的主题名为空。
+fn nodes_without_guide(app: &GongwenApp) -> Vec<(String, String, i64)> {
+    let mut out = Vec::new();
+    for t in &app.wiki.tree {
+        if t.theme_guide.is_none() {
+            out.push((String::new(), t.theme.name.clone(), t.theme.id));
+        }
+        for c in &t.categories {
+            if !t.category_guides.contains_key(&c.id) {
+                out.push((t.theme.name.clone(), c.name.clone(), c.id));
+            }
+        }
+    }
+    out
 }
 
 /// 导入框架对话框：粘贴 Markdown 大纲（# 主题 / ## 分类，或 - 列表两级），
@@ -1145,27 +1425,50 @@ fn parsed_themes(app: &GongwenApp) -> Result<Vec<OutlineTheme>, String> {
 
 // ── 缓存与链接解析 ──────────────────────────────────────────────────────────
 
-fn rebuild_cache(app: &mut GongwenApp) {
+/// 重建框架树、页面清单与缺口/需复核缓存。任何一步读失败都返回 false，
+/// 由调用方保留脏标记重试，不能把「读失败」显示成「还没有知识框架」。
+fn rebuild_cache(app: &mut GongwenApp) -> bool {
     let Some(store) = app.wiki_store.as_ref() else {
-        return;
+        return false;
     };
-    let Ok(tree) = store.list_tree() else {
-        return;
+    let tree = match store.list_tree() {
+        Ok(tree) => tree,
+        Err(error) => {
+            app.wiki.cache_error = Some(format!("知识框架读取失败：{error:#}"));
+            return false;
+        }
     };
     let mut pages = HashMap::new();
     for t in &tree {
-        if let Ok(v) = store.list_pages(t.theme.id) {
-            pages.insert(t.theme.id, v);
+        match store.list_pages(t.theme.id) {
+            Ok(v) => {
+                pages.insert(t.theme.id, v);
+            }
+            Err(error) => {
+                app.wiki.cache_error = Some(format!("页面清单读取失败：{error:#}"));
+                return false;
+            }
         }
         for c in &t.categories {
-            if let Ok(v) = store.list_pages(c.id) {
-                pages.insert(c.id, v);
+            match store.list_pages(c.id) {
+                Ok(v) => {
+                    pages.insert(c.id, v);
+                }
+                Err(error) => {
+                    app.wiki.cache_error = Some(format!("页面清单读取失败：{error:#}"));
+                    return false;
+                }
             }
         }
     }
+    let gaps = store.red_link_gaps().unwrap_or_default();
+    let needs_review = store.pages_needing_review().unwrap_or_default();
     app.wiki.tree = tree;
     app.wiki.pages = pages;
-    app.wiki.gaps = store.red_link_gaps().unwrap_or_default();
+    app.wiki.gaps = gaps;
+    app.wiki.needs_review = needs_review;
+    app.wiki.cache_error = None;
+    true
 }
 
 /// 链接跳转目标：已建页、框架节点（导览页或待建导览）。解析表里没有的目标
@@ -1268,12 +1571,20 @@ fn open_page(app: &mut GongwenApp, uuid: &str) {
     };
     match store.get_page(uuid) {
         Ok(Some(page)) => {
+            // 阅读器每帧都要显示依据与失效提示：在这里查一次并缓存，
+            // 不要每帧再查两遍库。
+            app.wiki.doc_refs = store.page_doc_refs(uuid).unwrap_or_default();
+            app.wiki.missing_sources = store.page_has_missing_sources(uuid).unwrap_or(false);
             app.wiki.backlinks = store.backlinks(uuid).unwrap_or_default();
+            app.wiki.open_links = saved_link_map(app, &page);
             app.wiki.open = Some(page);
         }
         Ok(None) => {
             app.wiki.open = None;
+            app.wiki.doc_refs = Vec::new();
+            app.wiki.missing_sources = false;
             app.wiki.backlinks = Vec::new();
+            app.wiki.open_links.clear();
         }
         Err(_) => {}
     }
@@ -1282,17 +1593,20 @@ fn open_page(app: &mut GongwenApp, uuid: &str) {
 // ── 左栏：框架树 ────────────────────────────────────────────────────────────
 
 fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) {
+    let busy = app.wiki.frame_progress.is_some() || app.wiki.write_progress.is_some();
     ui.horizontal(|ui| {
         ui.heading("知识框架");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
-                .add(theme::icon_text_button(theme::Icon::FileUp, "导入框架"))
+                .add_enabled(
+                    !busy,
+                    theme::icon_text_button(theme::Icon::FileUp, "导入框架"),
+                )
                 .on_hover_text("粘贴 Markdown 大纲（# 主题 / ## 分类）批量建框架")
                 .clicked()
             {
                 app.wiki.import_open = true;
             }
-            let busy = app.wiki.frame_progress.is_some();
             if ui
                 .add_enabled(
                     !busy,
@@ -1305,6 +1619,9 @@ fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) 
             }
         });
     });
+    if let Some(error) = &app.wiki.cache_error {
+        ui.colored_label(theme::warn(), error);
+    }
     frame_job_strip(app, ui);
     write_job_strip(app, ui);
     // 审核台入口：作业交回提案后常驻，关掉窗口可从这儿 reopen。
@@ -1320,8 +1637,11 @@ fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) 
             }
         }
     }
-    // 缺口入口：待建页红链 + 无页面覆盖的分类。
-    let gap_count = app.wiki.gaps.len() + empty_categories(app).len();
+    // 缺口入口：待建页红链 + 无条目页的分类 + 需复核页 + 缺导览页的节点。
+    let gap_count = app.wiki.gaps.len()
+        + empty_categories(app).len()
+        + app.wiki.needs_review.len()
+        + nodes_without_guide(app).len();
     if ui
         .add(theme::icon_text_button(
             theme::Icon::List,
@@ -1340,7 +1660,7 @@ fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) 
         let resp = ui.add(edit);
         let name = app.wiki.new_node_name.trim().to_string();
         let create = ui
-            .add_enabled(!name.is_empty(), egui::Button::new("建主题"))
+            .add_enabled(!name.is_empty() && !busy, egui::Button::new("建主题"))
             .clicked()
             || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
         if create {
@@ -1403,6 +1723,8 @@ fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
         app.wiki.selected_node = None;
         return;
     };
+    // 作业运行中不改进框架：删掉正在整编的目标分类会让整批提案作废。
+    let busy = app.wiki.frame_progress.is_some() || app.wiki.write_progress.is_some();
     ui.group(|ui| {
         ui.horizontal(|ui| {
             ui.label(if is_theme { "主题" } else { "分类" });
@@ -1410,7 +1732,7 @@ fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
             let new_name = app.wiki.node_name_edit.trim().to_string();
             if ui
                 .add_enabled(
-                    !new_name.is_empty() && new_name != name,
+                    !busy && !new_name.is_empty() && new_name != name,
                     egui::Button::new("改名"),
                 )
                 .clicked()
@@ -1427,13 +1749,13 @@ fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
         });
         if is_theme {
             ui.horizontal(|ui| {
-                let edit = egui::TextEdit::singleline(&mut app.wiki.new_node_name)
+                let edit = egui::TextEdit::singleline(&mut app.wiki.new_category_name)
                     .desired_width(120.0)
                     .hint_text("分类名称");
                 let resp = ui.add(edit);
-                let category = app.wiki.new_node_name.trim().to_string();
+                let category = app.wiki.new_category_name.trim().to_string();
                 let create = ui
-                    .add_enabled(!category.is_empty(), egui::Button::new("建分类"))
+                    .add_enabled(!busy && !category.is_empty(), egui::Button::new("建分类"))
                     .clicked()
                     || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                 if create {
@@ -1448,7 +1770,7 @@ fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
                             Err(error) => app.wiki.notice = Some(format!("建分类失败：{error:#}")),
                         }
                     }
-                    app.wiki.new_node_name.clear();
+                    app.wiki.new_category_name.clear();
                 }
             });
         } else {
@@ -1476,8 +1798,9 @@ fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
                         }
                     });
                 app.wiki.move_target = Some((id, target));
-                if target != current
-                    && ui.button("移过去").clicked()
+                if ui
+                    .add_enabled(!busy && target != current, egui::Button::new("移过去"))
+                    .clicked()
                     && let Some(store) = app.wiki_store.as_ref()
                 {
                     match store.move_category(id, target) {
@@ -1514,7 +1837,10 @@ fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
         }
         ui.horizontal(|ui| {
             if ui
-                .button(egui::RichText::new("删除节点").color(theme::warn()))
+                .add_enabled(
+                    !busy,
+                    egui::Button::new(egui::RichText::new("删除节点").color(theme::warn())),
+                )
                 .clicked()
                 && let Some(store) = app.wiki_store.as_ref()
             {
@@ -1581,6 +1907,33 @@ fn reader(
             });
         }
         ui.weak(format!("v{}", page.meta.current_version));
+        if ui
+            .small_button("改名")
+            .on_hover_text("页面身份按 UUID 保存，改名后所有链接仍指本页，不产生新版本")
+            .clicked()
+        {
+            app.wiki.page_op_open = true;
+            app.wiki.page_op_uuid = page.meta.uuid.clone();
+            app.wiki.page_op_rename = page.meta.title.clone();
+            app.wiki.page_op_confirm_delete = false;
+            app.wiki.page_op_error = None;
+        }
+        let refs = app.wiki.backlinks.len();
+        let delete = ui.add_enabled(refs == 0, egui::Button::new("删除").small());
+        if refs > 0 {
+            delete.on_hover_text(format!(
+                "被 {refs} 个页面引用，先解除引用才能删除（删除保护）"
+            ));
+        } else if delete
+            .on_hover_text("删除本页及其全部版本历史，不能恢复")
+            .clicked()
+        {
+            app.wiki.page_op_open = true;
+            app.wiki.page_op_uuid = page.meta.uuid.clone();
+            app.wiki.page_op_rename = page.meta.title.clone();
+            app.wiki.page_op_confirm_delete = true;
+            app.wiki.page_op_error = None;
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let busy = app.wiki.frame_progress.is_some() || app.wiki.write_progress.is_some();
             if ui
@@ -1603,6 +1956,7 @@ fn reader(
                 app.wiki.history_open = true;
                 app.wiki.history_confirm_rollback = false;
                 app.wiki.history_error = None;
+                app.wiki.history_uuid = Some(page.meta.uuid.clone());
                 let current = page.meta.current_version;
                 app.wiki.history_b = Some(current);
                 app.wiki.history_a = (current > 1).then_some(current - 1);
@@ -1617,25 +1971,25 @@ fn reader(
             }
         });
     });
-    if let Some(store) = app.wiki_store.as_ref()
-        && let Ok(refs) = store.page_doc_refs(&page.meta.uuid)
-    {
-        if store
-            .page_has_missing_sources(&page.meta.uuid)
-            .unwrap_or(false)
-        {
-            ui.colored_label(theme::warn(), "部分依据已删除或替换，请复核本页。");
-        }
+    if app.wiki.missing_sources {
+        ui.colored_label(theme::warn(), "部分依据已删除或替换，请复核本页。");
+    }
+    if !app.wiki.doc_refs.is_empty() {
+        let refs = app.wiki.doc_refs.clone();
         let mut doc = None;
         show_doc_refs(ui, &refs, &mut doc);
         if let Some(id) = doc {
             app.knowledge_open_preview(id);
         }
+    } else if !app.wiki.missing_sources {
+        ui.weak(
+            "本页没有登记依据：仅供人工阅读，不参与问答与写作的自动取证；             补上依据（可由更新作业带入）后自动进入取证。",
+        );
     }
     ui.add_space(6.0);
     ui.separator();
     ui.add_space(6.0);
-    let links = saved_link_map(app, &page);
+    let links = app.wiki.open_links.clone();
     egui::ScrollArea::vertical()
         .id_salt(&page.meta.uuid)
         .show(ui, |ui| {

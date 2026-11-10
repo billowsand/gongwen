@@ -71,6 +71,12 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+/** 按 Unicode 码点计字数，与 Rust 的 `chars().count()` 对齐（JS `.length` 会把
+ *  代理对算两个，含表情的正文会被 host 误判超限）。 */
+function charLength(value) {
+  return [...value].length;
+}
+
 /**
  * 维基框架交付的结构校验（与 Rust 侧 parse_frame_delivery 对齐；这里只卡结构，
  * 依据编号是否真实由 Rust 闸门判定）。每个分类必须至少挂靠一篇依据文档——
@@ -80,30 +86,40 @@ function validateWikiFrame(themes) {
   if (themes.length > WIKI_LIMITS.themes) {
     throw new Error(`主题超过 ${WIKI_LIMITS.themes} 个，请收窄归纳范围`);
   }
+  const themeNames = new Set();
   for (const [tIndex, theme] of themes.entries()) {
     const label = `themes 第 ${tIndex + 1} 项`;
     if (!isPlainObject(theme)) throw new Error(`${label}必须是对象`);
     if (typeof theme.name !== "string" || theme.name.trim() === "") {
       throw new Error(`${label}缺少主题名 name`);
     }
-    if (theme.name.trim().length > WIKI_LIMITS.nodeNameChars) {
+    if (charLength(theme.name.trim()) > WIKI_LIMITS.nodeNameChars) {
       throw new Error(`主题名超过 ${WIKI_LIMITS.nodeNameChars} 字：${theme.name}`);
     }
+    if (themeNames.has(theme.name.trim())) {
+      throw new Error(`主题「${theme.name.trim()}」重复；主题名必须唯一`);
+    }
+    themeNames.add(theme.name.trim());
     if (!Array.isArray(theme.categories) || theme.categories.length === 0) {
       throw new Error(`主题「${theme.name}」必须包含非空的 categories 数组`);
     }
     if (theme.categories.length > WIKI_LIMITS.categoriesPerTheme) {
       throw new Error(`主题「${theme.name}」下分类超过 ${WIKI_LIMITS.categoriesPerTheme} 个，请合并同类`);
     }
+    const categoryNames = new Set();
     for (const [cIndex, category] of theme.categories.entries()) {
       const clabel = `主题「${theme.name}」第 ${cIndex + 1} 个分类`;
       if (!isPlainObject(category)) throw new Error(`${clabel}必须是对象`);
       if (typeof category.name !== "string" || category.name.trim() === "") {
         throw new Error(`${clabel}缺少分类名 name`);
       }
-      if (category.name.trim().length > WIKI_LIMITS.nodeNameChars) {
+      if (charLength(category.name.trim()) > WIKI_LIMITS.nodeNameChars) {
         throw new Error(`分类名超过 ${WIKI_LIMITS.nodeNameChars} 字：${category.name}`);
       }
+      if (categoryNames.has(category.name.trim())) {
+        throw new Error(`主题「${theme.name.trim()}」下分类「${category.name.trim()}」重复`);
+      }
+      categoryNames.add(category.name.trim());
       if (!Array.isArray(category.doc_ids) || category.doc_ids.length === 0
         || category.doc_ids.some((id) => !Number.isSafeInteger(id))) {
         throw new Error(`分类「${category.name}」的 doc_ids 必须是至少一个资料编号；没有依据资料的分类不要交`);
@@ -123,36 +139,59 @@ function validateWikiPages(pages, { requireUuid, maxPages }) {
   if (pages.length > maxPages) {
     throw new Error(`一次交付最多 ${maxPages} 页，本轮交了 ${pages.length} 页；请收窄范围重试`);
   }
+  const seenTitles = new Set();
+  const seenUuids = new Set();
+  let guideCount = 0;
   for (const [index, page] of pages.entries()) {
     const label = `pages 第 ${index + 1} 页`;
     if (!isPlainObject(page)) throw new Error(`${label}必须是对象`);
     if (requireUuid && (typeof page.uuid !== "string" || page.uuid.trim() === "")) {
       throw new Error(`${label}缺少目标页 uuid；更新交付每页都要带回发起时给的 uuid`);
     }
+    if (!requireUuid && page.uuid !== undefined) {
+      throw new Error(`${label}不应带 uuid；新建页不要带 uuid，要改已有页请走更新作业`);
+    }
+    if (requireUuid) {
+      if (seenUuids.has(page.uuid.trim())) {
+        throw new Error(`本轮交付里页面 ${page.uuid.trim()} 重复`);
+      }
+      seenUuids.add(page.uuid.trim());
+    }
     if (typeof page.title !== "string" || page.title.trim() === "") {
       throw new Error(`${label}缺少标题 title`);
     }
-    if (page.title.trim().length > WIKI_LIMITS.titleChars) {
+    if (charLength(page.title.trim()) > WIKI_LIMITS.titleChars) {
       throw new Error(`页面标题超过 ${WIKI_LIMITS.titleChars} 字：${page.title}`);
     }
+    if (seenTitles.has(page.title.trim())) {
+      throw new Error(`本轮交付里页面「${page.title.trim()}」重复`);
+    }
+    seenTitles.add(page.title.trim());
     if (page.kind !== "normal" && page.kind !== "guide") {
       throw new Error(`${label}的 kind 必须是 normal 或 guide`);
+    }
+    if (page.kind === "guide") {
+      guideCount += 1;
+      if (guideCount > 1) throw new Error("一次交付只能有一篇导览页");
     }
     if (typeof page.body !== "string" || page.body.trim() === "") {
       throw new Error(`页面「${page.title}」缺少正文 body`);
     }
-    if (page.body.length > WIKI_LIMITS.bodyChars) {
+    if (charLength(page.body) > WIKI_LIMITS.bodyChars) {
       throw new Error(`页面「${page.title}」正文超过 ${WIKI_LIMITS.bodyChars} 字，请拆成多页`);
     }
     if (page.change_note !== undefined
-      && (typeof page.change_note !== "string" || page.change_note.trim().length > WIKI_LIMITS.changeNoteChars)) {
+      && (typeof page.change_note !== "string" || charLength(page.change_note.trim()) > WIKI_LIMITS.changeNoteChars)) {
       throw new Error(`页面「${page.title}」变更说明超过 ${WIKI_LIMITS.changeNoteChars} 字，请压缩到一两句话`);
+    }
+    if (requireUuid && (typeof page.change_note !== "string" || page.change_note.trim() === "")) {
+      throw new Error(`页面「${page.title}」缺 change_note：更新交付每页都要用一两句话说清这版改了什么`);
     }
     if (!Array.isArray(page.doc_refs) || page.doc_refs.length === 0
       || page.doc_refs.length > WIKI_LIMITS.docRefs
       || page.doc_refs.some((ref) => !isPlainObject(ref) || !Number.isSafeInteger(ref.doc_id)
         || typeof ref.note !== "string" || ref.note.trim() === ""
-        || ref.note.length > WIKI_LIMITS.noteChars)) {
+        || charLength(ref.note) > WIKI_LIMITS.noteChars)) {
       throw new Error(`页面「${page.title}」的 doc_refs 必须是 1 至 ${WIKI_LIMITS.docRefs} 条 {doc_id, note}，note 用${WIKI_LIMITS.noteChars}字以内说明支撑要点`);
     }
     // 正文里的每个〔E编号〕都要在 doc_refs 里有对应条目（与 Rust 闸门一致）：

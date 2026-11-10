@@ -136,6 +136,8 @@ impl GongwenApp {
             .as_ref()
             .and_then(|store| store.doc_wiki_status().ok())
             .unwrap_or_default();
+        // 资料增删会影响「需复核」与「未整编」派生状态，让知识库页下一帧重读缓存。
+        self.wiki.invalidate();
     }
 
     /// 只在资料列表刷新时检索。未轮到的资料保留到下一次提示。

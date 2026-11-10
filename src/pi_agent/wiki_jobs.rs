@@ -1,12 +1,12 @@
-//! 维基知识库的 Pi 作业：框架归纳（页面整编在切片 5 接入同一作业链）。
+//! 维基知识库的 Pi 作业：框架归纳、页面整编与页面更新。
 //!
 //! 与任务作业同一套链：不占写作门禁，host 用技能文件里的自然语言步骤工作，
 //! 用 `submit_task` 交一份 JSON；Rust 在这里做确定性复核——主题/分类名合规、
 //! 无重名、依据文档编号必须真实存在——通过后也只是一份**提案**，由用户在
-//! 知识库页确认后才写框架。
+//! 知识库页确认后才写库。
 //!
-//! 工具面：只读全套（资料库检索/读取、词库、日期），不挂维基工具（框架还没有），
-//! 不挂任务工具，不是任务作业（没有 task_only 收窄）。
+//! 工具面：只读全套（资料库检索/读取、日期、维基四工具）；不挂任务工具、
+//! 词库与数据接口，不是任务作业（没有 task_only 收窄）。
 
 use super::{
     PiBridge, PiEvent, PiJob, PiMaterialInput, PiOutcome, PiRunLog, PiRunRecord, PiRuntime, PiTask,
@@ -37,6 +37,16 @@ const MAX_THEMES: usize = 30;
 const MAX_CATEGORIES_PER_THEME: usize = 20;
 /// 单个分类挂靠依据文档的上限。
 const MAX_DOC_REFS: usize = 50;
+
+/// 维基作业全程靠 kb_search / kb_read 取料；资料库检索没开时跑到闸门才报
+/// 「文档 N 未检索到」既误导又浪费一整轮，发起时直接拦下。
+fn ensure_rag_enabled(config: &AppConfig) -> Result<(), String> {
+    if config.rag.enabled {
+        Ok(())
+    } else {
+        Err("资料库检索未启用：请先在「资料库」页启用检索，再发起维基作业。".into())
+    }
+}
 
 /// 归纳出的框架提案：两级 + 每个分类挂靠的资料文档 id。只表示「模型建议」，
 /// 只有用户确认后才写库。
@@ -174,6 +184,7 @@ pub(crate) fn induce_frame(
     if cancel.load(Ordering::Relaxed) {
         return Err("已停止归纳框架。".into());
     }
+    ensure_rag_enabled(&config)?;
     let catalog = pi_skills::load_catalog();
     catalog.resolve(Some(pi_skills::WIKI_FRAME_SKILL))?;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -272,6 +283,9 @@ pub(crate) fn induce_frame(
     let PiOutcome::Task(delivery) = outcome else {
         return Err("Pi 没有交回框架提案，未采纳。".into());
     };
+    if !delivery.summary.trim().is_empty() {
+        on_progress(format!("交付说明：{}", delivery.summary.trim()));
+    }
     parse_frame_delivery(&delivery.content, &consulted_docs(&store_path, &tools, [])?)
         .map_err(|error| format!("框架提案未通过复核：{error}"))
 }
@@ -367,8 +381,9 @@ pub(crate) fn validate_review_body(body: &str, refs: &[(i64, String)]) -> Result
     Ok(())
 }
 
-/// 页面整编交付的确定性复核：结构、标题合规、kind 合法、分类存在、
+/// 页面整编交付的确定性复核：结构、标题合规、kind 合法、
 /// 依据文档真实存在、与现有页面不重名。任何一条不过都明确报错。
+/// 目标节点在作业期间是否还在由调用方在作业结束后重读框架确认。
 pub(crate) fn parse_page_delivery(
     content: &str,
     category: &str,
@@ -376,7 +391,6 @@ pub(crate) fn parse_page_delivery(
     run_id: String,
     existing_titles: &[String],
     known_docs: &[i64],
-    node_categories: &[String],
 ) -> Result<PageProposalSet, String> {
     let raw: RawPages = serde_json::from_str(content)
         .map_err(|error| format!("页面交付不是合法 JSON（{error}）；应为 {{\"pages\": [...]}}"))?;
@@ -387,11 +401,6 @@ pub(crate) fn parse_page_delivery(
         return Err(format!(
             "一次整编最多 {MAX_PAGES_PER_RUN} 页，本轮交了 {} 页；请收窄范围重试",
             raw.pages.len()
-        ));
-    }
-    if !node_categories.iter().any(|name| name == category) {
-        return Err(format!(
-            "分类「{category}」已不存在，请回到知识库页重新发起整编"
         ));
     }
     let known: std::collections::HashSet<i64> = known_docs.iter().copied().collect();
@@ -491,6 +500,7 @@ pub(crate) fn write_pages(
     if cancel.load(Ordering::Relaxed) {
         return Err("已停止整编页面。".into());
     }
+    ensure_rag_enabled(&config)?;
     let store = crate::wiki::WikiStore::open(&store_path)
         .map_err(|error| format!("打开维基库失败：{error:#}"))?;
     let tree = store
@@ -519,13 +529,17 @@ pub(crate) fn write_pages(
         Some(theme) => format!("主题「{theme}」下的分类「{}」", node.name),
         None => format!("主题「{}」", node.name),
     };
-    let doc_hints = if doc_hints.is_empty() {
-        store
-            .frame_doc_ids(node_id)
-            .map_err(|error| format!("读取框架资料映射失败：{error:#}"))?
-    } else {
-        doc_hints
-    };
+    // 圈选的资料是「优先读物」，不是取料范围：与分类已确认的资料映射合并，
+    // 避免圈两篇就把整个分类已确认的依据丢掉。
+    let mut doc_hints = doc_hints;
+    for id in store
+        .frame_doc_ids(node_id)
+        .map_err(|error| format!("读取框架资料映射失败：{error:#}"))?
+    {
+        if !doc_hints.contains(&id) {
+            doc_hints.push(id);
+        }
+    }
     let catalog = pi_skills::load_catalog();
     catalog.resolve(Some(pi_skills::WIKI_WRITE_SKILL))?;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -541,18 +555,37 @@ pub(crate) fn write_pages(
                 .join("、"),
         )
     };
+    // 已有页面标题先告诉模型：整编会拒收与全库现有页面同名的标题，靠模型
+    // 自己 wiki_search 碰运气命中率太低，一次白跑就是 30 分钟。
+    let existing_here = store
+        .list_pages(node_id)
+        .map_err(|error| format!("读取已有页面失败：{error:#}"))?;
+    let existing_line = if existing_here.is_empty() {
+        "本节点下还没有页面。".to_string()
+    } else {
+        format!(
+            "本节点下已有页面：{}；这些标题不要重复新建，相关内容用更新流程。",
+            existing_here
+                .iter()
+                .map(|page| page.title.as_str())
+                .collect::<Vec<_>>()
+                .join("、")
+        )
+    };
+    let scope = if guide_only { "主题" } else { "分类" };
     let request = format!(
         "按技能 {} 为{target}整编维基页面，\
          最后用 submit_task 交 work/pages.json。今天日期：{today}。\
-         该分类{guide_hint}。资料用 kb_search / kb_read 找与目标相关的文档；\
+         该{scope}{guide_hint}。{existing_line}\
+         资料用 kb_search / kb_read 找与目标相关的文档；\
          已有维基页用 wiki_search / wiki_links 查，便于互相链接。{hint_line}",
         pi_skills::WIKI_WRITE_SKILL,
         guide_hint = if has_guide {
-            "已有导览页，本轮不要再交 guide 页"
+            "已有导览页，本轮不要再交 guide 页；至少交一篇新的 kind=normal 条目页"
         } else if guide_only {
             "只交一篇 kind=guide 的主题导览页，链接可用的分类导览页，不生成普通页"
         } else {
-            "还没有导览页，本轮要交一篇 kind=guide 的导览页"
+            "还没有导览页，本轮要交一篇 kind=guide 的导览页，并至少交一篇 kind=normal 的条目页"
         },
     );
     let materials: Vec<PiMaterialInput> = Vec::new();
@@ -645,10 +678,26 @@ pub(crate) fn write_pages(
     let PiOutcome::Task(delivery) = outcome else {
         return Err("Pi 没有交回页面提案，未采纳。".into());
     };
+    if !delivery.summary.trim().is_empty() {
+        on_progress(format!("交付说明：{}", delivery.summary.trim()));
+    }
     let known = consulted_docs(&store_path, &tools, [])?;
     let tree = store
         .list_tree()
         .map_err(|error| format!("读取当前框架失败：{error:#}"))?;
+    // 作业期间用户可能删了/移了目标节点：重读框架按节点 ID 确认还在，
+    // 不能等到逐页采纳才报「节点已不存在」。分类名以库里当前值为准。
+    let Some((node_name, node_has_guide)) = tree.iter().find_map(|t| {
+        if t.theme.id == node_id {
+            return Some((t.theme.name.clone(), t.theme_guide.is_some()));
+        }
+        t.categories
+            .iter()
+            .find(|c| c.id == node_id)
+            .map(|c| (c.name.clone(), t.category_guides.contains_key(&c.id)))
+    }) else {
+        return Err("目标节点在作业期间已被删除或移动，本批提案作废；请重新发起整编。".into());
+    };
     let mut existing_titles = Vec::new();
     for id in tree
         .iter()
@@ -661,12 +710,11 @@ pub(crate) fn write_pages(
     }
     let proposal = parse_page_delivery(
         &delivery.content,
-        &node.name,
+        &node_name,
         node_id,
         run_id,
         &existing_titles,
         &known,
-        std::slice::from_ref(&node.name),
     )
     .map_err(|error| format!("页面提案未通过复核：{error}"))?;
     let guides = proposal
@@ -674,8 +722,17 @@ pub(crate) fn write_pages(
         .iter()
         .filter(|page| page.kind == "guide")
         .count();
-    if (guide_only && proposal.pages.len() != 1) || guides != usize::from(!has_guide) {
+    if (guide_only && proposal.pages.len() != 1) || guides != usize::from(!node_has_guide) {
         return Err("交付的导览页不符合本次整编范围。".into());
+    }
+    // 分类整编不能只交一篇导览页：导览只是入口，分类没有条目页时既无法被问答
+    // 逐条引用，也会一直被缺口清单判为「没有条目覆盖」。
+    if !guide_only && !proposal.pages.iter().any(|page| page.kind == "normal") {
+        return Err(
+            "分类整编至少要交一篇条目页（kind=normal）：只交导览页等于该分类没有条目知识，\
+             请按「一页一主题」拆出至少一篇条目页后重试。"
+                .into(),
+        );
     }
     Ok(proposal)
 }
@@ -753,6 +810,11 @@ pub(crate) fn parse_update_delivery(
             return Err(format!("页面「{title}」的正文与现状逐字相同，没有变化"));
         }
         let change_note = page.change_note.trim().to_string();
+        if change_note.is_empty() {
+            return Err(format!(
+                "页面「{title}」缺 change_note：更新交付每页都要用一两句话说清这版改了什么"
+            ));
+        }
         if change_note.chars().count() > MAX_CHANGE_NOTE_CHARS {
             return Err(format!(
                 "页面「{title}」变更说明超过 {MAX_CHANGE_NOTE_CHARS} 字"
@@ -809,6 +871,7 @@ pub(crate) fn update_pages(
     if cancel.load(Ordering::Relaxed) {
         return Err("已停止更新页面。".into());
     }
+    ensure_rag_enabled(&config)?;
     if targets.is_empty() {
         return Err("没有指定要更新的页面。".into());
     }
@@ -844,6 +907,17 @@ pub(crate) fn update_pages(
                 .map_err(|error| format!("读取原页依据失败：{error:#}"))?,
         });
     }
+    // 原页依据里可能有已被删除的资料（页面正在「需复核」）。这类编号绝不能
+    // 再写进新版本：材料里明确标成「已删除，勿保留」，否则模型照材料抄就会
+    // 被闸门拒收，而需复核页正是最需要更新的页面。
+    let existing_docs: std::collections::HashSet<i64> = {
+        let mut kb = crate::knowledge::KnowledgeStore::open(&store_path)
+            .map_err(|error| format!("打开资料库失败：{error:#}"))?;
+        kb.all_doc_ids()
+            .map_err(|error| format!("读取资料库文档失败：{error:#}"))?
+            .into_iter()
+            .collect()
+    };
     let catalog = pi_skills::load_catalog();
     catalog.resolve(Some(pi_skills::WIKI_UPDATE_SKILL))?;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -857,7 +931,9 @@ pub(crate) fn update_pages(
          今天日期：{today}。目标页（正文已作为材料附上）：\n{listing}\n\
          用 kb_search / kb_read 找与这些页面相关、尤其是新入库的文档；\
          维基内现状用 wiki_search / wiki_read / wiki_links 自查互链。\
-         每个 pages[] 原样带回 uuid、title 与 kind（类型不可改），正文给整页新正文。{new_source}",
+         每个 pages[] 原样带回 uuid、title 与 kind（类型不可改），正文给整页新正文。\
+         依据必须仍存在于资料库：材料里标了「已删除」的资料不要写进 doc_refs。\
+         每页必须写 change_note（一两句话说清这版改了什么、依据哪些文档）。{new_source}",
         pi_skills::WIKI_UPDATE_SKILL,
         snapshot.len(),
     );
@@ -868,12 +944,18 @@ pub(crate) fn update_pages(
             let refs = t
                 .doc_refs
                 .iter()
-                .map(|(id, note)| format!("- E{id}：{note}"))
+                .map(|(id, note)| {
+                    if existing_docs.contains(id) {
+                        format!("- E{id}：{note}")
+                    } else {
+                        format!("- E{id}（资料已删除，不要保留到本版依据）：{note}")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             let text = format!(
                 "# {}\n\n（本页类型：{}，更新时 kind 保持不变）\n\n{}\n\n\
-                 当前版本的依据清单（保留仍支撑本页的依据）：\n{}",
+                 当前版本的依据清单（保留仍支撑本页、且仍存在的依据）：\n{}",
                 t.title, t.kind, t.current_body, refs
             );
             PiMaterialInput {
@@ -973,6 +1055,9 @@ pub(crate) fn update_pages(
     let PiOutcome::Task(delivery) = outcome else {
         return Err("Pi 没有交回页面更新提案，未采纳。".into());
     };
+    if !delivery.summary.trim().is_empty() {
+        on_progress(format!("交付说明：{}", delivery.summary.trim()));
+    }
     let known = consulted_docs(
         &store_path,
         &tools,
@@ -1030,7 +1115,7 @@ mod tests {
             ),
             (
                 "分类重名",
-                "{\"themes\":[{\"name\":\"甲\",\"categories\":[{\"name\":\"x\"},{\"name\":\"x\"}]}]}",
+                "{\"themes\":[{\"name\":\"甲\",\"categories\":[{\"name\":\"x\",\"doc_ids\":[3]},{\"name\":\"x\",\"doc_ids\":[3]}]}]}",
             ),
             (
                 "空依据分类",
@@ -1047,10 +1132,6 @@ mod tests {
                 "{label} 应被拒绝：{content}"
             );
         }
-    }
-
-    fn categories() -> Vec<String> {
-        vec!["监督检查".to_string()]
     }
 
     fn existing() -> Vec<String> {
@@ -1070,7 +1151,6 @@ mod tests {
             "run-1".into(),
             &existing(),
             &known(),
-            &categories(),
         )
         .unwrap();
         assert_eq!(set.category, "监督检查");
@@ -1085,25 +1165,13 @@ mod tests {
         let base = r#"{"pages":[{"title":"新页","kind":"normal","body":"正文","doc_refs":[{"doc_id":3,"note":"依据"}]}]}"#;
         let good = (
             "正常交付",
-            parse_page_delivery(
-                base,
-                "监督检查",
-                42,
-                "r".into(),
-                &existing(),
-                &known(),
-                &categories(),
-            ),
+            parse_page_delivery(base, "监督检查", 42, "r".into(), &existing(), &known()),
         );
         assert!(good.1.is_ok(), "{:?}", good.0);
 
         let cases = [
             ("不是 JSON", "[]".to_string()),
             ("空集合", "{\"pages\":[]}".to_string()),
-            (
-                "分类不存在",
-                base.to_string(),
-            ),
             (
                 "与已有页重名",
                 "{\"pages\":[{\"title\":\"责任体系\",\"kind\":\"normal\",\"body\":\"x\",\"doc_refs\":[{\"doc_id\":3,\"note\":\"依据\"}]}]}".to_string(),
@@ -1130,22 +1198,9 @@ mod tests {
             ),
         ];
         for (label, content) in cases {
-            let categories: Vec<String> = if label == "分类不存在" {
-                vec!["别的分类".to_string()]
-            } else {
-                categories()
-            };
             assert!(
-                parse_page_delivery(
-                    &content,
-                    "监督检查",
-                    42,
-                    "r".into(),
-                    &existing(),
-                    &known(),
-                    &categories
-                )
-                .is_err(),
+                parse_page_delivery(&content, "监督检查", 42, "r".into(), &existing(), &known(),)
+                    .is_err(),
                 "{label} 应被拒绝：{content}"
             );
         }
@@ -1183,7 +1238,7 @@ mod tests {
 
     #[test]
     fn update_delivery_rejects_invalid_proposals() {
-        let base = r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"normal","body":"新正文","change_note":"","doc_refs":[{"doc_id":3,"note":"依据"}]}]}"##;
+        let base = r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"normal","body":"新正文","change_note":"按 E3 补充口径","doc_refs":[{"doc_id":3,"note":"依据"}]}]}"##;
         let good = parse_update_delivery(base, "r".into(), &known(), &targets());
         assert!(good.is_ok(), "{good:?}");
 
@@ -1197,6 +1252,10 @@ mod tests {
             (
                 "uuid 不在发起范围",
                 r##"{"pages":[{"uuid":"u-9","title":"监督检查","kind":"normal","body":"新正文","doc_refs":[{"doc_id":3,"note":"依据"}]}]}"##.to_string(),
+            ),
+            (
+                "缺变更说明",
+                r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"normal","body":"新正文","doc_refs":[{"doc_id":3,"note":"依据"}]}]}"##.to_string(),
             ),
             (
                 "改了标题",
@@ -1236,16 +1295,8 @@ mod tests {
             {"uuid":"u-1","title":"新页","kind":"normal","body":"正文","doc_refs":[{"doc_id":3,"note":"依据"}]}
         ]}"##;
         assert!(
-            parse_page_delivery(
-                content,
-                "监督检查",
-                42,
-                "r".into(),
-                &existing(),
-                &known(),
-                &categories(),
-            )
-            .is_err()
+            parse_page_delivery(content, "监督检查", 42, "r".into(), &existing(), &known(),)
+                .is_err()
         );
     }
 }

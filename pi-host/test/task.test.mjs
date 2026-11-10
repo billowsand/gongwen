@@ -414,9 +414,48 @@ test("维基交付结构校验：空依据分类与残缺页面当场打回", ()
     () => validateTaskPayload(page({ body: "正文〔E9〕" }), "gongwen-wiki-write"),
     /正文标记 〔E9〕 在 doc_refs 里没有对应条目/,
   );
-  // 合法交付照常通过：整编页不带 uuid，更新页带 uuid。
+  // 框架重名（主题、同主题内分类）host 提前打回，不等 Rust 事后拒。
+  assert.throws(
+    () => validateTaskPayload(JSON.stringify({ themes: [
+      { name: "甲", categories: [{ name: "x", doc_ids: [3] }] },
+      { name: "甲", categories: [{ name: "y", doc_ids: [3] }] },
+    ] }), "gongwen-wiki-frame"),
+    /主题「甲」重复/,
+  );
+  assert.throws(
+    () => validateTaskPayload(JSON.stringify({ themes: [
+      { name: "甲", categories: [{ name: "x", doc_ids: [3] }, { name: "x", doc_ids: [3] }] },
+    ] }), "gongwen-wiki-frame"),
+    /分类「x」重复/,
+  );
+  // 整编页带 uuid（模型容易把 wiki_read 的 page_id 抄回来）当场打回。
+  assert.throws(
+    () => validateTaskPayload(page({ uuid: "u-1" }), "gongwen-wiki-write"),
+    /不应带 uuid/,
+  );
+  // 本轮标题重复、双导览页：Rust 会拒，host 提前打回。
+  assert.throws(
+    () => validateTaskPayload(JSON.stringify({ pages: [
+      { title: "甲", kind: "normal", body: "正文", doc_refs: [{ doc_id: 3, note: "支撑" }] },
+      { title: "甲", kind: "normal", body: "正文", doc_refs: [{ doc_id: 3, note: "支撑" }] },
+    ] }), "gongwen-wiki-write"),
+    /重复/,
+  );
+  assert.throws(
+    () => validateTaskPayload(JSON.stringify({ pages: [
+      { title: "甲", kind: "guide", body: "正文", doc_refs: [{ doc_id: 3, note: "支撑" }] },
+      { title: "乙", kind: "guide", body: "正文", doc_refs: [{ doc_id: 3, note: "支撑" }] },
+    ] }), "gongwen-wiki-write"),
+    /只能有一篇导览页/,
+  );
+  // 更新页必须写 change_note。
+  assert.throws(
+    () => validateTaskPayload(page({ uuid: "u-1" }), "gongwen-wiki-update"),
+    /缺 change_note/,
+  );
+  // 合法交付照常通过：整编页不带 uuid，更新页带 uuid 与 change_note。
   assert.ok(validateTaskPayload(page({}), "gongwen-wiki-write"));
-  assert.ok(validateTaskPayload(page({ uuid: "u-1" }), "gongwen-wiki-update"));
+  assert.ok(validateTaskPayload(page({ uuid: "u-1", change_note: "按 E3 更新" }), "gongwen-wiki-update"));
 });
 
 test("任务助手经宿主桥调用维基只读工具后交付", { timeout: 20_000 }, async () => {
