@@ -7,7 +7,7 @@
 
 用户已确认首版：面向 256K 及以上窗口，按实际容量优先整篇材料，超限按大章节切分；每轮提供当前日期/星期/时区及标准组织背景，词库按职能、人员简介及所属单位查询。Pi 新任务不做事实核查、不产生事实疑点清单，全面审校与政策核查技能退出新任务；现有文字复核、格式与引用保护、授权表单权限、基线和精确撤销保留。此口径取代下文 Pi 事实疑点“只提示”的旧表述，不改变旧提案历史的权限。详见 `docs/pi-implementation/writing-context-v1.md`。
 
-2026-11-04 后续：设置页风格学习也已统一到 Pi 的 `gongwen-style-learn`，支持库内/上传样稿，`submit_style` 交独立JSON草稿，用户编辑保存；不走辅助模型、不写正文。普通写作与风格学习按任务类型隔离技能和交付权限，见 `docs/pi-implementation/style-learning-v1.md`。Pi 内置技能共 11 个（6 个写作/提炼 + 2 个任务助手作业 + 1 个风格学习 + 2 个维基知识库作业；任务作业见 2026-11-10 条目，维基作业见 `docs/wiki-knowledge-base-design.md` 第十三节），全面审校 `gongwen-review` 与政策核查 `gongwen-policy-check` 已退役、只保留历史文件。交付通道按任务类型分四类：正文 `document`（`submit_document`）、清单 `report`（`finish_report`）、独立风格文件 `style`（`submit_style`，只进设置页编辑器、不能写正文）、任务助手 JSON `task`（`submit_task`，只进任务页）。
+2026-11-04 后续：设置页风格学习也已统一到 Pi 的 `gongwen-style-learn`，支持库内/上传样稿，`submit_style` 交独立JSON草稿，用户编辑保存；不走辅助模型、不写正文。普通写作与风格学习按任务类型隔离技能和交付权限，见 `docs/pi-implementation/style-learning-v1.md`。Pi 内置技能共 12 个（6 个写作/提炼 + 2 个任务助手作业 + 1 个风格学习 + 3 个维基知识库作业；任务作业见 2026-11-10 条目，维基作业见 `docs/wiki-knowledge-base-design.md` 第十三节），全面审校 `gongwen-review` 与政策核查 `gongwen-policy-check` 已退役、只保留历史文件。交付通道按任务类型分四类：正文 `document`（`submit_document`）、清单 `report`（`finish_report`）、独立风格文件 `style`（`submit_style`，只进设置页编辑器、不能写正文）、任务助手 JSON `task`（`submit_task`，只进任务页）。
 
 ## 技术栈
 
@@ -100,6 +100,19 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 并非全部集中在文件头部，改动前先 `grep -n "^mod " src/main.rs`。
 
 ## 进行中的工作
+
+- **维基知识库（资料库 → 知识库，2026-11-10）**：一、二、三期十个切片全部实现，
+  **待真机验收**。方案、分期、实施进度、出入与已知坑见
+  `docs/wiki-knowledge-base-design.md` 第十三节（权威进度入口）。要点：五表存储层
+  （`src/wiki.rs`，与稿件库同文件独立连接）；框架建立（词库式树编辑 + 大纲导入 +
+  `gongwen-wiki-frame` AI 归纳）；页面整编 / 更新（`gongwen-wiki-write` /
+  `gongwen-wiki-update` Pi 作业，交付 JSON 经确定性复核进审核台，人工逐页审核可编辑，
+  采纳由界面线程写库，版本带来源与「审核已修改」标记）；缺口清单（红链聚合 +
+  建页自动解析 + 空分类整编）；资料库联动（「维基」列、新资料关联提示、圈选整编）；
+  写作侧四只读工具 + 任务助手接入（12 次/轮独立额度）；问答改维基优先双层。
+  渲染换接点集中在 `wiki_ui::show_page_body`（口径 13），配色全取主题语义槽位。
+  Pi 内置技能共 12 个（含 3 个维基作业技能）。发布前需重建随包 `runtime/pi`
+  （bridge.mjs 加了四个域工具）。
 
 - **智能体改造现状与退役收尾（2026-11-05）**：权威进度入口见 `docs/pi-current-status.md`，
   全面审查见 `docs/ai-agent-retirement-audit-2026-11-05.md`，本轮修复与实际验证见
