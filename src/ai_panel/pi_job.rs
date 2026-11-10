@@ -952,6 +952,7 @@ fn prepare_start(
                 .map(|material| material.text.clone())
                 .collect(),
         )
+        .with_wiki_autoload()
         .with_api_cache_dir(workspace.run.clone()),
     );
     Ok(PiLaunch {
@@ -1087,6 +1088,7 @@ fn prepare_resume(
                 record.request.clone(),
                 material_facts,
             )
+            .with_wiki_autoload()
             .with_api_cache_dir(workspace.run.clone()),
         );
         // 上一轮用户确认过的回答仍是事实（纯答案值，不含模型题面假设）。
@@ -1173,6 +1175,7 @@ fn prepare_resume(
             record.request.clone(),
             material_facts,
         )
+        .with_wiki_autoload()
         .with_api_cache_dir(old_workspace.run.clone()),
     );
     // 已确认回答只重灌纯答案值；「问题：回答」的显示字符串可能含模型题面假设。

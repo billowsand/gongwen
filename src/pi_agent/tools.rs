@@ -33,6 +33,9 @@ const MAX_READ_CHARS: usize = 160_000;
 const MAX_SNIPPET_CHARS: usize = 600;
 /// `api_search` 一次最多返回几个接口。
 const MAX_API_RESULTS: usize = 5;
+/// 维基工具独立小额度（设计 §6.2）：一轮写作作业里四只维基工具合计 12 次，
+/// 防语义下钻遍历挤占写作工具预算。
+const WIKI_TOOL_BUDGET: usize = 12;
 /// `api_call` 一次交给模型的条目上限（接口返回可能很多，先给前几条）。
 const MAX_API_ITEMS: usize = 20;
 /// 每个接口条目交给模型的字符上限；证据台账同样截到这里，防超长返回撑爆预算。
@@ -69,6 +72,37 @@ pub(crate) trait PiKnowledge: Send + Sync {
     fn enabled(&self) -> bool;
     fn search(&self, query: &str, top: usize) -> Result<PiSearchOutcome, String>;
     fn read(&self, doc_id: i64) -> Result<Option<(String, String)>, String>;
+}
+
+/// 维基检索命中：标题 + 所在分类路径 + 摘要（路径与摘要帮助模型判断要不要读全文）。
+#[derive(Debug, Clone)]
+pub(crate) struct PiWikiHit {
+    pub(crate) page_id: String,
+    pub(crate) title: String,
+    pub(crate) path: String,
+    pub(crate) snippet: String,
+}
+
+/// 出链候选：显示文字 + 目标标题 + 是否已建页 + 一句话摘要。
+/// 只是下钻判断的候选方向，不是必读清单（设计 §6.1）。
+#[derive(Debug, Clone)]
+pub(crate) struct PiWikiLinkInfo {
+    pub(crate) text: String,
+    pub(crate) to_title: String,
+    pub(crate) to_page: Option<String>,
+    pub(crate) resolved: bool,
+    pub(crate) summary: String,
+}
+
+/// 维基知识库只读来源（生产每轮作业独立连接，测试可换假库）。
+pub(crate) trait PiWiki: Send + Sync {
+    fn enabled(&self) -> bool;
+    fn search(&self, query: &str, top: usize) -> Result<Vec<PiWikiHit>, String>;
+    /// 读页面全文：(标题, 正文)。
+    fn read(&self, uuid: &str) -> Result<Option<(String, String)>, String>;
+    fn links(&self, uuid: &str) -> Result<Vec<PiWikiLinkInfo>, String>;
+    /// 该页当前版本的依据清单：(资料库 doc_id, 支撑说明)。
+    fn doc_refs(&self, uuid: &str) -> Result<Vec<(i64, String)>, String>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -619,6 +653,10 @@ pub(crate) struct PiToolContext {
     /// 授权类要素不在此列，词库查询结果也不在此列。
     form_facts: Vec<String>,
     kb: Arc<dyn PiKnowledge>,
+    /// 维基知识库只读来源：默认 DisabledWiki，只有写作作业显式挂入（口径 7.3）。
+    wiki: Arc<dyn PiWiki>,
+    /// 维基工具本轮已用次数（独立小额度，防语义下钻遍历挤占写作预算）。
+    wiki_used: Arc<AtomicUsize>,
     apis: Arc<dyn PiApis>,
     api_cache: Mutex<ApiResultCache>,
     manuscripts: Arc<dyn PiManuscripts>,
@@ -759,6 +797,8 @@ impl PiToolContext {
             request,
             material_facts,
             kb: sources.knowledge,
+            wiki: Arc::new(DisabledWiki),
+            wiki_used: Arc::new(AtomicUsize::new(0)),
             apis: Arc::new(ApiCatalog),
             api_cache: Mutex::new(ApiResultCache::default()),
             manuscripts: sources.manuscripts,
@@ -778,6 +818,13 @@ impl PiToolContext {
         self
     }
 
+    /// 测试替身：换掉维基来源，不碰真实稿件库。
+    #[cfg(test)]
+    pub(crate) fn with_wiki(mut self, wiki: Arc<dyn PiWiki>) -> Self {
+        self.wiki = wiki;
+        self
+    }
+
     /// 给本轮挂上接口结果缓存目录（运行目录）。恢复后仍能按 `result_id` 续读。
     pub(crate) fn with_api_cache_dir(self, dir: PathBuf) -> Self {
         if let Ok(mut cache) = self.api_cache.lock() {
@@ -793,6 +840,15 @@ impl PiToolContext {
     pub(crate) fn task_only(mut self, db: std::path::PathBuf) -> Self {
         self.task_only = true;
         self.task_db = Some(db);
+        self
+    }
+
+    /// 写作作业挂入维基来源。库路径不可用时按未接入处理，工具给出明确指引。
+    pub(crate) fn with_wiki_autoload(mut self) -> Self {
+        self.wiki = match crate::storage::manuscript_db_path() {
+            Ok(path) => Arc::new(WikiArchives { db: path }),
+            Err(_) => Arc::new(DisabledWiki),
+        };
         self
     }
 
@@ -852,6 +908,10 @@ impl PiToolContext {
             name,
             "kb_search"
                 | "kb_read"
+                | "wiki_search"
+                | "wiki_read"
+                | "wiki_links"
+                | "wiki_doc_read"
                 | "ms_search"
                 | "ms_read"
                 | "api_search"
@@ -948,6 +1008,10 @@ impl PiToolContext {
         let result = match name {
             "kb_search" => self.kb_search(args),
             "kb_read" => self.kb_read(args),
+            "wiki_search" => self.wiki_search(args),
+            "wiki_read" => self.wiki_read(args),
+            "wiki_links" => self.wiki_links(args),
+            "wiki_doc_read" => self.wiki_doc_read(args),
             "ms_search" => self.ms_search(args),
             "ms_read" => self.ms_read(args),
             "api_search" => self.api_search(args),
@@ -1032,6 +1096,187 @@ impl PiToolContext {
         Ok(json!({
             "evidence": id,
             "doc_id": doc_id,
+            "title": title,
+            "text": page.text,
+            "offset": page.offset,
+            "total_chars": page.total_chars,
+            "next_offset": page.next_offset,
+            "unread_chars": page.unread_chars,
+            "truncated": page.next_offset.is_some(),
+            "note": READ_PAGE_NOTE,
+        }))
+    }
+
+    /// 维基工具本轮额度（设计 §6.2：独立小额度，防遍历挤占写作预算）。
+    fn wiki_budget(&self) -> Result<(), String> {
+        let used = self.wiki_used.fetch_add(1, Ordering::Relaxed);
+        if used >= WIKI_TOOL_BUDGET {
+            return Err(format!(
+                "维基工具本轮额度已用完（{WIKI_TOOL_BUDGET} 次）。请基于已读到的维基内容写作；\
+                 还不够就回落 kb_search 检索资料库，不要再调维基工具。"
+            ));
+        }
+        Ok(())
+    }
+
+    /// 未挂维基来源时的统一指引（任务/风格作业、或库路径不可用）。
+    fn wiki_enabled(&self) -> Result<(), String> {
+        if self.wiki.enabled() {
+            return Ok(());
+        }
+        Err("维基知识库未接入本轮作业（只有写作作业开放维基工具），或库打开失败。请改用 kb_search 检索资料库。".into())
+    }
+
+    /// 语义检索维基页面（写作取料第一站）：标题 + 分类路径 + 摘要，逐条登记证据。
+    fn wiki_search(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        self.wiki_budget()?;
+        self.wiki_enabled()?;
+        let query = required_str(args, "query")?;
+        let top = usize_arg(args, "top", MAX_SEARCH_RESULTS);
+        self.check_cancel()?;
+        let hits = self.wiki.search(&query, top)?;
+        self.check_cancel()?;
+        if hits.is_empty() {
+            return Ok(json!({
+                "results": [],
+                "zero_hits": true,
+                "note": "维基没有找到相关页面。可换用材料里的关键术语再试，或回落 kb_search 检索资料库。",
+            }));
+        }
+        let mut results = Vec::new();
+        for hit in hits {
+            // 逐条登记前复检：停止后不往证据台账里写资料。
+            self.check_cancel()?;
+            let id = self.record(
+                "wiki_search",
+                &hit.title,
+                "维基",
+                &hit.path,
+                &hit.snippet,
+                true,
+            );
+            results.push(json!({
+                "evidence": id,
+                "page_id": hit.page_id,
+                "title": hit.title,
+                "path": hit.path,
+                "snippet": hit.snippet,
+            }));
+        }
+        Ok(json!({
+            "results": results,
+            "zero_hits": false,
+            "note": "维基页是已整编的知识综述。信息不够细时用 wiki_read 读全文，再按其依据清单用 wiki_doc_read 溯源原文。",
+        }))
+    }
+
+    /// 读维基页面全文（按 offset 分页，与 kb_read 同规矩）。
+    fn wiki_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        self.wiki_budget()?;
+        self.wiki_enabled()?;
+        let uuid = required_str(args, "page_id")?;
+        self.check_cancel()?;
+        let Some((title, full)) = self.wiki.read(&uuid)? else {
+            return Err(format!("维基里没有这个页面（page_id={uuid}）"));
+        };
+        self.check_cancel()?;
+        let offset = optional_offset_arg(args);
+        let page = read_page(&full, offset, read_limit_arg(args))?;
+        let id = self.record(
+            "wiki_read",
+            &title,
+            "维基",
+            &page.location,
+            &page.text,
+            true,
+        );
+        Ok(json!({
+            "evidence": id,
+            "page_id": uuid,
+            "title": title,
+            "text": page.text,
+            "offset": page.offset,
+            "total_chars": page.total_chars,
+            "next_offset": page.next_offset,
+            "unread_chars": page.unread_chars,
+            "truncated": page.next_offset.is_some(),
+            "note": READ_PAGE_NOTE,
+        }))
+    }
+
+    /// 列出页面的出链候选（标题 + 一句话摘要），供语义下钻判断。
+    /// 候选方向不登记为事实证据——读没读、怎么用由模型结合写作任务决定。
+    fn wiki_links(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        self.wiki_budget()?;
+        self.wiki_enabled()?;
+        let uuid = required_str(args, "page_id")?;
+        self.check_cancel()?;
+        let links = self.wiki.links(&uuid)?;
+        self.check_cancel()?;
+        let results: Vec<Value> = links
+            .into_iter()
+            .map(|link| {
+                json!({
+                    "text": link.text,
+                    "to_title": link.to_title,
+                    "to_page": link.to_page,
+                    "resolved": link.resolved,
+                    "summary": link.summary,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "links": results,
+            "note": "出链只是候选方向，不是必读清单：结合写作任务自行判断要不要用 wiki_read 下钻；\
+                     resolved=false 是待建页，没有内容。",
+        }))
+    }
+
+    /// 按页的依据清单读原始资料文档（维基信息不够细时溯源原文）。
+    /// 文档必须在页面当前版本的依据清单里，防止借维基名义乱翻资料库。
+    fn wiki_doc_read(&self, args: &Map<String, Value>) -> Result<Value, String> {
+        self.wiki_budget()?;
+        self.wiki_enabled()?;
+        let uuid = required_str(args, "page_id")?;
+        let doc_id = int_arg(args, "doc_id")?;
+        let refs = self.wiki.doc_refs(&uuid)?;
+        let Some((_, note)) = refs.iter().find(|(id, _)| *id == doc_id) else {
+            return Err(format!(
+                "页面 {uuid} 当前版本的依据清单里没有文档 {doc_id}；\
+                 先用 wiki_read 读该页，按它给出的依据清单选文档。"
+            ));
+        };
+        if !self.kb.enabled() {
+            return Err(
+                "资料库未启用：维基依据指向原始资料文档，需到「资料库」页启用并配置检索后再试。"
+                    .into(),
+            );
+        }
+        self.check_cancel()?;
+        let Some((title, full)) = self.kb.read(doc_id)? else {
+            return Err(format!("资料库没有编号为 {doc_id} 的文档"));
+        };
+        self.check_cancel()?;
+        let offset = optional_offset_arg(args);
+        let page = read_page(&full, offset, read_limit_arg(args))?;
+        let role = if note.trim().is_empty() {
+            "维基依据".to_string()
+        } else {
+            format!("维基依据：{note}")
+        };
+        let id = self.record(
+            "wiki_doc_read",
+            &title,
+            "资料库原文",
+            &role,
+            &page.text,
+            true,
+        );
+        Ok(json!({
+            "evidence": id,
+            "page_id": uuid,
+            "doc_id": doc_id,
+            "support": note,
             "title": title,
             "text": page.text,
             "offset": page.offset,
@@ -1548,6 +1793,165 @@ impl PiKnowledge for DisabledKnowledge {
     }
 }
 
+/// 未接维基的占位（非写作作业、或库路径不可用）：工具给出明确指引，不静默空结果。
+struct DisabledWiki;
+
+impl PiWiki for DisabledWiki {
+    fn enabled(&self) -> bool {
+        false
+    }
+
+    fn search(&self, _query: &str, _top: usize) -> Result<Vec<PiWikiHit>, String> {
+        Err("维基知识库未接入本轮作业".into())
+    }
+
+    fn read(&self, _uuid: &str) -> Result<Option<(String, String)>, String> {
+        Err("维基知识库未接入本轮作业".into())
+    }
+
+    fn links(&self, _uuid: &str) -> Result<Vec<PiWikiLinkInfo>, String> {
+        Err("维基知识库未接入本轮作业".into())
+    }
+
+    fn doc_refs(&self, _uuid: &str) -> Result<Vec<(i64, String)>, String> {
+        Err("维基知识库未接入本轮作业".into())
+    }
+}
+
+/// 生产实现：每轮写作作业按次打开维基库连接（rusqlite 连接非 Sync，不能跨线程
+/// 缓存；与知识库检索链同姿势），工具调用频次低（独立小额度 12 次/轮），代价可接受。
+struct WikiArchives {
+    db: PathBuf,
+}
+
+impl WikiArchives {
+    fn open(&self) -> Result<crate::wiki::WikiStore, String> {
+        crate::wiki::WikiStore::open(&self.db).map_err(|error| format!("{error:#}"))
+    }
+}
+
+/// 框架里 node_id 所在的「主题 / 分类」路径；找不到时给空串。
+fn wiki_node_path(tree: &[crate::wiki::WikiTree], node_id: i64) -> String {
+    for t in tree {
+        if t.theme.id == node_id {
+            return t.theme.name.clone();
+        }
+        if let Some(c) = t.categories.iter().find(|c| c.id == node_id) {
+            return format!("{} / {}", t.theme.name, c.name);
+        }
+    }
+    String::new()
+}
+
+/// 压平空白后取前 n 字做摘要/导语。
+fn wiki_compact(text: &str, max_chars: usize) -> String {
+    let flat: String = text.split_whitespace().collect();
+    flat.chars().take(max_chars).collect()
+}
+
+impl PiWiki for WikiArchives {
+    fn enabled(&self) -> bool {
+        true
+    }
+
+    fn search(&self, query: &str, top: usize) -> Result<Vec<PiWikiHit>, String> {
+        let store = self.open()?;
+        let hits = store
+            .search(query, top)
+            .map_err(|error| format!("{error:#}"))?;
+        let tree = store.list_tree().map_err(|error| format!("{error:#}"))?;
+        let mut out = Vec::new();
+        for hit in hits {
+            let snippet = store
+                .get_page(&hit.uuid)
+                .ok()
+                .flatten()
+                .map(|page| wiki_compact(&page.body, 120))
+                .unwrap_or_default();
+            out.push(PiWikiHit {
+                path: wiki_node_path(&tree, hit.node_id),
+                page_id: hit.uuid,
+                title: hit.title,
+                snippet,
+            });
+        }
+        Ok(out)
+    }
+
+    fn read(&self, uuid: &str) -> Result<Option<(String, String)>, String> {
+        let store = self.open()?;
+        store
+            .get_page(uuid)
+            .map(|page| page.map(|page| (page.meta.title, page.body)))
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    fn links(&self, uuid: &str) -> Result<Vec<PiWikiLinkInfo>, String> {
+        let store = self.open()?;
+        let tree = store.list_tree().map_err(|error| format!("{error:#}"))?;
+        let links = store
+            .outgoing_links(uuid)
+            .map_err(|error| format!("{error:#}"))?;
+        let mut out = Vec::new();
+        for link in links {
+            let info = if let Some(target) = &link.to_page {
+                let (to_title, summary) = store
+                    .get_page(target)
+                    .ok()
+                    .flatten()
+                    .map(|page| (page.meta.title.clone(), wiki_compact(&page.body, 80)))
+                    .unwrap_or_else(|| (link.to_title.clone(), String::new()));
+                PiWikiLinkInfo {
+                    text: link.text,
+                    to_title,
+                    to_page: Some(target.clone()),
+                    resolved: true,
+                    summary,
+                }
+            } else if let Some(node) = link.to_node {
+                let name = tree
+                    .iter()
+                    .find(|t| t.theme.id == node)
+                    .map(|t| t.theme.name.clone())
+                    .or_else(|| {
+                        tree.iter().find_map(|t| {
+                            t.categories
+                                .iter()
+                                .find(|c| c.id == node)
+                                .map(|c| c.name.clone())
+                        })
+                    })
+                    .unwrap_or_else(|| link.to_title.clone());
+                PiWikiLinkInfo {
+                    text: link.text,
+                    to_title: name,
+                    to_page: None,
+                    resolved: true,
+                    summary: "框架节点导览".into(),
+                }
+            } else {
+                PiWikiLinkInfo {
+                    text: link.text,
+                    to_title: link.to_title.clone(),
+                    to_page: None,
+                    resolved: false,
+                    summary: "待建页，还没有内容".into(),
+                }
+            };
+            out.push(info);
+        }
+        Ok(out)
+    }
+
+    fn doc_refs(&self, uuid: &str) -> Result<Vec<(i64, String)>, String> {
+        self.open().and_then(|store| {
+            store
+                .page_doc_refs(uuid)
+                .map_err(|error| format!("{error:#}"))
+        })
+    }
+}
+
 /// 任务检索结果的一行：只带模型判断目标所需的最短信息。
 fn task_brief(task: &crate::task_assistant::Task) -> Value {
     serde_json::json!({
@@ -1956,6 +2360,175 @@ mod tests {
             .unwrap();
         assert!(value["name"].as_str().unwrap().chars().count() <= 100);
         assert!(value["text"].as_str().unwrap().chars().count() <= MAX_STYLE_CHARS);
+    }
+
+    /// 假维基库：两页 + 出链候选 + 依据清单，只验证工具行为。
+    struct FakeWiki;
+
+    impl PiWiki for FakeWiki {
+        fn enabled(&self) -> bool {
+            true
+        }
+
+        fn search(&self, _query: &str, _top: usize) -> Result<Vec<PiWikiHit>, String> {
+            Ok(vec![
+                PiWikiHit {
+                    page_id: "uuid-a".into(),
+                    title: "监督检查".into(),
+                    path: "安全生产 / 监督检查".into(),
+                    snippet: "四不两直与闭环整改。".into(),
+                },
+                PiWikiHit {
+                    page_id: "uuid-b".into(),
+                    title: "责任体系".into(),
+                    path: "安全生产 / 监督检查".into(),
+                    snippet: "职责分工与考核。".into(),
+                },
+            ])
+        }
+
+        fn read(&self, uuid: &str) -> Result<Option<(String, String)>, String> {
+            Ok(match uuid {
+                "uuid-a" => Some((
+                    "监督检查".into(),
+                    "监督检查要闭环整改。见 [[责任体系]]。".into(),
+                )),
+                _ => None,
+            })
+        }
+
+        fn links(&self, _uuid: &str) -> Result<Vec<PiWikiLinkInfo>, String> {
+            Ok(vec![
+                PiWikiLinkInfo {
+                    text: "责任体系".into(),
+                    to_title: "责任体系".into(),
+                    to_page: Some("uuid-b".into()),
+                    resolved: true,
+                    summary: "职责分工与考核".into(),
+                },
+                PiWikiLinkInfo {
+                    text: "安全文化".into(),
+                    to_title: "安全文化".into(),
+                    to_page: None,
+                    resolved: false,
+                    summary: "待建页，还没有内容".into(),
+                },
+            ])
+        }
+
+        fn doc_refs(&self, uuid: &str) -> Result<Vec<(i64, String)>, String> {
+            Ok(if uuid == "uuid-a" {
+                vec![(7, "闭环整改要求".into())]
+            } else {
+                Vec::new()
+            })
+        }
+    }
+
+    fn wiki_context() -> PiToolContext {
+        context("资料原文。").with_wiki(Arc::new(FakeWiki))
+    }
+
+    #[test]
+    fn wiki_search_records_each_hit_as_fact_evidence() {
+        let ctx = wiki_context();
+        let hits = ctx
+            .call("wiki_search", &json!({"query": "监督检查"}))
+            .unwrap();
+        assert_eq!(hits["zero_hits"], false);
+        let results = hits["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["page_id"], "uuid-a");
+        assert_eq!(results[0]["path"], "安全生产 / 监督检查");
+        assert_eq!(results[0]["evidence"], "E1");
+        // 命中进证据台账，也进事实来源。
+        assert_eq!(ctx.evidence().len(), 2);
+        assert_eq!(ctx.fact_sources().len(), 2);
+    }
+
+    #[test]
+    fn wiki_read_pages_like_kb_and_reports_missing_pages() {
+        let ctx = wiki_context();
+        let page = ctx
+            .call("wiki_read", &json!({"page_id": "uuid-a", "limit_chars": 6}))
+            .unwrap();
+        assert_eq!(page["title"], "监督检查");
+        assert_eq!(page["text"].as_str().unwrap().chars().count(), 6);
+        assert_eq!(page["next_offset"], 6);
+        assert_eq!(page["truncated"], true);
+        assert!(
+            ctx.call("wiki_read", &json!({"page_id": "uuid-x"}))
+                .is_err()
+        );
+        assert!(ctx.call("wiki_read", &json!({})).is_err());
+    }
+
+    #[test]
+    fn wiki_links_are_candidates_never_fact_sources() {
+        let ctx = wiki_context();
+        let links = ctx
+            .call("wiki_links", &json!({"page_id": "uuid-a"}))
+            .unwrap();
+        let items = links["links"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["resolved"], true);
+        assert_eq!(items[0]["to_page"], "uuid-b");
+        assert_eq!(items[1]["resolved"], false, "待建页要明确标出");
+        // 候选方向不登记证据，更不是事实来源。
+        assert!(ctx.evidence().is_empty());
+        assert!(ctx.fact_sources().is_empty());
+    }
+
+    #[test]
+    fn wiki_doc_read_requires_doc_in_the_pages_evidence_list() {
+        let ctx = wiki_context();
+        let read = ctx
+            .call("wiki_doc_read", &json!({"page_id": "uuid-a", "doc_id": 7}))
+            .unwrap();
+        assert_eq!(read["title"], "森林防火规定");
+        assert_eq!(read["support"], "闭环整改要求");
+        assert_eq!(read["evidence"], "E1");
+        // 不在依据清单里的文档一律拒绝。
+        assert!(
+            ctx.call("wiki_doc_read", &json!({"page_id": "uuid-a", "doc_id": 9}))
+                .is_err()
+        );
+        // 页面没有依据清单时同样拒绝。
+        assert!(
+            ctx.call("wiki_doc_read", &json!({"page_id": "uuid-b", "doc_id": 7}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn wiki_tools_stop_at_the_independent_round_budget() {
+        let ctx = wiki_context();
+        for i in 0..super::WIKI_TOOL_BUDGET {
+            assert!(
+                ctx.call("wiki_links", &json!({"page_id": "uuid-a"}))
+                    .is_ok(),
+                "第 {} 次应在额度内",
+                i + 1
+            );
+        }
+        let err = ctx
+            .call("wiki_links", &json!({"page_id": "uuid-a"}))
+            .unwrap_err();
+        assert!(err.contains("额度已用完"), "{err}");
+    }
+
+    #[test]
+    fn wiki_tools_are_closed_for_task_jobs_and_unmounted_rounds() {
+        // 任务助手作业不挂维基工具（也不挂知识库）。
+        let task = context("x").task_only(PathBuf::from(":memory:"));
+        assert!(task.call("wiki_search", &json!({"query": "甲"})).is_err());
+        assert!(task.call("wiki_links", &json!({"page_id": "u"})).is_err());
+        // 未挂维基来源的写作上下文给出明确指引，不静默空结果。
+        let bare = context("x");
+        let err = bare
+            .call("wiki_search", &json!({"query": "甲"}))
+            .unwrap_err();
+        assert!(err.contains("未接入"), "{err}");
     }
 
     #[test]

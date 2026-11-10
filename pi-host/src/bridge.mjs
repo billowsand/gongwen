@@ -27,6 +27,22 @@ export const DOMAIN_TOOLS = [
     doc_id: Type.Number({ description: "kb_search 返回的 doc_id" }),
     offset: Type.Optional(Type.Integer({ minimum: 0, description: "从字符位置继续读取；用上次返回的 next_offset，不是字节或行号" })),
   })],
+  ["wiki_search", "语义检索维基知识库页面（写作取料第一站），返回标题、分类路径、摘要与证据编号", Type.Object({
+    query: Type.String({ description: "用材料里的关键术语说明要找什么知识" }),
+    top: Type.Optional(Type.Number({ description: "最多返回几页，1–10" })),
+  })],
+  ["wiki_read", "读维基页面全文（维基是已整编的知识综述，比资料库片段更成体系）", Type.Object({
+    page_id: Type.String({ description: "wiki_search 返回的 page_id" }),
+    offset: Type.Optional(Type.Integer({ minimum: 0, description: "从字符位置继续读取；用上次返回的 next_offset，不是字节或行号" })),
+  })],
+  ["wiki_links", "列出维基页面的出链候选（标题+一句话摘要），只作语义下钻的候选方向、不是必读清单", Type.Object({
+    page_id: Type.String({ description: "wiki_search 返回的 page_id" }),
+  })],
+  ["wiki_doc_read", "按维基页给出的依据清单读原始资料文档段落（维基信息不够细时溯源原文）", Type.Object({
+    page_id: Type.String({ description: "wiki_search 返回的 page_id" }),
+    doc_id: Type.Number({ description: "该页依据清单里的资料库 doc_id" }),
+    offset: Type.Optional(Type.Integer({ minimum: 0, description: "从字符位置继续读取；用上次返回的 next_offset，不是字节或行号" })),
+  })],
   ["ms_search", "检索稿件库（标题 / 文号 / 备注）", Type.Object({
     query: Type.String({ description: "检索词" }),
     limit: Type.Optional(Type.Number({ description: "最多几篇，1–10" })),

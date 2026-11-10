@@ -11,7 +11,9 @@ description: 检索资料、分节论证并整合成研究报告，每个关键�
 2. 读 `skills/gongwen-markdown/references/research-report.md`，按研究报告的
    题名、摘要、章节、图表、公式、交叉引用与文献规则写 Markdown。
 3. 读 `references/argumentation-and-sources.md`，按那里的论证与出处判据组织全文。
-4. 先检索：用 `kb_search` / `ms_search` 找本机知识库与稿件库里的材料；
+4. 先检索：先用 `wiki_search` 找维基里已整编的知识页，`wiki_read` 读全文、按其依据清单
+   `wiki_doc_read` 溯源原文（`wiki_links` 的出链只是候选方向，由你判断要不要下钻）；
+   维基没有命中再用 `kb_search` / `ms_search` 找本机知识库与稿件库里的材料；
    `kb_read` / `ms_read` 读全文。证据编号用于内部追溯，正文用资料标题与章节说明出处。
    长句查询没有结果时，拆成研究对象、主题关键词再查一次；一次零命中不代表资料库没有相关资料。
    需要内网统计数据、政策库或业务系统数据时，先用 `api_search` 搜只读接口，再用 `api_call`
