@@ -210,6 +210,15 @@ test("Durable JSONL 加密提交后可关闭重开恢复，并继续追加提交
     { fsync: true },
   );
   let storage = await open();
+  console.error("DEBUG-commit-source", Object.getPrototypeOf(storage).commit.toString().slice(0, 160).replace(/\s+/g, " "));
+  {
+    const original = storage.fs.appendFile.bind(storage.fs);
+    storage.fs.appendFile = async (target, content, context) => {
+      const result = await original(target, content, context);
+      console.error("DEBUG-append", target, typeof content === "string" ? content.length : content?.length, JSON.stringify(result), fs.existsSync(target));
+      return result;
+    };
+  }
   await storage.commit([{ type: "conversation", value: { id: 2 } }], BACKGROUND_CONTEXT);
   console.error("DEBUG-48-after-commit", storage.mainPath, fs.existsSync(storage.mainPath), space.state, storage.constructor.name, typeof storage.fs?.appendFile);
   {
