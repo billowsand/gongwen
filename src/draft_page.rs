@@ -30,6 +30,7 @@ mod citation_marks;
 mod diff_editor;
 mod diff_gaps;
 pub(crate) mod diff_hunks;
+pub(crate) use editor::paint_editor_line_numbers;
 mod editor;
 mod editor_keys;
 mod find;

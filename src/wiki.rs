@@ -896,6 +896,28 @@ impl WikiStore {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// 资料表的关联条目来自已入库页面的当前版本。
+    pub fn source_pages(&self) -> Result<HashMap<i64, Vec<(String, String)>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT r.doc_id, p.uuid, p.title FROM wiki_doc_refs r
+             JOIN wiki_pages p ON p.uuid = r.page_id
+             JOIN wiki_page_versions v ON v.id = r.version_id
+             WHERE v.version = p.current_version ORDER BY p.title",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+            ))
+        })?;
+        let mut pages: HashMap<_, Vec<_>> = HashMap::new();
+        for row in rows {
+            let (doc, page) = row?;
+            pages.entry(doc).or_default().push(page);
+        }
+        Ok(pages)
+    }
+
     /// 某页当前版本的依据清单。
     pub fn page_doc_refs(&self, uuid: &str) -> Result<Vec<(i64, String)>> {
         let version = self
@@ -912,7 +934,7 @@ impl WikiStore {
         }
     }
 
-    fn version_doc_refs(&self, uuid: &str, version: i64) -> Result<Vec<(i64, String)>> {
+    pub(crate) fn version_doc_refs(&self, uuid: &str, version: i64) -> Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT r.doc_id, r.note FROM wiki_doc_refs r
              JOIN wiki_page_versions v ON v.id = r.version_id

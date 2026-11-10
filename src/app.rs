@@ -79,7 +79,6 @@ pub(crate) use versioning::{
     VersionCommitDraft, VersionDiffState, VersionScope, VersionSwitchPrompt, VersionTarget,
 };
 pub(crate) use widgets::*;
-pub(crate) use wiki::WikiCircleState;
 
 #[derive(Debug, Clone)]
 pub(crate) struct VocabularyMoveDraft {
@@ -1547,3 +1546,5 @@ mod tests {
 
 #[cfg(test)]
 mod management_samples;
+#[cfg(test)]
+pub(crate) use management_samples::fixture as ui_fixture;

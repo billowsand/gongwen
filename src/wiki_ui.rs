@@ -9,8 +9,15 @@ use std::collections::HashMap;
 use crate::app::GongwenApp;
 use crate::models::NumberingConfig;
 use crate::theme;
-use crate::wiki::{Backlink, OutlineTheme, WikiPage, WikiPageMeta, WikiTree};
+use crate::wiki::{Backlink, WikiPage, WikiPageMeta, WikiTree};
+
+mod job;
+#[cfg(test)]
+mod samples;
+mod workspaces;
 use eframe::egui;
+pub(crate) use job::{Outcome, WikiRequest, WikiRun, source_rail};
+use workspaces::{FrameTab, Route};
 
 /// 知识库页的界面状态：框架树缓存、当前阅读页、backlinks 栏开合、框架编辑。
 #[derive(Default)]
@@ -26,12 +33,31 @@ pub(crate) struct WikiUiState {
     open: Option<crate::wiki::WikiPage>,
     /// 当前页的入链（backlinks）与已解析的链接跳转表（打开页面时算一次）。
     backlinks: Vec<Backlink>,
+    backlink_context: HashMap<String, String>,
     open_links: HashMap<String, LinkTarget>,
     /// 当前页当前版本的依据清单与「依据已失效」标记（打开页面时算一次，阅读器不每帧查库）。
     doc_refs: Vec<(i64, String)>,
     missing_sources: bool,
-    /// 右侧 backlinks 栏是否展开。
-    backlinks_open: bool,
+    route: Route,
+    rail_hidden: bool,
+    job_tab: bool,
+    sources_tab: bool,
+    evidence_original: Option<(i64, String, String)>,
+    evidence_error: Option<String>,
+    pub(crate) source_pages: HashMap<i64, Vec<(String, String)>>,
+    search: String,
+    search_hits: Vec<crate::wiki::WikiSearchHit>,
+    collapsed_nodes: std::collections::HashSet<i64>,
+    pub(crate) frame_run: Option<WikiRun>,
+    pub(crate) page_run: Option<WikiRun>,
+    frame_tab: FrameTab,
+    frame_node: Option<(usize, Option<usize>)>,
+    review_diff: bool,
+    reviewed: Vec<workspaces::ReviewedBatch>,
+    show_processed: bool,
+    processed_batch: usize,
+    history_full: bool,
+    history_cache: Option<workspaces::HistoryCache>,
     /// 树编辑选中的框架节点 id（改名 / 移动 / 删除的对象）。
     selected_node: Option<i64>,
     move_target: Option<(i64, i64)>,
@@ -44,22 +70,16 @@ pub(crate) struct WikiUiState {
     /// 框架树缓存读取失败的原因（失败时保留脏标记，下帧重试）。
     cache_error: Option<String>,
     /// 「导入框架」对话框开关与粘贴内容。
-    import_open: bool,
     import_text: String,
-    /// 「从资料归纳」作业：进度行、停止请求、失败原因与待确认提案。
-    pub(crate) frame_progress: Option<String>,
+    /// 「从资料归纳」作业：停止请求、失败原因与待确认提案。
     pub(crate) request_stop_frame: bool,
     pub(crate) frame_error: Option<String>,
     pub(crate) frame_proposal: Option<crate::pi_agent::wiki_jobs::FrameProposal>,
     /// 「整编此分类」作业与审核台。
-    pub(crate) write_progress: Option<String>,
     pub(crate) request_stop_write: bool,
     pub(crate) write_error: Option<String>,
     pub(crate) review: Option<ReviewState>,
-    /// 审核台窗口开关：关闭窗口不丢提案，树上方有入口可 reopen。
-    pub(crate) review_open: bool,
     /// 版本历史窗口：A/B 两版行级对比、回滚（回滚也产生新版本）。
-    history_open: bool,
     /// 版本历史窗口当前绑定的页面 UUID：切页时重置 A/B，避免串页回滚。
     history_uuid: Option<String>,
     /// 对比的 A（旧）/ B（新）版本号。
@@ -92,6 +112,8 @@ impl WikiUiState {
     /// 资料库增删后让知识库页下一帧重读框架、页面与缺口缓存。
     pub(crate) fn invalidate(&mut self) {
         self.tree_dirty = true;
+        self.evidence_original = None;
+        self.evidence_error = None;
     }
 }
 
@@ -103,6 +125,7 @@ pub(crate) struct ReviewState {
     pub(crate) done: Vec<bool>,
     /// 已采纳页数（全部处理完时给结论提示）。
     pub(crate) adopted: usize,
+    accepted: Vec<bool>,
     pub(crate) selected: usize,
     /// 编辑框：当前页的 Markdown 源（可改，采纳的是这里的内容）。
     pub(crate) edit_body: String,
@@ -137,6 +160,7 @@ impl ReviewState {
         Self {
             done: vec![false; set.pages.len()],
             adopted: 0,
+            accepted: vec![false; set.pages.len()],
             selected: 0,
             edit_body: body.clone(),
             edit_base: body,
@@ -214,401 +238,13 @@ pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui, numbering: &Numbe
             app.wiki.tree_dirty = false;
         }
     }
-    // 链接解析表只给审核/预览用；审核台没开时不重建。
-    let link_map = if app.wiki.review_open {
-        build_link_map(&app.wiki.tree, &app.wiki.pages)
-    } else {
-        HashMap::new()
-    };
-
-    let height = ui.available_height();
-    let rail_w = if app.wiki.backlinks_open { 210.0 } else { 0.0 };
-    let tree_w = 240.0_f32.min(ui.available_width() * 0.35);
-    let mut nav: Option<String> = None;
-    ui.horizontal(|ui| {
-        ui.allocate_ui(egui::vec2(tree_w, height), |ui| {
-            ui.vertical(|ui| tree_pane(app, ui, &mut nav));
-        });
-        ui.separator();
-        let mid_w = (ui.available_width() - rail_w).max(240.0);
-        ui.allocate_ui(egui::vec2(mid_w, height), |ui| {
-            ui.vertical(|ui| reader(app, ui, &mut nav, numbering));
-        });
-        if app.wiki.backlinks_open {
-            ui.separator();
-            ui.allocate_ui(egui::vec2(rail_w, height), |ui| {
-                ui.vertical(|ui| backlinks_pane(app, ui, &mut nav));
-            });
-        }
-    });
-    // 链接点击产生的跳转统一在这里落库加载，避免边遍历边改缓存。
-    if let Some(uuid) = nav {
-        open_page(app, &uuid);
+    if let Some(error) = &app.wiki.cache_error {
+        ui.colored_label(theme::warn(), error);
     }
-    import_window(app, ui.ctx());
-    frame_proposal_window(app, ui.ctx());
-    review_desk(app, ui.ctx(), &link_map, numbering);
-    version_history_window(app, ui.ctx());
+    workspaces::show(app, ui, numbering);
     gap_window(app, ui.ctx());
     create_page_window(app, ui.ctx());
     page_op_window(app, ui.ctx());
-}
-
-/// 「从资料归纳」的进度、停止与错误提示，贴在树上方。
-fn frame_job_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
-    if let Some(progress) = &app.wiki.frame_progress {
-        ui.horizontal(|ui| {
-            ui.weak(progress);
-            if ui.button("停止").clicked() {
-                app.wiki.request_stop_frame = true;
-            }
-        });
-    }
-    if app.wiki.frame_error.is_some() {
-        let error = app.wiki.frame_error.clone().unwrap_or_default();
-        ui.horizontal(|ui| {
-            ui.colored_label(theme::warn(), &error);
-            if ui.small_button("知道了").clicked() {
-                app.wiki.frame_error = None;
-            }
-        });
-    }
-}
-
-/// 「整编此分类」的进度、停止与错误提示，与归纳的提示条并列。
-fn write_job_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
-    if let Some(progress) = &app.wiki.write_progress {
-        ui.horizontal(|ui| {
-            ui.weak(progress);
-            if ui.button("停止").clicked() {
-                app.wiki.request_stop_write = true;
-            }
-        });
-    }
-    if app.wiki.write_error.is_some() {
-        let error = app.wiki.write_error.clone().unwrap_or_default();
-        ui.horizontal(|ui| {
-            ui.colored_label(theme::warn(), &error);
-            if ui.small_button("知道了").clicked() {
-                app.wiki.write_error = None;
-            }
-        });
-    }
-}
-
-/// 框架提案确认窗：树形预览归纳结果，确认后写入（同名跳过），丢弃则不落库。
-fn frame_proposal_window(app: &mut GongwenApp, ctx: &egui::Context) {
-    let Some(proposal) = app.wiki.frame_proposal.clone() else {
-        return;
-    };
-    let mut open = true;
-    let mut accepted = false;
-    let mut discarded = false;
-    egui::Window::new("框架提案 · 待确认")
-        .collapsible(false)
-        .resizable(true)
-        .default_width(480.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.weak(
-                "AI 归纳的框架只是提案：确认前可在下方核对，写入时沿用现有同名节点并登记资料映射。",
-            );
-            ui.add_space(4.0);
-            egui::ScrollArea::vertical()
-                .max_height(320.0)
-                .show(ui, |ui| {
-                    for theme in &proposal.themes {
-                        ui.label(egui::RichText::new(&theme.name).strong());
-                        for category in &theme.categories {
-                            let basis = if category.doc_ids.is_empty() {
-                                String::new()
-                            } else {
-                                format!("（依据 {} 篇）", category.doc_ids.len())
-                            };
-                            ui.weak(format!("　├ {}{basis}", category.name));
-                        }
-                    }
-                });
-            if let Some(error) = &app.wiki.frame_error {
-                ui.colored_label(theme::warn(), error);
-            }
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ui.button("写入框架").clicked() {
-                    accepted = true;
-                }
-                if ui.button("丢弃").clicked() {
-                    discarded = true;
-                }
-            });
-        });
-    if accepted {
-        if let Some(store) = app.wiki_store.as_ref() {
-            match store.apply_frame(&proposal.themes) {
-                Ok((created, reused)) => {
-                    app.wiki.notice = Some(format!(
-                        "已写入框架：新建 {created} 个节点，沿用 {reused} 个节点。"
-                    ));
-                    app.wiki.tree_dirty = true;
-                    app.wiki.frame_proposal = None;
-                    app.wiki.frame_error = None;
-                }
-                Err(error) => app.wiki.frame_error = Some(format!("框架未写入：{error:#}")),
-            }
-        }
-    } else if discarded || !open {
-        app.wiki.frame_proposal = None;
-    }
-}
-
-/// 整编审核台：左列逐页把关，右上渲染预览（口径 13 换接点），右下可直接改
-/// Markdown 源；只有点「采纳本页」才经 `store.create_page` 写库（版本带来源与
-/// 「审核已修改」标记）。关掉窗口不丢提案，树上方「整编审核」按钮可 reopen。
-fn review_desk(
-    app: &mut GongwenApp,
-    ctx: &egui::Context,
-    link_map: &HashMap<String, LinkTarget>,
-    numbering: &NumberingConfig,
-) {
-    if app.wiki.review.is_none() || !app.wiki.review_open {
-        return;
-    }
-    let mut open = true;
-    let mut adopt = false;
-    let mut reject = false;
-    let mut reject_all = false;
-    let mut preview_nav: Option<String> = None;
-    let mut preview_doc = None;
-    egui::Window::new("整编审核")
-        .collapsible(false)
-        .resizable(true)
-        .default_width(800.0)
-        .default_height(520.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            let Some(review) = app.wiki.review.as_mut() else {
-                return;
-            };
-            let pending = review.done.iter().filter(|done| !**done).count();
-            ui.horizontal(|ui| {
-                ui.weak(format!(
-                    "分类「{}」 · 待审 {pending}/{} 页 · 作业 {}",
-                    review.set.category,
-                    review.set.pages.len(),
-                    review.set.run_id
-                ));
-                if ui
-                    .small_button("全部退回")
-                    .on_hover_text("放弃本批提案，不写库；之后可重新发起整编或更新")
-                    .clicked()
-                {
-                    reject_all = true;
-                }
-            });
-            ui.weak("页面只是 AI 提案：逐页核对，正文可直接改；只有点「采纳本页」才会写库。");
-            ui.separator();
-            ui.horizontal(|ui| {
-                // 左列：本批页面清单（✓ = 已处理，点名字切换待审页）。
-                let list_w = 200.0_f32.min(ui.available_width() * 0.3);
-                ui.allocate_ui(egui::vec2(list_w, ui.available_height()), |ui| {
-                    ui.vertical(|ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            for index in 0..review.set.pages.len() {
-                                let page = &review.set.pages[index];
-                                let done = review.done[index];
-                                let label = if done {
-                                    format!("✓ {}", page.title)
-                                } else if page.kind == "guide" {
-                                    format!("{}（导览）", page.title)
-                                } else {
-                                    page.title.clone()
-                                };
-                                let selected = !done && review.selected == index;
-                                if done {
-                                    ui.weak(label);
-                                } else if ui.selectable_label(selected, label).clicked() {
-                                    review.select(index);
-                                }
-                            }
-                        });
-                    });
-                });
-                ui.separator();
-                // 右侧：预览 + 源编辑 + 采纳/退回。
-                let detail = review.set.pages.get(review.selected).cloned();
-                let selected_done = review.done.get(review.selected) == Some(&true);
-                let right_w = ui.available_width();
-                let right_h = ui.available_height();
-                ui.allocate_ui(egui::vec2(right_w, right_h), |ui| {
-                    ui.vertical(|ui| {
-                        let Some(page) = detail else {
-                            ui.weak("这批提案已处理完。");
-                            return;
-                        };
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(&page.title).strong());
-                            if page.kind == "guide" {
-                                theme::accent_scope(ui, |ui| {
-                                    ui.small("导览页");
-                                });
-                            }
-                            if page.uuid.is_some() {
-                                theme::accent_scope(ui, |ui| {
-                                    ui.small("更新现有页");
-                                });
-                            }
-                        });
-                        if !page.change_note.is_empty() {
-                            ui.weak(format!("变更说明：{}", page.change_note));
-                        }
-                        show_doc_refs(ui, &page.doc_refs, &mut preview_doc);
-                        if let Some(error) = &review.error {
-                            ui.colored_label(theme::warn(), error);
-                        }
-                        ui.add_space(4.0);
-                        let preview_h = (ui.available_height() * 0.45).max(120.0);
-                        if let Some(uuid) = page.uuid.clone() {
-                            // 更新提案：diff（库中当前正文 → 源文本当前内容）。
-                            let current = app
-                                .wiki_store
-                                .as_ref()
-                                .and_then(|store| store.get_page(&uuid).ok().flatten());
-                            match current {
-                                Some(current_page) => {
-                                    if page.base_version != Some(current_page.meta.current_version) {
-                                        ui.colored_label(theme::warn(), "页面版本已变化，请退回并按当前版本重新发起。");
-                                    }
-                                    // diff 只在（页面、版本、编辑内容）变化时重算：
-                                    // 2 万字正文的 LCS 每帧跑一次会明显卡输入。
-                                    let stale = review.diff.as_ref().is_none_or(|cache| {
-                                        cache.uuid != uuid
-                                            || cache.version != current_page.meta.current_version
-                                            || cache.current != current_page.body
-                                            || cache.edit != review.edit_body
-                                    });
-                                    if stale {
-                                        review.diff = Some(ReviewDiffCache {
-                                            uuid: uuid.clone(),
-                                            version: current_page.meta.current_version,
-                                            current: current_page.body.clone(),
-                                            edit: review.edit_body.clone(),
-                                            lines: line_diff(&current_page.body, &review.edit_body),
-                                        });
-                                    }
-                                    let version_label = format!(
-                                        "v{} → 提案",
-                                        current_page.meta.current_version
-                                    );
-                                    match review.diff.as_ref().map(|cache| &cache.lines) {
-                                        Some(Some(lines)) => {
-                                            diff_view(ui, &version_label, lines, preview_h)
-                                        }
-                                        Some(None) => {
-                                            ui.weak("当前正文行数太多，算不动 diff；按预览显示。");
-                                            egui::ScrollArea::vertical()
-                                                .max_height(preview_h)
-                                                .show(ui, |ui| {
-                                                    show_page_body(
-                                                        ui,
-                                                        &page.title,
-                                                        &review.edit_body,
-                                                        link_map,
-                                                        &mut preview_nav,
-                                                        numbering,
-                                                    );
-                                                });
-                                        }
-                                        None => {}
-                                    }
-                                }
-                                None => {
-                                    ui.colored_label(
-                                        theme::warn(),
-                                        "读不到本页当前正文（可能已被删除）；请退回本页。",
-                                    );
-                                }
-                            }
-                        } else {
-                            ui.weak("预览（渲染的是下方源文本的当前内容）");
-                            egui::ScrollArea::vertical()
-                                .max_height(preview_h)
-                                .show(ui, |ui| {
-                                    show_page_body(ui, &page.title, &review.edit_body, link_map, &mut preview_nav, numbering);
-                                });
-                        }
-                        ui.add_space(4.0);
-                        ui.separator();
-                        ui.add_space(4.0);
-                        ui.add(
-                            egui::TextEdit::multiline(&mut review.edit_body)
-                                .desired_rows(10)
-                                .desired_width(f32::INFINITY)
-                                .hint_text("页面 Markdown 源：与普通公文正文一致，唯一扩展是 [[页面链接]]。"),
-                        );
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            if selected_done {
-                                ui.weak("本页已处理。");
-                            } else {
-                                if ui.button("采纳本页").clicked() {
-                                    adopt = true;
-                                }
-                                if ui.button("退回本页").clicked() {
-                                    reject = true;
-                                }
-                            }
-                        });
-                    });
-                });
-            });
-        });
-    if !open {
-        // 关掉窗口只是收起审核台：提案保留，树上方「整编审核」入口可 reopen。
-        app.wiki.review_open = false;
-    }
-    if let Some(doc_id) = preview_doc {
-        app.knowledge_open_preview(doc_id);
-    }
-    if let Some(uuid) = preview_nav {
-        open_page(app, &uuid);
-    }
-    if reject_all {
-        // 放弃本批：全部标记为已处理但不采纳；全部处理完的收尾逻辑会清空审核台。
-        if let Some(review) = app.wiki.review.as_mut() {
-            for done in review.done.iter_mut() {
-                *done = true;
-            }
-            review.error = None;
-        }
-    } else if adopt {
-        review_adopt(app);
-    } else if reject
-        && let Some(review) = app.wiki.review.as_mut()
-        && review.action_allowed()
-    {
-        review_mark_done_advance(review);
-    }
-    // 全部处理完：给结论、清审核台、刷新树（新页面挂进分类）。
-    if let Some(review) = &app.wiki.review
-        && review.done.iter().all(|done| *done)
-    {
-        let adopted = review.adopted;
-        let total = review.set.pages.len();
-        let action = if review.set.pages.iter().any(|page| page.uuid.is_some()) {
-            "更新"
-        } else {
-            "整编"
-        };
-        app.wiki.notice = Some(format!(
-            "{action}已处理完：采纳 {adopted} 页、退回 {} 页。",
-            total - adopted
-        ));
-        app.wiki.review = None;
-        app.wiki.review_open = false;
-        app.wiki.tree_dirty = true;
-    }
 }
 
 /// 采纳当前页：新建页走 `create_page`（建页 + v1）；更新提案走
@@ -688,6 +324,7 @@ fn review_adopt(app: &mut GongwenApp) {
             app.knowledge_dirty = true;
             app.wiki.tree_dirty = true;
             review.adopted += 1;
+            review.accepted[review.selected] = true;
             review_mark_done_advance(review);
         }
         Err(message) => review.error = Some(message),
@@ -707,173 +344,6 @@ fn review_mark_done_advance(review: &mut ReviewState) {
 
 /// 版本历史窗口：顶部 A/B 两版选择 + 行级 diff（红删主题增），
 /// 底部回滚（二次确认；回滚产生新版本，历史不丢）。
-fn version_history_window(app: &mut GongwenApp, ctx: &egui::Context) {
-    if !app.wiki.history_open {
-        return;
-    }
-    let Some(page) = app.wiki.open.clone() else {
-        app.wiki.history_open = false;
-        return;
-    };
-    let uuid = page.meta.uuid.clone();
-    // 版本窗跟随当前阅读页：换页后 A/B 必须重置，否则会把上一页选过的版本号
-    // 套到这一页上，甚至回滚到本页没选过的版本。
-    if app.wiki.history_uuid.as_deref() != Some(uuid.as_str()) {
-        app.wiki.history_uuid = Some(uuid.clone());
-        app.wiki.history_a =
-            (page.meta.current_version > 1).then_some(page.meta.current_version - 1);
-        app.wiki.history_b = Some(page.meta.current_version);
-        app.wiki.history_confirm_rollback = false;
-        app.wiki.history_error = None;
-    }
-    let mut open = true;
-    let mut rollback = false;
-    egui::Window::new(format!("版本历史 · {}", page.meta.title))
-        .collapsible(false)
-        .resizable(true)
-        .default_width(720.0)
-        .default_height(480.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            let versions = app
-                .wiki_store
-                .as_ref()
-                .map(|store| store.list_versions(&uuid).unwrap_or_default())
-                .unwrap_or_default();
-            if versions.is_empty() {
-                ui.weak("还没有版本记录。");
-                return;
-            }
-            // 版本清单：版本号、时间、来源、是否经人工修改。
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for v in &versions {
-                        let current = v.version == page.meta.current_version;
-                        let edited = if v.review_edited {
-                            " · 人工修改"
-                        } else {
-                            ""
-                        };
-                        let label = format!(
-                            "v{}{} · {}{edited}",
-                            v.version,
-                            if current { "（当前）" } else { "" },
-                            v.created_at
-                        );
-                        ui.weak(label)
-                            .on_hover_text(format!("来源：{}", v.source_run_id));
-                    }
-                });
-            });
-            ui.add_space(4.0);
-            let mut a = app.wiki.history_a.unwrap_or(page.meta.current_version);
-            let mut b = app.wiki.history_b.unwrap_or(page.meta.current_version);
-            ui.horizontal(|ui| {
-                ui.label("对比");
-                egui::ComboBox::from_id_salt("wiki_hist_a")
-                    .selected_text(format!("v{a}"))
-                    .show_ui(ui, |ui| {
-                        for v in &versions {
-                            ui.selectable_value(&mut a, v.version, format!("v{}", v.version));
-                        }
-                    });
-                ui.label("→");
-                egui::ComboBox::from_id_salt("wiki_hist_b")
-                    .selected_text(format!("v{b}"))
-                    .show_ui(ui, |ui| {
-                        for v in &versions {
-                            ui.selectable_value(&mut b, v.version, format!("v{}", v.version));
-                        }
-                    });
-            });
-            app.wiki.history_a = Some(a);
-            app.wiki.history_b = Some(b);
-            ui.add_space(4.0);
-            ui.separator();
-            let (body_a, body_b) = app.wiki_store.as_ref().map_or((None, None), |store| {
-                (
-                    store.get_version_body(&uuid, a).ok().flatten(),
-                    store.get_version_body(&uuid, b).ok().flatten(),
-                )
-            });
-            match (body_a, body_b) {
-                (Some(ref old), Some(ref new)) if a != b => match line_diff(old, new) {
-                    Some(lines) => diff_view(
-                        ui,
-                        &format!("v{a} → v{b}"),
-                        &lines,
-                        (ui.available_height() * 0.6).max(120.0),
-                    ),
-                    None => {
-                        ui.weak("两版行数太多，算不动行级 diff；请改选正文较小的版本。");
-                    }
-                },
-                (Some(_), Some(_)) => {
-                    ui.weak("A 与 B 是同一版本，无差异。");
-                }
-                _ => {
-                    ui.colored_label(theme::warn(), "读取版本正文失败。");
-                }
-            }
-            ui.add_space(4.0);
-            ui.separator();
-            ui.horizontal(|ui| {
-                if !app.wiki.history_confirm_rollback {
-                    if ui
-                        .add_enabled(
-                            b != page.meta.current_version,
-                            egui::Button::new(format!("回滚到 v{b}")),
-                        )
-                        .on_hover_text("以 v{b} 的内容生成一个新版本，历史版本全部保留")
-                        .clicked()
-                    {
-                        app.wiki.history_confirm_rollback = true;
-                    }
-                } else {
-                    ui.colored_label(
-                        theme::warn(),
-                        format!(
-                            "确认把本页回滚到 v{b}？当前 v{} 会保留为历史。",
-                            page.meta.current_version
-                        ),
-                    );
-                    if ui.button("确认回滚").clicked() {
-                        rollback = true;
-                    }
-                    if ui.button("取消").clicked() {
-                        app.wiki.history_confirm_rollback = false;
-                    }
-                }
-            });
-            if let Some(error) = &app.wiki.history_error {
-                ui.colored_label(theme::warn(), error);
-            }
-        });
-    if !open {
-        app.wiki.history_open = false;
-    }
-    if rollback {
-        app.wiki.history_confirm_rollback = false;
-        let target = app.wiki.history_b.unwrap_or(0);
-        match app
-            .wiki_store
-            .as_ref()
-            .map(|store| store.rollback(&uuid, target))
-        {
-            Some(Ok(_)) => {
-                app.wiki.notice = Some(format!("已回滚到 v{target}（产生新版本，历史保留）。"));
-                app.wiki.history_open = false;
-                app.knowledge_dirty = true;
-                app.wiki.tree_dirty = true;
-                open_page(app, &uuid);
-            }
-            Some(Err(error)) => app.wiki.history_error = Some(format!("回滚失败：{error:#}")),
-            None => app.wiki.history_error = Some("知识库不可用。".into()),
-        }
-    }
-}
-
 /// 行级 diff 的一行：相同 / 新增（B 有 A 无）/ 删除（A 有 B 无）。
 enum DiffLine {
     Same(String),
@@ -1277,6 +747,7 @@ fn page_op_window(app: &mut GongwenApp, ctx: &egui::Context) {
                 app.wiki.doc_refs = Vec::new();
                 app.wiki.missing_sources = false;
                 app.wiki.backlinks = Vec::new();
+                app.wiki.backlink_context.clear();
                 app.wiki.tree_dirty = true;
                 app.knowledge_dirty = true;
             }
@@ -1322,107 +793,6 @@ fn nodes_without_guide(app: &GongwenApp) -> Vec<(String, String, i64)> {
     out
 }
 
-/// 导入框架对话框：粘贴 Markdown 大纲（# 主题 / ## 分类，或 - 列表两级），
-/// 实时预览解析结果，确认后写库——与现有节点同名的跳过，不覆盖已有框架。
-fn import_window(app: &mut GongwenApp, ctx: &egui::Context) {
-    if !app.wiki.import_open {
-        return;
-    }
-    let mut open = true;
-    let mut close = false;
-    let mut done = false;
-    egui::Window::new("导入框架")
-        .collapsible(false)
-        .resizable(true)
-        .default_width(460.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.weak("粘贴 Markdown 大纲：# 主题、## 分类（或 - 主题、缩进 - 分类），只分两级。");
-            ui.add(
-                egui::TextEdit::multiline(&mut app.wiki.import_text)
-                    .desired_rows(10)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("# 安全生产\n## 监督检查\n## 应急管理\n# 政务服务\n……"),
-            );
-            ui.add_space(4.0);
-            let parsed = crate::wiki::parse_frame_outline(&app.wiki.import_text);
-            match &parsed {
-                Ok(themes) => {
-                    ui.weak(format!("解析出 {} 个主题：", themes.len()));
-                    egui::ScrollArea::vertical()
-                        .max_height(180.0)
-                        .show(ui, |ui| {
-                            for theme in themes {
-                                ui.label(format!(
-                                    "{}（{} 个分类）",
-                                    theme.name,
-                                    theme.categories.len()
-                                ));
-                                for category in &theme.categories {
-                                    ui.weak(format!("　├ {}", category));
-                                }
-                            }
-                        });
-                }
-                Err(error) => {
-                    ui.colored_label(theme::warn(), format!("还不能导入：{error}"));
-                }
-            }
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(parsed.is_ok(), egui::Button::new("确认导入"))
-                    .clicked()
-                {
-                    done = true;
-                }
-                if ui.button("取消").clicked() {
-                    close = true;
-                }
-            });
-        });
-    if close {
-        open = false;
-    }
-    if done && let Ok(themes) = parsed_themes(app) {
-        let themes = themes
-            .into_iter()
-            .map(|theme| crate::wiki::FrameTheme {
-                name: theme.name,
-                categories: theme
-                    .categories
-                    .into_iter()
-                    .map(|name| crate::wiki::FrameCategory {
-                        name,
-                        doc_ids: Vec::new(),
-                    })
-                    .collect(),
-            })
-            .collect::<Vec<_>>();
-        if let Some(store) = app.wiki_store.as_ref() {
-            match store.apply_frame(&themes) {
-                Ok((created, reused)) => {
-                    app.wiki.notice = Some(format!(
-                        "已导入框架：新建 {created} 个节点，沿用 {reused} 个节点。"
-                    ));
-                    app.wiki.tree_dirty = true;
-                    app.wiki.import_open = false;
-                    app.wiki.import_text.clear();
-                }
-                Err(error) => app.wiki.notice = Some(format!("框架未导入：{error:#}")),
-            }
-        }
-    } else if !open {
-        app.wiki.import_open = false;
-    }
-}
-
-/// 导入解析结果（确认时重解析一次，以对话框里看到的那份为准）。
-fn parsed_themes(app: &GongwenApp) -> Result<Vec<OutlineTheme>, String> {
-    crate::wiki::parse_frame_outline(&app.wiki.import_text)
-}
-
 // ── 缓存与链接解析 ──────────────────────────────────────────────────────────
 
 /// 重建框架树、页面清单与缺口/需复核缓存。任何一步读失败都返回 false，
@@ -1466,6 +836,9 @@ fn rebuild_cache(app: &mut GongwenApp) -> bool {
     app.wiki.tree = tree;
     app.wiki.pages = pages;
     app.wiki.gaps = gaps;
+    if !app.wiki.search.trim().is_empty() {
+        app.wiki.search_hits = store.search(app.wiki.search.trim(), 30).unwrap_or_default();
+    }
     app.wiki.needs_review = needs_review;
     app.wiki.cache_error = None;
     true
@@ -1562,6 +935,7 @@ fn saved_link_map(app: &GongwenApp, page: &WikiPage) -> HashMap<String, LinkTarg
 
 /// 供其他页面（资料库问答的维基依据等）跳转打开指定维基页。
 pub(crate) fn open_wiki_page(app: &mut GongwenApp, uuid: &str) {
+    app.wiki.route = Route::Browse;
     open_page(app, uuid);
 }
 
@@ -1576,7 +950,46 @@ fn open_page(app: &mut GongwenApp, uuid: &str) {
             app.wiki.doc_refs = store.page_doc_refs(uuid).unwrap_or_default();
             app.wiki.missing_sources = store.page_has_missing_sources(uuid).unwrap_or(false);
             app.wiki.backlinks = store.backlinks(uuid).unwrap_or_default();
+            app.wiki.backlink_context =
+                app.wiki
+                    .backlinks
+                    .iter()
+                    .take(16)
+                    .filter_map(|backlink| {
+                        let from = store.get_page(&backlink.from_uuid).ok().flatten()?;
+                        let bindings = store.link_bindings(&from.meta.uuid, &from.body).ok()?;
+                        let (span, link) = crate::wiki::wikilink_spans(&from.body)
+                            .into_iter()
+                            .find(|(_, link)| {
+                                bindings.get(&link.target).is_some_and(|edge| {
+                                    edge.to_page.as_deref() == Some(uuid)
+                                        || (page.meta.kind == "guide"
+                                            && edge.to_node == Some(page.meta.node_id))
+                                })
+                            })?;
+                        let before = &from.body[..span.start];
+                        let after = &from.body[span.end..];
+                        let start = before
+                            .char_indices()
+                            .rev()
+                            .nth(19)
+                            .map_or(0, |(index, _)| index);
+                        let end = after
+                            .char_indices()
+                            .nth(24)
+                            .map_or(after.len(), |(index, _)| index);
+                        let excerpt = format!("{}{}{}", &before[start..], link.text, &after[..end]);
+                        Some((
+                            backlink.from_uuid.clone(),
+                            excerpt.split_whitespace().collect::<Vec<_>>().join(" "),
+                        ))
+                    })
+                    .collect();
             app.wiki.open_links = saved_link_map(app, &page);
+            app.wiki.collapsed_nodes.remove(&page.meta.node_id);
+            if let Some((_, _, parent)) = find_node(&app.wiki.tree, page.meta.node_id) {
+                app.wiki.collapsed_nodes.remove(&parent);
+            }
             app.wiki.open = Some(page);
         }
         Ok(None) => {
@@ -1584,6 +997,7 @@ fn open_page(app: &mut GongwenApp, uuid: &str) {
             app.wiki.doc_refs = Vec::new();
             app.wiki.missing_sources = false;
             app.wiki.backlinks = Vec::new();
+            app.wiki.backlink_context.clear();
             app.wiki.open_links.clear();
         }
         Err(_) => {}
@@ -1592,125 +1006,97 @@ fn open_page(app: &mut GongwenApp, uuid: &str) {
 
 // ── 左栏：框架树 ────────────────────────────────────────────────────────────
 
-fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) {
-    let busy = app.wiki.frame_progress.is_some() || app.wiki.write_progress.is_some();
-    ui.horizontal(|ui| {
-        ui.heading("知识框架");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add_enabled(
-                    !busy,
-                    theme::icon_text_button(theme::Icon::FileUp, "导入框架"),
-                )
-                .on_hover_text("粘贴 Markdown 大纲（# 主题 / ## 分类）批量建框架")
-                .clicked()
-            {
-                app.wiki.import_open = true;
-            }
-            if ui
-                .add_enabled(
-                    !busy,
-                    theme::icon_text_button(theme::Icon::Sparkles, "从资料归纳"),
-                )
-                .on_hover_text("让 AI 浏览资料库，归纳两级框架提案；确认后才写入")
-                .clicked()
-            {
-                app.start_wiki_frame();
+fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>, manage: bool) {
+    ui.strong("分类框架");
+    ui.separator();
+    if app.wiki.tree.is_empty() {
+        ui.weak("尚未建立分类框架");
+    }
+    egui::ScrollArea::vertical()
+        .id_salt(("wiki_tree", manage))
+        .show(ui, |ui| {
+            for branch in &app.wiki.tree {
+                let theme = &branch.theme;
+                if !node_row(
+                    ui,
+                    theme,
+                    manage,
+                    0,
+                    &mut app.wiki.collapsed_nodes,
+                    &mut app.wiki.selected_node,
+                    &mut app.wiki.node_name_edit,
+                ) {
+                    continue;
+                }
+                if !manage {
+                    for page in app.wiki.pages.get(&theme.id).into_iter().flatten() {
+                        page_row(app, ui, page, nav);
+                    }
+                }
+                for category in &branch.categories {
+                    if !node_row(
+                        ui,
+                        category,
+                        manage,
+                        1,
+                        &mut app.wiki.collapsed_nodes,
+                        &mut app.wiki.selected_node,
+                        &mut app.wiki.node_name_edit,
+                    ) || manage
+                    {
+                        continue;
+                    }
+                    for page in app.wiki.pages.get(&category.id).into_iter().flatten() {
+                        page_row(app, ui, page, nav);
+                    }
+                }
             }
         });
-    });
-    if let Some(error) = &app.wiki.cache_error {
-        ui.colored_label(theme::warn(), error);
-    }
-    frame_job_strip(app, ui);
-    write_job_strip(app, ui);
-    // 审核台入口：作业交回提案后常驻，关掉窗口可从这儿 reopen。
-    if let Some(review) = &app.wiki.review {
-        let pending = review.done.iter().filter(|done| !**done).count();
-        if pending > 0 {
-            let label = format!("整编审核（待审 {pending} 页）");
-            if ui
-                .add(theme::icon_text_button(theme::Icon::BookmarkCheck, &label))
-                .clicked()
-            {
-                app.wiki.review_open = true;
-            }
-        }
-    }
-    // 缺口入口：待建页红链 + 无条目页的分类 + 需复核页 + 缺导览页的节点。
-    let gap_count = app.wiki.gaps.len()
-        + empty_categories(app).len()
-        + app.wiki.needs_review.len()
-        + nodes_without_guide(app).len();
-    if ui
-        .add(theme::icon_text_button(
-            theme::Icon::List,
-            &format!("缺口与复核（{gap_count}）"),
-        ))
-        .on_hover_text("待建页红链与还没有页面的分类")
-        .clicked()
-    {
-        app.wiki.gap_open = true;
-    }
-    // 新建主题：输入 + 建（复用标准词库页的「行内输入即建」交互）。
+}
+
+fn node_row(
+    ui: &mut egui::Ui,
+    node: &crate::wiki::WikiNode,
+    manage: bool,
+    indent: usize,
+    collapsed_nodes: &mut std::collections::HashSet<i64>,
+    selected_node: &mut Option<i64>,
+    node_name_edit: &mut String,
+) -> bool {
+    let mut expanded = !collapsed_nodes.contains(&node.id);
     ui.horizontal(|ui| {
-        let edit = egui::TextEdit::singleline(&mut app.wiki.new_node_name)
-            .desired_width(140.0)
-            .hint_text("新主题名称");
-        let resp = ui.add(edit);
-        let name = app.wiki.new_node_name.trim().to_string();
-        let create = ui
-            .add_enabled(!name.is_empty() && !busy, egui::Button::new("建主题"))
+        ui.add_space(indent as f32 * 14.0);
+        let icon = if expanded {
+            theme::Icon::ChevronDown
+        } else {
+            theme::Icon::ChevronRight
+        };
+        let hint = if expanded { "折叠" } else { "展开" };
+        if (!manage || indent == 0) && theme::icon_button(ui, icon, hint).clicked() {
+            expanded = !expanded;
+            if expanded {
+                collapsed_nodes.remove(&node.id);
+            } else {
+                collapsed_nodes.insert(node.id);
+            }
+        }
+        if ui
+            .selectable_label(manage && *selected_node == Some(node.id), &node.name)
             .clicked()
-            || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-        if create {
-            if let Some(store) = app.wiki_store.as_ref() {
-                match store.create_theme(&name) {
-                    Ok(id) => {
-                        app.wiki.notice = Some(format!("已建主题「{name}」。"));
-                        app.wiki.tree_dirty = true;
-                        app.wiki.selected_node = Some(id);
-                        app.wiki.node_name_edit = name.clone();
-                    }
-                    Err(error) => app.wiki.notice = Some(format!("建主题失败：{error:#}")),
-                }
-            }
-            app.wiki.new_node_name.clear();
-        }
-    });
-    if let Some(notice) = &app.wiki.notice {
-        ui.weak(notice);
-    }
-    ui.add_space(4.0);
-    if app.wiki.tree.is_empty() {
-        ui.weak("还没有知识框架：先建主题、点右上角「导入框架」粘贴大纲，或「从资料归纳」让 AI 提一份框架。");
-        return;
-    }
-    node_edit_strip(app, ui);
-    ui.add_space(2.0);
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for t in &app.wiki.tree {
-            let theme_selected = app.wiki.selected_node == Some(t.theme.id);
-            if tree_row(ui, &t.theme.name, theme_selected).clicked() {
-                app.wiki.selected_node = Some(t.theme.id);
-                app.wiki.node_name_edit = t.theme.name.clone();
-            }
-            // 主题名下的页面（含导览页）排在分类前面。
-            for m in app.wiki.pages.get(&t.theme.id).into_iter().flatten() {
-                page_row(app, ui, m, nav);
-            }
-            for c in &t.categories {
-                let category_selected = app.wiki.selected_node == Some(c.id);
-                if tree_row(ui, &format!("　{}", c.name), category_selected).clicked() {
-                    app.wiki.selected_node = Some(c.id);
-                    app.wiki.node_name_edit = c.name.clone();
-                }
-                for m in app.wiki.pages.get(&c.id).into_iter().flatten() {
-                    page_row(app, ui, m, nav);
-                }
+        {
+            if manage {
+                *selected_node = Some(node.id);
+                *node_name_edit = node.name.clone();
+            } else if expanded {
+                collapsed_nodes.insert(node.id);
+                expanded = false;
+            } else {
+                collapsed_nodes.remove(&node.id);
+                expanded = true;
             }
         }
     });
+    expanded
 }
 
 /// 树里选中节点的编辑条：改名、分类跨主题移动、删除、在主题下建分类。
@@ -1724,7 +1110,7 @@ fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
         return;
     };
     // 作业运行中不改进框架：删掉正在整编的目标分类会让整批提案作废。
-    let busy = app.wiki.frame_progress.is_some() || app.wiki.write_progress.is_some();
+    let busy = app.wiki.busy();
     ui.group(|ui| {
         ui.horizontal(|ui| {
             ui.label(if is_theme { "主题" } else { "分类" });
@@ -1821,7 +1207,7 @@ fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
         if (!is_theme || !has_theme_guide)
             && ui
                 .add_enabled(
-                    app.wiki.frame_progress.is_none() && app.wiki.write_progress.is_none(),
+                    !app.wiki.busy(),
                     theme::icon_text_button(
                         theme::Icon::Sparkles,
                         if is_theme {
@@ -1898,6 +1284,17 @@ fn reader(
         ui.weak("在左侧框架树里选一个页面开始阅读。");
         return;
     };
+    if let Some((name, is_theme, theme_id)) = find_node(&app.wiki.tree, page.meta.node_id) {
+        let path = if is_theme {
+            name
+        } else {
+            let parent = find_node(&app.wiki.tree, theme_id)
+                .map(|node| node.0)
+                .unwrap_or_default();
+            format!("{parent} / {name}")
+        };
+        ui.weak(path);
+    }
     // 页头：标题 + 元信息 + backlinks 栏开关。
     ui.horizontal(|ui| {
         ui.heading(&page.meta.title);
@@ -1935,7 +1332,7 @@ fn reader(
             app.wiki.page_op_error = None;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let busy = app.wiki.frame_progress.is_some() || app.wiki.write_progress.is_some();
+            let busy = app.wiki.busy();
             if ui
                 .add_enabled(!busy, theme::icon_text_button(theme::Icon::Refresh, "更新"))
                 .on_hover_text(
@@ -1953,48 +1350,46 @@ fn reader(
                 .on_hover_text("版本历史：两版对比、回滚（回滚也产生新版本，不丢历史）")
                 .clicked()
             {
-                app.wiki.history_open = true;
+                app.wiki.route = Route::History;
                 app.wiki.history_confirm_rollback = false;
                 app.wiki.history_error = None;
-                app.wiki.history_uuid = Some(page.meta.uuid.clone());
-                let current = page.meta.current_version;
-                app.wiki.history_b = Some(current);
-                app.wiki.history_a = (current > 1).then_some(current - 1);
+                app.wiki.rail_hidden = false;
             }
-            let icon = if app.wiki.backlinks_open {
+            let icon = if !app.wiki.rail_hidden {
                 theme::Icon::PanelClose
             } else {
                 theme::Icon::PanelOpen
             };
             if ui.add(theme::icon_text_button(icon, "被引用")).clicked() {
-                app.wiki.backlinks_open = !app.wiki.backlinks_open;
+                app.wiki.rail_hidden = !app.wiki.rail_hidden;
             }
         });
     });
     if app.wiki.missing_sources {
         ui.colored_label(theme::warn(), "部分依据已删除或替换，请复核本页。");
     }
-    if !app.wiki.doc_refs.is_empty() {
-        let refs = app.wiki.doc_refs.clone();
-        let mut doc = None;
-        show_doc_refs(ui, &refs, &mut doc);
-        if let Some(id) = doc {
-            app.knowledge_open_preview(id);
-        }
-    } else if !app.wiki.missing_sources {
-        ui.weak(
-            "本页没有登记依据：仅供人工阅读，不参与问答与写作的自动取证；             补上依据（可由更新作业带入）后自动进入取证。",
-        );
+    if app.wiki.doc_refs.is_empty() && !app.wiki.missing_sources {
+        ui.weak("本页尚未登记依据，仅供人工阅读。");
     }
     ui.add_space(6.0);
     ui.separator();
     ui.add_space(6.0);
-    let links = app.wiki.open_links.clone();
-    egui::ScrollArea::vertical()
+    let result = egui::ScrollArea::vertical()
         .id_salt(&page.meta.uuid)
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            show_page_body(ui, &page.meta.title, &page.body, &links, nav, numbering);
+            show_page_body(
+                ui,
+                &page.body,
+                &app.wiki.open_links,
+                &app.wiki.doc_refs,
+                numbering,
+            )
         });
+    if let Some(target) = result.inner {
+        follow_body_target(app, target);
+        *nav = None;
+    }
 }
 
 fn show_doc_refs(ui: &mut egui::Ui, refs: &[(i64, String)], open: &mut Option<i64>) {
@@ -2025,76 +1420,113 @@ fn link_display_text<'a>(
     }
 }
 
-/// 正文走研究报告预览；预览的点击定位单位是块，维基跳转单独提供控件。
+#[derive(Clone)]
+enum BodyTarget {
+    Page(String),
+    Source(i64),
+    Missing,
+}
+
+/// 正文沿用研究报告预览。先把维基链接换成显示文字，再把命中范围交给排版层。
 fn show_page_body(
     ui: &mut egui::Ui,
-    title: &str,
     body: &str,
     link_map: &HashMap<String, LinkTarget>,
-    nav: &mut Option<String>,
+    refs: &[(i64, String)],
     numbering: &NumberingConfig,
-) {
-    let links = crate::wiki::wikilink_spans(body);
-    if !links.is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            ui.weak("页面链接");
-            let mut seen = std::collections::HashSet::new();
-            for (_, link) in &links {
-                if !seen.insert((&link.target, &link.text)) {
-                    continue;
-                }
-                let (target, hover) = match link_map.get(&link.target) {
-                    Some(LinkTarget::Page { uuid, title }) => {
-                        (Some(uuid), format!("维基页：{title}"))
-                    }
-                    Some(LinkTarget::Node { name, guide }) => {
-                        (guide.as_ref(), format!("框架导览：{name}"))
-                    }
-                    None => (None, format!("待建页：{}", link.target)),
-                };
-                let color = if target.is_some() {
-                    theme::accent_text()
-                } else {
-                    theme::warn()
-                };
-                let response = ui
-                    .add_enabled(
-                        target.is_some(),
-                        egui::Button::new(
-                            egui::RichText::new(link_display_text(link, link_map)).color(color),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_text(hover);
-                if response.clicked()
-                    && let Some(uuid) = target
-                {
-                    *nav = Some(uuid.clone());
+) -> Option<BodyTarget> {
+    let mut targets = Vec::new();
+    let mut markdown = String::with_capacity(body.len());
+    let mut end = 0;
+    for (span, link) in crate::wiki::wikilink_spans(body) {
+        markdown.push_str(&body[end..span.start]);
+        let start = markdown.len();
+        markdown.push_str(link_display_text(&link, link_map));
+        let target = match link_map.get(&link.target) {
+            Some(LinkTarget::Page { uuid, .. }) => BodyTarget::Page(uuid.clone()),
+            Some(LinkTarget::Node {
+                guide: Some(uuid), ..
+            }) => BodyTarget::Page(uuid.clone()),
+            _ => BodyTarget::Missing,
+        };
+        let hint = if matches!(target, BodyTarget::Missing) {
+            format!("待建页 · {}", link.target)
+        } else {
+            format!("打开 · {}", link_display_text(&link, link_map))
+        };
+        targets.push((start..markdown.len(), hint, target));
+        end = span.end;
+    }
+    markdown.push_str(&body[end..]);
+    for (start, _) in markdown.match_indices("〔E") {
+        let after = start + "〔E".len();
+        let Some((number, _)) = markdown[after..].split_once('〕') else {
+            continue;
+        };
+        let Ok(id) = number.parse::<i64>() else {
+            continue;
+        };
+        let Some((_, note)) = refs.iter().find(|(source, _)| *source == id) else {
+            continue;
+        };
+        let span = start..after + number.len() + '〕'.len_utf8();
+        if targets
+            .iter()
+            .any(|(link, _, _)| link.start < span.end && span.start < link.end)
+        {
+            continue;
+        }
+        targets.push((span, format!("依据 E{id} · {note}"), BodyTarget::Source(id)));
+    }
+    let links = targets
+        .iter()
+        .map(|(source, hint, target)| crate::preview::InlineLink {
+            source: source.clone(),
+            hint: hint.clone(),
+            color: if matches!(target, BodyTarget::Missing) {
+                theme::warn()
+            } else {
+                theme::accent()
+            },
+        })
+        .collect();
+    let clicked = crate::preview::research_body_preview(
+        ui,
+        crate::preview::InlineLinks { markdown, links },
+        numbering,
+    )
+    .clicked;
+    if let Some(clicked) = clicked
+        && let Some((_, _, target)) = targets.iter().find(|(span, _, _)| *span == clicked)
+    {
+        return Some(target.clone());
+    }
+    // 标题、公式和部分表格还使用整块命中，保留对这些位置的跳转入口。
+    let mut chosen = None;
+    if !targets.is_empty() {
+        egui::CollapsingHeader::new("本页链接").show(ui, |ui| {
+            let mut shown = std::collections::HashSet::new();
+            for (_, label, target) in &targets {
+                if shown.insert(label) && ui.link(label).clicked() {
+                    chosen = Some(target.clone());
                 }
             }
         });
     }
-    let mut markdown = String::with_capacity(body.len());
-    let mut end = 0;
-    for (span, link) in links {
-        markdown.push_str(&body[end..span.start]);
-        markdown.push_str(link_display_text(&link, link_map));
-        end = span.end;
+    chosen
+}
+
+fn follow_body_target(app: &mut GongwenApp, target: BodyTarget) {
+    match target {
+        BodyTarget::Page(uuid) => open_wiki_page(app, &uuid),
+        BodyTarget::Source(id) => {
+            app.wiki.sources_tab = true;
+            app.wiki.job_tab = false;
+            app.wiki.rail_hidden = false;
+            workspaces::read_evidence(app, id);
+        }
+        BodyTarget::Missing => app.wiki.gap_open = true,
     }
-    markdown.push_str(&body[end..]);
-    let _ = crate::preview::research_preview(
-        ui,
-        &crate::models::DraftInput {
-            title_hint: title.to_owned(),
-            ..Default::default()
-        },
-        &markdown,
-        crate::preview::PreviewScale::zoom(None),
-        None,
-        false,
-        numbering,
-        false,
-    );
 }
 
 fn backlinks_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) {
@@ -2105,7 +1537,7 @@ fn backlinks_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<Stri
                 .add(theme::icon_text_button(theme::Icon::PanelClose, ""))
                 .clicked()
             {
-                app.wiki.backlinks_open = false;
+                app.wiki.rail_hidden = true;
             }
         });
     });
@@ -2123,6 +1555,10 @@ fn backlinks_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<Stri
             {
                 *nav = Some(b.from_uuid.clone());
             }
+            if let Some(context) = app.wiki.backlink_context.get(&b.from_uuid) {
+                ui.weak(context);
+            }
+            ui.separator();
         }
     });
 }

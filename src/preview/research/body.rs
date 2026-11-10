@@ -22,9 +22,59 @@ pub(crate) fn research_preview(
     markdown: &str,
     scale: PreviewScale,
     anchor: Option<&Range<usize>>,
+    scroll_to_anchor: bool,
+    numbering: &NumberingConfig,
+    line_numbers: bool,
+) -> PreviewOutput {
+    draw_research(
+        ui,
+        input,
+        markdown,
+        scale,
+        anchor,
+        scroll_to_anchor,
+        numbering,
+        line_numbers,
+        None,
+    )
+}
+
+/// 阅读器使用同一研究报告正文排版，页标题由外层工作区提供。
+pub(crate) fn research_body_preview(
+    ui: &mut egui::Ui,
+    content: crate::preview::InlineLinks,
+    numbering: &NumberingConfig,
+) -> PreviewOutput {
+    let markdown = content.markdown.clone();
+    let viewport = ui.available_width().min(ui.clip_rect().width());
+    ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+    draw_research(
+        ui,
+        &DraftInput::default(),
+        &markdown,
+        PreviewScale {
+            zoom: None,
+            viewport: Some(viewport),
+        },
+        None,
+        false,
+        numbering,
+        false,
+        Some(content),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_research(
+    ui: &mut egui::Ui,
+    input: &DraftInput,
+    markdown: &str,
+    scale: PreviewScale,
+    anchor: Option<&Range<usize>>,
     mut scroll_to_anchor: bool,
     numbering: &NumberingConfig,
     line_numbers: bool,
+    inline_links: Option<crate::preview::InlineLinks>,
 ) -> PreviewOutput {
     let visible = ui
         .clip_rect()
@@ -37,6 +87,10 @@ pub(crate) fn research_preview(
         .with_bold_style(ui.ctx())
         .with_line_numbers(line_numbers);
     metrics.terminal = terminal;
+    metrics.inline_links = inline_links;
+    if metrics.inline_links.is_some() {
+        metrics.margin_top = metrics.margin_top.min(32.0);
+    }
     // 两遍：先给锚点和文献定号，再按纸面字面重新切块。研究报告的标题编号不跟
     // 设置里的公文编号样式走；序号表的分组编号跟设置，与导出一致。
     // 两遍解析只取决于正文与编号样式，正文没动就复用上一次的结果（`preview::memo`）。
@@ -61,7 +115,7 @@ pub(crate) fn research_preview(
 
     if terminal {
         crate::preview::research_terminal::cover(ui, &metrics, input, markdown);
-    } else {
+    } else if metrics.inline_links.is_none() {
         cover_sheet(ui, &metrics, input, markdown);
     }
 

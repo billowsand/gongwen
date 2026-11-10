@@ -294,7 +294,11 @@ fn run_chain(
 
     let config = eval_config();
     let cancel = Arc::new(AtomicBool::new(false));
-    let progress = |line: String| eprintln!("[{tag}] {line}");
+    let progress = |event| match event {
+        super::PiEvent::Progress(line) | super::PiEvent::Tool(line) => eprintln!("[{tag}] {line}"),
+        super::PiEvent::Activity(activity) => eprintln!("[{tag}] {activity:?}"),
+        _ => {}
+    };
 
     // ① 归纳框架。
     let frame = induce_frame(

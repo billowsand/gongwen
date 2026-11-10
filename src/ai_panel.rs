@@ -33,6 +33,7 @@ pub(crate) mod session;
 mod session_ui;
 pub(crate) mod skill_job;
 mod ui;
+pub(crate) use ui::phase_label;
 mod workspace_ui;
 
 pub(crate) use skill_job::{

@@ -6,9 +6,10 @@
 use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
 
-use super::task_assistant::{TaskJobUi, progress_sink};
+use super::task_assistant::TaskJobUi;
 use crate::app::GongwenApp;
 use crate::pi_agent::wiki_jobs::FrameProposal;
+use crate::wiki_ui::{Outcome, WikiRequest, WikiRun};
 
 /// 框架归纳作业的输出：通过确定性复核的提案，或失败原因。
 pub(crate) struct WikiFrameOutput {
@@ -42,20 +43,19 @@ impl GongwenApp {
                 return;
             }
         };
-        let (ui, progress, cancel) = TaskJobUi::start();
+        let (ui, _, cancel) = TaskJobUi::start();
         let (tx, rx) = std::sync::mpsc::channel();
         self.wiki_frame_rx = Some(rx);
         self.wiki_frame_job = Some(ui);
         self.wiki.frame_error = None;
-        self.wiki.frame_progress = Some("正在准备工作区…".to_string());
+        let run = WikiRun::new(WikiRequest::Frame, "资料库".into());
+        let events = run.sink();
+        self.wiki.frame_run = Some(run);
+        self.wiki.open_frame_proposal();
+        self.wiki.show_job();
         std::thread::spawn(move || {
-            let result = crate::pi_agent::wiki_jobs::induce_frame(
-                config,
-                path,
-                cancel,
-                progress_sink(&progress),
-            )
-            .map_err(|error| format!("归纳失败，可重试：{error}"));
+            let result = crate::pi_agent::wiki_jobs::induce_frame(config, path, cancel, events)
+                .map_err(|error| format!("归纳失败，可重试：{error}"));
             let _ = tx.send(WikiFrameOutput { result });
         });
     }
@@ -65,47 +65,37 @@ impl GongwenApp {
         if let Some(job) = &self.wiki_frame_job {
             if self.wiki.request_stop_frame {
                 job.stop();
-            } else {
-                self.wiki.frame_progress = Some(job.line());
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         let Some(rx) = self.wiki_frame_rx.as_ref() else {
             return;
         };
-        match rx.try_recv() {
-            Ok(output) => {
-                self.wiki_frame_rx = None;
-                self.wiki_frame_job = None;
-                self.wiki.frame_progress = None;
-                if std::mem::take(&mut self.wiki.request_stop_frame) {
-                    // 用户主动停止：不采纳本轮结果，也不把「已停止」当错误吓人。
-                    self.wiki.frame_error = None;
-                } else {
-                    match output.result {
-                        Ok(proposal) => {
-                            self.wiki.frame_error = None;
-                            self.wiki.frame_proposal = Some(proposal);
-                        }
-                        Err(error) => self.wiki.frame_error = Some(error),
-                    }
+        let result = match rx.try_recv() {
+            Ok(output) => output.result,
+            Err(TryRecvError::Disconnected) => Err("归纳线程意外退出，请重试。".into()),
+            Err(TryRecvError::Empty) => return,
+        };
+        self.wiki_frame_rx = None;
+        self.wiki_frame_job = None;
+        let outcome = if std::mem::take(&mut self.wiki.request_stop_frame) {
+            Outcome::Stopped
+        } else {
+            match result {
+                Ok(value) => {
+                    self.wiki.frame_proposal = Some(value);
+                    Outcome::Delivered
                 }
-                ctx.request_repaint();
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.wiki_frame_rx = None;
-                self.wiki_frame_job = None;
-                let was_running = self.wiki.frame_progress.is_some();
-                self.wiki.frame_progress = None;
-                if std::mem::take(&mut self.wiki.request_stop_frame) {
-                    self.wiki.frame_error = None;
-                } else if was_running {
-                    self.wiki.frame_error = Some("归纳线程意外退出，请重试。".into());
+                Err(error) => {
+                    self.wiki.frame_error = Some(error);
+                    Outcome::Failed
                 }
-                ctx.request_repaint();
             }
-            Err(TryRecvError::Empty) => {}
+        };
+        if let Some(run) = &mut self.wiki.frame_run {
+            run.finish(outcome);
         }
+        ctx.request_repaint();
     }
 }
 
@@ -115,6 +105,7 @@ pub(crate) struct WikiCircleState {
     pub(crate) docs: Vec<(i64, String)>,
     /// 目标分类节点（知识库框架里选）。
     pub(crate) category: Option<i64>,
+    pub(crate) options: Vec<(i64, String)>,
     /// 发起失败的即时提示。
     pub(crate) error: Option<String>,
 }
@@ -129,6 +120,30 @@ pub(crate) struct WikiDocTip {
 }
 
 impl GongwenApp {
+    pub(crate) fn open_wiki_source_scope(&mut self, docs: Vec<(i64, String)>) {
+        let options = self
+            .wiki_store
+            .as_ref()
+            .and_then(|store| store.list_tree().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|theme| {
+                theme.categories.into_iter().map(move |category| {
+                    (
+                        category.id,
+                        format!("{} / {}", theme.theme.name, category.name),
+                    )
+                })
+            })
+            .collect();
+        self.wiki_circle = Some(WikiCircleState {
+            docs,
+            category: None,
+            options,
+            error: None,
+        });
+    }
+
     /// 刷新资料文档的维基状态（「维基」列：已用于维基 N 页 / 未整编）。
     pub(crate) fn refresh_wiki_doc_status(&mut self) {
         self.wiki_doc_status = self
@@ -137,6 +152,11 @@ impl GongwenApp {
             .and_then(|store| store.doc_wiki_status().ok())
             .unwrap_or_default();
         // 资料增删会影响「需复核」与「未整编」派生状态，让知识库页下一帧重读缓存。
+        self.wiki.source_pages = self
+            .wiki_store
+            .as_ref()
+            .and_then(|store| store.source_pages().ok())
+            .unwrap_or_default();
         self.wiki.invalidate();
     }
 
@@ -224,20 +244,46 @@ impl GongwenApp {
             }
         };
         let config = Arc::new(self.config.clone());
-        let (ui, progress, cancel) = TaskJobUi::start();
+        let (ui, _, cancel) = TaskJobUi::start();
         let (tx, rx) = std::sync::mpsc::channel();
         self.wiki_write_rx = Some(rx);
         self.wiki_write_job = Some(ui);
         self.wiki.write_error = None;
-        self.wiki.write_progress = Some("正在准备工作区…".to_string());
+        let scope = self
+            .wiki_store
+            .as_ref()
+            .and_then(|store| store.list_tree().ok())
+            .and_then(|tree| {
+                tree.into_iter().find_map(|theme| {
+                    if theme.theme.id == node_id {
+                        return Some(theme.theme.name);
+                    }
+                    theme
+                        .categories
+                        .into_iter()
+                        .find(|node| node.id == node_id)
+                        .map(|node| format!("{} / {}", theme.theme.name, node.name))
+                })
+            })
+            .unwrap_or_default();
+        let scope = if doc_hints.is_empty() {
+            scope
+        } else {
+            format!("{scope} · 已选 {} 篇", doc_hints.len())
+        };
+        let run = WikiRun::new(
+            WikiRequest::Write {
+                node: node_id,
+                docs: doc_hints.clone(),
+            },
+            scope,
+        );
+        let events = run.sink();
+        self.wiki.page_run = Some(run);
+        self.wiki.show_job();
         std::thread::spawn(move || {
             let result = crate::pi_agent::wiki_jobs::write_pages(
-                config,
-                path,
-                node_id,
-                doc_hints,
-                cancel,
-                progress_sink(&progress),
+                config, path, node_id, doc_hints, cancel, events,
             )
             .map_err(|error| format!("整编失败，可重试：{error}"));
             let _ = tx.send(WikiWriteOutput { result });
@@ -286,20 +332,29 @@ impl GongwenApp {
                 return false;
             }
         };
-        let (ui, progress, cancel) = TaskJobUi::start();
+        let (ui, _, cancel) = TaskJobUi::start();
         let (tx, rx) = std::sync::mpsc::channel();
         self.wiki_write_rx = Some(rx);
         self.wiki_write_job = Some(ui);
         self.wiki.write_error = None;
-        self.wiki.write_progress = Some("正在准备工作区…".to_string());
+        let scope = targets
+            .iter()
+            .map(|(_, title)| title.as_str())
+            .collect::<Vec<_>>()
+            .join("、");
+        let run = WikiRun::new(
+            WikiRequest::Update {
+                pages: targets.clone(),
+                source,
+            },
+            scope,
+        );
+        let events = run.sink();
+        self.wiki.page_run = Some(run);
+        self.wiki.show_job();
         std::thread::spawn(move || {
             let result = crate::pi_agent::wiki_jobs::update_pages(
-                config,
-                path,
-                targets,
-                source,
-                cancel,
-                progress_sink(&progress),
+                config, path, targets, source, cancel, events,
             )
             .map_err(|error| format!("更新失败，可重试：{error}"));
             let _ = tx.send(WikiWriteOutput { result });
@@ -312,46 +367,36 @@ impl GongwenApp {
         if let Some(job) = &self.wiki_write_job {
             if self.wiki.request_stop_write {
                 job.stop();
-            } else {
-                self.wiki.write_progress = Some(job.line());
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         let Some(rx) = self.wiki_write_rx.as_ref() else {
             return;
         };
-        match rx.try_recv() {
-            Ok(output) => {
-                self.wiki_write_rx = None;
-                self.wiki_write_job = None;
-                self.wiki.write_progress = None;
-                if std::mem::take(&mut self.wiki.request_stop_write) {
-                    self.wiki.write_error = None;
-                } else {
-                    match output.result {
-                        Ok(set) => {
-                            self.wiki.write_error = None;
-                            self.wiki.review = Some(crate::wiki_ui::ReviewState::new(set));
-                            self.wiki.review_open = true;
-                        }
-                        Err(error) => self.wiki.write_error = Some(error),
-                    }
+        let result = match rx.try_recv() {
+            Ok(output) => output.result,
+            Err(TryRecvError::Disconnected) => Err("整编线程意外退出，请重试。".into()),
+            Err(TryRecvError::Empty) => return,
+        };
+        self.wiki_write_rx = None;
+        self.wiki_write_job = None;
+        let outcome = if std::mem::take(&mut self.wiki.request_stop_write) {
+            Outcome::Stopped
+        } else {
+            match result {
+                Ok(value) => {
+                    self.wiki.review = Some(crate::wiki_ui::ReviewState::new(value));
+                    Outcome::Delivered
                 }
-                ctx.request_repaint();
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.wiki_write_rx = None;
-                self.wiki_write_job = None;
-                let was_running = self.wiki.write_progress.is_some();
-                self.wiki.write_progress = None;
-                if std::mem::take(&mut self.wiki.request_stop_write) {
-                    self.wiki.write_error = None;
-                } else if was_running {
-                    self.wiki.write_error = Some("整编线程意外退出，请重试。".into());
+                Err(error) => {
+                    self.wiki.write_error = Some(error);
+                    Outcome::Failed
                 }
-                ctx.request_repaint();
             }
-            Err(TryRecvError::Empty) => {}
+        };
+        if let Some(run) = &mut self.wiki.page_run {
+            run.finish(outcome);
         }
+        ctx.request_repaint();
     }
 }

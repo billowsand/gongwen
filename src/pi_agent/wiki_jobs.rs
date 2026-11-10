@@ -179,7 +179,7 @@ pub(crate) fn induce_frame(
     config: Arc<AppConfig>,
     store_path: PathBuf,
     cancel: Arc<AtomicBool>,
-    mut on_progress: impl FnMut(String),
+    mut on_event: impl FnMut(PiEvent),
 ) -> Result<FrameProposal, String> {
     if cancel.load(Ordering::Relaxed) {
         return Err("已停止归纳框架。".into());
@@ -267,14 +267,7 @@ pub(crate) fn induce_frame(
             proxy_env: crate::net::proxy_env(&config.proxy),
         },
         Arc::clone(&cancel),
-        |event| match event {
-            PiEvent::Progress(message) | PiEvent::Tool(message) => on_progress(message),
-            PiEvent::Activity(activity) if activity.outcome.is_none() => {
-                on_progress(activity.action)
-            }
-            PiEvent::Strategy(info) => on_progress(info.line()),
-            _ => {}
-        },
+        &mut on_event,
     )
     .map_err(|error| format!("{error}；工作文件保留在 {label}"))?;
     if cancel.load(Ordering::Relaxed) {
@@ -284,7 +277,10 @@ pub(crate) fn induce_frame(
         return Err("Pi 没有交回框架提案，未采纳。".into());
     };
     if !delivery.summary.trim().is_empty() {
-        on_progress(format!("交付说明：{}", delivery.summary.trim()));
+        on_event(PiEvent::Progress(format!(
+            "交付说明：{}",
+            delivery.summary.trim()
+        )));
     }
     parse_frame_delivery(&delivery.content, &consulted_docs(&store_path, &tools, [])?)
         .map_err(|error| format!("框架提案未通过复核：{error}"))
@@ -495,7 +491,7 @@ pub(crate) fn write_pages(
     // 圈选资料提示：从资料库反向发起整编时，优先读这些 doc_id（kb_read 按编号读）。
     doc_hints: Vec<i64>,
     cancel: Arc<AtomicBool>,
-    mut on_progress: impl FnMut(String),
+    mut on_event: impl FnMut(PiEvent),
 ) -> Result<PageProposalSet, String> {
     if cancel.load(Ordering::Relaxed) {
         return Err("已停止整编页面。".into());
@@ -662,14 +658,7 @@ pub(crate) fn write_pages(
             proxy_env: crate::net::proxy_env(&config.proxy),
         },
         Arc::clone(&cancel),
-        |event| match event {
-            PiEvent::Progress(message) | PiEvent::Tool(message) => on_progress(message),
-            PiEvent::Activity(activity) if activity.outcome.is_none() => {
-                on_progress(activity.action)
-            }
-            PiEvent::Strategy(info) => on_progress(info.line()),
-            _ => {}
-        },
+        &mut on_event,
     )
     .map_err(|error| format!("{error}；工作文件保留在 {label}"))?;
     if cancel.load(Ordering::Relaxed) {
@@ -679,7 +668,10 @@ pub(crate) fn write_pages(
         return Err("Pi 没有交回页面提案，未采纳。".into());
     };
     if !delivery.summary.trim().is_empty() {
-        on_progress(format!("交付说明：{}", delivery.summary.trim()));
+        on_event(PiEvent::Progress(format!(
+            "交付说明：{}",
+            delivery.summary.trim()
+        )));
     }
     let known = consulted_docs(&store_path, &tools, [])?;
     let tree = store
@@ -866,7 +858,7 @@ pub(crate) fn update_pages(
     targets: Vec<(String, String)>,
     source: Option<i64>,
     cancel: Arc<AtomicBool>,
-    mut on_progress: impl FnMut(String),
+    mut on_event: impl FnMut(PiEvent),
 ) -> Result<PageProposalSet, String> {
     if cancel.load(Ordering::Relaxed) {
         return Err("已停止更新页面。".into());
@@ -1039,14 +1031,7 @@ pub(crate) fn update_pages(
             proxy_env: crate::net::proxy_env(&config.proxy),
         },
         Arc::clone(&cancel),
-        |event| match event {
-            PiEvent::Progress(message) | PiEvent::Tool(message) => on_progress(message),
-            PiEvent::Activity(activity) if activity.outcome.is_none() => {
-                on_progress(activity.action)
-            }
-            PiEvent::Strategy(info) => on_progress(info.line()),
-            _ => {}
-        },
+        &mut on_event,
     )
     .map_err(|error| format!("{error}；工作文件保留在 {label}"))?;
     if cancel.load(Ordering::Relaxed) {
@@ -1056,7 +1041,10 @@ pub(crate) fn update_pages(
         return Err("Pi 没有交回页面更新提案，未采纳。".into());
     };
     if !delivery.summary.trim().is_empty() {
-        on_progress(format!("交付说明：{}", delivery.summary.trim()));
+        on_event(PiEvent::Progress(format!(
+            "交付说明：{}",
+            delivery.summary.trim()
+        )));
     }
     let known = consulted_docs(
         &store_path,

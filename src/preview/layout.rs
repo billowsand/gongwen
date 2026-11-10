@@ -1433,6 +1433,18 @@ pub(crate) fn clickable_justified_job(
         &base,
         rows.clone(),
     );
+    if let Some(links) = &metrics.inline_links {
+        paint_inline_links(
+            ui,
+            links,
+            segments,
+            &job.text,
+            block_rect.left_top(),
+            &base,
+            &rows,
+            clicked,
+        );
+    }
     if let Some((row_index, index, origin, tint_top, height)) = caret_at {
         paint_caret(ui, &rows[row_index], index, origin, tint_top, height);
     }
@@ -1444,6 +1456,90 @@ pub(crate) fn clickable_justified_job(
             &rows,
             chars.clone(),
         );
+    }
+}
+
+/// 用排版后的字形定位链接，换行后每一段都有自己的命中矩形。
+#[allow(clippy::too_many_arguments)]
+fn paint_inline_links(
+    ui: &mut egui::Ui,
+    content: &super::InlineLinks,
+    segments: &[ClickableSourceSegment],
+    rendered: &str,
+    origin: egui::Pos2,
+    base: &egui::Galley,
+    rows: &[std::sync::Arc<egui::Galley>],
+    clicked: &mut Option<Range<usize>>,
+) {
+    for segment in segments {
+        let links = content
+            .links
+            .iter()
+            .filter(|link| {
+                link.source.start < segment.source.end && segment.source.start < link.source.end
+            })
+            .collect::<Vec<_>>();
+        if links.is_empty() {
+            continue;
+        }
+        let Some(source) = content.markdown.get(segment.source.clone()) else {
+            continue;
+        };
+        let pairs = visible_pairs(source, rendered, segment);
+        for link in links {
+            let mut matching = pairs
+                .iter()
+                .filter(|(range, _)| {
+                    let start = segment.source.start + range.start;
+                    start >= link.source.start && start < link.source.end
+                })
+                .map(|(_, index)| *index);
+            let Some(first) = matching.next() else {
+                continue;
+            };
+            let last = matching.next_back().unwrap_or(first);
+            let chars = first..last + 1;
+            for range in glyph_ranges(rendered, std::slice::from_ref(&chars)) {
+                let mut row_start = 0;
+                for (row_index, (placed, row)) in base.rows.iter().zip(rows).enumerate() {
+                    let row_end = row_start + placed.glyphs.len();
+                    let start = range.start.max(row_start);
+                    let end = range.end.min(row_end);
+                    if start < end {
+                        let left = row
+                            .pos_from_cursor(egui::text::CCursor::new(start - row_start))
+                            .left();
+                        let right = row
+                            .pos_from_cursor(egui::text::CCursor::new(end - row_start))
+                            .left();
+                        let rect = egui::Rect::from_min_max(
+                            origin + placed.pos.to_vec2() + egui::vec2(left, 0.0),
+                            origin + placed.pos.to_vec2() + egui::vec2(right, placed.size.y),
+                        );
+                        let response = ui
+                            .interact(
+                                rect,
+                                ui.scope_id().with((
+                                    "preview_inline_link",
+                                    link.source.start,
+                                    row_index,
+                                )),
+                                egui::Sense::click(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(&link.hint);
+                        ui.painter().line_segment(
+                            [rect.left_bottom(), rect.right_bottom()],
+                            egui::Stroke::new(1.0, link.color),
+                        );
+                        if response.clicked() {
+                            *clicked = Some(link.source.clone());
+                        }
+                    }
+                    row_start = row_end;
+                }
+            }
+        }
     }
 }
 

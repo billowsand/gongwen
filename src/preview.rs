@@ -48,8 +48,8 @@ pub(crate) use layout::{
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};
 pub(crate) use research::outline as research_outline;
-pub(crate) use research::research_preview;
 pub(crate) use research::{LabelKind, LabelTarget, label_targets as research_label_targets};
+pub(crate) use research::{research_body_preview, research_preview};
 pub(crate) use research_anchor::{AnchorRefusal, suggest as suggest_research_anchor};
 
 /// 研究报告正文引过的文献（序号、处数），正文与文献库没动就复用上一次的结果。
@@ -155,6 +155,18 @@ const RESEARCH_CAPTION_PT: f32 = 12.0; // 图表题注，小四
 const RESEARCH_TABLE_PT: f32 = 12.0;
 const RESEARCH_TABLE_LINE_PT: f32 = 18.0;
 
+/// 阅读器在正文中标注的可交互范围，使用与版式预览相同的源码坐标。
+pub(crate) struct InlineLink {
+    pub(crate) source: std::ops::Range<usize>,
+    pub(crate) hint: String,
+    pub(crate) color: egui::Color32,
+}
+
+pub(crate) struct InlineLinks {
+    pub(crate) markdown: String,
+    pub(crate) links: Vec<InlineLink>,
+}
+
 /// 缩放后的版式尺寸，单位都是 egui 逻辑像素。
 pub(crate) struct Metrics {
     scale: f32,
@@ -200,6 +212,7 @@ pub(crate) struct Metrics {
     /// 按行高亮的块（`layout::clickable_rows`）画字时顺手记下的每行底色矩形；
     /// 不在这种块里时为 `None`，各部件的记录调用直接落空。
     tints: RefCell<Option<Vec<egui::Rect>>>,
+    inline_links: Option<InlineLinks>,
 }
 
 /// 本帧应该显示的缩放倍率：`zoom` 为 None 时按可用宽度自适应，否则按给定倍率。
@@ -294,6 +307,7 @@ impl Metrics {
             terminal: false,
             gutter: RefCell::default(),
             tints: RefCell::default(),
+            inline_links: None,
         }
     }
 }
@@ -378,6 +392,7 @@ impl Metrics {
             terminal: false,
             gutter: RefCell::default(),
             tints: RefCell::default(),
+            inline_links: None,
         }
     }
 

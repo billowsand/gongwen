@@ -1102,7 +1102,7 @@ fn pi_pending_actions(ui: &mut egui::Ui, turn: &super::AiTurn, action: &mut Opti
 }
 
 /// 阶段提示：一行放不下就截断，悬停看全文。
-fn phase_label(ui: &mut egui::Ui, text: &str) {
+pub(crate) fn phase_label(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).weak()).truncate())
         .on_hover_text(text);
 }
