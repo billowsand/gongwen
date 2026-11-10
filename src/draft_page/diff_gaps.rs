@@ -268,6 +268,12 @@ mod tests {
         frame.galley_pos + egui::vec2(row.pos.x + 20.0, row.rect().center().y)
     }
 
+    /// 行首第一个字内的一点：点击后的光标必须落在行首附近，不受平台字体度量影响。
+    fn line_start_point(frame: &Frame, line: usize) -> egui::Pos2 {
+        let row = &frame.galley.rows[line_first_rows(&frame.galley)[line]];
+        frame.galley_pos + egui::vec2(row.pos.x + 1.0, row.rect().center().y)
+    }
+
     #[test]
     fn rows_after_the_gap_move_down_and_the_galley_grows() {
         let mut harness = Harness::new(TEXT, gaps());
@@ -295,13 +301,13 @@ mod tests {
     fn clicking_below_the_gap_lands_on_that_line_not_on_the_deleted_one() {
         let mut harness = Harness::new(TEXT, gaps());
         let frame = harness.frame(Vec::new());
-        let at = line_point(&frame, GAP_LINE);
+        let at = line_start_point(&frame, GAP_LINE);
         let frame = harness.click(at);
         let cursor = frame.cursor.expect("点过后有光标").primary.index.0;
         let start = line_start(TEXT, GAP_LINE);
         assert!(
-            (start..start + 3).contains(&cursor),
-            "光标 {cursor} 应在第三行（{start} 起）"
+            (start..=start + 1).contains(&cursor),
+            "光标 {cursor} 应在第三行行首（{start} 起）"
         );
     }
 
