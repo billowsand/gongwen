@@ -35,7 +35,7 @@ const MAX_SNIPPET_CHARS: usize = 600;
 const MAX_API_RESULTS: usize = 5;
 /// 维基工具独立小额度（设计 §6.2）：一轮写作作业里四只维基工具合计 12 次，
 /// 防语义下钻遍历挤占写作工具预算。
-const WIKI_TOOL_BUDGET: usize = 12;
+pub(super) const WIKI_TOOL_BUDGET: usize = 12;
 /// `api_call` 一次交给模型的条目上限（接口返回可能很多，先给前几条）。
 const MAX_API_ITEMS: usize = 20;
 /// 每个接口条目交给模型的字符上限；证据台账同样截到这里，防超长返回撑爆预算。
@@ -669,6 +669,8 @@ pub(crate) struct PiToolContext {
     cancel: OnceLock<Arc<AtomicBool>>,
     /// 任务助手作业：只开放只读任务工具与词库/日期，拒绝知识库、稿件库、接口与正文工具。
     task_only: bool,
+    wiki_job: bool,
+    wiki_doc_hits: Mutex<std::collections::HashSet<i64>>,
     /// 任务数据库路径；只有任务作业才有。
     task_db: Option<std::path::PathBuf>,
 }
@@ -806,6 +808,8 @@ impl PiToolContext {
             evidence: Arc::new(Mutex::new(Vec::new())),
             seq: Arc::new(AtomicUsize::new(0)),
             task_only: false,
+            wiki_job: false,
+            wiki_doc_hits: Mutex::new(std::collections::HashSet::new()),
             task_db: None,
             cancel: OnceLock::new(),
         }
@@ -841,6 +845,18 @@ impl PiToolContext {
         self.task_only = true;
         self.task_db = Some(db);
         self
+    }
+
+    pub(super) fn wiki_job(mut self) -> Self {
+        self.wiki_job = true;
+        self
+    }
+
+    pub(super) fn wiki_doc_hits(&self) -> std::collections::HashSet<i64> {
+        self.wiki_doc_hits
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// 写作作业挂入维基来源。库路径不可用时按未接入处理，工具给出明确指引。
@@ -900,6 +916,13 @@ impl PiToolContext {
         for value in values {
             self.record("ask_user", "用户回答", "本轮用户", "事实", value, true);
         }
+    }
+
+    pub(super) fn is_wiki_tool(name: &str) -> bool {
+        matches!(
+            name,
+            "wiki_search" | "wiki_read" | "wiki_links" | "wiki_doc_read"
+        )
     }
 
     /// 允许的工具名（协议层先按它拒绝未知工具）。
@@ -1000,13 +1023,15 @@ impl PiToolContext {
                 "task_search" | "task_read" | "vocab_search" | "current_date"
             )
             // 任务作业挂了维基库时，开放四个只读维基工具（三期：任务助手接入）。
-            && !(self.wiki.enabled()
-                && matches!(
-                    name,
-                    "wiki_search" | "wiki_read" | "wiki_links" | "wiki_doc_read"
-                ))
+            && !(self.wiki.enabled() && Self::is_wiki_tool(name))
         {
             return Err(format!("任务助手作业不开放工具：{name}"));
+        }
+        if self.wiki_job
+            && !matches!(name, "kb_search" | "kb_read" | "current_date")
+            && !(self.wiki.enabled() && Self::is_wiki_tool(name))
+        {
+            return Err(format!("维基制作作业不开放工具：{name}"));
         }
         // 在途槽位是资源兜底：HTTP 请求无法从外部 abort，停掉的旧任务仍可能占着线程、
         // 连接和模型额度；限流后反复停止重开不会无限叠加。
@@ -1036,6 +1061,23 @@ impl PiToolContext {
         // dispatch 返回后再看一次：慢工具可能在停止之后才返回，即使成功也不能当成
         // 这一轮的工具结果交回去（迟到结果不采用）。
         self.check_cancel()?;
+        if self.wiki_job
+            && let Ok(value) = &result
+        {
+            let mut hits = self
+                .wiki_doc_hits
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match name {
+                "kb_search" => {
+                    if let Some(results) = value["results"].as_array() {
+                        hits.extend(results.iter().filter_map(|row| row["doc_id"].as_i64()));
+                    }
+                }
+                "kb_read" | "wiki_doc_read" => hits.extend(value["doc_id"].as_i64()),
+                _ => {}
+            }
+        }
         result
     }
 
@@ -1130,7 +1172,7 @@ impl PiToolContext {
         if self.wiki.enabled() {
             return Ok(());
         }
-        Err("维基知识库未接入本轮作业（只有写作作业开放维基工具），或库打开失败。请改用 kb_search 检索资料库。".into())
+        Err("维基知识库未接入本轮作业，或库打开失败。请改用 kb_search 检索资料库。".into())
     }
 
     /// 语义检索维基页面（写作取料第一站）：标题 + 分类路径 + 摘要，逐条登记证据。
@@ -1186,6 +1228,7 @@ impl PiToolContext {
             return Err(format!("维基里没有这个页面（page_id={uuid}）"));
         };
         self.check_cancel()?;
+        let refs = self.wiki.doc_refs(&uuid)?;
         let offset = optional_offset_arg(args);
         let page = read_page(&full, offset, read_limit_arg(args))?;
         let id = self.record(
@@ -1199,6 +1242,7 @@ impl PiToolContext {
         Ok(json!({
             "evidence": id,
             "page_id": uuid,
+            "doc_refs": refs.iter().map(|(id, note)| json!({"doc_id": id, "note": note})).collect::<Vec<_>>(),
             "title": title,
             "text": page.text,
             "offset": page.offset,
@@ -1252,12 +1296,6 @@ impl PiToolContext {
                  先用 wiki_read 读该页，按它给出的依据清单选文档。"
             ));
         };
-        if !self.kb.enabled() {
-            return Err(
-                "资料库未启用：维基依据指向原始资料文档，需到「资料库」页启用并配置检索后再试。"
-                    .into(),
-            );
-        }
         self.check_cancel()?;
         let Some((title, full)) = self.kb.read(doc_id)? else {
             return Err(format!("资料库没有编号为 {doc_id} 的文档"));
@@ -1863,7 +1901,7 @@ impl PiWiki for WikiArchives {
     fn search(&self, query: &str, top: usize) -> Result<Vec<PiWikiHit>, String> {
         let store = self.open()?;
         let hits = store
-            .search(query, top)
+            .search_for_evidence(query, top)
             .map_err(|error| format!("{error:#}"))?;
         let tree = store.list_tree().map_err(|error| format!("{error:#}"))?;
         let mut out = Vec::new();
@@ -1886,6 +1924,12 @@ impl PiWiki for WikiArchives {
 
     fn read(&self, uuid: &str) -> Result<Option<(String, String)>, String> {
         let store = self.open()?;
+        if store
+            .page_has_missing_sources(uuid)
+            .map_err(|error| format!("{error:#}"))?
+        {
+            return Err("此页的依据已删除或替换，待人工复核；请检索资料库原文。".into());
+        }
         store
             .get_page(uuid)
             .map(|page| page.map(|page| (page.meta.title, page.body)))
@@ -1915,25 +1959,31 @@ impl PiWiki for WikiArchives {
                     summary,
                 }
             } else if let Some(node) = link.to_node {
-                let name = tree
-                    .iter()
-                    .find(|t| t.theme.id == node)
-                    .map(|t| t.theme.name.clone())
-                    .or_else(|| {
-                        tree.iter().find_map(|t| {
-                            t.categories
-                                .iter()
-                                .find(|c| c.id == node)
-                                .map(|c| c.name.clone())
-                        })
-                    })
-                    .unwrap_or_else(|| link.to_title.clone());
+                let guide = tree.iter().find_map(|branch| {
+                    if branch.theme.id == node {
+                        branch.theme_guide.as_ref()
+                    } else {
+                        branch.category_guides.get(&node)
+                    }
+                });
+                let page = guide.and_then(|uuid| store.get_page(uuid).ok().flatten());
                 PiWikiLinkInfo {
-                    text: link.text,
-                    to_title: name,
-                    to_page: None,
-                    resolved: true,
-                    summary: "框架节点导览".into(),
+                    text: link.text.clone(),
+                    to_title: page
+                        .as_ref()
+                        .map(|p| p.meta.title.clone())
+                        .unwrap_or_else(|| {
+                            if link.to_title.is_empty() {
+                                link.text.clone()
+                            } else {
+                                link.to_title
+                            }
+                        }),
+                    to_page: guide.cloned(),
+                    resolved: guide.is_some(),
+                    summary: page
+                        .map(|p| wiki_compact(&p.body, 80))
+                        .unwrap_or_else(|| "导览页待整编".into()),
                 }
             } else {
                 PiWikiLinkInfo {

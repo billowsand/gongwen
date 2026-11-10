@@ -447,6 +447,7 @@ impl GongwenApp {
     fn close_local_stores(&mut self) {
         self.manuscript_store = None;
         self.knowledge_store = None;
+        self.wiki_store = None;
         self.lexicon_store = None;
         self.task_store = None;
     }
@@ -483,6 +484,15 @@ impl GongwenApp {
                 None
             }
         };
+        (self.wiki_store, self.wiki_error) = match crate::wiki::WikiStore::open(&path) {
+            Ok(store) => (Some(store), None),
+            Err(error) => (None, Some(format!("维基库打开失败：{error:#}"))),
+        };
+        self.wiki = crate::wiki_ui::WikiUiState::default();
+        self.wiki_doc_status.clear();
+        self.wiki_seen_doc_ids = None;
+        self.wiki_new_doc_tip = None;
+        self.wiki_circle = None;
         self.lexicon_store = match LexiconStore::open(&path) {
             Ok(store) => {
                 crate::lexicon::segmenter::install_from_store(&store);

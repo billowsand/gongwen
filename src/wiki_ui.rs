@@ -2,14 +2,14 @@
 //! 右侧 backlinks 窄栏（常驻可折叠）。设计方案见 `docs/wiki-knowledge-base-design.md` §9。
 //!
 //! 口径 14（配色跟随主题）：本页不引入独立配色，全部取 `theme` 语义色。
-//! 口径 13（渲染复用）：正文渲染集中在 [`show_page_body`]——它是换接点，后续切片
-//! 把现有预览渲染链接入后，这里整体换掉、链接只作为行内挂件保留。
+//! 正文复用研究报告预览。维基跳转控件由 [`show_page_body`] 提供。
 
 use std::collections::HashMap;
 
 use crate::app::GongwenApp;
+use crate::models::NumberingConfig;
 use crate::theme;
-use crate::wiki::{Backlink, OutlineTheme, WikiPageMeta, WikiTree};
+use crate::wiki::{Backlink, OutlineTheme, WikiPage, WikiPageMeta, WikiTree};
 use eframe::egui;
 
 /// 知识库页的界面状态：框架树缓存、当前阅读页、backlinks 栏开合、框架编辑。
@@ -30,6 +30,7 @@ pub(crate) struct WikiUiState {
     backlinks_open: bool,
     /// 树编辑选中的框架节点 id（改名 / 移动 / 删除的对象）。
     selected_node: Option<i64>,
+    move_target: Option<(i64, i64)>,
     /// 选中节点的名称编辑框内容。
     node_name_edit: String,
     /// 「新建主题 / 在主题下建分类」的名称输入。
@@ -83,6 +84,7 @@ pub(crate) struct ReviewState {
     pub(crate) edit_body: String,
     /// 编辑框载入时的原始正文；与当前内容不同即「审核已修改」。
     pub(crate) edit_base: String,
+    drafts: HashMap<usize, String>,
     /// 采纳/写库失败的即时提示。
     pub(crate) error: Option<String>,
 }
@@ -100,19 +102,26 @@ impl ReviewState {
             selected: 0,
             edit_body: body.clone(),
             edit_base: body,
+            drafts: HashMap::new(),
             set,
             error: None,
         }
     }
 
     fn select(&mut self, index: usize) {
-        if index >= self.set.pages.len() || self.done.get(index) == Some(&true) {
+        if index == self.selected
+            || index >= self.set.pages.len()
+            || self.done.get(index) == Some(&true)
+        {
             return;
+        }
+        if !self.done[self.selected] && self.edit_body != self.edit_base {
+            self.drafts.insert(self.selected, self.edit_body.clone());
         }
         self.selected = index;
         self.error = None;
         let body = self.set.pages[index].body.clone();
-        self.edit_body = body.clone();
+        self.edit_body = self.drafts.remove(&index).unwrap_or_else(|| body.clone());
         self.edit_base = body;
     }
 }
@@ -131,7 +140,7 @@ fn find_node(tree: &[WikiTree], id: i64) -> Option<(String, bool, i64)> {
 }
 
 /// 页面入口。
-pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
+pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui, numbering: &NumberingConfig) {
     // 库打不开时只报错，与资料库、稿件管理页的处置一致。
     if app.wiki_store.is_none() {
         ui.colored_label(
@@ -144,6 +153,9 @@ pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
     }
     if !app.wiki.tree_loaded || app.wiki.tree_dirty {
         rebuild_cache(app);
+        if let Some(uuid) = app.wiki.open.as_ref().map(|page| page.meta.uuid.clone()) {
+            open_page(app, &uuid);
+        }
         app.wiki.tree_loaded = true;
         app.wiki.tree_dirty = false;
     }
@@ -161,7 +173,7 @@ pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
         ui.separator();
         let mid_w = (ui.available_width() - rail_w).max(240.0);
         ui.allocate_ui(egui::vec2(mid_w, height), |ui| {
-            ui.vertical(|ui| reader(app, ui, &link_map, &mut nav));
+            ui.vertical(|ui| reader(app, ui, &mut nav, numbering));
         });
         if app.wiki.backlinks_open {
             ui.separator();
@@ -176,7 +188,7 @@ pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
     }
     import_window(app, ui.ctx());
     frame_proposal_window(app, ui.ctx());
-    review_desk(app, ui.ctx(), &link_map);
+    review_desk(app, ui.ctx(), &link_map, numbering);
     version_history_window(app, ui.ctx());
     gap_window(app, ui.ctx());
     create_page_window(app, ui.ctx());
@@ -240,7 +252,7 @@ fn frame_proposal_window(app: &mut GongwenApp, ctx: &egui::Context) {
         .open(&mut open)
         .show(ctx, |ui| {
             ui.weak(
-                "AI 归纳的框架只是提案：确认前可在下方核对，写入时与现有框架同名的节点自动跳过。",
+                "AI 归纳的框架只是提案：确认前可在下方核对，写入时沿用现有同名节点并登记资料映射。",
             );
             ui.add_space(4.0);
             egui::ScrollArea::vertical()
@@ -258,6 +270,9 @@ fn frame_proposal_window(app: &mut GongwenApp, ctx: &egui::Context) {
                         }
                     }
                 });
+            if let Some(error) = &app.wiki.frame_error {
+                ui.colored_label(theme::warn(), error);
+            }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui.button("写入框架").clicked() {
@@ -269,63 +284,19 @@ fn frame_proposal_window(app: &mut GongwenApp, ctx: &egui::Context) {
             });
         });
     if accepted {
-        let mut created = 0usize;
-        let mut skipped = 0usize;
         if let Some(store) = app.wiki_store.as_ref() {
-            for theme in &proposal.themes {
-                let theme_id = match app
-                    .wiki
-                    .tree
-                    .iter()
-                    .find(|t| t.theme.name == theme.name)
-                    .map(|t| t.theme.id)
-                {
-                    Some(id) => {
-                        skipped += 1;
-                        id
-                    }
-                    None => match store.create_theme(&theme.name) {
-                        Ok(id) => {
-                            created += 1;
-                            id
-                        }
-                        Err(error) => {
-                            app.wiki.notice =
-                                Some(format!("写入主题「{}」失败：{error:#}", theme.name));
-                            break;
-                        }
-                    },
-                };
-                let existing: Vec<String> = app
-                    .wiki
-                    .tree
-                    .iter()
-                    .find(|t| t.theme.id == theme_id)
-                    .map(|t| t.categories.iter().map(|c| c.name.clone()).collect())
-                    .unwrap_or_default();
-                for category in &theme.categories {
-                    if existing.contains(&category.name) {
-                        skipped += 1;
-                        continue;
-                    }
-                    match store.create_category(theme_id, &category.name) {
-                        Ok(_) => created += 1,
-                        Err(error) => {
-                            app.wiki.notice =
-                                Some(format!("写入分类「{}」失败：{error:#}", category.name));
-                            break;
-                        }
-                    }
+            match store.apply_frame(&proposal.themes) {
+                Ok((created, reused)) => {
+                    app.wiki.notice = Some(format!(
+                        "已写入框架：新建 {created} 个节点，沿用 {reused} 个节点。"
+                    ));
+                    app.wiki.tree_dirty = true;
+                    app.wiki.frame_proposal = None;
+                    app.wiki.frame_error = None;
                 }
+                Err(error) => app.wiki.frame_error = Some(format!("框架未写入：{error:#}")),
             }
         }
-        if app.wiki.notice.is_none() {
-            app.wiki.notice = Some(format!(
-                "框架提案已写入：新建 {created} 个节点（同名跳过 {skipped} 个）。"
-            ));
-        }
-        app.wiki.tree_dirty = true;
-        app.wiki.frame_proposal = None;
     } else if discarded || !open {
         app.wiki.frame_proposal = None;
     }
@@ -334,7 +305,12 @@ fn frame_proposal_window(app: &mut GongwenApp, ctx: &egui::Context) {
 /// 整编审核台：左列逐页把关，右上渲染预览（口径 13 换接点），右下可直接改
 /// Markdown 源；只有点「采纳本页」才经 `store.create_page` 写库（版本带来源与
 /// 「审核已修改」标记）。关掉窗口不丢提案，树上方「整编审核」按钮可 reopen。
-fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<String, LinkTarget>) {
+fn review_desk(
+    app: &mut GongwenApp,
+    ctx: &egui::Context,
+    link_map: &HashMap<String, LinkTarget>,
+    numbering: &NumberingConfig,
+) {
     if app.wiki.review.is_none() || !app.wiki.review_open {
         return;
     }
@@ -342,6 +318,7 @@ fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<Str
     let mut adopt = false;
     let mut reject = false;
     let mut preview_nav: Option<String> = None;
+    let mut preview_doc = None;
     egui::Window::new("整编审核")
         .collapsible(false)
         .resizable(true)
@@ -416,16 +393,7 @@ fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<Str
                         if !page.change_note.is_empty() {
                             ui.weak(format!("变更说明：{}", page.change_note));
                         }
-                        if !page.doc_refs.is_empty() {
-                            ui.weak(format!(
-                                "本页依据：{}",
-                                page.doc_refs
-                                    .iter()
-                                    .map(|(id, note)| format!("E{id}{note}"))
-                                    .collect::<Vec<_>>()
-                                    .join("；")
-                            ));
-                        }
+                        show_doc_refs(ui, &page.doc_refs, &mut preview_doc);
                         if let Some(error) = &review.error {
                             ui.colored_label(theme::warn(), error);
                         }
@@ -439,6 +407,9 @@ fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<Str
                                 .and_then(|store| store.get_page(&uuid).ok().flatten());
                             match current {
                                 Some(current_page) => {
+                                    if page.base_version != Some(current_page.meta.current_version) {
+                                        ui.colored_label(theme::warn(), "页面版本已变化，请退回并按当前版本重新发起。");
+                                    }
                                     match line_diff(&current_page.body, &review.edit_body) {
                                         Some(lines) => diff_view(
                                             ui,
@@ -455,9 +426,11 @@ fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<Str
                                                 .show(ui, |ui| {
                                                     show_page_body(
                                                         ui,
+                                                        &page.title,
                                                         &review.edit_body,
                                                         link_map,
                                                         &mut preview_nav,
+                                                        numbering,
                                                     );
                                                 });
                                         }
@@ -475,7 +448,7 @@ fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<Str
                             egui::ScrollArea::vertical()
                                 .max_height(preview_h)
                                 .show(ui, |ui| {
-                                    show_page_body(ui, &review.edit_body, link_map, &mut preview_nav);
+                                    show_page_body(ui, &page.title, &review.edit_body, link_map, &mut preview_nav, numbering);
                                 });
                         }
                         ui.add_space(4.0);
@@ -508,6 +481,9 @@ fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<Str
         // 关掉窗口只是收起审核台：提案保留，树上方「整编审核」入口可 reopen。
         app.wiki.review_open = false;
     }
+    if let Some(doc_id) = preview_doc {
+        app.knowledge_open_preview(doc_id);
+    }
     if let Some(uuid) = preview_nav {
         open_page(app, &uuid);
     }
@@ -515,21 +491,6 @@ fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<Str
         review_adopt(app);
     } else if reject && let Some(review) = app.wiki.review.as_mut() {
         review_mark_done_advance(review);
-    }
-    // 本批处理过当前阅读页时重载正文（采纳后是新版、退回也该重读元数据）。
-    let touched_open = app.wiki.review.as_ref().is_some_and(|review| {
-        review.set.pages.iter().enumerate().any(|(index, page)| {
-            review.done.get(index) == Some(&true)
-                && page.uuid.is_some()
-                && app
-                    .wiki
-                    .open
-                    .as_ref()
-                    .is_some_and(|open| page.uuid.as_deref() == Some(open.meta.uuid.as_str()))
-        })
-    });
-    if touched_open && let Some(uuid) = app.wiki.open.as_ref().map(|open| open.meta.uuid.clone()) {
-        open_page(app, &uuid);
     }
     // 全部处理完：给结论、清审核台、刷新树（新页面挂进分类）。
     if let Some(review) = &app.wiki.review
@@ -553,7 +514,7 @@ fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<Str
 }
 
 /// 采纳当前页：新建页走 `create_page`（建页 + v1）；更新提案走
-/// `update_page`（以库中现状为准写新版本）。两者都带来源与「审核已修改」标记。
+/// `update_page`（校验作业开始时的版本后写新版本）。两者都带来源与「审核已修改」标记。
 fn review_adopt(app: &mut GongwenApp) {
     let Some(review) = app.wiki.review.as_mut() else {
         return;
@@ -565,6 +526,10 @@ fn review_adopt(app: &mut GongwenApp) {
         return;
     };
     let body = review.edit_body.clone();
+    if let Err(error) = crate::pi_agent::wiki_jobs::validate_review_body(&body, &page.doc_refs) {
+        review.error = Some(error);
+        return;
+    }
     let edited = review.edit_body != review.edit_base;
     let run_id = review.set.run_id.clone();
     let node_id = review.set.node_id;
@@ -587,6 +552,7 @@ fn review_adopt(app: &mut GongwenApp) {
                     source_run_id: run_id.clone(),
                     review_edited: edited,
                     doc_refs: page.doc_refs.clone(),
+                    base_version: page.base_version,
                 };
                 store
                     .update_page(uuid, &input)
@@ -606,6 +572,7 @@ fn review_adopt(app: &mut GongwenApp) {
                 source_run_id: run_id,
                 review_edited: edited,
                 doc_refs: page.doc_refs.clone(),
+                base_version: page.base_version,
             };
             store
                 .create_page(&input)
@@ -616,6 +583,8 @@ fn review_adopt(app: &mut GongwenApp) {
     };
     match result {
         Ok(()) => {
+            app.knowledge_dirty = true;
+            app.wiki.tree_dirty = true;
             review.adopted += 1;
             review_mark_done_advance(review);
         }
@@ -778,6 +747,7 @@ fn version_history_window(app: &mut GongwenApp, ctx: &egui::Context) {
             Some(Ok(_)) => {
                 app.wiki.notice = Some(format!("已回滚到 v{target}（产生新版本，历史保留）。"));
                 app.wiki.history_open = false;
+                app.knowledge_dirty = true;
                 app.wiki.tree_dirty = true;
                 open_page(app, &uuid);
             }
@@ -882,6 +852,7 @@ fn gap_window(app: &mut GongwenApp, ctx: &egui::Context) {
         return;
     }
     let mut open = true;
+    let mut nav = None;
     egui::Window::new("缺口清单")
         .collapsible(false)
         .resizable(true)
@@ -891,9 +862,22 @@ fn gap_window(app: &mut GongwenApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             let gaps = app.wiki.gaps.clone();
             let empty = empty_categories(app);
-            if gaps.is_empty() && empty.is_empty() {
+            let missing = app
+                .wiki_store
+                .as_ref()
+                .and_then(|store| store.pages_needing_review().ok())
+                .unwrap_or_default();
+            if gaps.is_empty() && empty.is_empty() && missing.is_empty() {
                 ui.weak("没有缺口：红链都有落点，分类都有页面。");
                 return;
+            }
+            if !missing.is_empty() {
+                ui.strong("需复核（依据资料已删除或替换）");
+                for (uuid, title) in missing {
+                    if ui.link(title).clicked() {
+                        nav = Some(uuid);
+                    }
+                }
             }
             if !gaps.is_empty() {
                 ui.label(egui::RichText::new("待建页（正文里的红链）").strong());
@@ -924,15 +908,19 @@ fn gap_window(app: &mut GongwenApp, ctx: &egui::Context) {
                 for (theme, category, id) in &empty {
                     ui.horizontal(|ui| {
                         ui.label(format!("{theme} / {category}"));
-                        if ui.button("整编此分类").clicked() {
-                            app.start_wiki_write(theme.clone(), category.clone());
+                        if ui.button("整编此分类").clicked()
+                            && app.start_wiki_write(*id, Vec::new())
+                        {
                             app.wiki.gap_open = false;
                         }
-                        let _ = id;
                     });
                 }
             }
         });
+    if let Some(uuid) = nav {
+        open_page(app, &uuid);
+        open = false;
+    }
     if !open {
         app.wiki.gap_open = false;
     }
@@ -1020,6 +1008,7 @@ fn create_page_window(app: &mut GongwenApp, ctx: &egui::Context) {
             source_run_id: "manual".into(),
             review_edited: false,
             doc_refs: Vec::new(),
+            base_version: None,
         };
         match store.create_page(&input) {
             Ok(uuid) => {
@@ -1117,63 +1106,33 @@ fn import_window(app: &mut GongwenApp, ctx: &egui::Context) {
         open = false;
     }
     if done && let Ok(themes) = parsed_themes(app) {
-        let mut created = 0usize;
-        let mut skipped = 0usize;
+        let themes = themes
+            .into_iter()
+            .map(|theme| crate::wiki::FrameTheme {
+                name: theme.name,
+                categories: theme
+                    .categories
+                    .into_iter()
+                    .map(|name| crate::wiki::FrameCategory {
+                        name,
+                        doc_ids: Vec::new(),
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
         if let Some(store) = app.wiki_store.as_ref() {
-            for OutlineTheme { name, categories } in themes {
-                let existing = app
-                    .wiki
-                    .tree
-                    .iter()
-                    .find(|t| t.theme.name == name)
-                    .map(|t| t.theme.id);
-                let theme_id = match existing {
-                    Some(id) => {
-                        skipped += 1;
-                        id
-                    }
-                    None => match store.create_theme(&name) {
-                        Ok(id) => {
-                            created += 1;
-                            id
-                        }
-                        Err(error) => {
-                            app.wiki.notice = Some(format!("导入「{name}」失败：{error:#}"));
-                            break;
-                        }
-                    },
-                };
-                let existing_categories: Vec<String> = app
-                    .wiki
-                    .tree
-                    .iter()
-                    .find(|t| t.theme.id == theme_id)
-                    .map(|t| t.categories.iter().map(|c| c.name.clone()).collect())
-                    .unwrap_or_default();
-                for category in categories {
-                    if existing_categories.contains(&category) {
-                        skipped += 1;
-                        continue;
-                    }
-                    match store.create_category(theme_id, &category) {
-                        Ok(_) => created += 1,
-                        Err(error) => {
-                            app.wiki.notice =
-                                Some(format!("导入分类「{category}」失败：{error:#}"));
-                            break;
-                        }
-                    }
+            match store.apply_frame(&themes) {
+                Ok((created, reused)) => {
+                    app.wiki.notice = Some(format!(
+                        "已导入框架：新建 {created} 个节点，沿用 {reused} 个节点。"
+                    ));
+                    app.wiki.tree_dirty = true;
+                    app.wiki.import_open = false;
+                    app.wiki.import_text.clear();
                 }
+                Err(error) => app.wiki.notice = Some(format!("框架未导入：{error:#}")),
             }
         }
-        if app.wiki.notice.is_none() {
-            app.wiki.notice = Some(format!(
-                "已导入 {created} 个节点（同名跳过 {skipped} 个）。"
-            ));
-        }
-        app.wiki.tree_dirty = true;
-        app.wiki.import_open = false;
-        app.wiki.import_text.clear();
     } else if !open {
         app.wiki.import_open = false;
     }
@@ -1213,7 +1172,7 @@ fn rebuild_cache(app: &mut GongwenApp) {
 /// 即红链（待建页），走行内渲染的兜底分支。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LinkTarget {
-    Page(String),
+    Page { uuid: String, title: String },
     Node { name: String, guide: Option<String> },
 }
 
@@ -1221,34 +1180,81 @@ fn build_link_map(
     tree: &[WikiTree],
     pages: &HashMap<i64, Vec<WikiPageMeta>>,
 ) -> HashMap<String, LinkTarget> {
-    let mut map = HashMap::new();
-    for t in tree {
-        for m in pages.get(&t.theme.id).into_iter().flatten() {
-            map.insert(m.title.clone(), LinkTarget::Page(m.uuid.clone()));
-        }
-        if let Some(g) = &t.theme_guide {
-            map.insert(
-                t.theme.name.clone(),
-                LinkTarget::Node {
-                    name: t.theme.name.clone(),
-                    guide: Some(g.clone()),
-                },
-            );
-        }
-        for c in &t.categories {
-            for m in pages.get(&c.id).into_iter().flatten() {
-                map.insert(m.title.clone(), LinkTarget::Page(m.uuid.clone()));
-            }
-            map.insert(
-                c.name.clone(),
-                LinkTarget::Node {
-                    name: c.name.clone(),
-                    guide: t.category_guides.get(&c.id).cloned(),
-                },
-            );
+    let mut nodes = HashMap::new();
+    for branch in tree {
+        for node in std::iter::once(&branch.theme).chain(&branch.categories) {
+            let guide = if node.id == branch.theme.id {
+                branch.theme_guide.clone()
+            } else {
+                branch.category_guides.get(&node.id).cloned()
+            };
+            nodes
+                .entry(node.name.clone())
+                .and_modify(|target| *target = None)
+                .or_insert_with(|| {
+                    Some(LinkTarget::Node {
+                        name: node.name.clone(),
+                        guide,
+                    })
+                });
         }
     }
+    let mut map: HashMap<_, _> = nodes
+        .into_iter()
+        .filter_map(|(name, target)| Some((name, target?)))
+        .collect();
+    for page in pages.values().flatten() {
+        map.insert(
+            page.title.clone(),
+            LinkTarget::Page {
+                uuid: page.uuid.clone(),
+                title: page.title.clone(),
+            },
+        );
+    }
     map
+}
+
+fn saved_link_map(app: &GongwenApp, page: &WikiPage) -> HashMap<String, LinkTarget> {
+    let Some(bindings) = app
+        .wiki_store
+        .as_ref()
+        .and_then(|store| store.link_bindings(&page.meta.uuid, &page.body).ok())
+    else {
+        return HashMap::new();
+    };
+    bindings
+        .into_iter()
+        .filter_map(|(name, link)| {
+            if let Some(uuid) = link.to_page {
+                let title = app
+                    .wiki
+                    .pages
+                    .values()
+                    .flatten()
+                    .find(|page| page.uuid == uuid)
+                    .map_or_else(|| name.clone(), |page| page.title.clone());
+                return Some((name, LinkTarget::Page { uuid, title }));
+            }
+            let node = link.to_node?;
+            let (node_name, _, _) = find_node(&app.wiki.tree, node)?;
+            let guide = app
+                .wiki
+                .pages
+                .get(&node)
+                .into_iter()
+                .flatten()
+                .find(|page| page.kind == "guide")
+                .map(|page| page.uuid.clone());
+            Some((
+                name,
+                LinkTarget::Node {
+                    name: node_name,
+                    guide,
+                },
+            ))
+        })
+        .collect()
 }
 
 /// 供其他页面（资料库问答的维基依据等）跳转打开指定维基页。
@@ -1316,14 +1322,13 @@ fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) 
     }
     // 缺口入口：待建页红链 + 无页面覆盖的分类。
     let gap_count = app.wiki.gaps.len() + empty_categories(app).len();
-    if gap_count > 0
-        && ui
-            .add(theme::icon_text_button(
-                theme::Icon::List,
-                &format!("缺口（{gap_count}）"),
-            ))
-            .on_hover_text("待建页红链与还没有页面的分类")
-            .clicked()
+    if ui
+        .add(theme::icon_text_button(
+            theme::Icon::List,
+            &format!("缺口与复核（{gap_count}）"),
+        ))
+        .on_hover_text("待建页红链与还没有页面的分类")
+        .clicked()
     {
         app.wiki.gap_open = true;
     }
@@ -1451,13 +1456,17 @@ fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.label("移到主题");
                 let current = theme_id;
-                let mut target = current;
+                let mut target = app
+                    .wiki
+                    .move_target
+                    .filter(|(node, _)| *node == id)
+                    .map_or(current, |(_, target)| target);
                 egui::ComboBox::from_id_salt("wiki_move_theme")
                     .selected_text(
                         app.wiki
                             .tree
                             .iter()
-                            .find(|t| t.theme.id == current)
+                            .find(|t| t.theme.id == target)
                             .map(|t| t.theme.name.as_str())
                             .unwrap_or(""),
                     )
@@ -1466,6 +1475,7 @@ fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
                             ui.selectable_value(&mut target, t.theme.id, &t.theme.name);
                         }
                     });
+                app.wiki.move_target = Some((id, target));
                 if target != current
                     && ui.button("移过去").clicked()
                     && let Some(store) = app.wiki_store.as_ref()
@@ -1479,29 +1489,28 @@ fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
                     }
                 }
             });
-            // AI 整编：把该分类交给 Pi 作业，提案进审核台逐页把关后才写库。
-            ui.horizontal(|ui| {
-                let theme_name = app
-                    .wiki
-                    .tree
-                    .iter()
-                    .find(|t| t.theme.id == theme_id)
-                    .map(|t| t.theme.name.clone())
-                    .unwrap_or_default();
-                let busy = app.wiki.frame_progress.is_some() || app.wiki.write_progress.is_some();
-                if ui
-                    .add_enabled(
-                        !busy && !theme_name.is_empty(),
-                        theme::icon_text_button(theme::Icon::Sparkles, "整编此分类"),
-                    )
-                    .on_hover_text(
-                        "AI 按本分类写导览页与条目页；提案须经人工审核（可直接改正文）后才写入",
-                    )
-                    .clicked()
-                {
-                    app.start_wiki_write(theme_name, name.clone());
-                }
-            });
+        }
+        let has_theme_guide = app
+            .wiki
+            .tree
+            .iter()
+            .any(|t| t.theme.id == id && t.theme_guide.is_some());
+        if (!is_theme || !has_theme_guide)
+            && ui
+                .add_enabled(
+                    app.wiki.frame_progress.is_none() && app.wiki.write_progress.is_none(),
+                    theme::icon_text_button(
+                        theme::Icon::Sparkles,
+                        if is_theme {
+                            "整编主题导览"
+                        } else {
+                            "整编此分类"
+                        },
+                    ),
+                )
+                .clicked()
+        {
+            app.start_wiki_write(id, Vec::new());
         }
         ui.horizontal(|ui| {
             if ui
@@ -1556,8 +1565,8 @@ fn tree_row(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
 fn reader(
     app: &mut GongwenApp,
     ui: &mut egui::Ui,
-    link_map: &HashMap<String, LinkTarget>,
     nav: &mut Option<String>,
+    numbering: &NumberingConfig,
 ) {
     let Some(page) = app.wiki.open.clone() else {
         ui.weak("在左侧框架树里选一个页面开始阅读。");
@@ -1581,7 +1590,10 @@ fn reader(
                 )
                 .clicked()
             {
-                app.start_wiki_update(vec![(page.meta.uuid.clone(), page.meta.title.clone())]);
+                app.start_wiki_update(
+                    vec![(page.meta.uuid.clone(), page.meta.title.clone())],
+                    None,
+                );
             }
             if ui
                 .add(theme::icon_text_button(theme::Icon::History, "版本"))
@@ -1605,163 +1617,131 @@ fn reader(
             }
         });
     });
-    if let Ok(refs) = app
-        .wiki_store
-        .as_ref()
-        .map(|s| s.page_doc_refs(&page.meta.uuid))
-        .unwrap_or_else(|| Ok(Vec::new()))
-        && !refs.is_empty()
+    if let Some(store) = app.wiki_store.as_ref()
+        && let Ok(refs) = store.page_doc_refs(&page.meta.uuid)
     {
-        ui.weak(format!(
-            "本页依据：{}",
-            refs.iter()
-                .map(|(id, note)| format!("E{id}{note}"))
-                .collect::<Vec<_>>()
-                .join("；")
-        ));
+        if store
+            .page_has_missing_sources(&page.meta.uuid)
+            .unwrap_or(false)
+        {
+            ui.colored_label(theme::warn(), "部分依据已删除或替换，请复核本页。");
+        }
+        let mut doc = None;
+        show_doc_refs(ui, &refs, &mut doc);
+        if let Some(id) = doc {
+            app.knowledge_open_preview(id);
+        }
     }
     ui.add_space(6.0);
     ui.separator();
     ui.add_space(6.0);
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        show_page_body(ui, &page.body, link_map, nav);
+    let links = saved_link_map(app, &page);
+    egui::ScrollArea::vertical()
+        .id_salt(&page.meta.uuid)
+        .show(ui, |ui| {
+            show_page_body(ui, &page.meta.title, &page.body, &links, nav, numbering);
+        });
+}
+
+fn show_doc_refs(ui: &mut egui::Ui, refs: &[(i64, String)], open: &mut Option<i64>) {
+    if refs.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.weak("本页依据");
+        for (id, note) in refs {
+            if ui.link(format!("E{id}")).on_hover_text(note).clicked() {
+                *open = Some(*id);
+            }
+        }
     });
 }
 
-/// 正文渲染（口径 13 的换接点）：按段落/标题骨架排版，`[[链接]]` 渲染为
-/// 可点内链——已建页跳页面、框架名跳导览页、待建目标显示为红链样式。
-/// 接入现有预览渲染链时整体替换本函数，链接挂件逻辑原样保留。
+fn link_display_text<'a>(
+    link: &'a crate::wiki::RawLink,
+    targets: &'a HashMap<String, LinkTarget>,
+) -> &'a str {
+    if link.text != link.target {
+        return &link.text;
+    }
+    match targets.get(&link.target) {
+        Some(LinkTarget::Page { title, .. }) => title,
+        Some(LinkTarget::Node { name, .. }) => name,
+        None => &link.text,
+    }
+}
+
+/// 正文走研究报告预览；预览的点击定位单位是块，维基跳转单独提供控件。
 fn show_page_body(
     ui: &mut egui::Ui,
+    title: &str,
     body: &str,
     link_map: &HashMap<String, LinkTarget>,
     nav: &mut Option<String>,
+    numbering: &NumberingConfig,
 ) {
-    for line in body.lines() {
-        let line = line.trim_end();
-        if line.is_empty() {
-            ui.add_space(4.0);
-            continue;
-        }
-        if let Some(heading) = line.strip_prefix('#') {
-            let level = heading.chars().take_while(|c| *c == '#').count();
-            let text = heading[level..].trim();
-            if text.is_empty() {
-                continue;
-            }
-            let size = match level {
-                1 => 19.0,
-                2 => 17.0,
-                _ => 15.5,
-            };
-            ui.label(egui::RichText::new(text).strong().size(size));
-            ui.add_space(2.0);
-            continue;
-        }
-        // 列表行：无序列出换成圆点并缩进，有序行保留原编号。
-        let (indent, text) = if let Some(rest) = line.strip_prefix("- ") {
-            ("　", rest)
-        } else {
-            ("", line)
-        };
+    let links = crate::wiki::wikilink_spans(body);
+    if !links.is_empty() {
         ui.horizontal_wrapped(|ui| {
-            if !indent.is_empty() {
-                ui.label("•");
-            }
-            show_inline(ui, text, link_map, nav);
-        });
-    }
-}
-
-/// 一行内的行内排版：普通文字直接铺，`[[目标|显示]]` 按解析表渲染为内链。
-fn show_inline(
-    ui: &mut egui::Ui,
-    line: &str,
-    link_map: &HashMap<String, LinkTarget>,
-    nav: &mut Option<String>,
-) {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    let mut text_start = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'[' && bytes[i + 1] == b'[' {
-            let start = i + 2;
-            let mut j = start;
-            while j + 1 < bytes.len() && !(bytes[j] == b']' && bytes[j + 1] == b']') {
-                j += 1;
-            }
-            if j + 1 < bytes.len() {
-                if start > text_start {
-                    ui.label(&line[text_start..i]);
+            ui.weak("页面链接");
+            let mut seen = std::collections::HashSet::new();
+            for (_, link) in &links {
+                if !seen.insert((&link.target, &link.text)) {
+                    continue;
                 }
-                let inner = &line[start..j];
-                let (target, text) = match inner.split_once('|') {
-                    Some((t, x)) => (t.trim(), x.trim()),
-                    None => (inner.trim(), inner.trim()),
-                };
-                let hit = if target.is_empty() || text.is_empty() {
-                    None
-                } else {
-                    link_map.get(target)
-                };
-                match hit {
-                    Some(LinkTarget::Page(uuid)) => {
-                        let resp = ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(text)
-                                    .color(theme::accent_text())
-                                    .underline(),
-                            )
-                            .sense(egui::Sense::click()),
-                        );
-                        if resp.clicked() {
-                            *nav = Some(uuid.clone());
-                        }
-                        resp.on_hover_text(format!("维基页：{target}"));
+                let (target, hover) = match link_map.get(&link.target) {
+                    Some(LinkTarget::Page { uuid, title }) => {
+                        (Some(uuid), format!("维基页：{title}"))
                     }
                     Some(LinkTarget::Node { name, guide }) => {
-                        let resp = ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(text)
-                                    .color(theme::accent_text())
-                                    .underline(),
-                            )
-                            .sense(egui::Sense::click()),
-                        );
-                        if resp.clicked()
-                            && let Some(g) = guide
-                        {
-                            *nav = Some(g.clone());
-                        }
-                        let hover = match guide {
-                            Some(_) => format!("导览页：{name}"),
-                            None => format!("框架节点「{name}」还没有导览页"),
-                        };
-                        resp.on_hover_text(hover);
+                        (guide.as_ref(), format!("框架导览：{name}"))
                     }
-                    _ => {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(text).color(theme::warn()).underline(),
-                            )
-                            .sense(egui::Sense::click()),
+                    None => (None, format!("待建页：{}", link.target)),
+                };
+                let color = if target.is_some() {
+                    theme::accent_text()
+                } else {
+                    theme::warn()
+                };
+                let response = ui
+                    .add_enabled(
+                        target.is_some(),
+                        egui::Button::new(
+                            egui::RichText::new(link_display_text(link, link_map)).color(color),
                         )
-                        .on_hover_text(format!("待建页：{target}"));
-                    }
+                        .frame(false),
+                    )
+                    .on_hover_text(hover);
+                if response.clicked()
+                    && let Some(uuid) = target
+                {
+                    *nav = Some(uuid.clone());
                 }
-                i = j + 2;
-                text_start = i;
-                continue;
             }
-        }
-        i += 1;
+        });
     }
-    if text_start < line.len() {
-        ui.label(&line[text_start..]);
+    let mut markdown = String::with_capacity(body.len());
+    let mut end = 0;
+    for (span, link) in links {
+        markdown.push_str(&body[end..span.start]);
+        markdown.push_str(link_display_text(&link, link_map));
+        end = span.end;
     }
+    markdown.push_str(&body[end..]);
+    let _ = crate::preview::research_preview(
+        ui,
+        &crate::models::DraftInput {
+            title_hint: title.to_owned(),
+            ..Default::default()
+        },
+        &markdown,
+        crate::preview::PreviewScale::zoom(None),
+        None,
+        false,
+        numbering,
+        false,
+    );
 }
-
-// ── 右栏：backlinks ──────────────────────────────────────────────────────────
 
 fn backlinks_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) {
     ui.horizontal(|ui| {

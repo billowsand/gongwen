@@ -328,3 +328,18 @@ test("init carries skill, selection and material roles without trusting user pat
   assert.equal(config.workspace.piSkills, "skills/pi-skills");
   assert.equal(config.workspace.materials, "input/materials");
 });
+
+test("wiki tool allowance is independent of regular tool allowance", async () => {
+  const events = [];
+  const bridge = createToolBridge({ emit: event => events.push(event), maxCalls: 1 });
+  const reply = async (name) => {
+    const result = bridge.call(name, {});
+    bridge.handle({ type: "tool_result", callId: events.at(-1).callId, ok: true });
+    await result;
+  };
+  await reply("kb_search");
+  for (let index = 0; index < 12; index += 1) await reply("wiki_search");
+  assert.equal(bridge.used(), 1);
+  await assert.rejects(bridge.call("wiki_read", {}), /维基工具.*12/);
+  await assert.rejects(bridge.call("kb_search", {}), /工具调用次数超过上限（1）/);
+});

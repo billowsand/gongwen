@@ -161,8 +161,16 @@ CREATE TABLE IF NOT EXISTS wiki_doc_refs (
     note       TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_wiki_doc_refs_doc ON wiki_doc_refs(doc_id);
+CREATE INDEX IF NOT EXISTS idx_wiki_doc_refs_version ON wiki_doc_refs(version_id);
 
 -- 整页全文索引（jieba 分词后写入，与 knowledge_local_fts 同模式）。
+-- 框架确认的资料映射供整编使用；删除原文时自动清掉映射。
+CREATE TABLE IF NOT EXISTS wiki_category_docs (
+    node_id INTEGER NOT NULL REFERENCES wiki_nodes(id) ON DELETE CASCADE,
+    doc_id INTEGER NOT NULL REFERENCES knowledge_docs(id) ON DELETE CASCADE,
+    PRIMARY KEY (node_id, doc_id)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(tokens, tokenize='unicode61');
 "#;
 
@@ -177,6 +185,19 @@ pub(crate) struct PageInput {
     pub review_edited: bool,
     /// 依据清单：资料库 doc_id + 支撑说明。
     pub doc_refs: Vec<(i64, String)>,
+    pub base_version: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FrameTheme {
+    pub name: String,
+    pub categories: Vec<FrameCategory>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FrameCategory {
+    pub name: String,
+    pub doc_ids: Vec<i64>,
 }
 
 pub(crate) struct WikiStore {
@@ -200,6 +221,7 @@ impl WikiStore {
     fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys = ON")?;
+        conn.execute_batch(crate::manuscript::DDL_V5)?;
         ensure_schema(&conn)?;
         Ok(Self { conn })
     }
@@ -209,6 +231,63 @@ impl WikiStore {
     }
 
     // ── 框架节点 ─────────────────────────────────────────────────────────
+
+    /// 将用户确认的一整份框架合并入库。已有同名节点保留身份。
+    pub fn apply_frame(&self, themes: &[FrameTheme]) -> Result<(usize, usize)> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut created = 0;
+        let mut reused = 0;
+        for theme in themes {
+            let existing = tx
+                .query_row(
+                    "SELECT id FROM wiki_nodes WHERE kind='theme' AND name=?1 ORDER BY id",
+                    [&theme.name],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let theme_id = if let Some(id) = existing {
+                reused += 1;
+                id
+            } else {
+                created += 1;
+                self.create_theme(&theme.name)?
+            };
+            for category in &theme.categories {
+                let existing = tx
+                    .query_row(
+                        "SELECT id FROM wiki_nodes WHERE parent_id=?1 AND name=?2 ORDER BY id",
+                        params![theme_id, category.name],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let node = if let Some(id) = existing {
+                    reused += 1;
+                    id
+                } else {
+                    created += 1;
+                    self.create_category(theme_id, &category.name)?
+                };
+                for doc_id in &category.doc_ids {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO wiki_category_docs(node_id, doc_id) VALUES (?1, ?2)",
+                        params![node, doc_id],
+                    )
+                    .with_context(|| format!("无法为「{}」登记资料 E{doc_id}", category.name))?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok((created, reused))
+    }
+
+    pub fn frame_doc_ids(&self, node_id: i64) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT d.doc_id FROM wiki_category_docs d JOIN wiki_nodes n ON n.id=d.node_id
+             WHERE n.id=?1 OR n.parent_id=?1 ORDER BY d.doc_id",
+        )?;
+        let rows = stmt.query_map([node_id], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
 
     pub fn create_theme(&self, name: &str) -> Result<i64> {
         let now = Self::now();
@@ -254,11 +333,13 @@ impl WikiStore {
 
     /// 把分类移到另一个主题下。主题不能移动（总在顶层）。
     pub fn move_category(&self, id: i64, new_theme_id: i64) -> Result<()> {
-        self.conn.execute(
+        let changed = self.conn.execute(
             "UPDATE wiki_nodes SET parent_id = ?1, updated_at = ?2
-             WHERE id = ?3 AND kind = 'category'",
+             WHERE id = ?3 AND kind = 'category'
+               AND EXISTS (SELECT 1 FROM wiki_nodes WHERE id=?1 AND kind='theme')",
             params![new_theme_id, Self::now(), id],
         )?;
+        anyhow::ensure!(changed == 1, "只能把现有分类移到现有主题下");
         Ok(())
     }
 
@@ -288,8 +369,15 @@ impl WikiStore {
         if pages > 0 {
             anyhow::bail!("节点下还有页面，先移走或删除页面");
         }
-        self.conn
-            .execute("DELETE FROM wiki_nodes WHERE id=?1", params![id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE wiki_links SET to_node=NULL, resolved=0,
+               to_title=COALESCE(NULLIF(to_title,''),(SELECT name FROM wiki_nodes WHERE id=?1))
+             WHERE to_node=?1",
+            [id],
+        )?;
+        tx.execute("DELETE FROM wiki_nodes WHERE id=?1", [id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -362,6 +450,7 @@ impl WikiStore {
         let uuid = uuid::Uuid::new_v4().to_string();
         let now = Self::now();
         let tx = self.conn.unchecked_transaction()?;
+        validate_page(&tx, input, true)?;
         tx.execute(
             "INSERT INTO wiki_pages (uuid, title, node_id, kind, current_version, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)",
@@ -378,10 +467,10 @@ impl WikiStore {
         )?;
         insert_doc_refs(&tx, &uuid, version_id, &input.doc_refs)?;
         write_fts(&tx, seq, &input.title, &input.body)?;
-        write_links(&tx, &uuid, &input.body)?;
+        write_links(&tx, &uuid, &input.body, &HashMap::new())?;
         // 缺口补齐：既有正文里指向本页标题的红链，随建页解析为页面链接。
         tx.execute(
-            "UPDATE wiki_links SET to_page=?1, to_node=NULL, resolved=1, to_title=''
+            "UPDATE wiki_links SET to_page=?1, to_node=NULL, resolved=1
              WHERE resolved=0 AND to_title=?2",
             params![uuid, input.title.trim()],
         )?;
@@ -391,6 +480,11 @@ impl WikiStore {
 
     /// 更新页面：落一个新版本（全量快照），链接边与全文索引重建。
     pub fn update_page(&self, uuid: &str, input: &PageInput) -> Result<i64> {
+        self.write_new_version(uuid, input, true)
+    }
+
+    fn write_new_version(&self, uuid: &str, input: &PageInput, check_docs: bool) -> Result<i64> {
+        let tx = self.conn.unchecked_transaction()?;
         let old = self
             .get_page(uuid)?
             .with_context(|| format!("页面不存在：{uuid}"))?;
@@ -401,9 +495,22 @@ impl WikiStore {
         {
             anyhow::bail!("已存在同名页面「{}」", input.title);
         }
+        if let Some(base) = input.base_version {
+            anyhow::ensure!(
+                old.meta.current_version == base,
+                "页面已由 v{base} 变为 v{}，请按当前版本重新发起更新",
+                old.meta.current_version
+            );
+        }
+        anyhow::ensure!(old.meta.kind == input.kind, "不能改变页面类型");
+        anyhow::ensure!(
+            input.kind != "guide" || old.meta.node_id == input.node_id,
+            "导览页不能移到其他节点"
+        );
+        validate_page(&tx, input, check_docs)?;
+        let previous_links = self.link_bindings(uuid, &old.body)?;
         let version = old.meta.current_version + 1;
         let now = Self::now();
-        let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE wiki_pages SET title=?1, node_id=?2, current_version=?3, updated_at=?4 WHERE uuid=?5",
             params![input.title.trim(), input.node_id, version, now, uuid],
@@ -416,7 +523,6 @@ impl WikiStore {
             &input.source_run_id,
             input.review_edited,
         )?;
-        tx.execute("DELETE FROM wiki_doc_refs WHERE page_id=?1", params![uuid])?;
         insert_doc_refs(&tx, uuid, version_id, &input.doc_refs)?;
         let seq: i64 = tx.query_row(
             "SELECT seq FROM wiki_pages WHERE uuid=?1",
@@ -424,7 +530,12 @@ impl WikiStore {
             |r| r.get(0),
         )?;
         write_fts(&tx, seq, &input.title, &input.body)?;
-        write_links(&tx, uuid, &input.body)?;
+        write_links(&tx, uuid, &input.body, &previous_links)?;
+        tx.execute(
+            "UPDATE wiki_links SET to_page=?1, to_node=NULL, resolved=1
+             WHERE resolved=0 AND to_title=?2",
+            params![uuid, input.title.trim()],
+        )?;
         tx.commit()?;
         Ok(version)
     }
@@ -435,7 +546,7 @@ impl WikiStore {
             .get_version_body(uuid, version)?
             .with_context(|| format!("版本不存在：v{version}"))?;
         let cur = self.get_page(uuid)?.context("页面不存在")?;
-        self.update_page(
+        self.write_new_version(
             uuid,
             &PageInput {
                 title: cur.meta.title,
@@ -444,8 +555,10 @@ impl WikiStore {
                 body: old_body,
                 source_run_id: format!("rollback-from-v{version}"),
                 review_edited: true,
-                doc_refs: Vec::new(),
+                doc_refs: self.version_doc_refs(uuid, version)?,
+                base_version: Some(cur.meta.current_version),
             },
+            false,
         )
     }
 
@@ -544,28 +657,21 @@ impl WikiStore {
 
     /// 删除页面：被其他页面引用时拒绝（删除保护）。
     pub fn delete_page(&self, uuid: &str) -> Result<()> {
-        let refs: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM wiki_links WHERE to_page=?1",
-            params![uuid],
+        let tx = self.conn.unchecked_transaction()?;
+        let refs: i64 = tx.query_row(
+            "SELECT COUNT(DISTINCT l.from_page) FROM wiki_links l
+             JOIN wiki_pages p ON p.uuid=?1
+             WHERE l.from_page<>?1 AND (l.to_page=?1 OR (p.kind='guide' AND l.to_node=p.node_id))",
+            [uuid],
             |r| r.get(0),
         )?;
-        if refs > 0 {
-            anyhow::bail!("该页面被 {refs} 个页面引用，先解除引用才能删除");
-        }
-        let seq: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT seq FROM wiki_pages WHERE uuid=?1",
-                params![uuid],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(seq) = seq {
-            self.conn
-                .execute("DELETE FROM wiki_fts WHERE rowid=?1", params![seq])?;
-        }
-        self.conn
-            .execute("DELETE FROM wiki_pages WHERE uuid=?1", params![uuid])?;
+        anyhow::ensure!(refs == 0, "该页面被 {refs} 个页面引用，先解除引用才能删除");
+        tx.execute(
+            "DELETE FROM wiki_fts WHERE rowid=(SELECT seq FROM wiki_pages WHERE uuid=?1)",
+            [uuid],
+        )?;
+        tx.execute("DELETE FROM wiki_pages WHERE uuid=?1", [uuid])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -574,7 +680,9 @@ impl WikiStore {
         let mut stmt = self.conn.prepare(
             "SELECT p.uuid, p.title, l.link_text FROM wiki_links l
              JOIN wiki_pages p ON p.uuid = l.from_page
-             WHERE l.to_page=?1 ORDER BY p.title",
+             JOIN wiki_pages target ON target.uuid=?1
+             WHERE l.to_page=?1 OR (target.kind='guide' AND l.to_node=target.node_id)
+             ORDER BY p.title",
         )?;
         let rows = stmt.query_map(params![uuid], |r| {
             Ok(Backlink {
@@ -636,8 +744,21 @@ impl WikiStore {
         Ok(gaps)
     }
 
-    /// 语义检索：jieba 分词后 FTS 匹配（标题 + 正文），空查询返回空。
+    /// 关键词检索：jieba 分词后 FTS 匹配（标题 + 正文），空查询返回空。
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<WikiSearchHit>> {
+        self.search_pages(query, limit, false)
+    }
+
+    pub fn search_for_evidence(&self, query: &str, limit: usize) -> Result<Vec<WikiSearchHit>> {
+        self.search_pages(query, limit, true)
+    }
+
+    fn search_pages(
+        &self,
+        query: &str,
+        limit: usize,
+        evidence_only: bool,
+    ) -> Result<Vec<WikiSearchHit>> {
         let tokens = crate::rag::tokenize(query);
         let words: Vec<&str> = tokens.split_whitespace().collect();
         if words.is_empty() {
@@ -650,10 +771,14 @@ impl WikiStore {
             .join(" OR ");
         let sql = "SELECT p.uuid, p.title, p.node_id FROM wiki_fts f
              JOIN wiki_pages p ON p.seq = f.rowid
-             WHERE wiki_fts MATCH ?1 ORDER BY rank LIMIT ?2"
-            .to_string();
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![phrase, limit as i64], |r| {
+             WHERE wiki_fts MATCH ?1 AND (NOT ?3 OR NOT EXISTS (
+                SELECT 1 FROM wiki_page_versions v
+                JOIN wiki_doc_refs r ON r.version_id=v.id
+                LEFT JOIN knowledge_docs d ON d.id=r.doc_id
+                WHERE v.page_id=p.uuid AND v.version=p.current_version AND d.id IS NULL
+             )) ORDER BY rank LIMIT ?2";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![phrase, limit as i64, evidence_only], |r| {
             Ok(WikiSearchHit {
                 uuid: r.get(0)?,
                 title: r.get(1)?,
@@ -678,14 +803,76 @@ impl WikiStore {
 
     /// 某页当前版本的依据清单。
     pub fn page_doc_refs(&self, uuid: &str) -> Result<Vec<(i64, String)>> {
+        let version = self
+            .conn
+            .query_row(
+                "SELECT current_version FROM wiki_pages WHERE uuid=?1",
+                [uuid],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match version {
+            Some(version) => self.version_doc_refs(uuid, version),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn version_doc_refs(&self, uuid: &str, version: i64) -> Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT r.doc_id, r.note FROM wiki_doc_refs r
-             JOIN wiki_pages p ON p.uuid = r.page_id
              JOIN wiki_page_versions v ON v.id = r.version_id
-             WHERE r.page_id=?1 AND v.version = p.current_version
+             WHERE r.page_id=?1 AND v.version=?2
              ORDER BY r.id",
         )?;
-        let rows = stmt.query_map(params![uuid], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let rows = stmt.query_map(params![uuid, version], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// 当前正文里的原始链接名与已保存的稳定目标。旧库按边的入库顺序补读目标名。
+    pub fn link_bindings(&self, uuid: &str, body: &str) -> Result<HashMap<String, WikiLink>> {
+        let raw = parse_wikilinks(body);
+        let edges = self.outgoing_links(uuid)?;
+        let matching_order = raw.len() == edges.len();
+        Ok(edges
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, edge)| {
+                let title = if !edge.to_title.is_empty() {
+                    edge.to_title.clone()
+                } else if matching_order {
+                    raw[index].target.clone()
+                } else {
+                    return None;
+                };
+                Some((title, edge))
+            })
+            .collect())
+    }
+
+    pub fn page_has_missing_sources(&self, uuid: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (
+               SELECT 1 FROM wiki_pages p
+               JOIN wiki_page_versions v ON v.page_id=p.uuid AND v.version=p.current_version
+               JOIN wiki_doc_refs r ON r.version_id=v.id
+               LEFT JOIN knowledge_docs d ON d.id=r.doc_id
+               WHERE p.uuid=?1 AND d.id IS NULL
+             )",
+            [uuid],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// 当前依据已被移除的页面。保留历史引用，以便人工复核。
+    pub fn pages_needing_review(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT p.uuid, p.title FROM wiki_pages p
+             JOIN wiki_page_versions v ON v.page_id=p.uuid AND v.version=p.current_version
+             JOIN wiki_doc_refs r ON r.version_id=v.id
+             LEFT JOIN knowledge_docs d ON d.id=r.doc_id
+             WHERE d.id IS NULL ORDER BY p.title",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
@@ -711,6 +898,32 @@ fn box_kind(kind: &str) -> &'static str {
         "guide" => "guide",
         _ => "normal",
     }
+}
+
+fn validate_page(tx: &rusqlite::Transaction, input: &PageInput, check_docs: bool) -> Result<()> {
+    anyhow::ensure!(!input.title.trim().is_empty(), "页面标题不能为空");
+    anyhow::ensure!(!input.body.trim().is_empty(), "页面正文不能为空");
+    let node: String = tx
+        .query_row(
+            "SELECT kind FROM wiki_nodes WHERE id=?1",
+            [input.node_id],
+            |r| r.get(0),
+        )
+        .context("页面所属节点已不存在")?;
+    anyhow::ensure!(
+        input.kind == "guide" || (input.kind == "normal" && node == "category"),
+        "普通页面必须归属一个分类"
+    );
+    if check_docs && !input.doc_refs.is_empty() {
+        let mut exists = tx.prepare("SELECT EXISTS(SELECT 1 FROM knowledge_docs WHERE id=?1)")?;
+        for (id, _) in &input.doc_refs {
+            anyhow::ensure!(
+                exists.query_row([id], |r| r.get::<_, bool>(0))?,
+                "依据 E{id} 已不存在"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn insert_version(
@@ -763,7 +976,12 @@ fn write_fts(tx: &rusqlite::Transaction, seq: i64, title: &str, body: &str) -> R
 
 /// 从正文确定性解析 `[[链接]]`，重建该页的出链边。
 /// 目标解析顺序：页面标题 → 框架节点名（主题/分类，导览页链接）→ 红链。
-fn write_links(tx: &rusqlite::Transaction, from_uuid: &str, body: &str) -> Result<()> {
+fn write_links(
+    tx: &rusqlite::Transaction,
+    from_uuid: &str,
+    body: &str,
+    previous: &HashMap<String, WikiLink>,
+) -> Result<()> {
     tx.execute(
         "DELETE FROM wiki_links WHERE from_page=?1",
         params![from_uuid],
@@ -773,39 +991,33 @@ fn write_links(tx: &rusqlite::Transaction, from_uuid: &str, body: &str) -> Resul
         if target.is_empty() {
             continue;
         }
-        let page: Option<String> = tx
-            .query_row(
-                "SELECT uuid FROM wiki_pages WHERE title=?1",
-                params![target],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let (to_page, to_node, resolved) = if let Some(p) = page {
-            (Some(p), None, 1)
+        let (to_page, to_node) = if let Some(link) = previous.get(target) {
+            (link.to_page.clone(), link.to_node)
         } else {
-            let node: Option<i64> = tx
+            let page: Option<String> = tx
                 .query_row(
-                    "SELECT id FROM wiki_nodes WHERE name=?1",
-                    params![target],
+                    "SELECT uuid FROM wiki_pages WHERE title=?1",
+                    [target],
                     |r| r.get(0),
                 )
                 .optional()?;
-            match node {
-                Some(n) => (None, Some(n), 1),
-                None => (None, None, 0),
-            }
+            let node = if page.is_none() {
+                tx.query_row(
+                    "SELECT MIN(id) FROM wiki_nodes WHERE name=?1 HAVING COUNT(*)=1",
+                    [target],
+                    |r| r.get(0),
+                )
+                .optional()?
+            } else {
+                None
+            };
+            (page, node)
         };
+        let resolved = to_page.is_some() || to_node.is_some();
         tx.execute(
             "INSERT INTO wiki_links (from_page, to_page, to_node, to_title, link_text, resolved)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                from_uuid,
-                to_page,
-                to_node,
-                if resolved == 1 { "" } else { target },
-                raw.text,
-                resolved
-            ],
+            params![from_uuid, to_page, to_node, target, raw.text, resolved],
         )?;
     }
     Ok(())
@@ -918,6 +1130,13 @@ pub(crate) fn parse_frame_outline(text: &str) -> Result<Vec<OutlineTheme>, Strin
 /// 解析正文里的 `[[目标]]` 与 `[[目标|显示]]`（支持嵌套 `[` 的标题不做转义，
 /// 公文标题不含 `]`，扫描即可）。
 pub(crate) fn parse_wikilinks(body: &str) -> Vec<RawLink> {
+    wikilink_spans(body)
+        .into_iter()
+        .map(|(_, link)| link)
+        .collect()
+}
+
+pub(crate) fn wikilink_spans(body: &str) -> Vec<(std::ops::Range<usize>, RawLink)> {
     let mut out = Vec::new();
     let bytes = body.as_bytes();
     let mut i = 0;
@@ -935,10 +1154,13 @@ pub(crate) fn parse_wikilinks(body: &str) -> Vec<RawLink> {
                     None => (inner.trim(), inner.trim()),
                 };
                 if !target.is_empty() && !text.is_empty() {
-                    out.push(RawLink {
-                        target: target.to_string(),
-                        text: text.to_string(),
-                    });
+                    out.push((
+                        i..j + 2,
+                        RawLink {
+                            target: target.to_string(),
+                            text: text.to_string(),
+                        },
+                    ));
                 }
                 i = j + 2;
                 continue;

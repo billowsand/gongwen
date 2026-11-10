@@ -875,7 +875,11 @@ impl AppShell {
                         }
                     }
                 } else if app.take_lock_requested() {
-                    if app.task_extraction_rx.is_some() || app.task_fill_rx.is_some() {
+                    if app.task_extraction_rx.is_some()
+                        || app.task_fill_rx.is_some()
+                        || app.wiki_frame_rx.is_some()
+                        || app.wiki_write_rx.is_some()
+                    {
                         // Pi 的停止由后台收尾，收完结果再释放工作区与密钥。
                         app.request_lock();
                         None

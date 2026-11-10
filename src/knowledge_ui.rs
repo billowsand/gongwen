@@ -89,12 +89,15 @@ fn wiki_new_doc_tip_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
             .on_hover_text("发起维基页面更新：AI 读这篇资料，对关联页出 diff 提案，审核后才写库")
             .clicked()
         {
-            app.start_wiki_update(tip.hits.clone());
-            app.wiki_new_doc_tip = None;
+            if app.start_wiki_update(tip.hits.clone(), Some(tip.doc_id)) {
+                app.wiki_new_doc_tip = None;
+                app.knowledge_dirty = true;
+            }
             app.open_page(crate::app::NavPage::Wiki);
         }
         if ui.small_button("知道了").clicked() {
             app.wiki_new_doc_tip = None;
+            app.knowledge_dirty = true;
         }
     });
     ui.add_space(4.0);
@@ -188,22 +191,11 @@ fn wiki_circle_dialog(app: &mut GongwenApp, ctx: &egui::Context) {
             .as_ref()
             .map(|state| (state.docs.clone(), state.category))
             .unwrap_or_default();
-        if let (Some(node_id), Some(store)) = (category, app.wiki_store.as_ref()) {
-            let Ok(tree) = store.list_tree() else {
-                return;
-            };
-            let target = tree.iter().find_map(|t| {
-                t.categories
-                    .iter()
-                    .find(|c| c.id == node_id)
-                    .map(|c| (t.theme.name.clone(), c.name.clone()))
-            });
-            if let Some((theme, category)) = target {
-                let doc_hints = docs.iter().map(|(id, _)| *id).collect();
-                app.start_wiki_write_docs(theme, category, doc_hints);
-                app.wiki_circle = None;
-                app.open_page(crate::app::NavPage::Wiki);
-            }
+        if let Some(node_id) = category
+            && app.start_wiki_write(node_id, docs.into_iter().map(|(id, _)| id).collect())
+        {
+            app.wiki_circle = None;
+            app.open_page(crate::app::NavPage::Wiki);
         }
     }
 }
@@ -1078,7 +1070,7 @@ fn qa_answer_card(app: &mut GongwenApp, ui: &mut egui::Ui, index: usize, turn: &
         ui.add_space(4.0);
         if !turn.wiki_pages.is_empty() {
             ui.horizontal_wrapped(|ui| {
-                ui.weak("维基依据：");
+                ui.weak("供本轮参考的维基页");
                 for (uuid, title) in &turn.wiki_pages {
                     if ui.link(format!("《{title}》")).clicked() {
                         crate::wiki_ui::open_wiki_page(app, uuid);

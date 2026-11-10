@@ -14,6 +14,7 @@ use super::{
 };
 use crate::models::{AppConfig, DraftInput};
 use crate::pi_agent::materials::MaterialRole;
+use crate::wiki::{FrameCategory, FrameTheme};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -42,18 +43,6 @@ const MAX_DOC_REFS: usize = 50;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FrameProposal {
     pub(crate) themes: Vec<FrameTheme>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FrameTheme {
-    pub(crate) name: String,
-    pub(crate) categories: Vec<FrameCategory>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FrameCategory {
-    pub(crate) name: String,
-    pub(crate) doc_ids: Vec<i64>,
 }
 
 /// 交付 JSON 的原始形状（校验后转换成 [`FrameProposal`]）。
@@ -131,7 +120,7 @@ pub(crate) fn parse_frame_delivery(
             for id in category.doc_ids {
                 if !known.contains(&id) {
                     return Err(format!(
-                        "分类「{cname}」依据的文档 {id} 不在资料库里；只填 kb_search / kb_read 真实返回的编号"
+                        "分类「{cname}」依据的文档 {id} 已不存在或本轮未检索到；只填工具实际返回的资料编号"
                     ));
                 }
                 if !doc_ids.contains(&id) {
@@ -149,12 +138,21 @@ pub(crate) fn parse_frame_delivery(
 }
 
 /// 资料库里现存的文档编号，供依据校验。
-fn known_doc_ids(store_path: &Path) -> Result<Vec<i64>, String> {
+fn consulted_docs(
+    store_path: &Path,
+    tools: &PiToolContext,
+    previous: impl IntoIterator<Item = i64>,
+) -> Result<Vec<i64>, String> {
+    let mut allowed = tools.wiki_doc_hits();
+    allowed.extend(previous);
     let mut store = crate::knowledge::KnowledgeStore::open(store_path)
         .map_err(|error| format!("打开资料库失败：{error:#}"))?;
     store
-        .list_docs(None)
-        .map(|rows| rows.into_iter().map(|row| row.id).collect())
+        .all_doc_ids()
+        .map(|mut ids| {
+            ids.retain(|id| allowed.contains(id));
+            ids
+        })
         .map_err(|error| format!("读取资料库文档失败：{error:#}"))
 }
 
@@ -191,13 +189,16 @@ pub(crate) fn induce_frame(
         Some(pi_skills::WIKI_FRAME_SKILL),
     )?;
     // 只读全套：要读资料库；不挂维基工具（还没有框架可读）、不是任务作业。
-    let tools = Arc::new(PiToolContext::new(
-        Arc::clone(&config),
-        DraftInput::default(),
-        String::new(),
-        request.clone(),
-        Vec::new(),
-    ));
+    let tools = Arc::new(
+        PiToolContext::new(
+            Arc::clone(&config),
+            DraftInput::default(),
+            String::new(),
+            request.clone(),
+            Vec::new(),
+        )
+        .wiki_job(),
+    );
     let run_id = uuid::Uuid::new_v4().to_string();
     let request_id = format!("wiki-frame-{run_id}");
     let record = PiRunRecord::start(
@@ -237,7 +238,7 @@ pub(crate) fn induce_frame(
             },
             before: String::new(),
             base: String::new(),
-            tools,
+            tools: Arc::clone(&tools),
             bridge: Arc::new(PiBridge::default()),
             record,
             resume: false,
@@ -263,7 +264,7 @@ pub(crate) fn induce_frame(
     let PiOutcome::Task(delivery) = outcome else {
         return Err("Pi 没有交回框架提案，未采纳。".into());
     };
-    parse_frame_delivery(&delivery.content, &known_doc_ids(&store_path)?)
+    parse_frame_delivery(&delivery.content, &consulted_docs(&store_path, &tools, [])?)
         .map_err(|error| format!("框架提案未通过复核：{error}"))
 }
 
@@ -283,6 +284,7 @@ pub(crate) struct PageProposalSet {
 pub(crate) struct PageProposal {
     /// 更新提案的目标页 UUID；新建页提案为 None。
     pub uuid: Option<String>,
+    pub base_version: Option<i64>,
     pub title: String,
     /// normal 或 guide。
     pub kind: String,
@@ -331,6 +333,30 @@ struct RawDocRef {
     doc_id: i64,
     #[serde(default)]
     note: String,
+}
+
+/// 结构校验也用于人工编辑后的采纳。来源标记使用资料编号，不使用本轮工具台账号。
+pub(crate) fn validate_review_body(body: &str, refs: &[(i64, String)]) -> Result<(), String> {
+    if body.trim().is_empty() || body.chars().count() > MAX_PAGE_BODY_CHARS {
+        return Err(format!("正文不能为空或超过 {MAX_PAGE_BODY_CHARS} 字"));
+    }
+    if refs.is_empty()
+        || refs.len() > MAX_DOC_REFS
+        || refs.iter().any(|(_, note)| note.trim().is_empty())
+    {
+        return Err(format!(
+            "每页需有 1 至 {MAX_DOC_REFS} 篇依据，并逐条说明支撑要点"
+        ));
+    }
+    for mark in body.split("〔E").skip(1) {
+        if let Some((id, _)) = mark.split_once('〕')
+            && let Ok(id) = id.parse::<i64>()
+            && !refs.iter().any(|(doc_id, _)| *doc_id == id)
+        {
+            return Err(format!("正文标记 〔E{id}〕 没有对应的资料依据"));
+        }
+    }
+    Ok(())
 }
 
 /// 页面整编交付的确定性复核：结构、标题合规、kind 合法、分类存在、
@@ -409,7 +435,7 @@ pub(crate) fn parse_page_delivery(
         for reference in page.doc_refs {
             if !known.contains(&reference.doc_id) {
                 return Err(format!(
-                    "页面「{title}」依据的文档 {} 不在资料库里；只填 kb_search / kb_read 真实返回的编号",
+                    "页面「{title}」依据的文档 {} 已不存在或本轮未检索到；只填工具实际返回或本页保留的资料编号",
                     reference.doc_id
                 ));
             }
@@ -423,8 +449,11 @@ pub(crate) fn parse_page_delivery(
                 doc_refs.push((reference.doc_id, note));
             }
         }
+        validate_review_body(&page.body, &doc_refs)
+            .map_err(|error| format!("页面「{title}」：{error}"))?;
         pages.push(PageProposal {
             uuid: None,
+            base_version: None,
             title,
             kind,
             body: page.body,
@@ -445,8 +474,7 @@ pub(crate) fn parse_page_delivery(
 pub(crate) fn write_pages(
     config: Arc<AppConfig>,
     store_path: PathBuf,
-    theme: String,
-    category: String,
+    node_id: i64,
     // 圈选资料提示：从资料库反向发起整编时，优先读这些 doc_id（kb_read 按编号读）。
     doc_hints: Vec<i64>,
     cancel: Arc<AtomicBool>,
@@ -460,18 +488,36 @@ pub(crate) fn write_pages(
     let tree = store
         .list_tree()
         .map_err(|error| format!("读取框架失败：{error:#}"))?;
-    let Some(theme_node) = tree.iter().find(|t| t.theme.name == theme) else {
-        return Err(format!(
-            "主题「{theme}」已不存在，请回到知识库页重新发起整编"
-        ));
+    let (node, parent, has_guide) = tree
+        .iter()
+        .find_map(|t| {
+            if t.theme.id == node_id {
+                return Some((&t.theme, None, t.theme_guide.is_some()));
+            }
+            t.categories.iter().find(|c| c.id == node_id).map(|c| {
+                (
+                    c,
+                    Some(t.theme.name.as_str()),
+                    t.category_guides.contains_key(&c.id),
+                )
+            })
+        })
+        .ok_or("所选节点已不存在，请重新发起整编")?;
+    let guide_only = parent.is_none();
+    if guide_only && has_guide {
+        return Err("主题已有导览页，请打开导览页后使用「更新」。".into());
+    }
+    let target = match parent {
+        Some(theme) => format!("主题「{theme}」下的分类「{}」", node.name),
+        None => format!("主题「{}」", node.name),
     };
-    let Some(category_node) = theme_node.categories.iter().find(|c| c.name == category) else {
-        return Err(format!(
-            "分类「{category}」已不存在，请回到知识库页重新发起整编"
-        ));
+    let doc_hints = if doc_hints.is_empty() {
+        store
+            .frame_doc_ids(node_id)
+            .map_err(|error| format!("读取框架资料映射失败：{error:#}"))?
+    } else {
+        doc_hints
     };
-    // 该分类已有导览页时，整编不再接受新的 guide（存储层也会拒，提前给模型说清楚）。
-    let has_guide = theme_node.category_guides.contains_key(&category_node.id);
     let catalog = pi_skills::load_catalog();
     catalog.resolve(Some(pi_skills::WIKI_WRITE_SKILL))?;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -479,7 +525,7 @@ pub(crate) fn write_pages(
         String::new()
     } else {
         format!(
-            " 用户已从资料库圈选这些资料，优先用 kb_read 按编号读：{}。",
+            " 优先用 kb_read 按编号读这些确认或圈选的资料：{}。",
             doc_hints
                 .iter()
                 .map(|id| format!("E{id}"))
@@ -488,13 +534,15 @@ pub(crate) fn write_pages(
         )
     };
     let request = format!(
-        "按技能 {} 为主题「{theme}」下的分类「{category}」整编维基页面，\
+        "按技能 {} 为{target}整编维基页面，\
          最后用 submit_task 交 work/pages.json。今天日期：{today}。\
-         该分类{guide_hint}。资料用 kb_search / kb_read 找与「{category}」相关的文档；\
+         该分类{guide_hint}。资料用 kb_search / kb_read 找与目标相关的文档；\
          已有维基页用 wiki_search / wiki_links 查，便于互相链接。{hint_line}",
         pi_skills::WIKI_WRITE_SKILL,
         guide_hint = if has_guide {
             "已有导览页，本轮不要再交 guide 页"
+        } else if guide_only {
+            "只交一篇 kind=guide 的主题导览页，链接可用的分类导览页，不生成普通页"
         } else {
             "还没有导览页，本轮要交一篇 kind=guide 的导览页"
         },
@@ -521,6 +569,7 @@ pub(crate) fn write_pages(
             request.clone(),
             Vec::new(),
         )
+        .wiki_job()
         .with_wiki_autoload(),
     );
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -562,7 +611,7 @@ pub(crate) fn write_pages(
             },
             before: String::new(),
             base: String::new(),
-            tools,
+            tools: Arc::clone(&tools),
             bridge: Arc::new(PiBridge::default()),
             record,
             resume: false,
@@ -588,28 +637,39 @@ pub(crate) fn write_pages(
     let PiOutcome::Task(delivery) = outcome else {
         return Err("Pi 没有交回页面提案，未采纳。".into());
     };
-    let known = known_doc_ids(&store_path)?;
-    let existing_titles = store
-        .list_pages(category_node.id)
-        .map_err(|error| format!("读取已有页面失败：{error:#}"))?
-        .into_iter()
-        .map(|meta| meta.title)
-        .collect::<Vec<_>>();
-    let node_categories = theme_node
-        .categories
+    let known = consulted_docs(&store_path, &tools, [])?;
+    let tree = store
+        .list_tree()
+        .map_err(|error| format!("读取当前框架失败：{error:#}"))?;
+    let mut existing_titles = Vec::new();
+    for id in tree
         .iter()
-        .map(|c| c.name.clone())
-        .collect::<Vec<_>>();
-    parse_page_delivery(
+        .flat_map(|t| std::iter::once(t.theme.id).chain(t.categories.iter().map(|c| c.id)))
+    {
+        let pages = store
+            .list_pages(id)
+            .map_err(|error| format!("读取已有页面失败：{error:#}"))?;
+        existing_titles.extend(pages.into_iter().map(|meta| meta.title));
+    }
+    let proposal = parse_page_delivery(
         &delivery.content,
-        &category,
-        category_node.id,
+        &node.name,
+        node_id,
         run_id,
         &existing_titles,
         &known,
-        &node_categories,
+        std::slice::from_ref(&node.name),
     )
-    .map_err(|error| format!("页面提案未通过复核：{error}"))
+    .map_err(|error| format!("页面提案未通过复核：{error}"))?;
+    let guides = proposal
+        .pages
+        .iter()
+        .filter(|page| page.kind == "guide")
+        .count();
+    if (guide_only && proposal.pages.len() != 1) || guides != usize::from(!has_guide) {
+        return Err("交付的导览页不符合本次整编范围。".into());
+    }
+    Ok(proposal)
 }
 
 /// 更新作业的目标页快照（发起时从库里读出，交付复核时对照）。
@@ -620,6 +680,8 @@ pub(crate) struct UpdateTarget {
     pub node_id: i64,
     pub kind: String,
     pub current_body: String,
+    pub current_version: i64,
+    pub doc_refs: Vec<(i64, String)>,
 }
 
 /// 页面更新交付的确定性复核：UUID 对应页面存在、标题与类型未改、
@@ -692,7 +754,7 @@ pub(crate) fn parse_update_delivery(
         for reference in page.doc_refs {
             if !known.contains(&reference.doc_id) {
                 return Err(format!(
-                    "页面「{title}」依据的文档 {} 不在资料库里；只填 kb_search / kb_read 真实返回的编号",
+                    "页面「{title}」依据的文档 {} 已不存在或本轮未检索到；只填工具实际返回或本页保留的资料编号",
                     reference.doc_id
                 ));
             }
@@ -706,8 +768,11 @@ pub(crate) fn parse_update_delivery(
                 doc_refs.push((reference.doc_id, note));
             }
         }
+        validate_review_body(&page.body, &doc_refs)
+            .map_err(|error| format!("页面「{title}」：{error}"))?;
         pages.push(PageProposal {
             uuid: Some(uuid),
+            base_version: Some(target.current_version),
             title,
             kind,
             body: page.body,
@@ -729,6 +794,7 @@ pub(crate) fn update_pages(
     config: Arc<AppConfig>,
     store_path: PathBuf,
     targets: Vec<(String, String)>,
+    source: Option<i64>,
     cancel: Arc<AtomicBool>,
     mut on_progress: impl FnMut(String),
 ) -> Result<PageProposalSet, String> {
@@ -746,6 +812,9 @@ pub(crate) fn update_pages(
     }
     let store = crate::wiki::WikiStore::open(&store_path)
         .map_err(|error| format!("打开维基库失败：{error:#}"))?;
+    let new_source = source
+        .map(|id| format!("用户指定的新资料编号为 {id}，请先用 kb_read({{doc_id: {id}}}) 读它。"))
+        .unwrap_or_default();
     let mut snapshot = Vec::new();
     for (uuid, title) in &targets {
         if cancel.load(Ordering::Relaxed) {
@@ -760,7 +829,11 @@ pub(crate) fn update_pages(
             title: page.meta.title.clone(),
             node_id: page.meta.node_id,
             kind: page.meta.kind.to_string(),
-            current_body: page.body.clone(),
+            current_body: page.body,
+            current_version: page.meta.current_version,
+            doc_refs: store
+                .page_doc_refs(uuid)
+                .map_err(|error| format!("读取原页依据失败：{error:#}"))?,
         });
     }
     let catalog = pi_skills::load_catalog();
@@ -776,7 +849,7 @@ pub(crate) fn update_pages(
          今天日期：{today}。目标页（正文已作为材料附上）：\n{listing}\n\
          用 kb_search / kb_read 找与这些页面相关、尤其是新入库的文档；\
          维基内现状用 wiki_search / wiki_read / wiki_links 自查互链。\
-         每个 pages[] 原样带回 uuid 与 title，正文给整页新正文。",
+         每个 pages[] 原样带回 uuid 与 title，正文给整页新正文。{new_source}",
         pi_skills::WIKI_UPDATE_SKILL,
         snapshot.len(),
     );
@@ -784,8 +857,16 @@ pub(crate) fn update_pages(
     let materials: Vec<PiMaterialInput> = snapshot
         .iter()
         .map(|t| {
-            let mut text = format!("# {}\n\n{}", t.title, t.current_body);
-            text.truncate(MAX_PAGE_BODY_CHARS + 200);
+            let refs = t
+                .doc_refs
+                .iter()
+                .map(|(id, note)| format!("- E{id}：{note}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let text = format!(
+                "# {}\n\n{}\n\n当前版本的依据清单（保留仍支撑本页的依据）：\n{}",
+                t.title, t.current_body, refs
+            );
             PiMaterialInput {
                 title: format!("维基页：{}", t.title),
                 source: "维基现状".into(),
@@ -815,6 +896,7 @@ pub(crate) fn update_pages(
             request.clone(),
             Vec::new(),
         )
+        .wiki_job()
         .with_wiki_autoload(),
     );
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -856,7 +938,7 @@ pub(crate) fn update_pages(
             },
             before: String::new(),
             base: String::new(),
-            tools,
+            tools: Arc::clone(&tools),
             bridge: Arc::new(PiBridge::default()),
             record,
             resume: false,
@@ -882,7 +964,13 @@ pub(crate) fn update_pages(
     let PiOutcome::Task(delivery) = outcome else {
         return Err("Pi 没有交回页面更新提案，未采纳。".into());
     };
-    let known = known_doc_ids(&store_path)?;
+    let known = consulted_docs(
+        &store_path,
+        &tools,
+        snapshot
+            .iter()
+            .flat_map(|target| target.doc_refs.iter().map(|(id, _)| *id)),
+    )?;
     parse_update_delivery(&delivery.content, run_id, &known, &snapshot)
         .map_err(|error| format!("页面更新提案未通过复核：{error}"))
 }
@@ -961,7 +1049,7 @@ mod tests {
             r##"{"pages":[
                 {"title":"监督检查","kind":"guide","body":"# 导览\n\n见 [[责任体系]]。",
                  "doc_refs":[{"doc_id":3,"note":"支撑要点"}]},
-                {"title":"闭环整改","kind":"normal","body":"整改要闭环。","doc_refs":[]}
+                {"title":"闭环整改","kind":"normal","body":"整改要闭环。","doc_refs":[{"doc_id":3,"note":"整改要求"}]}
             ]}"##,
             "监督检查",
             42,
@@ -980,7 +1068,7 @@ mod tests {
 
     #[test]
     fn page_delivery_rejects_invalid_proposals() {
-        let base = r#"{"pages":[{"title":"新页","kind":"normal","body":"正文","doc_refs":[]}]}"#;
+        let base = r#"{"pages":[{"title":"新页","kind":"normal","body":"正文","doc_refs":[{"doc_id":3,"note":"依据"}]}]}"#;
         let good = (
             "正常交付",
             parse_page_delivery(
@@ -1004,19 +1092,19 @@ mod tests {
             ),
             (
                 "与已有页重名",
-                "{\"pages\":[{\"title\":\"责任体系\",\"kind\":\"normal\",\"body\":\"x\",\"doc_refs\":[]}]}".to_string(),
+                "{\"pages\":[{\"title\":\"责任体系\",\"kind\":\"normal\",\"body\":\"x\",\"doc_refs\":[{\"doc_id\":3,\"note\":\"依据\"}]}]}".to_string(),
             ),
             (
                 "本轮重名",
-                "{\"pages\":[{\"title\":\"甲\",\"kind\":\"normal\",\"body\":\"x\",\"doc_refs\":[]},{\"title\":\"甲\",\"kind\":\"normal\",\"body\":\"y\",\"doc_refs\":[]}]}".to_string(),
+                "{\"pages\":[{\"title\":\"甲\",\"kind\":\"normal\",\"body\":\"x\",\"doc_refs\":[{\"doc_id\":3,\"note\":\"依据\"}]},{\"title\":\"甲\",\"kind\":\"normal\",\"body\":\"y\",\"doc_refs\":[{\"doc_id\":3,\"note\":\"依据\"}]}]}".to_string(),
             ),
             (
                 "kind 非法",
-                "{\"pages\":[{\"title\":\"甲\",\"kind\":\"chapter\",\"body\":\"x\",\"doc_refs\":[]}]}".to_string(),
+                "{\"pages\":[{\"title\":\"甲\",\"kind\":\"chapter\",\"body\":\"x\",\"doc_refs\":[{\"doc_id\":3,\"note\":\"依据\"}]}]}".to_string(),
             ),
             (
                 "空正文",
-                "{\"pages\":[{\"title\":\"甲\",\"kind\":\"normal\",\"body\":\"  \",\"doc_refs\":[]}]}".to_string(),
+                "{\"pages\":[{\"title\":\"甲\",\"kind\":\"normal\",\"body\":\"  \",\"doc_refs\":[{\"doc_id\":3,\"note\":\"依据\"}]}]}".to_string(),
             ),
             (
                 "幽灵依据",
@@ -1024,7 +1112,7 @@ mod tests {
             ),
             (
                 "双导览",
-                "{\"pages\":[{\"title\":\"甲\",\"kind\":\"guide\",\"body\":\"x\",\"doc_refs\":[]},{\"title\":\"乙\",\"kind\":\"guide\",\"body\":\"y\",\"doc_refs\":[]}]}".to_string(),
+                "{\"pages\":[{\"title\":\"甲\",\"kind\":\"guide\",\"body\":\"x\",\"doc_refs\":[{\"doc_id\":3,\"note\":\"依据\"}]},{\"title\":\"乙\",\"kind\":\"guide\",\"body\":\"y\",\"doc_refs\":[{\"doc_id\":3,\"note\":\"依据\"}]}]}".to_string(),
             ),
         ];
         for (label, content) in cases {
@@ -1056,6 +1144,8 @@ mod tests {
             node_id: 42,
             kind: "normal".into(),
             current_body: "旧正文".into(),
+            current_version: 1,
+            doc_refs: Vec::new(),
         }]
     }
 
@@ -1079,7 +1169,7 @@ mod tests {
 
     #[test]
     fn update_delivery_rejects_invalid_proposals() {
-        let base = r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"normal","body":"新正文","change_note":"","doc_refs":[]}]}"##;
+        let base = r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"normal","body":"新正文","change_note":"","doc_refs":[{"doc_id":3,"note":"依据"}]}]}"##;
         let good = parse_update_delivery(base, "r".into(), &known(), &targets());
         assert!(good.is_ok(), "{good:?}");
 
@@ -1088,23 +1178,23 @@ mod tests {
             ("空集合", "{\"pages\":[]}".to_string()),
             (
                 "缺 uuid",
-                r##"{"pages":[{"title":"监督检查","kind":"normal","body":"新正文","doc_refs":[]}]}"##.to_string(),
+                r##"{"pages":[{"title":"监督检查","kind":"normal","body":"新正文","doc_refs":[{"doc_id":3,"note":"依据"}]}]}"##.to_string(),
             ),
             (
                 "uuid 不在发起范围",
-                r##"{"pages":[{"uuid":"u-9","title":"监督检查","kind":"normal","body":"新正文","doc_refs":[]}]}"##.to_string(),
+                r##"{"pages":[{"uuid":"u-9","title":"监督检查","kind":"normal","body":"新正文","doc_refs":[{"doc_id":3,"note":"依据"}]}]}"##.to_string(),
             ),
             (
                 "改了标题",
-                r##"{"pages":[{"uuid":"u-1","title":"监督监察","kind":"normal","body":"新正文","doc_refs":[]}]}"##.to_string(),
+                r##"{"pages":[{"uuid":"u-1","title":"监督监察","kind":"normal","body":"新正文","doc_refs":[{"doc_id":3,"note":"依据"}]}]}"##.to_string(),
             ),
             (
                 "改了类型",
-                r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"guide","body":"新正文","doc_refs":[]}]}"##.to_string(),
+                r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"guide","body":"新正文","doc_refs":[{"doc_id":3,"note":"依据"}]}]}"##.to_string(),
             ),
             (
                 "正文没有变化",
-                r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"normal","body":"旧正文","doc_refs":[]}]}"##.to_string(),
+                r##"{"pages":[{"uuid":"u-1","title":"监督检查","kind":"normal","body":"旧正文","doc_refs":[{"doc_id":3,"note":"依据"}]}]}"##.to_string(),
             ),
             (
                 "幽灵依据",
@@ -1113,8 +1203,8 @@ mod tests {
             (
                 "本轮重复 uuid",
                 r##"{"pages":[
-                    {"uuid":"u-1","title":"监督检查","kind":"normal","body":"甲","doc_refs":[]},
-                    {"uuid":"u-1","title":"监督检查","kind":"normal","body":"乙","doc_refs":[]}
+                    {"uuid":"u-1","title":"监督检查","kind":"normal","body":"甲","doc_refs":[{"doc_id":3,"note":"依据"}]},
+                    {"uuid":"u-1","title":"监督检查","kind":"normal","body":"乙","doc_refs":[{"doc_id":3,"note":"依据"}]}
                 ]}"##.to_string(),
             ),
         ];
@@ -1129,7 +1219,7 @@ mod tests {
     #[test]
     fn new_page_delivery_rejects_uuid_bearing_pages() {
         let content = r##"{"pages":[
-            {"uuid":"u-1","title":"新页","kind":"normal","body":"正文","doc_refs":[]}
+            {"uuid":"u-1","title":"新页","kind":"normal","body":"正文","doc_refs":[{"doc_id":3,"note":"依据"}]}
         ]}"##;
         assert!(
             parse_page_delivery(

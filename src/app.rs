@@ -358,8 +358,7 @@ pub struct GongwenApp {
     pub(crate) wiki_doc_status: std::collections::HashMap<i64, i64>,
     /// 新资料关联提示：会话基线（首次刷新建立，不把存量当新资料）、已提示集合、
     /// 当前待显示的一条提示（新资料 → 可能关联的维基页）。
-    pub(crate) wiki_seen_doc_ids: std::collections::HashSet<i64>,
-    pub(crate) wiki_prompted_doc_ids: std::collections::HashSet<i64>,
+    pub(crate) wiki_seen_doc_ids: Option<std::collections::HashSet<i64>>,
     pub(crate) wiki_new_doc_tip: Option<crate::app::wiki::WikiDocTip>,
     /// 「圈选未整编资料反向整编」对话框状态（None = 关）。
     pub(crate) wiki_circle: Option<crate::app::wiki::WikiCircleState>,
@@ -733,8 +732,7 @@ impl GongwenApp {
             wiki_write_rx: None,
             wiki_write_job: None,
             wiki_doc_status: std::collections::HashMap::new(),
-            wiki_seen_doc_ids: std::collections::HashSet::new(),
-            wiki_prompted_doc_ids: std::collections::HashSet::new(),
+            wiki_seen_doc_ids: None,
             wiki_new_doc_tip: None,
             wiki_circle: None,
             task_auto_queue: VecDeque::new(),
@@ -1095,7 +1093,7 @@ impl GongwenApp {
                     }
                     TabRef::Page(NavPage::Wiki) => {
                         theme::smartisan::management_page(&mut content_ui, |ui| {
-                            crate::wiki_ui::wiki_ui(self, ui)
+                            crate::wiki_ui::wiki_ui(self, ui, &self.config.numbering.clone())
                         })
                     }
                     TabRef::Page(NavPage::Settings) => self.settings_ui(&mut content_ui),
@@ -1265,6 +1263,14 @@ impl GongwenApp {
         }
         if let Some(job) = &self.task_fill_job {
             self.task_ui.fill_discard = true;
+            job.stop();
+        }
+        if let Some(job) = &self.wiki_frame_job {
+            self.wiki.request_stop_frame = true;
+            job.stop();
+        }
+        if let Some(job) = &self.wiki_write_job {
+            self.wiki.request_stop_write = true;
             job.stop();
         }
         if let Some(cancel) = &self.pi_calibration_cancel {

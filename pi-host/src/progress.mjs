@@ -472,7 +472,7 @@ export class ProgressRegistry {
 
   /** 只缓存真实知识/稿件工具返回，风格、词库和模型自己的文字不能进入事实资料。 */
   cacheEvidence(name, value, guard) {
-    if (!["kb_search", "kb_read", "ms_search", "ms_read"].includes(name)) return;
+    if (!["kb_search", "kb_read", "ms_search", "ms_read", "wiki_search", "wiki_read", "wiki_doc_read"].includes(name)) return;
     const text = `# ${name} 工具实际返回\n\n${JSON.stringify(value, null, 2)}\n`;
     if (Buffer.byteLength(text, "utf8") > 1024 * 1024) throw new ProgressError("工具资料超过快照上限，请缩小检索或分页读取");
     const hash = sha256(text);

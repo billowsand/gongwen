@@ -57,7 +57,7 @@ import { createBoundedReadTool } from "./read.mjs";
 import { observeActivity } from "./activity.mjs";
 
 import { isStyleTask, createSubmitStyleTool } from "./style.mjs";
-import { TASK_MAX_BYTES, TASK_SUBMIT_TOOL_NAME, isTaskTask, validateTaskPayload } from "./task.mjs";
+import { TASK_MAX_BYTES, TASK_SUBMIT_TOOL_NAME, isJsonTask, isTaskTask, validateTaskPayload, wikiDelivery } from "./task.mjs";
 
 const PROVIDER_ID = "gongwen";
 const CANDIDATE_INTERVAL_MS = 400;
@@ -303,14 +303,14 @@ export function createSubmitTaskTool({ guard, limits, state, onSubmitted, emit, 
   return defineTool({
     name: TASK_SUBMIT_TOOL_NAME,
     description:
-      "提交本轮的任务整理结果（work/ 下的 JSON 文件，≤ 2 MiB）。材料整理交 items 清单，表单填写交六栏 fields；提交内容在调用时固定，同一轮只认第一次。",
+      "提交本轮作业结果（work/ 下的 JSON 文件，≤ 2 MiB）。按本轮技能给出的结构填写；同一轮只认第一次提交。",
     parameters: Type.Object({
       path: Type.String({ description: "work/ 下的 JSON 文件路径" }),
       summary: Type.String({ description: "一句话说明整理了哪些材料或填了什么" }),
     }),
     execute: async (args, api) => {
-      if (!isTaskTask(phase?.task)) {
-        throw new AgentError("当前不是任务助手作业，不能使用 submit_task。", "task_required");
+      if (!isJsonTask(phase?.task)) {
+        throw new AgentError("当前技能不能使用 submit_task。", "task_required");
       }
       if (phase?.phased && phase.id !== "deliver") {
         throw new AgentError(
@@ -330,13 +330,13 @@ export function createSubmitTaskTool({ guard, limits, state, onSubmitted, emit, 
       }
       const { relative, text } = read.value;
       if (!relative.endsWith(".json")) {
-        throw new AgentError("任务交付必须是 work/ 下的 .json 文件；请把结果写进 work/task.json 后重新提交。", "submit_invalid");
+        throw new AgentError("作业交付必须是 work/ 下的 .json 文件。", "submit_invalid");
       }
       try {
         validateTaskPayload(text, phase.task.skill);
       } catch (error) {
         throw new AgentError(
-          `任务文件校验未通过：${error.message}。请按系统指令里的 JSON 结构改正 work/task.json 后重新提交。`,
+          `任务文件校验未通过：${error.message}。请按本轮技能的 JSON 结构改正后重新提交。`,
           "submit_invalid",
         );
       }
@@ -663,11 +663,15 @@ function createExtension({
       createSubmitStyleTool({guard,limits,state,onSubmitted,deliveryDir,runId,requestId,phase,files,validateCoverage:validatePhaseDelivery}),
     ]});
   }
-  if (isTaskTask(phase.task)) {
+  const wiki = wikiDelivery(phase.task);
+  if (isJsonTask(phase.task)) {
+    const wikiTools = ["wiki_search", "wiki_read", "wiki_links", "wiki_doc_read"];
     return defineExtension({ name: "gongwen-writing", tools: [
-      // 任务作业只挂任务检索、词库、日期与文件工具；知识库 / 稿件 / 接口 / 提问一律不挂。
       ...createDomainTools(bridge, {
-        only: ["task_search", "task_read", "vocab_search", "current_date"],
+        only: wiki
+          ? ["kb_search", "kb_read", "current_date", ...(wiki.key === "pages" ? wikiTools : [])]
+          : ["task_search", "task_read", "vocab_search", "current_date", ...wikiTools],
+        onResult: (name, result) => registry.cacheEvidence(name, result, guard),
         readChars,
       }),
       createBoundedReadTool({ guard, maxFileBytes: limits.maxFileBytes, maxChars: readChars }),
@@ -866,7 +870,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
     if (receipt) {
       const expectedKinds = isStyleTask(config.task)
         ? ["style"]
-        : isTaskTask(config.task) ? ["task"] : ["document", "report"];
+        : isJsonTask(config.task) ? ["task"] : ["document", "report"];
       if (!expectedKinds.includes(receipt.kind)) {
         throw new AgentError("交付回执的产物类型与本轮任务不一致，已拒绝恢复。", "receipt_kind_mismatch");
       }
@@ -896,7 +900,9 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
   });
   if (decision.mode === "insufficient") {
     throw new AgentError(
-      `本次预算放不下最小写作指令与一次有效输出（窗口 ${decision.window} token）。请换用窗口更大的模型，或把材料拆成几轮。`,
+      wikiDelivery(config.task)
+        ? `维基作业超出本轮可用窗口（${decision.window} token），请减少目标页或换用更大窗口的模型。`
+        : `本次预算放不下最小写作指令与一次有效输出（窗口 ${decision.window} token）。请换用窗口更大的模型，或把材料拆成几轮。`,
       "budget_insufficient",
     );
   }
@@ -988,7 +994,7 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
   const grantTools = (count) => toolQuota.grant(count);
   onBridge?.(bridge);
   // 任务作业的 work/ 里只有 JSON，候选稿预览没有意义，也不该把任务 JSON 当成正文提案。
-  const candidateScan = isTaskTask(config.task)
+  const candidateScan = isJsonTask(config.task)
     ? Object.assign(() => {}, { maybeTick: () => {} })
     : makeCandidateScanner({ guard, state, emit, limits: config.limits });
 
@@ -1134,8 +1140,8 @@ export async function runAgentJob({ config, models, model, emit, onCancel, onBri
           type: "input",
           content: attempt > 0 && isStyleTask(config.task)
             ? "继续读取work/中的文件，完成风格JSON文件并用submit_style提交。不得使用submit_document或finish_report，不要只在聊天中说完成。"
-            : attempt > 0 && isTaskTask(config.task)
-            ? "继续读取work/中的文件，完成任务JSON并用submit_task提交。不得使用submit_document或finish_report，不要只在聊天中说完成。"
+            : attempt > 0 && isJsonTask(config.task)
+            ? "继续读取work/中的文件，完成本轮作业JSON并用submit_task提交。不得使用submit_document或finish_report，不要只在聊天中说完成。"
             : attempt === 0 && firstContent
             ? firstContent
             : attempt === 0 ? userPrompt(config.task) :

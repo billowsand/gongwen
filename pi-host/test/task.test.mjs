@@ -315,3 +315,63 @@ test("分阶段任务作业拒绝中间步骤提前交付，也拒绝未登记 f
     fs.rmSync(space.base, { recursive: true, force: true });
   }
 });
+
+for (const [skill, file, key] of [
+  ["gongwen-wiki-frame", "work/frame.json", "themes"],
+  ["gongwen-wiki-write", "work/pages.json", "pages"],
+  ["gongwen-wiki-update", "work/pages.json", "pages"],
+]) {
+  test(`${skill} 通过真实 Harness 交付维基 JSON`, { timeout: 20_000 }, async () => {
+    const space = fixture();
+    try {
+      const config = makeConfig(space, { skill });
+      const { faux, models, model } = backend();
+      const content = JSON.stringify({ [key]: [{ title: "测试提案" }] });
+      faux.setResponses([
+        call("write", { path: file, content: JSON.stringify(EXTRACT) }),
+        call("submit_task", { path: file, summary: "错误的作业形状" }),
+        (context) => {
+          assert.match(JSON.stringify(context), new RegExp(`非空的 ${key}`));
+          return call("write", { path: file, content });
+        },
+        call("submit_task", { path: file, summary: "待审维基提案" }),
+      ]);
+      const result = await runAgentJob({ config, models, model, emit: () => {} });
+      assert.equal(result.snapshot.receipt.kind, "task");
+      assert.equal(result.snapshot.content, content);
+      assert.equal(result.snapshot.path, file);
+      assert.equal(fs.existsSync(path.join(space.run, "final.md")), false);
+    } finally {
+      fs.rmSync(space.base, { recursive: true, force: true });
+    }
+  });
+}
+
+test("任务助手经宿主桥调用维基只读工具后交付", { timeout: 20_000 }, async () => {
+  const space = fixture();
+  try {
+    const config = makeConfig(space);
+    const { faux, models, model } = backend();
+    let bridge;
+    const content = JSON.stringify(EXTRACT);
+    faux.setResponses([
+      call("wiki_search", { query: "台账" }),
+      call("write", { path: "work/task.json", content }),
+      call("submit_task", { path: "work/task.json", summary: "整理任务" }),
+    ]);
+    const requests = [];
+    const result = await runAgentJob({
+      config, models, model,
+      onBridge: value => { bridge = value; },
+      emit: event => {
+        if (event.type !== "tool_request") return;
+        requests.push(event.name);
+        bridge.handle({ type: "tool_result", callId: event.callId, ok: true, result: { results: [] } });
+      },
+    });
+    assert.deepEqual(requests, ["wiki_search"]);
+    assert.equal(result.snapshot.receipt.kind, "task");
+  } finally {
+    fs.rmSync(space.base, { recursive: true, force: true });
+  }
+});

@@ -458,6 +458,8 @@ impl GongwenApp {
             || self.lexicon_busy
             || self.task_ui.extraction_busy
             || self.task_fill_rx.is_some()
+            || self.wiki_frame_rx.is_some()
+            || self.wiki_write_rx.is_some()
             || !self.task_auto_queue.is_empty()
             || self.backup_busy
             || self.docs.iter().any(|doc| doc.busy)

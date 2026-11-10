@@ -799,6 +799,7 @@ pub(crate) fn run(
     let (tool_tx, tool_rx) = mpsc::channel::<ToolDone>();
     let mut pending_tool: Option<(String, Instant)> = None;
     let mut tool_calls = 0usize;
+    let mut wiki_calls = 0usize;
     let mut question_batches = 0u32;
     let mut waiting: Option<(String, u64, Instant)> = None;
     let mut paused = Duration::ZERO;
@@ -1087,7 +1088,14 @@ pub(crate) fn run(
                 if call_id.trim().is_empty() || call_id.len() > 64 {
                     return Err("Pi host 的工具调用 ID 不合法".into());
                 }
-                tool_calls += 1;
+                if PiToolContext::is_wiki_tool(&name) {
+                    wiki_calls += 1;
+                    if wiki_calls > super::tools::WIKI_TOOL_BUDGET {
+                        return Err("本轮维基工具调用超过上限，已停止。".into());
+                    }
+                } else {
+                    tool_calls += 1;
+                }
                 if tool_calls > MAX_TOTAL_TOOL_CALLS {
                     return Err(format!(
                         "本轮工具调用次数过多（最多 {MAX_TOTAL_TOOL_CALLS} 次），已停止；工作区保留，可「接着写」。"

@@ -65,26 +65,26 @@ pub fn qa_answer(
     kind_filter: Option<TemplateKind>,
 ) -> anyhow::Result<QaOutcome> {
     let wiki_pages = load_wiki_pages(db_path, question);
-    let outcome = rag::retrieve(config, chat, db_path, question, kind_filter)?;
-    let mut warnings = outcome.warnings;
-    if !wiki_pages.is_empty() {
-        warnings.push(format!(
-            "维基知识库命中 {} 页，已优先作为作答依据。",
-            wiki_pages.len()
-        ));
-    }
-    if outcome.chunks.is_empty() {
-        warnings.push("知识库没有检索到相关片段，答案未引用任何库内文档。".into());
+    let (chunks, mut warnings) = match rag::retrieve(config, chat, db_path, question, kind_filter) {
+        Ok(outcome) => (outcome.chunks, outcome.warnings),
+        Err(error) if !wiki_pages.is_empty() => (
+            Vec::new(),
+            vec![format!("资料库检索失败，本轮仅提供维基条目：{error:#}")],
+        ),
+        Err(error) => return Err(error),
+    };
+    if chunks.is_empty() && wiki_pages.is_empty() {
+        warnings.push("维基与资料库均未找到相关依据。".into());
     }
     let system = build_system_prompt();
-    let user = build_user_prompt(history, question, &wiki_pages, &outcome.chunks);
+    let user = build_user_prompt(history, question, &wiki_pages, &chunks);
     // 失败直接传播：错误链自带上下文（"调用模型服务失败"等），由调用方统一
     // 加前缀展示，避免"知识库问答失败：问答生成失败：…"式的重复。
     let raw = crate::lmstudio::generate(chat, &system, &user)?;
     let answer = prompt::sanitize_model_markdown(&raw);
     Ok(QaOutcome {
         answer,
-        references: outcome.chunks,
+        references: chunks,
         wiki_pages: wiki_pages
             .into_iter()
             .map(|(uuid, title, _)| (uuid, title))
@@ -99,7 +99,7 @@ fn load_wiki_pages(db_path: &Path, question: &str) -> Vec<(String, String, Strin
     let Ok(store) = crate::wiki::WikiStore::open(db_path) else {
         return Vec::new();
     };
-    let Ok(hits) = store.search(question, MAX_WIKI_PAGES) else {
+    let Ok(hits) = store.search_for_evidence(question, MAX_WIKI_PAGES) else {
         return Vec::new();
     };
     let mut pages = Vec::new();
@@ -120,7 +120,7 @@ fn load_wiki_pages(db_path: &Path, question: &str) -> Vec<(String, String, Strin
 fn build_system_prompt() -> String {
     "你是公文写作助手。回答依据下面提供的【维基页面】与【知识库片段】：\
      【维基页面】是经过人工审核的条目知识，优先采用；【知识库片段】是原始资料摘录，\
-     用于补充维基没有的细节。两者都没有的信息，直接说明「知识库中没有相关内容」，\
+     用于补充维基没有的细节。两类资料口径冲突时，说明各自出处与差异，避免合并成一个结论。两者都没有的信息，直接说明「知识库中没有相关内容」，\
      不要编造、不要凭常识补全。引用时标注出处：维基内容标（维基《标题》），\
      片段内容标（文种《标题》· 章节）。回答用简洁的 Markdown，段落分明。"
         .to_string()

@@ -40,6 +40,19 @@ export function taskMode(task) {
   return undefined;
 }
 
+export function wikiDelivery(task) {
+  switch (task?.skill) {
+    case "gongwen-wiki-frame": return { file: "work/frame.json", key: "themes" };
+    case "gongwen-wiki-write":
+    case "gongwen-wiki-update": return { file: "work/pages.json", key: "pages" };
+    default: return undefined;
+  }
+}
+
+export function isJsonTask(task) {
+  return isTaskTask(task) || Boolean(wikiDelivery(task));
+}
+
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -90,7 +103,8 @@ function validateFill(value) {
  */
 export function validateTaskPayload(text, skill) {
   const mode = taskMode({ skill });
-  if (!mode) throw new Error("当前技能不是任务作业，不能交付任务 JSON");
+  const wiki = wikiDelivery({ skill });
+  if (!mode && !wiki) throw new Error("当前技能不属于 JSON 交付任务作业");
   const source = typeof text === "string" ? text : "";
   const bytes = Buffer.byteLength(source, "utf8");
   if (bytes > TASK_MAX_BYTES) {
@@ -103,6 +117,12 @@ export function validateTaskPayload(text, skill) {
     throw new Error(`任务文件不是合法 JSON：${error.message}`);
   }
   if (!isPlainObject(value)) throw new Error("任务文件必须是 JSON 对象");
+  if (wiki) {
+    if (!Array.isArray(value[wiki.key]) || value[wiki.key].length === 0) {
+      throw new Error(`维基交付必须包含非空的 ${wiki.key} 数组`);
+    }
+    return value;
+  }
   if (value.mode !== mode) {
     throw new Error(`任务文件的 mode 必须是 "${mode}"，收到 ${JSON.stringify(value.mode ?? null)}`);
   }

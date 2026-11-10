@@ -9,13 +9,16 @@ import { PHASED_TOOL_LIMIT } from "./budget.mjs";
 
 /** 一轮最多多少次工具调用（与 Rust 上限一致）。 */
 export const MAX_TOOL_CALLS = 60;
+const WIKI_TOOL_LIMIT = 12;
+const WIKI_TOOLS = new Set(["wiki_search", "wiki_read", "wiki_links", "wiki_doc_read"]);
+const PAGED_READ_TOOLS = new Set(["kb_read", "ms_read", "wiki_read", "wiki_doc_read"]);
 export const MAX_QUESTION_BATCHES = 2;
 export const MAX_QUESTIONS = 3;
 /**
  * 同时挂着的请求上限：Rust 侧一次只接一个 `tool_request`，其余在桥里排队。
  * 排队也计入预算，所以这里只是把 `Map` 的规模封死，正常永远到不了。
  */
-export const MAX_PENDING_REQUESTS = MAX_TOOL_CALLS + MAX_QUESTION_BATCHES;
+export const MAX_PENDING_REQUESTS = PHASED_TOOL_LIMIT + WIKI_TOOL_LIMIT + MAX_QUESTION_BATCHES;
 
 /** 领域工具的名字与 schema。Rust 还会再校验一遍。 */
 export const DOMAIN_TOOLS = [
@@ -118,6 +121,7 @@ export function createToolBridge({ emit, pause, resume, maxCalls = MAX_TOOL_CALL
   let active = null;
   let nextCall = 1;
   let calls = 0;
+  let wikiCalls = 0;
   let batches = 0;
   /** 本轮的绝对工具额度；分阶段时按阶段增量上调，但总上限仍由宿主封顶。 */
   let callLimit = Number.isInteger(maxCalls) && maxCalls > 0 ? maxCalls : MAX_TOOL_CALLS;
@@ -186,13 +190,18 @@ export function createToolBridge({ emit, pause, resume, maxCalls = MAX_TOOL_CALL
 
   const call = (name, args) => {
     if (closed) return Promise.reject(new BridgeError("本轮已取消，不能再调用工具"));
-    if (calls >= callLimit) {
+    const wiki = WIKI_TOOLS.has(name);
+    if (wiki && wikiCalls >= WIKI_TOOL_LIMIT) {
+      return Promise.reject(new BridgeError(`维基工具调用次数超过上限（${WIKI_TOOL_LIMIT}）`));
+    }
+    if (!wiki && calls >= callLimit) {
       return Promise.reject(new BridgeError(`工具调用次数超过上限（${callLimit}）`));
     }
     if (pending.size >= MAX_PENDING_REQUESTS) {
       return Promise.reject(new BridgeError(`等待中的工具请求过多（${MAX_PENDING_REQUESTS}）`));
     }
-    calls += 1;
+    if (wiki) wikiCalls += 1;
+    else calls += 1;
     return enqueue("tool_request", { name, args });
   };
 
@@ -276,12 +285,12 @@ export function createDomainTools(bridge, { readDocument, readChars, onAnswer, o
       name,
       description,
       parameters,
-      ...((name === "kb_read" || name === "ms_read") && Number.isInteger(readChars)
+      ...(PAGED_READ_TOOLS.has(name) && Number.isInteger(readChars)
         ? { outputLimits: outputLimitsForChars(readChars, { json: true }) }
         : {}),
       execute: async (args) => {
         let values = args ?? {};
-        if ((name === "kb_read" || name === "ms_read") && Number.isInteger(readChars)) {
+        if (PAGED_READ_TOOLS.has(name) && Number.isInteger(readChars)) {
           values = { ...values, limit_chars: readChars };
         }
         if (name === "check_document" && values.path !== undefined) {

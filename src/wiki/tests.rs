@@ -24,6 +24,7 @@ fn page(title: &str, node_id: i64, kind: &'static str, body: &str) -> PageInput 
         source_run_id: String::new(),
         review_edited: false,
         doc_refs: Vec::new(),
+        base_version: None,
     }
 }
 
@@ -186,6 +187,7 @@ fn update_creates_version_and_rebuilds_links() {
     let (_, c) = seed_frame(&s);
     let b = s.create_page(&page("责任体系", c, "normal", "旧")).unwrap();
     let mut with_refs = page("监督检查", c, "normal", "见 [[责任体系]]。");
+    s.conn.execute("INSERT INTO knowledge_docs(id, source, created_at, updated_at) VALUES (7, 'markdown', '', '')", []).unwrap();
     with_refs.doc_refs = vec![(7, "支撑要点".into())];
     let a = s.create_page(&with_refs).unwrap();
     // 依据标记派生：doc 7 被一页使用。
@@ -215,6 +217,9 @@ fn update_creates_version_and_rebuilds_links() {
     assert_eq!(versions.len(), 2);
     assert!(!versions[0].review_edited); // v2 未标人工
     assert!(!versions[1].review_edited);
+    assert_eq!(s.version_doc_refs(&a, 1).unwrap(), with_refs.doc_refs);
+    assert_eq!(s.rollback(&a, 1).unwrap(), 3);
+    assert_eq!(s.page_doc_refs(&a).unwrap(), with_refs.doc_refs);
     let _ = b;
 }
 
@@ -347,4 +352,109 @@ fn parse_wikilinks_variants() {
     );
     // 未闭合不产出。
     assert!(parse_wikilinks("[[未闭合").is_empty());
+}
+
+#[test]
+fn stale_update_cannot_overwrite_a_later_version() {
+    let s = store();
+    let (_, c) = seed_frame(&s);
+    let uuid = s
+        .create_page(&page("检查制度", c, "normal", "第一版"))
+        .unwrap();
+    let mut input = page("检查制度", c, "normal", "过时提案");
+    input.base_version = Some(1);
+    s.rollback(&uuid, 1).unwrap();
+    assert!(
+        s.update_page(&uuid, &input)
+            .unwrap_err()
+            .to_string()
+            .contains("v2")
+    );
+    assert_eq!(s.list_versions(&uuid).unwrap().len(), 2);
+}
+
+#[test]
+fn stored_link_survives_a_rename_and_an_edit_after_the_old_title_is_reused() {
+    let s = store();
+    let (_, c) = seed_frame(&s);
+    let target = s.create_page(&page("旧名", c, "normal", "内容")).unwrap();
+    let source = s
+        .create_page(&page("源页", c, "normal", "见 [[旧名]]"))
+        .unwrap();
+    s.update_page(&target, &page("新名", c, "normal", "内容"))
+        .unwrap();
+    s.create_page(&page("旧名", c, "normal", "无关内容"))
+        .unwrap();
+    s.update_page(&source, &page("源页", c, "normal", "参见 [[旧名]]"))
+        .unwrap();
+    let links = s.link_bindings(&source, "参见 [[旧名]]").unwrap();
+    assert_eq!(links["旧名"].to_page.as_deref(), Some(target.as_str()));
+}
+
+#[test]
+fn guide_alias_protects_page_and_node_deletion_preserves_red_link() {
+    let s = store();
+    let (theme, category) = seed_frame(&s);
+    let source = s
+        .create_page(&page(
+            "源页",
+            category,
+            "normal",
+            "[[安全生产]] [[暂用分类]]",
+        ))
+        .unwrap();
+    let guide = s
+        .create_page(&page("安全生产总览", theme, "guide", "内容"))
+        .unwrap();
+    assert_eq!(s.backlinks(&guide).unwrap()[0].from_uuid, source);
+    assert!(s.delete_page(&guide).is_err());
+    let node = s.create_category(theme, "暂用分类").unwrap();
+    s.update_page(&source, &page("源页", category, "normal", "[[安全生产]]"))
+        .unwrap();
+    s.update_page(
+        &source,
+        &page("源页", category, "normal", "[[安全生产]] [[暂用分类]]"),
+    )
+    .unwrap();
+    s.delete_node(node).unwrap();
+    assert_eq!(s.red_link_gaps().unwrap()[0].title, "暂用分类");
+}
+
+#[test]
+fn frame_mapping_rolls_back_and_deleted_page_sources_remain_auditable() {
+    let s = store();
+    let proposal = FrameTheme {
+        name: "主题".into(),
+        categories: vec![FrameCategory {
+            name: "分类".into(),
+            doc_ids: vec![17],
+        }],
+    };
+    assert!(s.apply_frame(std::slice::from_ref(&proposal)).is_err());
+    assert!(s.list_tree().unwrap().is_empty());
+    s.conn.execute("INSERT INTO knowledge_docs(id, source, created_at, updated_at) VALUES (17, 'markdown', '', '')", []).unwrap();
+    assert_eq!(
+        s.apply_frame(std::slice::from_ref(&proposal)).unwrap(),
+        (2, 0)
+    );
+    assert_eq!(s.apply_frame(&[proposal]).unwrap(), (0, 2));
+    let tree = s.list_tree().unwrap();
+    let category = tree[0].categories[0].id;
+    assert_eq!(s.frame_doc_ids(category).unwrap(), vec![17]);
+    let mut input = page("条目", category, "normal", "依据见 〔E17〕");
+    input.doc_refs = vec![(17, "说明".into())];
+    let uuid = s.create_page(&input).unwrap();
+    s.conn
+        .execute("DELETE FROM knowledge_docs WHERE id=17", [])
+        .unwrap();
+    assert!(s.frame_doc_ids(category).unwrap().is_empty());
+    assert!(s.update_page(&uuid, &input).is_err());
+    assert_eq!(
+        s.pages_needing_review().unwrap(),
+        vec![(uuid.clone(), "条目".into())]
+    );
+    assert_eq!(s.version_doc_refs(&uuid, 1).unwrap(), input.doc_refs);
+    assert!(s.page_has_missing_sources(&uuid).unwrap());
+    assert_eq!(s.search("条目", 10).unwrap().len(), 1);
+    assert!(s.search_for_evidence("条目", 10).unwrap().is_empty());
 }

@@ -45,7 +45,7 @@ runtime/pi/
 | 平台 | `win-x64`、`linux-arm64`、`linux-x64`、`darwin-arm64`、`darwin-x64`（macOS 用官方 `.tar.gz`） |
 | Node | `22.22.3`（与本机已验版本一致，不跟随 latest） |
 | `@earendil-works/chord` / `pi-ai` / `pi-durable` | `1.5.1` |
-| host | `0.5.1`，协议 `4` |
+| host | `0.5.2`，协议 `4` |
 | lockfile | `pi-host/package-lock.json` 的 SHA-256 写进 manifest |
 
 官方压缩包与 SHA-256（来源 `https://nodejs.org/download/release/v22.22.3/SHASUMS256.txt`）：
@@ -172,7 +172,7 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
   一律当 `linux-*`：Windows x64 → `win-x64`，Linux arm64 / x64 → `linux-arm64` / `linux-x64`，
   macOS arm64 / x64 → `darwin-arm64` / `darwin-x64`（manifest 的平台名也用 `darwin-*`）；
   未知平台明确报「不支持的系统」，不再误接受一份别的平台的运行时；
-- 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.5.1`、协议 `4` 与配置一致；
+- 读 `manifest.json`，要求平台、Node `22.22.3`、host `0.5.2`、协议 `4` 与配置一致；
 - 在执行 Node 前核对 Node 本身的 SHA-256，并检查依赖锁文件哈希；抽查关键入口
   （`host/main.mjs`、`host/package.json`、三个 Pi 包的 `package.json`）的
   SHA-256；不会每帧遍历 `node_modules`（manifest 只在每次开跑定位时读一次）；
@@ -186,7 +186,7 @@ Rust 侧 `PiRuntime::locate()` 生产路径只认 exe 邻接 `runtime/pi`：
 
 ## 六、所有权、恢复与工作区
 
-### 统一策略、分阶段与阶段成果（当前协议 4 / host 0.5.1；策略语义沿用协议 3）
+### 统一策略、分阶段与阶段成果（当前协议 4 / host 0.5.2；策略语义沿用协议 3）
 
 模型能力档案由「测试写作能力」后台动作生成：四次同题自动 / 分阶段合成写作都经生产 Rust Pi 运行链，
 工具源显式绑定到临时 SQLite 知识库 / 稿件库与空风格源。单轮限时 **300 秒**、四轮总计 **15 分钟**，
@@ -577,5 +577,12 @@ host 侧适配的破坏性变更（按上游 1.5.0 CHANGELOG）：
 - 放开的一次性门禁：不再只注入最近 50 项任务（改用 `task_search`）、材料按 512 KiB 分块
   （每轮最多 20 份、合计 4 MiB，单份原文上限 4 MiB）、候选上限 100 条、任务作业不占
   `begin_writing` 写作门禁，可与 Pi 写作并行。
-- 依赖：任务作业需要已选 Pi 写作模型与随包 `runtime/pi`（当前 host 0.5.1）；缺任一项直接报错，
+- 依赖：任务作业需要已选 Pi 写作模型与随包 `runtime/pi`（当前 host 0.5.2）；缺任一项直接报错，
   不回落到旧起草模型。各平台发布前按锁文件重新组装随包运行时。
+
+
+## 维基作业宿主接线（2026-11-11，host 0.5.2 / 协议 4）
+
+- 归纳、整编、更新各自只开放所需的只读域工具，均走 `submit_task` 交 JSON。宿主按技能检查 `themes` 或 `pages` 的外层结构，Rust 负责核对引用和写入权限。维基作业要求一次读完当前目标页，容量不足时按目标页缩小批次。
+- 任务助手开放四个维基只读工具。维基内容用于理解背景，任务候选与表单字段的连续原文证据仍取本轮材料。
+- 维基工具独立限 12 次，宿主和 Rust 分别计数。维基正文和来源原文分页读取时遵循宿主的读取预算。升级时同步重建随包运行时。

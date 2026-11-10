@@ -21,8 +21,11 @@ impl GongwenApp {
         if self.lock_requested {
             return;
         }
-        if self.wiki_frame_rx.is_some() {
-            self.wiki.frame_error = Some("上一次归纳还没结束，请等待后重试。".into());
+        if self.wiki_frame_rx.is_some()
+            || self.wiki_write_rx.is_some()
+            || self.wiki.frame_proposal.is_some()
+        {
+            self.wiki.frame_error = Some("请先结束当前维基作业或处理待确认的框架提案。".into());
             return;
         }
         let setup: anyhow::Result<(Arc<crate::models::AppConfig>, std::path::PathBuf)> = (|| {
@@ -120,6 +123,7 @@ pub(crate) struct WikiCircleState {
 #[derive(Debug, Clone)]
 pub(crate) struct WikiDocTip {
     pub(crate) doc_title: String,
+    pub(crate) doc_id: i64,
     /// (页面 uuid, 标题)，至多 3 条。
     pub(crate) hits: Vec<(String, String)>,
 }
@@ -134,49 +138,53 @@ impl GongwenApp {
             .unwrap_or_default();
     }
 
-    /// 发现新入库资料：会话基线之外的新 doc_id，用标题去维基检索，
-    /// 命中就挂一条「按新资料更新」提示（一次一条， dismissed 后不再烦）。
+    /// 只在资料列表刷新时检索。未轮到的资料保留到下一次提示。
     pub(crate) fn detect_new_docs_for_wiki(&mut self) {
-        if self.wiki_store.is_none() || self.knowledge_docs.is_empty() {
+        let Some(wiki) = self.wiki_store.as_ref() else {
             return;
-        }
-        let current: std::collections::HashSet<i64> =
-            self.knowledge_docs.iter().map(|doc| doc.id).collect();
-        if self.wiki_seen_doc_ids.is_empty() {
-            // 首次刷新只建基线：存量资料不当新资料。
-            self.wiki_seen_doc_ids = current;
-            return;
-        }
-        let fresh: Vec<i64> = current
+        };
+        let unfiltered = if self.knowledge_filter_kind.is_some() {
+            let Some(store) = self.knowledge_store.as_mut() else {
+                return;
+            };
+            let Ok(docs) = store.list_docs(None) else {
+                return;
+            };
+            Some(docs)
+        } else {
+            None
+        };
+        let docs = unfiltered.as_deref().unwrap_or(&self.knowledge_docs);
+        let current = docs
             .iter()
-            .copied()
-            .filter(|id| !self.wiki_seen_doc_ids.contains(id))
-            .collect();
-        self.wiki_seen_doc_ids = current;
+            .map(|doc| doc.id)
+            .collect::<std::collections::HashSet<_>>();
+        if let Some(tip) = &self.wiki_new_doc_tip
+            && !current.contains(&tip.doc_id)
+        {
+            self.wiki_new_doc_tip = None;
+        }
+        let Some(seen) = self.wiki_seen_doc_ids.as_mut() else {
+            self.wiki_seen_doc_ids = Some(current);
+            return;
+        };
+        seen.retain(|id| current.contains(id));
         if self.wiki_new_doc_tip.is_some() {
             return;
         }
-        for id in fresh {
-            if self.wiki_prompted_doc_ids.contains(&id) {
+        for doc in docs {
+            if seen.contains(&doc.id) {
                 continue;
             }
-            let Some(doc) = self.knowledge_docs.iter().find(|doc| doc.id == id) else {
+            let Ok(hits) = wiki.search(&doc.title, 3) else {
                 continue;
             };
-            self.wiki_prompted_doc_ids.insert(id);
-            let Some(store) = self.wiki_store.as_ref() else {
-                return;
-            };
-            let hits = store
-                .search(&doc.title, 3)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|hit| (hit.uuid, hit.title))
-                .collect::<Vec<_>>();
+            seen.insert(doc.id);
             if !hits.is_empty() {
                 self.wiki_new_doc_tip = Some(WikiDocTip {
                     doc_title: doc.title.clone(),
-                    hits,
+                    doc_id: doc.id,
+                    hits: hits.into_iter().map(|hit| (hit.uuid, hit.title)).collect(),
                 });
                 break;
             }
@@ -190,83 +198,30 @@ pub(crate) struct WikiWriteOutput {
 }
 
 impl GongwenApp {
-    /// 发起「整编此分类」：Pi 读资料库与该分类相关的文档，交回页面提案集。
-    pub(crate) fn start_wiki_write(&mut self, theme: String, category: String) {
+    /// 发起节点整编，圈选资料可作为优先读物。
+    pub(crate) fn start_wiki_write(&mut self, node_id: i64, doc_hints: Vec<i64>) -> bool {
         if self.lock_requested {
-            return;
+            return false;
         }
-        if self.wiki_write_rx.is_some() || self.wiki_frame_rx.is_some() {
-            self.wiki.write_error = Some("已有维基作业在跑，请等待结束后再发起。".into());
-            return;
-        }
-        let setup: anyhow::Result<(Arc<crate::models::AppConfig>, std::path::PathBuf)> = (|| {
-            Ok((
-                Arc::new(self.config.clone()),
-                crate::storage::manuscript_db_path()?,
-            ))
-        })(
-        );
-        let (config, path) = match setup {
-            Ok(value) => value,
-            Err(error) => {
-                self.wiki.write_error = Some(format!("无法开始整编：{error:#}"));
-                return;
-            }
-        };
-        let (ui, progress, cancel) = TaskJobUi::start();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.wiki_write_rx = Some(rx);
-        self.wiki_write_job = Some(ui);
-        self.wiki.write_error = None;
-        self.wiki.write_progress = Some("正在准备工作区…".to_string());
-        std::thread::spawn(move || {
-            let result = crate::pi_agent::wiki_jobs::write_pages(
-                config,
-                path,
-                theme,
-                category,
-                Vec::new(),
-                cancel,
-                progress_sink(&progress),
-            )
-            .map_err(|error| format!("整编失败，可重试：{error}"));
-            let _ = tx.send(WikiWriteOutput { result });
-        });
-    }
-
-    /// 圈选资料反向发起整编：与「整编此分类」同一条作业链，额外把圈选的
-    /// doc_id 作为优先资料提示交给 Pi。
-    pub(crate) fn start_wiki_write_docs(
-        &mut self,
-        theme: String,
-        category: String,
-        doc_hints: Vec<i64>,
-    ) {
-        if self.lock_requested || doc_hints.is_empty() {
-            return;
-        }
-        if self.wiki_write_rx.is_some() || self.wiki_frame_rx.is_some() {
+        if let Err(error) = self.wiki_can_start_page_job() {
+            self.wiki.write_error = Some(error.clone());
             if let Some(state) = self.wiki_circle.as_mut() {
-                state.error = Some("已有维基作业在跑，请等待结束后再发起。".into());
+                state.error = Some(error);
             }
-            return;
+            return false;
         }
-        let setup: anyhow::Result<(Arc<crate::models::AppConfig>, std::path::PathBuf)> = (|| {
-            Ok((
-                Arc::new(self.config.clone()),
-                crate::storage::manuscript_db_path()?,
-            ))
-        })(
-        );
-        let (config, path) = match setup {
-            Ok(value) => value,
+        let path = match crate::storage::manuscript_db_path() {
+            Ok(path) => path,
             Err(error) => {
+                let error = format!("无法开始整编：{error:#}");
+                self.wiki.write_error = Some(error.clone());
                 if let Some(state) = self.wiki_circle.as_mut() {
-                    state.error = Some(format!("无法开始整编：{error:#}"));
+                    state.error = Some(error);
                 }
-                return;
+                return false;
             }
         };
+        let config = Arc::new(self.config.clone());
         let (ui, progress, cancel) = TaskJobUi::start();
         let (tx, rx) = std::sync::mpsc::channel();
         self.wiki_write_rx = Some(rx);
@@ -277,8 +232,7 @@ impl GongwenApp {
             let result = crate::pi_agent::wiki_jobs::write_pages(
                 config,
                 path,
-                theme,
-                category,
+                node_id,
                 doc_hints,
                 cancel,
                 progress_sink(&progress),
@@ -286,20 +240,35 @@ impl GongwenApp {
             .map_err(|error| format!("整编失败，可重试：{error}"));
             let _ = tx.send(WikiWriteOutput { result });
         });
+        true
+    }
+
+    fn wiki_can_start_page_job(&self) -> Result<(), String> {
+        if self.wiki_write_rx.is_some() || self.wiki_frame_rx.is_some() {
+            return Err("已有维基作业在跑，请等待结束后再发起。".into());
+        }
+        if self.wiki.review.is_some() {
+            return Err("请先处理审核台中的待审页面。".into());
+        }
+        Ok(())
     }
 
     /// 发起「按新资料更新」：给定目标页（uuid + 标题），Pi 读新资料交回
     /// 整页更新提案；与整编共用进度条、停止与审核台（提案带 uuid，审核台按 diff 展示）。
-    pub(crate) fn start_wiki_update(&mut self, targets: Vec<(String, String)>) {
+    pub(crate) fn start_wiki_update(
+        &mut self,
+        targets: Vec<(String, String)>,
+        source: Option<i64>,
+    ) -> bool {
         if self.lock_requested {
-            return;
+            return false;
         }
         if targets.is_empty() {
-            return;
+            return false;
         }
-        if self.wiki_write_rx.is_some() || self.wiki_frame_rx.is_some() {
-            self.wiki.write_error = Some("已有维基作业在跑，请等待结束后再发起。".into());
-            return;
+        if let Err(error) = self.wiki_can_start_page_job() {
+            self.wiki.write_error = Some(error);
+            return false;
         }
         let setup: anyhow::Result<(Arc<crate::models::AppConfig>, std::path::PathBuf)> = (|| {
             Ok((
@@ -312,7 +281,7 @@ impl GongwenApp {
             Ok(value) => value,
             Err(error) => {
                 self.wiki.write_error = Some(format!("无法开始更新：{error:#}"));
-                return;
+                return false;
             }
         };
         let (ui, progress, cancel) = TaskJobUi::start();
@@ -326,12 +295,14 @@ impl GongwenApp {
                 config,
                 path,
                 targets,
+                source,
                 cancel,
                 progress_sink(&progress),
             )
             .map_err(|error| format!("更新失败，可重试：{error}"));
             let _ = tx.send(WikiWriteOutput { result });
         });
+        true
     }
 
     /// 每帧轮询页面整编作业：进度、停止、提案进审核台或失败原因。
