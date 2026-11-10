@@ -69,6 +69,8 @@ pub(crate) const FILES: &[(&str, &str, &str)] = &[
     skill_file!("gongwen-task-fill", "references/form-fields.md"),
     skill_file!("gongwen-wiki-frame", "SKILL.md"),
     skill_file!("gongwen-wiki-frame", "references/frame-granularity.md"),
+    skill_file!("gongwen-wiki-write", "SKILL.md"),
+    skill_file!("gongwen-wiki-write", "references/page-rules.md"),
     skill_file!("gongwen-policy-check", "SKILL.md"),
     skill_file!("gongwen-policy-check", "references/citation-check.md"),
 ];
@@ -86,13 +88,14 @@ pub(crate) const TASK_FILL_SKILL: &str = "gongwen-task-fill";
 /// 与任务技能同一类：由知识库页面直接指定发起，不占写作门禁，交付走
 /// `submit_task`（JSON 回执，`kind = task`），框架/页面只有用户确认后才写库。
 pub(crate) const WIKI_FRAME_SKILL: &str = "gongwen-wiki-frame";
+pub(crate) const WIKI_WRITE_SKILL: &str = "gongwen-wiki-write";
 
 pub(crate) fn is_task_skill(name: &str) -> bool {
     matches!(name, TASK_EXTRACT_SKILL | TASK_FILL_SKILL)
 }
 
 pub(crate) fn is_wiki_skill(name: &str) -> bool {
-    matches!(name, WIKI_FRAME_SKILL)
+    matches!(name, WIKI_FRAME_SKILL | WIKI_WRITE_SKILL)
 }
 
 /// 作业类技能（任务 / 维基）：各有自己的页面入口，不进写作下拉，恢复策略同任务作业。
@@ -110,6 +113,7 @@ pub(crate) const BUILTINS: &[&str] = &[
     TASK_EXTRACT_SKILL,
     TASK_FILL_SKILL,
     WIKI_FRAME_SKILL,
+    WIKI_WRITE_SKILL,
     STYLE_SKILL,
 ];
 
@@ -130,6 +134,7 @@ pub(crate) fn builtin_label(name: &str) -> Option<&'static str> {
         TASK_EXTRACT_SKILL => Some("任务材料整理"),
         TASK_FILL_SKILL => Some("任务表单填写"),
         WIKI_FRAME_SKILL => Some("维基框架归纳"),
+        WIKI_WRITE_SKILL => Some("维基页面整编"),
         "gongwen-policy-check" => Some("政策依据核对"),
         _ => None,
     }
@@ -188,7 +193,7 @@ mod tests {
 
     #[test]
     fn active_builtin_skills_are_valid_standard_skills() {
-        assert_eq!(BUILTINS.len(), 10);
+        assert_eq!(BUILTINS.len(), 11);
         for name in BUILTINS {
             let text = builtin_text(name).unwrap_or_else(|| panic!("{name} 缺 SKILL.md"));
             let parsed = parser::parse(name, text).unwrap_or_else(|error| panic!("{error}"));

@@ -442,7 +442,7 @@ fn builtin_delivery_kind(skill: Option<&str>) -> Option<&'static str> {
         | "gongwen-reply" => Some("document"),
         "gongwen-extract" => Some("report"),
         super::pi_skills::TASK_EXTRACT_SKILL | super::pi_skills::TASK_FILL_SKILL => Some("task"),
-        super::pi_skills::WIKI_FRAME_SKILL => Some("task"),
+        super::pi_skills::WIKI_FRAME_SKILL | super::pi_skills::WIKI_WRITE_SKILL => Some("task"),
         super::pi_skills::STYLE_SKILL => Some("style"),
         _ => None,
     }

@@ -350,6 +350,9 @@ pub struct GongwenApp {
     /// 维基框架归纳作业：接收端与停止句柄（进度与提案在 wiki 界面状态里）。
     pub(crate) wiki_frame_rx: Option<std::sync::mpsc::Receiver<crate::app::wiki::WikiFrameOutput>>,
     pub(crate) wiki_frame_job: Option<crate::app::task_assistant::TaskJobUi>,
+    /// 维基页面整编作业：接收端与停止句柄（提案进审核台）。
+    pub(crate) wiki_write_rx: Option<std::sync::mpsc::Receiver<crate::app::wiki::WikiWriteOutput>>,
+    pub(crate) wiki_write_job: Option<crate::app::task_assistant::TaskJobUi>,
     /// 知识库文档列表，按文种过滤。
     pub(crate) knowledge_docs: Vec<knowledge::KnowledgeDocRow>,
     pub(crate) knowledge_chunk_count: i64,
@@ -717,6 +720,8 @@ impl GongwenApp {
             task_fill_job: None,
             wiki_frame_rx: None,
             wiki_frame_job: None,
+            wiki_write_rx: None,
+            wiki_write_job: None,
             task_auto_queue: VecDeque::new(),
             manuscript_error,
             manuscript_filter: ManuscriptFilter::default(),
@@ -943,6 +948,7 @@ impl GongwenApp {
         self.poll_task_extraction(&ctx);
         self.poll_task_fill(&ctx);
         self.poll_wiki_frame(&ctx);
+        self.poll_wiki_write(&ctx);
         self.poll_writing_tasks(&ctx);
         // 系统文件对话框在后台线程开窗，这里问一次结果；用户挑完再接着做那件事。
         self.poll_file_dialogs(&ctx);

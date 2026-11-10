@@ -42,8 +42,62 @@ pub(crate) struct WikiUiState {
     pub(crate) request_stop_frame: bool,
     pub(crate) frame_error: Option<String>,
     pub(crate) frame_proposal: Option<crate::pi_agent::wiki_jobs::FrameProposal>,
+    /// 「整编此分类」作业与审核台。
+    pub(crate) write_progress: Option<String>,
+    pub(crate) request_stop_write: bool,
+    pub(crate) write_error: Option<String>,
+    pub(crate) review: Option<ReviewState>,
+    /// 审核台窗口开关：关闭窗口不丢提案，树上方有入口可 reopen。
+    pub(crate) review_open: bool,
     /// 最近一次框架操作的提示（成功说明或失败原因）。
     notice: Option<String>,
+}
+
+/// 整编审核台：一批待审页面提案 + 逐页处理状态 + 编辑缓冲。
+/// 审核时可直接改正文（纠正口径），采纳时把「是否经人工修改」记进版本。
+pub(crate) struct ReviewState {
+    pub(crate) set: crate::pi_agent::wiki_jobs::PageProposalSet,
+    /// 每页是否已处理（采纳或退回）。
+    pub(crate) done: Vec<bool>,
+    /// 已采纳页数（全部处理完时给结论提示）。
+    pub(crate) adopted: usize,
+    pub(crate) selected: usize,
+    /// 编辑框：当前页的 Markdown 源（可改，采纳的是这里的内容）。
+    pub(crate) edit_body: String,
+    /// 编辑框载入时的原始正文；与当前内容不同即「审核已修改」。
+    pub(crate) edit_base: String,
+    /// 采纳/写库失败的即时提示。
+    pub(crate) error: Option<String>,
+}
+
+impl ReviewState {
+    pub(crate) fn new(set: crate::pi_agent::wiki_jobs::PageProposalSet) -> Self {
+        let body = set
+            .pages
+            .first()
+            .map(|page| page.body.clone())
+            .unwrap_or_default();
+        Self {
+            done: vec![false; set.pages.len()],
+            adopted: 0,
+            selected: 0,
+            edit_body: body.clone(),
+            edit_base: body,
+            set,
+            error: None,
+        }
+    }
+
+    fn select(&mut self, index: usize) {
+        if index >= self.set.pages.len() || self.done.get(index) == Some(&true) {
+            return;
+        }
+        self.selected = index;
+        self.error = None;
+        let body = self.set.pages[index].body.clone();
+        self.edit_body = body.clone();
+        self.edit_base = body;
+    }
 }
 
 /// 框架里找到一个节点：名字、是不是主题、所属主题 id。
@@ -105,6 +159,7 @@ pub(crate) fn wiki_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
     }
     import_window(app, ui.ctx());
     frame_proposal_window(app, ui.ctx());
+    review_desk(app, ui.ctx(), &link_map);
 }
 
 /// 「从资料归纳」的进度、停止与错误提示，贴在树上方。
@@ -123,6 +178,27 @@ fn frame_job_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
             ui.colored_label(theme::warn(), &error);
             if ui.small_button("知道了").clicked() {
                 app.wiki.frame_error = None;
+            }
+        });
+    }
+}
+
+/// 「整编此分类」的进度、停止与错误提示，与归纳的提示条并列。
+fn write_job_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
+    if let Some(progress) = &app.wiki.write_progress {
+        ui.horizontal(|ui| {
+            ui.weak(progress);
+            if ui.button("停止").clicked() {
+                app.wiki.request_stop_write = true;
+            }
+        });
+    }
+    if app.wiki.write_error.is_some() {
+        let error = app.wiki.write_error.clone().unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.colored_label(theme::warn(), &error);
+            if ui.small_button("知道了").clicked() {
+                app.wiki.write_error = None;
             }
         });
     }
@@ -232,6 +308,208 @@ fn frame_proposal_window(app: &mut GongwenApp, ctx: &egui::Context) {
         app.wiki.frame_proposal = None;
     } else if discarded || !open {
         app.wiki.frame_proposal = None;
+    }
+}
+
+/// 整编审核台：左列逐页把关，右上渲染预览（口径 13 换接点），右下可直接改
+/// Markdown 源；只有点「采纳本页」才经 `store.create_page` 写库（版本带来源与
+/// 「审核已修改」标记）。关掉窗口不丢提案，树上方「整编审核」按钮可 reopen。
+fn review_desk(app: &mut GongwenApp, ctx: &egui::Context, link_map: &HashMap<String, LinkTarget>) {
+    if app.wiki.review.is_none() || !app.wiki.review_open {
+        return;
+    }
+    let mut open = true;
+    let mut adopt = false;
+    let mut reject = false;
+    let mut preview_nav: Option<String> = None;
+    egui::Window::new("整编审核")
+        .collapsible(false)
+        .resizable(true)
+        .default_width(800.0)
+        .default_height(520.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let Some(review) = app.wiki.review.as_mut() else {
+                return;
+            };
+            let pending = review.done.iter().filter(|done| !**done).count();
+            ui.weak(format!(
+                "分类「{}」 · 待审 {pending}/{} 页 · 作业 {}",
+                review.set.category,
+                review.set.pages.len(),
+                review.set.run_id
+            ));
+            ui.weak("页面只是 AI 提案：逐页核对，正文可直接改；只有点「采纳本页」才会写库。");
+            ui.separator();
+            ui.horizontal(|ui| {
+                // 左列：本批页面清单（✓ = 已处理，点名字切换待审页）。
+                let list_w = 200.0_f32.min(ui.available_width() * 0.3);
+                ui.allocate_ui(egui::vec2(list_w, ui.available_height()), |ui| {
+                    ui.vertical(|ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for index in 0..review.set.pages.len() {
+                                let page = &review.set.pages[index];
+                                let done = review.done[index];
+                                let label = if done {
+                                    format!("✓ {}", page.title)
+                                } else if page.kind == "guide" {
+                                    format!("{}（导览）", page.title)
+                                } else {
+                                    page.title.clone()
+                                };
+                                let selected = !done && review.selected == index;
+                                if done {
+                                    ui.weak(label);
+                                } else if ui.selectable_label(selected, label).clicked() {
+                                    review.select(index);
+                                }
+                            }
+                        });
+                    });
+                });
+                ui.separator();
+                // 右侧：预览 + 源编辑 + 采纳/退回。
+                let detail = review.set.pages.get(review.selected).cloned();
+                let selected_done = review.done.get(review.selected) == Some(&true);
+                let right_w = ui.available_width();
+                let right_h = ui.available_height();
+                ui.allocate_ui(egui::vec2(right_w, right_h), |ui| {
+                    ui.vertical(|ui| {
+                        let Some(page) = detail else {
+                            ui.weak("这批提案已处理完。");
+                            return;
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(&page.title).strong());
+                            if page.kind == "guide" {
+                                theme::accent_scope(ui, |ui| {
+                                    ui.small("导览页");
+                                });
+                            }
+                        });
+                        if !page.doc_refs.is_empty() {
+                            ui.weak(format!(
+                                "本页依据：{}",
+                                page.doc_refs
+                                    .iter()
+                                    .map(|(id, note)| format!("E{id}{note}"))
+                                    .collect::<Vec<_>>()
+                                    .join("；")
+                            ));
+                        }
+                        if let Some(error) = &review.error {
+                            ui.colored_label(theme::warn(), error);
+                        }
+                        ui.add_space(4.0);
+                        let preview_h = (ui.available_height() * 0.45).max(120.0);
+                        ui.weak("预览（渲染的是下方源文本的当前内容）");
+                        egui::ScrollArea::vertical()
+                            .max_height(preview_h)
+                            .show(ui, |ui| {
+                                show_page_body(ui, &review.edit_body, link_map, &mut preview_nav);
+                            });
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        ui.add(
+                            egui::TextEdit::multiline(&mut review.edit_body)
+                                .desired_rows(10)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("页面 Markdown 源：与普通公文正文一致，唯一扩展是 [[页面链接]]。"),
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if selected_done {
+                                ui.weak("本页已处理。");
+                            } else {
+                                if ui.button("采纳本页").clicked() {
+                                    adopt = true;
+                                }
+                                if ui.button("退回本页").clicked() {
+                                    reject = true;
+                                }
+                            }
+                        });
+                    });
+                });
+            });
+        });
+    if !open {
+        // 关掉窗口只是收起审核台：提案保留，树上方「整编审核」入口可 reopen。
+        app.wiki.review_open = false;
+    }
+    if let Some(uuid) = preview_nav {
+        open_page(app, &uuid);
+    }
+    if adopt {
+        review_adopt(app);
+    } else if reject && let Some(review) = app.wiki.review.as_mut() {
+        review_mark_done_advance(review);
+    }
+    // 全部处理完：给结论、清审核台、刷新树（新页面挂进分类）。
+    if let Some(review) = &app.wiki.review
+        && review.done.iter().all(|done| *done)
+    {
+        let adopted = review.adopted;
+        let total = review.set.pages.len();
+        app.wiki.notice = Some(format!(
+            "整编已处理完：采纳 {adopted} 页、退回 {} 页。",
+            total - adopted
+        ));
+        app.wiki.review = None;
+        app.wiki.review_open = false;
+        app.wiki.tree_dirty = true;
+    }
+}
+
+/// 采纳当前页：把编辑后的正文经 `store.create_page` 写库（建页 + v1）。
+fn review_adopt(app: &mut GongwenApp) {
+    let Some(review) = app.wiki.review.as_mut() else {
+        return;
+    };
+    if review.done.get(review.selected) == Some(&true) {
+        return;
+    }
+    let Some(page) = review.set.pages.get(review.selected).cloned() else {
+        return;
+    };
+    let body = review.edit_body.clone();
+    let input = crate::wiki::PageInput {
+        title: page.title.clone(),
+        node_id: review.set.node_id,
+        kind: if page.kind == "guide" {
+            "guide"
+        } else {
+            "normal"
+        },
+        body: body.clone(),
+        source_run_id: review.set.run_id.clone(),
+        review_edited: body != review.edit_base,
+        doc_refs: page.doc_refs.clone(),
+    };
+    let result = app
+        .wiki_store
+        .as_ref()
+        .map(|store| store.create_page(&input).map(|_| ()));
+    match result {
+        Some(Ok(())) => {
+            review.adopted += 1;
+            review_mark_done_advance(review);
+        }
+        Some(Err(error)) => review.error = Some(format!("采纳失败：{error:#}")),
+        None => review.error = Some("知识库不可用。".into()),
+    }
+}
+
+/// 把当前页标记为已处理（采纳或退回），选中下一个待审页（没有则停在原地）。
+fn review_mark_done_advance(review: &mut ReviewState) {
+    if let Some(done) = review.done.get_mut(review.selected) {
+        *done = true;
+    }
+    review.error = None;
+    if let Some(next) = review.done.iter().position(|done| !*done) {
+        review.select(next);
     }
 }
 
@@ -476,6 +754,20 @@ fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>) 
         });
     });
     frame_job_strip(app, ui);
+    write_job_strip(app, ui);
+    // 审核台入口：作业交回提案后常驻，关掉窗口可从这儿 reopen。
+    if let Some(review) = &app.wiki.review {
+        let pending = review.done.iter().filter(|done| !**done).count();
+        if pending > 0 {
+            let label = format!("整编审核（待审 {pending} 页）");
+            if ui
+                .add(theme::icon_text_button(theme::Icon::BookmarkCheck, &label))
+                .clicked()
+            {
+                app.wiki.review_open = true;
+            }
+        }
+    }
     // 新建主题：输入 + 建（复用标准词库页的「行内输入即建」交互）。
     ui.horizontal(|ui| {
         let edit = egui::TextEdit::singleline(&mut app.wiki.new_node_name)
@@ -626,6 +918,29 @@ fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
                         }
                         Err(error) => app.wiki.notice = Some(format!("移动失败：{error:#}")),
                     }
+                }
+            });
+            // AI 整编：把该分类交给 Pi 作业，提案进审核台逐页把关后才写库。
+            ui.horizontal(|ui| {
+                let theme_name = app
+                    .wiki
+                    .tree
+                    .iter()
+                    .find(|t| t.theme.id == theme_id)
+                    .map(|t| t.theme.name.clone())
+                    .unwrap_or_default();
+                let busy = app.wiki.frame_progress.is_some() || app.wiki.write_progress.is_some();
+                if ui
+                    .add_enabled(
+                        !busy && !theme_name.is_empty(),
+                        theme::icon_text_button(theme::Icon::Sparkles, "整编此分类"),
+                    )
+                    .on_hover_text(
+                        "AI 按本分类写导览页与条目页；提案须经人工审核（可直接改正文）后才写入",
+                    )
+                    .clicked()
+                {
+                    app.start_wiki_write(theme_name, name.clone());
                 }
             });
         }

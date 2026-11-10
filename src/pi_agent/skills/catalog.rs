@@ -305,7 +305,7 @@ mod tests {
     fn builtins_are_listed_with_chinese_labels_and_catalog_can_be_empty() {
         let _dir = ConfigDir::new();
         let catalog = load();
-        assert_eq!(catalog.enabled().len(), 10);
+        assert_eq!(catalog.enabled().len(), 11);
         assert_eq!(catalog.label_for("gongwen-draft"), "起草");
         assert_eq!(catalog.label_for("gongwen-research"), "研究报告");
         assert_eq!(catalog.label_for("gongwen-reply"), "复函");
@@ -315,9 +315,9 @@ mod tests {
             store::set_enabled(name, false).unwrap();
         }
         let catalog = load();
-        assert_eq!(catalog.enabled().len(), 7);
+        assert_eq!(catalog.enabled().len(), 8);
         store::set_enabled("gongwen-imitate", true).unwrap();
-        assert_eq!(load().enabled().len(), 8);
+        assert_eq!(load().enabled().len(), 9);
         assert_eq!(
             load().resolve(Some("gongwen-imitate")),
             Ok(Some("gongwen-imitate".into()))

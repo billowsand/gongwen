@@ -105,3 +105,101 @@ impl GongwenApp {
         }
     }
 }
+
+/// 页面整编作业的输出：通过确定性复核的页面提案集，或失败原因。
+pub(crate) struct WikiWriteOutput {
+    pub(crate) result: Result<crate::pi_agent::wiki_jobs::PageProposalSet, String>,
+}
+
+impl GongwenApp {
+    /// 发起「整编此分类」：Pi 读资料库与该分类相关的文档，交回页面提案集。
+    pub(crate) fn start_wiki_write(&mut self, theme: String, category: String) {
+        if self.lock_requested {
+            return;
+        }
+        if self.wiki_write_rx.is_some() || self.wiki_frame_rx.is_some() {
+            self.wiki.write_error = Some("已有维基作业在跑，请等待结束后再发起。".into());
+            return;
+        }
+        let setup: anyhow::Result<(Arc<crate::models::AppConfig>, std::path::PathBuf)> = (|| {
+            Ok((
+                Arc::new(self.config.clone()),
+                crate::storage::manuscript_db_path()?,
+            ))
+        })(
+        );
+        let (config, path) = match setup {
+            Ok(value) => value,
+            Err(error) => {
+                self.wiki.write_error = Some(format!("无法开始整编：{error:#}"));
+                return;
+            }
+        };
+        let (ui, progress, cancel) = TaskJobUi::start();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.wiki_write_rx = Some(rx);
+        self.wiki_write_job = Some(ui);
+        self.wiki.write_error = None;
+        self.wiki.write_progress = Some("正在准备工作区…".to_string());
+        std::thread::spawn(move || {
+            let result = crate::pi_agent::wiki_jobs::write_pages(
+                config,
+                path,
+                theme,
+                category,
+                cancel,
+                progress_sink(&progress),
+            )
+            .map_err(|error| format!("整编失败，可重试：{error}"));
+            let _ = tx.send(WikiWriteOutput { result });
+        });
+    }
+
+    /// 每帧轮询页面整编作业：进度、停止、提案进审核台或失败原因。
+    pub(crate) fn poll_wiki_write(&mut self, ctx: &eframe::egui::Context) {
+        if let Some(job) = &self.wiki_write_job {
+            if self.wiki.request_stop_write {
+                job.stop();
+            } else {
+                self.wiki.write_progress = Some(job.line());
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        let Some(rx) = self.wiki_write_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(output) => {
+                self.wiki_write_rx = None;
+                self.wiki_write_job = None;
+                self.wiki.write_progress = None;
+                if std::mem::take(&mut self.wiki.request_stop_write) {
+                    self.wiki.write_error = None;
+                } else {
+                    match output.result {
+                        Ok(set) => {
+                            self.wiki.write_error = None;
+                            self.wiki.review = Some(crate::wiki_ui::ReviewState::new(set));
+                            self.wiki.review_open = true;
+                        }
+                        Err(error) => self.wiki.write_error = Some(error),
+                    }
+                }
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.wiki_write_rx = None;
+                self.wiki_write_job = None;
+                let was_running = self.wiki.write_progress.is_some();
+                self.wiki.write_progress = None;
+                if std::mem::take(&mut self.wiki.request_stop_write) {
+                    self.wiki.write_error = None;
+                } else if was_running {
+                    self.wiki.write_error = Some("整编线程意外退出，请重试。".into());
+                }
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+}
