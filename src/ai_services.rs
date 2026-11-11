@@ -20,7 +20,7 @@ pub(crate) mod budget;
 pub(crate) mod citations;
 pub(crate) mod knowledge;
 pub(crate) mod manuscripts;
-pub(crate) mod persistence;
+pub(crate) use crate::sealed_json as persistence;
 pub(crate) mod questions;
 pub(crate) mod references;
 pub(crate) mod skill_package;

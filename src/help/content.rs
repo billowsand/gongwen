@@ -14,6 +14,7 @@ use crate::models::{DraftInput, ResearchMetadata, TemplateKind};
 use anyhow::{Context, Result};
 use std::sync::OnceLock;
 
+#[cfg(feature = "ai-workbench")]
 macro_rules! help_file {
     ($name:literal) => {
         ($name, include_str!(concat!("../../assets/help/", $name)))
@@ -21,6 +22,7 @@ macro_rules! help_file {
 }
 
 /// 帮助正文的各个文件，顺序即拼接顺序（文件名升序，与「从文件夹新建」一致）。
+#[cfg(feature = "ai-workbench")]
 pub(crate) const FILES: &[(&str, &str)] = &[
     help_file!("00-front.md"),
     help_file!("01-intro.md"),
@@ -52,6 +54,7 @@ pub(crate) const FILES: &[(&str, &str)] = &[
     help_file!("c-glossary.md"),
 ];
 
+#[cfg(feature = "ai-workbench")]
 macro_rules! help_image {
     ($name:literal) => {
         (
@@ -63,6 +66,7 @@ macro_rules! help_image {
 
 /// 界面截图。正文里写 `![图题](images/help-xxx.png)`；看帮助时先释放到用户配置目录的
 /// `images/` 下（[`install_images`]），预览与导出 PDF 就和普通稿件的插图同一条路。
+#[cfg(feature = "ai-workbench")]
 pub(crate) const IMAGES: &[(&str, &[u8])] = &[
     help_image!("help-ui-elements.png"),
     help_image!("help-ui-hero.png"),
@@ -71,6 +75,22 @@ pub(crate) const IMAGES: &[(&str, &[u8])] = &[
     help_image!("help-ui-revision.png"),
     help_image!("help-ui-versions.png"),
 ];
+
+#[cfg(not(feature = "ai-workbench"))]
+pub(crate) const FILES: &[(&str, &str)] = &[
+    (
+        "00-manual.md",
+        include_str!("../../assets/help-no-ai/00-manual.md"),
+    ),
+    #[cfg(feature = "task-assistant")]
+    (
+        "01-tasks.md",
+        include_str!("../../assets/help-no-ai/01-tasks.md"),
+    ),
+];
+
+#[cfg(not(feature = "ai-workbench"))]
+pub(crate) const IMAGES: &[(&str, &[u8])] = &[];
 
 /// 拼好的整篇正文。文件之间空一行，免得前一篇末段与后一篇首行粘成一段。
 pub(crate) fn markdown() -> &'static str {

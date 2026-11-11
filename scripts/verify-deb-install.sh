@@ -31,25 +31,39 @@ apt-get -o Acquire::Check-Valid-Until=false update
 echo "== Depends:"
 dpkg-deb -f "$DEB" Depends | tr ',' '\n' | sed 's/^ */   /'
 
+PACKAGE="$(dpkg-deb -f "$DEB" Package)"
+case "$PACKAGE" in
+    gongwen-assistant) EDITION=ai; DESKTOP_ID=cn.localtools.GongwenAssistant ;;
+    gongwen-assistant-no-ai) EDITION=no-ai; DESKTOP_ID=cn.localtools.GongwenAssistantNoAi ;;
+    *) echo "error: unexpected Debian package: $PACKAGE" >&2; exit 1 ;;
+esac
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$PROJECT_ROOT/scripts/package-edition.sh"
+APP_DIR="/opt/$PACKAGE"
+
 # 只装 Depends，不装 Recommends：验证的是"没有 Recommends 也能装上并跑起来"。
 apt-get install -y --no-install-recommends "$DEB"
 
-status="$(dpkg-query -W -f='${Status}' gongwen-assistant)"
+status="$(dpkg-query -W -f='${Status}' "$PACKAGE")"
 echo "== dpkg status: $status"
 test "$status" = "install ok installed"
 
 # 随包 Pi 运行时：Node / host / manifest 必须在，且 Node 能在这个 glibc 基线上跑。
-PI_DIR=/opt/gongwen-assistant/runtime/pi
-test -x "$PI_DIR/bin/node"
-test -f "$PI_DIR/host/main.mjs"
-test -f "$PI_DIR/manifest.json"
-node_version="$("$PI_DIR/bin/node" --version)"
-test "$node_version" = "v22.22.3"
-echo "== bundled Node: $node_version"
+check_package_binary "$APP_DIR/gongwen-assistant"
+check_package_resources "$APP_DIR"
+binaries=("$APP_DIR/gongwen-assistant")
+if [ "$EDITION" = ai ]; then
+    PI_DIR="$APP_DIR/runtime/pi"
+    test -x "$PI_DIR/bin/node"
+    test -f "$PI_DIR/host/main.mjs"
+    test -f "$PI_DIR/manifest.json"
+    test "$("$PI_DIR/bin/node" --version)" = "v22.22.3"
+    binaries+=("$PI_DIR/bin/node")
+fi
 
 # 装进来的 Depends 必须覆盖二进制实际链接的所有库。
 failed=0
-for bin in /opt/gongwen-assistant/gongwen-assistant "$PI_DIR/bin/node"; do
+for bin in "${binaries[@]}"; do
     echo "== ldd $bin"
     # 静态链接的 ldd 返回非零并打印 "not a dynamic executable"，没有要找的库，放行。
     out="$(ldd "$bin" 2>&1)" || true
@@ -62,15 +76,20 @@ for bin in /opt/gongwen-assistant/gongwen-assistant "$PI_DIR/bin/node"; do
         failed=1
     fi
 done
-test -L /usr/bin/gongwen-assistant
+test -L "/usr/bin/$PACKAGE"
+test -f "$APP_DIR/runtime/fonts/GWFangSong.ttf"
+test -f "$APP_DIR/runtime/ime/base.txt"
+test -f "/usr/share/applications/$DESKTOP_ID.desktop"
 
 # 稿件包 .gwx 的登记：MIME 定义、desktop 声明、文档图标都要装到位。
 # 只装 Depends 的容器里未必有 shared-mime-info，装了才顺带核对数据库里的解析结果。
-test -f /usr/share/mime/packages/cn.localtools.GongwenAssistant.xml
-grep -qx 'MimeType=application/x-gongwen-package;'     /usr/share/applications/cn.localtools.GongwenAssistant.desktop
-test -f /usr/share/icons/hicolor/48x48/mimetypes/application-x-gongwen-package.png
-if command -v update-mime-database >/dev/null 2>&1; then
-    update-mime-database /usr/share/mime
-    test -f /usr/share/mime/application/x-gongwen-package.xml
+if [ "$EDITION" = ai ]; then
+    test -f /usr/share/mime/packages/cn.localtools.GongwenAssistant.xml
+    grep -qx 'MimeType=application/x-gongwen-package;'     /usr/share/applications/cn.localtools.GongwenAssistant.desktop
+    test -f /usr/share/icons/hicolor/48x48/mimetypes/application-x-gongwen-package.png
+    if command -v update-mime-database >/dev/null 2>&1; then
+        update-mime-database /usr/share/mime
+        test -f /usr/share/mime/application/x-gongwen-package.xml
+    fi
 fi
 exit "$failed"

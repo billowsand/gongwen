@@ -18,11 +18,11 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 0
 fi
 
-# Linux 变体（Arch/Omarchy）会带 --no-default-features --features linux-portal-dialogs，
+# Linux 变体（Arch/Omarchy）会带 --no-default-features --features ai,linux-portal-dialogs，
 # 与 package-portable.ps1 在非 Windows 主机的做法保持一致（参见 AGENTS.md）。
 CARGO_FEATURES=()
 if [[ "$(uname -s 2>/dev/null)" == "Linux" ]]; then
-    CARGO_FEATURES+=(--no-default-features --features linux-portal-dialogs)
+    CARGO_FEATURES+=(--no-default-features --features ai,linux-portal-dialogs)
 fi
 
 echo "post-commit: cargo build --release --locked ..."

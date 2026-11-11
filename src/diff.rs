@@ -905,37 +905,40 @@ fn profile_set_changes(a: &AppConfig, b: &AppConfig) -> Vec<KindChanges> {
 /// 设置项变化（词库与版式单列，这里比较模型服务 / 输出 / 导出 / 密级规则等）。
 fn settings_changes(a: &AppConfig, b: &AppConfig) -> Vec<FieldChange> {
     let mut out = Vec::new();
-    field(
-        &mut out,
-        "接口地址",
-        &a.lm_studio.base_url,
-        &b.lm_studio.base_url,
-    );
-    field(&mut out, "模型", &a.lm_studio.model, &b.lm_studio.model);
-    field(
-        &mut out,
-        "API Key",
-        masked(&a.lm_studio.api_key),
-        masked(&b.lm_studio.api_key),
-    );
-    field(
-        &mut out,
-        "温度",
-        a.lm_studio.temperature.to_string(),
-        b.lm_studio.temperature.to_string(),
-    );
-    field(
-        &mut out,
-        "最大输出 Token",
-        a.lm_studio.max_tokens.to_string(),
-        b.lm_studio.max_tokens.to_string(),
-    );
-    field(
-        &mut out,
-        "超时（秒）",
-        a.lm_studio.timeout_seconds.to_string(),
-        b.lm_studio.timeout_seconds.to_string(),
-    );
+    #[cfg(feature = "ai-workbench")]
+    {
+        field(
+            &mut out,
+            "接口地址",
+            &a.lm_studio.base_url,
+            &b.lm_studio.base_url,
+        );
+        field(&mut out, "模型", &a.lm_studio.model, &b.lm_studio.model);
+        field(
+            &mut out,
+            "API Key",
+            masked(&a.lm_studio.api_key),
+            masked(&b.lm_studio.api_key),
+        );
+        field(
+            &mut out,
+            "温度",
+            a.lm_studio.temperature.to_string(),
+            b.lm_studio.temperature.to_string(),
+        );
+        field(
+            &mut out,
+            "最大输出 Token",
+            a.lm_studio.max_tokens.to_string(),
+            b.lm_studio.max_tokens.to_string(),
+        );
+        field(
+            &mut out,
+            "超时（秒）",
+            a.lm_studio.timeout_seconds.to_string(),
+            b.lm_studio.timeout_seconds.to_string(),
+        );
+    }
     field(
         &mut out,
         "网络代理",
@@ -980,6 +983,7 @@ fn settings_changes(a: &AppConfig, b: &AppConfig) -> Vec<FieldChange> {
         yes_no(a.export.overwrite),
         yes_no(b.export.overwrite),
     );
+    #[cfg(feature = "ai-workbench")]
     field(
         &mut out,
         "生成后自动导出",
@@ -1124,6 +1128,7 @@ fn yes_no(value: bool) -> String {
     }
 }
 
+#[cfg(feature = "ai-workbench")]
 fn masked(value: &str) -> String {
     if value.is_empty() {
         String::new()
@@ -1134,7 +1139,7 @@ fn masked(value: &str) -> String {
 
 /// 代理地址里可能带着 `用户名:密码@`，密码打码，其余照原样显示。
 fn masked_proxy_url(value: &str) -> String {
-    match reqwest::Url::parse(value.trim()) {
+    match url::Url::parse(value.trim()) {
         Ok(mut url) if url.password().is_some() => {
             let _ = url.set_password(Some("******"));
             url.to_string()

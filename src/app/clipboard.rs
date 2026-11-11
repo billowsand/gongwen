@@ -73,6 +73,7 @@ struct PasteTarget {
     tab: Option<TabRef>,
     focus: egui::Id,
     cursor: Option<egui::text::CCursorRange>,
+    #[cfg(feature = "ai-workbench")]
     material: bool,
 }
 
@@ -239,11 +240,14 @@ impl GongwenApp {
             return;
         };
         let cursor = state.cursor.char_range();
+        #[cfg(feature = "ai-workbench")]
         let material = self.showing_doc()
             && self
                 .docs
                 .get(self.active_doc)
                 .is_some_and(|doc| focus == crate::ai_panel::composer_input_id(doc.key));
+        #[cfg(not(feature = "ai-workbench"))]
+        let material = false;
         self.clipboard.paste_sequence += 1;
         let sequence = self.clipboard.paste_sequence;
         self.clipboard.pending_paste = Some(PasteTarget {
@@ -251,6 +255,7 @@ impl GongwenApp {
             tab: self.tabs.get(self.active_tab).copied(),
             focus,
             cursor,
+            #[cfg(feature = "ai-workbench")]
             material,
         });
         let tx = self.sender.clone();
@@ -292,11 +297,12 @@ impl GongwenApp {
         }
         match result {
             Ok(text) if !text.is_empty() => {
+                #[cfg(feature = "ai-workbench")]
                 if target.material && self.draft_page().add_external_paste_material(&text) {
                     self.status = "已清洗并添加粘贴材料。".into();
-                } else {
-                    ctx.input_mut(|input| input.events.push(egui::Event::Paste(text)));
+                    return;
                 }
+                ctx.input_mut(|input| input.events.push(egui::Event::Paste(text)));
             }
             Ok(_) => self.status = "清洗后没有可粘贴的文字。".into(),
             Err(error) => self.status = error,

@@ -8,17 +8,20 @@ use crate::doc_import;
 use crate::draft_page::{DocKey, DraftPage, ExportKind, FileAction};
 use crate::export;
 use crate::images;
-use crate::models::{DraftInput, ExportSelection, GeneratedDraft, ReviewNote};
-use crate::prompt;
+use crate::models::{DraftInput, ExportSelection, ReviewNote};
+#[cfg(feature = "ai-workbench")]
 use crate::revise_model;
 use crate::theme;
 use crate::validator;
+#[cfg(feature = "ai-workbench")]
+use crate::{models::GeneratedDraft, prompt};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::thread;
 
 /// 模型原文 → 可落入正文的 Markdown：剥思考与围栏、按文种规整、补齐版式要素。
 /// 所有 AI 产物（单次起草、润色、研究式起草）都走这一条，不另起一套。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn prepare_model_markdown(input: &DraftInput, raw: &str) -> String {
     let cleaned = prompt::sanitize_model_markdown(raw);
     let cleaned = crate::ai_services::citations::delivery_markdown(
@@ -30,6 +33,7 @@ pub(crate) fn prepare_model_markdown(input: &DraftInput, raw: &str) -> String {
 }
 
 /// 定稿后的确定性复查：要素校验与研究报告的锚点、引用检查。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn review_notes(
     input: &DraftInput,
     config: &crate::models::AppConfig,
@@ -45,6 +49,7 @@ pub(crate) fn review_notes(
 
 /// 不导出的 AI 产物收尾：定稿、复查、版式粗估，撞了输出上限再记一条。
 /// 结果只进提案，由用户接受后才落入正文。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn reviewed_draft(
     input: &DraftInput,
     config: &crate::models::AppConfig,
@@ -346,6 +351,7 @@ impl DraftPage<'_> {
     /// 与起草、优化的根本区别：它**不产出正文**，只产出待确认的建议。所以既不
     /// 需要事实闸门那一套（没有整篇改写可言），也不会触发自动导出——复核结果
     /// 在用户逐条点过之前，正文一个字都没变。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn start_model_review(&mut self) {
         if self.doc.busy {
             return;
@@ -771,6 +777,7 @@ mod delivery_tests {
     }
 
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn proposal_delivery_removes_internal_marks_and_preserves_research_syntax() {
         let mut input = DraftInput {
             kind: TemplateKind::ResearchReport,
@@ -801,6 +808,7 @@ mod delivery_tests {
     }
 
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn non_research_proposals_also_remove_internal_source_marks() {
         let input = DraftInput::default();
         let body = "# 工作通知\n\n各单位加强巡查。";

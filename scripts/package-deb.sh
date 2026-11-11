@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Package the portable Linux layout (binary + TeX runtime) as a Debian package.
 #
-# Usage: package-deb.sh <version> <staging-dir> <output-dir> [architecture]
+# Usage: package-deb.sh <version> <staging-dir> <output-dir> [architecture] [ai|no-ai]
 #
 # The staging directory is produced by scripts/package-portable.ps1 with
 # -ArchiveFormat none; it contains `gongwen-assistant`, `runtime/`, and the
@@ -14,10 +14,16 @@ VERSION="${1:?usage: package-deb.sh <version> <staging-dir> <output-dir>}"
 STAGING="${2:?missing staging directory}"
 OUTPUT_DIR="${3:?missing output directory}"
 
-PACKAGE="gongwen-assistant"
 ARCH="${4:-arm64}"
-INSTALL_ROOT="/opt/gongwen-assistant"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+EDITION="${5:-ai}"
+source "$PROJECT_ROOT/scripts/package-edition.sh"
+PACKAGE="gongwen-assistant${EDITION_SUFFIX}"
+DESKTOP_ID="cn.localtools.GongwenAssistant"
+if [ "$EDITION" = no-ai ]; then DESKTOP_ID+="NoAi"; fi
+
+
+INSTALL_ROOT="/opt/$PACKAGE"
 
 case "$ARCH" in
     arm64)
@@ -44,16 +50,22 @@ if [ ! -f "$STAGING/runtime/fonts/GWFangSong.ttf" ]; then
     exit 1
 fi
 
+check_package_binary "$STAGING/gongwen-assistant"
+check_package_resources "$STAGING"
+
 # 随包 Pi 运行时：缺 Node / host / manifest 或校验不符就不能出包。
-case "$ARCH" in
-    arm64) pi_platform="linux-arm64" ;;
-    amd64) pi_platform="linux-x64" ;;
-esac
-if [ ! -x "$STAGING/runtime/pi/bin/node" ]; then
-    echo "error: staging Pi runtime missing: $STAGING/runtime/pi/bin/node" >&2
-    exit 1
+if [ "$EDITION" = ai ]; then
+    case "$ARCH" in
+        arm64) pi_platform="linux-arm64" ;;
+        amd64) pi_platform="linux-x64" ;;
+    esac
+    if [ ! -x "$STAGING/runtime/pi/bin/node" ]; then
+        echo "error: staging Pi runtime missing: $STAGING/runtime/pi/bin/node" >&2
+        exit 1
+    fi
+    "$STAGING/runtime/pi/bin/node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$STAGING/runtime/pi" "$pi_platform" >/dev/null
+
 fi
-"$STAGING/runtime/pi/bin/node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$STAGING/runtime/pi" "$pi_platform" >/dev/null
 
 PKG_ROOT="$(mktemp -d)"
 trap 'rm -rf "$PKG_ROOT"' EXIT
@@ -67,12 +79,12 @@ chmod 755 "$APP_DIR/gongwen-assistant"
 
 # Command-line entry point.
 mkdir -p "$PKG_ROOT/usr/bin"
-ln -s "$INSTALL_ROOT/gongwen-assistant" "$PKG_ROOT/usr/bin/gongwen-assistant"
+ln -s "$INSTALL_ROOT/gongwen-assistant" "$PKG_ROOT/usr/bin/$PACKAGE"
 
 # Desktop entry. Its filename must match the Wayland app_id used by eframe.
 mkdir -p "$PKG_ROOT/usr/share/applications"
-cp "$PROJECT_ROOT/assets/linux/cn.localtools.GongwenAssistant.desktop" \
-    "$PKG_ROOT/usr/share/applications/cn.localtools.GongwenAssistant.desktop"
+cp "$PROJECT_ROOT/assets/linux/$DESKTOP_ID.desktop" \
+    "$PKG_ROOT/usr/share/applications/$DESKTOP_ID.desktop"
 
 # Icons: install the pre-rendered PNG sizes into the hicolor theme.
 for size in 16 24 32 48 64 128 256 512; do
@@ -80,22 +92,25 @@ for size in 16 24 32 48 64 128 256 512; do
     if [ -f "$src" ]; then
         dest="$PKG_ROOT/usr/share/icons/hicolor/${size}x${size}/apps"
         mkdir -p "$dest"
-        cp "$src" "$dest/cn.localtools.GongwenAssistant.png"
+        cp "$src" "$dest/$DESKTOP_ID.png"
     fi
 done
 # 稿件包 .gwx：MIME 类型定义与文档图标。update-mime-database、gtk-update-icon-cache
 # 由 shared-mime-info、hicolor-icon-theme 的 dpkg 触发器自动跑，不必写 postinst。
-mkdir -p "$PKG_ROOT/usr/share/mime/packages"
-cp "$PROJECT_ROOT/assets/linux/cn.localtools.GongwenAssistant.xml"     "$PKG_ROOT/usr/share/mime/packages/cn.localtools.GongwenAssistant.xml"
-for size in 16 24 32 48 64 128 256 512; do
-    dest="$PKG_ROOT/usr/share/icons/hicolor/${size}x${size}/mimetypes"
-    mkdir -p "$dest"
-    cp "$PROJECT_ROOT/assets/doc-icon/gwx-document-$size.png"         "$dest/application-x-gongwen-package.png"
-done
+if [ "$EDITION" = ai ]; then
+    mkdir -p "$PKG_ROOT/usr/share/mime/packages"
+    cp "$PROJECT_ROOT/assets/linux/cn.localtools.GongwenAssistant.xml"     "$PKG_ROOT/usr/share/mime/packages/cn.localtools.GongwenAssistant.xml"
+    for size in 16 24 32 48 64 128 256 512; do
+        dest="$PKG_ROOT/usr/share/icons/hicolor/${size}x${size}/mimetypes"
+        mkdir -p "$dest"
+        cp "$PROJECT_ROOT/assets/doc-icon/gwx-document-$size.png"         "$dest/application-x-gongwen-package.png"
+    done
+fi
+
 if [ -f "$PROJECT_ROOT/assets/app-icon/app-icon.png" ]; then
     mkdir -p "$PKG_ROOT/usr/share/pixmaps"
     cp "$PROJECT_ROOT/assets/app-icon/app-icon.png" \
-        "$PKG_ROOT/usr/share/pixmaps/cn.localtools.GongwenAssistant.png"
+        "$PKG_ROOT/usr/share/pixmaps/$DESKTOP_ID.png"
 fi
 
 INSTALLED_SIZE="$(du -sk "$APP_DIR" | cut -f1)"
@@ -112,11 +127,11 @@ Depends: $DEPENDS
 Recommends: $RECOMMENDS
 Installed-Size: $INSTALLED_SIZE
 Description: 离线公文写作助手 (offline official-document writing assistant)
- 公文助手是一个基于 Rust、egui 与本地模型服务（LM Studio / Ollama 等）的
+ 公文助手是一个基于 Rust 与 egui 的
  离线公文写作桌面应用。内置 Typst 排版引擎与字体，
  可导出 Markdown、DOCX 与 PDF。
  .
- 此包针对 ${PLATFORM_DESCRIPTION}（glibc >= 2.28），安装在 /opt/gongwen-assistant。
+ 此包针对 ${PLATFORM_DESCRIPTION}（glibc >= 2.28），安装在 $INSTALL_ROOT。
 EOF
 
 mkdir -p "$OUTPUT_DIR"

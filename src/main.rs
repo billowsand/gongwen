@@ -11,11 +11,16 @@
 #![warn(clippy::missing_safety_doc)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
+#[cfg(feature = "ai-workbench")]
 mod agent;
+#[cfg(feature = "ai-workbench")]
 mod ai_guard;
+#[cfg(feature = "ai-workbench")]
 mod ai_panel;
+#[cfg(feature = "ai-workbench")]
 mod ai_services;
 mod app;
+mod content_hash;
 mod crash_log;
 mod data_backup;
 #[cfg(test)]
@@ -41,12 +46,15 @@ mod help;
 mod highlight;
 mod images;
 mod ime;
+#[cfg(feature = "ai-workbench")]
 mod knowledge;
+#[cfg(feature = "ai-workbench")]
 mod knowledge_ui;
 mod last_char_orphan;
 mod lexicon;
 mod lexicon_ui;
 mod linux_desktop;
+#[cfg(feature = "ai-workbench")]
 mod lmstudio;
 // FFI 模块：AppKit 窗口调用，每个 unsafe 块都带 SAFETY 注释。
 #[allow(unsafe_code)]
@@ -64,34 +72,45 @@ mod package_file;
 mod password_policy;
 mod pdf_text;
 mod pdf_viewer;
+#[cfg(feature = "ai-workbench")]
 mod pi_agent;
 mod portable_runtime;
 mod preview;
 // 打印：Win32 那一半是 FFI，在 `print` 内部的 `win` 模块声明处单独放行 unsafe。
 mod pdf_image;
 mod print;
+#[cfg(feature = "ai-workbench")]
 mod prompt;
 mod proofread;
 mod proofread_rules;
 mod proofread_xlsx;
+#[cfg(feature = "ai-workbench")]
 mod qa;
+#[cfg(feature = "ai-workbench")]
 mod rag;
+#[cfg(feature = "ai-workbench")]
 mod rag_client;
 mod redline;
 mod resources;
 /// 文字复核回归集。纯测试资产：样例文件与解析器只在测试构建里存在，
 /// 不进发行版二进制。
 #[cfg(test)]
+#[cfg(feature = "ai-workbench")]
 mod revise_cases;
+#[cfg(feature = "ai-workbench")]
 mod revise_model;
 mod revision;
 mod rich_paste;
 mod samples;
+mod sealed_json;
 mod single_instance;
+#[cfg(feature = "ai-workbench")]
 mod skill_pack;
 mod storage;
 mod system_fonts;
+#[cfg(feature = "task-assistant")]
 mod task_assistant;
+#[cfg(feature = "task-assistant")]
 mod task_ui;
 #[cfg(test)]
 mod test_support;
@@ -111,7 +130,9 @@ mod visual_diff;
 // 维基知识库存储层（一期切片 1 先行落地；界面/工具/智能体切片接入后移除 allow）。
 mod vocabulary_xlsx;
 #[allow(dead_code)]
+#[cfg(feature = "ai-workbench")]
 mod wiki;
+#[cfg(feature = "ai-workbench")]
 mod wiki_ui;
 
 use std::cell::Cell;
@@ -120,6 +141,20 @@ use std::rc::Rc;
 use app::gate::AppShell;
 
 fn main() -> eframe::Result {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--build-edition")
+    {
+        println!(
+            "{}",
+            if cfg!(feature = "ai-workbench") {
+                "ai"
+            } else {
+                "no-ai"
+            }
+        );
+        return Ok(());
+    }
     // 图形能力探测子进程：只做探测、打印一行结果就退出，主进程照常建窗口。
     // 放在最前面，免得子进程也去抢单实例锁、建窗口。
     #[cfg(target_os = "linux")]

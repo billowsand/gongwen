@@ -4,6 +4,7 @@
 //! 不接触公文正文；数据库读取经 `cache` 按数据代号缓存，代号不变的帧不查库。
 use crate::task_assistant::{Store, Task};
 use crate::theme;
+#[cfg(feature = "ai-workbench")]
 use std::collections::{HashMap, HashSet};
 
 mod cache;
@@ -12,16 +13,21 @@ mod date;
 mod detail;
 mod fill;
 mod form;
+#[cfg(feature = "ai-workbench")]
 mod inbox;
 mod list;
+#[cfg(feature = "ai-workbench")]
 mod materials;
 mod nav;
 mod owner;
 
+#[cfg(feature = "ai-workbench")]
 use crate::task_assistant::extract::FilledValue;
-#[cfg(test)]
+#[cfg(all(test, feature = "ai-workbench"))]
 pub(crate) use fill::apply_fill;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use fill::{FillField, FillRequest, receive_fill};
+#[cfg(feature = "ai-workbench")]
 pub(crate) use inbox::{ExtractionOutcome, receive_extraction};
 pub(crate) use nav::View;
 
@@ -37,6 +43,7 @@ const NOTICE_SECONDS: f64 = 5.0;
 #[derive(Clone)]
 pub(super) enum Replace {
     Blank,
+    #[cfg(feature = "ai-workbench")]
     Candidate(String, Box<Task>),
     Edit(Box<Task>),
 }
@@ -61,13 +68,18 @@ pub(crate) struct State {
     /// 正在就地更新进展的任务；不在编辑时详情里按正文显示当前进展。
     pub progress_editing: Option<String>,
     progress_focus: bool,
+    #[cfg(feature = "ai-workbench")]
     pub candidate_targets: HashMap<String, String>,
+    #[cfg(feature = "ai-workbench")]
     pub candidate_edits: HashMap<String, crate::task_assistant::extract::Proposal>,
     /// 候选卡里负责人搜索框的文字，按候选 id 分开。
+    #[cfg(feature = "ai-workbench")]
     candidate_owner_queries: HashMap<String, String>,
     /// 采纳时报过「过期 / 已变化」的候选；只有它们显示「以当前版本重新核对」。
+    #[cfg(feature = "ai-workbench")]
     expired_candidates: HashSet<String>,
     pub delete_confirm: Option<String>,
+    #[cfg(feature = "ai-workbench")]
     pub candidate_create_id: Option<String>,
     pub cancel_reason: String,
     /// 详情里状态下拉选了「已取消」、正等待填写理由的任务。
@@ -82,54 +94,93 @@ pub(crate) struct State {
     category_rename: Option<(String, String)>,
     category_delete: Option<(String, String)>,
     pub new_category: String,
+    #[cfg(feature = "ai-workbench")]
     pub source_title: String,
+    #[cfg(feature = "ai-workbench")]
     pub source_text: String,
     /// 标题留空时程序取首行填进去的那个值；原文再改时若标题没被人动过就一起清掉。
+    #[cfg(feature = "ai-workbench")]
     source_title_auto: Option<String>,
     /// 最近一次材料识别的结果，写在材料卡「识别」按钮旁边。
+    #[cfg(feature = "ai-workbench")]
     pub extraction_result: Option<String>,
     /// 上面那条结果对应的材料（有新建议时），结果旁的「只看这批」按它筛选。
+    #[cfg(feature = "ai-workbench")]
     extraction_source: Option<String>,
     /// 刚粘贴的材料之前识别过：材料卡里显示「查看 / 重新识别」卡片。
+    #[cfg(feature = "ai-workbench")]
     pub known_source: Option<crate::task_assistant::SourceRow>,
     /// 待应用层开始的重新识别（材料 id）。
+    #[cfg(feature = "ai-workbench")]
     pub request_rerun: Option<String>,
     /// 「待整理建议」只看这份材料的建议。
+    #[cfg(feature = "ai-workbench")]
     pub inbox_source: Option<String>,
     /// 「材料」视图里选中的材料。
+    #[cfg(feature = "ai-workbench")]
     pub material_selected: Option<String>,
     /// 选中材料的原文快照（id、标题、正文）；快照不会改，按 id 缓存一份。
+    #[cfg(feature = "ai-workbench")]
     material_text: Option<(String, String, String)>,
+    #[cfg(feature = "ai-workbench")]
     material_delete: Option<String>,
+    #[cfg(feature = "ai-workbench")]
     focus_material: bool,
+    #[cfg(feature = "ai-workbench")]
     pub knowledge_id: Option<i64>,
+    #[cfg(feature = "ai-workbench")]
     knowledge_docs: Option<Vec<(i64, String)>>,
+    #[cfg(feature = "ai-workbench")]
     pub request_extract: Option<(String, String, String)>,
+    #[cfg(feature = "ai-workbench")]
     pub extraction_busy: bool,
+    #[cfg(feature = "ai-workbench")]
     pub discard_extraction: bool,
+    #[cfg(feature = "ai-workbench")]
     pub request_knowledge: Option<i64>,
+    #[cfg(feature = "ai-workbench")]
     pub history_candidates: bool,
+    #[cfg(feature = "ai-workbench")]
     pub extraction_error: Option<String>,
+    #[cfg(feature = "ai-workbench")]
     pub request_fill: Option<FillRequest>,
+    #[cfg(feature = "ai-workbench")]
     pub fill_text: String,
     /// 后台 Pi 作业的最近一条进度；没有作业时为空。
+    #[cfg(feature = "ai-workbench")]
     pub extraction_progress: Option<String>,
+    #[cfg(feature = "ai-workbench")]
     pub fill_progress: Option<String>,
     /// 界面请求停止后台作业；应用层每帧读一次并置停止信号。
+    #[cfg(feature = "ai-workbench")]
     pub request_stop_extraction: bool,
+    #[cfg(feature = "ai-workbench")]
     pub request_stop_fill: bool,
+    #[cfg(feature = "ai-workbench")]
     pub fill_busy: bool,
+    #[cfg(feature = "ai-workbench")]
     pub fill_discard: bool,
+    #[cfg(feature = "ai-workbench")]
     pub fill_error: Option<String>,
+    #[cfg(feature = "ai-workbench")]
     pub fill_owner_note: Option<String>,
+    #[cfg(feature = "ai-workbench")]
     pub fill_owner_id: Option<u64>,
+    #[cfg(feature = "ai-workbench")]
     pub fill_owner_suggestion_id: Option<u64>,
+    #[cfg(feature = "ai-workbench")]
     pub fill_marks: HashMap<FillField, FilledValue>,
+    #[cfg(feature = "ai-workbench")]
     pub fill_suggestions: HashMap<FillField, FilledValue>,
+    #[cfg(feature = "ai-workbench")]
     pub fill_before: Option<Task>,
+    #[cfg(feature = "ai-workbench")]
     pub fill_source: Option<String>,
+    #[cfg(feature = "ai-workbench")]
     pub fill_summary: Option<(usize, usize)>,
+    #[cfg(feature = "ai-workbench")]
     fill_open_more: bool,
+    #[cfg(feature = "ai-workbench")]
     fill_focus: bool,
     cache: cache::Cache,
 }
@@ -153,6 +204,7 @@ impl State {
         self.apply_replace(replace);
     }
     fn apply_replace(&mut self, replace: Replace) {
+        #[cfg(feature = "ai-workbench")]
         self.clear_fill();
         self.form_error = None;
         self.prerequisite_query.clear();
@@ -161,30 +213,48 @@ impl State {
         self.progress_task = None;
         match replace {
             Replace::Blank => {
-                self.fill_focus = true;
-                self.candidate_create_id = None;
+                #[cfg(feature = "ai-workbench")]
+                {
+                    self.fill_focus = true;
+                }
+                #[cfg(feature = "ai-workbench")]
+                {
+                    self.candidate_create_id = None;
+                }
                 self.draft = Some(Task::blank());
                 self.selected = None;
             }
+            #[cfg(feature = "ai-workbench")]
             Replace::Candidate(id, task) => {
-                self.candidate_create_id = Some(id);
+                #[cfg(feature = "ai-workbench")]
+                {
+                    self.candidate_create_id = Some(id);
+                }
                 self.draft = Some(*task);
                 self.selected = None;
             }
             Replace::Edit(task) => {
-                self.candidate_create_id = None;
+                #[cfg(feature = "ai-workbench")]
+                {
+                    self.candidate_create_id = None;
+                }
                 self.draft = Some(*task);
             }
         }
     }
     fn close_draft(&mut self) {
+        #[cfg(feature = "ai-workbench")]
         self.clear_fill();
         self.draft = None;
-        self.candidate_create_id = None;
+        #[cfg(feature = "ai-workbench")]
+        {
+            self.candidate_create_id = None;
+        }
         self.form_error = None;
         self.prerequisite_query.clear();
         self.cancel_reason.clear();
     }
+    #[cfg(feature = "ai-workbench")]
     fn clear_fill(&mut self) {
         self.request_fill = None;
         self.fill_text.clear();
@@ -202,7 +272,10 @@ impl State {
         self.fill_source = None;
         self.fill_summary = None;
         self.fill_open_more = false;
-        self.fill_focus = false;
+        #[cfg(feature = "ai-workbench")]
+        {
+            self.fill_focus = false;
+        }
     }
 }
 
@@ -210,7 +283,9 @@ impl State {
 pub(super) struct Snapshot<'a> {
     pub tasks: Vec<Task>,
     pub categories: Vec<String>,
+    #[cfg(feature = "ai-workbench")]
     pub candidates: Vec<crate::task_assistant::CandidateRow>,
+    #[cfg(feature = "ai-workbench")]
     pub sources: Vec<crate::task_assistant::SourceRow>,
     pub today: String,
     /// 借用配置里的标准词库：每帧都要重绘，不复制整份词库。
@@ -226,7 +301,7 @@ impl Snapshot<'_> {
 pub(crate) fn show(
     ui: &mut egui::Ui,
     store: Option<&mut Store>,
-    knowledge: Option<&mut crate::knowledge::KnowledgeStore>,
+    #[cfg(feature = "ai-workbench")] knowledge: Option<&mut crate::knowledge::KnowledgeStore>,
     vocabulary: &[crate::models::VocabularyEntry],
     state: &mut State,
 ) {
@@ -253,7 +328,9 @@ pub(crate) fn show(
     let data = Snapshot {
         tasks: std::mem::take(&mut state.cache.tasks),
         categories: std::mem::take(&mut state.cache.categories),
+        #[cfg(feature = "ai-workbench")]
         candidates: std::mem::take(&mut state.cache.candidates),
+        #[cfg(feature = "ai-workbench")]
         sources: std::mem::take(&mut state.cache.sources),
         today: chrono::Local::now()
             .date_naive()
@@ -261,28 +338,54 @@ pub(crate) fn show(
             .to_string(),
         vocabulary,
     };
-    page(ui, store, knowledge, state, &data);
+    page(
+        ui,
+        store,
+        #[cfg(feature = "ai-workbench")]
+        knowledge,
+        state,
+        &data,
+    );
     state.cache.tasks = data.tasks;
     state.cache.categories = data.categories;
-    state.cache.candidates = data.candidates;
-    state.cache.sources = data.sources;
+    #[cfg(feature = "ai-workbench")]
+    {
+        state.cache.candidates = data.candidates;
+    }
+    #[cfg(feature = "ai-workbench")]
+    {
+        state.cache.sources = data.sources;
+    }
 }
 
 fn page(
     ui: &mut egui::Ui,
     store: &mut Store,
-    knowledge: Option<&mut crate::knowledge::KnowledgeStore>,
+    #[cfg(feature = "ai-workbench")] knowledge: Option<&mut crate::knowledge::KnowledgeStore>,
     state: &mut State,
     data: &Snapshot,
 ) {
     let page_rect = ui.max_rect();
-    top_bar(ui, store, state);
+    top_bar(
+        ui,
+        #[cfg(feature = "ai-workbench")]
+        store,
+        state,
+    );
     messages(ui, state);
     ui.add_space(6.0);
     let size = ui.available_size();
     let with_nav = size.x >= NAV_MIN_PAGE;
     if size.x < SPLIT_MIN_PAGE {
-        single_column(ui, store, knowledge, state, data, size.y);
+        single_column(
+            ui,
+            store,
+            #[cfg(feature = "ai-workbench")]
+            knowledge,
+            state,
+            data,
+            size.y,
+        );
     } else {
         ui.horizontal_top(|ui| {
             if with_nav {
@@ -295,14 +398,27 @@ fn page(
                 ui.separator();
             }
             let rest = ui.available_width();
+            #[cfg(feature = "ai-workbench")]
             let share = if matches!(state.view, View::Inbox | View::Materials) {
                 0.55
             } else {
                 0.42
             };
+            #[cfg(not(feature = "ai-workbench"))]
+            let share = 0.42;
             let list_width = (rest * share).clamp(260.0, 560.0);
             column(ui, list_width, size.y, |ui| {
-                middle(ui, store, knowledge, state, data, !with_nav, size.y)
+                middle(
+                    ui,
+                    store,
+                    #[cfg(feature = "ai-workbench")]
+                    knowledge,
+                    state,
+                    data,
+                    !with_nav,
+                    #[cfg(feature = "ai-workbench")]
+                    size.y,
+                );
             });
             ui.separator();
             let detail_width = ui.available_width();
@@ -331,31 +447,33 @@ fn column(ui: &mut egui::Ui, width: f32, height: f32, add: impl FnOnce(&mut egui
 fn middle(
     ui: &mut egui::Ui,
     store: &mut Store,
-    knowledge: Option<&mut crate::knowledge::KnowledgeStore>,
+    #[cfg(feature = "ai-workbench")] knowledge: Option<&mut crate::knowledge::KnowledgeStore>,
     state: &mut State,
     data: &Snapshot,
     compact_nav: bool,
-    height: f32,
+    #[cfg(feature = "ai-workbench")] height: f32,
 ) {
     if compact_nav {
         nav::dropdown(ui, state, data);
         ui.add_space(4.0);
     }
+    #[cfg(feature = "ai-workbench")]
     if state.view == View::Inbox {
         egui::ScrollArea::vertical()
             .id_salt("task_inbox")
             .auto_shrink([false, false])
             .max_height(ui.available_height().min(height))
             .show(ui, |ui| inbox::show(ui, store, knowledge, state, data));
+        return;
     } else if state.view == View::Materials {
         egui::ScrollArea::vertical()
             .id_salt("task_materials")
             .auto_shrink([false, false])
             .max_height(ui.available_height().min(height))
             .show(ui, |ui| materials::list(ui, state, data));
-    } else {
-        list::show(ui, store, state, data, compact_nav);
+        return;
     }
+    list::show(ui, store, state, data, compact_nav);
 }
 
 /// 右栏：有未保存表单时是表单，否则是所选任务的详情。
@@ -366,12 +484,17 @@ fn right(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data: &Snapsho
         if keep && state.draft.is_none() {
             state.draft = Some(draft);
         }
-    } else if state.view == View::Materials {
+        return;
+    }
+    #[cfg(feature = "ai-workbench")]
+    if state.view == View::Materials {
         egui::ScrollArea::vertical()
             .id_salt("task_material_detail")
             .auto_shrink([false, false])
             .show(ui, |ui| materials::detail(ui, store, state, data));
-    } else {
+        return;
+    }
+    {
         egui::ScrollArea::vertical()
             .id_salt("task_detail")
             .auto_shrink([false, false])
@@ -383,49 +506,78 @@ fn right(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data: &Snapsho
 fn single_column(
     ui: &mut egui::Ui,
     store: &mut Store,
-    knowledge: Option<&mut crate::knowledge::KnowledgeStore>,
+    #[cfg(feature = "ai-workbench")] knowledge: Option<&mut crate::knowledge::KnowledgeStore>,
     state: &mut State,
     data: &Snapshot,
     height: f32,
 ) {
+    let showing_task = state
+        .selected
+        .as_deref()
+        .is_some_and(|id| data.task(id).is_some());
+    #[cfg(feature = "ai-workbench")]
     let showing = if state.view == View::Materials {
         state
             .material_selected
             .as_deref()
             .is_some_and(|id| data.sources.iter().any(|s| s.id == id))
     } else {
-        state
-            .selected
-            .as_deref()
-            .is_some_and(|id| data.task(id).is_some())
+        showing_task
     };
+    #[cfg(not(feature = "ai-workbench"))]
+    let showing = showing_task;
     if state.draft.is_some() || showing {
         if state.draft.is_none()
             && ui
                 .add(theme::icon_text_button(theme::Icon::Undo, "返回列表"))
                 .clicked()
         {
-            if state.view == View::Materials {
-                state.material_selected = None;
-            } else {
+            #[cfg(feature = "ai-workbench")]
+            {
+                if state.view == View::Materials {
+                    state.material_selected = None;
+                } else {
+                    state.selected = None;
+                }
+            }
+            #[cfg(not(feature = "ai-workbench"))]
+            {
                 state.selected = None;
             }
         }
         let height = ui.available_height().min(height);
         right(ui, store, state, data, height);
     } else {
-        middle(ui, store, knowledge, state, data, true, height);
+        middle(
+            ui,
+            store,
+            #[cfg(feature = "ai-workbench")]
+            knowledge,
+            state,
+            data,
+            true,
+            #[cfg(feature = "ai-workbench")]
+            height,
+        );
     }
 }
 
-fn top_bar(ui: &mut egui::Ui, store: &mut Store, state: &mut State) {
+fn top_bar(
+    ui: &mut egui::Ui,
+    #[cfg(feature = "ai-workbench")] store: &mut Store,
+    state: &mut State,
+) {
     ui.horizontal(|ui| {
         ui.heading("任务助手");
         ui.add_space(8.0);
         let width = (ui.available_width() - 300.0).clamp(140.0, 460.0);
         ui.add(theme::field(
             &mut state.query,
-            "搜索任务、负责人、进展、材料原文",
+            if cfg!(feature = "ai-workbench") {
+                "搜索任务、负责人、进展、材料原文"
+            } else {
+                "搜索任务、负责人、进展"
+            },
             width,
         ));
         if !state.query.is_empty()
@@ -438,10 +590,18 @@ fn top_bar(ui: &mut egui::Ui, store: &mut Store, state: &mut State) {
                 theme::Icon::Menu,
                 "更多",
             ))
-            .ui(ui, |ui| more_menu(ui, store, state));
+            .ui(ui, |ui| {
+                more_menu(
+                    ui,
+                    #[cfg(feature = "ai-workbench")]
+                    store,
+                    state,
+                )
+            });
             if theme::primary_icon_button(ui, theme::Icon::Plus, "新建任务").clicked() {
                 state.open_draft(Replace::Blank);
             }
+            #[cfg(feature = "ai-workbench")]
             if ui
                 .add(theme::secondary_icon_button(
                     theme::Icon::Paperclip,
@@ -457,7 +617,11 @@ fn top_bar(ui: &mut egui::Ui, store: &mut Store, state: &mut State) {
     });
 }
 
-fn more_menu(ui: &mut egui::Ui, store: &mut Store, state: &mut State) {
+fn more_menu(
+    ui: &mut egui::Ui,
+    #[cfg(feature = "ai-workbench")] store: &mut Store,
+    state: &mut State,
+) {
     ui.set_min_width(220.0);
     if ui
         .add(theme::menu_item(theme::Icon::Folder, "管理分类…"))
@@ -466,23 +630,26 @@ fn more_menu(ui: &mut egui::Ui, store: &mut Store, state: &mut State) {
         state.categories_open = true;
         ui.close();
     }
-    ui.separator();
-    let mut auto = state.cache.auto;
-    if ui
-        .checkbox(&mut auto, "新入库资料自动整理")
-        .on_hover_text("只处理之后新入库的资料，结果进「待整理建议」，不会自动采纳")
-        .changed()
+    #[cfg(feature = "ai-workbench")]
     {
-        match store.set_auto(auto) {
-            Ok(()) => state.ok(if auto {
-                "已开启：之后新入库的资料会自动整理"
-            } else {
-                "已关闭新入库资料自动整理"
-            }),
-            Err(e) => state.fail(format!("保存自动整理设置失败：{e:#}")),
+        ui.separator();
+        let mut auto = state.cache.auto;
+        if ui
+            .checkbox(&mut auto, "新入库资料自动整理")
+            .on_hover_text("只处理之后新入库的资料，结果进「待整理建议」，不会自动采纳")
+            .changed()
+        {
+            match store.set_auto(auto) {
+                Ok(()) => state.ok(if auto {
+                    "已开启：之后新入库的资料会自动整理"
+                } else {
+                    "已关闭新入库资料自动整理"
+                }),
+                Err(e) => state.fail(format!("保存自动整理设置失败：{e:#}")),
+            }
         }
+        ui.checkbox(&mut state.history_candidates, "显示已处理的建议");
     }
-    ui.checkbox(&mut state.history_candidates, "显示已处理的建议");
 }
 
 /// 页顶只放常驻可关的错误；成功提示在 [`toast`] 里浮在页面底部，几秒后自己消失。
@@ -516,6 +683,7 @@ fn messages(ui: &mut egui::Ui, state: &mut State) {
             state.error = None;
         }
     }
+    #[cfg(feature = "ai-workbench")]
     if state.view != View::Inbox
         && let Some(e) = state.extraction_error.clone()
     {
@@ -731,10 +899,12 @@ fn dialogs(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data: &Snaps
         }
     }
     categories::window(ui, store, state, data);
+    #[cfg(feature = "ai-workbench")]
     materials::delete_dialog(ui, store, state, data);
 }
 
 #[cfg(test)]
+#[cfg(feature = "ai-workbench")]
 mod eval;
 #[cfg(test)]
 mod tests;

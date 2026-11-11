@@ -13,6 +13,8 @@
 #   --output DIR      产物目录；缺省 <仓库>/dist/macos。
 #   --staging DIR     复用现成便携目录，跳过构建与组装。
 #   --skip-build      不重新 cargo build，直接用 target/release/gongwen-assistant。
+#   --edition ai|no-ai  选择编译版本，默认 ai。
+#   --binary FILE     使用已编译的可执行文件，跳过构建。
 #   --require-pi      必须包含 Pi 运行时（runtime/pi），缺失就失败；发布流水线用。
 #   -h, --help        显示帮助。
 #
@@ -61,6 +63,8 @@ STAGING=""
 OUTPUT_DIR=""
 SKIP_BUILD=0
 REQUIRE_PI=0
+EDITION=ai
+BIN=""
 
 # 旧三段式接口：<version> <staging-dir> <output-dir>（首参数不以 - 开头）。
 if [ $# -eq 3 ] && [ "${1#-}" = "$1" ]; then
@@ -89,6 +93,11 @@ else
                 SKIP_BUILD=1
                 shift
                 ;;
+            --edition | --binary)
+                [ $# -ge 2 ] || die "$1 缺少参数"
+                if [ "$1" = --edition ]; then EDITION="$2"; else BIN="$2"; SKIP_BUILD=1; fi
+                shift 2
+                ;;
             --require-pi)
                 REQUIRE_PI=1
                 shift
@@ -103,6 +112,15 @@ else
         esac
     done
 fi
+
+source "$PROJECT_ROOT/scripts/package-edition.sh"
+if [ "$EDITION" = no-ai ]; then
+    [ "$REQUIRE_PI" -eq 0 ] || die "--require-pi 仅适用于 AI 版"
+    BUNDLE_ID="com.billowsand.gongwen.no-ai"
+    APP_NAME="公文助手（非 AI 版）"
+    BUNDLE_NAME="GongwenAssistantNoAi.app"
+fi
+[ -z "$STAGING" ] || [ -z "$BIN" ] || die "--staging 与 --binary 不能一起使用"
 
 case "$(uname -s)" in
     Darwin) ;;
@@ -162,10 +180,19 @@ else
 
     if [ "$SKIP_BUILD" -eq 0 ]; then
         echo "==> cargo build --release --locked"
-        (cd "$PROJECT_ROOT" && cargo build --release --locked)
+        if [ "$EDITION" = ai ]; then
+            (cd "$PROJECT_ROOT" && cargo build --release --locked)
+        else
+            (cd "$PROJECT_ROOT" && CARGO_TARGET_DIR="$PROJECT_ROOT/target/no-ai-package" cargo build --release --locked --no-default-features --features task-assistant)
+            BIN="$PROJECT_ROOT/target/no-ai-package/release/gongwen-assistant"
+        fi
     fi
-    BIN="$PROJECT_ROOT/target/release/gongwen-assistant"
+    if [ -z "$BIN" ]; then
+        if [ "$EDITION" = ai ]; then BIN="$PROJECT_ROOT/target/release/gongwen-assistant"
+        else BIN="$PROJECT_ROOT/dist/editions/gongwen-assistant-no-ai"; fi
+    fi
     [ -f "$BIN" ] || die "找不到二进制：${BIN}（去掉 --skip-build 或先构建）"
+    check_package_binary "$BIN"
     cp "$BIN" "$STAGE/gongwen-assistant"
 
     # 按 runtime 清单校验并组装；缺平台清单时回退 SHA256SUMS.txt（与
@@ -179,6 +206,7 @@ else
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in '' | \#*) continue ;; esac
         read -r sum rel <<<"$line"
+        case "$rel" in pi/*) continue ;; esac
         src="$PROJECT_ROOT/runtime/$rel"
         [ -f "$src" ] || die "runtime 清单中的资产不存在：$src"
         actual="$(shasum -a 256 "$src" | awk '{print toupper($1)}')"
@@ -198,32 +226,42 @@ else
 
     # Pi 运行时：与字体 runtime 分开组装（SHA256SUMS 里没有它），复制进 staging。
     # 缺 manifest 说明没跑 stage-pi-runtime.sh；这一轮默认只警告，--require-pi 必须失败。
-    PI_SOURCE="$PROJECT_ROOT/runtime/pi"
-    if [ -f "$PI_SOURCE/manifest.json" ]; then
-        verify_pi_runtime "$PI_SOURCE"
-        rm -rf "$STAGE/runtime/pi"
-        cp -a "$PI_SOURCE" "$STAGE/runtime/pi"
-        chmod 755 "$STAGE/runtime/pi/bin/node"
-    elif [ "$REQUIRE_PI" -eq 1 ]; then
-        die "没有 Pi 运行时（${PI_SOURCE}/manifest.json）。先运行 scripts/stage-pi-runtime.sh --platform ${PI_PLATFORM} --force，或去掉 --require-pi"
-    else
-        echo "警告：未包含 Pi 运行时，智能写作将不可用（缺 ${PI_SOURCE}/manifest.json）" >&2
+    if [ "$EDITION" = ai ]; then
+        PI_SOURCE="$PROJECT_ROOT/runtime/pi"
+        if [ -f "$PI_SOURCE/manifest.json" ]; then
+            verify_pi_runtime "$PI_SOURCE"
+            rm -rf "$STAGE/runtime/pi"
+            cp -a "$PI_SOURCE" "$STAGE/runtime/pi"
+            chmod 755 "$STAGE/runtime/pi/bin/node"
+        elif [ "$REQUIRE_PI" -eq 1 ]; then
+            die "没有 Pi 运行时（${PI_SOURCE}/manifest.json）。先运行 scripts/stage-pi-runtime.sh --platform ${PI_PLATFORM} --force，或去掉 --require-pi"
+        else
+            echo "警告：未包含 Pi 运行时，智能写作将不可用（缺 ${PI_SOURCE}/manifest.json）" >&2
+        fi
+
     fi
 
-    for doc in README.md THIRD_PARTY_NOTICES.md LICENSE config.example.json; do
+    for doc in README.md THIRD_PARTY_NOTICES.md LICENSE; do
         [ -f "$PROJECT_ROOT/$doc" ] && cp "$PROJECT_ROOT/$doc" "$STAGE/"
     done
 
-    SKILL_SRC="$PROJECT_ROOT/skills/gongwen-markdown"
-    [ -f "$SKILL_SRC/SKILL.md" ] || die "技能包源目录不存在：$SKILL_SRC"
-    mkdir -p "$STAGE/skills"
-    command -v zip >/dev/null 2>&1 || die "找不到 zip 命令（打包技能包需要）"
-    (cd "$PROJECT_ROOT/skills" &&
-        zip -Xrq "$STAGE/skills/gongwen-markdown.skill" gongwen-markdown \
-            -x '*__pycache__*' -x '*.DS_Store')
+    if [ "$EDITION" = ai ]; then
+        cp "$PROJECT_ROOT/config.example.json" "$STAGE/"
+        SKILL_SRC="$PROJECT_ROOT/skills/gongwen-markdown"
+        [ -f "$SKILL_SRC/SKILL.md" ] || die "技能包源目录不存在：$SKILL_SRC"
+        mkdir -p "$STAGE/skills"
+        command -v zip >/dev/null 2>&1 || die "找不到 zip 命令（打包技能包需要）"
+        (cd "$PROJECT_ROOT/skills" &&
+            zip -Xrq "$STAGE/skills/gongwen-markdown.skill" gongwen-markdown \
+                -x '*__pycache__*' -x '*.DS_Store')
+
+    fi
 
     chmod 755 "$STAGE/gongwen-assistant"
 fi
+
+check_package_binary "$STAGE/gongwen-assistant"
+check_package_resources "$STAGE"
 
 # 与 Windows 便携包一致：项目自维护的 quan.txt 独立随包，不嵌入二进制；
 # mabiao.txt 只作旧机后备。
@@ -253,8 +291,9 @@ fi
 # 注意：node 不能在这里签——它随后还要按 manifest 校验 SHA-256；签名会改写文件，
 # 校验就过不去。随包 node 保留官方 Developer ID 签名（见下方 PI_DIR 段）。
 if [ -z "${GONGWEN_MACOS_SIGN_IDENTITY:-}" ]; then
-    codesign --force --sign - "$STAGE/gongwen-assistant"
-    codesign --verify --strict "$STAGE/gongwen-assistant"
+    cp "$STAGE/gongwen-assistant" "$BUILD_ROOT/gongwen-assistant"
+    codesign --force --sign - "$BUILD_ROOT/gongwen-assistant"
+    codesign --verify --strict "$BUILD_ROOT/gongwen-assistant"
 fi
 
 MACOS_DIR="$BUILD_ROOT/$BUNDLE_NAME/Contents/MacOS"
@@ -263,7 +302,11 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 # 可执行文件与 runtime/ 同级，对应 src/portable_runtime.rs 的查找逻辑
 # （current_exe().parent()/runtime）。
-cp "$STAGE/gongwen-assistant" "$MACOS_DIR/gongwen-assistant"
+if [ -f "$BUILD_ROOT/gongwen-assistant" ]; then
+    cp "$BUILD_ROOT/gongwen-assistant" "$MACOS_DIR/gongwen-assistant"
+else
+    cp "$STAGE/gongwen-assistant" "$MACOS_DIR/gongwen-assistant"
+fi
 cp -a "$STAGE/runtime" "$MACOS_DIR/runtime"
 chmod 755 "$MACOS_DIR/gongwen-assistant"
 
@@ -276,17 +319,20 @@ chmod 755 "$MACOS_DIR/gongwen-assistant"
 # manifest 逐项比哈希，文件一变就报「随包 Pi 运行时文件校验失败（bin/node）。请重装。」
 # 智能写作整条链随即不可用。需要 Developer ID 签名时在下面 .app 签名段处理 node，
 # 并在签完后回写 manifest。
-PI_DIR="$STAGE/runtime/pi"
-if [ -f "$PI_DIR/manifest.json" ]; then
-    verify_pi_runtime "$PI_DIR"
-    rm -rf "$MACOS_DIR/runtime/pi"
-    cp -a "$PI_DIR" "$MACOS_DIR/runtime/pi"
-    chmod 755 "$MACOS_DIR/runtime/pi/bin/node"
-else
-    if [ "$REQUIRE_PI" -eq 1 ]; then
-        die "staging 里没有 Pi 运行时（${PI_DIR}/manifest.json），但传了 --require-pi"
+if [ "$EDITION" = ai ]; then
+    PI_DIR="$STAGE/runtime/pi"
+    if [ -f "$PI_DIR/manifest.json" ]; then
+        verify_pi_runtime "$PI_DIR"
+        rm -rf "$MACOS_DIR/runtime/pi"
+        cp -a "$PI_DIR" "$MACOS_DIR/runtime/pi"
+        chmod 755 "$MACOS_DIR/runtime/pi/bin/node"
+    else
+        if [ "$REQUIRE_PI" -eq 1 ]; then
+            die "staging 里没有 Pi 运行时（${PI_DIR}/manifest.json），但传了 --require-pi"
+        fi
+        echo "警告：未包含 Pi 运行时，智能写作将不可用（缺 ${PI_DIR}/manifest.json）" >&2
     fi
-    echo "警告：未包含 Pi 运行时，智能写作将不可用（缺 ${PI_DIR}/manifest.json）" >&2
+
 fi
 
 # 随包 runtime 里的许可证、字体说明等普通文件从 zip 解出来可能带可执行位；
@@ -395,7 +441,7 @@ entry.sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
 ' "$MACOS_DIR/runtime/pi" || die "签名后回写 Pi 运行时 manifest 失败"
         verify_pi_runtime "$MACOS_DIR/runtime/pi"
-    else
+    elif [ "$EDITION" = ai ]; then
         echo "警告：没有随包 Pi 运行时，跳过 node 签名与 manifest 回写" >&2
     fi
     codesign --force --options runtime --timestamp \
@@ -427,7 +473,7 @@ case "$OUTPUT_DIR" in
 esac
 mkdir -p "$OUTPUT_DIR"
 
-DMG_NAME="gongwen-assistant-${VERSION}-macos-${ARCH}.dmg"
+DMG_NAME="gongwen-assistant${EDITION_SUFFIX}-${VERSION}-macos-${ARCH}.dmg"
 DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
 echo "==> 生成磁盘映像：$DMG_PATH"
 hdiutil create \

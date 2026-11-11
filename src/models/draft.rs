@@ -435,6 +435,7 @@ impl From<String> for ReviewNote {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(feature = "ai-workbench")]
 pub struct GeneratedDraft {
     pub markdown: String,
     pub title: String,

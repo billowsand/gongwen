@@ -793,6 +793,7 @@ impl Harness {
     }
 
     /// 画一帧完整起草页（`create_ui`），供 AI 写作版面的纸面测试查找纸签与纸张。
+    #[cfg(feature = "ai-workbench")]
     fn create_ui_frame(&mut self, size: egui::Vec2, events: Vec<egui::Event>) -> egui::FullOutput {
         self.clock += 1;
         let ctx = self.ctx.clone();
@@ -1791,6 +1792,7 @@ fn dragging_neither_rebuilds_the_atlas_nor_relayouts() {
 }
 
 /// 递归收集文字图形，返回 (文本, 屏幕矩形)。用于找纸签与工作稿正文的位置。
+#[cfg(feature = "ai-workbench")]
 fn shape_texts(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
     match shape {
         egui::epaint::Shape::Text(text) => out.push((
@@ -1807,6 +1809,7 @@ fn shape_texts(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>)
 }
 
 /// 递归收集填色矩形，返回 (屏幕矩形, 填充色)。用于区分稿纸与校样纸。
+#[cfg(feature = "ai-workbench")]
 fn shape_fills(shape: &egui::epaint::Shape, out: &mut Vec<(egui::Rect, egui::Color32)>) {
     match shape {
         egui::epaint::Shape::Rect(rect) => out.push((rect.rect, rect.fill)),
@@ -1819,6 +1822,7 @@ fn shape_fills(shape: &egui::epaint::Shape, out: &mut Vec<(egui::Rect, egui::Col
     }
 }
 
+#[cfg(feature = "ai-workbench")]
 fn texts_of(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
     let mut texts = Vec::new();
     for clipped in &output.shapes {
@@ -1827,6 +1831,7 @@ fn texts_of(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
     texts
 }
 
+#[cfg(feature = "ai-workbench")]
 fn fills_of(output: &egui::FullOutput) -> Vec<(egui::Rect, egui::Color32)> {
     let mut fills = Vec::new();
     for clipped in &output.shapes {
@@ -1836,12 +1841,14 @@ fn fills_of(output: &egui::FullOutput) -> Vec<(egui::Rect, egui::Color32)> {
 }
 
 /// 纸签在屏幕上锚定的脚线：纸签高 26，文字垂直居中，中心 + 13 即纸面上沿。
+#[cfg(feature = "ai-workbench")]
 fn tab_base(tab: egui::Rect) -> f32 {
     tab.center().y + 13.0
 }
 
 /// 锤子稿纸的 AI 写作版面只在源码模式（或正看 AI 稿）出现。
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn only_the_paper_theme_puts_the_work_copy_on_the_same_sheet() {
     use super::editor::uses_workspace_sheet;
     assert!(uses_workspace_sheet(true, PreviewMode::Source, true, false));
@@ -1872,6 +1879,7 @@ fn only_the_paper_theme_puts_the_work_copy_on_the_same_sheet() {
 /// 工作稿不再铺在木纹上、也不贴窗口左边。样张出到 tmp/。
 #[test]
 #[ignore = "出锤子稿纸 AI 工作稿样张，手动跑"]
+#[cfg(feature = "ai-workbench")]
 fn smartisan_ai_workspace_sample() {
     let size = egui::vec2(1200.0, 820.0);
     let mut harness = Harness::new();

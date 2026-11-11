@@ -25,7 +25,7 @@ pub mod flypy;
 pub mod scan;
 pub mod segmenter;
 
-use crate::knowledge::content_hash;
+use crate::content_hash::content_hash;
 use crate::models::{VocabularyCategory, VocabularyEntry};
 use crate::proofread;
 use anyhow::{Context, Result};

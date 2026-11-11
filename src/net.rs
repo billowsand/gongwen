@@ -25,13 +25,17 @@ const SCHEMES: [&str; 6] = ["http", "https", "socks4", "socks4a", "socks5", "soc
 /// 这些服务地址由用户配置，但内网中转、代理出错时可能吐出没完没了的数据；
 /// 不设上限，整段读进内存会把界面拖死。正常的 Chat Completions、embedding
 /// 批次都远小于它。
+#[cfg(feature = "ai-workbench")]
 pub(crate) const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 /// 流式响应单行（一个 SSE 事件）的上限：没有换行的「一行」不能无限长。
+#[cfg(feature = "ai-workbench")]
 pub(crate) const MAX_STREAM_LINE_BYTES: u64 = 16 * 1024 * 1024;
 /// 出错时的响应体只用来给人看，截到这么长就够了。
+#[cfg(feature = "ai-workbench")]
 const MAX_ERROR_BODY_BYTES: u64 = 64 * 1024;
 
 /// 读响应体，超过 [`MAX_RESPONSE_BYTES`] 就报错，不整段读进内存。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn read_body(response: reqwest::blocking::Response) -> Result<String> {
     use std::io::Read as _;
     let mut bytes = Vec::new();
@@ -49,6 +53,7 @@ pub(crate) fn read_body(response: reqwest::blocking::Response) -> Result<String>
 }
 
 /// 读出错时的响应体：最多读 [`MAX_ERROR_BODY_BYTES`]，读不到就给空串。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn read_error_body(response: reqwest::blocking::Response) -> String {
     use std::io::Read as _;
     let mut bytes = Vec::new();
@@ -73,6 +78,7 @@ fn current_proxy() -> ProxyConfig {
 ///
 /// Pi 的 Node host 在最小环境里运行（`env_clear` 后只放运行必需项），代理设置
 /// 不会自己传过去：不显式下发的话，开着代理的机器上 Pi 会连不上模型服务。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn proxy_env(config: &ProxyConfig) -> Vec<(String, String)> {
     proxy_env_from(config.mode, &config.url, &config.bypass, |name| {
         std::env::var(name).ok()
@@ -81,6 +87,7 @@ pub(crate) fn proxy_env(config: &ProxyConfig) -> Vec<(String, String)> {
 
 /// 纯换算：`lookup` 由调用方给（生产读进程环境，测试直接给固定值），
 /// 免得单测改进程环境变量与并行用例互相踩。
+#[cfg(any(test, feature = "ai-workbench"))]
 fn proxy_env_from(
     mode: ProxyMode,
     url: &str,
@@ -128,6 +135,7 @@ fn proxy_env_from(
 }
 
 /// 只收非空值，同名只留第一次出现的。
+#[cfg(any(test, feature = "ai-workbench"))]
 fn push_proxy_env(env: &mut Vec<(String, String)>, name: &str, value: &str) {
     let value = value.trim();
     if value.is_empty() || env.iter().any(|(saved, _)| saved.as_str() == name) {
@@ -142,6 +150,7 @@ pub fn client(target: &str, timeout_seconds: u64) -> Result<Client> {
 }
 
 /// 数据接口只能访问用户配置的地址，不能把自定义鉴权头或请求体转发到重定向目标。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn api_client(target: &str, timeout_seconds: u64) -> Result<Client> {
     let builder = Client::builder()
         .timeout(Duration::from_secs(timeout_seconds.max(5)))
@@ -150,6 +159,7 @@ pub(crate) fn api_client(target: &str, timeout_seconds: u64) -> Result<Client> {
 }
 
 /// 流式请求的连接超时。连不上就该立刻报，不必等生成上限。
+#[cfg(feature = "ai-workbench")]
 const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 为流式补全建一个客户端。
@@ -158,6 +168,7 @@ const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 读超时，而 `timeout` 管的是从连接到读完响应体的**总时长**。流式请求照搬它，
 /// 一篇长稿会在生成中途被掐断。这里只把连接卡紧，总时长放宽到原设置的四倍
 /// （至少十分钟）作最后保险；中途要停由用户点停止。
+#[cfg(feature = "ai-workbench")]
 pub fn stream_client(target: &str, timeout_seconds: u64) -> Result<Client> {
     let total = Duration::from_secs((timeout_seconds.max(5) * 4).max(600));
     let builder = Client::builder()

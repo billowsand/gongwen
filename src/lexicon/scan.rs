@@ -13,20 +13,24 @@ use std::path::PathBuf;
 
 /// 来源种类，写进 `lexicon_scans.source_kind`。改名会让旧记账失配，别改。
 pub const SOURCE_MANUSCRIPT: &str = "manuscript";
+#[cfg(feature = "ai-workbench")]
 pub const SOURCE_KNOWLEDGE: &str = "knowledge";
 
 /// 扫描范围。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(feature = "ai-workbench"), derive(Default))]
 pub struct ScanOptions {
     /// 把草稿也算进语料。默认关：草稿里半成品错字最多，是词表噪声的主要来源。
     pub include_drafts: bool,
     /// 把知识库里从外部 markdown 导入的文档也算进语料。
     /// 从稿件库勾选入库的那些不算——它们是稿件的副本，算两遍等于篇数翻倍。
+    #[cfg(feature = "ai-workbench")]
     pub include_knowledge: bool,
     /// 全部重扫：忽略哈希记账，把每个来源都当成新的。
     pub rescan_all: bool,
 }
 
+#[cfg(feature = "ai-workbench")]
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
@@ -117,12 +121,15 @@ pub fn run_scan_with<F: Fn(usize, usize, String)>(
     // 它们上次贡献的词频必须跟着消失，否则口径改了而数字不动。
     // 草稿那一路不用特殊处理——不勾选时它们本来就不在 `sources` 里，
     // 会被上面这次 forget 一并清掉。
-    let knowledge_ids: Vec<i64> = sources
-        .iter()
-        .filter(|source| source.kind == SOURCE_KNOWLEDGE)
-        .map(|source| source.id)
-        .collect();
-    summary.forgotten += store.forget_missing_sources(SOURCE_KNOWLEDGE, &knowledge_ids)?;
+    #[cfg(feature = "ai-workbench")]
+    {
+        let knowledge_ids: Vec<i64> = sources
+            .iter()
+            .filter(|source| source.kind == SOURCE_KNOWLEDGE)
+            .map(|source| source.id)
+            .collect();
+        summary.forgotten += store.forget_missing_sources(SOURCE_KNOWLEDGE, &knowledge_ids)?;
+    }
 
     let known = if options.rescan_all {
         HashMap::new()
@@ -209,6 +216,7 @@ fn collect_sources(db_path: &std::path::Path, options: &ScanOptions) -> Result<V
         }
     }
 
+    #[cfg(feature = "ai-workbench")]
     if options.include_knowledge {
         // source='manuscript' 的文档是稿件副本，算两遍会让篇数凭空翻倍。
         let mut stmt = conn.prepare(

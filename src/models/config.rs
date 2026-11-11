@@ -5,33 +5,45 @@
 
 use crate::models::{
     DEFAULT_TRANSMIT_TASKS, DiagramTheme, EditorFontScheme, ExportSelection, FontConfig, ImeConfig,
-    LmStudioConfig, ModelRef, ModelRefError, NumberingConfig, PROVIDER_PRESETS, PaperMode,
-    PrintConfig, ProofreadConfig, ProviderConfig, ProxyConfig, RagConfig, ReasoningEffort,
-    ReasoningFormat, RerankMode, ReviseModelConfig, RibbonTab, SecurityRules, TemplateKind,
-    TemplateProfile, ThemeName, VocabularyEntry, VocabularySetupStatus, preset_for_url,
+    NumberingConfig, PaperMode, PrintConfig, ProofreadConfig, ProxyConfig, RibbonTab,
+    SecurityRules, TemplateKind, TemplateProfile, ThemeName, VocabularyEntry,
+    VocabularySetupStatus,
 };
+#[cfg(feature = "ai-workbench")]
+use crate::models::{
+    LmStudioConfig, ModelRef, ModelRefError, PROVIDER_PRESETS, ProviderConfig, RagConfig,
+    ReasoningEffort, ReasoningFormat, RerankMode, ReviseModelConfig, preset_for_url,
+};
+#[cfg(feature = "ai-workbench")]
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "ai-workbench")]
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+    #[cfg(feature = "ai-workbench")]
     pub lm_studio: LmStudioConfig,
     /// 模型服务提供商清单：地址与密钥的唯一存放处（「AI 管理 → 模型服务商管理」）。
+    #[cfg(feature = "ai-workbench")]
     pub providers: Vec<ProviderConfig>,
     /// 文字起草用的模型（引用 providers 中的一项）。
+    #[cfg(feature = "ai-workbench")]
     pub draft_model: ModelRef,
     /// 起草服务不可用且尚未输出时，本次调用使用的备用对话模型。
+    #[cfg(feature = "ai-workbench")]
     pub draft_backup_model: ModelRef,
     /// 智能写作（Pi）独立选择的模型。旧配置没有该字段时为空；为空就明确提示，
     /// 不偷偷回落到起草模型。地址与密钥仍只存在 providers 里。
     #[serde(default)]
+    #[cfg(feature = "ai-workbench")]
     pub pi_model: ModelRef,
     /// 智能写作（Pi）自己的生成参数（目前只有思考深度）。旧配置没有该字段时为空，
     /// 由 `migrate_pi_options` 一次性按原来实际用的深度补上，之后与文字起草的设置互不影响。
     /// 窗口与输出预算由程序自动管理，不放用户旋钮。
     #[serde(default)]
+    #[cfg(feature = "ai-workbench")]
     pub pi_options: Option<PiOptions>,
     pub output_dir: String,
     pub vocabulary: Vec<VocabularyEntry>,
@@ -50,6 +62,7 @@ pub struct AppConfig {
     /// 打印对话框记住的选择（上次用的打印机）。
     pub print: PrintConfig,
     /// AI 起草或优化完成后是否立即按勾选格式导出一次。
+    #[cfg(feature = "ai-workbench")]
     pub auto_export: bool,
     /// 定时与切标签时把改动静默写回稿件库。关掉就只认主快捷键+S。
     #[serde(default = "auto_save_default")]
@@ -96,10 +109,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub samples_seeded: bool,
     /// 知识库检索增强（RAG）配置。
+    #[cfg(feature = "ai-workbench")]
     pub rag: RagConfig,
     /// 校对词表的用户层：对内置条目的改动与自建条目。
     pub proofread: ProofreadConfig,
     /// 文字复核用的小模型接入。与起草模型相互独立。
+    #[cfg(feature = "ai-workbench")]
     pub revise_model: ReviseModelConfig,
     /// 访问模型服务的网络代理。旧配置没有该字段时按「跟随系统」补齐。
     pub proxy: ProxyConfig,
@@ -133,11 +148,17 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "ai-workbench")]
             lm_studio: LmStudioConfig::default(),
+            #[cfg(feature = "ai-workbench")]
             providers: Vec::new(),
+            #[cfg(feature = "ai-workbench")]
             draft_model: ModelRef::default(),
+            #[cfg(feature = "ai-workbench")]
             draft_backup_model: ModelRef::default(),
+            #[cfg(feature = "ai-workbench")]
             pi_model: ModelRef::default(),
+            #[cfg(feature = "ai-workbench")]
             pi_options: None,
             output_dir: String::new(),
             vocabulary: vec![],
@@ -151,6 +172,7 @@ impl Default for AppConfig {
             transmit_tasks: Vec::new(),
             transmit_defaults: TransmitDefaults::default(),
             print: PrintConfig::default(),
+            #[cfg(feature = "ai-workbench")]
             auto_export: false,
             auto_save: true,
             auto_save_interval_secs: DEFAULT_AUTO_SAVE_INTERVAL_SECS,
@@ -167,8 +189,10 @@ impl Default for AppConfig {
             ui_scale: 1.0,
             update_check_url: default_update_check_url(),
             samples_seeded: false,
+            #[cfg(feature = "ai-workbench")]
             rag: RagConfig::default(),
             proofread: ProofreadConfig::default(),
+            #[cfg(feature = "ai-workbench")]
             revise_model: ReviseModelConfig::default(),
             proxy: ProxyConfig::default(),
             fonts: FontConfig::default(),
@@ -201,15 +225,18 @@ impl AppConfig {
             .clamp(AUTO_SAVE_INTERVAL_MIN_SECS, AUTO_SAVE_INTERVAL_MAX_SECS)
     }
 
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn provider(&self, id: &str) -> Option<&ProviderConfig> {
         self.providers.iter().find(|p| p.id == id)
     }
 
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn provider_mut(&mut self, id: &str) -> Option<&mut ProviderConfig> {
         self.providers.iter_mut().find(|p| p.id == id)
     }
 
     /// 下一个可用的提供商 id（`p1`、`p2`…，取数字后缀最大值加一）。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn next_provider_id(&self) -> String {
         let max = self
             .providers
@@ -222,6 +249,7 @@ impl AppConfig {
     }
 
     /// 校验并取出功能引用的提供商。错误消息直接给用户看。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn require_provider(
         &self,
         id: &str,
@@ -250,6 +278,7 @@ impl AppConfig {
     /// 起草模型（对话）的完整接入配置：提供商的地址密钥 + 功能侧的生成参数。
     ///
     /// 旧配置的内联字段（迁移前 / 测试直填）优先于引用，保证两条路都能跑。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn draft_chat(&self) -> Result<LmStudioConfig, ModelRefError> {
         let mut config = self.lm_studio.clone();
         if self.draft_model.is_empty() {
@@ -274,6 +303,7 @@ impl AppConfig {
     ///
     /// 这些调用不需要多步工具循环，但需要理解与表达；2026-11-05 起不再单独维护「辅助模型」。
     /// 旧配置只选了文字起草模型时回落到它，避免升级后这些功能直接不可用。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn aux_chat(&self) -> Result<LmStudioConfig, ModelRefError> {
         // 选了 Pi 就以 Pi 为准：提供商被删 / 停用要如实报错，不能偷偷用旧起草模型。
         // 只有完全没选 Pi 的旧配置才回落 `draft_model`（兼容升级前的机器）。
@@ -288,6 +318,7 @@ impl AppConfig {
     }
 
     /// Pi 只认独立模型；上下文自动按该服务与模型解析，不继承小模型的手动窗口和输出上限。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn pi_chat(&self) -> Result<LmStudioConfig, ModelRefError> {
         if self.pi_model.is_empty() {
             return Err(ModelRefError(
@@ -309,6 +340,7 @@ impl AppConfig {
     }
 
     /// Pi 的生成参数：旧配置还没迁移时按 Pi 默认值解析（不回写，迁移在启动时做）。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn pi_options(&self) -> PiOptions {
         self.pi_options.clone().unwrap_or_default()
     }
@@ -318,6 +350,7 @@ impl AppConfig {
     /// 旧版 Pi 直接沿用文字起草的 `reasoning_effort`；这里把它复制成 `pi_options`，之后
     /// 改起草设置不再影响 Pi。旧配置没有 Pi 模型（本来也启动不了 Pi）时用 Pi 默认值。
     /// 与提供商迁移无关，单独由 `storage::load_config` 接入。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn migrate_pi_options(&mut self) -> bool {
         if self.pi_options.is_some() {
             return false;
@@ -336,6 +369,7 @@ impl AppConfig {
     ///
     /// 2026-11-05 起「文字复核」是唯一保留的专门小模型；`assist` 只为旧会话回放保留，
     /// 新流程的一次性辅助调用走 [`Self::aux_chat`]。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn revise_chat(&self, assist: bool) -> Result<LmStudioConfig, ModelRefError> {
         let revise = &self.revise_model;
         let mut config = if revise.enabled && !revise.model_ref.is_empty() {
@@ -382,10 +416,12 @@ impl AppConfig {
     }
 
     /// 智能体辅助步骤用的接入配置（原 `agent::backend::assist_config`）。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn assist_chat(&self) -> Result<LmStudioConfig, ModelRefError> {
         self.revise_chat(true)
     }
 
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn backup_chat(
         &self,
         model: &ModelRef,
@@ -404,6 +440,7 @@ impl AppConfig {
         Ok(Some(config))
     }
 
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn draft_backup_chat(&self) -> Result<Option<LmStudioConfig>, ModelRefError> {
         self.backup_chat(
             &self.draft_backup_model,
@@ -414,6 +451,7 @@ impl AppConfig {
 
     /// 一次性写作模型的备用解析：选了 Pi 就没有旧起草备用语义；旧配置未选 Pi 时，
     /// 仍可沿用 `draft_backup_model` 兼容旧调用。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn aux_backup_chat(&self) -> Result<Option<LmStudioConfig>, ModelRefError> {
         if !self.pi_model.is_empty() {
             return Ok(None);
@@ -421,6 +459,7 @@ impl AppConfig {
         self.draft_backup_chat()
     }
 
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn revise_backup_chat(
         &self,
         assist: bool,
@@ -447,6 +486,7 @@ impl AppConfig {
     /// 智能体辅助角色的备用模型：配了复核备用就用它；没配、而辅助角色此刻用的就是起草
     /// 模型（复核没启用或没选模型，见 [`Self::revise_chat`]）时，沿用起草的备用（温度 0）——
     /// 否则起草模型一挂，起草调用换了备用，澄清、核对、自主步骤这些辅助调用却直接失败。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn assist_backup_chat(&self) -> Result<Option<LmStudioConfig>, ModelRefError> {
         if let Some(own) = self.revise_backup_chat(true)? {
             return Ok(Some(own));
@@ -466,6 +506,7 @@ impl AppConfig {
     /// 解析后的知识库配置：embedding / rerank 的地址密钥从提供商填好，
     /// 其余检索参数原样保留。提供商失效时不报错而是留空地址——检索路径
     /// 已有「embedding 不可用就退回关键词检索」的降级与告警，界面另有警示芯片。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn resolved_rag(&self) -> RagConfig {
         let mut rag = self.rag.clone();
         if !rag.embedding.model_ref.is_empty() {
@@ -500,6 +541,7 @@ impl AppConfig {
     }
 
     /// 当前 embedding 模型的名字（解析引用后）。建索引与「换模型提示重建」用它。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn embedding_model_name(&self) -> String {
         if !self.rag.embedding.model_ref.is_empty() {
             return self.rag.embedding.model_ref.model.trim().to_string();
@@ -509,6 +551,7 @@ impl AppConfig {
 
     /// 状态栏上起草模型的显示名：模型（提供商）。
     /// 状态栏显示的写作模型名（带提供商）。没选 Pi 时为空，不回落到旧起草模型。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn pi_model_label(&self) -> String {
         let model = self.pi_model.model.trim();
         if model.is_empty() {
@@ -526,6 +569,7 @@ impl AppConfig {
     /// 同一个「地址 + 密钥」只建一条。提供商按地址
     /// 匹配预设起名（127.0.0.1:1234 → LM Studio，dmxapi → DMXAPI……），认不出
     /// 的叫「自定义提供商」。迁移后清空旧内联字段，返回是否发生了改动。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn migrate_providers(&mut self) -> bool {
         if !self.providers.is_empty() {
             // 旧版 Go 模板漏了地址，只修复原名且地址仍为空的条目，保留自定义连接。
@@ -635,6 +679,7 @@ impl AppConfig {
 }
 
 /// 迁移用的归并助手：同一个「地址 + 密钥」只留一条提供商，返回其 id。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn upsert_provider(
     providers: &mut Vec<ProviderConfig>,
     base_url: &str,
@@ -776,11 +821,13 @@ pub(crate) fn source_navigation_default() -> bool {
 /// 与 `LmStudioConfig` 里的起草参数彻底分开——改文字起草的思考深度不影响 Pi。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[cfg(feature = "ai-workbench")]
 pub struct PiOptions {
     /// 思考深度。默认「沿用服务端」：不发深度参数，兼容不认该参数的服务。
     pub reasoning_effort: ReasoningEffort,
 }
 
+#[cfg(feature = "ai-workbench")]
 impl Default for PiOptions {
     fn default() -> Self {
         Self {

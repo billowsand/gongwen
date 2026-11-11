@@ -15,6 +15,30 @@ Inno Setup **6.3 或更新**：`.iss` 与 `scripts/ChineseSimplified.isl` 都按
 用的是 6.3 引入的 `x64compatible` 架构标识、且不再包含 6.5 前才有的 `FileExists` /
 `ExistingFileNewer` 消息（旧版编译时会给“架构标识废弃”“消息名不认识”的告警）。
 
+## 从已编译的二进制打包两版
+
+运行 `python3 scripts/build-editions.py` 生成双版二进制。Arch 构建加 `--linux-dialogs portal`，Windows 可用 `py -3`。两版打包均需要已有的字体运行时。AI 版发布包还需要按目标平台准备 Pi 运行时。
+
+**macOS**
+
+```bash
+bash scripts/package-dmg.sh --binary dist/editions/gongwen-assistant --require-pi
+bash scripts/package-dmg.sh --edition no-ai --binary dist/editions/gongwen-assistant-no-ai
+```
+
+**Windows**
+
+```powershell
+./scripts/package-dev.ps1 -BinaryPath dist/editions/gongwen-assistant.exe
+./scripts/package-dev.ps1 -Edition no-ai -BinaryPath dist/editions/gongwen-assistant-no-ai.exe
+```
+
+`package-dev.ps1` 生成开发版安装程序。发布流程调用 `package-portable.ps1` 和 `package-installer.ps1` 生成正式版，非 AI 版安装包名为 `gongwen-assistant-no-ai-<版本>-win-x64-setup.exe`。
+
+**Linux**
+
+先用 `stage-linux-portable.sh <binary> <runtime-dir> <staging-dir> <ai|no-ai>` 分别组装两版。随后用 `package-deb.sh` 或 `package-arch-pkg.sh`，按 `<版本> <staging-dir> <output-dir> <架构> <ai|no-ai>` 传参。Arch 本机也可用 `bash scripts/package-arch-local.sh --edition no-ai --no-install` 打包。
+
 ## 在 Omarchy / Arch Linux 安装
 
 Release 提供 x86_64 的 Arch 软件包（Omarchy 4 的 amd64 机器直接用）。下载后离线安装：
@@ -28,7 +52,7 @@ pacman -U ./gongwen-assistant-<版本>-1-x86_64.pkg.tar.zst
 要从源码构建相同变体时使用：
 
 ```bash
-cargo build --release --locked --no-default-features --features linux-portal-dialogs
+cargo build --release --locked --no-default-features --features ai,linux-portal-dialogs
 ```
 
 文件选择依赖 `xdg-desktop-portal-gtk`；应用内直接打印还需要可提供 `lp` 命令的 CUPS

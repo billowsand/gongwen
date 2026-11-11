@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+#[cfg(any(test, feature = "ai-workbench"))]
 use std::fmt;
 
 /// 模型服务提供商预设模板。预设只是模板：点「添加」才实例化成一条
@@ -171,6 +172,7 @@ impl ModelKind {
 /// 给一个模型定用途类别。`probed` 是服务原生接口自报的类型（没有就 None）。
 ///
 /// rerank 关键词最具体，永远优先：服务把 reranker 报成普通 llm 也不耽误。
+#[cfg(any(test, feature = "ai-workbench"))]
 pub(crate) fn classify_model(name: &str, probed: Option<ModelKind>) -> ModelKind {
     let lower = name.to_lowercase();
     if lower.contains("rerank") {
@@ -249,14 +251,17 @@ impl ModelRef {
 
 /// 模型引用解析失败：提供商被删、被停用或没填地址。消息直接给用户看。
 #[derive(Debug, Clone)]
+#[cfg(any(test, feature = "ai-workbench"))]
 pub struct ModelRefError(pub String);
 
+#[cfg(any(test, feature = "ai-workbench"))]
 impl fmt::Display for ModelRefError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
+#[cfg(any(test, feature = "ai-workbench"))]
 impl std::error::Error for ModelRefError {}
 
 /// 思考深度由模型服务解释；默认不发送参数，兼容旧配置和非思考模型。
@@ -290,6 +295,7 @@ impl ReasoningEffort {
         }
     }
 
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub(crate) fn wire_value(self) -> Option<&'static str> {
         match self {
             Self::Default => None,
@@ -353,48 +359,6 @@ impl Default for LmStudioConfig {
     }
 }
 
-/// 访问模型服务时走哪条网络通道。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ProxyMode {
-    /// 一律直连，连环境变量里的代理也不认。
-    Direct,
-    /// 跟随系统：先看 `HTTPS_PROXY` / `ALL_PROXY` 等环境变量，没设再读 Windows
-    /// 「设置 → 网络 → 代理」（macOS 读系统偏好）。
-    #[default]
-    System,
-    /// 用下面填的代理地址。
-    Custom,
-}
-
-impl ProxyMode {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Direct => "直连",
-            Self::System => "跟随系统",
-            Self::Custom => "自定义代理",
-        }
-    }
-
-    pub const ALL: [Self; 3] = [Self::Direct, Self::System, Self::Custom];
-}
-
-/// 网络代理。起草、复核、知识库的 embedding / rerank 请求都走这一条通道。
-///
-/// 本机地址（localhost、127.0.0.0/8、::1）不论哪种模式都直连：本地模型服务
-/// 绕到代理上再折回来，轻则多一跳，重则被代理规则拦下。
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ProxyConfig {
-    pub mode: ProxyMode,
-    /// 代理地址，如 `http://127.0.0.1:7890`、`socks5h://127.0.0.1:1080`。
-    /// 用户名密码写在地址里：`socks5://user:pass@host:port`。
-    pub url: String,
-    /// 自定义代理下不走代理的地址，逗号分隔；支持域名（含子域）、IP 与网段，
-    /// 如 `intranet.gov.cn, 10.0.0.0/8`。
-    pub bypass: String,
-}
-
 /// 文字复核用的小模型接入。
 ///
 /// 与起草模型分开配是这一层的前提：起草要发挥，需要大模型和一点温度；逐句
@@ -448,19 +412,24 @@ impl Default for ReviseModelConfig {
             context_window: 0,
             max_sentence_chars: 120,
             max_sentences: 200,
+            #[cfg(feature = "ai-workbench")]
             disabled_tasks: crate::revise_model::DEFAULT_DISABLED_TASKS
                 .iter()
                 .map(|id| (*id).to_string())
                 .collect(),
+            #[cfg(not(feature = "ai-workbench"))]
+            disabled_tasks: Vec::new(),
         }
     }
 }
 
 impl ReviseModelConfig {
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub(crate) fn task_enabled(&self, id: &str) -> bool {
         !self.disabled_tasks.iter().any(|item| item == id)
     }
 
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub(crate) fn set_task_enabled(&mut self, id: &str, enabled: bool) {
         self.disabled_tasks.retain(|item| item != id);
         if !enabled {
@@ -469,6 +438,7 @@ impl ReviseModelConfig {
     }
 
     /// 当前启用的检查器。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn enabled_tasks(&self) -> Vec<&'static crate::revise_model::ReviseTask> {
         crate::revise_model::TASKS
             .iter()
@@ -477,6 +447,7 @@ impl ReviseModelConfig {
     }
 
     /// 解析成一次真正可用的接入配置。温度固定为 0：复核要的是可复现，不是发挥。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub(crate) fn resolve(&self, draft_model: &LmStudioConfig) -> LmStudioConfig {
         let pick = |own: &str, fallback: &str| {
             if own.trim().is_empty() {

@@ -8,6 +8,9 @@
 # 基础词表由 package-portable 独立复制，修改词表无需重新编译。
 param(
     [string]$Version = "",
+    [ValidateSet("ai", "no-ai")]
+    [string]$Edition = "ai",
+    [string]$BinaryPath = "",
     [switch]$SkipBuild
 )
 
@@ -24,23 +27,10 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
     $Version = "{0}.{1}.{2}-dev" -f $parts[0], $parts[1], ([int]$parts[2] + 1)
 }
 
-if (-not $SkipBuild) {
-    Push-Location $projectRoot
-    try {
-        cargo build --release --locked
-        if ($LASTEXITCODE -ne 0) {
-            throw "cargo build --release --locked failed with exit code $LASTEXITCODE"
-        }
-    }
-    finally {
-        Pop-Location
-    }
-}
-
-# 两个子脚本自带 $ErrorActionPreference="Stop"，失败会以终止错误向上抛，
-# 不需要（也不能）用 $LASTEXITCODE 检查它们的退出码——那个变量只对原生命令有效。
+$editionSuffix = if ($Edition -eq "ai") { "" } else { "-no-ai" }
+$staging = Join-Path $projectRoot "dist/win-x64-full$editionSuffix"
 & (Join-Path $PSScriptRoot "package-portable.ps1") `
-    -Suffix win-x64 -Force -SkipBuild `
-    -OutputDir (Join-Path $projectRoot "dist\win-x64-full")
+    -Edition $Edition -BinaryPath $BinaryPath -Suffix win-x64 -Force -SkipBuild:$SkipBuild `
+    -OutputDir $staging
 
-& (Join-Path $PSScriptRoot "package-installer.ps1") -Version $Version -Force
+& (Join-Path $PSScriptRoot "package-installer.ps1") -Edition $Edition -Version $Version -SourceDir $staging -Force

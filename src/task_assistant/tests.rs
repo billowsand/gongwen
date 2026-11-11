@@ -476,6 +476,7 @@ fn task_assistant_fill_rejects_protocol_and_keeps_only_eligible_context() {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_fill_skill_covers_the_six_fields_and_delivery_contract() {
     use crate::pi_agent::skills;
     let text = skills::builtin_text(skills::TASK_FILL_SKILL).expect("填写技能已内置");

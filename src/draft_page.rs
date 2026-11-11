@@ -10,9 +10,11 @@ use crate::app::{DraftAction, VersionSwitchPrompt, WorkerResult};
 use crate::export;
 use crate::highlight::MarkdownHighlighter;
 use crate::manuscript::ManuscriptStore;
+#[cfg(feature = "ai-workbench")]
+use crate::models::GeneratedDraft;
 use crate::models::{
-    AppConfig, DraftInput, ExportSelection, GeneratedDraft, ManuscriptStatus, ResearchMetadata,
-    ReviewNote, TemplateKind, TemplateProfile,
+    AppConfig, DraftInput, ExportSelection, ManuscriptStatus, ResearchMetadata, ReviewNote,
+    TemplateKind, TemplateProfile,
 };
 use crate::theme;
 use eframe::egui;
@@ -30,6 +32,7 @@ mod citation_marks;
 mod diff_editor;
 mod diff_gaps;
 pub(crate) mod diff_hunks;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use editor::paint_editor_line_numbers;
 mod editor;
 mod editor_keys;
@@ -54,8 +57,10 @@ mod tasks;
 mod timeline;
 mod version_diff;
 mod versions;
+#[cfg(feature = "ai-workbench")]
 pub(crate) mod writing;
 
+#[cfg(feature = "ai-workbench")]
 pub(crate) use diff_editor::replace_with_undo;
 pub(crate) use editor::{PreviewAnchor, editor_id};
 pub(crate) use find::{
@@ -74,7 +79,10 @@ pub(crate) use markdown::table_column_count;
 pub(crate) use navigator::PreviewScroll;
 pub(crate) use source_nav::{SourceMinimap, SourceOutline};
 pub(crate) use table::{TableOp, table_grid_picker};
-pub(crate) use tasks::{review_notes, reviewed_draft};
+#[cfg(feature = "ai-workbench")]
+pub(crate) use tasks::review_notes;
+#[cfg(feature = "ai-workbench")]
+pub(crate) use tasks::reviewed_draft;
 pub(crate) use timeline::VersionTimelineState;
 // test-only names: only compiled in test builds (kept for the root test modules)
 #[cfg(test)]
@@ -364,6 +372,7 @@ pub(crate) type DocKey = u64;
 
 /// AI 返回但尚未落入正文的修改提案。接受前复用版本对照视图，并对关键事实变化
 /// 另设确认门槛。
+#[cfg(feature = "ai-workbench")]
 pub(crate) struct AiProposal {
     pub(crate) before: String,
     pub(crate) result: GeneratedDraft,
@@ -478,19 +487,25 @@ pub(crate) struct DraftSession {
     /// 本篇已发起的后台任务序号；结果回投时对不上就说明已被新任务取代。
     pub(crate) job_seq: u64,
     /// 本次优化用的提示词名称，只用于完成后的状态栏文案。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) ai_prompt_last_label: String,
     /// 后台任务开始时冻结的审校稿；需要审阅的 AI 结果回来后与它做差异对照。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) ai_review_baseline: Option<String>,
     /// 尚未接受的 AI 修改提案。提案不参与自动保存，也不能直接导出。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) ai_proposal: Option<AiProposal>,
     /// 右侧 AI 侧栏：输入区、任务流与停止开关。按稿件各存一份，只在内存里。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) ai_panel: crate::ai_panel::AiPanel,
     /// 独立于聊天的固定六阶段写作任务。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) writing: writing::WritingPanel,
     /// 本篇待确认的修订建议。词表、文档规则与模型检查器共用这一份。
     pub(crate) revisions: crate::revision::RevisionSet,
     /// 逐句复核的结论缓存：句子指纹 → 模型原话。改了别处的句子不必重问一遍，
     /// 这是「一轮几十次本地推理」能反复跑的前提。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) revise_cache: std::collections::BTreeMap<u64, Option<String>>,
     /// 上次写入稿件库时的内容基线：`(要素 JSON, 正文)`。为 None 表示这篇
     /// 还没入过库。脏判定就是拿它和当前内容比。
@@ -564,6 +579,7 @@ impl DraftSession {
         {
             draft.profile.document_year = draft.document_year();
         }
+        #[cfg(feature = "ai-workbench")]
         let writing = writing::WritingPanel::new(draft.kind);
         let mut session = Self {
             key,
@@ -612,12 +628,18 @@ impl DraftSession {
             highlighter: MarkdownHighlighter::default(),
             busy: false,
             job_seq: 0,
+            #[cfg(feature = "ai-workbench")]
             ai_prompt_last_label: String::new(),
+            #[cfg(feature = "ai-workbench")]
             ai_review_baseline: None,
+            #[cfg(feature = "ai-workbench")]
             ai_proposal: None,
+            #[cfg(feature = "ai-workbench")]
             ai_panel: crate::ai_panel::AiPanel::default(),
+            #[cfg(feature = "ai-workbench")]
             writing,
             revisions: crate::revision::RevisionSet::default(),
+            #[cfg(feature = "ai-workbench")]
             revise_cache: std::collections::BTreeMap::new(),
             saved_baseline: None,
             committed_baseline: None,
@@ -768,16 +790,53 @@ impl DraftSession {
         }
     }
 
+    pub(crate) fn ai_running(&self) -> bool {
+        #[cfg(feature = "ai-workbench")]
+        {
+            self.ai_panel.running()
+        }
+        #[cfg(not(feature = "ai-workbench"))]
+        {
+            false
+        }
+    }
+
+    pub(crate) fn ai_workspace_open(&self) -> bool {
+        #[cfg(feature = "ai-workbench")]
+        {
+            self.ai_panel.workspace_view.is_some()
+        }
+        #[cfg(not(feature = "ai-workbench"))]
+        {
+            false
+        }
+    }
+
+    pub(crate) fn writing_history_open(&self) -> bool {
+        #[cfg(feature = "ai-workbench")]
+        {
+            self.writing.open
+        }
+        #[cfg(not(feature = "ai-workbench"))]
+        {
+            false
+        }
+    }
+
     /// 换稿（载入别的记录或别的版本）后要清掉的一次性状态。
     pub(crate) fn reset_transient(&mut self) {
         self.output_files.clear();
         self.export_error = None;
         self.clear_review_confirm = false;
         self.heading_focus = None;
-        self.ai_review_baseline = None;
-        self.ai_proposal = None;
+        #[cfg(feature = "ai-workbench")]
+        {
+            self.ai_review_baseline = None;
+            self.ai_proposal = None;
+        }
         // 建议锚在正文上，换了正文就全部失效；忽略记录也只对这一篇成立。
         self.revisions.clear();
+        #[cfg(feature = "ai-workbench")]
         self.revise_cache.clear();
         self.preview_anchor = None;
         self.preview_selection = None;

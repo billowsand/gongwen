@@ -49,6 +49,7 @@ pub(super) fn label(
     }
 }
 
+#[cfg(feature = "ai-workbench")]
 pub(super) fn match_name<'a>(vocab: &'a [VocabularyEntry], text: &str) -> Vec<&'a VocabularyEntry> {
     let text = text.trim();
     if text.is_empty() {

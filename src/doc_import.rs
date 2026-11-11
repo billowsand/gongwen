@@ -14,8 +14,10 @@ pub(crate) mod structure;
 use crate::app::file_dialog::FileDialogSpec;
 use crate::models::ResearchMetadata;
 use anyhow::{Context, Result, anyhow, bail};
+#[cfg(any(test, feature = "ai-workbench"))]
 use regex::Regex;
 use std::path::{Component, Path, PathBuf};
+#[cfg(any(test, feature = "ai-workbench"))]
 use std::sync::OnceLock;
 
 /// 走 `anydoc` 转换的二进制文档格式，全部小写。
@@ -55,6 +57,7 @@ pub(crate) fn file_dialog_spec() -> FileDialogSpec {
 }
 
 /// 知识库导入的文件选择框参数（可多选）。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn knowledge_files_spec() -> FileDialogSpec {
     filtered_spec(FileDialogSpec::pick_files())
 }
@@ -197,6 +200,7 @@ pub(crate) fn to_markdown(path: &Path) -> Result<String> {
 
 /// 知识库导入用的转换：给没用标题样式的公文补出章节标题（见 [`promote_headings`]）。
 /// Markdown 原文作者自己排过结构，不动。
+#[cfg(any(test, feature = "ai-workbench"))]
 pub(crate) fn to_knowledge_markdown(path: &Path) -> Result<String> {
     let extension = extension_of(path);
     let markdown = to_markdown(path)?;
@@ -416,6 +420,7 @@ fn looks_garbled(text: &str) -> bool {
 ///
 /// 已经有 `##` 的文档说明作者用了标题样式，不再猜。`（一）` 这类二级标题不升：
 /// 切块器会把 `###` 并回上一节，升了也不改变分块。
+#[cfg(any(test, feature = "ai-workbench"))]
 fn promote_headings(markdown: &str) -> String {
     if markdown
         .lines()
@@ -440,6 +445,7 @@ fn promote_headings(markdown: &str) -> String {
 }
 
 /// 判断一行是否像公文一级标题，是则返回去掉整行加粗后的标题文字。
+#[cfg(any(test, feature = "ai-workbench"))]
 fn heading_candidate(line: &str) -> Option<String> {
     let text = line.trim();
     // 整行加粗是 Word 里手工设粗体的标题。

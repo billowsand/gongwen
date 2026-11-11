@@ -12,9 +12,14 @@ OriginalFilename = "gongwen-assistant.exe"
 
 [features]
 # Debian/麒麟等传统桌面继续使用不依赖 portal 的 GTK3 文件选择器；
-# Arch/Omarchy 发布包用 `--no-default-features --features linux-portal-dialogs`
+# Arch/Omarchy 发布包用 `--no-default-features --features ai,linux-portal-dialogs`
 # 构建，以便文件选择器跟随 Hyprland/Wayland 桌面。
-default = ["linux-gtk-dialogs"]
+default = ["ai", "linux-gtk-dialogs"]
+
+# 产品组合与桌面后端独立选择。
+ai = ["ai-workbench"]
+ai-workbench = ["task-assistant", "dep:serde_yaml"]
+task-assistant = []
 linux-gtk-dialogs = ["rfd/gtk3"]
 linux-portal-dialogs = ["rfd/xdg-portal", "rfd/wayland"]
 
@@ -85,7 +90,7 @@ rust_xlsxwriter = "0.99.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # 技能文件（SKILL.md）的 YAML 开头。已经是 hayagriva 的依赖，不新增下载。
-serde_yaml = "0.9"
+serde_yaml = { version = "0.9", optional = true }
 sha2 = "0.11"
 # 剪贴板里的 HTML 容错解析：内部是 html5ever（HTML5 解析算法），不闭合、
 # 乱嵌套的片段也能得到可用的元素树。只用到 DOM，不需要选择器与 CLI。

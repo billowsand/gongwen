@@ -20,6 +20,7 @@ enum Target {
     Vocabulary(u64),
     Page(NavPage),
     NewDocument,
+    #[cfg(feature = "task-assistant")]
     Task(String),
 }
 
@@ -168,7 +169,9 @@ impl GongwenApp {
             },
             None => Some("稿件库不可用，仍可查找已打开稿件、词库和页面。".to_string()),
         };
+        #[cfg(feature = "task-assistant")]
         let mut warning = warning;
+        #[cfg(feature = "task-assistant")]
         if let Some(store) = self.task_store.as_ref() {
             match store.list(false) {
                 Ok(tasks) => {
@@ -213,9 +216,13 @@ impl GongwenApp {
             NavPage::Proofread,
             NavPage::Lexicon,
             NavPage::ImeTable,
+            #[cfg(feature = "ai-workbench")]
             NavPage::Knowledge,
+            #[cfg(feature = "ai-workbench")]
             NavPage::Wiki,
+            #[cfg(feature = "task-assistant")]
             NavPage::TaskAssistant,
+            #[cfg(feature = "ai-workbench")]
             NavPage::AiPrompts,
             NavPage::Settings,
             NavPage::Help,
@@ -227,6 +234,7 @@ impl GongwenApp {
                 NavPage::Proofread => ("常用页面 · 词库", "词库 错别字 纠错 建议写法"),
                 NavPage::Lexicon => ("常用页面 · 词库", "词库 公文用词 语料"),
                 NavPage::ImeTable => ("常用页面 · 词库", "词库 输入法 编码 查码 码表"),
+                #[cfg(feature = "task-assistant")]
                 NavPage::TaskAssistant => ("任务与进展", "任务 下一步 期限 阻塞 待办"),
                 _ => ("常用页面", ""),
             };
@@ -313,6 +321,7 @@ impl GongwenApp {
             }
             Target::Page(page) => self.open_page(page),
             Target::NewDocument => self.new_blank_manuscript(),
+            #[cfg(feature = "task-assistant")]
             Target::Task(id) => {
                 self.open_page(NavPage::TaskAssistant);
                 self.task_ui.selected = Some(id);

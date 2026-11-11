@@ -16,6 +16,7 @@
 //! 数据只留在本机，单独存一个文件而不进 `config.json`：埋点每点一次就变，塞进
 //! 配置会让配置版本历史被这类噪音淹没，回看「我上周改过什么设置」时全是计数。
 
+#[cfg(feature = "ai-workbench")]
 use crate::revise_model::GateReason;
 use crate::revision::RevisionSource;
 use serde::{Deserialize, Serialize};
@@ -107,6 +108,7 @@ impl Metrics {
         stat.accepted = stat.accepted.saturating_sub(1);
     }
 
+    #[cfg(feature = "ai-workbench")]
     pub fn record_gate_rejection(&mut self, task: &str, count: u32) {
         if count == 0 {
             return;
@@ -115,6 +117,7 @@ impl Metrics {
     }
 
     /// 记一笔按原因分类的拦截。
+    #[cfg(feature = "ai-workbench")]
     pub fn record_gate_reason(&mut self, task: &str, reason: GateReason, count: u32) {
         if count == 0 {
             return;
@@ -153,7 +156,7 @@ impl Metrics {
 /// 读埋点。文件不存在、损坏或读不动都返回空表——埋点是辅助信息，
 /// 任何一种失败都不该妨碍用户写公文。
 pub fn load() -> Metrics {
-    crate::ai_services::persistence::read_json("metrics.json").unwrap_or_default()
+    crate::sealed_json::read_json("metrics.json").unwrap_or_default()
 }
 
 /// 落盘。失败静默：同上，这不是用户需要处理的错误。
@@ -162,7 +165,7 @@ pub fn save(metrics: &mut Metrics) {
         return;
     }
     // 个人使用统计也属于配置数据：加密工作区里与接口配置一样整份 GWA2。
-    let written = crate::ai_services::persistence::write_json("metrics.json", metrics);
+    let written = crate::sealed_json::write_json("metrics.json", metrics);
     if written.is_ok() {
         metrics.mark_saved();
     }
@@ -239,6 +242,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn gate_rejections_are_counted_separately_from_decisions() {
         let mut metrics = Metrics::default();
         metrics.record_gate_rejection("MDL-GRAMMAR", 5);
@@ -263,6 +267,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn zero_rejections_do_not_create_an_entry() {
         let mut metrics = Metrics::default();
         metrics.record_gate_rejection("MDL-GRAMMAR", 0);

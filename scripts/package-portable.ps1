@@ -1,6 +1,9 @@
 ﻿param(
     [string]$Suffix = "",
     [string]$BinaryName = "",
+    [string]$BinaryPath = "",
+    [ValidateSet("ai", "no-ai")]
+    [string]$Edition = "ai",
     [string]$RuntimeManifest = "",
     [string]$OutputDir = "",
     [ValidateSet("none", "zip", "tar.gz")]
@@ -14,6 +17,8 @@ $ErrorActionPreference = "Stop"
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $runtimeRoot = [System.IO.Path]::Combine($projectRoot, "runtime")
 $isWindowsHost = $env:OS -eq "Windows_NT"
+. (Join-Path $PSScriptRoot "package-edition.ps1")
+$editionSuffix = if ($Edition -eq "ai") { "" } else { "-no-ai" }
 
 # Get-FileHash 是 PowerShell 4.0+ 的内置 cmdlet（位于 Microsoft.PowerShell.Utility）。
 # 极少数精简过的 Windows 镜像（特别是 LTSC 去掉 PSReadLine + 删了一些内置 cmdlet 的
@@ -38,7 +43,7 @@ if ([string]::IsNullOrWhiteSpace($RuntimeManifest)) {
     }
 }
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
-    $OutputDir = [System.IO.Path]::Combine($projectRoot, "dist", "gongwen-assistant-$Suffix")
+    $OutputDir = [System.IO.Path]::Combine($projectRoot, "dist", "gongwen-assistant$editionSuffix-$Suffix")
 }
 $RuntimeManifest = [System.IO.Path]::GetFullPath($RuntimeManifest)
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
@@ -148,7 +153,7 @@ foreach ($line in Get-Content -LiteralPath $RuntimeManifest -Encoding UTF8) {
     }
     $expected = $parts[0].ToUpperInvariant()
     $relative = $parts[1].Trim().Replace("/", [System.IO.Path]::DirectorySeparatorChar)
-    if (Test-RetiredRuntimeAsset $relative) {
+    if ((Test-RetiredRuntimeAsset $relative) -or $relative -match "^pi[/\\]") {
         continue
     }
     $asset = [System.IO.Path]::Combine($runtimeRoot, $relative)
@@ -165,10 +170,17 @@ foreach ($line in Get-Content -LiteralPath $RuntimeManifest -Encoding UTF8) {
     }
 }
 
-if (-not $SkipBuild) {
+if (-not $SkipBuild -and -not $BinaryPath) {
     Push-Location $projectRoot
     try {
-        cargo build --release
+        if ($Edition -eq "ai") {
+            cargo build --release --locked
+        }
+        else {
+            $targetDir = Join-Path $projectRoot "target/no-ai-package"
+            cargo build --release --locked --target-dir $targetDir --no-default-features --features task-assistant,linux-gtk-dialogs
+            $BinaryPath = Join-Path $targetDir "release/$BinaryName"
+        }
         if ($LASTEXITCODE -ne 0) {
             throw "cargo build --release failed with exit code $LASTEXITCODE"
         }
@@ -178,10 +190,19 @@ if (-not $SkipBuild) {
     }
 }
 
-$binarySource = [System.IO.Path]::Combine($projectRoot, "target", "release", $BinaryName)
+$binarySource = if ($BinaryPath) {
+    [System.IO.Path]::GetFullPath($BinaryPath)
+} elseif ($Edition -eq "no-ai") {
+    $file = if ($Suffix -eq "win-x64") { "gongwen-assistant-no-ai.exe" } else { "gongwen-assistant-no-ai" }
+    Join-Path $projectRoot "dist/editions/$file"
+} else {
+    Join-Path $projectRoot "target/release/$BinaryName"
+}
 if (-not (Test-Path -LiteralPath $binarySource -PathType Leaf)) {
     throw "Built binary not found: $binarySource"
 }
+
+Assert-PackageEdition $binarySource $Edition
 
 if ($overwriteExisting) {
     Assert-DirectoryNotInUse $OutputDir
@@ -212,28 +233,30 @@ if (-not $isWindowsHost -and $Suffix -eq "win-x64") {
     throw "Portable suffix win-x64 must be built on Windows"
 }
 $piPlatform = $Suffix
-$piDir = [System.IO.Path]::Combine($runtimeRoot, "pi")
-$piFiles = & (Join-Path $PSScriptRoot "verify-pi-runtime.ps1") -RuntimeDir $piDir -Platform $piPlatform -ListFiles
-if (-not $piFiles -or $piFiles.Count -eq 0) {
-    throw "Pi runtime manifest listed no files: $piDir"
-}
-foreach ($relative in $piFiles) {
-    $source = [System.IO.Path]::Combine($piDir, $relative.Replace("/", [System.IO.Path]::DirectorySeparatorChar))
-    $destination = [System.IO.Path]::Combine($OutputDir, "runtime", "pi", $relative.Replace("/", [System.IO.Path]::DirectorySeparatorChar))
-    $destinationDirectory = Split-Path -Parent $destination
-    New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
-    Copy-Item -LiteralPath $source -Destination $destination
-}
-# manifest 自己不在文件清单里（它描述清单），必须单独带上，否则启动时校验不过。
-Copy-Item -LiteralPath ([System.IO.Path]::Combine($piDir, "manifest.json")) -Destination ([System.IO.Path]::Combine($OutputDir, "runtime", "pi", "manifest.json")) -Force
-if (-not $isWindowsHost) {
-    & chmod 755 ([System.IO.Path]::Combine($OutputDir, "runtime", "pi", "bin", "node"))
-    if ($LASTEXITCODE -ne 0) {
-        throw "chmod +x failed for the bundled Node"
+if ($Edition -eq "ai") {
+    $piDir = [System.IO.Path]::Combine($runtimeRoot, "pi")
+    $piFiles = & (Join-Path $PSScriptRoot "verify-pi-runtime.ps1") -RuntimeDir $piDir -Platform $piPlatform -ListFiles
+    if (-not $piFiles -or $piFiles.Count -eq 0) {
+        throw "Pi runtime manifest listed no files: $piDir"
     }
-}
-if (-not (Test-Path -LiteralPath ([System.IO.Path]::Combine($OutputDir, "runtime", "pi", "manifest.json")) -PathType Leaf)) {
-    throw "Pi runtime manifest was not copied into the package"
+    foreach ($relative in $piFiles) {
+        $source = [System.IO.Path]::Combine($piDir, $relative.Replace("/", [System.IO.Path]::DirectorySeparatorChar))
+        $destination = [System.IO.Path]::Combine($OutputDir, "runtime", "pi", $relative.Replace("/", [System.IO.Path]::DirectorySeparatorChar))
+        $destinationDirectory = Split-Path -Parent $destination
+        New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
+        Copy-Item -LiteralPath $source -Destination $destination
+    }
+    # manifest 自己不在文件清单里（它描述清单），必须单独带上，否则启动时校验不过。
+    Copy-Item -LiteralPath ([System.IO.Path]::Combine($piDir, "manifest.json")) -Destination ([System.IO.Path]::Combine($OutputDir, "runtime", "pi", "manifest.json")) -Force
+    if (-not $isWindowsHost) {
+        & chmod 755 ([System.IO.Path]::Combine($OutputDir, "runtime", "pi", "bin", "node"))
+        if ($LASTEXITCODE -ne 0) {
+            throw "chmod +x failed for the bundled Node"
+        }
+    }
+    if (-not (Test-Path -LiteralPath ([System.IO.Path]::Combine($OutputDir, "runtime", "pi", "manifest.json")) -PathType Leaf)) {
+        throw "Pi runtime manifest was not copied into the package"
+    }
 }
 
 # 初始基础词表独立随包，便于更新：项目自维护的 quan.txt 为唯一正式来源，
@@ -256,37 +279,40 @@ Copy-Item -LiteralPath ([System.IO.Path]::Combine($runtimeRoot, "licenses/NUCLEO
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "README.md")) -Destination $OutputDir
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "THIRD_PARTY_NOTICES.md")) -Destination $OutputDir
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "LICENSE")) -Destination $OutputDir
-Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "config.example.json")) -Destination $OutputDir
 # 稿件包 .gwx 的文档图标：安装包在注册表里登记它（gongwen-assistant.iss 的 [Registry]）。
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "assets/doc-icon/gwx-document.ico")) -Destination $OutputDir
 # AI 技能包：把 skills/gongwen-markdown/ 打成 skills/gongwen-markdown.skill 随包分发。
 # .skill 就是 zip，顶层一个 gongwen-markdown/ 文件夹。条目名手工拼成正斜杠——
 # Compress-Archive 在 PowerShell 5.1 上会写反斜杠，别的工具解压会得到一个怪文件名。
 # 程序里的「导出 AI 技能包」按钮用的是编进二进制的同一套文件（src/skill_pack.rs）。
-$skillName = "gongwen-markdown"
-$skillSource = [System.IO.Path]::Combine($projectRoot, "skills", $skillName)
-if (-not (Test-Path -LiteralPath (Join-Path $skillSource "SKILL.md") -PathType Leaf)) {
-    throw "Skill source not found: $skillSource"
-}
-$skillOutputDir = Join-Path $OutputDir "skills"
-New-Item -ItemType Directory -Force -Path $skillOutputDir | Out-Null
-$skillArchive = Join-Path $skillOutputDir "$skillName.skill"
-if (Test-Path -LiteralPath $skillArchive) {
-    Remove-Item -LiteralPath $skillArchive -Force
-}
-Add-Type -AssemblyName System.IO.Compression
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-$skillZip = [System.IO.Compression.ZipFile]::Open($skillArchive, [System.IO.Compression.ZipArchiveMode]::Create)
-try {
-    $skillPrefix = $skillSource.TrimEnd("\", "/").Length + 1
-    foreach ($file in Get-ChildItem -LiteralPath $skillSource -Recurse -File | Where-Object { $_.FullName -notmatch "__pycache__" } | Sort-Object FullName) {
-        $entryName = "$skillName/" + $file.FullName.Substring($skillPrefix).Replace("\", "/")
-        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($skillZip, $file.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+if ($Edition -eq "ai") {
+    Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "config.example.json")) -Destination $OutputDir
+    $skillName = "gongwen-markdown"
+    $skillSource = [System.IO.Path]::Combine($projectRoot, "skills", $skillName)
+    if (-not (Test-Path -LiteralPath (Join-Path $skillSource "SKILL.md") -PathType Leaf)) {
+        throw "Skill source not found: $skillSource"
+    }
+    $skillOutputDir = Join-Path $OutputDir "skills"
+    New-Item -ItemType Directory -Force -Path $skillOutputDir | Out-Null
+    $skillArchive = Join-Path $skillOutputDir "$skillName.skill"
+    if (Test-Path -LiteralPath $skillArchive) {
+        Remove-Item -LiteralPath $skillArchive -Force
+    }
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $skillZip = [System.IO.Compression.ZipFile]::Open($skillArchive, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $skillPrefix = $skillSource.TrimEnd("\", "/").Length + 1
+        foreach ($file in Get-ChildItem -LiteralPath $skillSource -Recurse -File | Where-Object { $_.FullName -notmatch "__pycache__" } | Sort-Object FullName) {
+            $entryName = "$skillName/" + $file.FullName.Substring($skillPrefix).Replace("\", "/")
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($skillZip, $file.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    }
+    finally {
+        $skillZip.Dispose()
     }
 }
-finally {
-    $skillZip.Dispose()
-}
+
 if (-not $isWindowsHost) {
     foreach ($executable in @($BinaryName)) {
         $executablePath = Join-Path $OutputDir $executable
@@ -298,6 +324,8 @@ if (-not $isWindowsHost) {
         }
     }
 }
+
+if ($Edition -eq "no-ai") { Assert-NoAiResources $OutputDir }
 
 $outputPrefix = $OutputDir.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 $manifest = Get-ChildItem -LiteralPath $OutputDir -Recurse -File |

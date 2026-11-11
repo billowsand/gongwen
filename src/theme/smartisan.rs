@@ -13,8 +13,10 @@ pub const MINIMAP_PAPER: Color32 = Color32::from_rgb(248, 242, 230);
 pub const INDEX_MARK: Color32 = Color32::from_rgb(182, 139, 79);
 /// AI 工作稿的校样纸：同一张桌子上比正式稿纸更暖、更灰一档，
 /// 用来区分「未合并的稿」与要落正式正文的稿纸，纸的材质不变。
+#[cfg(feature = "ai-workbench")]
 pub const PROOF_PAPER: Color32 = Color32::from_rgb(244, 236, 222);
 /// 「未合并」小印章的墨色：低饱和赭，压在校样纸右上角。
+#[cfg(feature = "ai-workbench")]
 pub const PROOF_STAMP: Color32 = Color32::from_rgba_unmultiplied_const(178, 140, 82, 150);
 
 pub(super) const fn palette() -> Theme {
@@ -115,7 +117,9 @@ pub fn tab_background(painter: &egui::Painter, slot: egui::layers::ShapeIdx, rec
 mod tabs;
 #[cfg(test)]
 pub use tabs::document_tab;
-pub use tabs::{document_tab_to, ribbon_shape, rounded_gradient, sheet_tab};
+#[cfg(feature = "ai-workbench")]
+pub use tabs::sheet_tab;
+pub use tabs::{document_tab_to, ribbon_shape, rounded_gradient};
 
 pub fn chrome(painter: &egui::Painter, rect: Rect) {
     if !active() {
@@ -248,6 +252,7 @@ pub fn manuscript(
 }
 
 /// AI 工作稿的校样纸横线：比正式稿纸淡一档，左边是一条赭色书脊线。
+#[cfg(feature = "ai-workbench")]
 pub fn proof_manuscript(
     painter: &egui::Painter,
     slot: egui::layers::ShapeIdx,
@@ -273,6 +278,7 @@ const MANUSCRIPT_INK: ManuscriptInk = ManuscriptInk {
     fiber: Color32::from_black_alpha(5),
 };
 
+#[cfg(feature = "ai-workbench")]
 const PROOF_INK: ManuscriptInk = ManuscriptInk {
     rule: Color32::from_rgb(232, 220, 202),
     gutter_fill: Color32::from_rgba_unmultiplied_const(198, 164, 120, 10),

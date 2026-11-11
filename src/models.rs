@@ -6,7 +6,10 @@
 mod ai;
 mod config;
 mod draft;
+mod network;
+#[cfg(feature = "ai-workbench")]
 mod provider;
+#[cfg(feature = "ai-workbench")]
 mod rag;
 mod security;
 mod template;
@@ -19,6 +22,7 @@ pub(crate) use ai::ProofreadRule;
 pub(crate) use config::AUTO_SAVE_INTERVAL_MAX_SECS;
 pub(crate) use config::AUTO_SAVE_INTERVAL_MIN_SECS;
 pub(crate) use config::AppConfig;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use config::PiOptions;
 pub(crate) use config::TransmitDefaults;
 pub(crate) use config::TransmitDisposal;
@@ -27,6 +31,7 @@ pub(crate) use config::UI_SCALE_MIN;
 pub(crate) use config::UI_SCALE_PRESETS;
 pub(crate) use draft::DraftInput;
 pub(crate) use draft::ExportSelection;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use draft::GeneratedDraft;
 pub(crate) use draft::LeaderReading;
 pub(crate) use draft::ManuscriptStatus;
@@ -39,23 +44,39 @@ pub(crate) use draft::ResearchPalette;
 pub(crate) use draft::ResearchTemplate;
 pub(crate) use draft::ReviewNote;
 pub(crate) use draft::StyleMode;
+pub(crate) use network::ProxyConfig;
+pub(crate) use network::ProxyMode;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::EmbeddingConfig;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::LmStudioConfig;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::ModelKind;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::ModelRef;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::ModelRefError;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::PROVIDER_PRESETS;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::ProviderConfig;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::ProviderPreset;
-pub(crate) use provider::ProxyConfig;
-pub(crate) use provider::ProxyMode;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::ReasoningEffort;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::ReasoningFormat;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::ReviseModelConfig;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::classify_model;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use provider::preset_for_url;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use rag::RagConfig;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use rag::RerankConfig;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use rag::RerankMode;
 pub(crate) use security::SecurityLevel;
 pub(crate) use security::SecurityRules;
@@ -152,6 +173,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn independent_revision_does_not_require_a_working_writing_provider() {
         let mut config = AppConfig::default();
         config.pi_model = ModelRef {
@@ -180,6 +202,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn backup_models_load_old_config_and_report_deleted_providers() {
         let mut config: AppConfig = serde_json::from_str("{}").unwrap();
         assert!(config.draft_backup_chat().unwrap().is_none());
@@ -213,6 +236,7 @@ mod tests {
 
     /// 复核没启用时辅助角色用的是起草模型，备用也跟着起草走；启用了复核模型就各管各的。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn the_assist_role_inherits_the_draft_backup_when_it_runs_on_the_draft_model() {
         let mut config: AppConfig = serde_json::from_str("{}").unwrap();
         config.providers.push(ProviderConfig {
@@ -251,6 +275,7 @@ mod tests {
     /// 用途归类：rerank 关键词最具体（bge-reranker 不能归成向量）；
     /// 服务自报优先于名字启发式；认不出的按对话处理。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn classify_model_by_name_and_probe() {
         assert_eq!(
             classify_model("bge-reranker-v2-m3", None),
@@ -296,6 +321,7 @@ mod tests {
 
     /// kinds 字段为空时不写进配置，旧配置没有它也能读。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn provider_kinds_serde_roundtrip() {
         let provider = ProviderConfig::default();
         let json = serde_json::to_string(&provider).unwrap();
@@ -307,6 +333,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn opencode_go_preset_repairs_only_missing_default_address() {
         let preset = PROVIDER_PRESETS
             .iter()
@@ -348,6 +375,7 @@ mod tests {
     /// 旧配置（内联地址密钥）迁移成提供商清单与模型引用：同一地址密钥只建一条，
     /// 按地址认出预设名，旧字段清空。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn legacy_inline_endpoints_migrate_into_providers() {
         let mut config = AppConfig::default();
         config.lm_studio.base_url = "http://127.0.0.1:1234/v1".into();
@@ -375,6 +403,7 @@ mod tests {
 
     /// 提供商引用模式下，沿用起草与独立复核分别使用对应的窗口配置。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn referenced_assist_inherits_the_draft_window_only_when_reusing_it() {
         let mut config = AppConfig::default();
         config.lm_studio.model = "DeepSeek-V4.1-Flash".into();
@@ -395,6 +424,7 @@ mod tests {
 
     /// 旧配置没有 `pi_options`：把 Pi 当时实际继承的思考深度复制一次，之后不再随起草变。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn legacy_pi_config_copies_the_thinking_depth_it_actually_used() {
         // 自造旧配置：只有 Pi 模型与起草侧的思考深度，没有 pi_options。
         let mut config: AppConfig = serde_json::from_str(
@@ -429,6 +459,7 @@ mod tests {
 
     /// 旧配置没有 Pi 模型：用 Pi 自己的默认深度，不从起草那边借。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn pi_without_a_model_starts_from_its_own_default() {
         let mut config: AppConfig =
             serde_json::from_str(r#"{"lm_studio": {"reasoning_effort": "max"}}"#).unwrap();
@@ -445,6 +476,7 @@ mod tests {
 
     /// 迁移写回后是持久的；起草与 Pi 的深度各走各的，窗口与输出仍自动管理。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn pi_thinking_depth_persists_and_stays_independent() {
         let mut config = AppConfig::default();
         config.providers = vec![ProviderConfig {
@@ -489,6 +521,7 @@ mod tests {
 
     /// 迁移后的解析：起草 / 复核 / embedding 都拿到提供商的地址密钥。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn resolvers_fill_endpoint_from_the_provider() {
         let mut config = AppConfig::default();
         config.lm_studio.base_url = "https://www.dmxapi.cn/v1".into();

@@ -24,6 +24,15 @@ if [ ! -f "$PKG" ]; then
     exit 1
 fi
 
+PACKAGE="$(pacman -Qp "$PKG" | awk '{print $1}')"
+case "$PACKAGE" in
+    gongwen-assistant) EDITION=ai; DESKTOP_ID=cn.localtools.GongwenAssistant ;;
+    gongwen-assistant-no-ai) EDITION=no-ai; DESKTOP_ID=cn.localtools.GongwenAssistantNoAi ;;
+    *) echo "error: unexpected Arch package: $PACKAGE" >&2; exit 1 ;;
+esac
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$PROJECT_ROOT/scripts/package-edition.sh"
+
 echo "== Target: Arch Linux ($(uname -m)), $(pacman --version | head -1)"
 
 # 依赖解析：pacman -U 时如果缺依赖会从仓库补装；仓库里没有的依赖名会在这里
@@ -35,10 +44,10 @@ else
     echo "== --no-install: 跳过 pacman -U，只校验已安装状态"
 fi
 
-status="$(pacman -Q gongwen-assistant 2>/dev/null || true)"
+status="$(pacman -Q "$PACKAGE" 2>/dev/null || true)"
 echo "== pacman -Q: $status"
 case "$status" in
-    "gongwen-assistant "*) ;;
+    "$PACKAGE "*) ;;
     *)
         echo "error: the package is not registered with pacman" >&2
         exit 1
@@ -46,29 +55,33 @@ case "$status" in
 esac
 
 # 安装位置
-APP_DIR="/usr/lib/gongwen-assistant"
+APP_DIR="/usr/lib/$PACKAGE"
 test -x "$APP_DIR/gongwen-assistant"
-test -L /usr/bin/gongwen-assistant
+test -L "/usr/bin/$PACKAGE"
 
 # 随包 Pi 运行时：Node / host / manifest 必须在，且 Node 能跑。
-test -x "$APP_DIR/runtime/pi/bin/node"
-test -f "$APP_DIR/runtime/pi/host/main.mjs"
-test -f "$APP_DIR/runtime/pi/manifest.json"
-node_version="$("$APP_DIR/runtime/pi/bin/node" --version)"
-test "$node_version" = "v22.22.3"
-echo "== bundled Node: $node_version"
+check_package_binary "$APP_DIR/gongwen-assistant"
+check_package_resources "$APP_DIR"
+if [ "$EDITION" = ai ]; then
+    test -x "$APP_DIR/runtime/pi/bin/node"
+    test -f "$APP_DIR/runtime/pi/host/main.mjs"
+    test -f "$APP_DIR/runtime/pi/manifest.json"
+    test "$("$APP_DIR/runtime/pi/bin/node" --version)" = "v22.22.3"
+fi
 test -f "$APP_DIR/runtime/fonts/GWFangSong.ttf"
 test -f "$APP_DIR/runtime/fonts/FZShuSong.ttf"
 test -f "$APP_DIR/runtime/ime/base.txt"
 
 # 桌面集成
-test -f /usr/share/applications/cn.localtools.GongwenAssistant.desktop
-grep -qx 'MimeType=application/x-gongwen-package;' \
-    /usr/share/applications/cn.localtools.GongwenAssistant.desktop
-test -f /usr/share/mime/packages/cn.localtools.GongwenAssistant.xml
-test -f /usr/share/icons/hicolor/48x48/apps/cn.localtools.GongwenAssistant.png
-test -f /usr/share/icons/hicolor/48x48/mimetypes/application-x-gongwen-package.png
-test -f /usr/share/licenses/gongwen-assistant/LICENSE
+test -f "/usr/share/applications/$DESKTOP_ID.desktop"
+if [ "$EDITION" = ai ]; then
+    grep -qx 'MimeType=application/x-gongwen-package;' \
+        /usr/share/applications/cn.localtools.GongwenAssistant.desktop
+    test -f /usr/share/mime/packages/cn.localtools.GongwenAssistant.xml
+    test -f /usr/share/icons/hicolor/48x48/mimetypes/application-x-gongwen-package.png
+fi
+test -f "/usr/share/icons/hicolor/48x48/apps/$DESKTOP_ID.png"
+test -f "/usr/share/licenses/$PACKAGE/LICENSE"
 
 # 属主必须是 root:root：makepkg 不用 fakeroot 时会记成打包用户的 uid。
 owner="$(stat -c '%U:%G' "$APP_DIR/gongwen-assistant")"
@@ -89,6 +102,6 @@ fi
 
 # 声明的依赖要真的都装上了（pacman -U 装不上就会失败，这里再确认一遍）
 echo "== Depends:"
-pacman -Qi gongwen-assistant | sed -n '/^Depends On/p'
+pacman -Qi "$PACKAGE" | sed -n '/^Depends On/p'
 
 exit 0

@@ -1046,7 +1046,7 @@ mod tests {
                 kind: TemplateKind::OfficialLetter,
                 title: "安全生产通知".into(),
                 content_markdown: "# 安全生产通知\n\n关于开展安全生产大检查。".into(),
-                content_hash: crate::knowledge::content_hash("# 安全生产通知"),
+                content_hash: crate::content_hash::content_hash("# 安全生产通知"),
                 embed_model: "m".into(),
             };
             let chunk = NewKnowledgeChunk {

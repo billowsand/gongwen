@@ -5,10 +5,9 @@
 //! 状态。起草页的统一视图（[`unified_body_ui`]）把点击、悬停交回调用方，由它去
 //! 与右栏花脸稿预览联动；稿件管理的分栏视图（[`manuscript_diff_ui`]）只读。
 
-use crate::diff::{
-    BlockChange, BodyDiff, ChangeKind, ContextBlock, DiffBlock, FieldChange, InlineSpan,
-    ManuscriptDiff, SpanKind,
-};
+#[cfg(feature = "ai-workbench")]
+use crate::diff::{BlockChange, ContextBlock, ManuscriptDiff};
+use crate::diff::{BodyDiff, ChangeKind, DiffBlock, FieldChange, InlineSpan, SpanKind};
 use crate::theme;
 use std::collections::BTreeSet;
 use std::ops::Range;
@@ -55,6 +54,7 @@ impl DiffViewState {
 }
 
 /// 一次渲染的呈现参数。
+#[cfg(feature = "ai-workbench")]
 pub struct DiffViewConfig<'a> {
     /// 左栏表头，如 `v3（已提交）`。
     pub old_label: &'a str,
@@ -69,6 +69,7 @@ pub struct DiffViewConfig<'a> {
 /// 逐块排除的显示参数。开关挂在 hunk 上而不是单条变更上：一个 hunk 可能覆盖
 /// 几条相邻变更（`Hunk.changes` 是变更序号范围），同一 hunk 的变更一起排除。
 #[derive(Clone, Copy)]
+#[cfg(feature = "ai-workbench")]
 pub struct HunkExclude<'a> {
     /// `diff_hunks::hunks` 对当前正文 diff 聚出的变更块。
     pub hunks: &'a [crate::draft_page::diff_hunks::Hunk],
@@ -81,6 +82,7 @@ pub struct HunkExclude<'a> {
 /// 这是稿件管理对照窗与 AI 工作台用的只读分栏视图；起草页的版本对照已改用
 /// [`unified_body_ui`] + 花脸稿预览（见 `draft_page::version_diff`），第 ④ 期
 /// 稿件管理也会切过去，届时这套分栏下线。
+#[cfg(feature = "ai-workbench")]
 pub fn manuscript_diff_ui(
     ui: &mut egui::Ui,
     diff: &ManuscriptDiff,
@@ -207,6 +209,7 @@ pub fn field_changes_table(
 }
 
 /// 正文两栏对照。左旧右新，同一行左右对齐；未改动段落折叠成一行。
+#[cfg(feature = "ai-workbench")]
 fn body_ui(
     ui: &mut egui::Ui,
     diff: &BodyDiff,
@@ -316,6 +319,7 @@ fn body_ui(
 }
 
 /// 一栏：固定宽度、内容自顶向下排。两栏都走这里，同一行左右才对得齐。
+#[cfg(feature = "ai-workbench")]
 fn column_ui<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.allocate_ui_with_layout(
         egui::vec2(width, 0.0),
@@ -331,6 +335,7 @@ fn column_ui<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -
 }
 
 /// 未改动的一段：灰字、带行号，与改动行的行号列对齐。
+#[cfg(feature = "ai-workbench")]
 fn context_cell(ui: &mut egui::Ui, line: &ContextBlock, width: f32) -> egui::Response {
     ui.horizontal(|ui| {
         ui.label(
@@ -362,6 +367,7 @@ enum Side {
 }
 
 /// 一处改动的单侧格子：行号 + 字级上色的文字，整格可点。
+#[cfg(feature = "ai-workbench")]
 fn change_cell(
     ui: &mut egui::Ui,
     change: &BlockChange,
@@ -439,6 +445,7 @@ fn change_cell(
 
 /// 把字级片段拼成一个排版任务：同一段文字里，改掉的字才有底色和删除线。
 /// 用 `LayoutJob` 而不是并排一串 Label，才能在中文长句里正常换行。
+#[cfg(feature = "ai-workbench")]
 fn spans_job(
     ui: &egui::Ui,
     spans: &[InlineSpan],

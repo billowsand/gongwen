@@ -849,6 +849,7 @@ impl GongwenApp {
                 self.new_document_items(ui);
                 ui.separator();
                 self.nav_menu_item(ui, NavPage::Manuscript);
+                #[cfg(feature = "task-assistant")]
                 self.nav_menu_item(ui, NavPage::TaskAssistant);
                 // 四张词表同属「词库」，收进一个子菜单；当前页是其中之一时，
                 // 子菜单入口也带选中底，顺着高亮就能找到所在位置。
@@ -868,8 +869,11 @@ impl GongwenApp {
                         self.nav_menu_item(ui, page);
                     }
                 });
+                #[cfg(feature = "ai-workbench")]
                 self.nav_menu_item(ui, NavPage::AiPrompts);
+                #[cfg(feature = "ai-workbench")]
                 self.nav_menu_item(ui, NavPage::Knowledge);
+                #[cfg(feature = "ai-workbench")]
                 self.nav_menu_item(ui, NavPage::Wiki);
                 ui.separator();
                 // 外观主题在顶栏右端的换肤按钮里。图表样式管的是纸面上的图，
@@ -918,7 +922,7 @@ impl GongwenApp {
                 }
             })
             .0
-            .on_hover_text("新建文档、稿件管理、词库、AI 管理与设置");
+            .on_hover_text("新建文档、稿件管理、词库与设置");
     }
 
     /// 菜单里的一个常驻页面入口。
@@ -1105,9 +1109,11 @@ impl GongwenApp {
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(6.0);
-                ui.label(
-                    "基于 egui 的离线公文写作助手：规范排版、AI 起草与优化、知识库检索、稿件管理。",
-                );
+                ui.label(if cfg!(feature = "ai-workbench") {
+                    "公文助手 AI 全版 · 规范排版、智能写作、知识库与稿件管理。"
+                } else {
+                    "公文助手非 AI 版 · 规范排版、规则校对与稿件管理。"
+                });
                 ui.add_space(4.0);
                 ui.weak("本软件为内部使用工具，所有数据仅保存在本机。");
                 ui.add_space(6.0);
@@ -1665,6 +1671,7 @@ impl GongwenApp {
             ui.style_mut().spacing.interact_size.y = ROW_HEIGHT;
 
             let status = self.status.clone();
+            #[cfg(feature = "ai-workbench")]
             let model = self.config.pi_model_label();
             let show_doc_controls = self.showing_doc();
             // 输入法状态：常显的一小块，点一下切中英。
@@ -1752,10 +1759,11 @@ impl GongwenApp {
                     egui::Label::new(egui::RichText::new(status).color(theme::text_soft()))
                         .truncate(),
                 );
+                #[cfg(feature = "ai-workbench")]
                 let left_bound = ui.min_rect().right();
 
                 // 右：导出、审校、候选、版本四个抽屉入口。只留图标，说明放在悬停里。
-                let right_bound = ui
+                let _right_bound = ui
                     .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // 输入法指示放最右：它是「现在在中文还是英文」唯一的常显提示，
                         // 不该只在打开稿件时才出现。
@@ -1794,7 +1802,10 @@ impl GongwenApp {
                             doc.result_drawer_open = !doc.result_drawer_open;
                             // 与 AI 侧栏同在右侧，同时开着中央区太窄。
                             if doc.result_drawer_open {
-                                doc.ai_panel.open = false;
+                                #[cfg(feature = "ai-workbench")]
+                                {
+                                    doc.ai_panel.open = false;
+                                }
                             }
                         }
                         // 候选区入口：只在源码 / 分栏模式且已有条目时显示，与编辑区底
@@ -1872,36 +1883,39 @@ impl GongwenApp {
                     .inner;
 
                 // 中：模型名。画在左右两组之间的空档里，仍属于这一行，不额外占纵向空间。
-                let gap_left = left_bound + 10.0;
-                let gap_right = right_bound - 10.0;
-                if gap_right - gap_left > 80.0 {
-                    let model_text = if model.is_empty() {
-                        "模型：未选择".to_string()
-                    } else {
-                        format!("模型：{}", truncate_middle(&model, 36))
-                    };
-                    let (fg, bg) = if model.is_empty() {
-                        (theme::warn(), theme::warn_soft())
-                    } else {
-                        (theme::success(), theme::surface_sunk())
-                    };
-                    // 对齐整条状态栏的中线；只有窗口太窄、居中会压到两侧时才让位。
-                    let chip_width = (gap_right - gap_left).min(420.0);
-                    let center_x = ui
-                        .max_rect()
-                        .center()
-                        .x
-                        .clamp(gap_left + chip_width * 0.5, gap_right - chip_width * 0.5);
-                    let chip_rect = egui::Rect::from_center_size(
-                        egui::pos2(center_x, ui.max_rect().center().y),
-                        egui::vec2(chip_width, CHIP_HEIGHT),
-                    );
-                    ui.scope_builder(
-                        egui::UiBuilder::new()
-                            .max_rect(chip_rect)
-                            .layout(egui::Layout::top_down(egui::Align::Center)),
-                        |ui| theme::chip(ui, &model_text, fg, bg),
-                    );
+                #[cfg(feature = "ai-workbench")]
+                {
+                    let gap_left = left_bound + 10.0;
+                    let gap_right = _right_bound - 10.0;
+                    if gap_right - gap_left > 80.0 {
+                        let model_text = if model.is_empty() {
+                            "模型：未选择".to_string()
+                        } else {
+                            format!("模型：{}", truncate_middle(&model, 36))
+                        };
+                        let (fg, bg) = if model.is_empty() {
+                            (theme::warn(), theme::warn_soft())
+                        } else {
+                            (theme::success(), theme::surface_sunk())
+                        };
+                        // 对齐整条状态栏的中线；只有窗口太窄、居中会压到两侧时才让位。
+                        let chip_width = (gap_right - gap_left).min(420.0);
+                        let center_x = ui
+                            .max_rect()
+                            .center()
+                            .x
+                            .clamp(gap_left + chip_width * 0.5, gap_right - chip_width * 0.5);
+                        let chip_rect = egui::Rect::from_center_size(
+                            egui::pos2(center_x, ui.max_rect().center().y),
+                            egui::vec2(chip_width, CHIP_HEIGHT),
+                        );
+                        ui.scope_builder(
+                            egui::UiBuilder::new()
+                                .max_rect(chip_rect)
+                                .layout(egui::Layout::top_down(egui::Align::Center)),
+                            |ui| theme::chip(ui, &model_text, fg, bg),
+                        );
+                    }
                 }
             });
         });

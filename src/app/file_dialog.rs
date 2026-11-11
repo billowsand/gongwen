@@ -75,6 +75,7 @@ impl FileDialogSpec {
     }
 
     /// 对话框标题。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
         self

@@ -8,6 +8,7 @@ use super::file_dialog::FileDialogSpec;
 use super::settings::{setting_continuation, setting_row, sub_heading};
 use super::{GongwenApp, WorkerResult, open_in_os, warn};
 use crate::data_backup;
+#[cfg(feature = "ai-workbench")]
 use crate::knowledge::KnowledgeStore;
 use crate::lexicon::LexiconStore;
 use crate::manuscript::ManuscriptStore;
@@ -51,11 +52,13 @@ impl GongwenApp {
                 "把配置目录里的有效数据打成一个内容和文件名均加密的 7z，换机器或重装系统前先导出一份。",
             ),
         );
-        ui.label(
+        ui.label(if cfg!(feature = "ai-workbench") {
             "备份包含配置、稿件库与知识库（manuscripts.db）、图片、数据接口配置、\
              输入法词表、技能文件与 Pi 运行数据；加密工作区中这些内容保持密文。\
-             崩溃日志、崩溃提示标记与损坏配置的留底文件属于本机诊断信息，不进入备份。",
-        );
+             崩溃日志、崩溃提示标记与损坏配置的留底文件属于本机诊断信息，不进入备份。"
+        } else {
+            "备份包含本机配置、稿件数据库、图片和输入法词表。启用应用锁后，受保护的内容保持密文。"
+        });
         ui.add_space(8.0);
 
         let mut export = false;
@@ -446,10 +449,16 @@ impl GongwenApp {
     /// 恢复前释放本地库连接；失败时由 [`Self::reopen_local_stores`] 重新打开。
     fn close_local_stores(&mut self) {
         self.manuscript_store = None;
-        self.knowledge_store = None;
-        self.wiki_store = None;
+        #[cfg(feature = "ai-workbench")]
+        {
+            self.knowledge_store = None;
+            self.wiki_store = None;
+        }
         self.lexicon_store = None;
-        self.task_store = None;
+        #[cfg(feature = "task-assistant")]
+        {
+            self.task_store = None;
+        }
     }
 
     /// 恢复失败后把三个本地库重新打开，避免界面一直停在「库不可用」。
@@ -459,7 +468,10 @@ impl GongwenApp {
             Err(error) => {
                 let message = format!("稿件库路径获取失败：{error:#}");
                 self.manuscript_error = Some(message.clone());
-                self.knowledge_error = Some(message.clone());
+                #[cfg(feature = "ai-workbench")]
+                {
+                    self.knowledge_error = Some(message.clone());
+                }
                 self.lexicon_error = Some(message);
                 return;
             }
@@ -474,30 +486,39 @@ impl GongwenApp {
                 None
             }
         };
-        self.knowledge_store = match KnowledgeStore::open(&path) {
-            Ok(store) => {
-                self.knowledge_error = None;
-                Some(store)
-            }
-            Err(error) => {
-                self.knowledge_error = Some(format!("知识库打开失败：{error:#}"));
-                None
-            }
-        };
-        (self.wiki_store, self.wiki_error) = match crate::wiki::WikiStore::open(&path) {
-            Ok(store) => (Some(store), None),
-            Err(error) => (None, Some(format!("维基库打开失败：{error:#}"))),
-        };
-        self.wiki = crate::wiki_ui::WikiUiState::default();
-        // 恢复失败后重置会话状态：晚到的作业结果不能写进重置后的审核台。
-        self.wiki_frame_rx = None;
-        self.wiki_frame_job = None;
-        self.wiki_write_rx = None;
-        self.wiki_write_job = None;
-        self.wiki_doc_status.clear();
-        self.wiki_seen_doc_ids = None;
-        self.wiki_new_doc_tip = None;
-        self.wiki_circle = None;
+        #[cfg(feature = "ai-workbench")]
+        {
+            self.knowledge_store = match KnowledgeStore::open(&path) {
+                Ok(store) => {
+                    #[cfg(feature = "ai-workbench")]
+                    {
+                        self.knowledge_error = None;
+                    }
+                    Some(store)
+                }
+                Err(error) => {
+                    #[cfg(feature = "ai-workbench")]
+                    {
+                        self.knowledge_error = Some(format!("知识库打开失败：{error:#}"));
+                    }
+                    None
+                }
+            };
+            (self.wiki_store, self.wiki_error) = match crate::wiki::WikiStore::open(&path) {
+                Ok(store) => (Some(store), None),
+                Err(error) => (None, Some(format!("维基库打开失败：{error:#}"))),
+            };
+            self.wiki = crate::wiki_ui::WikiUiState::default();
+            // 恢复失败后重置会话状态：晚到的作业结果不能写进重置后的审核台。
+            self.wiki_frame_rx = None;
+            self.wiki_frame_job = None;
+            self.wiki_write_rx = None;
+            self.wiki_write_job = None;
+            self.wiki_doc_status.clear();
+            self.wiki_seen_doc_ids = None;
+            self.wiki_new_doc_tip = None;
+            self.wiki_circle = None;
+        }
         self.lexicon_store = match LexiconStore::open(&path) {
             Ok(store) => {
                 crate::lexicon::segmenter::install_from_store(&store);
@@ -509,31 +530,45 @@ impl GongwenApp {
                 None
             }
         };
-        self.task_store = match crate::task_assistant::Store::open(&path) {
-            Ok(mut store) => {
-                self.task_error = store
-                    .bind_legacy_owners(&self.config.vocabulary)
-                    .err()
-                    .map(|e| format!("负责人身份迁移失败：{e:#}"));
-                Some(store)
-            }
-            Err(error) => {
-                self.task_error = Some(format!("任务助手数据库重开失败：{error:#}"));
-                None
-            }
-        };
-        // 恢复后不能继续展示旧库的候选或保存旧编辑草稿。
-        self.task_ui = crate::task_ui::State::default();
+        #[cfg(feature = "task-assistant")]
+        {
+            self.task_store = match crate::task_assistant::Store::open(&path) {
+                Ok(mut store) => {
+                    self.task_error = store
+                        .bind_legacy_owners(&self.config.vocabulary)
+                        .err()
+                        .map(|e| format!("负责人身份迁移失败：{e:#}"));
+                    Some(store)
+                }
+                Err(error) => {
+                    self.task_error = Some(format!("任务助手数据库重开失败：{error:#}"));
+                    None
+                }
+            };
+            // 恢复后不能继续展示旧库的候选或保存旧编辑草稿。
+            self.task_ui = crate::task_ui::State::default();
+        }
+        #[cfg(feature = "ai-workbench")]
         if let Some(job) = self.task_fill_job.take() {
             job.stop();
         }
+        #[cfg(feature = "ai-workbench")]
         if let Some(job) = self.task_extraction_job.take() {
             job.stop();
         }
-        self.task_fill_rx = None;
-        self.task_extraction_rx = None;
+        #[cfg(feature = "ai-workbench")]
+        {
+            self.task_fill_rx = None;
+        }
+        #[cfg(feature = "ai-workbench")]
+        {
+            self.task_extraction_rx = None;
+        }
         self.manuscript_dirty = true;
-        self.knowledge_dirty = true;
+        #[cfg(feature = "ai-workbench")]
+        {
+            self.knowledge_dirty = true;
+        }
         self.lexicon_dirty = true;
     }
 }
@@ -719,6 +754,7 @@ mod tests {
             app.begin_backup_restore(dir.join("unused.zip"));
             assert!(!app.backup_restore_running);
             assert!(app.manuscript_store.is_some());
+            #[cfg(feature = "ai-workbench")]
             assert!(app.knowledge_store.is_some());
             assert!(app.lexicon_store.is_some());
             app.lexicon_busy = false;

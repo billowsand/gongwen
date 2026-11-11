@@ -39,12 +39,26 @@
   #define MyStaleListInclude "../dist/win-x64-stale.iss"
 #endif
 
-#define MyAppName "公文助手"
 #define MyAppExeName "gongwen-assistant.exe"
-; AppId 用 #ifndef 包起来只是为了能在沙箱里换 GUID 做安装测试，
-; 正式打包（package-installer.ps1）不传这个宏，取值与历史版本保持一致。
-#ifndef MyAppId
-  #define MyAppId "{06988153-58ff-4ce5-b78d-1ffd98a796ce}"
+#ifndef MyNoAi
+  #define MyNoAi "0"
+#endif
+#if MyNoAi == "1"
+  #define MyAppName "公文助手（非 AI 版）"
+  #define MyAppFolder "GongwenAssistantNoAi"
+  #define MyEditionSuffix "-no-ai"
+  #define MyProgId "GongwenAssistantNoAi.Package"
+  #ifndef MyAppId
+    #define MyAppId "{578E5AF2-A044-426F-81E4-118357DF18F8}"
+  #endif
+#else
+  #define MyAppName "公文助手"
+  #define MyAppFolder "GongwenAssistant"
+  #define MyEditionSuffix ""
+  #define MyProgId "GongwenAssistant.Package"
+  #ifndef MyAppId
+    #define MyAppId "{06988153-58ff-4ce5-b78d-1ffd98a796ce}"
+  #endif
 #endif
 
 [Setup]
@@ -55,13 +69,13 @@ AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher=Gongwen
 AppPublisherURL=https://github.com/billowsand/gongwen
 AppSupportURL=https://github.com/billowsand/gongwen/issues
-DefaultDirName={localappdata}\Programs\GongwenAssistant
+DefaultDirName={localappdata}\Programs\{#MyAppFolder}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 SourceDir="{#MySourceDir}"
 OutputDir="{#MyOutputDir}"
-OutputBaseFilename=gongwen-assistant-{#MyAppVersion}-win-x64{#MyPackageKind}
+OutputBaseFilename=gongwen-assistant{#MyEditionSuffix}-{#MyAppVersion}-win-x64{#MyPackageKind}
 SetupIconFile="{#MyIconPath}"
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/ultra64
@@ -113,11 +127,13 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 ; gwx-document.ico 第一次出现时是新文件，增量包会自动带上。
 ; 卸载时 ProgId 整键删除；.gwx 下只删我们写的值，别的程序也可能挂在那里。
 [Registry]
-Root: HKA; Subkey: "Software\Classes\.gwx"; ValueType: string; ValueName: ""; ValueData: "GongwenAssistant.Package"; Flags: uninsdeletevalue
-Root: HKA; Subkey: "Software\Classes\.gwx\OpenWithProgids"; ValueType: none; ValueName: "GongwenAssistant.Package"; Flags: uninsdeletevalue
-Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package"; ValueType: string; ValueName: ""; ValueData: "公文助手稿件包"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\gwx-document.ico"
-Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+#if MyNoAi == "0"
+Root: HKA; Subkey: "Software\Classes\.gwx"; ValueType: string; ValueName: ""; ValueData: "{#MyProgId}"; Flags: uninsdeletevalue
+#endif
+Root: HKA; Subkey: "Software\Classes\.gwx\OpenWithProgids"; ValueType: none; ValueName: "{#MyProgId}"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\{#MyProgId}"; ValueType: string; ValueName: ""; ValueData: "公文助手稿件包"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\{#MyProgId}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\gwx-document.ico"
+Root: HKA; Subkey: "Software\Classes\{#MyProgId}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent

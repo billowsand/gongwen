@@ -267,6 +267,14 @@ AI 的形态是**右侧 AI 侧栏**：起草页点「智能写作」就开一格
 
 **从源码构建**：Rust stable（edition 2024），`cargo run` 即可。
 
+使用 Python 3 一次编译两版。
+
+```sh
+python3 scripts/build-editions.py
+```
+
+产物位于 `dist/editions/`，分别为 `gongwen-assistant`（AI 全版）与 `gongwen-assistant-no-ai`（非 AI 版）。Windows 使用 `py -3 scripts/build-editions.py`，产物带 `.exe`。Arch / Omarchy 构建加 `--linux-dialogs portal`。功能特性及依赖关系见 [双版本构建设计](docs/edition-build-design.md)。
+
 ## 文档
 
 - [使用手册](docs/manual.md)：完整用户手册，24 章 + 3 附录，覆盖写作全流程、AI 能力、任务助手、词表、资料库与知识库、设置。应用内也可读：菜单 →「使用帮助」或按 `F1`

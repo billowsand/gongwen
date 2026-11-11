@@ -1,7 +1,15 @@
 /// 窗口标题不展示版本号；软件版本仍以 Cargo.toml 为唯一来源。
-pub const APP_TITLE: &str = "公文助手";
+pub const APP_TITLE: &str = if cfg!(feature = "ai-workbench") {
+    "公文助手"
+} else {
+    "公文助手（非 AI 版）"
+};
 /// Wayland app_id、桌面文件名与窗口规则共同使用的稳定标识。
-pub const APP_ID: &str = "cn.localtools.GongwenAssistant";
+pub const APP_ID: &str = if cfg!(feature = "ai-workbench") {
+    "cn.localtools.GongwenAssistant"
+} else {
+    "cn.localtools.GongwenAssistantNoAi"
+};
 
 #[cfg(test)]
 mod tests {
@@ -21,11 +29,16 @@ mod tests {
 
     #[test]
     fn app_id_is_a_stable_reverse_dns_identifier() {
-        assert_eq!(APP_ID, "cn.localtools.GongwenAssistant");
         assert!(!APP_ID.contains(char::is_whitespace));
 
-        let desktop = include_str!("../assets/linux/cn.localtools.GongwenAssistant.desktop");
-        assert!(desktop.contains(&format!("Icon={APP_ID}")));
-        assert!(desktop.contains(&format!("StartupWMClass={APP_ID}")));
+        #[cfg(feature = "ai-workbench")]
+        {
+            assert_eq!(APP_ID, "cn.localtools.GongwenAssistant");
+            let desktop = include_str!("../assets/linux/cn.localtools.GongwenAssistant.desktop");
+            assert!(desktop.contains(&format!("Icon={APP_ID}")));
+            assert!(desktop.contains(&format!("StartupWMClass={APP_ID}")));
+        }
+        #[cfg(not(feature = "ai-workbench"))]
+        assert_eq!(APP_ID, "cn.localtools.GongwenAssistantNoAi");
     }
 }

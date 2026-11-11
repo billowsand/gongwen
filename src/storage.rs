@@ -260,6 +260,7 @@ pub fn set_test_config_dir_in_current_thread(dir: std::path::PathBuf) {
 static TEST_CONFIG_DIR_GLOBAL: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 
 #[cfg(test)]
+#[cfg(feature = "ai-workbench")]
 pub fn set_test_config_dir_global(dir: Option<PathBuf>) {
     *TEST_CONFIG_DIR_GLOBAL
         .write()
@@ -268,9 +269,11 @@ pub fn set_test_config_dir_global(dir: Option<PathBuf>) {
 
 /// 全局覆盖的守卫：离开作用域（含 panic 展开）自动清回。
 #[cfg(test)]
+#[cfg(feature = "ai-workbench")]
 pub struct TestConfigDirGlobalGuard;
 
 #[cfg(test)]
+#[cfg(feature = "ai-workbench")]
 impl Drop for TestConfigDirGlobalGuard {
     fn drop(&mut self) {
         set_test_config_dir_global(None);
@@ -278,10 +281,18 @@ impl Drop for TestConfigDirGlobalGuard {
 }
 
 #[cfg(test)]
+#[cfg(feature = "ai-workbench")]
 pub fn push_test_config_dir_global(dir: PathBuf) -> TestConfigDirGlobalGuard {
     set_test_config_dir_global(Some(dir));
     TestConfigDirGlobalGuard
 }
+
+// 二进制可以直接同时运行，配置、缓存与单实例端点按产品版本独立。
+const APPLICATION_DIR_NAME: &str = if cfg!(feature = "ai-workbench") {
+    "GongwenAssistant"
+} else {
+    "GongwenAssistantNoAi"
+};
 
 pub fn config_dir() -> Result<PathBuf> {
     #[cfg(test)]
@@ -296,7 +307,7 @@ pub fn config_dir() -> Result<PathBuf> {
     {
         return Ok(dir);
     }
-    let dirs = ProjectDirs::from("cn", "LocalTools", "GongwenAssistant")
+    let dirs = ProjectDirs::from("cn", "LocalTools", APPLICATION_DIR_NAME)
         .context("无法确定用户配置目录")?;
     Ok(dirs.config_dir().to_path_buf())
 }
@@ -304,7 +315,7 @@ pub fn config_dir() -> Result<PathBuf> {
 /// 本用户的缓存目录（预览之类可以随时重建的文件）。与系统临时目录不同，
 /// 它只有当前用户能写，不会被同机其他用户抢先占用。
 pub fn cache_dir() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("cn", "LocalTools", "GongwenAssistant")
+    let dirs = ProjectDirs::from("cn", "LocalTools", APPLICATION_DIR_NAME)
         .context("无法确定用户缓存目录")?;
     Ok(dirs.cache_dir().to_path_buf())
 }
@@ -612,11 +623,13 @@ pub fn load() -> Result<(AppConfig, Option<PathBuf>)> {
     };
     // 旧配置里的内联地址 / 密钥归并成提供商清单；迁移结果立即写回，
     // 写盘失败也不影响本次运行（下次启动再迁一次）。
+    #[cfg(feature = "ai-workbench")]
     if config.migrate_providers() && path.exists() {
         let _ = save(&config);
     }
     // 智能写作（Pi）的思考深度单独迁移：与提供商迁移互不相干，迁移后立即写回，
     // 之后改文字起草的思考深度不会影响 Pi。
+    #[cfg(feature = "ai-workbench")]
     if config.migrate_pi_options() && path.exists() {
         let _ = save(&config);
     }
@@ -865,6 +878,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn example_config_matches_the_current_schema() {
         let raw = include_str!("../config.example.json");
         let config: AppConfig = serde_json::from_str(raw).expect("示例配置应能反序列化");
@@ -934,6 +948,7 @@ mod tests {
     /// 老配置里没有 `rag.rerank.mode` 字段，必须默认成「专用端点」，
     /// 保持既有行为不变——不能因为加了新枚举就把用户已配好的重排静默改掉。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn rerank_mode_defaults_to_api_for_existing_configs() {
         let legacy = r#"{"rag":{"rerank":{"model":"bge-reranker","path":"rerank"}}}"#;
         let config: AppConfig = serde_json::from_str(legacy).expect("老配置应能反序列化");
@@ -1023,6 +1038,7 @@ mod tests {
         assert!(config.show_source_minimap);
         assert!(config.show_preview_navigator);
         assert_eq!(config.security_rules.secret_max_years, 10);
+        #[cfg(feature = "ai-workbench")]
         assert!(!config.auto_export);
         assert!(!config.profile(TemplateKind::OfficialLetter).duplex_printing);
         assert_eq!(

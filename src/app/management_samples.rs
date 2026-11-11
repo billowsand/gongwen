@@ -21,6 +21,7 @@ pub(crate) fn fixture() -> GongwenApp {
             Ok(store) => (Some(store), None),
             Err(error) => (None, Some(format!("稿件库打开失败：{error:#}"))),
         };
+    #[cfg(feature = "ai-workbench")]
     let (knowledge_store, knowledge_error) =
         match knowledge::KnowledgeStore::open(std::path::Path::new(":memory:")) {
             Ok(store) => (Some(store), None),
@@ -31,6 +32,7 @@ pub(crate) fn fixture() -> GongwenApp {
             Ok(store) => (Some(store), None),
             Err(error) => (None, Some(format!("词表库打开失败：{error:#}"))),
         };
+    #[cfg(feature = "task-assistant")]
     let task_store = crate::task_assistant::Store::open(std::path::Path::new(":memory:")).ok();
     let mut app = GongwenApp {
         applied_theme: config.theme,
@@ -53,19 +55,30 @@ pub(crate) fn fixture() -> GongwenApp {
         next_pdf_key: 1,
         draft_actions: Vec::new(),
         export_links: ExportLinks::default(),
+        #[cfg(feature = "ai-workbench")]
         provider_status: std::collections::HashMap::new(),
+        #[cfg(feature = "ai-workbench")]
         provider_edit: std::collections::HashSet::new(),
+        #[cfg(feature = "ai-workbench")]
         model_filter: BTreeMap::new(),
+        #[cfg(feature = "ai-workbench")]
         model_picker_show_all: std::collections::HashSet::new(),
         vocabulary_import_conflicts: None,
         vocabulary_dirty: false,
         vocabulary_setup_name: String::new(),
+        #[cfg(feature = "ai-workbench")]
         pi_calibration_rx: None,
+        #[cfg(feature = "ai-workbench")]
         pi_calibration_cancel: None,
+        #[cfg(feature = "ai-workbench")]
         pi_calibration_note: String::new(),
+        #[cfg(feature = "ai-workbench")]
         pi_calibration_view_key: String::new(),
+        #[cfg(feature = "ai-workbench")]
         pi_workspace_usage: None,
+        #[cfg(feature = "ai-workbench")]
         pi_workspace_busy: false,
+        #[cfg(feature = "ai-workbench")]
         pi_workspace_error: None,
         vocabulary_move: None,
         vocabulary_sort_undo: None,
@@ -81,13 +94,21 @@ pub(crate) fn fixture() -> GongwenApp {
         vocabulary_clear_confirm: false,
         proofread_page: ProofreadPageState::default(),
         manuscript_store,
+        #[cfg(feature = "task-assistant")]
         task_store,
+        #[cfg(feature = "task-assistant")]
         task_error: None,
+        #[cfg(feature = "task-assistant")]
         task_ui: crate::task_ui::State::default(),
+        #[cfg(feature = "ai-workbench")]
         task_extraction_rx: None,
+        #[cfg(feature = "ai-workbench")]
         task_fill_rx: None,
+        #[cfg(feature = "ai-workbench")]
         task_extraction_job: None,
+        #[cfg(feature = "ai-workbench")]
         task_fill_job: None,
+        #[cfg(feature = "ai-workbench")]
         task_auto_queue: Default::default(),
         manuscript_error,
         manuscript_filter: ManuscriptFilter::default(),
@@ -148,44 +169,81 @@ pub(crate) fn fixture() -> GongwenApp {
         backup_restore_prompt: None,
         backup_restore_result: None,
         backup_restore_error: None,
+        #[cfg(feature = "ai-workbench")]
         busy: false,
         sender,
         receiver,
+        #[cfg(feature = "ai-workbench")]
         knowledge_store,
+        #[cfg(feature = "ai-workbench")]
         knowledge_error,
+        #[cfg(feature = "ai-workbench")]
         wiki_store: None,
+        #[cfg(feature = "ai-workbench")]
         wiki_error: None,
+        #[cfg(feature = "ai-workbench")]
         wiki: Default::default(),
+        #[cfg(feature = "ai-workbench")]
         wiki_frame_rx: None,
+        #[cfg(feature = "ai-workbench")]
         wiki_frame_job: None,
+        #[cfg(feature = "ai-workbench")]
         wiki_write_rx: None,
+        #[cfg(feature = "ai-workbench")]
         wiki_write_job: None,
+        #[cfg(feature = "ai-workbench")]
         wiki_doc_status: Default::default(),
+        #[cfg(feature = "ai-workbench")]
         wiki_seen_doc_ids: None,
+        #[cfg(feature = "ai-workbench")]
         wiki_new_doc_tip: None,
+        #[cfg(feature = "ai-workbench")]
         wiki_circle: None,
+        #[cfg(feature = "ai-workbench")]
         knowledge_docs: Vec::new(),
+        #[cfg(feature = "ai-workbench")]
         knowledge_chunk_count: 0,
+        #[cfg(feature = "ai-workbench")]
         knowledge_retrieval_elapsed: None,
+        #[cfg(feature = "ai-workbench")]
         knowledge_filter_kind: None,
+        #[cfg(feature = "ai-workbench")]
         knowledge_dirty: true,
+        #[cfg(feature = "ai-workbench")]
         knowledge_delete_confirm: None,
+        #[cfg(feature = "ai-workbench")]
         knowledge_list: Default::default(),
+        #[cfg(feature = "ai-workbench")]
         knowledge_index_progress: None,
+        #[cfg(feature = "ai-workbench")]
         knowledge_progress_verb: "正在建立索引",
+        #[cfg(feature = "ai-workbench")]
         knowledge_index_result: None,
+        #[cfg(feature = "ai-workbench")]
         knowledge_unindexed: 0,
+        #[cfg(feature = "ai-workbench")]
         knowledge_test_query: String::new(),
+        #[cfg(feature = "ai-workbench")]
         knowledge_test_results: Vec::new(),
+        #[cfg(feature = "ai-workbench")]
         knowledge_local_results: Vec::new(),
+        #[cfg(feature = "ai-workbench")]
         knowledge_local_backfill_started: false,
+        #[cfg(feature = "ai-workbench")]
         knowledge_mode: KnowledgeMode::default(),
+        #[cfg(feature = "ai-workbench")]
         knowledge_qa_history: Vec::new(),
+        #[cfg(feature = "ai-workbench")]
         knowledge_qa_pending: None,
+        #[cfg(feature = "ai-workbench")]
         knowledge_search_warnings: Vec::new(),
+        #[cfg(feature = "ai-workbench")]
         knowledge_indexed_manuscripts: std::collections::HashSet::new(),
+        #[cfg(feature = "ai-workbench")]
         knowledge_embed_models: Vec::new(),
+        #[cfg(feature = "ai-workbench")]
         knowledge_busy: false,
+        #[cfg(feature = "ai-workbench")]
         knowledge_import: None,
         lexicon_store,
         lexicon_error,
@@ -210,11 +268,17 @@ pub(crate) fn fixture() -> GongwenApp {
         font_filter: BTreeMap::new(),
         last_content_tab: None,
         settings_section: SettingsSection::default(),
+        #[cfg(feature = "ai-workbench")]
         ai_section: AiSection::default(),
+        #[cfg(feature = "ai-workbench")]
         agent_settings: Default::default(),
+        #[cfg(feature = "ai-workbench")]
         styles_page: Default::default(),
+        #[cfg(feature = "ai-workbench")]
         rerank_verify_busy: false,
+        #[cfg(feature = "ai-workbench")]
         rerank_verify_result: None,
+        #[cfg(feature = "ai-workbench")]
         knowledge_preview: None,
     };
     app.manuscript_dirty = false;
@@ -244,35 +308,38 @@ pub(crate) fn fixture() -> GongwenApp {
         });
     }
     app.manuscript_count = [0, 7, 0, 0];
-    app.knowledge_dirty = false;
-    for (i, title) in [
-        "地震",
-        "国际传播研究",
-        "战略叙事：传播权力与世界秩序",
-        "政策研究资料",
-        "语言与权力",
-        "公共管理案例",
-        "组织行为研究",
-        "作者的话",
-    ]
-    .iter()
-    .enumerate()
+    #[cfg(feature = "ai-workbench")]
     {
-        app.knowledge_docs.push(knowledge::KnowledgeDocRow {
-            id: i as i64 + 1,
-            source: "external".into(),
-            source_manuscript_id: None,
-            source_path: String::new(),
-            kind: TemplateKind::ResearchReport,
-            title: (*title).into(),
-            chunk_count: 132 + i as i64 * 17,
-            embed_model: "sample".into(),
-            created_at: "2026-10-09".into(),
-            updated_at: "2026-10-09".into(),
-        });
+        app.knowledge_dirty = false;
+        for (i, title) in [
+            "地震",
+            "国际传播研究",
+            "战略叙事：传播权力与世界秩序",
+            "政策研究资料",
+            "语言与权力",
+            "公共管理案例",
+            "组织行为研究",
+            "作者的话",
+        ]
+        .iter()
+        .enumerate()
+        {
+            app.knowledge_docs.push(knowledge::KnowledgeDocRow {
+                id: i as i64 + 1,
+                source: "external".into(),
+                source_manuscript_id: None,
+                source_path: String::new(),
+                kind: TemplateKind::ResearchReport,
+                title: (*title).into(),
+                chunk_count: 132 + i as i64 * 17,
+                embed_model: "sample".into(),
+                created_at: "2026-10-09".into(),
+                updated_at: "2026-10-09".into(),
+            });
+        }
+        app.knowledge_chunk_count = 1848;
+        app.knowledge_list.selected.insert(2);
     }
-    app.knowledge_chunk_count = 1848;
-    app.knowledge_list.selected.insert(2);
     for name in [
         "政策研究",
         "规范管理",
@@ -329,6 +396,7 @@ pub(crate) fn fixture() -> GongwenApp {
 
 #[test]
 #[ignore = "出五个管理页样张，手动跑"]
+#[cfg(feature = "ai-workbench")]
 fn smartisan_management_samples() {
     let ctx = egui::Context::default();
     theme::set_current(crate::models::ThemeName::Smartisan);
@@ -473,6 +541,7 @@ fn theme_settings_samples() {
 /// 使用正式标题栏和标签事件入口出图，检查文稿工具按钮与页面标签之间的层次。
 #[test]
 #[ignore = "出文稿顶部样张，手动跑"]
+#[cfg(feature = "ai-workbench")]
 fn smartisan_document_chrome_samples() {
     let ctx = egui::Context::default();
     theme::set_current(crate::models::ThemeName::Smartisan);
@@ -554,6 +623,7 @@ fn smartisan_document_chrome_samples() {
 /// 个人任务助手原生样张：1280px 与窄屏布局，使用内存库和真实页面函数。
 #[test]
 #[ignore = "生成任务助手界面样张，供人工目视检查"]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_samples() {
     let ctx = egui::Context::default();
     theme::set_current(crate::models::ThemeName::Smartisan);

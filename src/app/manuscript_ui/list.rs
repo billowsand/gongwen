@@ -3,14 +3,16 @@
 //! 由 src/app/manuscript_ui.rs 拆分而来：本文件是模块 `app::manuscript_ui::list`，与其它子模块共享
 //! `app::manuscript_ui` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+#[cfg(feature = "ai-workbench")]
+use crate::app::accent;
 use crate::app::file_dialog::FileDialogSpec;
 use crate::app::manuscript_ui::{
     ManuscriptAction, PdfExportDialog, ZipPasswordPurpose, archive_form, batch_delete_dialog,
     import_preview_form, large_dialog_size, pending_merge_form, row_delete_confirm,
 };
 use crate::app::{
-    FORM_CONTROL_HEIGHT, GongwenApp, accent, centered_cell_text, centered_header,
-    empty_cell_placeholder, security_level_color, short_date, status_color, warn,
+    FORM_CONTROL_HEIGHT, GongwenApp, centered_cell_text, centered_header, empty_cell_placeholder,
+    security_level_color, short_date, status_color, warn,
 };
 use crate::manuscript::ManuscriptFilter;
 use crate::manuscript_io;
@@ -292,6 +294,7 @@ impl GongwenApp {
                             ids: self.manuscript_selected.iter().copied().collect(),
                         });
                     }
+                    #[cfg(feature = "ai-workbench")]
                     if ui
                         .add(theme::icon_text_button(
                             theme::Icon::PackageOpen,
@@ -345,6 +348,7 @@ impl GongwenApp {
 
     pub(crate) fn refresh_manuscript_rows(&mut self) {
         // 「已入库」标记要在稿件管理页上也是准的，哪怕用户从没打开过知识库页。
+        #[cfg(feature = "ai-workbench")]
         if self.knowledge_dirty
             && let Some(knowledge) = self.knowledge_store.as_mut()
         {
@@ -585,7 +589,7 @@ impl GongwenApp {
                 .column(Column::initial(76.0).at_least(56.0)) // 成文日期
                 .column(Column::remainder().at_least(44.0).resizable(false)) // 更多操作
         } else {
-            table
+            let table = table
                 .column(Column::auto().at_least(28.0)) // 勾选
                 .column(Column::initial(52.0).at_least(44.0)) // 状态
                 .column(Column::initial(60.0).at_least(44.0)) // 文种
@@ -595,8 +599,10 @@ impl GongwenApp {
                 .column(Column::initial(76.0).at_least(56.0)) // 成文日期
                 .column(Column::initial(76.0).at_least(56.0)) // 更新
                 .column(Column::initial(76.0).at_least(56.0)) // 归档
-                .column(Column::initial(56.0).at_least(44.0)) // 知识库
-                .column(Column::remainder().at_least(120.0).resizable(false)) // 操作
+                ;
+            #[cfg(feature = "ai-workbench")]
+            let table = table.column(Column::initial(56.0).at_least(44.0)); // 知识库
+            table.column(Column::remainder().at_least(120.0).resizable(false)) // 操作
         };
         table
             .header(ROW_HEIGHT, |mut header| {
@@ -664,6 +670,7 @@ impl GongwenApp {
                         theme::smartisan::ledger_header(ui);
                         centered_header(ui, "归档");
                     });
+                    #[cfg(feature = "ai-workbench")]
                     header.col(|ui| {
                         theme::smartisan::ledger_header(ui);
                         centered_header(ui, "知识库");
@@ -801,6 +808,7 @@ impl GongwenApp {
                         // 已入库标记：导入前就看得出哪些进过知识库，免得同一篇
                         // 反复导入。跨来源去重虽已兜底，但让用户看见更省事。
                         // 已入库用成功色圆点 + 文字，比纯文字更易扫读。
+                        #[cfg(feature = "ai-workbench")]
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
                             let indexed = self.knowledge_indexed_manuscripts.contains(&data.id);

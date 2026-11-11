@@ -20,7 +20,7 @@
 # 说明：gongwen-runtime 的字体 runtime 是可选的（没有也能启动查看界面，仅 PDF
 # 不可用）；Pi 运行时（runtime/pi）若已由 scripts/stage-pi-runtime.sh 组装好，会
 # 校验平台与哈希后一并复制进 Contents/MacOS/runtime/pi，缺省只警告「智能写作不可用」。
-# 正式发布用 scripts/package-dmg.sh（带签名/公证与 --require-pi）。
+# 双版本 DMG 使用 scripts/package-dmg.sh（支持 --edition no-ai 和 --binary）。
 set -euo pipefail
 
 VERSION=""
@@ -128,6 +128,10 @@ else
         [ -f "$PROJECT_ROOT/$doc" ] && cp "$PROJECT_ROOT/$doc" "$STAGE/"
     done
 fi
+
+EDITION=ai
+source "$PROJECT_ROOT/scripts/package-edition.sh"
+check_package_binary "$STAGE/gongwen-assistant"
 
 # runtime 是可选的：没有也能启动查看界面，PDF 排版需要其中的字体。
 RUNTIME_DIR="$STAGE/runtime"

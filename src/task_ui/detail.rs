@@ -57,6 +57,7 @@ pub(super) fn show(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data
             }
         }
     }
+    #[cfg(feature = "ai-workbench")]
     let pending = data
         .candidates
         .iter()
@@ -66,6 +67,7 @@ pub(super) fn show(ui: &mut egui::Ui, store: &mut Store, state: &mut State, data
                 .is_ok_and(|p| p.task_id.as_deref() == Some(t.id.as_str()))
         })
         .count();
+    #[cfg(feature = "ai-workbench")]
     if pending > 0 {
         ui.add_space(6.0);
         if banner(

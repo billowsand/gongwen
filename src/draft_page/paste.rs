@@ -33,10 +33,7 @@ impl DraftPage<'_> {
         ctx: &egui::Context,
         read: impl FnOnce() -> Result<Source, String> + Send + 'static,
     ) {
-        if self.doc.read_only()
-            || !self.candidates_available()
-            || self.doc.ai_panel.workspace_view.is_some()
-        {
+        if self.doc.read_only() || !self.candidates_available() || self.doc.ai_workspace_open() {
             return;
         }
         if self.doc.pending_paste.is_some() {
@@ -77,7 +74,7 @@ impl DraftPage<'_> {
         result: Result<PreparedPaste, String>,
     ) {
         if self.doc.read_only()
-            || self.doc.ai_panel.workspace_view.is_some()
+            || self.doc.ai_workspace_open()
             || !self.candidates_available()
             || self.doc.draft.kind != pending.kind
             || self.doc.generated_markdown != pending.markdown

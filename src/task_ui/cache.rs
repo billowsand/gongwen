@@ -2,7 +2,9 @@
 //!
 //! egui 每次鼠标移动都会重绘；不缓存时任务、候选、分类、历史每帧各查一遍，
 //! 搜索还要逐任务查一次材料来源。改成代号不变就不查库，写入后下一帧整体重取。
-use crate::task_assistant::{CandidateRow, HistoryEntry, SourceRow, Store, Task};
+#[cfg(feature = "ai-workbench")]
+use crate::task_assistant::{CandidateRow, SourceRow};
+use crate::task_assistant::{HistoryEntry, Store, Task};
 use std::collections::HashSet;
 
 #[derive(Default)]
@@ -10,8 +12,11 @@ pub(super) struct Cache {
     key: Option<(u64, u64)>,
     pub tasks: Vec<Task>,
     pub categories: Vec<String>,
+    #[cfg(feature = "ai-workbench")]
     pub candidates: Vec<CandidateRow>,
+    #[cfg(feature = "ai-workbench")]
     pub sources: Vec<SourceRow>,
+    #[cfg(feature = "ai-workbench")]
     pub auto: bool,
     hits: Option<(String, HashSet<String>)>,
     history: Option<(String, Vec<HistoryEntry>)>,
@@ -36,14 +41,17 @@ impl Cache {
             Ok(v) => self.categories = v,
             Err(e) => errors.push(format!("读取分类失败：{e:#}")),
         }
+        #[cfg(feature = "ai-workbench")]
         match store.candidates() {
             Ok(v) => self.candidates = v,
             Err(e) => errors.push(format!("读取待整理建议失败：{e:#}")),
         }
+        #[cfg(feature = "ai-workbench")]
         match store.sources() {
             Ok(v) => self.sources = v,
             Err(e) => errors.push(format!("读取材料失败：{e:#}")),
         }
+        #[cfg(feature = "ai-workbench")]
         match store.auto() {
             Ok(v) => self.auto = v,
             Err(e) => errors.push(format!("读取自动整理设置失败：{e:#}")),

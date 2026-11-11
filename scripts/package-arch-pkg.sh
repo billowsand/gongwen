@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 在 Arch 系环境里把 Linux 便携目录打成 pacman 包（.pkg.tar.zst）。
 #
-# Usage: package-arch-pkg.sh <version> <staging-dir> <output-dir> [amd64|arm64]
+# Usage: package-arch-pkg.sh <version> <staging-dir> <output-dir> [amd64|arm64] [ai|no-ai]
 #
 #   staging-dir  scripts/stage-linux-portable.sh 组装出来的便携目录
 #   output-dir   .pkg.tar.zst 与 .sha256 的输出位置
@@ -17,12 +17,18 @@
 # 在用户机器上会直接拒装。
 set -euo pipefail
 
-VERSION="${1:?usage: package-arch-pkg.sh <version> <staging-dir> <output-dir> [amd64|arm64]}"
+VERSION="${1:?usage: package-arch-pkg.sh <version> <staging-dir> <output-dir> [amd64|arm64] [ai|no-ai]}"
 STAGING="${2:?missing staging directory}"
 OUTPUT_DIR="${3:?missing output directory}"
 ARCH="${4:-amd64}"
 PKGREL="${GONGWEN_PKGREL:-1}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+EDITION="${5:-ai}"
+source "$PROJECT_ROOT/scripts/package-edition.sh"
+PACKAGE="gongwen-assistant${EDITION_SUFFIX}"
+DESKTOP_ID="cn.localtools.GongwenAssistant"
+if [ "$EDITION" = no-ai ]; then DESKTOP_ID+="NoAi"; fi
+
 
 case "$ARCH" in
     amd64) PKG_ARCH="x86_64" ;;
@@ -56,16 +62,22 @@ if [ ! -f "$STAGING/runtime/fonts/GWFangSong.ttf" ]; then
     exit 1
 fi
 
+check_package_binary "$STAGING/gongwen-assistant"
+check_package_resources "$STAGING"
+
 # 随包 Pi 运行时：缺 Node / host / manifest 或校验不符就不能出包。
-case "$ARCH" in
-    amd64) pi_platform="linux-x64" ;;
-    arm64) pi_platform="linux-arm64" ;;
-esac
-if [ ! -x "$STAGING/runtime/pi/bin/node" ]; then
-    echo "error: staging Pi runtime missing: $STAGING/runtime/pi/bin/node" >&2
-    exit 1
+if [ "$EDITION" = ai ]; then
+    case "$ARCH" in
+        amd64) pi_platform="linux-x64" ;;
+        arm64) pi_platform="linux-arm64" ;;
+    esac
+    if [ ! -x "$STAGING/runtime/pi/bin/node" ]; then
+        echo "error: staging Pi runtime missing: $STAGING/runtime/pi/bin/node" >&2
+        exit 1
+    fi
+    "$STAGING/runtime/pi/bin/node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$STAGING/runtime/pi" "$pi_platform" >/dev/null
+
 fi
-"$STAGING/runtime/pi/bin/node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$STAGING/runtime/pi" "$pi_platform" >/dev/null
 
 # ---------------------------------------------------------------- 依赖列表
 # 1) ldd 里出现的动态库：反查 pacman 包名。
@@ -80,13 +92,15 @@ add_dep() {
     DEPS_RAW+="$1"$'\n'
 }
 
+link_inputs=("$STAGING/gongwen-assistant")
+if [ "$EDITION" = ai ]; then link_inputs+=("$STAGING/runtime/pi/bin/node"); fi
 while read -r lib_path; do
     [ -e "$lib_path" ] || continue
     real_path="$(readlink -f "$lib_path")"
     owner="$(pacman -Qoq "$real_path" 2>/dev/null || true)"
     [ -n "$owner" ] || continue
     add_dep "$owner"
-done < <(ldd "$STAGING/gongwen-assistant" "$STAGING/runtime/pi/bin/node" 2>/dev/null \
+done < <(ldd "${link_inputs[@]}" 2>/dev/null \
     | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) { print $i; break } }')
 
 # 2) ldd 看不到、但运行时确实要用的：
@@ -136,6 +150,7 @@ done
 
 # 用 awk 替换占位符：依赖列表是多行的，sed 的替换里带裸换行不可移植。
 awk \
+    -v pkgname="$PACKAGE" -v desktop="$DESKTOP_ID" -v edition="$EDITION" \
     -v ver="$VERSION" \
     -v rel="$PKGREL" \
     -v arch="$PKG_ARCH" \
@@ -150,6 +165,9 @@ BEGIN {
 }
 {
     line = $0
+    gsub(/@PKGNAME@/, pkgname, line)
+    gsub(/@DESKTOP_ID@/, desktop, line)
+    gsub(/@EDITION@/, edition, line)
     gsub(/@PKGVER@/, ver, line)
     gsub(/@PKGREL@/, rel, line)
     gsub(/@PKGARCH@/, arch, line)

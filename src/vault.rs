@@ -909,6 +909,7 @@ pub(crate) fn ensure_slot_encrypted() -> Result<()> {
         let dir = storage::slot_subdir(name)?;
         for_each_regular_file(&dir, |path| seal_plaintext_file(path, &key))?;
     }
+    #[cfg(feature = "ai-workbench")]
     crate::pi_agent::sealed_tree::migrate()?;
     Ok(())
 }
@@ -1248,6 +1249,7 @@ pub(crate) fn slot_has_encrypted_data(slot: DataSlot) -> bool {
 /// 只做文件头嗅探（十几字节），不打开数据库——解锁路径每次都要问形态，
 /// 大库每次跑完整性扫描太重。
 pub(crate) fn slot_needs_encryption(slot: DataSlot) -> bool {
+    #[cfg(feature = "ai-workbench")]
     if crate::pi_agent::sealed_tree::pending(slot) {
         return true;
     }
@@ -2568,9 +2570,9 @@ mod tests {
         std::fs::create_dir_all(&images).unwrap();
         let user = images.join("20260101_扫描件.pdf");
         std::fs::write(&user, b"%PDF-user").unwrap();
-        let (help_name, help_bytes) = crate::help::content::IMAGES[0];
-        let help = images.join(help_name);
-        std::fs::write(&help, help_bytes).unwrap();
+        if let Some(&(name, bytes)) = crate::help::content::IMAGES.first() {
+            std::fs::write(images.join(name), bytes).unwrap();
+        }
         let cache = crate::storage::slot_subdir(crate::storage::MERMAID_CACHE_DIR).unwrap();
         std::fs::create_dir_all(&cache).unwrap();
         let diagram = cache.join("abc123.svg");
@@ -2579,11 +2581,13 @@ mod tests {
         assert!(slot_needs_encryption(DataSlot::Real));
         ensure_slot_encrypted().unwrap();
         assert!(is_sealed_file(&std::fs::read(&user).unwrap()));
-        assert_eq!(
-            std::fs::read(&help).unwrap(),
-            help_bytes,
-            "公开帮助截图不参与加密"
-        );
+        if let Some(&(name, bytes)) = crate::help::content::IMAGES.first() {
+            assert_eq!(
+                std::fs::read(images.join(name)).unwrap(),
+                bytes,
+                "公开帮助截图不参与加密"
+            );
+        }
         assert!(is_sealed_file(&std::fs::read(&diagram).unwrap()));
         assert!(!slot_needs_encryption(DataSlot::Real));
 

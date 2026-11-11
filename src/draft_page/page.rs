@@ -18,17 +18,19 @@ const DRAWER_DEFAULT_WIDTH: f32 = 300.0;
 impl DraftPage<'_> {
     pub(crate) fn create_ui(&mut self, ui: &mut egui::Ui) {
         self.sync_candidates(ui.ctx());
+        #[cfg(feature = "ai-workbench")]
         self.sync_ai_session();
         egui::Panel::top("draft_toolbar")
             .show_separator_line(!theme::smartisan::active())
             .frame(theme::panel(theme::surface(), 10))
             .show(ui, |ui| self.ribbon(ui));
         // AI 侧栏先于审校抽屉声明，贴在最右边。
+        #[cfg(feature = "ai-workbench")]
         if !self.doc.writing.open {
             self.ai_panel_side(ui);
         }
         // 历史版本时间轴：第 ④ 期并入左侧时间轴列，旧右侧抽屉下线。
-        let mut result_open = self.doc.result_drawer_open && !self.doc.writing.open;
+        let mut result_open = self.doc.result_drawer_open && !self.doc.writing_history_open();
         let mut close_result = false;
         egui::Panel::right("review_result_drawer_right_v1")
             .default_size(DRAWER_DEFAULT_WIDTH)
@@ -87,6 +89,7 @@ impl DraftPage<'_> {
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 self.read_only_banner(ui);
+                #[cfg(feature = "ai-workbench")]
                 if self.doc.writing.open {
                     self.writing_workspace(ui);
                     return;

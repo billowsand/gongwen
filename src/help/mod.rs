@@ -372,7 +372,11 @@ mod tests {
     use std::collections::BTreeSet;
 
     fn help_dir() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/help")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if cfg!(feature = "ai-workbench") {
+            "assets/help"
+        } else {
+            "assets/help-no-ai"
+        })
     }
 
     /// 目录下的文件与 [`content::FILES`] 一一对应、顺序就是文件名升序——与
@@ -383,6 +387,7 @@ mod tests {
             .unwrap()
             .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
             .filter(|name| name.ends_with(".md"))
+            .filter(|name| name != "01-tasks.md" || cfg!(feature = "task-assistant"))
             .collect();
         on_disk.sort();
         let listed: Vec<&str> = content::FILES.iter().map(|(name, _)| *name).collect();
@@ -391,6 +396,7 @@ mod tests {
 
     #[test]
     fn 截图清单与目录一致且都被正文用上() {
+        #[cfg(feature = "ai-workbench")]
         let on_disk: BTreeSet<String> = std::fs::read_dir(help_dir().join("images"))
             .unwrap()
             .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
@@ -399,7 +405,10 @@ mod tests {
             .iter()
             .map(|(name, _)| name.to_string())
             .collect();
+        #[cfg(feature = "ai-workbench")]
         assert_eq!(listed, on_disk);
+        #[cfg(not(feature = "ai-workbench"))]
+        assert!(listed.is_empty());
         let markdown = content::markdown();
         for (name, bytes) in content::IMAGES {
             assert!(
@@ -468,10 +477,16 @@ mod tests {
                 assert!(!caption.is_empty(), "示意图都要有图题");
             }
         }
-        assert!(count >= 10, "示意图应当都已改成 Mermaid，实际 {count} 张");
+        let minimum = if cfg!(feature = "ai-workbench") {
+            10
+        } else {
+            1
+        };
+        assert!(count >= minimum, "帮助中的 Mermaid 示意图只有 {count} 张");
     }
 
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn 目录列出部分章与附录() {
         let parts = toc().iter().filter(|e| e.kind == EntryKind::Part).count();
         let chapters = toc()
@@ -499,13 +514,21 @@ mod tests {
         assert!(search("这几个字正文里一定没有").is_empty());
     }
 
+    fn quickstart_title() -> &'static str {
+        if cfg!(feature = "ai-workbench") {
+            "五分钟出第一份稿子"
+        } else {
+            "开始起草"
+        }
+    }
+
     #[test]
     fn 上手指引能跳到快速上手章() {
         let mut state = HelpState::default();
         state.open_chapter(QUICKSTART_CHAPTER);
         assert!(state.request_open);
         let line = state.jump.clone().expect("应当记下要跳去的标题");
-        assert!(content::markdown()[line].contains("五分钟出第一份稿子"));
+        assert!(content::markdown()[line].contains(quickstart_title()));
     }
 
     /// 离屏画两帧：纸面与目录都画得出来，跳转用完即清。
@@ -536,7 +559,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(drawn.iter().any(|text| text.contains("五分钟出第一份稿子")));
+        assert!(drawn.iter().any(|text| text.contains(quickstart_title())));
     }
 
     /// 帮助页离屏画成 `tmp/help-page.png`，改版后目视检查。默认忽略：
@@ -546,6 +569,7 @@ mod tests {
     /// ```
     #[test]
     #[ignore]
+    #[cfg(feature = "ai-workbench")]
     fn help_page_snapshot() {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());

@@ -342,6 +342,7 @@ pub(crate) fn vocabulary_depths(vocab: &[VocabularyEntry]) -> Vec<usize> {
 
 /// 表单中的多行输入限制可见高度，长文本在框内滚动。
 /// `desired_rows` 只是最小行数，不能阻止粘贴内容把后面的操作挤出视区。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn bounded_text_edit(
     ui: &mut egui::Ui,
     id: impl egui::AsIdSalt,

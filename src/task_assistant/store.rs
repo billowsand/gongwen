@@ -4,9 +4,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 const DDL: &str = "CREATE TABLE IF NOT EXISTS task_categories(name TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,name TEXT NOT NULL,category TEXT NOT NULL,role TEXT NOT NULL DEFAULT '',collaborators TEXT NOT NULL DEFAULT '',goal TEXT NOT NULL DEFAULT '',next_step TEXT NOT NULL,next_deadline TEXT,deadline TEXT,status TEXT NOT NULL,parent_id TEXT,needs_review INTEGER NOT NULL DEFAULT 0,archived INTEGER NOT NULL DEFAULT 0,deleted INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL,owner_id INTEGER,owner_name TEXT NOT NULL DEFAULT '',progress TEXT NOT NULL DEFAULT '',risks TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS task_prerequisites(task_id TEXT NOT NULL, prerequisite_id TEXT NOT NULL, PRIMARY KEY(task_id,prerequisite_id)); CREATE TABLE IF NOT EXISTS task_history(id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, happened_at TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, source_id TEXT); CREATE TABLE IF NOT EXISTS task_sources(id TEXT PRIMARY KEY,title TEXT NOT NULL,content TEXT NOT NULL,fingerprint TEXT NOT NULL UNIQUE,source_ref TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS task_candidates(id TEXT PRIMARY KEY,source_id TEXT NOT NULL,task_id TEXT,task_revision INTEGER,kind TEXT NOT NULL,payload TEXT NOT NULL,evidence TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL,FOREIGN KEY(source_id) REFERENCES task_sources(id)); CREATE TABLE IF NOT EXISTS task_preferences(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT OR IGNORE INTO task_categories(name) VALUES('未分类');";
 /// 候选一行：id、类型、内容 JSON、摘录、状态、所属材料 id。
+#[cfg(any(test, feature = "ai-workbench"))]
 pub type CandidateRow = (String, String, String, String, String, String);
 /// 材料库里的一份材料，带它产生的建议计数（`pending` 含「稍后处理」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(test, feature = "ai-workbench"))]
 pub struct SourceRow {
     pub id: String,
     pub title: String,
@@ -20,12 +22,15 @@ pub struct SourceRow {
 }
 /// 重新识别的结果：替换了几条未处理的建议、新增几条、几条与已处理的相同而跳过。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "ai-workbench"))]
 pub struct Rerun {
     pub replaced: usize,
     pub added: usize,
     pub skipped: usize,
 }
+#[cfg(any(test, feature = "ai-workbench"))]
 const SOURCE_COLUMNS: &str = "s.id,s.title,s.source_ref,s.created_at,s.hidden,(SELECT COUNT(*) FROM task_candidates c WHERE c.source_id=s.id AND c.state IN ('pending','later')),(SELECT COUNT(*) FROM task_candidates c WHERE c.source_id=s.id AND c.state='accepted'),(SELECT COUNT(*) FROM task_candidates c WHERE c.source_id=s.id AND c.state='ignored')";
+#[cfg(any(test, feature = "ai-workbench"))]
 fn source_row(r: &rusqlite::Row) -> rusqlite::Result<SourceRow> {
     Ok(SourceRow {
         id: r.get(0)?,
@@ -64,6 +69,7 @@ impl Store {
         Ok(Self::wrap(conn))
     }
     /// 只读打开（Pi 任务检索用）：不建表、不补列，避免把只读查询变成写事务。
+    #[cfg(feature = "ai-workbench")]
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .context("只读打开任务助手数据库失败")?;
@@ -89,6 +95,7 @@ impl Store {
     ///
     /// 只返回未归档、未删除的任务；空查询直接给出最近更新的几项。个人任务量小，
     /// 这里在内存里筛，不为一个只读工具再加索引与迁移。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Task>> {
         let query = query.trim();
         let mut tasks = self.list(false)?;
@@ -112,6 +119,7 @@ impl Store {
         Ok(tasks)
     }
     /// 按 id 读一项任务；已删除的当作不存在。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn get(&self, id: &str) -> Result<Option<Task>> {
         Ok(self
             .list(true)?
@@ -128,6 +136,7 @@ impl Store {
         Ok(())
     }
     /// 填表来源与任务原子保存，指纹空间与批量整理分离。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn save_with_source(
         &mut self,
         t: &Task,
@@ -203,10 +212,12 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn set_auto(&self, on: bool) -> Result<()> {
         self.conn.execute("INSERT INTO task_preferences(key,value) VALUES('auto_organize',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[if on{"1"}else{"0"}])?;
         Ok(())
     }
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn auto(&self) -> Result<bool> {
         Ok(self
             .conn
@@ -261,6 +272,7 @@ fn parse_status(s: &str) -> super::model::Status {
     }
 }
 impl Store {
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn candidates(&self) -> Result<Vec<CandidateRow>> {
         let mut s = self.conn.prepare(
             "SELECT id,kind,payload,evidence,state,source_id FROM task_candidates ORDER BY created_at DESC",
@@ -277,6 +289,7 @@ impl Store {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn candidate_done(&self, id: &str, state: &str) -> Result<()> {
         if !["pending", "later", "ignored"].contains(&state) {
             bail!("非法候选状态")
@@ -287,6 +300,7 @@ impl Store {
         )?;
         Ok(())
     }
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn apply_candidate(&mut self, id: &str, chosen_task_id: &str) -> Result<()> {
         let tx = self
             .conn
@@ -391,6 +405,7 @@ impl Store {
         tasks[index].revision = next_revision;
         Ok(())
     }
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn recheck_candidate(&mut self, id: &str, chosen_task_id: &str) -> Result<()> {
         let exists: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND deleted=0 AND archived=0)",
@@ -411,6 +426,7 @@ impl Store {
         }
         Ok(())
     }
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn edit_candidate(&self, id: &str, proposal: &super::extract::Proposal) -> Result<()> {
         let (old_kind,evidence,source):(String,String,String)=self.conn.query_row("SELECT c.kind,c.evidence,s.content FROM task_candidates c JOIN task_sources s ON s.id=c.source_id WHERE c.id=?1 AND c.state!='accepted'",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         if proposal.kind != old_kind
@@ -521,6 +537,7 @@ impl Store {
 }
 
 impl Store {
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn create_from_candidate(&mut self, id: &str, task: &Task) -> Result<()> {
         let tx = self
             .conn
@@ -572,6 +589,7 @@ impl Store {
         Ok(())
     }
     /// 原文快照与全部候选一次提交；模型失败不会留下去重标记。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn commit_extraction(
         &mut self,
         title: &str,
@@ -619,6 +637,7 @@ impl Store {
 
     /// 材料库：批量整理识别过的材料，新的在前。表单「从文字填写」的快照挂在任务历史上，
     /// 不列在这里；删掉但仍被引用的也不列。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn sources(&self) -> Result<Vec<SourceRow>> {
         let mut s = self.conn.prepare(&format!(
             "SELECT {SOURCE_COLUMNS} FROM task_sources s WHERE s.source_ref!='fill' AND s.hidden=0 ORDER BY s.created_at DESC"
@@ -628,6 +647,7 @@ impl Store {
     }
 
     /// 按指纹找已识别过的材料（含已从材料库删掉、只为历史保留的）。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn source_by_fingerprint(&self, fingerprint: &str) -> Result<Option<SourceRow>> {
         Ok(self
             .conn
@@ -642,6 +662,7 @@ impl Store {
     /// 重新识别一份已存的材料：它还没处理（待核对、稍后）的建议换成这次的结果；
     /// 已采纳、已忽略的留作记录，这次结果里与它们同类型、同目标、同摘录的不再生成。
     /// 删掉过的材料重新识别后回到材料库。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn rerun_extraction(
         &mut self,
         source_id: &str,
@@ -709,6 +730,7 @@ impl Store {
 
     /// 从材料库删掉一份材料，连同它没采纳的建议。任务历史或已采纳的建议还引用它时，
     /// 快照留着（历史里的「原文」照样能看），只是不再列进材料库；返回是否这样保留了。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn delete_source(&mut self, source_id: &str) -> Result<bool> {
         let tx = self
             .conn
@@ -784,6 +806,7 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    #[cfg(feature = "ai-workbench")]
     pub fn candidate_source(&self, id: &str) -> Result<(String, String)> {
         Ok(self.conn.query_row("SELECT s.title,s.content FROM task_sources s JOIN task_candidates c ON c.source_id=s.id WHERE c.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?)))?)
     }

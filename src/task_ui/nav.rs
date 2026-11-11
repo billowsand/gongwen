@@ -10,7 +10,9 @@ pub(crate) enum View {
     Active,
     Waiting,
     Review,
+    #[cfg(feature = "ai-workbench")]
     Inbox,
+    #[cfg(feature = "ai-workbench")]
     Materials,
     Done,
     Cancelled,
@@ -18,12 +20,14 @@ pub(crate) enum View {
     Deleted,
 }
 
-pub(super) const MAIN: [View; 6] = [
+pub(super) const MAIN: &[View] = &[
     View::Today,
     View::Active,
     View::Waiting,
     View::Review,
+    #[cfg(feature = "ai-workbench")]
     View::Inbox,
+    #[cfg(feature = "ai-workbench")]
     View::Materials,
 ];
 pub(super) const CLOSED: [View; 4] = [View::Done, View::Cancelled, View::Archived, View::Deleted];
@@ -35,7 +39,9 @@ impl View {
             Self::Active => "进行中的工作",
             Self::Waiting => "等待 · 阻塞",
             Self::Review => "待核对",
+            #[cfg(feature = "ai-workbench")]
             Self::Inbox => "待整理建议",
+            #[cfg(feature = "ai-workbench")]
             Self::Materials => "材料",
             Self::Done => "已完成",
             Self::Cancelled => "已取消",
@@ -49,7 +55,9 @@ impl View {
             Self::Active => theme::Icon::List,
             Self::Waiting => theme::Icon::History,
             Self::Review => theme::Icon::TriangleAlert,
+            #[cfg(feature = "ai-workbench")]
             Self::Inbox => theme::Icon::Sparkles,
+            #[cfg(feature = "ai-workbench")]
             Self::Materials => theme::Icon::Paperclip,
             Self::Done => theme::Icon::SquareCheck,
             Self::Cancelled => theme::Icon::X,
@@ -66,6 +74,7 @@ impl View {
             Self::Active => open,
             Self::Waiting => open && (t.status == Status::Waiting || held_up(all, t)),
             Self::Review => live && t.needs_review,
+            #[cfg(feature = "ai-workbench")]
             Self::Inbox | Self::Materials => false,
             Self::Done => live && t.status == Status::Done,
             Self::Cancelled => live && t.status == Status::Cancelled,
@@ -88,14 +97,17 @@ pub(super) fn held_up(all: &[Task], t: &Task) -> bool {
 }
 
 /// 候选是否还等人处理。
+#[cfg(feature = "ai-workbench")]
 pub(super) fn pending_candidate(state: &str) -> bool {
     matches!(state, "pending" | "later")
 }
 
 fn count(view: View, data: &Snapshot) -> usize {
+    #[cfg(feature = "ai-workbench")]
     if view == View::Materials {
         return data.sources.len();
     }
+    #[cfg(feature = "ai-workbench")]
     if view == View::Inbox {
         return data
             .candidates
@@ -126,6 +138,7 @@ fn count_color(view: View, data: &Snapshot) -> egui::Color32 {
             }
         }
         View::Review => theme::warn(),
+        #[cfg(feature = "ai-workbench")]
         View::Inbox => theme::accent(),
         _ => theme::text_muted(),
     }
@@ -133,7 +146,7 @@ fn count_color(view: View, data: &Snapshot) -> egui::Color32 {
 
 pub(super) fn sidebar(ui: &mut egui::Ui, state: &mut State, data: &Snapshot) {
     ui.spacing_mut().item_spacing.y = 2.0;
-    for view in MAIN {
+    for &view in MAIN {
         view_row(ui, state, data, view);
     }
     ui.add_space(8.0);
@@ -164,6 +177,7 @@ pub(super) fn sidebar(ui: &mut egui::Ui, state: &mut State, data: &Snapshot) {
             } else {
                 name.clone()
             };
+            #[cfg(feature = "ai-workbench")]
             if matches!(state.view, View::Inbox | View::Materials) {
                 state.view = View::Active;
             }
@@ -180,6 +194,7 @@ fn view_row(ui: &mut egui::Ui, state: &mut State, data: &Snapshot, view: View) {
     if row(ui, state.view == view, view.icon(), view.label(), shown).clicked() {
         state.view = view;
         // 从视图栏进「待整理建议」看的是全部建议，不沿用「只看某份材料」。
+        #[cfg(feature = "ai-workbench")]
         if view == View::Inbox {
             state.inbox_source = None;
         }
@@ -263,7 +278,7 @@ pub(super) fn dropdown(ui: &mut egui::Ui, state: &mut State, data: &Snapshot) {
         egui::ComboBox::from_id_salt("task_view")
             .selected_text(label(state.view))
             .show_ui(ui, |ui| {
-                for view in MAIN.into_iter().chain(CLOSED) {
+                for view in MAIN.iter().copied().chain(CLOSED) {
                     ui.selectable_value(&mut state.view, view, label(view));
                 }
             });

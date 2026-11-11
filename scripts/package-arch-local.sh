@@ -3,14 +3,15 @@
 #
 # Usage: scripts/package-arch-local.sh [options]
 #
-#   --skip-build     不重新编译，直接用 target/release/gongwen-assistant
+#   --edition ai|no-ai 选择版本，默认 ai
+#   --skip-build     使用已编译的对应版本
 #   --no-install     只出包，不 pacman -U 安装（只做包内容自检）
 #   --keep-staging   保留中间的便携目录（默认也保留，方便排查）
 #   -h | --help      显示本帮助
 #
 # 流程与 CI 的 release.yml 一致，只是把「容器里做」搬到本机：
 #   1) cargo build --release --locked --no-default-features
-#      --features linux-portal-dialogs（Arch 变体走 XDG Desktop Portal，不依赖 GTK3）
+#      --features ai,linux-portal-dialogs（Arch 变体走 XDG Desktop Portal，不依赖 GTK3）
 #   2) scripts/stage-linux-portable.sh 组装便携目录（二进制 + runtime 字体 + 文档 + 技能包）
 #   3) scripts/package-arch-pkg.sh 用 makepkg 打成 .pkg.tar.zst
 #   4) sudo pacman -U 安装
@@ -24,11 +25,17 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 SKIP_BUILD=0
+EDITION=ai
 DO_INSTALL=1
 KEEP_STAGING=1
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --edition)
+            [ "$#" -ge 2 ] || { echo "error: --edition needs an argument" >&2; exit 1; }
+            EDITION="$2"
+            shift
+            ;;
         --skip-build) SKIP_BUILD=1 ;;
         --no-install) DO_INSTALL=0 ;;
         --keep-staging) KEEP_STAGING=1 ;;
@@ -37,6 +44,9 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+source "$PROJECT_ROOT/scripts/package-edition.sh"
+PACKAGE="gongwen-assistant${EDITION_SUFFIX}"
 
 for tool in cargo makepkg pacman zstd sha256sum; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -70,7 +80,14 @@ BINARY="$PROJECT_ROOT/target/release/gongwen-assistant"
 # ---------------------------------------------------------------- 1) 编译
 if [ "$SKIP_BUILD" -eq 0 ]; then
     echo "== Building release binary (linux-portal-dialogs)"
-    cargo build --release --locked --no-default-features --features linux-portal-dialogs
+    if [ "$EDITION" = ai ]; then
+        cargo build --release --locked --no-default-features --features ai,linux-portal-dialogs
+    else
+        cargo build --release --locked --target-dir target/no-ai-package --no-default-features --features task-assistant,linux-portal-dialogs
+        BINARY="$PROJECT_ROOT/target/no-ai-package/release/gongwen-assistant"
+    fi
+elif [ "$EDITION" = no-ai ]; then
+    BINARY="$PROJECT_ROOT/dist/editions/gongwen-assistant-no-ai"
 fi
 if [ ! -x "$BINARY" ]; then
     echo "error: binary not found: $BINARY" >&2
@@ -78,11 +95,11 @@ if [ ! -x "$BINARY" ]; then
 fi
 
 # ---------------------------------------------------------------- 2) 便携目录
-STAGING_DIR="$PROJECT_ROOT/dist/staging-linux-x86_64"
+STAGING_DIR="$PROJECT_ROOT/dist/staging-linux-x86_64$EDITION_SUFFIX"
 echo "== Staging portable directory: $STAGING_DIR"
 rm -rf "$STAGING_DIR"
 bash "$PROJECT_ROOT/scripts/stage-linux-portable.sh" \
-    "$BINARY" "$RUNTIME_DIR" "$STAGING_DIR"
+    "$BINARY" "$RUNTIME_DIR" "$STAGING_DIR" "$EDITION"
 
 # ---------------------------------------------------------------- 3) 打包
 PKG_OUTPUT_DIR="$PROJECT_ROOT/dist"
@@ -90,9 +107,9 @@ PKG_OUTPUT_DIR="$PROJECT_ROOT/dist"
 # 本机已经装过同版本时，pacman -U 会因版本相同而跳过（up to date -- skipping）。
 # 这里把 pkgrel 自动加一，让它成为一次真正的升级。
 PKGREL="${GONGWEN_PKGREL:-1}"
-installed="$(pacman -Q gongwen-assistant 2>/dev/null || true)"
+installed="$(pacman -Q "$PACKAGE" 2>/dev/null || true)"
 if [ -n "$installed" ]; then
-    inst_ver="${installed#gongwen-assistant }"
+    inst_ver="${installed#"$PACKAGE "}"
     inst_ver="${inst_ver%-*}"
     inst_rel="${installed##*-}"
     if [ "$inst_ver" = "$VERSION" ] && [ "${GONGWEN_PKGREL:-}" = "" ]; then
@@ -103,10 +120,10 @@ fi
 
 echo "== Building pacman package (makepkg)"
 GONGWEN_PKGREL="$PKGREL" bash "$PROJECT_ROOT/scripts/package-arch-pkg.sh" \
-    "$VERSION" "$STAGING_DIR" "$PKG_OUTPUT_DIR" amd64
+    "$VERSION" "$STAGING_DIR" "$PKG_OUTPUT_DIR" amd64 "$EDITION"
 
-PKG_FILE="$(find "$PKG_OUTPUT_DIR" -maxdepth 1 -name 'gongwen-assistant-*-x86_64.pkg.tar.zst' -print | sort | tail -1)"
-if [ -z "$PKG_FILE" ]; then
+PKG_FILE="$PKG_OUTPUT_DIR/$PACKAGE-$VERSION-$PKGREL-x86_64.pkg.tar.zst"
+if [ ! -f "$PKG_FILE" ]; then
     echo "error: no .pkg.tar.zst produced" >&2
     exit 1
 fi

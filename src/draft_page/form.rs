@@ -15,7 +15,6 @@ use crate::models::{
     CorrespondenceScope, DraftInput, JointIssuanceMode, LetterVersion, ReviewNote, SecurityLevel,
     StyleMode, TemplateKind, VocabularyCategory, split_units,
 };
-use crate::prompt;
 use crate::proofread;
 use crate::proofread_rules;
 use crate::theme;
@@ -2442,7 +2441,7 @@ impl DraftPage<'_> {
         if kind == TemplateKind::MeetingAgenda {
             ui.add_space(6.0);
             ui.collapsing("查看会议议程固定 Markdown 格式", |ui| {
-                ui.monospace(prompt::MEETING_AGENDA_MARKDOWN_TEMPLATE);
+                ui.monospace(MEETING_AGENDA_MARKDOWN_TEMPLATE);
             });
         }
         ui.add_space(8.0);
@@ -2473,3 +2472,15 @@ impl DraftPage<'_> {
         }
     }
 }
+
+pub(crate) const MEETING_AGENDA_MARKDOWN_TEMPLATE: &str = r#"# 【会议标题】
+
+一、时间地点：【YYYY年M月D日（星期X）HH:MM，会议地点。】
+
+二、参加人员：【参加人员。】
+
+三、研讨内容：
+
+1. 【第一项议程；】
+2. 【第二项议程；】
+3. 【最后一项议程。】"#;

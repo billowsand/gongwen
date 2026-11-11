@@ -5,18 +5,6 @@ use crate::units::UnitDisplay;
 use chrono::{DateTime, Datelike, Duration, FixedOffset, Local, NaiveDate, Weekday};
 use regex::Regex;
 
-pub const MEETING_AGENDA_MARKDOWN_TEMPLATE: &str = r#"# 【会议标题】
-
-一、时间地点：【YYYY年M月D日（星期X）HH:MM，会议地点。】
-
-二、参加人员：【参加人员。】
-
-三、研讨内容：
-
-1. 【第一项议程；】
-2. 【第二项议程；】
-3. 【最后一项议程。】"#;
-
 #[derive(Debug, Clone)]
 pub struct TimeContext {
     pub now: String,

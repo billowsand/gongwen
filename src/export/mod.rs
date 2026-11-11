@@ -226,6 +226,7 @@ pub fn extract_title(markdown: &str, fallback: &str) -> String {
 
 /// Markdown 保留“标题 + 正文 + 可选附件”。密级、文号、主送、落款、成文日期、抄送和版记
 /// 都由 DOCX/PDF 导出器按锁定元数据渲染，这里不再重复写入。
+#[cfg(feature = "ai-workbench")]
 pub fn finalize_markdown(input: &DraftInput, generated: &str) -> String {
     // 研究报告先出去：有序列表统一收尾标点（`；`/`。`）是公文的行文规范，
     // 研报正文里常有以单位、英文缩写或公式结尾的条目，套上去反而是错的。

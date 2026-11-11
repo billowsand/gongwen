@@ -1091,6 +1091,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn shared_help_fallback_checks_both_the_bundled_name_and_contents() {
         let dir = tempfile::tempdir().unwrap();
         let (name, bytes) = crate::help::content::IMAGES[0];

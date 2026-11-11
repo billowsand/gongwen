@@ -59,6 +59,7 @@ fn dependency_performance_probe() {
     }
     let scan_options = crate::lexicon::scan::ScanOptions {
         include_drafts: false,
+        #[cfg(feature = "ai-workbench")]
         include_knowledge: false,
         rescan_all: true,
     };

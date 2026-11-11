@@ -276,6 +276,7 @@ pub(super) fn show(
         clicked = clicked.take().or(gutter::paint(ui, &body_m, anchor));
     });
     PreviewOutput {
+        #[cfg(feature = "ai-workbench")]
         scale: m.scale,
         clicked,
     }

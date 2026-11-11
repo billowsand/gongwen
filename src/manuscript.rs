@@ -18,7 +18,9 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+#[cfg(feature = "ai-workbench")]
 pub(crate) mod ai_checkpoints;
+#[cfg(feature = "ai-workbench")]
 pub(crate) mod ai_sessions;
 pub(crate) mod candidates;
 pub(crate) mod merge;
@@ -116,6 +118,7 @@ CREATE TABLE IF NOT EXISTS open_tabs (
 /// 供 RAG 检索增强起草。FTS5 采用 external-content 模式：只索引 jieba
 /// 预分词后的 tokens（unicode61 会把整段中文当成一个词，必须先分词），
 /// 由 ai/ad/au 三个触发器保持与 knowledge_chunks 同步。
+#[cfg(feature = "ai-workbench")]
 pub(crate) const DDL_V5: &str = r#"
 CREATE TABLE IF NOT EXISTS knowledge_docs (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -198,6 +201,7 @@ END;
 /// `DDL_V5` 里的 `CREATE TABLE IF NOT EXISTS` 对**已存在**的旧表只会跳过、
 /// 不会补列，所以后加的列必须单独探测再 `ALTER`——DDL 里直接引用新列会在
 /// 老库上报 `no such column`。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn ensure_knowledge_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(DDL_V5)?;
     if !column_exists(conn, "knowledge_docs", "content_hash")? {
@@ -434,6 +438,7 @@ impl ManuscriptStore {
         }
         // v5：知识库文档/块/全文索引。建表与补列都幂等，v5 之后的知识库
         // 列变更统一走 ensure_knowledge_schema，不再单开 user_version 档位。
+        #[cfg(feature = "ai-workbench")]
         ensure_knowledge_schema(&self.conn)?;
         if version < 5 {
             self.conn.execute_batch("PRAGMA user_version = 5")?;
@@ -447,6 +452,7 @@ impl ManuscriptStore {
         // 起草页候选区：同样幂等建表，不单开档位。
         candidates::ensure_schema(&self.conn)?;
         // AI 侧栏会话：同样幂等建表，不单开档位。
+        #[cfg(feature = "ai-workbench")]
         ai_sessions::ensure_schema(&self.conn)?;
         // 公文登记簿：同样幂等建表，不单开档位。
         registry::ensure_schema(&self.conn)?;
@@ -457,6 +463,7 @@ impl ManuscriptStore {
         // 资源对象（图片/PDF 插图/图表缓存）与稿件同库；幂等建表，不单开档位。
         crate::resources::ensure_schema(&self.conn)?;
         // 维基知识库（框架/页面/版本/链接/资料引用）：同样幂等建表。
+        #[cfg(feature = "ai-workbench")]
         crate::wiki::ensure_schema(&self.conn)?;
         Ok(())
     }

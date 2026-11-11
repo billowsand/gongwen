@@ -48,8 +48,10 @@ pub(crate) use layout::{
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};
 pub(crate) use research::outline as research_outline;
+#[cfg(feature = "ai-workbench")]
+pub(crate) use research::research_body_preview;
+pub(crate) use research::research_preview;
 pub(crate) use research::{LabelKind, LabelTarget, label_targets as research_label_targets};
-pub(crate) use research::{research_body_preview, research_preview};
 pub(crate) use research_anchor::{AnchorRefusal, suggest as suggest_research_anchor};
 
 /// 研究报告正文引过的文献（序号、处数），正文与文献库没动就复用上一次的结果。

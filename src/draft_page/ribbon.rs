@@ -6,10 +6,11 @@
 
 use crate::app::{DraftAction, VersionScope, warn};
 use crate::doc_import::clean;
+#[cfg(feature = "ai-workbench")]
+use crate::draft_page::editor_selection;
 use crate::draft_page::{
     DraftPage, PreviewMode, TOOLBAR_CONTROL_HEIGHT, TableOp, body_stats, chinese_today,
-    editor_selection, format_clean, table_grid_picker, tidy_blank_lines, toggle_bullet,
-    toolbar_separator,
+    format_clean, table_grid_picker, tidy_blank_lines, toggle_bullet, toolbar_separator,
 };
 use crate::export;
 use crate::export::ColumnAlign;
@@ -358,7 +359,9 @@ impl DraftPage<'_> {
 
         // 旧「分阶段写作」只保留历史：可以打开看成果、导出，并整份迁移为新的 Pi 任务；
         // 新任务统一从右侧「智能写作」（Pi）发起，这里不再引导第二条写作路线。
-        if self.doc.writing.has_history() && ui
+        #[cfg(feature = "ai-workbench")]
+        {
+            if self.doc.writing.has_history() && ui
             .add_enabled(
                 true,
                 theme::icon_text_button(theme::Icon::FilePlus, "旧分阶段写作（历史）…"),
@@ -373,8 +376,8 @@ impl DraftPage<'_> {
             self.doc.ai_panel.open = false;
             self.doc.result_drawer_open = false;
         }
-        toolbar_separator(ui);
-
+            toolbar_separator(ui);
+        }
         // 二、稿件本身的编辑动作
         if ui
             .add(theme::icon_text_button(
@@ -418,7 +421,9 @@ impl DraftPage<'_> {
 
         // 三、AI：统一从右侧「智能写作」侧栏发起新任务（Pi 执行内核）。
         // 旧流程只保留历史兼容，这里不再引导第二条写作路线。
-        if theme::primary_icon_button_enabled(ui, editable, theme::Icon::Sparkles, "智能写作")
+        #[cfg(feature = "ai-workbench")]
+        {
+            if theme::primary_icon_button_enabled(ui, editable, theme::Icon::Sparkles, "智能写作")
             .on_hover_text(if self.doc.ai_panel.open {
                 "收起智能写作侧栏；选中正文再点，则把选区交给 Pi"
             } else {
@@ -429,8 +434,8 @@ impl DraftPage<'_> {
             let selection = editor_selection(ui.ctx(), &self.doc.generated_markdown);
             self.toggle_ai_panel(selection);
         }
-        toolbar_separator(ui);
-
+            toolbar_separator(ui);
+        }
         // 四、校验
         if ui
             .add_enabled(
@@ -447,21 +452,24 @@ impl DraftPage<'_> {
         }
         // 复核紧挨着校验：两者产出的都是同一条总线上的建议，只是一个靠词表、
         // 一个靠小模型，用户不该为了它们跑两个地方。
-        let review_ready = has_draft && self.config.revise_model.enabled && !self.doc.busy;
-        if ui
-            .add_enabled(
-                review_ready,
-                theme::icon_text_button(theme::Icon::Sparkles, "AI 文字复核"),
-            )
-            .on_hover_text("用小模型逐句检查语病，结果进修订建议，逐条确认后才改正文")
-            .on_disabled_hover_text(if self.config.revise_model.enabled {
-                "需要先有正文，且当前没有正在运行的任务"
-            } else {
-                "未启用：请在「AI 管理 → 文字复核」中配置复核用的小模型"
-            })
-            .clicked()
+        #[cfg(feature = "ai-workbench")]
         {
-            self.start_model_review();
+            let review_ready = has_draft && self.config.revise_model.enabled && !self.doc.busy;
+            if ui
+                .add_enabled(
+                    review_ready,
+                    theme::icon_text_button(theme::Icon::Sparkles, "AI 文字复核"),
+                )
+                .on_hover_text("用小模型逐句检查语病，结果进修订建议，逐条确认后才改正文")
+                .on_disabled_hover_text(if self.config.revise_model.enabled {
+                    "需要先有正文，且当前没有正在运行的任务"
+                } else {
+                    "未启用：请在「AI 管理 → 文字复核」中配置复核用的小模型"
+                })
+                .clicked()
+            {
+                self.start_model_review();
+            }
         }
         self.warning_badge(ui);
     }
@@ -493,7 +501,7 @@ impl DraftPage<'_> {
 
     /// 插入：往光标处放东西。功能区扩容之后最主要的受益者。
     pub(crate) fn ribbon_insert(&mut self, ui: &mut egui::Ui) {
-        let editable = !self.doc.read_only() && self.doc.ai_panel.workspace_view.is_none();
+        let editable = !self.doc.read_only() && !self.doc.ai_workspace_open();
         if ui
             .add(theme::icon_text_button(theme::Icon::Quote, "公文引用"))
             .clicked()
@@ -756,7 +764,7 @@ impl DraftPage<'_> {
     /// 才算：功能区每帧重画，把全文逐行跑一遍正则、再把整份 `.bib` 扫一遍，
     /// 长稿子上就是每帧白烧一次。下拉没展开，这两份清单一次都不算。
     pub(crate) fn ribbon_research(&mut self, ui: &mut egui::Ui) {
-        let editable = !self.doc.read_only() && self.doc.ai_panel.workspace_view.is_none();
+        let editable = !self.doc.read_only() && !self.doc.ai_workspace_open();
         // 下拉闭包借着 `self.doc` 取候选，插入要的是 `&mut self`：闭包里只记下
         // 选了什么，等这一组画完再动正文。
         let mut action: Option<MarkupInsert> = None;
@@ -1061,7 +1069,7 @@ impl DraftPage<'_> {
     /// 格式：改已有文字的 Markdown 标记。这里只放导出器认识的语法——
     /// 放个斜体按钮插出来的 `*文字*`，预览和 Word 里就是原样带星号。
     pub(crate) fn ribbon_format(&mut self, ui: &mut egui::Ui) {
-        let editable = !self.doc.read_only() && self.doc.ai_panel.workspace_view.is_none();
+        let editable = !self.doc.read_only() && !self.doc.ai_workspace_open();
         let current = self.heading_level_at_cursor(ui.ctx());
         let mut heading: Option<(u8, &'static str)> = None;
         let mut bold = false;
@@ -1245,7 +1253,7 @@ impl DraftPage<'_> {
     /// 这里的命令全是确定性的文本替换：只改审校稿 `generated_markdown`，改完重新
     /// 校验。只读稿件与 AI 工作区视图下整组禁用——那种视图里的正文不许就地改。
     pub(crate) fn ribbon_clean(&mut self, ui: &mut egui::Ui) {
-        let editable = !self.doc.read_only() && self.doc.ai_panel.workspace_view.is_none();
+        let editable = !self.doc.read_only() && !self.doc.ai_workspace_open();
         let mut action = None;
         ui.add_enabled_ui(editable, |ui| {
             // 一、编号互转
@@ -1363,7 +1371,7 @@ impl DraftPage<'_> {
     fn apply_clean(&mut self, action: CleanAction) {
         // 按钮在只读与 AI 工作区视图下已经禁用；这里再挡一道，免得以后有人
         // 从别处调用时把不该改的稿子改了。
-        if self.doc.read_only() || self.doc.ai_panel.workspace_view.is_some() {
+        if self.doc.read_only() || self.doc.ai_workspace_open() {
             return;
         }
         let before = std::mem::take(&mut self.doc.generated_markdown);

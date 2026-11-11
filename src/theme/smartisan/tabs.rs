@@ -285,6 +285,7 @@ pub fn rounded_gradient(
 
 /// 稿纸上的视图纸签（正文 / AI 工作稿）：选中签与纸面同色、下沿压进纸边，
 /// 未选签是一张略深的牛皮纸。`base` 是纸面上沿（纸签脚线）。
+#[cfg(feature = "ai-workbench")]
 pub fn sheet_tab(
     painter: &egui::Painter,
     rect: Rect,

@@ -1,10 +1,14 @@
 //! 单任务草稿的文字填写、建议、出处与撤销；这里不写数据库。
-use super::{Snapshot, State, View};
+#[cfg(feature = "ai-workbench")]
+use super::View;
+use super::{Snapshot, State};
 use crate::task_assistant::Task;
+#[cfg(feature = "ai-workbench")]
 use crate::task_assistant::extract::{Fill, MAX_SOURCE_BYTES};
 use crate::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg(feature = "ai-workbench")]
 pub(crate) enum FillField {
     Name,
     Owner,
@@ -13,6 +17,7 @@ pub(crate) enum FillField {
     Deadline,
     Risks,
 }
+#[cfg(feature = "ai-workbench")]
 impl FillField {
     pub fn value(self, t: &Task) -> String {
         match self {
@@ -39,12 +44,14 @@ impl FillField {
     }
 }
 
+#[cfg(feature = "ai-workbench")]
 pub(crate) struct FillRequest {
     pub draft_id: String,
     pub text: String,
     pub current: Task,
 }
 
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn prune_marks(state: &mut State, draft: &Task) {
     let owner_id = state.fill_owner_id;
     state.fill_marks.retain(|field, v| {
@@ -58,6 +65,7 @@ pub(crate) fn prune_marks(state: &mut State, draft: &Task) {
 
 /// 以填写框里的文字为原文应用结果（样张与测试用；后台结果走 `apply_from`）。
 #[cfg(test)]
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn apply_fill(
     state: &mut State,
     draft: &mut Task,
@@ -69,6 +77,7 @@ pub(crate) fn apply_fill(
 }
 
 /// `source` 是发请求那一刻的原文：识别期间用户改了填写框，出处仍按当时的文字核对。
+#[cfg(feature = "ai-workbench")]
 fn apply_from(
     state: &mut State,
     draft: &mut Task,
@@ -168,6 +177,7 @@ fn apply_from(
     state.fill_open_more = false;
 }
 
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn undo_fill(state: &mut State, draft: &mut Task) {
     if let Some(before) = state.fill_before.take() {
         for (field, v) in &state.fill_marks {
@@ -194,10 +204,12 @@ pub(crate) fn undo_fill(state: &mut State, draft: &mut Task) {
 }
 
 /// 忙状态也属于请求身份；关闭再打开同一任务不应接收旧请求的结果。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn fill_result_matches(state: &State, id: &str) -> bool {
     state.fill_busy && !state.fill_discard && state.draft.as_ref().is_some_and(|d| d.id == id)
 }
 
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn receive_fill(
     state: &mut State,
     id: &str,
@@ -225,6 +237,7 @@ pub(crate) fn receive_fill(
     }
 }
 
+#[cfg(feature = "ai-workbench")]
 pub(super) fn show(ui: &mut egui::Ui, draft: &mut Task, state: &mut State) {
     if state.candidate_create_id.is_some() {
         return;
@@ -239,6 +252,7 @@ pub(super) fn show(ui: &mut egui::Ui, draft: &mut Task, state: &mut State) {
     }
 }
 
+#[cfg(feature = "ai-workbench")]
 fn card(ui: &mut egui::Ui, draft: &mut Task, state: &mut State) {
     theme::card().show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -328,32 +342,38 @@ fn card(ui: &mut egui::Ui, draft: &mut Task, state: &mut State) {
 /// 一处统一绘制字段标签、AI 边框与建议，人工编辑后立即取消标记。
 pub(super) fn field(
     ui: &mut egui::Ui,
-    state: &mut State,
+    #[cfg(feature = "ai-workbench")] state: &mut State,
     draft: &mut Task,
-    data: &Snapshot,
-    field: FillField,
+    #[cfg(feature = "ai-workbench")] data: &Snapshot,
+    #[cfg(feature = "ai-workbench")] field: FillField,
     label: &str,
     body: impl FnOnce(&mut egui::Ui, &mut Task),
 ) {
     ui.add_space(2.0);
     ui.horizontal_wrapped(|ui| {
         theme::caption(ui, label);
+        #[cfg(feature = "ai-workbench")]
         if let Some(v) = state.fill_marks.get(&field) {
             theme::chip(ui, "AI", theme::accent(), theme::accent_soft())
                 .on_hover_text(format!("原文：{}", v.evidence));
         }
     });
+    #[cfg(feature = "ai-workbench")]
     let stroke = if state.fill_marks.contains_key(&field) {
         egui::Stroke::new(1.0, theme::accent())
     } else {
         egui::Stroke::NONE
     };
+    #[cfg(not(feature = "ai-workbench"))]
+    let stroke = egui::Stroke::NONE;
     egui::Frame::new()
         .stroke(stroke)
         .corner_radius(theme::chrome_radius(7))
         .inner_margin(2.0)
         .show(ui, |ui| body(ui, draft));
+    #[cfg(feature = "ai-workbench")]
     prune_marks(state, draft);
+    #[cfg(feature = "ai-workbench")]
     if let Some(v) = state.fill_suggestions.get(&field).cloned() {
         let readable = if field == FillField::Owner {
             super::owner::match_name(data.vocabulary, &v.value)
@@ -385,17 +405,21 @@ pub(super) fn owner_field(ui: &mut egui::Ui, draft: &mut Task, state: &mut State
     ui.add_space(2.0);
     ui.horizontal_wrapped(|ui| {
         theme::caption(ui, "负责人");
+        #[cfg(feature = "ai-workbench")]
         if let Some(v) = state.fill_marks.get(&FillField::Owner) {
             theme::chip(ui, "AI", theme::accent(), theme::accent_soft())
                 .on_hover_text(format!("原文：{}", v.evidence));
         }
     });
+    #[cfg(feature = "ai-workbench")]
     let stroke = if state.fill_marks.contains_key(&FillField::Owner) {
         egui::Stroke::new(1.0, theme::accent())
     } else {
         egui::Stroke::NONE
     };
-    let changed = egui::Frame::new()
+    #[cfg(not(feature = "ai-workbench"))]
+    let stroke = egui::Stroke::NONE;
+    let _changed = egui::Frame::new()
         .stroke(stroke)
         .corner_radius(theme::chrome_radius(7))
         .inner_margin(2.0)
@@ -411,12 +435,14 @@ pub(super) fn owner_field(ui: &mut egui::Ui, draft: &mut Task, state: &mut State
             )
         })
         .inner;
-    if changed {
+    #[cfg(feature = "ai-workbench")]
+    if _changed {
         state.fill_marks.remove(&FillField::Owner);
         state.fill_suggestions.remove(&FillField::Owner);
         state.fill_owner_id = None;
         state.fill_owner_suggestion_id = None;
     }
+    #[cfg(feature = "ai-workbench")]
     if let Some(v) = state.fill_suggestions.get(&FillField::Owner).cloned() {
         let proposed = state.fill_owner_suggestion_id.and_then(|id| {
             data.vocabulary

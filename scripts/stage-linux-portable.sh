@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 组装 Linux 便携目录：二进制 + runtime（字体、许可证）+ 文档 + AI 技能包。
 #
-# Usage: stage-linux-portable.sh <binary> <runtime-dir> <output-dir>
+# Usage: stage-linux-portable.sh <binary> <runtime-dir> <output-dir> [ai|no-ai]
 #
 #   binary      编译好的 gongwen-assistant
 #   runtime-dir 解开后的 runtime 目录（里面有 SHA256SUMS.txt）
@@ -23,10 +23,12 @@ else
     exit 1
 fi
 
-BINARY="${1:?usage: stage-linux-portable.sh <binary> <runtime-dir> <output-dir>}"
+BINARY="${1:?usage: stage-linux-portable.sh <binary> <runtime-dir> <output-dir> [ai|no-ai]}"
 RUNTIME_DIR="${2:?missing runtime directory}"
 OUTPUT_DIR="${3:?missing output directory}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+EDITION="${4:-ai}"
+source "$PROJECT_ROOT/scripts/package-edition.sh"
 
 # 打技能包时要 cd 到 skills/ 再引用输出目录，传进来的相对路径先转绝对；
 # 相对路径在 `(cd ... && zip ...)` 里会相对新工作目录解析，报「No such file」。
@@ -48,12 +50,14 @@ fi
 # ime/ 是旧拼音词库，也不随包（初始词表由本仓库的 quan.txt 提供）。
 is_retired_runtime_asset() {
     case "$1" in
-        tectonic/*|texbundle/*|ime/*) return 0 ;;
+        tectonic/*|texbundle/*|ime/*|pi/*) return 0 ;;
         licenses/LICENSE.CTAN|licenses/LICENSE.TL|licenses/TECTONIC-LICENSE.txt) return 0 ;;
         *) return 1 ;;
     esac
 }
 
+check_package_binary "$BINARY"
+check_package_resources "$OUTPUT_DIR"
 install -m 755 "$BINARY" "$OUTPUT_DIR/gongwen-assistant"
 
 runtime_out="$OUTPUT_DIR/runtime"
@@ -82,28 +86,31 @@ done < "$RUNTIME_DIR/SHA256SUMS.txt"
 
 # 随包 Pi 运行时：必须先由 scripts/stage-pi-runtime.sh 组装好，manifest 与当前
 # 架构一致，缺文件 / 哈希不符 / 不是 npm ci 产物都直接失败。
-pi_platform=""
-case "$(uname -m)" in
-    aarch64|arm64) pi_platform="linux-arm64" ;;
-    x86_64|amd64) pi_platform="linux-x64" ;;
-    *) echo "error: unsupported architecture for Pi runtime" >&2; exit 1 ;;
-esac
-pi_source="$PROJECT_ROOT/runtime/pi"
-pi_node="$pi_source/bin/node"
-if [ ! -x "$pi_node" ]; then
-    echo "error: Pi runtime not staged ($pi_source). Run scripts/stage-pi-runtime.sh --platform $pi_platform" >&2
-    exit 1
+if [ "$EDITION" = ai ]; then
+    pi_platform=""
+    case "$(uname -m)" in
+        aarch64|arm64) pi_platform="linux-arm64" ;;
+        x86_64|amd64) pi_platform="linux-x64" ;;
+        *) echo "error: unsupported architecture for Pi runtime" >&2; exit 1 ;;
+    esac
+    pi_source="$PROJECT_ROOT/runtime/pi"
+    pi_node="$pi_source/bin/node"
+    if [ ! -x "$pi_node" ]; then
+        echo "error: Pi runtime not staged ($pi_source). Run scripts/stage-pi-runtime.sh --platform $pi_platform" >&2
+        exit 1
+    fi
+    "$pi_node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$pi_source" "$pi_platform" >/dev/null
+    mkdir -p "$runtime_out/pi"
+    "$pi_node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$pi_source" "$pi_platform" --list | while read -r relative; do
+        mkdir -p "$runtime_out/pi/$(dirname "$relative")"
+        install -m 644 "$pi_source/$relative" "$runtime_out/pi/$relative"
+    done
+    # manifest 自己不在文件清单里，必须单独带上。
+    install -m 644 "$pi_source/manifest.json" "$runtime_out/pi/manifest.json"
+    chmod 755 "$runtime_out/pi/bin/node"
+    bash "$PROJECT_ROOT/scripts/check-node-glibc.sh" "$runtime_out/pi/bin/node"
+
 fi
-"$pi_node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$pi_source" "$pi_platform" >/dev/null
-mkdir -p "$runtime_out/pi"
-"$pi_node" "$PROJECT_ROOT/scripts/pi-runtime-verify.mjs" "$pi_source" "$pi_platform" --list | while read -r relative; do
-    mkdir -p "$runtime_out/pi/$(dirname "$relative")"
-    install -m 644 "$pi_source/$relative" "$runtime_out/pi/$relative"
-done
-# manifest 自己不在文件清单里，必须单独带上。
-install -m 644 "$pi_source/manifest.json" "$runtime_out/pi/manifest.json"
-chmod 755 "$runtime_out/pi/bin/node"
-bash "$PROJECT_ROOT/scripts/check-node-glibc.sh" "$runtime_out/pi/bin/node"
 
 # 初始基础词表独立随包，便于更新：项目自维护的 quan.txt 为唯一正式来源，
 # mabiao.txt 只作旧机后备；两者都没有时由使用者在设置页导入。
@@ -122,7 +129,7 @@ if [ -f "$RUNTIME_DIR/licenses/NUCLEO-MPL-2.0.txt" ]; then
     install -m 644 "$RUNTIME_DIR/licenses/NUCLEO-MPL-2.0.txt" "$runtime_out/licenses/"
 fi
 
-for doc in README.md THIRD_PARTY_NOTICES.md LICENSE config.example.json; do
+for doc in README.md THIRD_PARTY_NOTICES.md LICENSE; do
     if [ -f "$PROJECT_ROOT/$doc" ]; then
         install -m 644 "$PROJECT_ROOT/$doc" "$OUTPUT_DIR/$doc"
     fi
@@ -131,13 +138,17 @@ done
 # AI 技能包：把 skills/gongwen-markdown/ 打成 skills/gongwen-markdown.skill
 # 随包分发（.skill 就是 zip）。没有 zip 命令就跳过——应用内的「导出 AI 技能包」
 # 按钮用的是编进二进制的同一份文件（src/skill_pack.rs），不影响使用。
-skill_name="gongwen-markdown"
-skill_source="$PROJECT_ROOT/skills/$skill_name"
-if [ -d "$skill_source" ] && command -v zip >/dev/null 2>&1; then
-    mkdir -p "$OUTPUT_DIR/skills"
-    rm -f "$OUTPUT_DIR/skills/$skill_name.skill"
-    (cd "$PROJECT_ROOT/skills" && zip -q -r "$OUTPUT_DIR/skills/$skill_name.skill" "$skill_name" \
-        -x '*/__pycache__/*' -x '*/.DS_Store')
+if [ "$EDITION" = ai ]; then
+    install -m 644 "$PROJECT_ROOT/config.example.json" "$OUTPUT_DIR/config.example.json"
+    skill_name="gongwen-markdown"
+    skill_source="$PROJECT_ROOT/skills/$skill_name"
+    if [ -d "$skill_source" ] && command -v zip >/dev/null 2>&1; then
+        mkdir -p "$OUTPUT_DIR/skills"
+        rm -f "$OUTPUT_DIR/skills/$skill_name.skill"
+        (cd "$PROJECT_ROOT/skills" && zip -q -r "$OUTPUT_DIR/skills/$skill_name.skill" "$skill_name" \
+            -x '*/__pycache__/*' -x '*/.DS_Store')
+    fi
+
 fi
 
 # 便携目录自己的校验清单，便于事后核对。

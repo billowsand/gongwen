@@ -192,13 +192,18 @@ fn empty(ui: &mut egui::Ui, state: &mut State, data: &Snapshot, searching: bool)
         ui.label("还没有任务。");
         theme::caption(
             ui,
-            "新建一个，或把通知、纪要粘贴进来，让 AI 拆成待核对的建议。",
+            if cfg!(feature = "ai-workbench") {
+                "新建一个，或把通知、纪要粘贴进来，让 AI 拆成待核对的建议。"
+            } else {
+                "点击「新建任务」开始记录。"
+            },
         );
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if theme::primary_icon_button(ui, theme::Icon::Plus, "新建一个任务").clicked() {
                 state.open_draft(Replace::Blank);
             }
+            #[cfg(feature = "ai-workbench")]
             if ui
                 .add(theme::secondary_icon_button(
                     theme::Icon::Paperclip,

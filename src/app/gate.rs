@@ -371,6 +371,7 @@ impl AppShell {
         storage::set_writes_blocked(false);
         // 上次崩溃/锁屏时没能落终态的 Pi 轮次仍停在 Running：在持有密钥、
         // 尚未开始新任务的窗口里纠正一次（尽力而为，失败不阻断进入工作区）。
+        #[cfg(feature = "ai-workbench")]
         let reconciled = crate::pi_agent::recovery::reconcile_interrupted_runs();
         let Some(startup) = self.startup.as_mut() else {
             return;
@@ -380,6 +381,7 @@ impl AppShell {
         if let Some(notice) = notice {
             app.status = notice;
         }
+        #[cfg(feature = "ai-workbench")]
         match reconciled {
             Ok(count) if count > 0 => {
                 app.status =
@@ -877,13 +879,9 @@ impl AppShell {
                         }
                     }
                 } else if app.take_lock_requested() {
-                    if app.task_extraction_rx.is_some()
-                        || app.task_fill_rx.is_some()
-                        || app.wiki_frame_rx.is_some()
-                        || app.wiki_write_rx.is_some()
-                    {
+                    if app.ai_jobs_stopping() {
                         // Pi 的停止由后台收尾，收完结果再释放工作区与密钥。
-                        app.status = "正在等待维基作业结束后锁定…".into();
+                        app.status = "正在等待后台作业结束后锁定…".into();
                         app.request_lock();
                         None
                     } else if let Err(error) = app.save_before_lock() {

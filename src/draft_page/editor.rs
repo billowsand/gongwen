@@ -659,6 +659,7 @@ fn paint_editor_empty_hint(
 /// 锤子稿纸是纸面隐喻的主题：正文与 AI 工作稿必须落在同一张纸上，切换才不会
 /// 从纸掉到木纹上。版式模式本身是一张虚拟 A4，只在正看 AI 稿时借用这张纸；
 /// 其它主题保持原来的标签行，不动它们的界面语义。
+#[cfg(feature = "ai-workbench")]
 pub(super) fn uses_workspace_sheet(
     smartisan: bool,
     preview: PreviewMode,
@@ -674,7 +675,7 @@ impl DraftPage<'_> {
     }
 
     pub(crate) fn preview_ui(&mut self, ui: &mut egui::Ui) {
-        if self.doc.markdown_find.open && self.doc.ai_panel.workspace_view.is_none() {
+        if self.doc.markdown_find.open && !self.doc.ai_workspace_open() {
             egui::Panel::top("preview_find")
                 .frame(theme::panel(theme::surface(), 12))
                 .show(ui, |ui| self.markdown_find_ui(ui));
@@ -698,6 +699,7 @@ impl DraftPage<'_> {
 
     /// 返回正文里不透明、会把底板整片盖住的区域。
     fn preview_body_ui(&mut self, ui: &mut egui::Ui) -> Option<egui::Rect> {
+        #[cfg(feature = "ai-workbench")]
         if uses_workspace_sheet(
             theme::smartisan::active(),
             self.doc.preview_mode,
@@ -707,6 +709,7 @@ impl DraftPage<'_> {
         {
             return Some(paper);
         }
+        #[cfg(feature = "ai-workbench")]
         if self.ai_workspace_ui(ui) {
             return None;
         }
@@ -863,6 +866,7 @@ impl DraftPage<'_> {
 
     /// Markdown 源码编辑框，带语法高亮。
     pub(crate) fn markdown_editor(&mut self, ui: &mut egui::Ui) {
+        #[cfg(feature = "ai-workbench")]
         crate::ai_panel::pi_write::bind_editor(ui.ctx(), self.doc.key);
         let source_mode = self.doc.preview_mode == PreviewMode::Source;
         let source_scroll_request = source_mode

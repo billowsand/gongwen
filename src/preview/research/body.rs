@@ -40,6 +40,7 @@ pub(crate) fn research_preview(
 }
 
 /// 阅读器使用同一研究报告正文排版，页标题由外层工作区提供。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn research_body_preview(
     ui: &mut egui::Ui,
     content: crate::preview::InlineLinks,
@@ -233,6 +234,7 @@ fn draw_research(
 
     let numbered = gutter::paint(ui, &metrics, anchor);
     PreviewOutput {
+        #[cfg(feature = "ai-workbench")]
         scale: metrics.scale,
         clicked: clicked.or(numbered),
     }

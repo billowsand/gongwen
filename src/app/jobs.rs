@@ -3,22 +3,37 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::jobs`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+#[cfg(feature = "ai-workbench")]
 use crate::ai_panel::TurnState;
-use crate::app::{ExportOutcome, GongwenApp, KnowledgeImportDraft, KnowledgePreviewState, TabRef};
+use crate::app::{ExportOutcome, GongwenApp, TabRef};
+#[cfg(feature = "ai-workbench")]
+use crate::app::{KnowledgeImportDraft, KnowledgePreviewState};
+#[cfg(feature = "ai-workbench")]
 use crate::doc_import;
-use crate::draft_page::{DocKey, DraftSession};
+use crate::draft_page::DocKey;
+#[cfg(feature = "ai-workbench")]
+use crate::draft_page::DraftSession;
+#[cfg(feature = "ai-workbench")]
 use crate::knowledge;
+#[cfg(feature = "ai-workbench")]
 use crate::lmstudio;
 use crate::manuscript_io;
-use crate::models::{DraftInput, GeneratedDraft, ModelKind, RerankMode, ReviewNote, TemplateKind};
+use crate::models::ReviewNote;
+#[cfg(feature = "ai-workbench")]
+use crate::models::{DraftInput, GeneratedDraft, ModelKind, RerankMode, TemplateKind};
 use crate::pdf_viewer;
 use crate::pdf_viewer::PdfKey;
+#[cfg(feature = "ai-workbench")]
 use crate::preview;
+#[cfg(feature = "ai-workbench")]
 use crate::qa;
+#[cfg(feature = "ai-workbench")]
 use crate::rag;
 use crate::storage;
 use crate::system_fonts;
+#[cfg(feature = "ai-workbench")]
 use crate::theme;
+#[cfg(feature = "ai-workbench")]
 use crate::units::UnitDisplay;
 use eframe::egui;
 use std::path::PathBuf;
@@ -35,12 +50,14 @@ pub(crate) enum WorkerResult {
     /// 探测一家提供商：连接结果与已加载模型清单。
     /// `probed_kinds` 是服务原生接口自报的模型用途（目前只有 LM Studio 给），
     /// 写回配置前还要过一遍 `classify_model` 补名字启发式。
+    #[cfg(feature = "ai-workbench")]
     ProviderModels {
         provider_id: String,
         result: Result<Vec<String>, String>,
         probed_kinds: std::collections::HashMap<String, ModelKind>,
     },
     /// 真跑一次 rerank 的验证结果（端点路径 + 响应字段是否对得上）。
+    #[cfg(feature = "ai-workbench")]
     RerankVerify(Result<String, String>),
     /// 某一篇稿件的任务结果。`key` 认稿件、`seq` 认这一次任务：稿件关了或者
     /// 同一篇又发起了新任务，回来的结果就已作废。
@@ -63,6 +80,7 @@ pub(crate) enum WorkerResult {
         result: Result<String, String>,
     },
     /// 知识库任务：与具体稿件无关的全局任务（索引构建 / 检索测试）。
+    #[cfg(feature = "ai-workbench")]
     Knowledge(KnowledgeJob),
     /// 公文词表任务：语料扫描的进度与结果。
     Lexicon(crate::app::LexiconJob),
@@ -147,12 +165,15 @@ pub(crate) enum WorkerResult {
         result: Result<crate::print::PrintOutcome, String>,
     },
     /// Pi 工作区占用统计结果：总字节数与轮次数。
+    #[cfg(feature = "ai-workbench")]
     PiWorkspaceUsage(Result<(u64, usize), String>),
     /// 清理旧 Pi 工作区：清掉几轮、释放多少字节。
+    #[cfg(feature = "ai-workbench")]
     PiWorkspacePruned(Result<(usize, u64), String>),
 }
 
 /// 知识库后台任务的结果。
+#[cfg(feature = "ai-workbench")]
 pub(crate) enum KnowledgeJob {
     /// 导入或索引的进度（每篇回报一次）。
     IndexProgress {
@@ -199,6 +220,7 @@ pub(crate) enum KnowledgeJob {
 /// 知识库页输入区的模式：检索片段列表，还是基于片段生成问答答案。
 /// 两种模式共用同一个输入框，切换只改变「发送后干什么」，互不清空各自结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg(feature = "ai-workbench")]
 pub(crate) enum KnowledgeMode {
     #[default]
     Search,
@@ -209,31 +231,42 @@ pub(crate) enum KnowledgeMode {
 pub(crate) enum DocJob {
     /// 模型的流式增量，落进 AI 侧栏正在跑的那一轮，不碰正文。`done` 表示模型
     /// 已经说完、接下来是程序校验。
+    #[cfg(feature = "ai-workbench")]
     AiStream {
         content: String,
         reasoning: String,
         done: bool,
     },
     /// 要留在 AI 侧栏卡片上的说明（知识库命中了哪几篇、为什么没命中）。
+    #[cfg(feature = "ai-workbench")]
     AiNote(String),
     /// 动笔前「要素抽取」直接给出的要素建议：挂到这一轮的建议卡上（不挡起草）。
+    #[cfg(feature = "ai-workbench")]
     AiFieldSuggestions(Vec<crate::element_fields::FieldSuggestion>),
     /// 技能流程的一次工具调用，侧栏「过程」里一行。
+    #[cfg(feature = "ai-workbench")]
     AiTool(String),
     /// Pi 智能写作的进度（读正文、等模型、工具完成……）。
+    #[cfg(feature = "ai-workbench")]
     PiProgress(String),
     /// Pi 本轮的一次工具调用，侧栏「过程」里一行。
+    #[cfg(feature = "ai-workbench")]
     PiTool(String),
+    #[cfg(feature = "ai-workbench")]
     PiActivity(crate::pi_agent::PiActivity),
     /// Pi 工作区有已验证的候选稿，可作为缺少阶段信息时的进度提示。
+    #[cfg(feature = "ai-workbench")]
     PiCandidate,
     /// Pi 本轮结束。成功时是一份固定版本或侧栏清单，失败时报原因；
     /// 未提交、超时、取消、崩溃都不会走到成功分支。
     /// Pi 交付结果。装箱：`PiOutcome` 带着完整正文，不把整个 `DocJob` 撞大。
+    #[cfg(feature = "ai-workbench")]
     PiDone(Box<Result<crate::pi_agent::PiOutcome, String>>),
     /// Pi 在等用户回答；题目只活在本轮。
+    #[cfg(feature = "ai-workbench")]
     PiQuestions(crate::pi_agent::PiQuestionBatch),
     /// Pi 后台准备完成：把稳定运行引用交回界面，等界面核对轮次、保存会话后确认。
+    #[cfg(feature = "ai-workbench")]
     PiPrepared {
         turn_id: u64,
         reference: crate::pi_agent::PiRunRef,
@@ -242,28 +275,36 @@ pub(crate) enum DocJob {
         kind: String,
         ack: crate::ai_panel::pi_prepare::PiPrepareAck,
     },
+    #[cfg(feature = "ai-workbench")]
     AiUsage {
         turn_id: u64,
         usage: crate::ai_services::backend::UsageTotals,
     },
     /// 技能流程的工作稿整体换新（补全之后）。
+    #[cfg(feature = "ai-workbench")]
     AiWorkspace(String),
+    #[cfg(feature = "ai-workbench")]
     AiWriteBegin {
         prefix: String,
         suffix: String,
     },
     /// 技能任务结束：流程挂起要问的题，或定稿后的提案。
+    #[cfg(feature = "ai-workbench")]
     SkillDone(Result<Box<crate::ai_panel::SkillResult>, String>),
     /// 技能任务开跑前压缩了会话：新的会话摘要与它覆盖到的最后一轮。
+    #[cfg(feature = "ai-workbench")]
     AiSessionSummary {
         summary: String,
         upto: u64,
     },
     /// 手动压缩会话的结果：(摘要, 覆盖到的最后一轮, 并进去几轮)。
+    #[cfg(feature = "ai-workbench")]
     AiCompactDone(Result<(String, u64, usize), String>),
     /// 这一轮用了哪份风格档案（记一次使用）。
+    #[cfg(feature = "ai-workbench")]
     StyleUsed(String),
     /// 按回答修订的结果：AI 把缺口题的回答写进了所在段落（或闸门不过、直接替换）。
+    #[cfg(feature = "ai-workbench")]
     GapRevised(Box<crate::ai_panel::GapRevision>),
     ExportProgress(String),
     Exported(Result<ExportOutcome, String>),
@@ -274,6 +315,7 @@ pub(crate) enum DocJob {
     RedlinePrintPreview(Result<Vec<u8>, String>),
     MemoryPrintPdf(Result<Vec<u8>, String>),
     /// 小模型逐句文字复核的结果。只产出待确认的建议，不碰正文。
+    #[cfg(feature = "ai-workbench")]
     Reviewed(Result<crate::revise_model::ReviewOutcome, String>),
 }
 
@@ -296,6 +338,7 @@ impl GongwenApp {
     /// 探测一家提供商：测试连接并把已加载模型清单缓存进配置。
     ///
     /// 各家独立进行，互不阻塞；状态挂在提供商卡片上（`provider_status`）。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn start_provider_probe(&mut self, provider_id: &str) {
         let Some(provider) = self.config.provider(provider_id) else {
             return;
@@ -332,6 +375,7 @@ impl GongwenApp {
     }
 
     /// 刷新所有已启用提供商的模型清单。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn start_all_provider_probes(&mut self) {
         let ids: Vec<String> = self
             .config
@@ -451,6 +495,7 @@ impl GongwenApp {
     /// 只查 `/v1/models` 是不够的：有些服务（如 LM Studio）对不认识的路径会记
     /// `Unexpected endpoint or method` 却仍返回 200，于是"连接成功"，
     /// 而每次检索的 rerank 都在静默失败。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn start_rerank_verify(&mut self) {
         if self.rerank_verify_busy {
             return;
@@ -493,6 +538,7 @@ impl GongwenApp {
     pub(crate) fn poll_worker(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.receiver.try_recv() {
             match result {
+                #[cfg(feature = "ai-workbench")]
                 WorkerResult::ProviderModels {
                     provider_id,
                     result,
@@ -599,6 +645,7 @@ impl GongwenApp {
                         session.draft_diff.accept_redline(base, hash, *doc);
                     }
                 }
+                #[cfg(feature = "ai-workbench")]
                 WorkerResult::Knowledge(job) => self.apply_knowledge_job(job),
                 WorkerResult::Lexicon(job) => self.handle_lexicon_job(job),
                 WorkerResult::SystemFonts(fonts) => {
@@ -691,6 +738,7 @@ impl GongwenApp {
                         }
                     }
                 }
+                #[cfg(feature = "ai-workbench")]
                 WorkerResult::RerankVerify(result) => {
                     self.rerank_verify_busy = false;
                     self.rerank_verify_result = Some(match result {
@@ -798,6 +846,7 @@ impl GongwenApp {
                     dialog,
                     result,
                 } => self.apply_pdf_printed(path, printer, dialog, result),
+                #[cfg(feature = "ai-workbench")]
                 WorkerResult::PiWorkspaceUsage(result) => {
                     self.pi_workspace_busy = false;
                     match result {
@@ -813,6 +862,7 @@ impl GongwenApp {
                         }
                     }
                 }
+                #[cfg(feature = "ai-workbench")]
                 WorkerResult::PiWorkspacePruned(result) => {
                     self.pi_workspace_busy = false;
                     // 清完让下一次进页面重新统计，看到的是清理后的占用。
@@ -835,6 +885,7 @@ impl GongwenApp {
     }
 
     /// 知识库后台任务的收尾。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn apply_knowledge_job(&mut self, job: KnowledgeJob) {
         match job {
             KnowledgeJob::IndexProgress {
@@ -958,6 +1009,7 @@ impl GongwenApp {
     }
 
     /// 刷新知识库文档列表、块计数、已入库稿件集合与库内嵌入模型。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn refresh_knowledge(&mut self) {
         self.knowledge_dirty = false;
         let Some(store) = self.knowledge_store.as_mut() else {
@@ -979,6 +1031,7 @@ impl GongwenApp {
 
     /// 库内是否存在与当前配置不同的 embedding 模型。换模型后维度多半不同，
     /// 旧块的余弦恒为 0，会静默退出向量召回——必须提示用户重建索引。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn knowledge_embed_model_mismatch(&self) -> Option<String> {
         let current = self.config.embedding_model_name();
         let current = current.trim();
@@ -1001,6 +1054,7 @@ impl GongwenApp {
     }
 
     /// 打开外部文档选择框（Markdown / Word / 电子版 PDF 等），进入导入确认（选文种）。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn knowledge_pick_documents(&mut self) {
         self.request_files(doc_import::knowledge_files_spec(), |app, paths| {
             let Some(paths) = paths else {
@@ -1022,6 +1076,7 @@ impl GongwenApp {
     /// 转换放进后台：单个 docx 是毫秒级，
     /// 但一次选几十个文件、或几百页的 PDF 就会卡住界面。失败（扫描版 PDF、加密、
     /// 格式坏了）逐个记下，汇总在结果摘要里，不让后一条把前一条覆盖掉。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn knowledge_confirm_import(&mut self) {
         let Some(draft) = self.knowledge_import.take() else {
             return;
@@ -1138,6 +1193,7 @@ impl GongwenApp {
 
     /// 把稿件库当前勾选的稿件加入知识库（只入库，不建索引）。稿件正文已在库里，
     /// 写一遍是毫秒级，直接在主线程做。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn knowledge_import_selected_manuscripts(&mut self) {
         let auto_enabled = match self.task_store.as_ref().map(|s| s.auto()) {
             Some(Ok(v)) => v,
@@ -1244,6 +1300,7 @@ impl GongwenApp {
     }
 
     /// 为已导入、尚未索引的文档建立索引。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn knowledge_build_index(&mut self) {
         let ids = match self.knowledge_store.as_mut().map(|s| s.unindexed_doc_ids()) {
             Some(Ok(ids)) => ids,
@@ -1264,6 +1321,7 @@ impl GongwenApp {
     }
 
     /// 重建全部索引：对库内所有文档逐一重新切块+嵌入，用于更换 embedding 模型后。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn knowledge_rebuild_all(&mut self) {
         let ids = match self.knowledge_store.as_mut().map(|s| s.all_doc_ids()) {
             Some(Ok(ids)) => ids,
@@ -1287,6 +1345,7 @@ impl GongwenApp {
     ///
     /// 前置条件不满足时的提示放进 `knowledge_error`：它就挂在知识库页上，
     /// 而 `status` 在这一页看不到，点了按钮没反应会让人以为程序坏了。
+    #[cfg(feature = "ai-workbench")]
     fn start_knowledge_index(&mut self, doc_ids: Vec<i64>) {
         if self.knowledge_busy {
             self.knowledge_error = Some("知识库任务正在进行中，请稍候。".into());
@@ -1336,6 +1395,7 @@ impl GongwenApp {
     }
 
     /// 在后台线程跑一次检索测试。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn knowledge_test_search(&mut self) {
         if self.knowledge_busy {
             return;
@@ -1370,6 +1430,7 @@ impl GongwenApp {
 
     /// 在后台线程跑一次知识库问答：检索片段 → 生成答案。问题带回时连同答案
     /// 一起入历史，等待期间 `knowledge_qa_pending` 记录原问题供对话区展示。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn knowledge_ask(&mut self) {
         if self.knowledge_busy {
             return;
@@ -1399,6 +1460,7 @@ impl GongwenApp {
         });
     }
     /// 删除知识库文档（单篇或批量），并从勾选里去掉。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn knowledge_delete(&mut self, ids: &[i64]) {
         if let Some(store) = self.knowledge_store.as_mut() {
             match store.delete_documents(ids) {
@@ -1418,6 +1480,7 @@ impl GongwenApp {
     }
 
     /// 改知识库文档标题；成功后该篇转为待索引（理由见 `rename_document`）。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn knowledge_rename(&mut self, id: i64, title: &str) {
         if let Some(store) = self.knowledge_store.as_mut() {
             match store.rename_document(id, title) {
@@ -1435,6 +1498,7 @@ impl GongwenApp {
     }
 
     /// 打开知识库文档预览弹窗：从库里读出标题、文种、原文。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn knowledge_open_preview(&mut self, doc_id: i64) {
         let Some(store) = self.knowledge_store.as_mut() else {
             self.status = "知识库不可用。".into();
@@ -1456,6 +1520,7 @@ impl GongwenApp {
     }
 
     /// 知识库文档预览浮窗：复用起草页的公文版式渲染，按窗口宽度自适应缩放。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn knowledge_preview_window(&mut self, ctx: &egui::Context) {
         let Some(preview) = self.knowledge_preview.as_mut() else {
             theme::reset_window_anim(ctx, egui::Id::unique("knowledge_preview_anim"));
@@ -1536,6 +1601,7 @@ impl GongwenApp {
     }
 
     /// 生成与优化的收尾一致：换正文、换审校结果，有提示就弹审校抽屉。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn take_generated(doc: &mut DraftSession, result: GeneratedDraft) {
         doc.proof_markdown = if result.proof_measured {
             result.markdown.clone()
@@ -1554,12 +1620,14 @@ impl GongwenApp {
     }
 
     /// 研究式起草结束。
+    #[cfg(feature = "ai-workbench")]
     fn apply_skill_done(
         &mut self,
         index: usize,
         prefix: &str,
         result: Result<Box<crate::ai_panel::SkillResult>, String>,
     ) {
+        #[cfg(feature = "ai-workbench")]
         use crate::ai_panel::{ResearchSnapshot, SkillResult};
         let doc = &mut self.docs[index];
         match result.map(|boxed| *boxed) {
@@ -1708,6 +1776,7 @@ impl GongwenApp {
 
     /// 后台任务回投（测试用：不带 `egui::Context`，Pi 成品直接换文本、不碰编辑器撤销栈）。
     #[cfg(test)]
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn apply_doc_job(&mut self, key: DocKey, seq: u64, job: DocJob) {
         self.apply_doc_job_with(None, key, seq, job);
     }
@@ -1724,10 +1793,13 @@ impl GongwenApp {
         seq: u64,
         job: DocJob,
     ) {
+        #[cfg(not(feature = "ai-workbench"))]
+        let _ = ctx;
         let Some(index) = self.docs.iter().position(|doc| doc.key == key) else {
             return;
         };
         // 停止会使 job_seq 失效；只读的用量仍可回到原轮次，其余产物照旧丢弃。
+        #[cfg(feature = "ai-workbench")]
         if let DocJob::AiUsage { turn_id, usage } = job {
             self.docs[index].ai_panel.record_usage(turn_id, seq, usage);
             return;
@@ -1735,6 +1807,7 @@ impl GongwenApp {
         if self.docs[index].job_seq != seq {
             return;
         }
+        #[cfg(feature = "ai-workbench")]
         if !matches!(
             job,
             DocJob::ExportProgress(_)
@@ -1755,6 +1828,10 @@ impl GongwenApp {
         ) {
             self.docs[index].busy = false;
         }
+        #[cfg(not(feature = "ai-workbench"))]
+        if !matches!(job, DocJob::ExportProgress(_)) {
+            self.docs[index].busy = false;
+        }
         // 后台跑完的未必是当前显示的那篇，状态栏要点名是谁。
         let prefix = if index == self.active_doc {
             String::new()
@@ -1762,6 +1839,7 @@ impl GongwenApp {
             format!("《{}》", self.docs[index].title())
         };
         match job {
+            #[cfg(feature = "ai-workbench")]
             DocJob::Reviewed(Ok(outcome)) => {
                 // 缓存合并而不是覆盖：这一轮跳过的句子，结论还在旧缓存里。
                 self.docs[index].revise_cache.extend(outcome.cache);
@@ -1804,21 +1882,28 @@ impl GongwenApp {
                 self.status = message;
                 self.docs[index].result_drawer_open = true;
             }
+            #[cfg(feature = "ai-workbench")]
             DocJob::Reviewed(Err(error)) => {
                 self.status = format!("{prefix}文字复核失败：{error}");
             }
+            #[cfg(feature = "ai-workbench")]
             DocJob::AiStream {
                 content,
                 reasoning,
                 done,
             } => self.docs[index].ai_panel.append(&content, &reasoning, done),
+            #[cfg(feature = "ai-workbench")]
             DocJob::AiTool(line) => self.docs[index].ai_panel.step(line),
+            #[cfg(feature = "ai-workbench")]
             DocJob::PiProgress(message) => {
                 self.docs[index].ai_panel.pi_progress(&message);
                 self.status = format!("{prefix}{message}");
             }
+            #[cfg(feature = "ai-workbench")]
             DocJob::PiTool(line) => self.docs[index].ai_panel.step(line),
+            #[cfg(feature = "ai-workbench")]
             DocJob::PiActivity(activity) => self.docs[index].ai_panel.pi_activity(activity),
+            #[cfg(feature = "ai-workbench")]
             DocJob::PiCandidate => {
                 // 候选扫描可能在任何阶段触发，不覆盖正在做的事。
                 let panel = &mut self.docs[index].ai_panel;
@@ -1829,6 +1914,7 @@ impl GongwenApp {
                     panel.pi_progress("候选文件已更新");
                 }
             }
+            #[cfg(feature = "ai-workbench")]
             DocJob::PiPrepared {
                 turn_id,
                 reference,
@@ -1913,7 +1999,9 @@ impl GongwenApp {
                 ack.confirm(Ok(()));
                 self.status = "Pi 运行引用已保存，正在启动 host…".into();
             }
+            #[cfg(feature = "ai-workbench")]
             DocJob::PiDone(result) => self.apply_pi_done(index, &prefix, ctx, *result),
+            #[cfg(feature = "ai-workbench")]
             DocJob::PiQuestions(batch) => {
                 let bridge = self.docs[index].ai_panel.pi_bridge.clone();
                 match bridge {
@@ -1936,17 +2024,23 @@ impl GongwenApp {
                 }
             }
             // 用量按原轮次回投，这一支不该走到这里；真走到就忽略，不让任务崩掉。
+            #[cfg(feature = "ai-workbench")]
             DocJob::AiUsage { .. } => {}
+            #[cfg(feature = "ai-workbench")]
             DocJob::AiWorkspace(text) => self.docs[index].ai_panel.replace_content(text),
+            #[cfg(feature = "ai-workbench")]
             DocJob::AiWriteBegin { prefix, suffix } => {
                 self.docs[index].ai_panel.begin_write(prefix, suffix)
             }
+            #[cfg(feature = "ai-workbench")]
             DocJob::SkillDone(result) => self.apply_skill_done(index, &prefix, result),
+            #[cfg(feature = "ai-workbench")]
             DocJob::AiSessionSummary { summary, upto } => {
                 let session = &mut self.docs[index].ai_panel.session;
                 session.summary = summary;
                 session.compacted_upto = upto;
             }
+            #[cfg(feature = "ai-workbench")]
             DocJob::AiCompactDone(Ok((summary, upto, count))) => {
                 let session = &mut self.docs[index].ai_panel.session;
                 session.summary = summary;
@@ -1954,9 +2048,11 @@ impl GongwenApp {
                 self.status =
                     format!("{prefix}会话已压缩：前面 {count} 轮并成了摘要，原始记录仍可翻看。");
             }
+            #[cfg(feature = "ai-workbench")]
             DocJob::AiCompactDone(Err(error)) => {
                 self.status = format!("{prefix}压缩会话失败：{error}");
             }
+            #[cfg(feature = "ai-workbench")]
             DocJob::GapRevised(revision) => {
                 let revision = *revision;
                 crate::ai_panel::finish_research_revision(
@@ -1969,20 +2065,24 @@ impl GongwenApp {
                 );
                 self.status = format!("{prefix}已按你的回答修订，新的提案在侧栏里。");
             }
+            #[cfg(feature = "ai-workbench")]
             DocJob::StyleUsed(id) => {
                 if let Ok(mut book) = crate::ai_services::style::StyleBook::load() {
                     book.record_use(&id);
                     let _ = book.save();
                 }
             }
+            #[cfg(feature = "ai-workbench")]
             DocJob::AiNote(note) => {
                 self.status = format!("{prefix}{note}");
                 self.docs[index].ai_panel.note(note);
             }
+            #[cfg(feature = "ai-workbench")]
             DocJob::AiFieldSuggestions(list) => {
                 self.docs[index].ai_panel.offer_field_suggestions(list);
             }
             DocJob::ExportProgress(message) => {
+                #[cfg(feature = "ai-workbench")]
                 self.docs[index].ai_panel.set_phase(&message);
                 self.status = format!("{prefix}{message}");
             }
@@ -2172,6 +2272,7 @@ impl GongwenApp {
 }
 
 /// 结果摘要里的失败部分：「，N 篇失败（《甲》：原因；…）」，最多列三条；无失败为空串。
+#[cfg(feature = "ai-workbench")]
 fn failure_summary(failed: &[(String, String)]) -> String {
     if failed.is_empty() {
         return String::new();
@@ -2187,6 +2288,7 @@ fn failure_summary(failed: &[(String, String)]) -> String {
 }
 
 #[cfg(test)]
+#[cfg(feature = "ai-workbench")]
 mod tests {
     use super::*;
     use crate::app::management_samples;
@@ -2214,9 +2316,11 @@ mod tests {
         app.apply_doc_job(
             key,
             7,
+            #[cfg(feature = "ai-workbench")]
             DocJob::PiProgress("正在写第 2/4 节「工作安排」".into()),
         );
         let activity = |outcome: Option<&str>| {
+            #[cfg(feature = "ai-workbench")]
             DocJob::PiActivity(crate::pi_agent::PiActivity {
                 id: "search".into(),
                 action: "查知识库 · 整改时限".into(),

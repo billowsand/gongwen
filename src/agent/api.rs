@@ -20,7 +20,7 @@ use std::io::Read;
 use std::sync::LazyLock;
 
 /// JSON 配置文件读写的实现在共享层（`ai_services::persistence`），这里单向 re-export。
-pub(crate) use crate::ai_services::persistence::{read_json, write_json};
+pub(crate) use crate::sealed_json::{read_json, write_json};
 
 /// 模板占位：`{region}`、`{secret:token}`。
 pub(crate) static PLACEHOLDER: LazyLock<Regex> =

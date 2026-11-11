@@ -45,6 +45,7 @@ pub enum RevisionSource {
     /// 与规则来源分开的实际作用在 [`RevisionSet::begin_rule_pass`]：规则每轮
     /// 校验都重算，模型建议只重定位——跑一轮要几秒到几十秒，不能跟词表一样
     /// 每次校验都推倒重来。
+    #[cfg(any(test, feature = "ai-workbench"))]
     Model { task: String },
 }
 
@@ -59,6 +60,7 @@ impl RevisionSource {
         match self {
             Self::Lexicon { entry_id } => entry_id,
             Self::DocRule { rule_id } => rule_id,
+            #[cfg(any(test, feature = "ai-workbench"))]
             Self::Model { task } => task,
         }
     }
@@ -67,6 +69,7 @@ impl RevisionSource {
         match self {
             Self::Lexicon { .. } => "词表",
             Self::DocRule { .. } => "规则",
+            #[cfg(any(test, feature = "ai-workbench"))]
             Self::Model { .. } => "模型",
         }
     }
@@ -245,6 +248,7 @@ impl Revision {
 /// 全文字节范围——模型只回改后的整句，偏移量由检查器对原句求差得出，这条
 /// 规矩写在这里才拦得住后来者顺手把模型给的位置传进来。
 #[derive(Debug, Clone)]
+#[cfg(any(test, feature = "ai-workbench"))]
 pub struct ModelSuggestion {
     pub span: Range<usize>,
     pub before: String,
@@ -304,6 +308,7 @@ impl RevisionSet {
 
     /// 模型来源的待确认条数。复核完成后的状态栏只该报这个数，不能报总数——
     /// 把词表命中也算进「复核发现」会让人以为模型查出了它根本没查的东西。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn model_count(&self) -> usize {
         self.items
             .iter()
@@ -413,6 +418,7 @@ impl RevisionSet {
     /// 可能在这期间改了稿子；改动之前的部分一改，后面所有 span 就都偏了。这种
     /// 丢弃必须报到界面上——静默吞掉结果比丢结果本身更糟，用户会以为模型什么
     /// 都没查出来。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn replace_model(
         &mut self,
         suggestions: Vec<ModelSuggestion>,
@@ -425,6 +431,7 @@ impl RevisionSet {
 
     /// 并入一个技能（全面审校之类）给出的建议：只换掉同一检查器（`task`）上一轮的，
     /// 文字复核等其他模型来源的建议原样留着。返回因正文对不上而丢弃的条数。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub fn merge_model(
         &mut self,
         task: &str,
@@ -438,6 +445,7 @@ impl RevisionSet {
         self.push_model(suggestions, text, permanent)
     }
 
+    #[cfg(any(test, feature = "ai-workbench"))]
     fn push_model(
         &mut self,
         suggestions: Vec<ModelSuggestion>,

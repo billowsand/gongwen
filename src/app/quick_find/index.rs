@@ -32,6 +32,7 @@ impl Entry {
                 Target::Vocabulary(_) => crate::theme::Icon::Building,
                 Target::Page(page) => page.icon(),
                 Target::NewDocument => crate::theme::Icon::FilePlus,
+                #[cfg(feature = "task-assistant")]
                 Target::Task(_) => crate::theme::Icon::List,
             },
             badge: None,

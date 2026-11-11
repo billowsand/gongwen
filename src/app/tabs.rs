@@ -15,13 +15,17 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NavPage {
     Manuscript,
+    #[cfg(feature = "task-assistant")]
     TaskAssistant,
     Vocabulary,
     Proofread,
     Lexicon,
     ImeTable,
+    #[cfg(feature = "ai-workbench")]
     AiPrompts,
+    #[cfg(feature = "ai-workbench")]
     Knowledge,
+    #[cfg(feature = "ai-workbench")]
     Wiki,
     Settings,
     Help,
@@ -41,13 +45,17 @@ impl NavPage {
     pub(crate) fn key(self) -> &'static str {
         match self {
             Self::Manuscript => "manuscript",
+            #[cfg(feature = "task-assistant")]
             Self::TaskAssistant => "task_assistant",
             Self::Vocabulary => "vocabulary",
             Self::Proofread => "proofread",
             Self::Lexicon => "lexicon",
             Self::ImeTable => "ime_table",
+            #[cfg(feature = "ai-workbench")]
             Self::AiPrompts => "ai_prompts",
+            #[cfg(feature = "ai-workbench")]
             Self::Knowledge => "knowledge",
+            #[cfg(feature = "ai-workbench")]
             Self::Wiki => "wiki",
             Self::Settings => "settings",
             Self::Help => "help",
@@ -57,13 +65,17 @@ impl NavPage {
     pub(crate) fn from_key(key: &str) -> Option<Self> {
         match key {
             "manuscript" => Some(Self::Manuscript),
+            #[cfg(feature = "task-assistant")]
             "task_assistant" => Some(Self::TaskAssistant),
             "vocabulary" => Some(Self::Vocabulary),
             "proofread" => Some(Self::Proofread),
             "lexicon" => Some(Self::Lexicon),
             "ime_table" => Some(Self::ImeTable),
+            #[cfg(feature = "ai-workbench")]
             "ai_prompts" => Some(Self::AiPrompts),
+            #[cfg(feature = "ai-workbench")]
             "knowledge" => Some(Self::Knowledge),
+            #[cfg(feature = "ai-workbench")]
             "wiki" => Some(Self::Wiki),
             "settings" => Some(Self::Settings),
             "help" => Some(Self::Help),
@@ -74,13 +86,17 @@ impl NavPage {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Manuscript => "稿件管理",
+            #[cfg(feature = "task-assistant")]
             Self::TaskAssistant => "任务助手",
             Self::Vocabulary => "标准词库",
             Self::Proofread => "校对词表",
             Self::Lexicon => "公文词表",
             Self::ImeTable => "输入法词表",
+            #[cfg(feature = "ai-workbench")]
             Self::AiPrompts => "AI 管理",
+            #[cfg(feature = "ai-workbench")]
             Self::Knowledge => "资料库",
+            #[cfg(feature = "ai-workbench")]
             Self::Wiki => "知识库",
             Self::Settings => "设置",
             Self::Help => "使用帮助",
@@ -90,13 +106,17 @@ impl NavPage {
     pub(crate) fn icon(self) -> theme::Icon {
         match self {
             Self::Manuscript => theme::Icon::Library,
+            #[cfg(feature = "task-assistant")]
             Self::TaskAssistant => theme::Icon::List,
             Self::Vocabulary => theme::Icon::Book,
             Self::Proofread => theme::Icon::SquareCheck,
             Self::Lexicon => theme::Icon::Type,
             Self::ImeTable => theme::Icon::Hash,
+            #[cfg(feature = "ai-workbench")]
             Self::AiPrompts => theme::Icon::WandSparkles,
+            #[cfg(feature = "ai-workbench")]
             Self::Knowledge => theme::Icon::PackageOpen,
+            #[cfg(feature = "ai-workbench")]
             Self::Wiki => theme::Icon::BookmarkCheck,
             Self::Settings => theme::Icon::Settings,
             Self::Help => theme::Icon::HelpCircle,
@@ -453,14 +473,20 @@ impl GongwenApp {
 
     /// 全局任务或任意一篇稿件的任务在跑。
     pub(crate) fn any_busy(&self) -> bool {
-        self.busy
-            || self.knowledge_busy
+        #[cfg(feature = "ai-workbench")]
+        let ai_busy = {
+            self.busy
+                || self.knowledge_busy
+                || self.task_ui.extraction_busy
+                || self.task_fill_rx.is_some()
+                || self.wiki_frame_rx.is_some()
+                || self.wiki_write_rx.is_some()
+                || !self.task_auto_queue.is_empty()
+        };
+        #[cfg(not(feature = "ai-workbench"))]
+        let ai_busy = false;
+        ai_busy
             || self.lexicon_busy
-            || self.task_ui.extraction_busy
-            || self.task_fill_rx.is_some()
-            || self.wiki_frame_rx.is_some()
-            || self.wiki_write_rx.is_some()
-            || !self.task_auto_queue.is_empty()
             || self.backup_busy
             || self.docs.iter().any(|doc| doc.busy)
             || self.pdfs.iter().any(PdfSession::busy)
@@ -513,6 +539,7 @@ impl GongwenApp {
                 DraftAction::OpenSendPackage(id) => self.open_send_package(id),
                 DraftAction::OpenManuscript(id) => self.open_in_editor(id),
                 DraftAction::OpenVersionCommit(scope) => self.open_version_commit(scope),
+                #[cfg(feature = "ai-workbench")]
                 DraftAction::OpenStyleSettings => {
                     self.ai_section = super::AiSection::Styles;
                     self.open_page(NavPage::AiPrompts);
@@ -554,6 +581,7 @@ impl GongwenApp {
                         app.draft_page_at(index).import_document_from(&ctx, &path);
                     });
                 }
+                #[cfg(feature = "ai-workbench")]
                 DraftAction::ImportWritingSources { key, role } => {
                     let ctx = ctx.clone();
                     self.request_files(
@@ -575,6 +603,7 @@ impl GongwenApp {
                         },
                     );
                 }
+                #[cfg(feature = "ai-workbench")]
                 DraftAction::ExportWritingArtifact { name, text } => {
                     let encrypted = match crate::export::protection::encryption_enabled() {
                         Ok(enabled) => enabled,
@@ -699,12 +728,15 @@ mod tests {
     fn 每个导航页的键都能往返() {
         for page in [
             NavPage::Manuscript,
+            #[cfg(feature = "task-assistant")]
             NavPage::TaskAssistant,
             NavPage::Vocabulary,
             NavPage::Proofread,
             NavPage::Lexicon,
             NavPage::ImeTable,
+            #[cfg(feature = "ai-workbench")]
             NavPage::AiPrompts,
+            #[cfg(feature = "ai-workbench")]
             NavPage::Knowledge,
             NavPage::Settings,
             NavPage::Help,

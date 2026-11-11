@@ -1,5 +1,7 @@
 //! 新建 / 编辑任务表单：字段分三组，保存与放弃固定在底栏，表单内容自己滚动。
-use super::{FillField, Snapshot, State, fill};
+#[cfg(feature = "ai-workbench")]
+use super::FillField;
+use super::{Snapshot, State, fill};
 use crate::task_assistant::{Status, Store, Task};
 use crate::theme;
 
@@ -16,6 +18,7 @@ pub(super) fn show(
     height: f32,
 ) -> bool {
     let mut keep = true;
+    #[cfg(feature = "ai-workbench")]
     fill::prune_marks(state, d);
     ui.horizontal(|ui| {
         ui.heading(if d.revision == 0 {
@@ -27,6 +30,7 @@ pub(super) fn show(
             theme::caption(ui, "未保存");
         });
     });
+    #[cfg(feature = "ai-workbench")]
     if state.candidate_create_id.is_some() {
         theme::caption(ui, "来自材料建议；保存后该建议记为已采纳。");
     }
@@ -61,6 +65,7 @@ pub(super) fn show(
             } else {
                 "用户保存".to_owned()
             };
+            #[cfg(feature = "ai-workbench")]
             let result = if let Some(candidate_id) = state.candidate_create_id.as_deref() {
                 store.create_from_candidate(candidate_id, d)
             } else if let Some(src) = state
@@ -79,6 +84,8 @@ pub(super) fn show(
             } else {
                 store.save(d, if d.revision == 0 { "创建" } else { "编辑" }, &detail)
             };
+            #[cfg(not(feature = "ai-workbench"))]
+            let result = store.save(d, if d.revision == 0 { "创建" } else { "编辑" }, &detail);
             match result {
                 Ok(()) => {
                     state.selected = Some(d.id.clone());
@@ -116,13 +123,17 @@ fn label(ui: &mut egui::Ui, text: &str) {
 
 fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
     let full = ui.available_width();
+    #[cfg(feature = "ai-workbench")]
     fill::show(ui, d, state);
     group(ui, "要做什么");
     fill::field(
         ui,
+        #[cfg(feature = "ai-workbench")]
         state,
         d,
+        #[cfg(feature = "ai-workbench")]
         data,
+        #[cfg(feature = "ai-workbench")]
         FillField::Name,
         "任务名称（必填）",
         |ui, d| {
@@ -137,9 +148,12 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
     group(ui, "进展与安排");
     fill::field(
         ui,
+        #[cfg(feature = "ai-workbench")]
         state,
         d,
+        #[cfg(feature = "ai-workbench")]
         data,
+        #[cfg(feature = "ai-workbench")]
         FillField::Progress,
         "当前进展",
         |ui, d| {
@@ -153,9 +167,12 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
     );
     fill::field(
         ui,
+        #[cfg(feature = "ai-workbench")]
         state,
         d,
+        #[cfg(feature = "ai-workbench")]
         data,
+        #[cfg(feature = "ai-workbench")]
         FillField::NextStep,
         "下一步工作",
         |ui, d| {
@@ -169,9 +186,12 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
     );
     fill::field(
         ui,
+        #[cfg(feature = "ai-workbench")]
         state,
         d,
+        #[cfg(feature = "ai-workbench")]
         data,
+        #[cfg(feature = "ai-workbench")]
         FillField::Risks,
         "风险问题及应对措施",
         |ui, d| {
@@ -207,9 +227,12 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
         });
         fill::field(
             &mut cols[1],
+            #[cfg(feature = "ai-workbench")]
             state,
             d,
+            #[cfg(feature = "ai-workbench")]
             data,
+            #[cfg(feature = "ai-workbench")]
             FillField::Deadline,
             "任务期限",
             |ui, d| {
@@ -237,6 +260,7 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
     ui.checkbox(&mut d.needs_review, "标记为待核对");
     let has_more = d.category != "未分类" || d.parent_id.is_some() || !d.prerequisites.is_empty();
     ui.add_space(4.0);
+    #[cfg(feature = "ai-workbench")]
     let open_more = std::mem::take(&mut state.fill_open_more).then_some(true);
     egui::CollapsingHeader::new(
         egui::RichText::new("更多设置")
@@ -245,7 +269,16 @@ fn fields(ui: &mut egui::Ui, d: &mut Task, state: &mut State, data: &Snapshot) {
     )
     .id_salt(("task_form_more", &d.id))
     .default_open(has_more)
-    .open(open_more)
+    .open({
+        #[cfg(feature = "ai-workbench")]
+        {
+            open_more
+        }
+        #[cfg(not(feature = "ai-workbench"))]
+        {
+            None
+        }
+    })
     .show_unindented(ui, |ui| more(ui, d, state, data));
 }
 

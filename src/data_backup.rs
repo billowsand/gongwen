@@ -1343,17 +1343,18 @@ mod tests {
     fn public_help_plaintext_never_blocks_a_backup() {
         assert!(is_excluded(Path::new("help/公文助手使用帮助-abc.pdf")));
         // 诱饵槽里的公开截图与真实槽同权：按名称 + 字节判定，不按槽位路径。
-        let (name, public) = crate::help::content::IMAGES[0];
-        for base in ["images", "alt-images"] {
-            let rel = Path::new(base).join(name);
-            assert!(
-                ensure_encrypted_payload(&rel, public).is_ok(),
-                "{rel:?} 是随包公开字节，不应卡住备份"
-            );
-            assert!(ensure_encrypted_payload(&rel, b"user-private-bytes").is_err());
+        for &(name, public) in crate::help::content::IMAGES {
+            for base in ["images", "alt-images"] {
+                let rel = Path::new(base).join(name);
+                assert!(
+                    ensure_encrypted_payload(&rel, public).is_ok(),
+                    "{rel:?} 是随包公开字节，不应卡住备份"
+                );
+                assert!(ensure_encrypted_payload(&rel, b"user-private-bytes").is_err());
+            }
+            // 别处同名文件不算公开内容。
+            assert!(ensure_encrypted_payload(&Path::new("help").join(name), public).is_err());
         }
-        // 别处同名文件不算公开内容。
-        assert!(ensure_encrypted_payload(&Path::new("help").join(name), public).is_err());
 
         // 端到端：配置目录里同时有旧帮助 PDF、诱饵槽公开截图与密封配置，备份应成功。
         let root = tempfile::tempdir().unwrap();
@@ -1364,14 +1365,18 @@ mod tests {
         crate::vault::set_key_handle(*unlocked.unwrap().dek, true);
         crate::vault::write_path(&config.join("config.json"), "config", b"{}").unwrap();
         write(&config, "help/公文助手使用帮助-old.pdf", b"%PDF-public");
-        write(&config, &format!("alt-images/{name}"), public);
+        for &(name, public) in crate::help::content::IMAGES {
+            write(&config, &format!("alt-images/{name}"), public);
+        }
         let out = root.path().join("backup.7z");
         export_from(&config, &out, PASSWORD).unwrap();
         let info = inspect_backup(&out, PASSWORD).unwrap();
         assert!(!info.groups.iter().any(|group| group.name == "help"));
         let target = root.path().join("restored");
         restore_backup(&out, &target, PASSWORD).unwrap();
-        assert_eq!(read(&target, &format!("alt-images/{name}")), public);
+        for &(name, public) in crate::help::content::IMAGES {
+            assert_eq!(read(&target, &format!("alt-images/{name}")), public);
+        }
         crate::vault::clear_key_handle();
         crate::storage::set_test_config_dir(None);
     }

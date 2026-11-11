@@ -137,6 +137,7 @@ fn scan_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
         let mut options = app.lexicon_scan_options.clone();
         ui.checkbox(&mut options.include_drafts, "含草稿")
             .on_hover_text("草稿是半成品，错字与临时措辞最多，默认不计入语料");
+        #[cfg(feature = "ai-workbench")]
         ui.checkbox(&mut options.include_knowledge, "含知识库外部文档")
             .on_hover_text(
                 "只算从外部 Markdown 导入的；从稿件库入库的那些是副本，算两遍会让篇数翻倍",

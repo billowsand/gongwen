@@ -5,6 +5,7 @@
 //! 表：knowledge_docs（整篇副本）→ knowledge_chunks（切块，含向量 BLOB 与 jieba
 //! 分词 tokens）→ knowledge_chunks_fts（FTS5 external-content，由触发器同步）。
 
+use crate::content_hash::content_hash;
 use crate::manuscript::{ensure_knowledge_schema, kind_to_str, str_to_kind};
 use crate::models::{RagConfig, TemplateKind};
 use crate::rag::{self, vector};
@@ -46,19 +47,6 @@ pub struct NewKnowledgeDoc {
     pub embed_model: String,
     /// 正文归一化后的哈希，跨来源去重用（见 `content_hash`）。
     pub content_hash: String,
-}
-
-/// 正文内容哈希：去掉所有空白后取 64 位 FNV-1a，十六进制。
-///
-/// 只为“同一篇内容是否已入库”服务，不做密码学用途。去空白是因为同一篇公文
-/// 走稿件库和走 md 文件两条路进来时，缩进和换行常有细微差别。
-pub fn content_hash(markdown: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in markdown.bytes().filter(|b| !b.is_ascii_whitespace()) {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{hash:016x}")
 }
 
 /// 外部文件导入时的标题：取正文首个 `# ` 标题；它以冒号结尾、下一行又是标题时，

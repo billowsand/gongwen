@@ -38,6 +38,7 @@ pub(crate) enum DraftAction {
     /// 查看引用来源稿件，沿用稿件库的只读与标签规则。
     OpenManuscript(i64),
     /// 到 AI 管理页「风格」。
+    #[cfg(feature = "ai-workbench")]
     OpenStyleSettings,
     /// 把已发布的稿件退回草稿，好继续编辑。
     RevertToDraft(i64),
@@ -60,11 +61,13 @@ pub(crate) enum DraftAction {
     /// 导入文档：应用层开文件框，选好后把正文插进这篇稿件。
     ImportDocument { key: DocKey },
     /// 给分阶段写作添加原文快照；系统文件框仍由应用层调度。
+    #[cfg(feature = "ai-workbench")]
     ImportWritingSources {
         key: DocKey,
         role: crate::agent::writing::SourceRole,
     },
     /// 导出本次任务的风格或框架 Markdown，文件框仍在应用层打开。
+    #[cfg(feature = "ai-workbench")]
     ExportWritingArtifact { name: String, text: String },
     /// 插入图片：应用层开文件框，选好后把图片插进这篇稿件。
     InsertImages { key: DocKey },
@@ -89,7 +92,7 @@ impl GongwenApp {
                     return;
                 };
                 // 任务在跑时即使正文没改也要确认：关闭会把这一轮取消，未交付的成品不再写入。
-                let running = self.docs[index].busy || self.docs[index].ai_panel.running();
+                let running = self.docs[index].busy || self.docs[index].ai_running();
                 if running || self.docs[index].is_dirty() {
                     self.close_confirm = Some(*key);
                     self.close_confirm_running = running;
@@ -123,13 +126,17 @@ impl GongwenApp {
                 self.status = error;
             }
             // AI 会话同理（跑着的那一轮下次打开时标「已中断」）。
+            #[cfg(feature = "ai-workbench")]
             if let Some(error) =
                 save_ai_session(&mut self.docs[index], self.manuscript_store.as_mut())
             {
                 self.status = error;
             }
+            #[cfg(feature = "ai-workbench")]
             let manuscript_id = self.docs[index].manuscript_id;
+            #[cfg(feature = "ai-workbench")]
             self.docs[index].writing.sync(manuscript_id, true);
+            #[cfg(feature = "ai-workbench")]
             if let Some(error) = &self.docs[index].writing.save_error
                 && self.docs[index].writing.waiting_to_save()
             {
@@ -259,11 +266,15 @@ impl GongwenApp {
         let Some(doc) = self.docs.get_mut(index) else {
             return;
         };
+        #[cfg(feature = "ai-workbench")]
         if let Some(cancel) = doc.ai_panel.cancel.take() {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        doc.ai_panel.pi_bridge = None;
-        doc.ai_panel.pi_ask = None;
+        #[cfg(feature = "ai-workbench")]
+        {
+            doc.ai_panel.pi_bridge = None;
+            doc.ai_panel.pi_ask = None;
+        }
         doc.job_seq = doc.job_seq.wrapping_add(1);
         doc.busy = false;
     }
@@ -287,6 +298,7 @@ impl GongwenApp {
         if self.exit_confirmed {
             return;
         }
+        #[cfg(feature = "ai-workbench")]
         for doc in &mut self.docs {
             doc.writing.sync(doc.manuscript_id, true);
             if let Some(error) = &doc.writing.save_error
@@ -541,7 +553,9 @@ impl GongwenApp {
         }
         // 候选区里正在打的字等不到停手了：切标签、关窗前一并写下去。
         for doc in &mut self.docs {
+            #[cfg(feature = "ai-workbench")]
             doc.writing.sync(doc.manuscript_id, true);
+            #[cfg(feature = "ai-workbench")]
             if let Some(error) = &doc.writing.save_error {
                 self.status.clone_from(error);
             }
@@ -552,6 +566,7 @@ impl GongwenApp {
             {
                 self.status = error;
             }
+            #[cfg(feature = "ai-workbench")]
             if let Some(error) = save_ai_session(doc, self.manuscript_store.as_mut()) {
                 self.status = error;
             }
@@ -879,6 +894,7 @@ pub(crate) fn ime_settings_of(ime: &crate::models::ImeConfig) -> crate::ime::Ime
 }
 
 /// 立即写下一篇稿件的 AI 会话（关标签、关窗前）。
+#[cfg(feature = "ai-workbench")]
 pub(super) fn save_ai_session(
     doc: &mut crate::draft_page::DraftSession,
     store: Option<&mut crate::manuscript::ManuscriptStore>,

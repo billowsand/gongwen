@@ -31,6 +31,7 @@ use std::ops::Range;
 /// 预览的一次绘制结果。
 pub struct PreviewOutput {
     /// 本帧实际使用的缩放倍率，供“适应宽度”状态下的加减档以它为起点。
+    #[cfg(feature = "ai-workbench")]
     pub scale: f32,
     /// 本帧被点击的正文块在 Markdown 源码中的字节范围。
     pub clicked: Option<Range<usize>>,
@@ -672,6 +673,7 @@ pub(crate) fn official_preview(
         // 会连带把页边整列号码漏掉，看上去就是闪一下。
         let numbered = gutter::paint(ui, &metrics, anchor);
         return PreviewOutput {
+            #[cfg(feature = "ai-workbench")]
             scale: metrics.scale,
             clicked: clicked.or(numbered),
         };
@@ -788,6 +790,7 @@ pub(crate) fn official_preview(
     // 点中的号与点中的正文块是同一件事——都是「把光标带到这一行」。
     let numbered = gutter::paint(ui, &metrics, anchor);
     PreviewOutput {
+        #[cfg(feature = "ai-workbench")]
         scale: metrics.scale,
         clicked: clicked.or(numbered),
     }

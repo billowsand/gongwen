@@ -145,7 +145,7 @@ impl SettingsSection {
     fn description(self) -> &'static str {
         match self {
             SettingsSection::Network => {
-                "起草、文字复核、知识库访问模型服务时走的通道，支持 HTTP / HTTPS / SOCKS 代理。本机地址（localhost、127.0.0.1）始终直连，本地模型服务不受影响。"
+                "配置网络请求使用的代理，支持 HTTP、HTTPS 和 SOCKS。本机地址始终直连。"
             }
             SettingsSection::Output => {
                 "PDF 由内置 Typst 引擎在程序里直接排版，公文与研究报告都是，不依赖本机安装任何排版软件。"
@@ -314,11 +314,13 @@ pub(super) fn settings_menu_item(
 /// 调字号都要滚过一遍；它只在头一次用的时候有用，所以单独成一项。
 fn guide_section_ui(help: &mut crate::help::HelpState, ui: &mut egui::Ui) {
     for (index, step) in [
+        #[cfg(feature = "ai-workbench")]
         "在「AI 管理 → 模型服务」里填好接口地址——LM Studio 先启动 Local Server，Ollama 先执行 ollama serve。",
+        #[cfg(feature = "ai-workbench")]
         "点「测试连接 / 刷新模型」，从下拉里选一个中文指令模型。",
         "在「标准词库」里维护单位全称、常见错写和联系人电话。",
         "为每类模板保存默认的发文单位、联系人和呈报领导。",
-        "生成草稿 → 在右侧改稿 → 处理审校提示 → 导出签发稿。",
+        "在起草页填写要素和正文，处理校对提示后导出。",
     ]
     .iter()
     .enumerate()
@@ -1354,6 +1356,7 @@ impl GongwenApp {
 
     /// 左栏主菜单：沉底面板上按组竖排的分区列表，整行可点，选中项常显底色。
     fn settings_menu_ui(&mut self, ui: &mut egui::Ui) {
+        #[cfg(feature = "ai-workbench")]
         let mut open_ai_page = false;
         egui::Frame::new()
             .fill(theme::surface_sunk())
@@ -1367,6 +1370,7 @@ impl GongwenApp {
                     .show(ui, |ui| {
                         // 模型、技能这些设置搬去了 AI 管理页，老用户会先来这里找，
                         // 在菜单顶上留一条去那边的路。
+                        #[cfg(feature = "ai-workbench")]
                         if settings_menu_item(
                             ui,
                             false,
@@ -1380,6 +1384,7 @@ impl GongwenApp {
                         {
                             open_ai_page = true;
                         }
+                        #[cfg(feature = "ai-workbench")]
                         ui.add_space(10.0);
                         for (index, (group, sections)) in MENU_GROUPS.iter().enumerate() {
                             if index > 0 {
@@ -1400,6 +1405,7 @@ impl GongwenApp {
                         }
                     });
             });
+        #[cfg(feature = "ai-workbench")]
         if open_ai_page {
             self.open_page(super::NavPage::AiPrompts);
         }
@@ -1452,6 +1458,7 @@ impl GongwenApp {
                             SettingsSection::Input => self.ime_section_ui(ui),
                             SettingsSection::Guide => {
                                 guide_section_ui(&mut self.help, ui);
+                                #[cfg(feature = "ai-workbench")]
                                 self.skill_pack_section_ui(ui);
                             }
                         }
@@ -1532,7 +1539,9 @@ impl GongwenApp {
             );
         }
 
+        #[cfg(feature = "ai-workbench")]
         sub_heading(ui, "验证", None);
+        #[cfg(feature = "ai-workbench")]
         setting_row(ui, "写作模型", None, |ui| {
             if ui
                 .add_enabled(
@@ -1635,6 +1644,7 @@ impl GongwenApp {
     /// 导出格式分区：勾选起草页「导出」按钮产出的格式。
     /// 上手指引里的「AI 技能包」：把公文 Markdown 规范导出成 Agent Skill，给
     /// Claude、Codex、OpenCode、DeerFlow、pi 这些外部工具用。内容见 [`crate::skill_pack`]。
+    #[cfg(feature = "ai-workbench")]
     fn skill_pack_section_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(16.0);
         ui.separator();
@@ -1803,6 +1813,7 @@ impl GongwenApp {
             "公函勾选后每次导出都出两类随行单据：纸质《公文签收记录单》一份（收件人手写签名），\
              电子《传发任务单》每家接收单位一份（只出 PDF，不用签字）。都与原公函分开成文件；其他文种不生成",
         );
+        #[cfg(feature = "ai-workbench")]
         ui.checkbox(
             &mut self.config.auto_export,
             "AI 起草或优化完成后自动导出一次",

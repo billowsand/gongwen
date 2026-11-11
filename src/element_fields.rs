@@ -13,6 +13,7 @@
 //! 「人手工选」与「AI 建议采纳后」不会出现两种结果。主送 / 抄送 / 发文三者互斥
 //! （规格 §2.4）、代字带出、承办条目同步都在这里处理。
 
+#[cfg(feature = "ai-workbench")]
 use crate::agent::clarify::{Action, Question, Reply, Target};
 use crate::models::{
     DraftInput, JointIssuanceMode, JointResponsibleEntry, TemplateKind, TemplateProfile,
@@ -63,6 +64,7 @@ pub(crate) enum PersonScope {
 }
 
 impl FieldId {
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub(crate) const ALL: [Self; 8] = [
         Self::IssuingUnit,
         Self::Recipient,
@@ -75,6 +77,7 @@ impl FieldId {
     ];
 
     /// 中文名，与表单行标签一致。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::IssuingUnit => "发文单位",
@@ -89,6 +92,7 @@ impl FieldId {
     }
 
     /// 适用文种。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub(crate) fn kinds(self) -> &'static [TemplateKind] {
         match self {
             Self::IssuingUnit => &[
@@ -109,6 +113,7 @@ impl FieldId {
 
     /// 这个字段对当前稿件是否适用。联合发文模式下发文单位是
     /// `joint_issuing_units` 多选并要指定主发文单位，不在本框架内。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub(crate) fn applies(self, draft: &DraftInput) -> bool {
         if !self.kinds().contains(&draft.kind) {
             return false;
@@ -120,6 +125,7 @@ impl FieldId {
 
     /// 表单是否必填（与 `draft_page::form::check_form` 的必填项一致）。
     /// 红头呈批件的承办单位与联系人按「至少一条承办条目」整体必填，联系电话不单列。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub(crate) fn required(self, kind: TemplateKind) -> bool {
         match self {
             Self::IssuingUnit | Self::Recipient | Self::ReportingLeaders | Self::SigningUnit => {
@@ -159,6 +165,7 @@ impl FieldId {
     }
 
     /// 读表单当前值。联合发文模式与红头呈批件的承办三要素取承办条目第一条。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub(crate) fn read(self, draft: &DraftInput) -> String {
         let profile = &draft.profile;
         let joint = uses_joint_responsible(profile, draft.kind);
@@ -436,6 +443,7 @@ fn exclude_issuing(profile: &mut TemplateProfile, picked: &[String]) {
 
 /// 一条要素建议。旧会话侧栏的建议卡仍要显示、采纳与撤销；新流程不再生成。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg(any(test, feature = "ai-workbench"))]
 pub(crate) struct FieldSuggestion {
     pub(crate) field: FieldId,
     #[serde(default)]
@@ -463,6 +471,7 @@ impl FieldId {
 /// 「已填要素：主送单位 市数据局；联系人 张三」——拼进六要素检查的原文，让「何人」
 /// 算作已给（表单已填值 + 黑板上的旧建议值）。要素抽取退役后不再有新建议，旧会话
 /// 恢复的黑板上可能还带着建议清单，这里照样算进已填。
+#[cfg(any(test, feature = "ai-workbench"))]
 pub(crate) fn filled_summary(draft: &DraftInput, suggestions: &[FieldSuggestion]) -> String {
     let mut parts = Vec::new();
     for field in FieldId::ALL
@@ -498,6 +507,7 @@ pub(crate) fn filled_summary(draft: &DraftInput, suggestions: &[FieldSuggestion]
 }
 
 /// 多值字段的集合比较：顺序不同、分隔符不同都算一致。建议卡的提醒也用它。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn same_value(a: &str, b: &str) -> bool {
     let mut a = split_units(a);
     let mut b = split_units(b);
@@ -514,6 +524,7 @@ pub(crate) fn same_value(a: &str, b: &str) -> bool {
 /// - 自己写 → 只记已确认信息（词库外的值不进表单）；
 /// - 跳过（或多选一个都没勾）→ 记一句「之后在表单里填」。表单要素由版式从表单渲染，
 ///   起草提示词禁止写进正文（`prompt.rs`），所以不留「【待核实】」占位。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn resolve_answers(
     draft: &DraftInput,
     questions: &[Question],
@@ -594,6 +605,7 @@ pub(crate) fn resolve_answers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "ai-workbench")]
     use crate::agent::clarify::Choice;
     use crate::models::{ResearchMetadata, VocabularyCategory};
 
@@ -974,6 +986,7 @@ mod tests {
     // ================= 回答落地（旧会话挂起的要素题） =================
 
     /// 造一道旧会话的要素题：选项都按「选中」处理。
+    #[cfg(feature = "ai-workbench")]
     fn field_question(field: FieldId, labels: &[&str], multi: bool) -> Question {
         Question {
             id: 1,
@@ -996,6 +1009,7 @@ mod tests {
     }
 
     /// 要素题跳过时写给起草的那句话（与 `resolve_answers` 的格式一致）。
+    #[cfg(feature = "ai-workbench")]
     fn skip_note(field: FieldId) -> String {
         format!(
             "{}暂未确定：由起草人之后在要素表单里选，正文不写这一项，也不要留占位或自己编",
@@ -1005,6 +1019,7 @@ mod tests {
 
     /// 回答落地：选中进建议清单（出处「起草人从标准词库选定」）并记已确认信息。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn resolve_answers_turns_picks_into_suggestions_and_notes() {
         let draft = draft_of(TemplateKind::OfficialLetter);
         let question = field_question(FieldId::Recipient, &["市数据局", "省数据局"], true);
@@ -1028,6 +1043,7 @@ mod tests {
 
     /// 多选题：勾几个合几个；一个都没勾按跳过处理。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn resolve_answers_merges_multi_picks_and_treats_none_as_skip() {
         let draft = draft_of(TemplateKind::OfficialLetter);
         let question = field_question(FieldId::Recipient, &["市数据局", "省数据局"], true);
@@ -1054,6 +1070,7 @@ mod tests {
 
     /// 自己写：只记已确认信息，不进建议清单（词库外的值不进表单）；跳过记「之后在表单里填」。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn resolve_answers_custom_is_a_note_only_and_skip_leaves_a_placeholder() {
         let draft = draft_of(TemplateKind::OfficialLetter);
         let question = field_question(FieldId::Recipient, &["市数据局"], true);
@@ -1080,6 +1097,7 @@ mod tests {
     /// 答题那一刻表单已经被填上（等待期间用户在表单里改过）：建议标冲突，
     /// 生成时的表单值记进 previous。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn resolve_answers_marks_conflict_when_the_form_changed_while_answering() {
         let mut draft = draft_of(TemplateKind::OfficialLetter);
         let question = field_question(FieldId::Recipient, &["市数据局"], true);
@@ -1118,6 +1136,7 @@ mod tests {
 
     /// 旧检查点、旧会话：没有 `multi` 的题目、没有 `field_suggestions` 的黑板，读回不报错。
     #[test]
+    #[cfg(feature = "ai-workbench")]
     fn old_sessions_without_multi_and_suggestions_still_load() {
         let question: Question = serde_json::from_str(
             r#"{"id":1,"text":"主送单位是哪些？","choices":[],"custom_hint":null,"prefill":"","skippable":true,"target":"PreDraft"}"#,

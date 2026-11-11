@@ -22,6 +22,7 @@ pub enum RerankMode {
 }
 
 impl RerankMode {
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::None => "不重排",
@@ -128,6 +129,7 @@ impl Default for RagConfig {
 impl RagConfig {
     /// 实际生效的重排方式：选了「专用端点」却没填模型名时降级为不重排。
     /// 模型名看新引用，也认迁移前的旧内联字段。
+    #[cfg(any(test, feature = "ai-workbench"))]
     pub(crate) fn effective_rerank_mode(&self) -> RerankMode {
         match self.rerank.mode {
             RerankMode::Api

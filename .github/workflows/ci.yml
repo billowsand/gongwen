@@ -49,6 +49,9 @@ jobs:
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Lint without AI
+        run: cargo clippy --locked --no-default-features --features task-assistant,linux-gtk-dialogs --all-targets -- -D warnings
+
       - name: Download bundled fonts for layout tests
         shell: pwsh
         run: |
@@ -65,6 +68,19 @@ jobs:
       # 与 Broken pipe 的伪失败）。整套用例本地串行约 1 分钟，换确定性更值得。
       - name: Test
         run: cargo test --locked --all-targets -- --test-threads=1
+
+      - name: Test without AI
+        run: cargo test --locked --no-default-features --features task-assistant,linux-gtk-dialogs --all-targets -- --test-threads=1
+
+      - name: Build both editions
+        run: python scripts/build-editions.py
+
+      - name: Upload both executables
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-win-x64-editions
+          path: dist/editions/*.exe
+          if-no-files-found: error
 
       - name: Stage bundled Pi runtime
         shell: pwsh

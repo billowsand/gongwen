@@ -54,12 +54,15 @@ cargo fmt --all -- --check     # CI 零容忍，改完必跑
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 cargo build --release --locked
+python3 scripts/build-editions.py  # 同时产出 AI 全版与非 AI 版二进制
 ```
+
+- 双版本构建及功能特性见 `docs/edition-build-design.md`。增加可选模块时一起处理启动、后台事件、界面导航、快捷键和内嵌资源，并检查关闭特性后的构建。
 
 - 开发构建给依赖开 `opt-level = 3`（见 `Cargo.toml`），首次编译依赖约需一分钟，属正常。
 - `cargo test` 有**约 5 个与沙箱环境相关的失败，是预期结果**，不要为此改动测试。
 - Linux 变体：Arch/Omarchy 包（随 Release 发布 x86_64 的 `.pkg.tar.zst`）用
-  `cargo build --release --locked --no-default-features --features linux-portal-dialogs`。
+  `cargo build --release --locked --no-default-features --features ai,linux-portal-dialogs`。
 - **外部数据源与耗时任务不能占住主线程**。Wayland 合成器（Hyprland 等）每 1.5 秒给客户端发一次
   存活探测，主线程一停就弹「应用无响应」系统对话框。系统文件框一律走
   `src/app/file_dialog.rs` 的 `request_file` / `request_files`：portal 后端（Linux/Wayland
@@ -485,7 +488,7 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   （GLIBC 2.28）与 Ubuntu 20.04 ARM64 启动冒烟（`scripts/smoke-launch-linux.sh`）三个作业
   保留在 `ci.yml` 里但 `if: false` 停用，恢复时去掉那一行即可。代价是 Linux 专有代码
   （`linux-portal-dialogs` 变体等）不再随 CI 编译，改到那部分要走本地
-  `cargo build --release --locked --no-default-features --features linux-portal-dialogs`。
+  `cargo build --release --locked --no-default-features --features ai,linux-portal-dialogs`。
   `release.yml` 在 push `v*` tag 时触发，产出 Windows x64 setup.exe、Linux ARM64 deb
   （Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）、
   Linux x86_64 的 Arch / Omarchy pacman 包（`archlinux:base` 容器构建，`makepkg` 打成
@@ -512,7 +515,7 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 - **本机打 pacman 包**（Arch / Omarchy）：`scripts/package-arch-local.sh` 在本机一次
   跑完「编译 → 组装便携目录 → makepkg 打 `.pkg.tar.zst` → `pacman -U` 安装 → 静态
   校验」，口径与 `release.yml` 的 `build-linux-x86_64-arch` + `verify-arch-pkg` 一致
-  （`--no-default-features --features linux-portal-dialogs`，依赖名由 `pacman -Qoq`
+  （`--no-default-features --features ai,linux-portal-dialogs`，依赖名由 `pacman -Qoq`
   反查）。提权优先用免密 `sudo`，没有就走 `pkexec`；本机已装同版本时自动把 `pkgrel`
   加一（`GONGWEN_PKGREL` 可指定），否则 `pacman -U` 会因版本相同而跳过。字体来自
   `gongwen-runtime` 的 `runtime.zip`，解到 `runtime/`（清单用仓库里的
@@ -540,7 +543,7 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 - **本地 post-commit 钩子**（`scripts/git-hooks/post-commit`，首次使用跑
   `scripts/install-git-hooks.sh`）每次 commit 后自动跑
   `cargo build --release --locked`，保证 `target/release/` 始终是最新二进制；
-  Linux 主机自动加 `--no-default-features --features linux-portal-dialogs`。
+  Linux 主机自动加 `--no-default-features --features ai,linux-portal-dialogs`。
   失败仅打印告警、不阻塞提交。
 - 许可证是 **GPL-3.0-or-later**：项目继续按 GPL 分发；旧输入法内核已移除。改许可证相关的东西要同步 `LICENSE`、`Cargo.toml` 的 `license`、
   `README.md` 许可节、`THIRD_PARTY_NOTICES.md` 四处。

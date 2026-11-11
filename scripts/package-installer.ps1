@@ -1,5 +1,7 @@
 param(
     [string]$Version = "",
+    [ValidateSet("ai", "no-ai")]
+    [string]$Edition = "ai",
     [string]$SourceDir = "",
     [string]$OutputDir = "",
     [string]$CompilerPath = "",
@@ -13,6 +15,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "package-edition.ps1")
+$editionSuffix = if ($Edition -eq "ai") { "" } else { "-no-ai" }
+if ($Upgrade -and $Edition -eq "no-ai") { throw "Use the full no-ai installer for upgrades." }
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $scriptPath = Join-Path $PSScriptRoot "gongwen-assistant.iss"
 $iconPath = Join-Path $projectRoot "assets\app-icon\app-icon.ico"
@@ -39,7 +44,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($SourceDir)) {
-    $SourceDir = Join-Path $projectRoot "dist\win-x64-full"
+    $SourceDir = Join-Path $projectRoot "dist\win-x64-full$editionSuffix"
 }
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Join-Path $projectRoot "dist"
@@ -72,6 +77,13 @@ if (-not $Upgrade) {
         if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
             throw "Missing portable package file: $requiredPath"
         }
+    }
+    Assert-PackageEdition (Join-Path $SourceDir "gongwen-assistant.exe") $Edition
+    if ($Edition -eq "no-ai") {
+        Assert-NoAiResources $SourceDir
+    }
+    else {
+        & (Join-Path $PSScriptRoot "verify-pi-runtime.ps1") -RuntimeDir (Join-Path $SourceDir "runtime/pi") -Platform win-x64
     }
 }
 elseif ([string]::IsNullOrWhiteSpace($StaleListInclude)) {
@@ -109,7 +121,7 @@ if ([string]::IsNullOrWhiteSpace($CompilerPath) -or -not (Test-Path -LiteralPath
 $CompilerPath = [System.IO.Path]::GetFullPath($CompilerPath)
 
 $packageKind = if ($Upgrade) { "-win-x64-upgrade-setup" } else { "-win-x64-setup" }
-$outputExe = Join-Path $OutputDir "gongwen-assistant-$Version$packageKind.exe"
+$outputExe = Join-Path $OutputDir "gongwen-assistant$editionSuffix-$Version$packageKind.exe"
 if (Test-Path -LiteralPath $outputExe -PathType Leaf) {
     if (-not $Force) {
         throw "Installer already exists: $outputExe`nPass -Force to overwrite."
@@ -125,6 +137,7 @@ $defines = @(
     "/DMyIconPath=$iconPath",
     "/DMyLanguageFile=$languageFile"
 )
+if ($Edition -eq "no-ai") { $defines += "/DMyNoAi=1" }
 if ($Upgrade) {
     # ISPP 的 #include 把反斜杠当转义符，路径一律用正斜杠。
     $staleInclude = [System.IO.Path]::GetFullPath($StaleListInclude).Replace("\", "/")

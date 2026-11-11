@@ -90,6 +90,7 @@ pub fn install_from_store(store: &super::LexiconStore) {
 }
 
 /// 把文本切成空格分隔的词串，供 FTS5 索引与查询使用。
+#[cfg(any(test, feature = "ai-workbench"))]
 pub fn tokenize(text: &str) -> String {
     shared()
         .cut(text, true)

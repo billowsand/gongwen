@@ -16,7 +16,14 @@ fn harness() -> egui_kittest::Harness<'static, Bench> {
     };
     let mut h = crate::test_support::harness_ui_state(
         |ui, b: &mut Bench| {
-            show(ui, Some(&mut b.store), None, &b.vocabulary, &mut b.state);
+            show(
+                ui,
+                Some(&mut b.store),
+                #[cfg(feature = "ai-workbench")]
+                None,
+                &b.vocabulary,
+                &mut b.state,
+            );
         },
         Bench {
             store: Store::open(":memory:").unwrap(),
@@ -57,10 +64,29 @@ fn task_assistant_editor_cancel_closes_without_writing() {
     assert!(h.state().store.list(true).unwrap().is_empty());
 }
 
+#[cfg(not(feature = "ai-workbench"))]
+#[test]
+fn manual_task_edition_hides_ai_actions_and_keeps_the_editor() {
+    let mut h = bench(State::default(), Store::open(":memory:").unwrap());
+    h.get_by_label("新建任务").click();
+    h.run();
+    assert!(h.query_by_label("保存").is_some());
+    for action in ["粘贴材料", "去粘贴材料", "待整理建议", "从文字填写"] {
+        assert!(h.query_by_label_contains(action).is_none(), "{action}");
+    }
+}
+
 fn bench(state: State, store: Store) -> egui_kittest::Harness<'static, Bench> {
     let mut h = crate::test_support::harness_ui_state(
         |ui, b: &mut Bench| {
-            show(ui, Some(&mut b.store), None, &b.vocabulary, &mut b.state);
+            show(
+                ui,
+                Some(&mut b.store),
+                #[cfg(feature = "ai-workbench")]
+                None,
+                &b.vocabulary,
+                &mut b.state,
+            );
         },
         Bench {
             store,
@@ -87,6 +113,7 @@ fn saved(store: &mut Store, name: &str, edit: impl FnOnce(&mut Task)) -> Task {
         .unwrap()
 }
 
+#[cfg(feature = "ai-workbench")]
 fn filled(value: &str) -> crate::task_assistant::extract::FilledValue {
     crate::task_assistant::extract::FilledValue {
         value: value.into(),
@@ -95,6 +122,7 @@ fn filled(value: &str) -> crate::task_assistant::extract::FilledValue {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_fill_empty_fields_suggestions_replace_and_undo() {
     let store = Store::open(":memory:").unwrap();
     let mut draft = Task::blank();
@@ -146,6 +174,7 @@ fn task_assistant_fill_empty_fields_suggestions_replace_and_undo() {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_fill_save_attaches_source_only_with_remaining_marks() {
     for keep_marks in [true, false] {
         let store = Store::open(":memory:").unwrap();
@@ -184,6 +213,7 @@ fn task_assistant_fill_save_attaches_source_only_with_remaining_marks() {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_fill_late_cancelled_and_reopened_results_are_discarded() {
     let draft = Task::blank();
     let id = draft.id.clone();
@@ -217,6 +247,7 @@ fn task_assistant_fill_late_cancelled_and_reopened_results_are_discarded() {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_fill_keeps_request_source_and_transfers_other_matters_to_inbox() {
     let mut state = State {
         draft: Some(Task::blank()),
@@ -247,6 +278,7 @@ fn task_assistant_fill_keeps_request_source_and_transfers_other_matters_to_inbox
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_material_title_can_be_omitted_and_is_filled_before_request() {
     let state = State {
         view: View::Inbox,
@@ -264,6 +296,7 @@ fn task_assistant_material_title_can_be_omitted_and_is_filled_before_request() {
     );
 }
 
+#[cfg(feature = "ai-workbench")]
 fn source_row(
     id: &str,
     title: &str,
@@ -283,6 +316,7 @@ fn source_row(
 }
 
 /// 一份带一条新任务建议的材料；`evidence` 必须出现在 `content` 里。
+#[cfg(feature = "ai-workbench")]
 fn store_with_material(store: &mut Store, title: &str, content: &str, evidence: &str) -> String {
     let p: crate::task_assistant::extract::Proposal = serde_json::from_value(serde_json::json!({
         "kind": "new_task", "task_id": null, "name": evidence, "next_step": null,
@@ -301,6 +335,7 @@ fn store_with_material(store: &mut Store, title: &str, content: &str, evidence: 
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_extraction_result_names_the_material_and_offers_a_filter() {
     // 新材料：说新增几条，不再挂「同版材料不重复生成」；框里还是交出去的原文就清空。
     let mut state = State {
@@ -399,6 +434,7 @@ fn task_assistant_extraction_result_names_the_material_and_offers_a_filter() {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_known_material_card_offers_rerun_and_its_suggestions() {
     let mut store = Store::open(":memory:").unwrap();
     let id = store_with_material(&mut store, "周报", "本周周报原文已完成。", "周报原文已完成");
@@ -426,6 +462,7 @@ fn task_assistant_known_material_card_offers_rerun_and_its_suggestions() {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_inbox_can_show_one_material_and_back_to_all() {
     let mut store = Store::open(":memory:").unwrap();
     let first = store_with_material(&mut store, "周报", "本周周报原文已完成。", "周报原文已完成");
@@ -444,6 +481,7 @@ fn task_assistant_inbox_can_show_one_material_and_back_to_all() {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_materials_view_shows_the_snapshot_and_deletes() {
     let mut store = Store::open(":memory:").unwrap();
     let id = store_with_material(
@@ -481,6 +519,7 @@ fn task_assistant_materials_view_shows_the_snapshot_and_deletes() {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_new_paste_drops_the_auto_title_but_keeps_a_typed_one() {
     let state = State {
         view: View::Inbox,
@@ -513,6 +552,7 @@ fn task_assistant_new_paste_drops_the_auto_title_but_keeps_a_typed_one() {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_success_notice_floats_without_moving_the_columns() {
     let state = State {
         view: View::Inbox,
@@ -531,6 +571,7 @@ fn task_assistant_success_notice_floats_without_moving_the_columns() {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_fill_repeated_sources_keep_evidence_and_limit_total_size() {
     use crate::task_assistant::extract::{Fill, MAX_SOURCE_BYTES};
     let mut state = State {
@@ -682,6 +723,7 @@ fn task_assistant_short_dates_drop_current_year() {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_fill_owner_matching_is_unique_or_explicitly_ambiguous() {
     use crate::models::{VocabularyCategory as C, VocabularyEntry as E};
     let vocab = vec![
@@ -955,6 +997,7 @@ fn task_assistant_progress_box_follows_changes_it_has_not_edited() {
 }
 
 #[test]
+#[cfg(feature = "ai-workbench")]
 fn task_assistant_untargeted_progress_can_be_built_into_a_new_task() {
     let mut store = Store::open(":memory:").unwrap();
     let mut other = Task::blank();
