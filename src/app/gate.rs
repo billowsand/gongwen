@@ -236,6 +236,7 @@ impl AppShell {
         );
         theme::set_current_paper(PaperMode::Follow);
         crate::mermaid::set_theme(DiagramTheme::Auto);
+        super::clipboard::configure(&cc.egui_ctx);
         theme::configure_fonts(&cc.egui_ctx, &FontConfig::default());
         theme::configure_icons(&cc.egui_ctx);
         theme::configure_style(&cc.egui_ctx);
@@ -364,6 +365,7 @@ impl AppShell {
         // 不把上一工作区的弹窗、编辑撤销栈与焦点带入另一数据槽。
         ctx.memory_mut(|memory| *memory = egui::Memory::default());
         ctx.data_mut(|data| data.clear());
+        super::clipboard::configure(ctx);
         storage::set_current_slot(slot);
         // 进入工作区：槽位与密钥句柄都明确，恢复配置目录写入。
         storage::set_writes_blocked(false);
@@ -710,6 +712,7 @@ impl AppShell {
         crate::vault::clear_key_handle();
         ctx.memory_mut(|memory| *memory = egui::Memory::default());
         ctx.data_mut(|data| data.clear());
+        super::clipboard::configure(ctx);
         // 锁定即丢弃工作区：顺手清掉应用自己的明文缓存与花脸稿预览副本。
         crate::app::manuscript_ui::purge_plaintext_caches();
         if let ShellPhase::Gate(gate) = &mut self.phase {
@@ -843,9 +846,8 @@ impl AppShell {
                         input.pointer = egui::PointerState::default();
                     });
                 }
-                app.guard_clipboard_input(&ctx);
                 app.update_workspace(ui, frame);
-                app.guard_clipboard_output(&ctx);
+                app.publish_approved_copy(&ctx);
                 if app.take_force_relock() {
                     // 备份恢复：目录已整体替换，保存会拿旧密钥覆盖新数据；
                     // 恢复后还需要按新磁盘重新 probe（可能变成无锁/跳过/损坏）。

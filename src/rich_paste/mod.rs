@@ -15,8 +15,7 @@
 //! 因此也能变成标题。
 //!
 //! 全程只用确定性规则，不调用模型，也不经过任何 AI 代码路径：粘贴是用户的键盘输入。
-//! 任何一步失败（没有 HTML、解析超限、转换结果为空）都退回原样粘贴，绝不丢用户的
-//! 剪贴板内容。
+//! HTML 转换失败时使用清洗后的纯文本。
 
 pub(crate) mod clipboard;
 mod gaps;
@@ -29,20 +28,16 @@ mod pipeline;
 mod samples;
 mod syntax;
 
-pub(crate) use clipboard::read_html;
-pub(crate) use images::has_importable_image;
-
 /// 这次粘贴的内容从哪来。
 pub(crate) enum Source {
-    /// 剪贴板里有 HTML：`plain` 是同一份内容的纯文本形态（`Event::Paste` 带的那份），
-    /// 转换失败或用户点「改为原样粘贴」时用它。
+    /// 剪贴板里有 HTML，转换失败时使用同一次读取的纯文本。
     Html { html: String, plain: String },
     /// 只有纯文本。
     Plain(String),
 }
 
 impl Source {
-    /// 同一份内容的纯文本形态，「改为原样粘贴」用。
+    /// 同一份内容的纯文本副本。
     pub(crate) fn plain_text(&self) -> &str {
         match self {
             Source::Html { plain, .. } => plain,
@@ -152,10 +147,7 @@ fn jump_notice(jumps: &[(String, String)]) -> String {
 
 /// 把剪贴板内容转成可直接插进编辑框的 Markdown。
 ///
-/// 返回 `None` 表示不必转换：纯文本本来就是 Markdown、转换结果与原文只差空白，
-/// 或者富文本这条路失败而纯文本也没什么可还原的。调用方拿到 `None` 就把事件
-/// 交还给编辑框，原样粘贴。「内容只有一行」「光标前有字」这两个条件在调用方
-/// （起草页的粘贴拦截）判断，这里只管内容本身。
+/// 返回 `None` 时，调用方用清洗后的纯文本。
 pub(crate) fn convert(source: &Source, ctx: &Context) -> Option<Outcome> {
     pipeline::convert(source, ctx)
 }
@@ -164,14 +156,22 @@ pub(crate) fn convert(source: &Source, ctx: &Context) -> Option<Outcome> {
 ///
 /// 去掉标题与列表记号，但保留原文编号文字（这时不是在建结构，编号是正文的一部分）、
 /// 保留加粗，段落之间直接相连（中文不加空格、西文一个空格）。含表格时返回 `None`，
-/// 表格塞不进一行，调用方交还编辑框原样粘贴。
+/// 表格塞不进一行，调用方用清洗后的纯文本。
 pub(crate) fn convert_inline(source: &Source, ctx: &Context) -> Option<Outcome> {
     pipeline::convert_inline(source, ctx)
 }
 
-/// 大段粘贴作为侧栏材料时的正文：有 HTML 就用它转出来的 Markdown，否则原文。
-pub(crate) fn material_text(plain: &str) -> String {
-    pipeline::material_text(plain)
+/// 清洗外部纯文本，保留行结构与 Markdown 需要的缩进。
+pub(crate) fn clean_plain(text: &str) -> String {
+    crate::doc_import::clean::normalize_spaces(text)
+        .trim_matches('\n')
+        .trim_end()
+        .to_owned()
+}
+
+/// 表单接收清洗后的文字，侧栏材料保留转换后的 Markdown 格式。
+pub(crate) fn external_text(source: &Source, material: bool) -> String {
+    pipeline::external_text(source, material)
 }
 
 #[cfg(test)]

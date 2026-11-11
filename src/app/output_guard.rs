@@ -5,7 +5,7 @@ use super::GongwenApp;
 use crate::modal::{self, Dismiss};
 use eframe::egui;
 
-pub(crate) const CLIPBOARD_WARNING: &str = "复制或剪切会把明文交给系统剪贴板；系统历史记录、跨设备同步或第三方剪贴板工具可能保存副本，不受应用锁保护。锁定或清空当前剪贴板不能保证删除历史副本。";
+pub(crate) const CLIPBOARD_WARNING: &str = "此操作会把内容交给系统剪贴板；系统历史记录、跨设备同步或第三方剪贴板工具可能保存副本，不受应用锁保护。锁定或清空当前剪贴板不能保证删除历史副本。";
 pub(crate) const PLAINTEXT_WARNING: &str = "此次导出的文件将以明文保存，可能包含正文、图片、附件、人员和单位等敏感信息，不受应用锁或导出密码保护。复制、同步、发送或由其他软件打开后，可能留下无法撤回的副本。请确认保存位置、接收范围及传输方式。";
 pub(crate) const DOCUMENT_WARNING: &str = "已选择不加密导出。此次 Word、PDF、源码包及随行单据将以普通文件保存，正文、图片、人员、单位和份号等敏感信息不受密码保护。复制、发送或同步后可能导致信息泄露，锁定应用不能撤回文件。请确认保存位置、接收范围与传输方式。";
 pub(crate) const PDF_ARCHIVE_WARNING: &str = "当前工作区已启用加密。此次导出的 7z 压缩包由独立密码保护，包内文件名也已加密，但解压后的 PDF 是普通文件，不受应用密码和本地加密保护。PDF 可能包含正文、图片、附件及人员等敏感信息；解压、复制、同步或发送后，可能导致信息泄露。压缩包自身的文件名和大小仍可见，请妥善保管导出密码并确认接收范围。";
@@ -26,89 +26,6 @@ pub(super) struct PendingOutput {
 }
 
 impl GongwenApp {
-    pub(crate) fn copy_file_confirmed(&mut self, path: &std::path::Path) {
-        let Some(ctx) = self.clipboard_context.clone() else {
-            self.status = "界面尚未就绪，无法复制文件。".into();
-            return;
-        };
-        self.start_file_copy(path.to_path_buf(), ctx);
-    }
-
-    /// 剪切必须在编辑器删除文字前确认；取消确认不能丢失源文字。
-    pub(crate) fn guard_clipboard_input(&mut self, ctx: &egui::Context) {
-        if let Some(focus) = self.clipboard_cut_replay.take() {
-            if let Some(id) = focus {
-                ctx.memory_mut(|memory| memory.request_focus(id));
-            }
-            ctx.input_mut(|input| input.events.push(egui::Event::Cut));
-            self.clipboard_output_approved = true;
-            return;
-        }
-        if crate::vault::key_handle().is_none() {
-            return;
-        }
-        let mut cut = false;
-        ctx.input_mut(|input| {
-            input.events.retain(|event| {
-                if matches!(event, egui::Event::Cut) {
-                    cut = true;
-                    false
-                } else {
-                    true
-                }
-            })
-        });
-        if cut {
-            let focus = ctx.memory(|memory| memory.focused());
-            self.request_output_with_warning(
-                "剪切内容到系统剪贴板",
-                CLIPBOARD_WARNING,
-                move |app| {
-                    app.clipboard_cut_replay = Some(focus);
-                },
-            );
-        }
-    }
-
-    /// 捕获所有 egui 文本/图片复制（包括 Ctrl+C），确认前不交给系统。
-    pub(crate) fn guard_clipboard_output(&mut self, ctx: &egui::Context) {
-        self.clipboard_context = Some(ctx.clone());
-        if crate::vault::key_handle().is_none() {
-            return;
-        }
-        let mut copied = Vec::new();
-        ctx.output_mut(|output| {
-            output.commands.retain(|command| {
-                if matches!(
-                    command,
-                    egui::OutputCommand::CopyText(_) | egui::OutputCommand::CopyImage(_)
-                ) {
-                    copied.push(command.clone());
-                    false
-                } else {
-                    true
-                }
-            })
-        });
-        if copied.is_empty() {
-            self.clipboard_output_approved = false;
-            return;
-        }
-        if std::mem::take(&mut self.clipboard_output_approved) {
-            ctx.output_mut(|output| output.commands.extend(copied));
-            return;
-        }
-        let ctx = ctx.clone();
-        self.request_output_with_warning(
-            "复制内容到系统剪贴板",
-            CLIPBOARD_WARNING,
-            move |app| {
-                app.clipboard_output_approved = true;
-                ctx.output_mut(|output| output.commands.extend(copied));
-            },
-        );
-    }
-
     #[cfg(test)]
     pub(crate) fn request_plaintext_output(
         &mut self,
@@ -186,7 +103,7 @@ impl GongwenApp {
                     return;
                 }
             }
-        } else if !has_key {
+        } else if !has_key && warning != CLIPBOARD_WARNING {
             action(self);
             return;
         }
@@ -262,26 +179,27 @@ mod tests {
     use crate::draft_page::ExportKind;
 
     #[test]
-    fn clipboard_copy_waits_for_confirmation_and_cut_waits_before_modifying_the_editor() {
-        let mut h = Harness::new(true);
-        h.ctx.copy_text("保密剪贴板内容".into());
-        h.app.guard_clipboard_output(&h.ctx);
-        assert!(h.ctx.output(|output| output.commands.is_empty()));
-        assert!(h.app.pending_output.is_some());
-        let pending = h.app.pending_output.take().unwrap();
-        (pending.action)(&mut h.app);
-        h.app.guard_clipboard_output(&h.ctx);
-        assert!(h.ctx.output(|output| output.commands.iter().any(|command| matches!(command, egui::OutputCommand::CopyText(text) if text == "保密剪贴板内容"))));
-        h.ctx.output_mut(|output| output.commands.clear());
-        h.ctx.input_mut(|input| input.events.push(egui::Event::Cut));
-        h.app.guard_clipboard_input(&h.ctx);
-        assert!(
-            !h.ctx
-                .input(|input| input.events.contains(&egui::Event::Cut))
-        );
-        assert!(h.app.pending_output.is_some());
-        h.app.pending_output = None; // 取消：不重放剪切，源文字不会被编辑器删除。
-        assert!(h.app.clipboard_cut_replay.is_none());
+    fn approved_clipboard_payload_is_the_only_output_sent_to_the_platform() {
+        for encrypted in [false, true] {
+            let mut h = Harness::new(encrypted);
+            super::super::clipboard::configure(&h.ctx);
+            h.app
+                .request_clipboard_export(egui::OutputCommand::CopyText("外发选区".into()));
+            let pending = h
+                .app
+                .pending_output
+                .take()
+                .expect("普通与加密工作区都须确认");
+            (pending.action)(&mut h.app);
+            let output = crate::test_support::run_ui(&h.ctx, egui::RawInput::default(), |_| {
+                h.app.handle_clipboard_input(&h.ctx);
+                h.ctx.copy_text("仅应用内使用".into());
+                h.app.publish_approved_copy(&h.ctx);
+            });
+            assert!(
+                matches!(output.platform_output.commands.as_slice(), [egui::OutputCommand::CopyText(text)] if text == "外发选区")
+            );
+        }
     }
 
     #[test]

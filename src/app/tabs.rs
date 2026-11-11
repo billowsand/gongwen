@@ -533,7 +533,14 @@ impl GongwenApp {
                 } => {
                     self.request_output_with_warning(operation, warning, action);
                 }
-                DraftAction::CopyFile { path } => self.start_file_copy(path, ctx.clone()),
+                DraftAction::CopyFile { path } => {
+                    let wake = ctx.clone();
+                    self.request_output_with_warning(
+                        "复制导出文件到系统剪贴板",
+                        super::output_guard::CLIPBOARD_WARNING,
+                        move |app| app.start_file_copy(path, wake),
+                    );
+                }
 
                 DraftAction::ImportDocument { key } => {
                     let ctx = ctx.clone();

@@ -68,7 +68,23 @@ struct BarActions {
     ref_role: Option<((String, i64), MaterialRole)>,
 }
 
+pub(crate) fn composer_input_id(key: crate::draft_page::DocKey) -> egui::Id {
+    egui::Id::unique(("ai_panel_input", key))
+}
+
 impl DraftPage<'_> {
+    /// 短内容由输入框粘贴，清洗后的长材料以独立附件接收。
+    pub(crate) fn add_external_paste_material(&mut self, text: &str) -> bool {
+        if !super::paste::is_large(text) {
+            return false;
+        }
+        let composer = &mut self.doc.ai_panel.composer;
+        composer.materials.push(super::paste::PastedFile::new(text));
+        composer.pi_material_roles.push(composer.pi_material_role);
+        composer.error = None;
+        true
+    }
+
     pub(super) fn ai_composer_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
         self.commit_prompt_ui(ui);
@@ -77,53 +93,11 @@ impl DraftPage<'_> {
         let running = self.doc.ai_panel.running();
         let selection_now = crate::draft_page::editor_selection(&ctx, &self.doc.generated_markdown)
             .filter(|range| !range.is_empty());
-        let input_id = egui::Id::unique(("ai_panel_input", self.doc.key));
+        let input_id = composer_input_id(self.doc.key);
         let popup_id = input_id.with("popup");
         let had_focus_id = input_id.with("had_focus");
         let had_focus = ctx.data(|data| data.get_temp::<bool>(had_focus_id).unwrap_or(false));
         let mut focused = ctx.memory(|memory| memory.has_focus(input_id));
-        // 只接管本输入框的 Paste；文件写入失败时把事件留给 TextEdit，原文不会丢失。
-        if focused {
-            let composer = &mut self.doc.ai_panel.composer;
-            ui.input_mut(|input| {
-                input.events.retain(|event| {
-                    if let egui::Event::Paste(text) = event
-                        && super::paste::is_large(text)
-                    {
-                        // 材料要的是原文：剪贴板里有 HTML 就用它转出来的 Markdown
-                        // （网页、Word 的表格不会散成制表符），没有就照旧用纯文本。
-                        let pasted = super::paste::PastedFile::new(text);
-                        let id = pasted.id;
-                        composer.materials.push(pasted);
-                        // 逐篇用途跟着材料一起进，旧会话没有这项时回退到默认值。
-                        composer.pi_material_roles.push(composer.pi_material_role);
-                        composer.error = None;
-                        let key = self.doc.key;
-                        let tx = self.sender.clone();
-                        let wake = ctx.clone();
-                        let plain = text.clone();
-                        #[cfg(test)]
-                        let test_html = crate::rich_paste::clipboard::test_html().flatten();
-                        std::thread::spawn(move || {
-                            #[cfg(test)]
-                            crate::rich_paste::clipboard::set_test_html_in_current_thread(
-                                test_html,
-                            );
-                            let markdown = crate::rich_paste::material_text(&plain);
-                            let _ = tx.send(crate::app::WorkerResult::MaterialPasteDone {
-                                key,
-                                id,
-                                plain,
-                                markdown,
-                            });
-                            wake.request_repaint();
-                        });
-                        return false;
-                    }
-                    true
-                });
-            });
-        }
         // 点弹出层的那一下文本框会失焦；指针在弹出层上时照样当它开着。
         let over_popup = ctx
             .memory(|memory| memory.area_rect(popup_id))

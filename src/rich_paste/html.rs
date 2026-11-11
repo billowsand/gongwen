@@ -551,7 +551,7 @@ fn styled_bold(style: &str) -> Option<bool> {
 }
 
 /// 元素里的全部文字。
-fn text_of(element: &DocElement) -> String {
+pub(super) fn text_of(element: &DocElement) -> String {
     let mut out = String::new();
     for child in &element.children {
         match child {

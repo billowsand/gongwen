@@ -32,6 +32,7 @@ mod ai_manage;
 pub(crate) mod ai_proposal;
 mod api_settings;
 mod chrome;
+pub(crate) mod clipboard;
 mod data_safety;
 mod export_password;
 pub(crate) mod file_dialog;
@@ -198,9 +199,7 @@ pub struct GongwenApp {
     /// 还没问完结果的系统文件对话框；后台线程开窗，主线程每帧问一次。
     pending_file_dialogs: Vec<file_dialog::PendingFileDialog>,
     pending_output: Option<output_guard::PendingOutput>,
-    clipboard_context: Option<egui::Context>,
-    clipboard_output_approved: bool,
-    clipboard_cut_replay: Option<Option<egui::Id>>,
+    clipboard: clipboard::Clipboard,
     /// 送批材料面板；None 表示未打开。
     send_package: Option<SendPackagePanel>,
     /// 正在后台进行的送批材料合并导出；同一时间只跑一个。
@@ -678,9 +677,7 @@ impl GongwenApp {
             next_print_dialog: 1,
             pending_file_dialogs: Vec::new(),
             pending_output: None,
-            clipboard_context: None,
-            clipboard_output_approved: false,
-            clipboard_cut_replay: None,
+            clipboard: clipboard::Clipboard::default(),
             send_package: None,
             send_package_export: None,
             macos_titlebar_metrics,
@@ -943,6 +940,7 @@ impl GongwenApp {
         self.sync_omarchy_theme(&ctx);
         // 模态守卫最先跑：焦点要在输入法接管键盘之前从模态下面收走。
         self.modal_guard.begin_frame(&ctx);
+        self.handle_clipboard_input(&ctx);
         // 输入法要在所有控件之前接管键盘：该吃的按键在这里吃掉、该上屏的塞回事件队列。
         // 设置从配置里来，每帧对一次（设置没变是空操作）。
         self.ime.apply_settings(self.ime_settings());
@@ -964,7 +962,6 @@ impl GongwenApp {
         self.poll_writing_tasks(&ctx);
         // 系统文件对话框在后台线程开窗，这里问一次结果；用户挑完再接着做那件事。
         self.poll_file_dialogs(&ctx);
-        self.poll_smart_paste(ui);
         self.poll_import_preparation();
         if self.package_staging_busy || self.import_preparation.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));

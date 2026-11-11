@@ -239,6 +239,7 @@ impl DraftPage<'_> {
         action: EditorMenuAction,
         selection: Option<egui::text::CCursorRange>,
     ) {
+        let cursor_selection = selection;
         let selection = selection
             .map(|range| ccursor_range_bytes(&self.doc.generated_markdown, range))
             .filter(|range| !range.is_empty());
@@ -254,17 +255,42 @@ impl DraftPage<'_> {
                 }
                 if let Some(range) = selection {
                     ctx.copy_text(self.doc.generated_markdown[range.clone()].to_string());
-                    self.doc.generated_markdown.replace_range(range.clone(), "");
-                    self.doc.pending_source_jump = Some(range.start);
+                    let start = range.start;
+                    let mut replacement = self.doc.generated_markdown.clone();
+                    replacement.replace_range(range, "");
+                    super::diff_editor::replace_with_undo(
+                        ctx,
+                        &mut self.doc.generated_markdown,
+                        replacement,
+                        start,
+                    );
+                    self.doc.pending_source_jump = Some(start);
                 }
             }
-            EditorMenuAction::Paste => {
+            EditorMenuAction::CopyToSystem => {
+                if let Some(range) = selection {
+                    crate::app::clipboard::request_system_copy(
+                        ctx,
+                        self.doc.generated_markdown[range].to_string(),
+                    );
+                }
+            }
+            EditorMenuAction::Paste | EditorMenuAction::PasteExternal => {
                 if self.doc.read_only() {
                     return;
                 }
-                // 剪贴板只能由窗口层读：把焦点还给编辑框，再让它照 Ctrl+V 粘贴。
                 ctx.memory_mut(|memory| memory.request_focus(editor_id()));
-                ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                if let Some(cursor) = cursor_selection {
+                    let mut state =
+                        egui::TextEdit::load_state(ctx, editor_id()).unwrap_or_default();
+                    state.cursor.set_char_range(Some(cursor));
+                    state.store(ctx, editor_id());
+                }
+                if action == EditorMenuAction::PasteExternal {
+                    self.start_external_paste(ctx);
+                } else {
+                    crate::app::clipboard::request_local_paste(ctx, self.doc.key);
+                }
             }
             EditorMenuAction::MoveToCandidates => match selection {
                 Some(range) => self.move_range_to_candidates(ctx, range),
@@ -478,7 +504,9 @@ struct UndoSnapshot {
 pub(crate) enum EditorMenuAction {
     Cut,
     Copy,
+    CopyToSystem,
     Paste,
+    PasteExternal,
     MoveToCandidates,
 }
 
@@ -555,6 +583,22 @@ pub(crate) fn editor_context_menu(
         }
         if menu_entry(ui, editable, "粘贴", &crate::theme::primary_shortcut("V")) {
             action = Some(EditorMenuAction::Paste);
+        }
+        if menu_entry(
+            ui,
+            editable,
+            "从外部粘贴",
+            &crate::theme::primary_shortcut("Shift+V"),
+        ) {
+            action = Some(EditorMenuAction::PasteExternal);
+        }
+        if menu_entry(
+            ui,
+            has_selection,
+            "复制到系统剪贴板",
+            &crate::theme::primary_shortcut("Shift+C"),
+        ) {
+            action = Some(EditorMenuAction::CopyToSystem);
         }
         ui.separator();
         // 加词与查码都只带选中的文字过去，不改正文；请求经临时存储交给输入法浮窗。

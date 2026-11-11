@@ -1409,6 +1409,16 @@ fn select_text(
             }
             ui.close();
         }
+        let export = ui.add_enabled(
+            range.is_some(),
+            egui::Button::new("复制到系统剪贴板").shortcut_text(theme::primary_shortcut("Shift+C")),
+        );
+        if export.clicked() {
+            if let Some(range) = range {
+                crate::app::clipboard::request_system_copy(ui.ctx(), selected_text(slots, range));
+            }
+            ui.close();
+        }
     });
 
     let Some(range) = range else {

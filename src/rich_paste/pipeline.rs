@@ -9,9 +9,7 @@
 //!        → 列表整形
 //! ```
 //!
-//! 任何一步失败都返回 `None`，调用方把事件交还编辑框原样粘贴。纯文本这条路还要
-//! 多一道判断：转换结果与原文只差空白时同样返回 `None`——没有任何结构可还原时再走
-//! 一遍清洗反而会动用户的字。
+//! 没有可用结构时返回 `None`，调用方再做纯文本清洗。
 //!
 //! 粘在句子中间时走 [`convert_inline`]：多行内容压成一行行内文字，不建结构。
 //! AI 侧栏的材料走 [`to_material`]：只要 HTML → Markdown 与语法裁剪，不做结构还原。
@@ -120,14 +118,14 @@ pub(crate) fn convert_inline(source: &Source, ctx: &Context) -> Option<Outcome> 
 
 fn inline_html(source: &str, ctx: &Context) -> Option<Outcome> {
     let parsed = html::parse(source, false).ok()?;
-    // 图片塞不进一行行内文字：和表格一样交还编辑框原样粘贴。
+    // 图片塞不进一行行内文字：和表格一样回退到清洗后的纯文本。
     if parsed.images > 0 {
         return None;
     }
     let document = anydoc::html::to_document(&parsed.body, &parsed.css).ok()?;
     let mut stats = Stats::default();
     let document = syntax::prune(document, ctx.research(), false, &mut stats);
-    // 表格没法塞进一行：交给编辑框原样粘贴。
+    // 表格没法塞进一行：回退到清洗后的纯文本。
     if syntax::has_table(&document) {
         return None;
     }
@@ -169,16 +167,23 @@ pub(crate) fn to_material(source: &str) -> Option<String> {
     (!markdown.trim().is_empty()).then_some(markdown)
 }
 
-/// 大段粘贴作为侧栏材料时的正文：有 HTML 就用它转出来的 Markdown（表格是管道表），
-/// 没有或转换失败就用剪贴板里的纯文本。与起草页一致，读失败一律退回原文。
-pub(crate) fn material_text(plain: &str) -> String {
-    // 复制的本来就是 Markdown（VS Code 一类编辑器同时给一份 HTML）：走 HTML 会转义成 `\## `。
-    if looks_like_markdown(plain) {
-        return plain.to_string();
+pub(crate) fn external_text(source: &Source, material: bool) -> String {
+    let plain = source.plain_text();
+    if let Source::Html { html, .. } = source {
+        if material
+            && !looks_like_markdown(plain)
+            && let Some(markdown) = to_material(html)
+        {
+            return super::clean_plain(&markdown);
+        }
+        if !material
+            && plain.trim().is_empty()
+            && let Ok(parsed) = html::parse(html, false)
+        {
+            return super::clean_plain(&html::text_of(&parsed.body));
+        }
     }
-    super::clipboard::read_html()
-        .and_then(|html| to_material(&html))
-        .unwrap_or_else(|| plain.to_string())
+    super::clean_plain(plain)
 }
 
 /// 多行 Markdown / 纯文本压成一行行内文字：去掉标题、列表、引用的记号，
@@ -494,21 +499,22 @@ mod tests {
     }
 
     #[test]
-    fn material_text_falls_back_to_the_plain_clipboard() {
-        crate::rich_paste::clipboard::set_test_html(None);
-        assert_eq!(material_text("原文"), "原文");
-        crate::rich_paste::clipboard::set_test_html(Some(
-            "<html><body><table><tr><th>甲</th><th>乙</th></tr>\
-             <tr><td>1</td><td>2</td></tr></table></body></html>",
-        ));
-        let text = material_text("甲\t乙");
+    fn external_material_and_form_use_their_own_cleaning() {
+        let source = Source::Html {
+            html: "<table><tr><th>甲</th><th>乙</th></tr><tr><td>1</td><td>2</td></tr></table>"
+                .into(),
+            plain: "甲\t乙\n１   ２  ".into(),
+        };
+        let text = external_text(&source, true);
         assert!(text.contains("| 甲 | 乙 |"), "{text}");
-        crate::rich_paste::clipboard::clear_test_html();
+        assert_eq!(external_text(&source, false), "甲乙\n1 2");
+        let text = external_text(&Source::Plain("报\u{200b}  送  ".into()), true);
+        assert_eq!(text, "报送");
     }
 
     /// 材料里不能有占位符，复制的现成 Markdown 不能被转义。
     #[test]
-    fn material_keeps_field_gaps_and_verbatim_markdown() {
+    fn material_keeps_field_gaps_and_markdown_syntax() {
         let markdown =
             to_material("<p>联系人：张某　联系电话：123</p><p>二段</p>").expect("材料应能转换");
         assert!(!markdown.contains('\u{FDD0}'), "{markdown:?}");
@@ -516,15 +522,11 @@ mod tests {
             markdown.contains("联系人：张某　联系电话：123"),
             "{markdown}"
         );
-
-        crate::rich_paste::clipboard::set_test_html(Some(
-            "<div><div><span>## 标题</span></div><div><span>正文**加粗**</span></div></div>",
-        ));
-        assert_eq!(
-            material_text("## 标题\n正文**加粗**"),
-            "## 标题\n正文**加粗**"
-        );
-        crate::rich_paste::clipboard::clear_test_html();
+        let source = Source::Html {
+            html: "<div><span>## 标题</span><span>正文**加粗**</span></div>".into(),
+            plain: "## 标题\n正文**加粗**".into(),
+        };
+        assert_eq!(external_text(&source, true), "## 标题\n正文**加粗**");
     }
 
     /// 微信公众号白底 `section` 里的「一、总体要求」是章节，不是文框。

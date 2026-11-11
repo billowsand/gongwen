@@ -781,7 +781,7 @@ impl DraftPage<'_> {
         });
         if copy_all {
             ui.ctx().copy_text(self.warnings_text());
-            *self.status = "审校提示已复制到剪贴板。".into();
+            *self.status = "审校提示已复制到应用内剪贴板。".into();
         }
         ui.separator();
         egui::ScrollArea::vertical()
@@ -875,11 +875,6 @@ impl DraftPage<'_> {
         let editable = !self.doc.read_only();
         // 规范键入的列表编号标点，由 TextEdit 正常写入正文并管理光标与撤销。
         super::list_period::normalize_editor_events(ui, &self.doc.generated_markdown, editable);
-        // 智能粘贴要在编辑框绘制之前：把本帧的 `Event::Paste` 换成转换结果，
-        // 否则 TextEdit 会再插一遍纯文本。Shift 按着时这里不接管，原样粘贴。
-        self.smart_paste(ui, editable);
-        // 「改为原样粘贴」只在刚粘贴完的一小会儿出现，放在编辑区上方。
-        self.recent_paste_strip(ui);
         // 空列表项与空标题的层级快捷键在 TextEdit 之前处理；边界提示写入状态栏。
         if let Some(message) =
             super::list_keys::handle_tab(ui, &mut self.doc.generated_markdown, editable)
@@ -1511,7 +1506,7 @@ fn copy_menu(response: &egui::Response, text: &str, status: &mut String) {
     response.context_menu(|ui| {
         if ui.button("复制这条提示").clicked() {
             ui.ctx().copy_text(text.to_owned());
-            *status = "已复制到剪贴板。".into();
+            *status = "已复制到应用内剪贴板。".into();
             ui.close();
         }
     });

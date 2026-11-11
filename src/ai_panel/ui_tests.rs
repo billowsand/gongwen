@@ -233,76 +233,25 @@ fn has(texts: &[String], needle: &str) -> bool {
     texts.iter().any(|text| text.contains(needle))
 }
 
-/// 真正走 egui 粘贴事件：长文成为材料（只在内存，不落临时文件），短文仍在光标处
-/// 插入；其它输入框的粘贴不接管。
+/// 应用内粘贴直接进输入框，保留原文。只有外部导入的长文成为独立材料。
 #[test]
-fn large_paste_becomes_material_only_in_the_focused_composer() {
+fn local_paste_preserves_text_and_external_long_paste_becomes_material() {
     let mut harness = Harness::new("原有正文");
     harness.doc.ai_panel.open = true;
-    harness.doc.ai_panel.composer.text = "请根据材料整理通知".into();
     harness.frame_texts();
     harness.focus_input();
     let text = "中文材料与🙂\n".repeat(400);
     harness.frame_with(vec![egui::Event::Paste(text.clone())]);
+    assert_eq!(harness.doc.ai_panel.composer.text, text);
+    assert!(harness.doc.ai_panel.composer.materials.is_empty());
+    harness.with_page(|page| {
+        assert!(!page.add_external_paste_material("短材料"));
+        assert!(page.add_external_paste_material(&text));
+    });
     let composer = &harness.doc.ai_panel.composer;
-    assert_eq!(composer.text, "请根据材料整理通知");
     assert_eq!(composer.materials.len(), 1);
     assert_eq!(composer.materials[0].material.text, text);
-    assert!(!composer.materials[0].material.name.is_empty());
-    harness.frame_with(vec![egui::Event::Paste("短材料".into())]);
-    assert!(harness.doc.ai_panel.composer.text.contains("短材料"));
-    harness.ctx.memory_mut(|memory| {
-        memory.surrender_focus(egui::Id::unique(("ai_panel_input", harness.doc.key)))
-    });
-    harness.frame_with(vec![egui::Event::Paste(text)]);
-    assert_eq!(harness.doc.ai_panel.composer.materials.len(), 1);
-    harness.doc.ai_panel.composer.materials.clear();
-}
-
-/// 带 HTML 的大段粘贴：材料用转出来的 Markdown，网页 / Word 的表格不会散成制表符。
-#[test]
-fn pasted_material_keeps_html_tables() {
-    crate::rich_paste::clipboard::set_test_html(Some(
-        "<html><body><table><tr><th>序号</th><th>事项</th></tr>\
-         <tr><td>1</td><td>隐患排查</td></tr></table></body></html>",
-    ));
-    let mut harness = Harness::new("原有正文");
-    harness.doc.ai_panel.open = true;
-    harness.frame_texts();
-    harness.focus_input();
-    let text = "序号\t事项\n1\t隐患排查\n".repeat(40);
-    harness.frame_with(vec![egui::Event::Paste(text)]);
-    let result = harness
-        ._keep
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("material conversion should finish");
-    let WorkerResult::MaterialPasteDone {
-        key,
-        id,
-        plain,
-        markdown,
-    } = result
-    else {
-        panic!("expected material conversion result")
-    };
-    assert_eq!(key, harness.doc.key);
-    let material = harness
-        .doc
-        .ai_panel
-        .composer
-        .materials
-        .iter_mut()
-        .find(|material| material.id == id && material.material.text == plain)
-        .unwrap();
-    material.material.text = markdown;
-    material.chars = material.material.text.chars().count();
-    assert!(harness.doc.ai_panel.composer.text.is_empty());
-    assert_eq!(harness.doc.ai_panel.composer.materials.len(), 1);
-    let material = &harness.doc.ai_panel.composer.materials[0].material.text;
-    assert!(material.contains("| 序号 | 事项 |"), "{material}");
-    assert!(!material.contains('\t'), "{material}");
-    harness.doc.ai_panel.composer.materials.clear();
-    crate::rich_paste::clipboard::clear_test_html();
+    assert_eq!(composer.pi_material_roles.len(), 1);
 }
 
 #[test]

@@ -401,7 +401,7 @@ impl DraftPage<'_> {
             self.doc.generated_markdown =
                 export::normalize_ordered_list_punctuation(&self.doc.generated_markdown);
             ui.ctx().copy_text(self.doc.generated_markdown.clone());
-            *self.status = "审校稿已复制到剪贴板。".into();
+            *self.status = "审校稿已复制到应用内剪贴板。".into();
         }
         // 清空是不可逆操作：功能区保留明确文字，点击后再由模态框二次确认。
         if ui

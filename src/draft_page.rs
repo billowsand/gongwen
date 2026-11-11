@@ -454,10 +454,7 @@ pub(crate) struct DraftSession {
     pub(crate) preview_selection: Option<Range<usize>>,
     /// 源码编辑框中正在拖动的文字选区；按稿件隔离，避免切换标签后误改别篇。
     pub(crate) text_drag: Option<editor::TextDrag>,
-    /// 最近一次智能粘贴（插入的字节范围、内容与原始纯文本），编辑区上方的
-    /// 「改为原样粘贴」按钮用它。下一次改动那段文字、换稿或约 15 秒后清掉。
-    pub(crate) recent_paste: Option<paste::RecentPaste>,
-    /// 原文已插入、富文本转换仍在后台进行的一次粘贴；不随稿件存盘。
+    /// 正在后台读取及转换的外部粘贴；不随稿件存盘。
     pub(crate) pending_paste: Option<paste::PendingPaste>,
     /// 待处理的“跳到源码”请求，编辑框下次绘制时把光标挪过去并滚动到位。
     pub(crate) pending_source_jump: Option<usize>,
@@ -604,7 +601,6 @@ impl DraftSession {
             preview_anchor: None,
             preview_selection: None,
             text_drag: None,
-            recent_paste: None,
             pending_paste: None,
             pending_source_jump: None,
             pending_source_selection: None,
@@ -785,7 +781,6 @@ impl DraftSession {
         self.revise_cache.clear();
         self.preview_anchor = None;
         self.preview_selection = None;
-        self.recent_paste = None;
         self.pending_source_jump = None;
         self.pending_source_selection = None;
         self.pending_render_jump = false;

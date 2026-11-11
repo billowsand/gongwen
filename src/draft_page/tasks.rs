@@ -528,16 +528,6 @@ impl DraftPage<'_> {
         let (result, path, verb) = match action {
             FileAction::Reveal(path) => (reveal_in_os(&path), path, "定位"),
             FileAction::CopyToClipboard(path) => {
-                if crate::vault::key_handle().is_some() {
-                    self.actions.push(DraftAction::ConfirmPlaintextOutput {
-                        operation: "复制导出文件到系统剪贴板".into(),
-                        warning: crate::app::output_guard::CLIPBOARD_WARNING,
-                        action: Box::new(move |app| {
-                            app.copy_file_confirmed(&path);
-                        }),
-                    });
-                    return;
-                }
                 self.actions.push(DraftAction::CopyFile { path });
                 return;
             }

@@ -39,10 +39,10 @@ directories = "6.0"
 docx-rs = "0.4.22"
 # Word 里的 EMF / WMF 矢量图转 SVG（再经 resvg 出 PNG），见 src/metafile.rs。
 emf-core = { version = "0.1.1", default-features = false, features = ["svg"] }
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland", "x11"] }
-# 剪贴板 HTML：起草页粘贴时读富文本片段（见 src/rich_paste/）。egui-winit 已经
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "persistence", "wayland", "x11"] }
+# 系统剪贴板：外部粘贴在后台读取（见 src/rich_paste/）。egui-winit 已经
 # 间接引入 3.6.1，这里只是声明直接引用；关掉默认的 image-data，不新增系统依赖。
-arboard = { version = "3.6.1", default-features = false }
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 egui = "0.37.0"
 egui_dnd = "0.18.0"
 egui_extras = { version = "0.37.0", features = ["image", "svg"] }
@@ -165,3 +165,5 @@ proptest = "1.11.0"
 [patch.crates-io]
 typst-layout = { path = "vendor/typst-layout" }
 anydoc = { path = "vendor/anydoc" }
+# 公文助手自行路由粘贴快捷键，避免窗口后端在主线程读系统剪贴板。
+egui-winit = { path = "vendor/egui-winit" }

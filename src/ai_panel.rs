@@ -19,6 +19,7 @@ mod appearance;
 mod checkpoint;
 mod commit_intent;
 mod composer_ui;
+pub(crate) use composer_ui::composer_input_id;
 pub(crate) mod field_card;
 mod history;
 mod mention;

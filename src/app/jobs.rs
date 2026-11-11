@@ -4,7 +4,7 @@
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
 use crate::ai_panel::TurnState;
-use crate::app::{ExportOutcome, GongwenApp, KnowledgeImportDraft, KnowledgePreviewState};
+use crate::app::{ExportOutcome, GongwenApp, KnowledgeImportDraft, KnowledgePreviewState, TabRef};
 use crate::doc_import;
 use crate::draft_page::{DocKey, DraftSession};
 use crate::knowledge;
@@ -58,12 +58,9 @@ pub(crate) enum WorkerResult {
     },
     /// 后台读取剪贴板并转换完成；真正的正文替换在主线程按粘贴快照执行。
     SmartPasteDone { key: DocKey },
-    /// AI 侧栏的大段材料先保留纯文本，富文本转换完成后按材料身份替换。
-    MaterialPasteDone {
-        key: DocKey,
-        id: u64,
-        plain: String,
-        markdown: String,
+    ExternalPaste {
+        sequence: u64,
+        result: Result<String, String>,
     },
     /// 知识库任务：与具体稿件无关的全局任务（索引构建 / 检索测试）。
     Knowledge(KnowledgeJob),
@@ -281,25 +278,6 @@ pub(crate) enum DocJob {
 }
 
 impl GongwenApp {
-    pub(crate) fn poll_smart_paste(&mut self, ui: &egui::Ui) {
-        let Some(doc) = self.docs.get_mut(self.active_doc) else {
-            return;
-        };
-        let Some(pending) = doc.pending_paste.take() else {
-            return;
-        };
-        let Ok(prepared) = pending.receiver.try_recv() else {
-            doc.pending_paste = Some(pending);
-            return;
-        };
-        if doc.generated_markdown.get(pending.range.clone()) != Some(pending.plain.as_str()) {
-            self.status = "粘贴期间原文已被修改，保留原样粘贴。".into();
-            return;
-        }
-        self.draft_page_at(self.active_doc)
-            .finish_paste(ui, pending.range, prepared);
-    }
-
     pub(crate) fn start_file_copy(&mut self, path: PathBuf, wake: egui::Context) {
         self.status = format!(
             "正在复制 {} 到系统剪贴板…",
@@ -591,28 +569,22 @@ impl GongwenApp {
                     let Some(index) = self.doc_index_of_key(key) else {
                         continue;
                     };
-                    // 唤醒只负责让这一帧收取结果；真正替换由编辑器处理。
-                    debug_assert!(self.docs[index].pending_paste.is_some());
-                }
-                WorkerResult::MaterialPasteDone {
-                    key,
-                    id,
-                    plain,
-                    markdown,
-                } => {
-                    let Some(index) = self.doc_index_of_key(key) else {
+                    let Some(pending) = self.docs[index].pending_paste.take() else {
                         continue;
                     };
-                    if let Some(material) = self.docs[index]
-                        .ai_panel
-                        .composer
-                        .materials
-                        .iter_mut()
-                        .find(|material| material.id == id && material.material.text == plain)
+                    if self.tabs.get(self.active_tab) != Some(&TabRef::Doc(key))
+                        || ctx.input(|input| !input.focused)
                     {
-                        material.material.text = markdown;
-                        material.chars = material.material.text.chars().count();
+                        continue;
                     }
+                    let result = pending
+                        .receiver
+                        .try_recv()
+                        .unwrap_or_else(|error| Err(format!("无法读取粘贴结果：{error}")));
+                    self.draft_page_at(index).finish_paste(ctx, pending, result);
+                }
+                WorkerResult::ExternalPaste { sequence, result } => {
+                    self.finish_external_paste(ctx, sequence, result);
                 }
                 WorkerResult::Doc { key, seq, job } => {
                     self.apply_doc_job_with(Some(ctx), key, seq, job)
