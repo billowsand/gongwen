@@ -345,15 +345,13 @@ impl Icon {
     }
 }
 
-/// 当前是不是 MDEX 两套之一；只用来挑标题栏的品牌图标，外壳形状看 [`square_chrome`]。
-fn is_mdex() -> bool {
-    matches!(current().label, mdex::LABEL | mdex::DARK_LABEL)
-}
-
 /// 直角、细描边、不投影的平面外壳，配色仍由统一主题接口提供。MDEX 两套与
 /// 「跟随 Omarchy」（Hyprland 默认是直角细线边框）用它。
 pub(crate) fn square_chrome() -> bool {
-    is_mdex() || current().label == omarchy::LABEL
+    matches!(
+        current().label,
+        mdex::LABEL | mdex::DARK_LABEL | omarchy::LABEL
+    )
 }
 
 pub(crate) fn chrome_radius(default: u8) -> CornerRadius {
@@ -363,25 +361,9 @@ pub(crate) fn chrome_radius(default: u8) -> CornerRadius {
     CornerRadius::same(if square_chrome() { 0 } else { default })
 }
 
-/// 标题栏的品牌图标；MDEX 使用完整双色图标，不给绿色光标整体染色。
+/// 标题栏使用单色品牌标识，颜色随界面主题变化。
 pub(crate) fn brand_image(size: f32, tint: Color32) -> egui::Image<'static> {
-    if is_mdex() {
-        egui::Image::from_bytes(
-            if current().dark {
-                "bytes://brand/mdex-dark.svg"
-            } else {
-                "bytes://brand/mdex.svg"
-            },
-            if current().dark {
-                include_bytes!("../../assets/app-icon/themes/mdex-dark/app-icon.svg").as_slice()
-            } else {
-                include_bytes!("../../assets/app-icon/themes/mdex/app-icon.svg").as_slice()
-            },
-        )
-        .fit_to_exact_size(egui::vec2(size, size))
-    } else {
-        Icon::BrandMark.image_sized(size).tint(tint)
-    }
+    Icon::BrandMark.image_sized(size).tint(tint)
 }
 
 const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/app-icon/app-icon-256.png");

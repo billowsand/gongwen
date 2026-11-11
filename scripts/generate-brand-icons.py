@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the theme-aware raster app icon family from one shared geometry."""
+"""生成系统应用图标、主题图标和稿件包图标。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "assets" / "app-icon"
 APP_SOURCE = OUT / "app-icon-source.png"
 DOC_OUT = ROOT / "assets" / "doc-icon"
+BRAND_MARK = ROOT / "assets" / "icons" / "brand-mark.svg"
 SIZES = (16, 24, 32, 48, 64, 128, 256, 512, 1024)
 DOC_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
 # 小于等于这个尺寸的文档图标不写「GWX」字样，字在任务栏尺寸下只会糊成一团。
@@ -28,26 +29,76 @@ LABEL_FONTS = (
 )
 THEMES = {
     "claude": {
-        "tile_top": "#2A2927",
-        "tile_bottom": "#171614",
-        "accent": "#C96442",
-        "accent_light": "#D47450",
+        "tile": ("#F7F6F3", "#DEDDD9"),
+        "ink": ("#292928", "#101010"),
     },
-    # Terminal-inspired schemes. The tile stays dark in every theme so the icon
-    # reads at taskbar size; only the accent tracks the theme's accent colour.
     "nord": {
-        "tile_top": "#3B4252",
-        "tile_bottom": "#2E3440",
-        "accent": "#88C0D0",
-        "accent_light": "#9BD0DE",
+        "tile": ("#EEF2F7", "#CCD5E2"),
+        "ink": ("#344354", "#161E2B"),
     },
     "gruvbox-dark": {
-        "tile_top": "#282828",
-        "tile_bottom": "#1D2021",
-        "accent": "#FE8019",
-        "accent_light": "#FF9645",
+        "tile": ("#F4EBDA", "#DBCCB2"),
+        "ink": ("#40352B", "#201915"),
+    },
+    "mdex": {
+        "tile": ("#F8F7EF", "#DDE2D2"),
+        "ink": ("#29352C", "#111A14"),
+    },
+    "mdex-dark": {
+        "tile": ("#343B35", "#181D19"),
+        "ink": ("#F2F2E9", "#C6CEBA"),
     },
 }
+
+# 轮廓坐标以 1024 为画布。COUNTER 是「文」字两笔交汇处留下的墨面。
+PAGE = (
+    ("M", 309, 203),
+    ("L", 593, 203),
+    ("C", 605, 203, 615, 207, 624, 215),
+    ("L", 747, 333),
+    ("C", 758, 343, 765, 357, 765, 373),
+    ("L", 765, 746),
+    ("C", 765, 781, 740, 806, 706, 806),
+    ("L", 309, 806),
+    ("C", 274, 806, 249, 781, 249, 746),
+    ("L", 249, 263),
+    ("C", 249, 228, 274, 203, 309, 203),
+)
+DOT = (
+    ("M", 484, 380),
+    ("L", 528, 367),
+    ("L", 554, 414),
+    ("L", 507, 429),
+)
+WRITING = (
+    ("M", 332, 442),
+    ("L", 682, 442),
+    ("L", 682, 491),
+    ("L", 625, 491),
+    ("C", 611, 539, 586, 581, 549, 617),
+    ("C", 584, 642, 631, 659, 689, 674),
+    ("L", 659, 727),
+    ("C", 597, 707, 545, 683, 504, 653),
+    ("C", 461, 684, 409, 709, 352, 728),
+    ("L", 323, 678),
+    ("C", 376, 664, 423, 643, 462, 616),
+    ("C", 426, 580, 401, 538, 386, 491),
+    ("L", 332, 491),
+)
+COUNTER = (
+    ("M", 442, 491),
+    ("L", 569, 491),
+    ("C", 555, 524, 534, 554, 506, 580),
+    ("C", 477, 554, 456, 524, 442, 491),
+)
+FOLD = (
+    ("M", 608, 205),
+    ("C", 615, 208, 620, 211, 624, 215),
+    ("L", 747, 333),
+    ("C", 755, 341, 760, 350, 763, 360),
+    ("L", 652, 360),
+    ("C", 626, 360, 608, 342, 608, 316),
+)
 
 
 def hex_rgb(value: str) -> tuple[int, int, int]:
@@ -86,90 +137,90 @@ def cubic(
     return points
 
 
-def polygon_mask(size: int, points: Iterable[tuple[float, float]]) -> Image.Image:
-    mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(mask).polygon(list(points), fill=255)
-    return mask
+def outline_points(outline: Iterable[tuple]) -> list[tuple[float, float]]:
+    points = []
+    for command, *coordinates in outline:
+        if command == "C":
+            ax, ay, bx, by, x, y = coordinates
+            points.extend(cubic(points[-1], (ax, ay), (bx, by), (x, y)))
+        else:
+            x, y = coordinates
+            points.append((x, y))
+    return points
+
+
+def paint_outline(draw: ImageDraw.ImageDraw, outline: Iterable[tuple], fill: int) -> None:
+    draw.polygon([(2 * x, 2 * y) for x, y in outline_points(outline)], fill=fill)
 
 
 def vertical_gradient(size: int, top: str, bottom: str) -> Image.Image:
     top_rgb = hex_rgb(top)
     bottom_rgb = hex_rgb(bottom)
-    image = Image.new("RGBA", (size, size))
-    pixels = image.load()
-    for y in range(size):
-        color = mix(top_rgb, bottom_rgb, y / max(size - 1, 1))
-        for x in range(size):
-            pixels[x, y] = (*color, 255)
-    return image
+    strip = Image.new("RGB", (1, size))
+    strip.putdata([mix(top_rgb, bottom_rgb, y / (size - 1)) for y in range(size)])
+    return strip.resize((size, size), Image.Resampling.NEAREST)
 
 
-def diagonal_gradient(size: int, start: str, end: str) -> Image.Image:
-    start_rgb = hex_rgb(start)
-    end_rgb = hex_rgb(end)
-    image = Image.new("RGBA", (size, size))
-    pixels = image.load()
-    for y in range(size):
-        for x in range(size):
-            t = min(max((x + 0.35 * y) / (1.35 * (size - 1)), 0), 1)
-            pixels[x, y] = (*mix(start_rgb, end_rgb, t), 255)
-    return image
+def over(image: Image.Image, fill: Image.Image | str, mask: Image.Image) -> None:
+    layer = Image.new("RGBA", image.size, fill) if isinstance(fill, str) else fill.convert("RGBA")
+    layer.putalpha(mask)
+    image.alpha_composite(layer)
 
 
-def render_icon(theme: dict[str, str], size: int = 1024) -> Image.Image:
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    tile_mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(tile_mask).rounded_rectangle((56, 56, 968, 968), radius=218, fill=255)
-    image.alpha_composite(Image.composite(vertical_gradient(size, theme["tile_top"], theme["tile_bottom"]), Image.new("RGBA", (size, size)), tile_mask))
+def shadow(
+    image: Image.Image, mask: Image.Image, offset: tuple[int, int], blur: float, opacity: float
+) -> None:
+    shifted = Image.new("L", image.size)
+    shifted.paste(mask, offset)
+    blurred = shifted.filter(ImageFilter.GaussianBlur(blur))
+    over(image, "#000000", blurred.point(lambda alpha: round(alpha * opacity)))
 
-    # A restrained shadow separates the white sheet from the dark tile without becoming skeuomorphic.
-    shadow_mask = Image.new("L", (size, size), 0)
-    paper = [
-        (235, 520),
-        (353, 276),
-        *cubic((353, 276), (370, 241), (402, 230), (440, 237)),
-        (614, 270),
-        *cubic((614, 270), (648, 276), (670, 298), (681, 329)),
-        (772, 590),
-        (516, 714),
-    ]
-    ImageDraw.Draw(shadow_mask).polygon([(x + 8, y + 16) for x, y in paper], fill=135)
-    shadow_mask = shadow_mask.filter(ImageFilter.GaussianBlur(18))
-    shadow = Image.new("RGBA", (size, size), (0, 0, 0, 92))
-    image.alpha_composite(Image.composite(shadow, Image.new("RGBA", (size, size)), shadow_mask))
 
-    paper_mask = polygon_mask(size, paper)
-    paper_fill = vertical_gradient(size, "#FFFFFF", "#F2F3F7")
-    image.alpha_composite(Image.composite(paper_fill, Image.new("RGBA", (size, size)), paper_mask))
+def writing_mask(size: int, *, cutout: bool) -> Image.Image:
+    mask = Image.new("L", (size * 2, size * 2))
+    draw = ImageDraw.Draw(mask)
+    if cutout:
+        paint_outline(draw, PAGE, 255)
+    foreground = 0 if cutout else 255
+    paint_outline(draw, DOT, foreground)
+    paint_outline(draw, WRITING, foreground)
+    paint_outline(draw, COUNTER, 255 - foreground)
+    return mask.resize((size, size), Image.Resampling.LANCZOS)
 
-    left = [(235, 520)]
-    left += cubic((235, 520), (218, 548), (225, 579), (246, 616))
-    left += [(354, 801)]
-    left += cubic((354, 801), (377, 840), (421, 845), (449, 812))
-    left += [(524, 724), (453, 654), (380, 741)]
-    left += cubic((380, 741), (363, 761), (344, 755), (331, 734))
-    left += [(235, 570)]
-    left += cubic((235, 570), (225, 553), (224, 536), (235, 520))
 
-    right = [(453, 654), (524, 724), (602, 650)]
-    right += cubic((602, 650), (627, 628), (653, 617), (686, 614))
-    right += [(828, 601)]
-    right += cubic((828, 601), (858, 598), (878, 618), (884, 647))
-    right += [(910, 770)]
-    right += cubic((910, 770), (916, 800), (897, 824), (868, 830))
-    right += [(681, 866)]
-    right += cubic((681, 866), (643, 873), (610, 860), (585, 832))
-    right += [(453, 680)]
+def render_icon(tile_colors: tuple[str, str], ink_colors: tuple[str, str]) -> Image.Image:
+    size = 1024
+    tile = vertical_gradient(size, *tile_colors).convert("RGBA")
+    mark = writing_mask(size, cutout=True)
 
-    ribbon = diagonal_gradient(size, theme["accent"], theme["accent_light"])
-    image.alpha_composite(Image.composite(ribbon, Image.new("RGBA", (size, size)), polygon_mask(size, left)))
-    image.alpha_composite(Image.composite(ribbon, Image.new("RGBA", (size, size)), polygon_mask(size, right)))
+    # 柔影定方向，贴边窄影让薄薄一层墨面有厚度。镂空里也保留投影。
+    shadow(tile, mark, (13, 26), 24, 0.29)
+    shadow(tile, mark, (2, 6), 4, 0.32)
+    over(tile, vertical_gradient(size, *ink_colors), mark)
 
-    # The narrow darker fold makes the continuous ribbon readable down to taskbar size.
-    fold = [(524, 724), (602, 650), (625, 631), (552, 754), (585, 832), (548, 790)]
-    fold_color = mix(hex_rgb(theme["accent"]), hex_rgb(theme["tile_bottom"]), 0.22)
-    ImageDraw.Draw(image).polygon(fold, fill=(*fold_color, 205))
-    return image
+    fold = Image.new("L", (size * 2, size * 2))
+    paint_outline(ImageDraw.Draw(fold), FOLD, 255)
+    over(tile, ink_colors[0], fold.resize(tile.size, Image.Resampling.LANCZOS))
+    tile_mask = Image.new("L", fold.size)
+    ImageDraw.Draw(tile_mask).rounded_rectangle((112, 112, 1935, 1935), radius=436, fill=255)
+    tile.putalpha(tile_mask.resize(tile.size, Image.Resampling.LANCZOS))
+    return tile
+
+
+def write_brand_mark() -> None:
+    contours = (PAGE, DOT, WRITING, COUNTER)
+    path = " ".join(
+        " ".join(" ".join(map(str, command)) for command in outline) + " Z"
+        for outline in contours
+    )
+    # 标题栏与菜单使用同一轮廓，以界面主题色着色。
+    BRAND_MARK.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="163 160 688 688">\n'
+        f'  <path fill="#ffffff" fill-rule="evenodd" d="{path}"/>\n'
+        '</svg>\n',
+        encoding="utf-8",
+    )
 
 
 def label_font(size: int) -> ImageFont.FreeTypeFont:
@@ -179,13 +230,14 @@ def label_font(size: int) -> ImageFont.FreeTypeFont:
     raise SystemExit("找不到粗体西文字体，请在 LABEL_FONTS 里补一个本机路径")
 
 
-def render_document_icon(theme: dict[str, str], compact: bool, size: int = 1024) -> Image.Image:
-    """`.gwx` 稿件包的文档图标：折角白纸 + 居中的程序图标 + 底部强调色色带。
+def render_document_icon(compact: bool) -> Image.Image:
+    """`.gwx` 稿件包的文档图标：折角白纸、居中的「文」字与底部墨色色带。
 
-    compact 版给 48 px 及以下用：不写字，程序图标和色带放大、页边描线加粗，
+    compact 版给 48 px 及以下用：不写后缀，「文」字和色带放大、页边描线加粗，
     任务栏和资源管理器小图标尺寸下也认得出纸的轮廓。
     """
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    size = 1024
+    image = Image.new("RGBA", (size, size))
     left, top, right, bottom = 176, 48, 848, 976
     fold = 220
     radius = 56
@@ -196,14 +248,8 @@ def render_document_icon(theme: dict[str, str], compact: bool, size: int = 1024)
     # 右上角切掉一个三角，留给折角。
     draw.polygon([(right - fold, top - 1), (right + 1, top - 1), (right + 1, top + fold)], fill=0)
 
-    shadow_mask = page_mask.filter(ImageFilter.GaussianBlur(20))
-    shadow = Image.new("RGBA", (size, size), (0, 0, 0, 70))
-    image.alpha_composite(
-        Image.composite(shadow, Image.new("RGBA", (size, size)), shadow_mask),
-        dest=(0, 14),
-    )
-    page_fill = vertical_gradient(size, "#FFFFFF", "#F1F2F6")
-    image.alpha_composite(Image.composite(page_fill, Image.new("RGBA", (size, size)), page_mask))
+    shadow(image, page_mask, (0, 14), 20, 0.27)
+    over(image, vertical_gradient(size, "#FFFFFF", "#F1F2F6"), page_mask)
 
     # 页边一圈灰描线：白底资源管理器里也能看出纸的轮廓。
     outline_width = 44 if compact else 10
@@ -219,15 +265,16 @@ def render_document_icon(theme: dict[str, str], compact: bool, size: int = 1024)
     edge = ImageDraw.Draw(image)
     edge.line([(right - fold, top), (right, top + fold)], fill=(*outline_color, 255), width=outline_width)
 
-    # 折角：一块略深的三角，带圆角的那一侧朝里。
+    # 折角贴合外边缘，内侧转角略圆。
+    corner_x = right - fold
+    corner_y = top + fold
     edge.polygon(
-        [(right - fold, top), (right - fold, top + fold - 36), (right - 36, top + fold)],
-        fill=(*hex_rgb("#DDE0E7"), 255),
-    )
-    edge.rounded_rectangle(
-        (right - fold, top + fold - 72, right - fold + 72, top + fold),
-        radius=36,
-        fill=(*hex_rgb("#DDE0E7"), 255),
+        [
+            (corner_x, top), (right, corner_y), (corner_x + 36, corner_y),
+            *cubic((corner_x + 36, corner_y), (corner_x + 14, corner_y),
+                   (corner_x, corner_y - 14), (corner_x, corner_y - 36)),
+        ],
+        fill="#DDE0E7",
     )
 
     band_top = 700 if compact else 744
@@ -235,13 +282,20 @@ def render_document_icon(theme: dict[str, str], compact: bool, size: int = 1024)
     band_mask = Image.new("L", (size, size), 0)
     ImageDraw.Draw(band_mask).rectangle((left, band_top, right, band_bottom), fill=255)
     band_mask = Image.composite(band_mask, Image.new("L", (size, size), 0), page_mask)
-    band = diagonal_gradient(size, theme["accent"], theme["accent_light"])
-    image.alpha_composite(Image.composite(band, Image.new("RGBA", (size, size)), band_mask))
+    ink_colors = THEMES["claude"]["ink"]
+    over(image, vertical_gradient(size, *ink_colors), band_mask)
 
-    mark_size = 560 if compact else 470
-    mark_top = 150 if compact else 230
-    mark = render_icon(theme).resize((mark_size, mark_size), Image.Resampling.LANCZOS)
-    image.alpha_composite(mark, dest=((left + right - mark_size) // 2, mark_top))
+    writing = writing_mask(size, cutout=False)
+    writing = writing.crop(writing.getbbox())
+    mark_width = 455 if compact else 350
+    mark_height = round(mark_width * writing.height / writing.width)
+    mark = Image.new("L", image.size)
+    mark.paste(
+        writing.resize((mark_width, mark_height), Image.Resampling.LANCZOS),
+        ((size - mark_width) // 2, 239 if compact else 306),
+    )
+    shadow(image, mark, (8, 15), 14, 0.25)
+    over(image, vertical_gradient(size, *ink_colors), mark)
 
     if not compact:
         font = label_font(118)
@@ -260,9 +314,8 @@ def write_document_icons(resampling: Image.Resampling) -> None:
     主题切换不影响系统里登记的图标，只出默认（claude）主题一套。
     """
     DOC_OUT.mkdir(parents=True, exist_ok=True)
-    theme = THEMES["claude"]
-    full = render_document_icon(theme, compact=False)
-    compact = render_document_icon(theme, compact=True)
+    full = render_document_icon(compact=False)
+    compact = render_document_icon(compact=True)
     icons = {
         size: (compact if size <= DOC_COMPACT_MAX else full).resize((size, size), resampling)
         for size in DOC_SIZES
@@ -270,14 +323,7 @@ def write_document_icons(resampling: Image.Resampling) -> None:
     for size, icon in icons.items():
         icon.save(DOC_OUT / f"gwx-document-{size}.png", optimize=True)
     icons[512].save(DOC_OUT / "gwx-document.png", optimize=True)
-    ico_sizes = [16, 24, 32, 48, 64, 128, 256]
-    # Pillow 的 ICO 按 sizes 从一张底图缩放；不同尺寸用不同底图要走 append_images。
-    icons[256].save(
-        DOC_OUT / "gwx-document.ico",
-        format="ICO",
-        sizes=[(size, size) for size in ico_sizes],
-        append_images=[icons[size] for size in ico_sizes if size != 256],
-    )
+    write_ico(DOC_OUT / "gwx-document.ico", icons)
 
 
 def write_ico(path: Path, icons: dict[int, Image.Image]) -> None:
@@ -318,14 +364,17 @@ def main() -> None:
 
     resampling = Image.Resampling.LANCZOS
     for name, theme in THEMES.items():
-        base = render_icon(theme)
+        base = render_icon(theme["tile"], theme["ink"])
         theme_dir = OUT / "themes" / name
         theme_dir.mkdir(parents=True, exist_ok=True)
-        for size in SIZES:
-            icon = base.resize((size, size), resampling)
+        icons = {size: base.resize((size, size), resampling) for size in SIZES}
+        for size, icon in icons.items():
             icon.save(theme_dir / f"app-icon-{size}.png", optimize=True)
 
+        if name in ("mdex", "mdex-dark"):
+            write_ico(theme_dir / "app-icon.ico", icons)
     write_document_icons(resampling)
+    write_brand_mark()
 
 
 if __name__ == "__main__":
