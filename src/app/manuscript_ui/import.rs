@@ -9,6 +9,7 @@ use crate::app::manuscript_ui::{
 };
 use crate::app::{truncate, warn};
 use crate::manuscript_io;
+use crate::modal::{self, Dismiss};
 use crate::models::VocabularyCategory;
 use crate::theme;
 use eframe::egui;
@@ -373,6 +374,38 @@ pub(crate) fn zip_password_form(
         }
     });
     submit
+}
+
+impl crate::app::GongwenApp {
+    /// 压缩包密码框。稿件包从稿件库页开，全量备份的导出与恢复从设置页开，
+    /// 所以它挂在帧末的全局窗口里，不跟着任何标签页渲染；否则在设置页点
+    /// 「导出备份…」时，密码框要等用户切到稿件库页才看得见。
+    pub(crate) fn zip_password_window(&mut self, ctx: &egui::Context) {
+        let Some(password) = self.manuscript_zip_password.as_mut() else {
+            return;
+        };
+        let importing = password.purpose.is_import();
+        // 有输入的表单：点遮罩不关，免得误点丢掉已经敲好的密码；Esc 与「取消」照常关。
+        let dialog = modal::dialog(
+            ctx,
+            egui::Id::unique("manuscript_zip_password"),
+            if matches!(password.purpose, ZipPasswordPurpose::BackupImport(_)) {
+                "输入备份密码"
+            } else if importing {
+                "输入稿件包密码"
+            } else {
+                "设置加密密码"
+            },
+            420.0,
+            Dismiss::EscOnly,
+            |ui| zip_password_form(ui, password, importing),
+        );
+        if dialog.inner {
+            self.submit_zip_password();
+        } else if dialog.dismissed {
+            self.manuscript_zip_password = None;
+        }
+    }
 }
 
 pub(crate) fn import_action_label(action: &manuscript_io::sync::ImportAction) -> &'static str {

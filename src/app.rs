@@ -1144,6 +1144,8 @@ impl GongwenApp {
         self.knowledge_preview_window(&ctx);
         self.about_window(&ctx);
         self.quick_find_window(&ctx);
+        // 压缩包密码框既服务稿件库页，也服务设置页的备份导出/恢复，放在全局窗口这层。
+        self.zip_password_window(&ctx);
         // 损坏配置、崩溃日志、备份恢复都是全局提示，不依附任何标签页。
         self.data_safety_windows(&ctx);
         self.output_risk_window(&ctx);

@@ -7,7 +7,6 @@ use crate::app::file_dialog::FileDialogSpec;
 use crate::app::manuscript_ui::{
     ManuscriptAction, PdfExportDialog, ZipPasswordPurpose, archive_form, batch_delete_dialog,
     import_preview_form, large_dialog_size, pending_merge_form, row_delete_confirm,
-    zip_password_form,
 };
 use crate::app::{
     FORM_CONTROL_HEIGHT, GongwenApp, accent, centered_cell_text, centered_header,
@@ -454,30 +453,6 @@ impl GongwenApp {
                 }
             } else if dialog.dismissed {
                 self.manuscript_pdf_export = None;
-            }
-        }
-
-        if let Some(password) = self.manuscript_zip_password.as_mut() {
-            let importing = password.purpose.is_import();
-            // 有输入的表单：点遮罩不关，免得误点丢掉已经敲好的密码；Esc 与「取消」照常关。
-            let dialog = modal::dialog(
-                ui.ctx(),
-                egui::Id::unique("manuscript_zip_password"),
-                if matches!(password.purpose, super::ZipPasswordPurpose::BackupImport(_)) {
-                    "输入备份密码"
-                } else if importing {
-                    "输入稿件包密码"
-                } else {
-                    "设置加密密码"
-                },
-                420.0,
-                Dismiss::EscOnly,
-                |ui| zip_password_form(ui, password, importing),
-            );
-            if dialog.inner {
-                self.submit_zip_password();
-            } else if dialog.dismissed {
-                self.manuscript_zip_password = None;
             }
         }
 

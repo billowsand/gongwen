@@ -641,6 +641,8 @@ fn crash_report_dialog(ctx: &egui::Context, pending: &mut Option<PathBuf>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::NavPage;
+    use crate::app::manuscript_ui::ZipPasswordPurpose;
     use crate::test_support::harness_ui;
     use egui_kittest::kittest::Queryable;
     use std::cell::RefCell;
@@ -745,6 +747,25 @@ mod tests {
                 app.update_check,
                 crate::update_check::UpdateCheckState::Failed(_)
             ));
+        });
+    }
+
+    #[test]
+    fn backup_password_dialog_renders_without_the_manuscript_page() {
+        with_app(|app, _| {
+            // 用户停在设置页点「导出备份…」/「恢复备份…」：密码框原先画在稿件库页里，
+            // 要切到稿件库才看得见。现在它必须是全局浮窗，这里只画全局那一层来验证。
+            app.open_page(NavPage::Settings);
+            app.open_zip_password_dialog(ZipPasswordPurpose::BackupImport(PathBuf::from(
+                "公文助手备份-20260101-000000.7z",
+            )));
+            let mut harness = harness_ui(|ui| app.zip_password_window(ui.ctx()));
+            harness.run();
+            harness.get_by_label("输入备份密码");
+            harness.get_by_label("取消").click();
+            harness.run();
+            drop(harness);
+            assert!(app.manuscript_zip_password.is_none(), "取消后应关闭密码框");
         });
     }
 
