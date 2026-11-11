@@ -3,11 +3,9 @@
 //! 由 src/theme.rs 拆分而来：本文件是模块 `theme::icons`，与其它子模块共享
 //! `theme` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::models::ThemeName;
 use crate::theme::{current, mdex, omarchy, smartisan};
 use eframe::egui;
 use eframe::egui::{Color32, CornerRadius};
-use std::sync::Arc;
 
 /// 界面中反复出现的紧凑操作图标。资源来自 Lucide 1.28.0（ISC）与
 /// Tabler Icons 3.46.0（MIT，只取 Lucide 没有的三个文件类型图标），
@@ -386,27 +384,10 @@ pub(crate) fn brand_image(size: f32, tint: Color32) -> egui::Image<'static> {
     }
 }
 
-pub(crate) fn app_icon_png(name: ThemeName) -> &'static [u8] {
-    match name {
-        ThemeName::MdexDark => {
-            include_bytes!("../../assets/app-icon/themes/mdex-dark/app-icon-256.png")
-        }
-        ThemeName::Mdex => include_bytes!("../../assets/app-icon/themes/mdex/app-icon-256.png"),
-        // Wayland 不让客户端设窗口图标，Omarchy 上用不上按主题换的图标。
-        ThemeName::Claude | ThemeName::Smartisan | ThemeName::Omarchy => {
-            include_bytes!("../../assets/app-icon/themes/claude/app-icon-256.png")
-        }
-        ThemeName::Nord => include_bytes!("../../assets/app-icon/themes/nord/app-icon-256.png"),
-        ThemeName::GruvboxDark => {
-            include_bytes!("../../assets/app-icon/themes/gruvbox-dark/app-icon-256.png")
-        }
-    }
-}
+const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/app-icon/app-icon-256.png");
 
-/// 启动时按已保存主题选择窗口图标。
-pub(crate) fn app_icon(name: ThemeName) -> egui::IconData {
-    eframe::icon_data::from_png_bytes(app_icon_png(name))
-        .expect("embedded themed app icon must be a valid PNG")
+pub(crate) fn app_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(APP_ICON_PNG).expect("embedded app icon must be a valid PNG")
 }
 
 /// 平台的主快捷键文案：macOS 用 Command，其他平台用 Ctrl。
@@ -418,18 +399,9 @@ pub(crate) fn primary_shortcut(key: &str) -> String {
     }
 }
 
-/// 切换主题时同步更新原生图标。
-///
-/// Windows 与 X11 由 winit 处理；macOS 没有窗口图标，额外通过 AppKit 更新 Dock。
-/// Wayland 不允许客户端设置窗口图标，因此仍使用发行包安装的桌面图标。
-pub(crate) fn apply_app_icon(ctx: &egui::Context, name: ThemeName) {
-    ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(app_icon(name)))));
-    #[cfg(target_os = "macos")]
-    apply_macos_dock_icon(name);
-}
-
+/// 为开发运行的裸二进制设置 Dock 图标。发布包也通过 ICNS 提供系统图标。
 #[cfg(target_os = "macos")]
-pub(crate) fn apply_macos_dock_icon(name: ThemeName) {
+pub(crate) fn apply_macos_dock_icon() {
     use objc2::ClassType as _;
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::{MainThreadMarker, NSData};
@@ -438,7 +410,7 @@ pub(crate) fn apply_macos_dock_icon(name: ThemeName) {
     let Some(main_thread) = MainThreadMarker::new() else {
         return;
     };
-    let data = NSData::with_bytes(app_icon_png(name));
+    let data = NSData::with_bytes(APP_ICON_PNG);
     let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
         return;
     };

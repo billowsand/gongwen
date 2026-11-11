@@ -146,7 +146,7 @@ fn main() -> eframe::Result {
             Err(_) => None,
         }
     };
-    let app_icon = theme::app_icon(storage::peek_theme());
+    let app_icon = theme::app_icon();
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
         // 760 宽能在常见 1920 屏幕的二等分平铺与高 DPI 逻辑尺寸下正常容纳；
@@ -187,6 +187,8 @@ fn main() -> eframe::Result {
         version::APP_TITLE,
         options,
         Box::new(move |cc| {
+            #[cfg(target_os = "macos")]
+            theme::apply_macos_dock_icon();
             // 这时窗口还隐藏着；命令随首帧输出，在首帧画完、窗口显示之后才执行。
             let state = deferred_window_state.get();
             let locked = matches!(vault::Vault::probe(), vault::Probe::Locked);

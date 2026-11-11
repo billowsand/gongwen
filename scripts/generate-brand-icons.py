@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import argparse
+
 from pathlib import Path
 from typing import Iterable
 
@@ -11,6 +13,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "assets" / "app-icon"
+APP_SOURCE = OUT / "app-icon-source.png"
 DOC_OUT = ROOT / "assets" / "doc-icon"
 SIZES = (16, 24, 32, 48, 64, 128, 256, 512, 1024)
 DOC_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
@@ -277,29 +280,51 @@ def write_document_icons(resampling: Image.Resampling) -> None:
     )
 
 
+def write_ico(path: Path, icons: dict[int, Image.Image]) -> None:
+    sizes = [size for size in icons if size <= 256]
+    icons[256].save(
+        path,
+        format="ICO",
+        sizes=[(size, size) for size in sizes],
+        append_images=[icons[size] for size in sizes if size != 256],
+    )
+
+
+def write_app_icons() -> None:
+    with Image.open(APP_SOURCE) as source:
+        base = source.convert("RGBA")
+    icons = {
+        size: base.resize((size, size), Image.Resampling.LANCZOS)
+        for size in SIZES
+    }
+    for size, icon in icons.items():
+        icon.save(OUT / f"app-icon-{size}.png", optimize=True)
+    icons[512].save(OUT / "app-icon.png", optimize=True)
+    write_ico(OUT / "app-icon.ico", icons)
+    icons[1024].save(
+        OUT / "app-icon.icns",
+        append_images=[icon for size, icon in icons.items() if size < 1024],
+    )
+
+
 def main() -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--app-only", action="store_true", help="仅重建系统应用图标")
+    args = parser.parse_args()
+
+    write_app_icons()
+    if args.app_only:
+        return
+
     resampling = Image.Resampling.LANCZOS
-    rendered: dict[str, dict[int, Image.Image]] = {}
     for name, theme in THEMES.items():
         base = render_icon(theme)
         theme_dir = OUT / "themes" / name
         theme_dir.mkdir(parents=True, exist_ok=True)
-        rendered[name] = {}
         for size in SIZES:
             icon = base.resize((size, size), resampling)
-            rendered[name][size] = icon
             icon.save(theme_dir / f"app-icon-{size}.png", optimize=True)
 
-    # Claude is the stable installer/launcher identity; the runtime window icon follows the theme.
-    for size in SIZES:
-        rendered["claude"][size].save(OUT / f"app-icon-{size}.png", optimize=True)
-    rendered["claude"][512].save(OUT / "app-icon.png", optimize=True)
-    rendered["claude"][256].save(
-        OUT / "app-icon.ico",
-        format="ICO",
-        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
-    )
     write_document_icons(resampling)
 
 

@@ -534,7 +534,6 @@ impl GongwenApp {
         self.omarchy_generation = theme::omarchy::generation();
         theme::set_current(name);
         theme::reconfigure_style(ctx);
-        theme::apply_app_icon(ctx, name);
         self.status = match (&omarchy_error, theme::omarchy::theme_name()) {
             (Some(error), _) => format!("Omarchy 主题重读失败，沿用上一次读到的配色：{error}"),
             (None, Some(omarchy)) if name == ThemeName::Omarchy => {
@@ -598,7 +597,6 @@ impl GongwenApp {
         self.applied_theme = name;
         theme::set_current(name);
         theme::reconfigure_style(ctx);
-        theme::apply_app_icon(ctx, name);
     }
 
     /// 后台轮询读到 Omarchy 换了主题（版本号变了），且界面正跟随 Omarchy 时重套

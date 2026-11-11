@@ -154,24 +154,10 @@ else
     warn "未找到基础词表；安装后需在「输入法词表」页导入，内置输入法才能接管"
 fi
 
-# 生成 .icns（sips + iconutil 为 macOS 自带）；不可用则跳过图标。
-ICNS_FILE=""
-if command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
-    ICON_SRC="$PROJECT_ROOT/assets/app-icon/app-icon.png"
-    if [ -f "$ICON_SRC" ]; then
-        ICONSET="$WORK_DIR/app-icon.iconset"
-        mkdir -p "$ICONSET"
-        # 512 源图缩放出 iconset 各尺寸；512@2x 用放大到 1024 的占位。
-        for spec in \
-            "16 icon_16x16" "32 icon_32x32" "32 icon_32x32@2x" \
-            "128 icon_128x128" "256 icon_128x128@2x" "256 icon_256x256" \
-            "512 icon_256x256@2x" "512 icon_512x512" "1024 icon_512x512@2x"; do
-            set -- $spec
-            sips -z "$1" "$1" "$ICON_SRC" --out "$ICONSET/$2.png" >/dev/null
-        done
-        ICNS_FILE="$WORK_DIR/app-icon.icns"
-        iconutil -c icns "$ICONSET" -o "$ICNS_FILE"
-    fi
+# 直接使用与其他平台一起生成的多尺寸图标。
+ICNS_FILE="$PROJECT_ROOT/assets/app-icon/app-icon.icns"
+if [ ! -f "$ICNS_FILE" ]; then
+    die "应用图标不存在：$ICNS_FILE（由 scripts/generate-brand-icons.py 生成）"
 fi
 
 [ -n "$OUTPUT_DIR" ] || OUTPUT_DIR="$PROJECT_ROOT/dist/macos"
@@ -223,9 +209,7 @@ fi
 for doc in README.md THIRD_PARTY_NOTICES.md LICENSE config.example.json; do
     [ -f "$STAGE/$doc" ] && cp "$STAGE/$doc" "$RESOURCES_DIR/"
 done
-if [ -n "$ICNS_FILE" ]; then
-    cp "$ICNS_FILE" "$RESOURCES_DIR/app-icon.icns"
-fi
+cp "$ICNS_FILE" "$RESOURCES_DIR/app-icon.icns"
 
 # Info.plist 刻意不含 CFBundleDocumentTypes / UTExportedTypeDeclarations：
 # .gwx 双击走 macOS open-file Apple Event，当前 winit/eframe 外壳还没接，
@@ -253,14 +237,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
 	<string>$VERSION</string>
 	<key>CFBundleVersion</key>
 	<string>$VERSION</string>
-EOF
-if [ -n "$ICNS_FILE" ]; then
-    cat >> "$APP_DIR/Contents/Info.plist" <<'EOF'
 	<key>CFBundleIconFile</key>
 	<string>app-icon</string>
-EOF
-fi
-cat >> "$APP_DIR/Contents/Info.plist" <<'EOF'
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>

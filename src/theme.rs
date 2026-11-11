@@ -41,9 +41,10 @@ pub(crate) use fonts::{FONT_RESEARCH_BIAOSONG, FONT_RESEARCH_KAI, FONT_RESEARCH_
 // 只有 macOS 的冬青黑体测试用它；其它平台导出就成了未使用的 import。
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use fonts::line_gap_offset_factor;
+#[cfg(target_os = "macos")]
+pub(crate) use icons::apply_macos_dock_icon;
 pub(crate) use icons::{
-    Icon, app_icon, apply_app_icon, brand_image, chrome_radius, configure_icons, primary_shortcut,
-    square_chrome,
+    Icon, app_icon, brand_image, chrome_radius, configure_icons, primary_shortcut, square_chrome,
 };
 pub(crate) use palette::{
     MdPalette, PaperFamily, Theme, accent, accent_active, accent_hover, accent_soft, border,
@@ -701,12 +702,10 @@ mod tests {
     }
 
     #[test]
-    fn every_theme_has_a_valid_runtime_app_icon() {
-        for name in ThemeName::ALL {
-            let icon = app_icon(name);
-            assert_eq!((icon.width, icon.height), (256, 256), "{name:?}");
-            assert_eq!(icon.rgba.len(), 256 * 256 * 4, "{name:?}");
-        }
+    fn runtime_app_icon_is_valid() {
+        let icon = app_icon();
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
     }
 
     /// sRGB 相对亮度（WCAG 2.1 定义），用于对比度计算。

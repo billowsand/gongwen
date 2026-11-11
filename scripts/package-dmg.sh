@@ -106,7 +106,7 @@ fi
 
 case "$(uname -s)" in
     Darwin) ;;
-    *) die "package-dmg.sh 只能在 macOS 上运行（需要 hdiutil / codesign / iconutil）" ;;
+    *) die "package-dmg.sh 只能在 macOS 上运行（需要 hdiutil / codesign）" ;;
 esac
 
 # Pi 运行时的平台名与 packaging/pi-runtime.json 的 platforms 键一致；macOS 用
@@ -146,8 +146,9 @@ case "$ARCH" in
     *) SUFFIX="darwin-$ARCH" ;;
 esac
 
-if [ ! -f "$PROJECT_ROOT/assets/app-icon/app-icon-1024.png" ]; then
-    die "图标源图不存在：$PROJECT_ROOT/assets/app-icon/app-icon-1024.png"
+ICNS_FILE="$PROJECT_ROOT/assets/app-icon/app-icon.icns"
+if [ ! -f "$ICNS_FILE" ]; then
+    die "应用图标不存在：$ICNS_FILE（由 scripts/generate-brand-icons.py 生成）"
 fi
 
 BUILD_ROOT="$(mktemp -d)"
@@ -317,32 +318,8 @@ if [ -d "$STAGE/skills" ]; then
     cp -a "$STAGE/skills" "$RESOURCES_DIR/skills"
 fi
 
-# 由预渲染 PNG 生成 .icns。iconutil 需要完整固定尺寸 iconset，sips 保证像素精确。
-ICONSET="$BUILD_ROOT/AppIcon.iconset"
-mkdir -p "$ICONSET"
-render() {
-    local size=$1
-    local name=$2
-    sips -z "$size" "$size" \
-        "$PROJECT_ROOT/assets/app-icon/app-icon-1024.png" \
-        --out "$ICONSET/$name" >/dev/null
-}
-render 16 icon_16x16.png
-render 32 icon_16x16@2x.png
-render 32 icon_32x32.png
-render 64 icon_32x32@2x.png
-render 128 icon_128x128.png
-render 256 icon_128x128@2x.png
-render 256 icon_256x256.png
-render 512 icon_256x256@2x.png
-render 512 icon_512x512.png
-render 1024 icon_512x512@2x.png
-if ! iconutil -c icns "$ICONSET" -o "$RESOURCES_DIR/AppIcon.icns"; then
-    # iconutil 在部分新版 macOS 上会拒绝 sips 生成的合法 PNG iconset；
-    # 图标不影响应用运行，继续打包并省略图标声明。
-    rm -f "$RESOURCES_DIR/AppIcon.icns"
-    echo "警告：系统 iconutil 无法转换图标，DMG 将使用默认应用图标" >&2
-fi
+# 直接使用与其他平台一起生成的多尺寸图标。
+cp "$ICNS_FILE" "$RESOURCES_DIR/AppIcon.icns"
 
 # Info.plist 刻意不含 CFBundleDocumentTypes / UTExportedTypeDeclarations：
 # .gwx 双击走 macOS open-file Apple Event，当前 winit/eframe 外壳还没接，
@@ -370,6 +347,8 @@ cat >"$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist" <<EOF
 	<string>$VERSION</string>
 	<key>CFBundleVersion</key>
 	<string>$VERSION</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>12.0</string>
 	<key>NSHighResolutionCapable</key>
@@ -379,10 +358,6 @@ cat >"$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
-if [ -f "$RESOURCES_DIR/AppIcon.icns" ]; then
-    /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' \
-        "$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist"
-fi
 
 SIGN_IDENTITY="${GONGWEN_MACOS_SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${GONGWEN_MACOS_NOTARY_PROFILE:-}"
