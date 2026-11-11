@@ -22,7 +22,7 @@ flowchart TD
 - **LM Studio**：先启动 Local Server，地址一般填 `http://127.0.0.1:1234/v1`。
 - **Ollama**：先执行 `ollama serve`，地址填 `http://127.0.0.1:11434/v1`。
 
-对话、Embedding、Rerank 三个配置互相独立（后两个在「AI 管理 → 知识库检索」），不用的可以留空。Ollama 的接法有专门说明，见第{@chap:knowledge}章「知识库与问答」。
+对话、Embedding、Rerank 三个配置互相独立（后两个在「AI 管理 → 知识库检索」），不用的可以留空。Ollama 的接法有专门说明，见第{@chap:knowledge}章「资料库与问答」。
 
 #### 2. 测试连接并选模型
 

@@ -7,7 +7,7 @@
 | 内容 | 路径 | 说明 |
 |---|---|---|
 | 配置 | `config/config.json` | 词库、提示词、设置、模板默认要素 |
-| 稿件库 + 知识库 + 公文词表 | `config/manuscripts.db` | **三者共用一个 SQLite 文件** |
+| 稿件库 + 资料库 + 知识库（维基）+ 公文词表 | `config/manuscripts.db` | **共用一个 SQLite 文件** |
 | 记住的稿件包密码 | `config/.zip-password` | 仅启用应用锁后允许保存，整份加密 |
 | 诱饵系统的稿件库 | `config/alt-manuscripts.db` | 设了第二密码才有；与主库同构但内容独立 |
 | 插入的图片与 PDF 附件 | `config/manuscripts.db` | 资源 BLOB、原文件名和媒体类型都在库内 |
@@ -27,7 +27,7 @@
 ```mermaid
 flowchart LR
   R[配置目录] --> C[config.json：设置、词库、提示词]
-  R --> M[manuscripts.db：稿件、知识库、公文词表、插图与 PDF 附件]
+  R --> M[manuscripts.db：稿件、资料库、知识库、公文词表、插图与 PDF 附件]
   R --> E[ime：输入法词表]
   R --> A[apis：数据接口]
 ```
@@ -144,7 +144,7 @@ flowchart LR
 只备份**配置目录**：
 
 - `config.json`（词库、提示词、模板默认要素）；
-- `manuscripts.db`（稿件、版本、知识库、公文词表，以及插图、PDF 附件与图表缓存）；
+- `manuscripts.db`（稿件、版本、资料库、知识库、公文词表，以及插图、PDF 附件与图表缓存）；
 - `apis/`（数据接口配置）；
 - `api-envs.json`（各服务的服务器地址）；
 - `api-secrets.json`（密钥名与值）；
@@ -213,7 +213,7 @@ PDF 由程序内置的 **Typst** 引擎直接排版，公文与研究报告都�
 
 > [!警告]
 >
-> 删配置目录 = 删全部稿件、词库、知识库。删之前确认备份在手。
+> 删配置目录 = 删全部稿件、词库、资料库与知识库。删之前确认备份在手。
 
 ### 隐私
 

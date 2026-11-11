@@ -2,7 +2,7 @@
 
 ## 获取发布版
 
-当前版本（v0.10.6）的 GitHub Release 只提供 Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）。macOS arm64 磁盘映像、Linux ARM64 Debian 包与 Linux x86_64 的 Arch / Omarchy 包的打包作业保留在发布工作流里但当前停用，需要时按发布工作流里的说明启用或按下文从源码构建。安装包内含应用与字体（PDF 由程序内置的 Typst 引擎排版），安装后即可离线导出 Markdown、DOCX 与 PDF。
+当前版本（v0.10.7）的 GitHub Release 只提供 Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）。macOS arm64 磁盘映像、Linux ARM64 Debian 包与 Linux x86_64 的 Arch / Omarchy 包的打包作业保留在发布工作流里但当前停用，需要时按发布工作流里的说明启用或按下文从源码构建。安装包内含应用与字体（PDF 由程序内置的 Typst 引擎排版），安装后即可离线导出 Markdown、DOCX 与 PDF。
 
 安装后稿件包（`.gwx`）已与本程序关联：双击直接打开导入流程，Linux 装了 deb 或 tar
 包也会注册对应的 MIME 类型与文档图标。程序已开着时，双击的稿件包交给已开的窗口
