@@ -298,7 +298,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-GitHub Actions：CI 在 Windows x64、macOS arm64 与 Linux ARM64（GLIBC 2.28）三个平台执行格式、静态检查和测试；推送 `v*` 标签后自动构建 Windows x64 安装程序并连同 SHA-256 校验和创建 Release。macOS arm64、Linux ARM64 deb 与 Arch / Omarchy pacman 包的打包作业保留在发布工作流里（当前停用），需要时再启用。
+GitHub Actions：CI 只在 Windows x64 上执行格式、静态检查与测试——除整套用例，还包括随包 Pi 运行时的组装、Pi host 测试、离线验收与运行时 manifest 端到端校验；另有每周一次的依赖漏洞扫描。推送 `v*` 标签后自动构建 Windows x64 安装程序，连同 SHA-256 校验和创建 Release。macOS arm64、Linux ARM64 deb 与 Arch / Omarchy pacman 包的作业以及它们的 CI 门禁都保留在仓库里（当前停用），需要时再启用。
 
 ## 许可
 

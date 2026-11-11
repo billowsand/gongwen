@@ -478,11 +478,14 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
 - 版本号只维护在两处：`Cargo.toml` 的根包 `version` 和 `Cargo.lock` 里
   `name = "gongwen-assistant"` 的 `version`。
 - 本机**没有 `pwsh`**，不要调用 `scripts/bump-version.ps1`，手动编辑上述两处。
-- `ci.yml` 在 push `main` 时触发：Windows x64、Linux ARM64（GLIBC 2.28）与 macOS arm64
-  （`macos-15`）三平台跑 fmt / clippy / test；Debian buster 作业会组装 `linux-arm64` 运行时
-  并把 `runtime/pi/bin` 加进 PATH，Pi 的进程 / 锁 / 交付 Rust 测试真正执行，Linux 与 Windows
-  作业还跑 `cargo test --locked --release shipped_pi_runtime_manifest -- --ignored`；
-  另在干净的 Ubuntu 20.04 ARM64 里装 deb 并用 Xvfb 真正启动一次，见 `scripts/smoke-launch-linux.sh`。
+- `ci.yml` 在 push `main` 时触发：**当前只跑 Windows x64**（fmt / clippy / test），并组装
+  `win-x64` 随包运行时，Pi host 测试、离线验收与
+  `cargo test --locked shipped_pi_runtime_manifest -- --ignored` 用真实运行时执行；
+  另有一个 RustSec 依赖漏洞扫描作业（每周一自动跑一次）。macOS arm64、Linux ARM64
+  （GLIBC 2.28）与 Ubuntu 20.04 ARM64 启动冒烟（`scripts/smoke-launch-linux.sh`）三个作业
+  保留在 `ci.yml` 里但 `if: false` 停用，恢复时去掉那一行即可。代价是 Linux 专有代码
+  （`linux-portal-dialogs` 变体等）不再随 CI 编译，改到那部分要走本地
+  `cargo build --release --locked --no-default-features --features linux-portal-dialogs`。
   `release.yml` 在 push `v*` tag 时触发，产出 Windows x64 setup.exe、Linux ARM64 deb
   （Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）、
   Linux x86_64 的 Arch / Omarchy pacman 包（`archlinux:base` 容器构建，`makepkg` 打成

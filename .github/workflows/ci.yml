@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+# 当前只跑 Windows x64 门禁（与 release.yml 只发 Windows 一致），另保留依赖漏洞扫描。
+# macOS、Linux（GLIBC 2.28）与 Ubuntu 20.04 启动冒烟四个作业保留在文件里但停用：
+# 需要恢复时去掉对应作业的 `if: false`，并确认它们依赖的 `needs` 也一起恢复。
+
 # 与 release.yml 保持一致：测试作业也要取同一份随包字体，预览 / 稿纸几何断言
 # 依赖真实中文字体度量，缺字体时各平台会落到不同系统字体上而误报。
 env:
@@ -91,6 +95,8 @@ jobs:
 
   macos-arm64:
     name: fmt / clippy / test (macOS arm64)
+    # 停用：当前只做 Windows x64。恢复时删掉这一行。
+    if: false
     runs-on: macos-15
     timeout-minutes: 60
     steps:
@@ -173,6 +179,8 @@ jobs:
 
   linux-arm64-glibc228:
     name: fmt / clippy / test (Linux ARM64 / GLIBC 2.28)
+    # 停用：当前只做 Windows x64。恢复时删掉这一行。
+    if: false
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     container:
@@ -272,6 +280,8 @@ jobs:
   # 在干净的 Ubuntu 20.04 里装包并真正启动。
   linux-glibc228-release:
     name: Build release binary (Linux ARM64 / GLIBC 2.28)
+    # 停用：当前只做 Windows x64。恢复时删掉这一行。
+    if: false
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     container:
@@ -334,6 +344,8 @@ jobs:
   ubuntu-2004-launch:
     name: Launch smoke test (Ubuntu 20.04 / ARM64)
     needs: linux-glibc228-release
+    # 停用：当前只做 Windows x64。恢复时删掉这一行（并先恢复它 needs 的作业）。
+    if: false
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     container:

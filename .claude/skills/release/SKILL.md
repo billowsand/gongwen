@@ -13,7 +13,7 @@ description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与使�
 
 - 远程：`git@github.com:billowsand/gongwen.git`，发布分支 `main`。
 - 版本号只维护在 `Cargo.toml`（根包 `version`）+ `Cargo.lock`（根包 `gongwen-assistant` 的 `version`）。**注意 `Cargo.lock` 里另有若干同名版本的依赖**（`block2`、`type-map`、`windows-strings`、`zune-core` 等），只改 `name = "gongwen-assistant"` 那一条。
-- 工作流：`ci.yml` 在 push main 时触发（fmt / clippy / test：Windows x64 + macOS arm64 + Linux ARM64 三平台）；`release.yml` 在 push `v*` tag 时触发，共 8 个 job（build-windows、build-macos-arm64、build-linux-arm64、package-linux-arm64、verify-deb、build-linux-x86_64-arch、verify-arch-pkg、release）。
+- 工作流：`ci.yml` 在 push main 时触发，**当前只跑 Windows x64**（fmt / clippy / test + 随包 Pi 运行时、host 测试、离线验收、manifest 端到端）加一个 RustSec 依赖漏洞扫描；macOS / Linux / Ubuntu 20.04 启动冒烟三个作业 `if: false` 停用。`release.yml` 在 push `v*` tag 时触发，共 8 个 job，但当前只有 build-windows 与 release 会执行（其余 `if: false` 跳过）。
 - **版本更新说明由工作流取仓库文件**：`release.yml` 的 `release` job 读 `docs/release-notes/${GITHUB_REF_NAME}.md`，有则 `gh release create --title "公文助手 vX.Y.Z" --notes-file <该文件>`；**缺文件才回退 `--generate-notes` 并打一条 `::warning::`**。所以说明必须在打 tag 前提交进仓库，不是发完再补。
 - **用户文档有三份，发版时都可能过期**（发版前必查，见步骤 3）：
   - `README.md`（根目录）：面向读者的宣发版，含成堆**会随版本漂移的硬数字**（文种 7 种、导入 24 种格式、校对词表 155 条、文档级规则 21 条、约 21.2 万行 Rust、1852 项自动化测试——括号里是 v0.9.1 的值，**每版都要重新数**，见步骤 3）。打包脚本会把它复制进发布包（`scripts/package-portable.ps1`、`scripts/package-dmg.sh`），所以它是**随包发行**的文档，不是仓库自留物。
@@ -33,7 +33,7 @@ description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与使�
   **它不替代任何硬性要求**：版本更新说明仍要手写，README / 使用帮助仍要人工过目。
   没配 TypeSafe 凭据就跳过，流程完全不变。
 - 历史惯例：tag 为 **annotated tag**（消息为中文概述）；release 标题为「公文助手 vX.Y.Z」；版本号按 **patch** 递增（`v0.5.x` 系列）；发布前有一个 `chore: release vX.Y.Z` 提交（可同时带上说明文件）。
-- Release workflow 全程约 40–60 分钟（Windows + macOS arm64 + Linux ARM64 + Arch x86_64 构建与打包），`gh run watch` 一轮就能等完。
+- 当前 Release 只构建 Windows x64，全程约 30–45 分钟（Rust 编译 + 组装 Pi 运行时 + 离线验收 + PDF 冒烟 + Inno 打包）；`gh run watch` 一轮就能等完。
 
 ## 工作流
 
@@ -209,7 +209,7 @@ gh run watch <run-id> --interval 60 --exit-status   # 可后台运行，两路�
 gh run view <run-id> --json status,conclusion,jobs --jq '"\(.status)/\(.conclusion)", (.jobs[] | "  \(.name): \(.conclusion)")'
 ```
 
-- 期望终态：CI 全部 job success；Release 的 8 个 job（Build Windows x64 / Build macOS arm64 / Build Linux ARM64 / Package Linux ARM64 / Verify deb install / Build Linux AMD64 / Arch / Verify pacman install / Publish GitHub release）全 success（macOS 作业被取消时 `release` 仍会出包，只是缺 dmg）。
+- 期望终态：CI 的 Windows x64 与依赖漏洞扫描两个 job success；Release 里 Build Windows x64 与 Publish GitHub release success，其余 macOS / Linux / Arch 作业为 skipped。
 - `gh run view --json jobs` 里 `Build …` 的 job 名带平台后缀（如 `Build Linux ARM64 / GLIBC 2.28`），按包含关键字筛选：
   `gh run view <id> --json jobs --jq '.jobs[] | select(.name | test("ARM64")) | .databaseId'`。
 - **CI 失败时**：先 `gh run cancel` 取消所有本次相关 run（CI + Release，避免浪费与旧 release 干扰）→ 本地修复（多数是 fmt 或环境假设类断言）→ 提交 → 移动 tag（步骤 6 的做法）→ 重新 `git push origin main` + `git push origin vX.Y.Z`。
@@ -286,7 +286,7 @@ cd - && rm -rf /tmp/kw
 
 ### 质量检查
 
-- 三平台 CI 门禁（格式、clippy、<N> 余项自动化测试）全部通过。
+- Windows x64 CI 门禁（格式、clippy、<N> 余项自动化测试）全部通过。
 - <本版新增的关键测试与它为什么这么断>
 
 ### 下载
@@ -308,7 +308,7 @@ cd - && rm -rf /tmp/kw
 | 发布后又加了提交 | tag 移到新提交：`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z && git tag -a vX.Y.Z -m "..." <new-commit> && git push origin vX.Y.Z` |
 | release 正文是 generate-notes 占位 | 缺 `docs/release-notes/vX.Y.Z.md`。先记下文件内容，`gh release edit vX.Y.Z --title "公文助手 vX.Y.Z" --notes-file …` 补正；同时把文件补提交，下次同 tag 重跑就不会再回退 |
 | release 标题/正文不对 | `gh release edit vX.Y.Z --title "..." --notes-file ...`（幂等，可重复执行） |
-| 发版后才发现 README / 使用帮助没跟上 | 别指望下版补：优先按步骤 6 移动 tag 重跑（代价是三平台构建再来一轮）；若只是文字补充、不值得重跑，就单独提 `docs:` 提交并用 `gh release edit vX.Y.Z --notes-file …` 把文档改动补进正文，**同时把步骤 3 的检查固化到下一次发版** |
+| 发版后才发现 README / 使用帮助没跟上 | 别指望下版补：优先按步骤 6 移动 tag 重跑（代价是 Release 构建再来一轮）；若只是文字补充、不值得重跑，就单独提 `docs:` 提交并用 `gh release edit vX.Y.Z --notes-file …` 把文档改动补进正文，**同时把步骤 3 的检查固化到下一次发版** |
 | 资产数不是 8（macOS 缺省时不是 6） | `gh release view vX.Y.Z --json assets --jq '.assets[].name'` 对比上面清单；少平台包看对应 build/package job 的日志 |
 | `judge_batch` 的 `drain()` 取不到东西 | `drain` 是协程，必须 `await`；不 await 会静默不消费、循环立刻空转退出 |
 | 报 `unknown judge_batch "<id>"` | `close()` 之后作业引用失效，状态 / 结果 / 失败项必须在 close 前读完；真丢了结果用 `judge_batch.attach(<id>)` 拿回 |
