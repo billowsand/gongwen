@@ -1,5 +1,5 @@
 //! 公文标题的排布：超出一行不多于 2 个全角字宽时**横向压缩字形**保持单行（字高不变），
-//! 超出更多时用 jieba 分词在词边界均衡换行，词不被拆到两行。
+//! 超出更多时用 jieba 分词在词边界换行，公文标题排成两行时优先上宽下窄。
 //!
 //! 断行点在词边界之外还要守几条排版规矩（见 [`title_words`]）：标点不落行首、
 //! 开括号不落行尾、短括注整体不拆、“的”不起行、“第”与数字、数字与量词不分家。
@@ -81,6 +81,10 @@ pub fn compressed_scale_percent_for(title: &str, width_pt: f64, size_pt: usize) 
 
 /// 决定标题排布：不超一行单行；超出一行不超过 2 个全角字宽横向压缩单行；否则 jieba 换行。
 pub fn title_plan(title: &str, chars_per_line: usize) -> TitlePlan {
+    plan(title, chars_per_line, true)
+}
+
+fn plan(title: &str, chars_per_line: usize, prefer_wider_first_line: bool) -> TitlePlan {
     let width = display_units(title);
     let line_units = chars_per_line * 2;
     if width <= line_units {
@@ -89,7 +93,11 @@ pub fn title_plan(title: &str, chars_per_line: usize) -> TitlePlan {
     if width <= line_units + 4 {
         return TitlePlan::Compressed;
     }
-    TitlePlan::Wrapped(wrap_units(&title_units(title), chars_per_line))
+    TitlePlan::Wrapped(wrap_units(
+        &title_units(title),
+        chars_per_line,
+        prefer_wider_first_line,
+    ))
 }
 
 /// 表格单元格左右内边距合计（twip）：Word 默认 108 ×2，tabularray 默认 6pt ×2，
@@ -107,7 +115,7 @@ pub fn cell_plan(text: &str, width_twips: usize, em_twips: usize) -> (TitlePlan,
     if chars < 2 {
         return (TitlePlan::SingleLine, 100);
     }
-    let plan = title_plan(text, chars);
+    let plan = plan(text, chars, false);
     let scale = compressed_scale_percent_for(text, usable as f64 / 20.0, em_twips / 20);
     (plan, scale)
 }
@@ -159,7 +167,7 @@ fn plain_cover_title_lines(title: &str) -> Vec<String> {
     if display_units(title) <= per_line * 2 {
         return vec![title.to_string()];
     }
-    wrap_units(&title_units(title), per_line)
+    wrap_units(&title_units(title), per_line, false)
 }
 
 /// 行首不能出现的字符：句读、点号与各种闭括号、闭引号。
@@ -325,9 +333,9 @@ fn break_cost(left: &Unit, right: &Unit) -> f32 {
 
 /// 在单元边界、每行不超过 `chars_per_line` 个全角字宽的约束下分行，全局取代价最小的
 /// 断法。代价 = 各断点的 [`break_cost`] + 各行字数偏离平均的总量 + 多用一行的罚分。
-/// “头不轻脚不重”（首行不短于末行）是硬要求：只要有断法满足，就只在这些断法里挑。
+/// 同一行数优先首行不短于末行。公文标题排成两行时，有上宽下窄的合法断法就不用等宽。
 /// 行数只在“最少行数”与“多一行”之间比较——多一行能换来词意完整时才值得。
-fn wrap_units(units: &[Unit], chars_per_line: usize) -> Vec<String> {
+fn wrap_units(units: &[Unit], chars_per_line: usize, prefer_wider_first_line: bool) -> Vec<String> {
     let line_units = chars_per_line * 2;
     let widths: Vec<usize> = units.iter().map(|unit| display_units(&unit.text)).collect();
     let total: usize = widths.iter().sum();
@@ -342,14 +350,14 @@ fn wrap_units(units: &[Unit], chars_per_line: usize) -> Vec<String> {
     let costs: Vec<f32> = (1..units.len())
         .map(|i| break_cost(&units[i - 1], &units[i]))
         .collect();
-    // 每种行数各取一个最优：同一行数里“头不轻脚不重”的断法优先。
+    // 同一行数先按首末行宽度关系排序，再比较断点与均衡代价。
     let mut per_count: Vec<(bool, f32, Vec<usize>)> = Vec::new();
     for lines in min_lines..=min_lines + 1 {
         if lines > units.len() {
             break;
         }
         let mean = total as f32 / lines as f32;
-        let mut best: Option<(bool, f32, Vec<usize>)> = None; // (头轻脚重, 代价, 断点)
+        let mut best = None;
         let mut splits = Vec::new();
         search_splits(&widths, 0, lines, line_units, &mut splits, &mut |splits| {
             let bounds: Vec<usize> = std::iter::once(0)
@@ -361,19 +369,24 @@ fn wrap_units(units: &[Unit], chars_per_line: usize) -> Vec<String> {
                 .map(|w| widths[w[0]..w[1]].iter().sum())
                 .collect();
             let light_head = lens[0] < lens[lens.len() - 1];
+            let equal_width = prefer_wider_first_line && lines == 2 && lens[0] == lens[1];
             let ragged: f32 = lens
                 .iter()
                 .map(|&len| (len as f32 - mean).abs() / 2.0)
                 .sum();
             let breaks: f32 = splits.iter().map(|&i| costs[i - 1]).sum();
             let cost = breaks + ragged + (lines - min_lines) as f32 * 6.0;
-            if best.as_ref().is_none_or(|(best_light, best_cost, _)| {
-                (light_head, cost) < (*best_light, *best_cost)
-            }) {
-                best = Some((light_head, cost, splits.to_vec()));
+            let score = (light_head, equal_width, cost);
+            if best
+                .as_ref()
+                .is_none_or(|(best_score, _)| score < *best_score)
+            {
+                best = Some((score, splits.to_vec()));
             }
         });
-        per_count.extend(best);
+        if let Some(((light_head, _, cost), splits)) = best {
+            per_count.push((light_head, cost, splits));
+        }
     }
     // 跨行数比较时，头轻脚重只记罚分，不一票否决：多拆一行换来的往往更难看。
     let Some((_, _, splits)) = per_count.into_iter().min_by(|a, b| {
@@ -555,6 +568,39 @@ mod tests {
                 assert!(display_units(line) <= 40, "单行超上限：{line}");
             }
         }
+    }
+
+    #[test]
+    fn two_line_official_titles_prefer_a_wider_first_line() {
+        let units = [
+            Unit::new("关于", "p"),
+            Unit::new("政务服务的", "uj"),
+            Unit::new("整改", "v"),
+            Unit::new("工作情况表", "n"),
+        ];
+        // 等宽的断点在「的」之后，词性评分更好，但公文标题优先上宽下窄。
+        assert_eq!(
+            wrap_units(&units, 9, true),
+            ["关于政务服务的整改", "工作情况表"]
+        );
+        assert_eq!(
+            wrap_units(&units, 9, false),
+            ["关于政务服务的", "整改工作情况表"]
+        );
+    }
+
+    #[test]
+    fn two_line_official_titles_allow_equal_width_when_both_lines_are_full() {
+        let units = [
+            Unit::new("关于做好", "v"),
+            Unit::new("安全检查", "n"),
+            Unit::new("以及整改", "c"),
+            Unit::new("工作的函", "n"),
+        ];
+        assert_eq!(
+            wrap_units(&units, 8, true),
+            ["关于做好安全检查", "以及整改工作的函"]
+        );
     }
 
     #[test]
