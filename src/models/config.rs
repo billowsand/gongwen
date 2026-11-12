@@ -53,8 +53,8 @@ pub struct AppConfig {
     pub last_template: TemplateKind,
     pub export: ExportSelection,
     /// 传输任务类型（《传发任务单》的题名）字典。默认三项，用户可增删；
-    /// 旧配置没有这一项时按默认补齐（见 [`AppConfig::ensure_transmit_tasks`]）。
-    #[serde(default)]
+    /// 旧配置缺少这一项时补默认值，显式保存的空字典保留。
+    #[serde(default = "default_transmit_tasks")]
     pub transmit_tasks: Vec<String>,
     /// 《传发任务单》上由用户预先定好的填写内容（设置页「加密传输单」一节）。
     #[serde(default)]
@@ -169,7 +169,7 @@ impl Default for AppConfig {
                 .collect(),
             last_template: TemplateKind::OfficialLetter,
             export: ExportSelection::default(),
-            transmit_tasks: Vec::new(),
+            transmit_tasks: default_transmit_tasks(),
             transmit_defaults: TransmitDefaults::default(),
             print: PrintConfig::default(),
             #[cfg(feature = "ai-workbench")]
@@ -749,18 +749,13 @@ impl AppConfig {
             }
         }
     }
+}
 
-    /// 载入配置后补齐传输任务字典：旧配置没有这一项，用户也没自己加过，
-    /// 就按默认三项补上。用户删空了就尊重用户的选择，不再补。
-    pub(crate) fn ensure_transmit_tasks(&mut self) {
-        if self.transmit_tasks.is_empty() {
-            self.transmit_tasks = DEFAULT_TRANSMIT_TASKS
-                .iter()
-                .map(|task| (*task).to_string())
-                .collect();
-        }
-        self.transmit_tasks.retain(|task| !task.trim().is_empty());
-    }
+fn default_transmit_tasks() -> Vec<String> {
+    DEFAULT_TRANSMIT_TASKS
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// 界面缩放的可选范围：再小看不清控件，再大普通笔记本一屏放不下两栏。

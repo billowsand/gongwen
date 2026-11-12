@@ -31,6 +31,18 @@ pub(super) const DETAIL_MAX_WIDTH: f32 = 760.0;
 /// 底部操作条的高度。两栏先把这块高度让出来，「保存设置」才不会被内容顶出视区。
 /// 操作条紧接在两栏之后画，这里多留的高度落在按钮下方，把它和状态栏隔开。
 pub(super) const FOOTER_HEIGHT: f32 = 62.0;
+#[derive(Clone, Default)]
+struct TransmitTasksEditor {
+    edit: Option<TransmitTitleEdit>,
+}
+
+#[derive(Clone)]
+struct TransmitTitleEdit {
+    index: Option<usize>,
+    title: String,
+    focus: bool,
+}
+
 /// 设置页表单行的标签列宽。比起草页的窄标签宽，容得下「单轮送检句数上限」这类
 /// 完整的设置项名称，不再被截断成半截。
 const SETTING_LABEL_WIDTH: f32 = 132.0;
@@ -160,7 +172,7 @@ impl SettingsSection {
                  保证预览所见即导出所得。"
             }
             SettingsSection::Export => {
-                "这里的选择对所有稿件生效；起草页的「导出」按钮按这里勾选的格式产出。"
+                "这些格式适用于所有稿件。起草页按所选格式导出。同一稿件使用固定目录，同名文件直接替换。"
             }
             SettingsSection::Transmit => {
                 "公函导出时随《传发任务单》一同印出的内容：题名（传输任务，留空按密级自动带）、\
@@ -169,9 +181,7 @@ impl SettingsSection {
             SettingsSection::Persistence => {
                 "新建的稿件在第一次真正改动时自动入库；下次启动会恢复本次打开的标签。"
             }
-            SettingsSection::Backup => {
-                "把配置、稿件库、图片、数据接口与输入法词表一键打包成 ZIP；恢复前会自动留底当前数据。"
-            }
+            SettingsSection::Backup => "导出加密 7z 备份。恢复前会自动留底当前数据。",
             SettingsSection::Security => {
                 "默认取自《保守国家秘密法》第十五条：绝密级不超过三十年、机密级不超过二十年、\
                  秘密级不超过十年。本单位口径不同的，直接改下面三个上限。"
@@ -1432,14 +1442,19 @@ impl GongwenApp {
                                     .tint(theme::accent())
                                     .fit_to_exact_size(egui::vec2(20.0, 20.0)),
                             );
-                            ui.heading(section.label());
+                            let heading = ui.heading(section.label());
+                            if section == SettingsSection::Backup {
+                                heading.on_hover_text(section.description());
+                            }
                         });
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(section.description())
-                                .size(theme::font_sizes::SMALL)
-                                .color(theme::text_muted()),
-                        );
+                        if !matches!(section, SettingsSection::Export | SettingsSection::Backup) {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(section.description())
+                                    .size(theme::font_sizes::SMALL)
+                                    .color(theme::text_muted()),
+                            );
+                        }
                         ui.add_space(10.0);
                         ui.separator();
                         ui.add_space(8.0);
@@ -1734,71 +1749,158 @@ impl GongwenApp {
         }
     }
 
-    /// 传输任务类型字典（《传发任务单》的题名）。可增删改。
-    ///
-    /// 题名说的是「这次传的是什么任务」，不是公文标题——公文标题印在单子表内的
-    /// 「标题」一栏。字典默认三项，用户按自己的口径增删；上面「传输任务」行从
-    /// 字典里挑默认题名。
     fn transmit_tasks_editor(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new("传输任务类型（可增删改，供上面挑选）")
-                .size(theme::font_sizes::SMALL)
-                .color(theme::text_muted()),
-        );
-        let mut remove = None;
-        ui.vertical(|ui| {
-            for (index, task) in self.config.transmit_tasks.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(task)
-                            .desired_width(320.0)
-                            .margin(egui::Margin::symmetric(8, 4)),
-                    );
-                    if theme::danger_icon_button(ui, theme::Icon::Trash, "删除这一项").clicked()
-                    {
-                        remove = Some(index);
+        let state_id = ui.make_persistent_id("transmit_tasks_editor");
+        let open = ui.button("管理题名…").clicked();
+        let ctx = ui.ctx();
+        let mut editor = ctx.data_mut(|data| data.get_temp::<TransmitTasksEditor>(state_id));
+        if open {
+            editor = Some(TransmitTasksEditor::default());
+        }
+        let Some(mut editor) = editor else {
+            return;
+        };
+        let width = (ctx.content_rect().width() - 48.0).clamp(240.0, 420.0);
+        let list_height = (ctx.content_rect().height() * 0.4).min(280.0);
+        let edit_id = state_id.with("title");
+        let tasks = &mut self.config.transmit_tasks;
+        let default = &mut self.config.transmit_defaults.task;
+        let response = crate::modal::dialog(
+            ctx,
+            state_id,
+            "管理传输题名",
+            width,
+            crate::modal::Dismiss::EscOnly,
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(list_height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        if tasks.is_empty() {
+                            ui.weak("暂无自定义题名");
+                        }
+                        let mut remove = None;
+                        for (index, task) in tasks.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.add_enabled_ui(editor.edit.is_none(), |ui| {
+                                    if ui.small_button("编辑").clicked() {
+                                        editor.edit = Some(TransmitTitleEdit {
+                                            index: Some(index),
+                                            title: task.clone(),
+                                            focus: true,
+                                        });
+                                    }
+                                    if theme::danger_icon_button(ui, theme::Icon::Trash, "删除题名")
+                                        .clicked()
+                                    {
+                                        remove = Some(index);
+                                    }
+                                });
+                                ui.add(egui::Label::new(task).truncate())
+                                    .on_hover_text(task);
+                            });
+                        }
+                        if let Some(index) = remove {
+                            let removed = tasks.remove(index);
+                            if default.trim() == removed.trim()
+                                && !tasks.iter().any(|task| task.trim() == removed.trim())
+                            {
+                                default.clear();
+                            }
+                        }
+                    });
+
+                if let Some(edit) = &mut editor.edit {
+                    let (save, cancel) = ui
+                        .horizontal_wrapped(|ui| {
+                            let input = ui.add(
+                                egui::TextEdit::singleline(&mut edit.title)
+                                    .id(edit_id)
+                                    .hint_text("输入传发任务单题名")
+                                    .desired_width((width - 116.0).max(120.0)),
+                            );
+                            if std::mem::take(&mut edit.focus) {
+                                input.request_focus();
+                            }
+                            let title = edit.title.trim();
+                            let duplicate = tasks.iter().enumerate().any(|(index, task)| {
+                                Some(index) != edit.index && task.trim() == title
+                            });
+                            let can_save = !title.is_empty() && !duplicate;
+                            let save = ui
+                                .add_enabled(can_save, egui::Button::new("保存"))
+                                .on_disabled_hover_text(if duplicate {
+                                    "已有同名题名"
+                                } else {
+                                    "请输入题名"
+                                })
+                                .clicked()
+                                || (can_save
+                                    && input.lost_focus()
+                                    && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                            (save, ui.button("取消").clicked())
+                        })
+                        .inner;
+                    if save {
+                        let title = edit.title.trim().to_owned();
+                        if let Some(index) = edit.index {
+                            if default.trim() == tasks[index].trim() {
+                                default.clone_from(&title);
+                            }
+                            tasks[index] = title;
+                        } else {
+                            tasks.push(title);
+                        }
                     }
-                });
+                    if save || cancel {
+                        editor.edit = None;
+                    }
+                    false
+                } else {
+                    ui.horizontal(|ui| {
+                        if ui.button("＋ 添加题名").clicked() {
+                            editor.edit = Some(TransmitTitleEdit {
+                                index: None,
+                                title: String::new(),
+                                focus: true,
+                            });
+                        }
+                        ui.button("完成").clicked()
+                    })
+                    .inner
+                }
+            },
+        );
+        ctx.data_mut(|data| {
+            if response.dismissed || response.inner {
+                data.remove::<TransmitTasksEditor>(state_id);
+            } else {
+                data.insert_temp(state_id, editor);
             }
         });
-        if let Some(index) = remove {
-            self.config.transmit_tasks.remove(index);
-        }
-        if ui
-            .add(egui::Button::new("＋ 添加一项").min_size(egui::vec2(0.0, 24.0)))
-            .clicked()
-        {
-            self.config.transmit_tasks.push("新的传发任务单".into());
-        }
-        if self.config.transmit_tasks.is_empty() {
-            ui.colored_label(
-                warn(),
-                "字典空了：传输任务只能按密级自动带，无法在字典里挑选。",
-            );
-        }
     }
 
     fn export_section_ui(&mut self, ui: &mut egui::Ui) {
-        let can_change_export = !self.any_busy()
-            && self.pending_output.is_none()
-            && self.pending_file_dialogs.is_empty();
-        ui.add_enabled_ui(can_change_export, |ui| self.vault_page.export.ui(ui));
-        ui.add_space(12.0);
         // Word 导出尚未达到 PDF 的成熟度，入口保留但暂不允许启用。
         self.config.export.docx = false;
-        setting_row(ui, "格式", None, |ui| {
-            ui.checkbox(&mut self.config.export.markdown, "Markdown");
-            ui.add_enabled(
-                false,
-                egui::Checkbox::new(&mut self.config.export.docx, "Word"),
-            )
-            .on_disabled_hover_text("Word 导出仍在完善，当前请使用 PDF");
-            ui.checkbox(&mut self.config.export.pdf, "PDF");
-            ui.checkbox(&mut self.config.export.typst, "Typst 包")
+        setting_row(
+            ui,
+            "格式",
+            Some(SettingsSection::Export.description()),
+            |ui| {
+                ui.checkbox(&mut self.config.export.markdown, "Markdown");
+                ui.add_enabled(
+                    false,
+                    egui::Checkbox::new(&mut self.config.export.docx, "Word"),
+                )
+                .on_disabled_hover_text("Word 导出仍在完善，当前请使用 PDF");
+                ui.checkbox(&mut self.config.export.pdf, "PDF");
+                ui.checkbox(&mut self.config.export.typst, "Typst 包")
                 .on_hover_text(
                     "模板、数据与插图打成一个 zip，装有仿宋/楷体/黑体/宋体的机器可用 Typst 命令行编译",
                 );
-        });
+            },
+        );
         if !self.config.export.any() {
             setting_continuation(ui, |ui| {
                 ui.colored_label(warn(), "未勾选任何导出格式，起草页的导出按钮不会产生文件。");
@@ -1818,8 +1920,14 @@ impl GongwenApp {
             &mut self.config.auto_export,
             "AI 起草或优化完成后自动导出一次",
         )
-        .on_hover_text("不勾选则只出稿，什么时候导出完全由你决定");
-        ui.label("同一稿件使用固定目录，同名文件直接替换");
+        .on_hover_text("同一稿件使用固定目录，同名文件直接替换。");
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(8.0);
+        let can_change_export = !self.any_busy()
+            && self.pending_output.is_none()
+            && self.pending_file_dialogs.is_empty();
+        ui.add_enabled_ui(can_change_export, |ui| self.vault_page.export.ui(ui));
         self.print_trace_settings_ui(ui);
     }
 
@@ -1843,8 +1951,9 @@ impl GongwenApp {
                     current.clone()
                 };
                 egui::ComboBox::from_id_salt("transmit_default_task")
-                    .selected_text(shown)
+                    .selected_text(&shown)
                     .width(240.0)
+                    .truncate()
                     .show_ui(ui, |ui| {
                         if ui
                             .selectable_label(current.is_empty(), "按密级自动")
@@ -1857,12 +1966,12 @@ impl GongwenApp {
                                 self.config.transmit_defaults.task = task.clone();
                             }
                         }
-                    });
+                    })
+                    .response
+                    .on_hover_text(shown);
+                self.transmit_tasks_editor(ui);
             },
         );
-        setting_continuation(ui, |ui| {
-            self.transmit_tasks_editor(ui);
-        });
 
         let defaults = &mut self.config.transmit_defaults;
 
@@ -2141,6 +2250,44 @@ mod tests {
     use super::*;
     use crate::models::FontChoice;
     use std::path::PathBuf;
+
+    #[test]
+    fn transmit_title_editor_updates_default_and_saves_empty_dictionary() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut app = crate::app::management_samples::fixture();
+        app.config.transmit_tasks = vec!["原题名".into()];
+        app.config.transmit_defaults.task = "原题名".into();
+        let mut harness =
+            crate::test_support::harness_ui_state(|ui, app| app.transmit_section_ui(ui), app);
+        harness.run();
+        harness.get_by_label("管理题名…").click();
+        harness.run();
+        harness.get_by_label("编辑").click();
+        harness.run();
+        harness.key_press(egui::Key::End);
+        harness.event(egui::Event::Text("修订".into()));
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(harness.state().config.transmit_tasks, ["原题名修订"]);
+        assert_eq!(harness.state().config.transmit_defaults.task, "原题名修订");
+
+        harness.get_by_label("删除题名").click();
+        harness.run();
+        assert!(harness.state().config.transmit_defaults.task.is_empty());
+        let config = serde_json::to_string(&harness.state().config).unwrap();
+        let restored: crate::models::AppConfig = serde_json::from_str(&config).unwrap();
+        assert!(restored.transmit_tasks.is_empty());
+
+        harness.get_by_label("＋ 添加题名").click();
+        harness.run();
+        harness.event(egui::Event::Text("新增题名".into()));
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(harness.state().config.transmit_tasks, ["新增题名"]);
+    }
 
     fn font(family: &str, display: &str) -> system_fonts::SystemFont {
         system_fonts::SystemFont {

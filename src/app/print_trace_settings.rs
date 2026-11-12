@@ -1,6 +1,6 @@
 //! 印制追溯设置与本地登记查询。
 use super::GongwenApp;
-use super::settings::{setting_continuation, setting_row};
+use super::settings::setting_row;
 use eframe::egui;
 
 impl GongwenApp {
@@ -11,21 +11,18 @@ impl GongwenApp {
         ui.checkbox(
             &mut self.config.export.print_trace.enabled,
             "起草页导出 PDF 时添加印制追溯码",
-        );
-        setting_row(
-            ui,
-            "印制单位",
-            Some("填写本机登记的打印单位，与主送、抄送和接收单位无关"),
-            |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.config.export.print_trace.unit)
-                        .char_limit(60)
-                        .desired_width(300.0),
-                );
-            },
-        );
-        setting_continuation(ui, |ui| {
-            ui.weak("每页右下角底部叠加长方形码和两行小字，不占正文空间。记录的是本次生成 PDF 登记的印制单位，不能验证文件转交后的实际打印单位。");
+        )
+        .on_hover_text("在每页右下角叠加长方形码和两行小字，不占正文空间。");
+        let unit_tip =
+            "填写生成 PDF 时登记的本机印制单位。追溯码无法验证文件转交后的实际打印单位。";
+        setting_row(ui, "印制单位", Some(unit_tip), |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.config.export.print_trace.unit)
+                    .hint_text("输入印制单位名称")
+                    .char_limit(60)
+                    .desired_width(300.0),
+            )
+            .on_hover_text(unit_tip);
         });
         if let Err(error) = self.config.export.print_trace.validate() {
             ui.colored_label(super::warn(), error.to_string());

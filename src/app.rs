@@ -656,8 +656,7 @@ impl GongwenApp {
         {
             config.vocabulary_setup = VocabularySetupStatus::Completed;
         }
-        // 传输任务字典（旧配置没有这一项）按默认补齐。
-        config.ensure_transmit_tasks();
+        config.transmit_tasks.retain(|task| !task.trim().is_empty());
         // 密级现在是所有文稿类型的必要填报项目：旧配置里的空密级回填默认“机密、20年”。
         config.ensure_security_defaults();
         if config.output_dir.trim().is_empty() {

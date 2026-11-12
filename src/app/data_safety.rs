@@ -5,7 +5,7 @@
 //! 备份文件的读写与回滚在 [`crate::data_backup`]，这里只负责交互与状态。
 
 use super::file_dialog::FileDialogSpec;
-use super::settings::{setting_continuation, setting_row, sub_heading};
+use super::settings::{setting_row, sub_heading};
 use super::{GongwenApp, WorkerResult, open_in_os, warn};
 use crate::data_backup;
 #[cfg(feature = "ai-workbench")]
@@ -53,70 +53,52 @@ impl GongwenApp {
                 "把配置目录里的有效数据打成一个内容和文件名均加密的 7z，换机器或重装系统前先导出一份。",
             ),
         );
-        ui.label(if cfg!(feature = "ai-workbench") {
-            "备份包含配置、稿件库与知识库（manuscripts.db）、图片、数据接口配置、\
-             输入法词表、技能文件与 Pi 运行数据；加密工作区中这些内容保持密文。\
-             崩溃日志、崩溃提示标记与损坏配置的留底文件属于本机诊断信息，不进入备份。"
+        let backup_contents = if cfg!(feature = "ai-workbench") {
+            "包含配置、稿件库、知识库、图片、数据接口、输入法词表、技能和 Pi 运行数据。崩溃日志等本机诊断文件不打包。"
         } else {
-            "备份包含本机配置、稿件数据库、图片和输入法词表。启用应用锁后，受保护的内容保持密文。"
-        });
-        ui.add_space(8.0);
+            "包含配置、稿件库、图片和输入法词表。"
+        };
+        let export_tip = format!(
+            "选一个配置目录之外的位置保存加密 7z。\n{backup_contents}\n{}",
+            concat!(
+                "导出前会保存已修改的稿件。备份完成后，状态栏会显示文件大小。\n",
+                "备份期间请保持应用开启，避免修改应用锁设置。",
+            )
+        );
+        let mut restore_tip = "先校验备份文件，再确认是否恢复。".to_owned();
+        if let Ok(dir) = storage::config_dir() {
+            restore_tip.push_str(&format!(
+                "\n恢复前会把当前数据留底到：{}",
+                data_backup::restore_backup_location(&dir).display(),
+            ));
+        }
 
         let mut export = false;
         let mut inspect = false;
         let idle = !self.any_busy();
         ui.add_enabled_ui(idle, |ui| {
             setting_row(ui, "导出备份", None, |ui| {
-                if theme::primary_icon_button(ui, theme::Icon::Archive, "导出备份…").clicked()
-                {
-                    export = true;
-                }
-                ui.weak("选一个配置目录之外的位置保存 7z。");
+                export = theme::primary_icon_button(ui, theme::Icon::Archive, "导出备份…")
+                    .on_hover_text(export_tip)
+                    .clicked();
             });
-            setting_continuation(ui, |ui| {
-                ui.weak("导出前会保存所有已修改稿件；保存失败将取消备份。");
-                ui.weak("导出期间请勿关闭应用；完成后状态栏会显示文件大小。");
-                ui.weak(concat!(
-                    "导出期间不要修改应用锁设置（改主密码、设置或清除第二密码、启用或停用）——",
-                    "锁文件在导出中途变化会让本次备份自动取消。",
-                ));
-            });
-            ui.add_space(8.0);
             setting_row(ui, "恢复备份", None, |ui| {
-                if ui
+                inspect = ui
                     .add(theme::secondary_icon_button(
                         theme::Icon::RotateCcw,
                         "恢复备份…",
                     ))
-                    .clicked()
-                {
-                    inspect = true;
-                }
-                ui.weak("先校验文件，再让你确认一次才会动数据。");
+                    .on_hover_text(restore_tip)
+                    .clicked();
             });
-            if let Ok(dir) = storage::config_dir() {
-                let location = data_backup::restore_backup_location(&dir);
-                setting_continuation(ui, |ui| {
-                    ui.weak(format!(
-                        "恢复前会把当前数据整体留底到同级目录：{}",
-                        location.display()
-                    ));
-                });
-            }
         });
         if self.backup_busy {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(16.0));
-                ui.weak("正在处理备份…");
+                ui.weak("正在处理备份…")
+                    .on_hover_text("导出期间应用锁设置发生变化会取消本次备份。");
             });
-            // 应用锁设置在「安全 → 应用锁」分区，那里看不到备份状态；导出侧靠
-            // vault.dat 代次比对兜底，这里提前告知用户别在备份期间改锁设置，
-            // 免得好不容易跑完的备份被取消。
-            ui.weak(concat!(
-                "备份进行中：请勿修改应用锁设置（改主密码、设置或清除第二密码、启用或停用）。",
-                "锁文件一旦在导出期间变化，本次备份会自动取消并提示重试。",
-            ));
         } else if !idle {
             ui.add_space(6.0);
             ui.weak("有其他任务正在运行，请完成后再导出或恢复备份。");
@@ -134,11 +116,13 @@ impl GongwenApp {
             setting_row(ui, "清空内容", None, |ui| {
                 if ui
                     .add(theme::warning_icon_button(theme::Icon::Trash, "清空数据…"))
+                    .on_hover_text(
+                        "永久删除词条、稿件（含归档、版本、附件和插图）、资料库和维基库。",
+                    )
                     .clicked()
                 {
                     self.content_clear_confirm = true;
                 }
-                ui.weak("包括归档稿件、版本、附件和插图，不可恢复。");
             });
         });
         if export {

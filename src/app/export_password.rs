@@ -1,4 +1,5 @@
 //! 设置页独立导出密码；不写配置历史，不保存明文，不复用登录口令。
+use super::settings::{setting_continuation, setting_row};
 use eframe::egui;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -16,7 +17,7 @@ pub(super) struct PasswordSettings {
 impl PasswordSettings {
     pub(super) fn ui(&mut self, ui: &mut egui::Ui) {
         ui.strong("导出加密");
-        ui.label("勾选加密后，Word、PDF 使用打开密码，源码包及份号清单使用加密 7z。修改密码只影响今后的导出。");
+
         if crate::vault::key_handle().is_none() {
             ui.weak("先启用应用锁并解锁，再单独设置导出密码。");
             return;
@@ -24,16 +25,16 @@ impl PasswordSettings {
         match crate::export::protection::ExportPolicy::load() {
             Ok(mut policy) => {
                 let mut enabled = policy.enabled;
-                if ui
+                let encryption = ui
                     .add_enabled(
                         self.saving.is_none(),
-                        egui::Checkbox::new(
-                            &mut enabled,
-                            "加密导出文档（Word、PDF、源码包及随行单据）",
-                        ),
+                        egui::Checkbox::new(&mut enabled, "加密导出文档"),
                     )
-                    .changed()
-                {
+                    .on_hover_text(concat!(
+                        "Word、PDF 和随行单据使用打开密码，源码包及份号清单使用加密 7z。\n",
+                        "明文导出、打印和复制到系统剪贴板仍须确认。修改密码只影响今后的导出。",
+                    ));
+                if encryption.changed() {
                     policy.enabled = enabled;
                     if let Some(handle) = crate::vault::key_handle() {
                         self.notice = match policy.save(&handle) {
@@ -47,7 +48,6 @@ impl PasswordSettings {
                         };
                     }
                 }
-                ui.weak("勾选时加密导出，不弹安全风险确认；不勾选时导出普通文件，每次都需明确确认。打印与复制到系统剪贴板仍单独确认。");
             }
             Err(error) => {
                 // fail-closed：解不开就不导出。但用户必须有一条恢复路径，
@@ -56,7 +56,7 @@ impl PasswordSettings {
                     crate::theme::danger(),
                     format!("导出设置读取失败：{error:#}"),
                 );
-                ui.weak("导出密码文件可能来自另一代锁设置或已损坏。重置只删除这份导出密码设置，不影响稿件、登录密码与其它配置；旧加密成果仍可用原密码在系统阅读器打开。");
+
                 if self.reset_confirm {
                     ui.colored_label(
                         crate::theme::danger(),
@@ -84,7 +84,10 @@ impl PasswordSettings {
                             self.reset_confirm = false;
                         }
                     });
-                } else if ui.button("重置导出设置…").clicked() {
+                } else if ui.button("重置导出设置…")
+                    .on_hover_text("重置会删除已保存的导出密码设置。旧加密文件仍可在系统阅读器中用原密码打开。")
+                    .clicked()
+                {
                     self.reset_confirm = true;
                 }
                 if !self.notice.is_empty() {
@@ -114,15 +117,18 @@ impl PasswordSettings {
         }
         let configured =
             crate::export::protection::ExportPolicy::load().is_ok_and(|p| !p.password.is_empty());
-        ui.weak(if configured {
-            "已设置独立导出密码。"
-        } else {
-            "尚未设置密码：选择加密时需先保存密码；选择明文时无需密码。"
-        });
         ui.add_enabled_ui(self.saving.is_none(), |ui| {
-            ui.horizontal(|ui| {
-                ui.label("新导出密码");
-                ui.add(egui::TextEdit::singleline(&mut *self.password).password(!self.show).desired_width(260.0));
+            let password_tip = concat!(
+                "必须与登录密码不同。已保存的导出密码由应用锁加密保护；能解锁本机数据的人仍可能取得它。\n",
+                "接收方可用导出密码打开文件，登录本应用仍需登录密码。",
+            );
+            setting_row(ui, "新导出密码", Some(crate::password_policy::EXPORT_HINT), |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut *self.password)
+                        .password(!self.show)
+                        .desired_width(260.0),
+                )
+                .on_hover_text(crate::password_policy::EXPORT_HINT);
                 if ui
                     .button("随机生成")
                     .on_hover_text("按音节拼读的三个词，含大小写字母、数字与符号，便于口述与记忆")
@@ -133,14 +139,29 @@ impl PasswordSettings {
                     self.show = true;
                 }
             });
-            ui.horizontal(|ui| {
-                ui.label("确认密码");
-                ui.add(egui::TextEdit::singleline(&mut *self.confirm).password(!self.show).desired_width(260.0));
+            setting_row(ui, "确认密码", Some("再次输入新导出密码。"), |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut *self.confirm)
+                        .password(!self.show)
+                        .desired_width(260.0),
+                );
                 ui.checkbox(&mut self.show, "显示输入");
             });
-            ui.weak(crate::password_policy::EXPORT_HINT);
-            ui.weak("必须与登录密码不同；本地保存的导出密码由应用锁加密保护。接收方得到导出密码不能用它登录本应用；能解锁本机数据的人仍可能取得已保存的导出密码。");
-            if ui.button("保存独立导出密码").clicked() {
+            let save = setting_continuation(ui, |ui| {
+                let save = ui.button("保存导出密码").on_hover_text(password_tip).clicked();
+                ui.weak(if configured {
+                    "已设置密码"
+                } else {
+                    "尚未设置密码"
+                })
+                .on_hover_text(if configured {
+                    "启用加密导出时将使用已保存的密码。"
+                } else {
+                    "加密导出前需要先保存密码。"
+                });
+                save
+            });
+            if save {
                 if self.password != self.confirm {
                     self.notice = "两次输入的导出密码不一致。".into();
                 } else if let Err(error) = crate::export::protection::validate_password(&self.password) {

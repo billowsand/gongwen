@@ -912,6 +912,10 @@ impl AppShell {
             }
             None => {}
         }
+        // 密码框只接受直接键入；显式关闭系统输入法，避免中文预编辑或候选词进入密码。
+        if matches!(self.phase, ShellPhase::Gate(_) | ShellPhase::Unlocking(_)) {
+            ctx.output_mut(|output| output.ime = None);
+        }
         if let Some(started) = self.unlock_fade_started {
             let elapsed = ctx.input(|input| input.time - started);
             if elapsed >= 0.3 {
