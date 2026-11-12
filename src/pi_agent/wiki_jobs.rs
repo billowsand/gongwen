@@ -64,12 +64,16 @@ struct RawFrame {
 #[derive(serde::Deserialize)]
 struct RawTheme {
     name: String,
+    #[serde(default)]
+    guidance: String,
     categories: Vec<RawCategory>,
 }
 
 #[derive(serde::Deserialize)]
 struct RawCategory {
     name: String,
+    #[serde(default)]
+    guidance: String,
     #[serde(default)]
     doc_ids: Vec<i64>,
 }
@@ -110,6 +114,7 @@ pub(crate) fn parse_frame_delivery(
                 "主题「{name}」下分类超过 {MAX_CATEGORIES_PER_THEME} 个，请合并同类"
             ));
         }
+        let guidance = parse_guidance(&name, &theme.guidance)?;
         let mut category_names = std::collections::HashSet::new();
         let mut categories = Vec::new();
         for category in theme.categories {
@@ -146,11 +151,16 @@ pub(crate) fn parse_frame_delivery(
                 }
             }
             categories.push(FrameCategory {
+                guidance: parse_guidance(&cname, &category.guidance)?,
                 name: cname,
                 doc_ids,
             });
         }
-        themes.push(FrameTheme { name, categories });
+        themes.push(FrameTheme {
+            name,
+            guidance,
+            categories,
+        });
     }
     Ok(FrameProposal { themes })
 }
@@ -174,6 +184,71 @@ fn consulted_docs(
         .map_err(|error| format!("读取资料库文档失败：{error:#}"))
 }
 
+fn parse_guidance(name: &str, guidance: &str) -> Result<String, String> {
+    let guidance = guidance.trim();
+    crate::wiki::validate_frame_guidance(guidance)
+        .map_err(|error| format!("「{name}」：{error}"))?;
+    Ok(guidance.to_owned())
+}
+
+fn scope_guidance(tree: &[crate::wiki::WikiTree], id: i64) -> String {
+    for branch in tree {
+        let category = branch.categories.iter().find(|node| node.id == id);
+        if branch.theme.id != id && category.is_none() {
+            continue;
+        }
+        let mut lines = Vec::new();
+        for (kind, node) in
+            std::iter::once(("主题", &branch.theme)).chain(category.map(|node| ("分类", node)))
+        {
+            if !node.guidance.is_empty() {
+                lines.push(format!(
+                    "{kind}「{}」的分类口径：{}",
+                    node.name, node.guidance
+                ));
+            }
+        }
+        return lines.join("\n");
+    }
+    String::new()
+}
+
+fn frame_guidance_materials(tree: &[crate::wiki::WikiTree]) -> Vec<PiMaterialInput> {
+    let rules = tree
+        .iter()
+        .flat_map(|branch| {
+            std::iter::once((
+                format!("主题「{}」", branch.theme.name),
+                &branch.theme.guidance,
+            ))
+            .chain(branch.categories.iter().map(|node| {
+                (
+                    format!("主题「{}」/ 分类「{}」", branch.theme.name, node.name),
+                    &node.guidance,
+                )
+            }))
+        })
+        .map(|(name, guidance)| {
+            let rule = if guidance.is_empty() {
+                "尚未填写分类口径"
+            } else {
+                guidance
+            };
+            format!("## {name}\n\n{rule}\n\n")
+        })
+        .collect::<Vec<_>>();
+    rules
+        .chunks(100)
+        .enumerate()
+        .map(|(index, chunk)| PiMaterialInput {
+            title: format!("现有分类口径 {}", index + 1),
+            source: "已确认的维基框架".into(),
+            role: MaterialRole::StructureSample,
+            text: chunk.concat(),
+        })
+        .collect()
+}
+
 /// 浏览资料库归纳两级框架：返回通过确定性复核的提案，由用户确认后写库。
 pub(crate) fn induce_frame(
     config: Arc<AppConfig>,
@@ -188,13 +263,21 @@ pub(crate) fn induce_frame(
     let catalog = pi_skills::load_catalog();
     catalog.resolve(Some(pi_skills::WIKI_FRAME_SKILL))?;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let store = crate::wiki::WikiStore::open(&store_path)
+        .map_err(|error| format!("打开维基库失败：{error:#}"))?;
+    let tree = store
+        .list_tree()
+        .map_err(|error| format!("读取框架失败：{error:#}"))?;
+    let materials = frame_guidance_materials(&tree);
+    let existing = if materials.is_empty() {
+        ""
+    } else {
+        " 先读材料中的现有框架与分类口径；可覆盖的资料优先归入对应节点，保留其层级与名称。为相关节点补拟缺失的口径。依据仍用 kb_search / kb_read 核实。"
+    };
     let request = format!(
-        "按技能 {} 浏览资料库，归纳两级知识框架（主题 → 分类），每个分类挂靠它实际依据的\
-         资料文档，最后用 submit_task 交 work/frame.json。今天日期：{today}。",
+        "按技能 {} 浏览资料库，归纳两级知识框架（主题 → 分类），为每个主题和分类写出可执行的归类口径，         每个分类挂靠它实际依据的资料文档，最后用 submit_task 交 work/frame.json。今天日期：{today}。{existing}",
         pi_skills::WIKI_FRAME_SKILL,
     );
-    // 框架归纳不注入材料：模型用 kb_search / kb_read 自己遍历资料库。
-    let materials: Vec<PiMaterialInput> = Vec::new();
     let runtime = PiRuntime::locate()?;
     let chat = config.pi_chat().map_err(|error| error.to_string())?;
     let model = crate::ai_panel::pi_job::pi_model(&chat)?;
@@ -568,13 +651,19 @@ pub(crate) fn write_pages(
                 .join("、")
         )
     };
+    let guidance = scope_guidance(&tree, node_id);
+    let guidance = if guidance.is_empty() {
+        String::new()
+    } else {
+        format!("\n按已确认的分类口径选材；边界外资料不要纳入。\n{guidance}\n")
+    };
     let scope = if guide_only { "主题" } else { "分类" };
     let request = format!(
         "按技能 {} 为{target}整编维基页面，\
          最后用 submit_task 交 work/pages.json。今天日期：{today}。\
          该{scope}{guide_hint}。{existing_line}\
          资料用 kb_search / kb_read 找与目标相关的文档；\
-         已有维基页用 wiki_search / wiki_links 查，便于互相链接。{hint_line}",
+         已有维基页用 wiki_search / wiki_links 查，便于互相链接。{hint_line}{guidance}",
         pi_skills::WIKI_WRITE_SKILL,
         guide_hint = if has_guide {
             "已有导览页，本轮不要再交 guide 页；至少交一篇新的 kind=normal 条目页"
@@ -910,6 +999,9 @@ pub(crate) fn update_pages(
             .into_iter()
             .collect()
     };
+    let tree = store
+        .list_tree()
+        .map_err(|error| format!("读取框架失败：{error:#}"))?;
     let catalog = pi_skills::load_catalog();
     catalog.resolve(Some(pi_skills::WIKI_UPDATE_SKILL))?;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -923,6 +1015,7 @@ pub(crate) fn update_pages(
          今天日期：{today}。目标页（正文已作为材料附上）：\n{listing}\n\
          用 kb_search / kb_read 找与这些页面相关、尤其是新入库的文档；\
          维基内现状用 wiki_search / wiki_read / wiki_links 自查互链。\
+         按各目标页材料中的分类口径判断新资料是否归入；边界外资料不要纳入。\
          每个 pages[] 原样带回 uuid、title 与 kind（类型不可改），正文给整页新正文。\
          依据必须仍存在于资料库：材料里标了「已删除」的资料不要写进 doc_refs。\
          每页必须写 change_note（一两句话说清这版改了什么、依据哪些文档）。{new_source}",
@@ -945,8 +1038,14 @@ pub(crate) fn update_pages(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            let guidance = scope_guidance(&tree, t.node_id);
+            let guidance = if guidance.is_empty() {
+                String::new()
+            } else {
+                format!("分类口径（用于选材）：\n{guidance}\n\n")
+            };
             let text = format!(
-                "# {}\n\n（本页类型：{}，更新时 kind 保持不变）\n\n{}\n\n\
+                "# {}\n\n（本页类型：{}，更新时 kind 保持不变）\n\n{guidance}{}\n\n\
                  当前版本的依据清单（保留仍支撑本页、且仍存在的依据）：\n{}",
                 t.title, t.kind, t.current_body, refs
             );
@@ -1063,6 +1162,44 @@ mod tests {
 
     fn known() -> Vec<i64> {
         vec![3, 7, 12]
+    }
+
+    #[test]
+    fn frame_guidance_flows_from_delivery_to_job_context() {
+        let content = serde_json::json!({
+            "themes": [{
+                "name": "安全生产", "guidance": "  收录生产经营安全。  ",
+                "categories": [{"name": "监督检查", "guidance": "排除事故处置。", "doc_ids": [3]}]
+            }]
+        });
+        let proposal = parse_frame_delivery(&content.to_string(), &[3]).unwrap();
+        assert_eq!(proposal.themes[0].guidance, "收录生产经营安全。");
+        assert_eq!(proposal.themes[0].categories[0].guidance, "排除事故处置。");
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wiki.sqlite");
+        let store = crate::wiki::WikiStore::open(&path).unwrap();
+        let theme_id = store.create_theme("安全生产").unwrap();
+        let node_id = store.create_category(theme_id, "监督检查").unwrap();
+        store
+            .save_node_definition(theme_id, "安全生产", &proposal.themes[0].guidance)
+            .unwrap();
+        store
+            .save_node_definition(
+                node_id,
+                "监督检查",
+                &proposal.themes[0].categories[0].guidance,
+            )
+            .unwrap();
+        let tree = store.list_tree().unwrap();
+        let scope = scope_guidance(&tree, node_id);
+        assert!(scope.contains("主题「安全生产」的分类口径：收录生产经营安全。"));
+        assert!(scope.contains("分类「监督检查」的分类口径：排除事故处置。"));
+        let materials = frame_guidance_materials(&tree);
+        assert_eq!(materials.len(), 1);
+        assert!(!materials[0].role.is_fact_source());
+        assert!(materials[0].text.contains("分类「监督检查」"));
+        assert!(materials[0].text.contains("排除事故处置。"));
     }
 
     #[test]

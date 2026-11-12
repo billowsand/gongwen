@@ -349,6 +349,16 @@ for (const [skill, file, key, content] of [
   });
 }
 
+test("维基分类口径兼容旧交付并验证 Unicode 字数", () => {
+  const payload = (guidance) => JSON.stringify({
+    themes: [{ name: "安全生产", categories: [{ name: "监督检查", guidance, doc_ids: [3] }] }],
+  });
+  assert.doesNotThrow(() => validateTaskPayload(payload(undefined), "gongwen-wiki-frame"));
+  assert.doesNotThrow(() => validateTaskPayload(payload("𠮷".repeat(600)), "gongwen-wiki-frame"));
+  assert.throws(() => validateTaskPayload(payload("𠮷".repeat(601)), "gongwen-wiki-frame"), /guidance/);
+  assert.throws(() => validateTaskPayload(payload(null), "gongwen-wiki-frame"), /guidance/);
+});
+
 test("维基交付结构校验：空依据分类与残缺页面当场打回", () => {
   const frame = (categories) => JSON.stringify({ themes: [{ name: "安全生产", categories }] });
   assert.throws(

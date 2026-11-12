@@ -29,8 +29,12 @@ fn wiki_workspaces_render() {
     let wiki = WikiStore::open(&path).unwrap();
     let themes = vec![FrameTheme {
         name: "安全生产".into(),
+        guidance: "收录生产经营安全监管与应急处置。".into(),
         categories: vec![FrameCategory {
             name: "监督检查".into(),
+            guidance: "收录日常检查、隐患台账和整改复查。
+应急预案和演练归入应急管理。"
+                .into(),
             doc_ids: vec![source],
         }],
     }];
@@ -92,6 +96,7 @@ fn wiki_workspaces_render() {
         ("05-review", "采纳并入库"),
         ("06-history", "版本详情"),
         ("07-split", "双栏对照"),
+        ("08-frame-definition", "保存定义"),
     ]
     .into_iter()
     .enumerate()
@@ -161,6 +166,11 @@ fn wiki_workspaces_render() {
                 open_wiki_page(&mut app, &page_id);
                 app.wiki.reader_mode = ReaderMode::Split;
             }
+            7 => {
+                app.wiki.route = Route::Frame;
+                app.wiki.frame_tab = FrameTab::Existing;
+                app.wiki.selected_node = Some(node);
+            }
             _ => {}
         }
         app.open_page(if index == 2 {
@@ -222,6 +232,14 @@ fn wiki_workspaces_render() {
                             .shapes
                             .iter()
                             .any(|shape| contains_text(&shape.shape, "## 整改流程"))
+                    );
+                }
+                if index == 7 {
+                    assert!(
+                        output
+                            .shapes
+                            .iter()
+                            .any(|shape| contains_text(&shape.shape, "收录日常检查"))
                     );
                 }
                 if let Some(dir) = &output_dir {

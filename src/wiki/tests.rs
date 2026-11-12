@@ -67,7 +67,7 @@ fn node_rename_and_move_category() {
     let (t1, c) = seed_frame(&s);
     let t2 = s.create_theme("政务服务").unwrap();
     // 改名后树里是新名。
-    s.rename_node(c, "监督检查与执法").unwrap();
+    s.save_node_definition(c, "监督检查与执法", "").unwrap();
     let tree = s.list_tree().unwrap();
     assert_eq!(tree[0].categories[0].name, "监督检查与执法");
     // 分类可跨主题移动。
@@ -331,12 +331,19 @@ fn parse_frame_outline_variants() {
         parse_frame_outline("# 安全生产\n## 监督检查\n## 应急管理\n# 政务服务\n").unwrap();
     assert_eq!(heading.len(), 2);
     assert_eq!(heading[0].name, "安全生产");
-    assert_eq!(heading[0].categories, vec!["监督检查", "应急管理"]);
+    assert_eq!(
+        heading[0]
+            .categories
+            .iter()
+            .map(|category| category.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["监督检查", "应急管理"]
+    );
     assert!(heading[1].categories.is_empty());
     let list = parse_frame_outline("- 安全生产\n  - 监督检查\n  - 应急管理\n- 政务服务\n").unwrap();
     assert_eq!(list, heading);
     let mixed = parse_frame_outline("# 安全生产\n  - 监督检查\n").unwrap();
-    assert_eq!(mixed[0].categories, vec!["监督检查"]);
+    assert_eq!(mixed[0].categories[0].name, "监督检查");
 
     assert!(parse_frame_outline("").is_err());
     assert!(parse_frame_outline("随便一行\n").is_err());
@@ -444,8 +451,10 @@ fn frame_mapping_rolls_back_and_deleted_page_sources_remain_auditable() {
     let s = store();
     let proposal = FrameTheme {
         name: "主题".into(),
+        guidance: String::new(),
         categories: vec![FrameCategory {
             name: "分类".into(),
+            guidance: String::new(),
             doc_ids: vec![17],
         }],
     };
@@ -607,8 +616,10 @@ fn apply_frame_refuses_ambiguous_duplicate_nodes() {
     s.create_theme("重复主题").unwrap();
     let proposal = FrameTheme {
         name: "重复主题".into(),
+        guidance: String::new(),
         categories: vec![FrameCategory {
             name: "分类".into(),
+            guidance: String::new(),
             doc_ids: Vec::new(),
         }],
     };
@@ -667,4 +678,61 @@ fn rename_page_keeps_identity_and_resolves_new_title_links() {
     assert!(hits.iter().any(|hit| hit.uuid == target));
     // 新标题与现有页面重名时拒绝。
     assert!(s.rename_page(&target, "源页").is_err());
+}
+
+#[test]
+fn framework_guidance_migrates_and_preserves_confirmed_definitions() {
+    let store = WikiStore::open_in_memory().unwrap();
+    store
+        .conn
+        .execute("DROP TABLE wiki_node_guidance", [])
+        .unwrap();
+    let theme_id = store.create_theme("安全生产").unwrap();
+    let category_id = store.create_category(theme_id, "监督检查").unwrap();
+    ensure_schema(&store.conn).unwrap();
+    let tree = store.list_tree().unwrap();
+    assert!(tree[0].theme.guidance.is_empty());
+    assert!(tree[0].categories[0].guidance.is_empty());
+
+    let outline =
+        "# 安全生产\n> 收录生产经营安全。\n## 监督检查\n> 收录日常监督。\n> 排除事故处置。";
+    let proposal = parse_frame_outline(outline).unwrap();
+    assert_eq!(store.apply_frame(&proposal).unwrap(), (0, 2));
+    let tree = store.list_tree().unwrap();
+    assert_eq!(tree[0].theme.guidance, "收录生产经营安全。");
+    assert_eq!(
+        tree[0].categories[0].guidance,
+        "收录日常监督。\n排除事故处置。"
+    );
+    assert_eq!(tree[0].categories[0].id, category_id);
+
+    store
+        .save_node_definition(category_id, "监督检查", "以常态监督为主。")
+        .unwrap();
+    store.apply_frame(&proposal).unwrap();
+    assert_eq!(
+        store.list_tree().unwrap()[0].categories[0].guidance,
+        "以常态监督为主。"
+    );
+
+    let too_long = "字".repeat(MAX_FRAME_GUIDANCE_CHARS + 1);
+    assert!(
+        store
+            .save_node_definition(category_id, "不会写入", &too_long)
+            .is_err()
+    );
+    assert_eq!(store.list_tree().unwrap()[0].categories[0].name, "监督检查");
+    store.delete_node(category_id).unwrap();
+    assert!(
+        store
+            .conn
+            .query_row(
+                "SELECT 1 FROM wiki_node_guidance WHERE node_id=?1",
+                [category_id],
+                |_| Ok(())
+            )
+            .optional()
+            .unwrap()
+            .is_none()
+    );
 }

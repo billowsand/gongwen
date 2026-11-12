@@ -11,6 +11,7 @@ use crate::theme;
 use crate::wiki::{Backlink, WikiPage, WikiPageMeta, WikiTree};
 
 mod body;
+mod framework;
 mod job;
 #[cfg(test)]
 mod samples;
@@ -62,9 +63,8 @@ pub(crate) struct WikiUiState {
     history_cache: Option<workspaces::HistoryCache>,
     /// 树编辑选中的框架节点 id（改名 / 移动 / 删除的对象）。
     selected_node: Option<i64>,
-    move_target: Option<(i64, i64)>,
-    /// 选中节点的名称编辑框内容。
-    node_name_edit: String,
+    node_drafts: HashMap<i64, framework::DefinitionDraft>,
+    frame_documents: Option<(i64, Vec<(i64, String)>)>,
     /// 「新建主题」的名称输入。
     new_node_name: String,
     /// 「在主题下新建分类」的名称输入（与新建主题分开，避免误建错层级）。
@@ -835,6 +835,7 @@ fn rebuild_cache(app: &mut GongwenApp) -> bool {
     }
     let gaps = store.red_link_gaps().unwrap_or_default();
     let needs_review = store.pages_needing_review().unwrap_or_default();
+    app.wiki.frame_documents = None;
     app.wiki.tree = tree;
     app.wiki.pages = pages;
     app.wiki.gaps = gaps;
@@ -1009,8 +1010,10 @@ fn open_page(app: &mut GongwenApp, uuid: &str) {
 // ── 左栏：框架树 ────────────────────────────────────────────────────────────
 
 fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>, manage: bool) {
-    ui.weak("分类");
-    ui.add_space(4.0);
+    if !manage {
+        ui.weak("分类");
+        ui.add_space(4.0);
+    }
     if app.wiki.tree.is_empty() {
         ui.weak("尚未建立分类框架");
     }
@@ -1027,7 +1030,6 @@ fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>, 
                     0,
                     &mut app.wiki.node_expansion,
                     &mut app.wiki.selected_node,
-                    &mut app.wiki.node_name_edit,
                 ) {
                     continue;
                 }
@@ -1044,7 +1046,6 @@ fn tree_pane(app: &mut GongwenApp, ui: &mut egui::Ui, nav: &mut Option<String>, 
                         1,
                         &mut app.wiki.node_expansion,
                         &mut app.wiki.selected_node,
-                        &mut app.wiki.node_name_edit,
                     ) || manage
                     {
                         continue;
@@ -1064,7 +1065,6 @@ fn node_row(
     indent: usize,
     node_expansion: &mut HashMap<i64, bool>,
     selected_node: &mut Option<i64>,
-    node_name_edit: &mut String,
 ) -> bool {
     let expandable = !manage || indent == 0;
     let mut expanded = node_expansion.get(&node.id).copied().unwrap_or(indent == 0);
@@ -1086,154 +1086,9 @@ fn node_row(
             node_expansion.insert(node.id, expanded);
         } else if manage {
             *selected_node = Some(node.id);
-            *node_name_edit = node.name.clone();
         }
     }
     expanded
-}
-
-/// 树里选中节点的编辑条：改名、分类跨主题移动、删除、在主题下建分类。
-/// 交互复用标准词库页（口径 15）：行内输入 + 明确按钮，存储层守卫兜底。
-fn node_edit_strip(app: &mut GongwenApp, ui: &mut egui::Ui) {
-    let Some(id) = app.wiki.selected_node else {
-        return;
-    };
-    let Some((name, is_theme, theme_id)) = find_node(&app.wiki.tree, id) else {
-        app.wiki.selected_node = None;
-        return;
-    };
-    // 作业运行中不改进框架：删掉正在整编的目标分类会让整批提案作废。
-    let busy = app.wiki.busy();
-    ui.group(|ui| {
-        ui.horizontal(|ui| {
-            ui.label(if is_theme { "主题" } else { "分类" });
-            ui.add(egui::TextEdit::singleline(&mut app.wiki.node_name_edit).desired_width(120.0));
-            let new_name = app.wiki.node_name_edit.trim().to_string();
-            if ui
-                .add_enabled(
-                    !busy && !new_name.is_empty() && new_name != name,
-                    egui::Button::new("改名"),
-                )
-                .clicked()
-                && let Some(store) = app.wiki_store.as_ref()
-            {
-                match store.rename_node(id, &new_name) {
-                    Ok(()) => {
-                        app.wiki.notice = Some(format!("「{name}」已改名为「{new_name}」。"));
-                        app.wiki.tree_dirty = true;
-                    }
-                    Err(error) => app.wiki.notice = Some(format!("改名失败：{error:#}")),
-                }
-            }
-        });
-        if is_theme {
-            ui.horizontal(|ui| {
-                let edit = egui::TextEdit::singleline(&mut app.wiki.new_category_name)
-                    .desired_width(120.0)
-                    .hint_text("分类名称");
-                let resp = ui.add(edit);
-                let category = app.wiki.new_category_name.trim().to_string();
-                let create = ui
-                    .add_enabled(!busy && !category.is_empty(), egui::Button::new("建分类"))
-                    .clicked()
-                    || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                if create {
-                    if let Some(store) = app.wiki_store.as_ref() {
-                        match store.create_category(id, &category) {
-                            Ok(cid) => {
-                                app.wiki.notice = Some(format!("已建分类「{category}」。"));
-                                app.wiki.tree_dirty = true;
-                                app.wiki.selected_node = Some(cid);
-                                app.wiki.node_name_edit = category.clone();
-                            }
-                            Err(error) => app.wiki.notice = Some(format!("建分类失败：{error:#}")),
-                        }
-                    }
-                    app.wiki.new_category_name.clear();
-                }
-            });
-        } else {
-            // 分类跨主题移动。
-            ui.horizontal(|ui| {
-                ui.label("移到主题");
-                let current = theme_id;
-                let mut target = app
-                    .wiki
-                    .move_target
-                    .filter(|(node, _)| *node == id)
-                    .map_or(current, |(_, target)| target);
-                egui::ComboBox::from_id_salt("wiki_move_theme")
-                    .selected_text(
-                        app.wiki
-                            .tree
-                            .iter()
-                            .find(|t| t.theme.id == target)
-                            .map(|t| t.theme.name.as_str())
-                            .unwrap_or(""),
-                    )
-                    .show_ui(ui, |ui| {
-                        for t in &app.wiki.tree {
-                            ui.selectable_value(&mut target, t.theme.id, &t.theme.name);
-                        }
-                    });
-                app.wiki.move_target = Some((id, target));
-                if ui
-                    .add_enabled(!busy && target != current, egui::Button::new("移过去"))
-                    .clicked()
-                    && let Some(store) = app.wiki_store.as_ref()
-                {
-                    match store.move_category(id, target) {
-                        Ok(()) => {
-                            app.wiki.notice = Some(format!("已把「{name}」移走。"));
-                            app.wiki.tree_dirty = true;
-                        }
-                        Err(error) => app.wiki.notice = Some(format!("移动失败：{error:#}")),
-                    }
-                }
-            });
-        }
-        let has_theme_guide = app
-            .wiki
-            .tree
-            .iter()
-            .any(|t| t.theme.id == id && t.theme_guide.is_some());
-        if (!is_theme || !has_theme_guide)
-            && ui
-                .add_enabled(
-                    !app.wiki.busy(),
-                    theme::icon_text_button(
-                        theme::Icon::Sparkles,
-                        if is_theme {
-                            "整编主题导览"
-                        } else {
-                            "整编此分类"
-                        },
-                    ),
-                )
-                .clicked()
-        {
-            app.start_wiki_write(id, Vec::new());
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    !busy,
-                    egui::Button::new(egui::RichText::new("删除节点").color(theme::warn())),
-                )
-                .clicked()
-                && let Some(store) = app.wiki_store.as_ref()
-            {
-                match store.delete_node(id) {
-                    Ok(()) => {
-                        app.wiki.notice = Some(format!("已删除「{name}」。"));
-                        app.wiki.selected_node = None;
-                        app.wiki.tree_dirty = true;
-                    }
-                    Err(error) => app.wiki.notice = Some(format!("删不掉：{error:#}")),
-                }
-            }
-        });
-    });
 }
 
 fn page_row(

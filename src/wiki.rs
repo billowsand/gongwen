@@ -19,6 +19,7 @@ pub(crate) struct WikiNode {
     pub parent_id: Option<i64>,
     pub name: String,
     pub kind: &'static str,
+    pub guidance: String,
 }
 
 /// 主题 → 其下分类，供界面直接渲染框架树。
@@ -111,6 +112,8 @@ const MAX_PAGE_BODY_CHARS: usize = 20_000;
 const MAX_FRAME_THEMES: usize = 30;
 const MAX_FRAME_CATEGORIES_PER_THEME: usize = 20;
 
+pub(crate) const MAX_FRAME_GUIDANCE_CHARS: usize = 600;
+
 const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS wiki_nodes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,6 +125,10 @@ CREATE TABLE IF NOT EXISTS wiki_nodes (
     updated_at TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wiki_nodes_parent ON wiki_nodes(parent_id);
+CREATE TABLE IF NOT EXISTS wiki_node_guidance (
+    node_id  INTEGER PRIMARY KEY REFERENCES wiki_nodes(id) ON DELETE CASCADE,
+    guidance TEXT NOT NULL
+);
 
 -- 页面：seq 是库内整数主键（FTS rowid 用），uuid 是稳定身份（链接按它解析，
 -- 标题改名不影响链接）。标题全局唯一，供 [[目标]] 按标题解析。
@@ -201,12 +208,14 @@ pub(crate) struct PageInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FrameTheme {
     pub name: String,
+    pub guidance: String,
     pub categories: Vec<FrameCategory>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FrameCategory {
     pub name: String,
+    pub guidance: String,
     pub doc_ids: Vec<i64>,
 }
 
@@ -270,6 +279,7 @@ impl WikiStore {
                 created += 1;
                 self.create_theme(theme_name)?
             };
+            fill_node_guidance(&tx, theme_id, &theme.guidance)?;
             rebind_unresolved(&tx, theme_name)?;
             for category in &theme.categories {
                 let category_name = category.name.trim();
@@ -286,6 +296,7 @@ impl WikiStore {
                     created += 1;
                     self.create_category(theme_id, category_name)?
                 };
+                fill_node_guidance(&tx, node, &category.guidance)?;
                 rebind_unresolved(&tx, category_name)?;
                 for doc_id in &category.doc_ids {
                     tx.execute(
@@ -306,6 +317,18 @@ impl WikiStore {
              WHERE n.id=?1 OR n.parent_id=?1 ORDER BY d.doc_id",
         )?;
         let rows = stmt.query_map([node_id], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn frame_documents(&self, node_id: i64) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT k.id, k.title
+             FROM wiki_category_docs d
+             JOIN wiki_nodes n ON n.id=d.node_id
+             JOIN knowledge_docs k ON k.id=d.doc_id
+             WHERE n.id=?1 OR n.parent_id=?1 ORDER BY k.id",
+        )?;
+        let rows = stmt.query_map([node_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
@@ -352,15 +375,29 @@ impl WikiStore {
         Ok(id)
     }
 
-    pub fn rename_node(&self, id: i64, name: &str) -> Result<()> {
+    /// 保存名称和分类口径；与链接重绑同一事务。
+    pub fn save_node_definition(&self, id: i64, name: &str, guidance: &str) -> Result<()> {
         let name = name.trim();
+        let guidance = guidance.trim();
         validate_node_name(name)?;
-        let changed = self.conn.execute(
+        validate_frame_guidance(guidance)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
             "UPDATE wiki_nodes SET name = ?1, updated_at = ?2 WHERE id = ?3",
             params![name, Self::now(), id],
         )?;
         anyhow::ensure!(changed == 1, "节点已不存在");
-        rebind_unresolved(&self.conn, name)?;
+        if guidance.is_empty() {
+            tx.execute("DELETE FROM wiki_node_guidance WHERE node_id=?1", [id])?;
+        } else {
+            tx.execute(
+                "INSERT INTO wiki_node_guidance(node_id, guidance) VALUES (?1, ?2)
+                 ON CONFLICT(node_id) DO UPDATE SET guidance=excluded.guidance",
+                params![id, guidance],
+            )?;
+        }
+        rebind_unresolved(&tx, name)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -423,7 +460,9 @@ impl WikiStore {
     pub fn list_tree(&self) -> Result<Vec<WikiTree>> {
         let mut themes = Vec::new();
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_id, name, kind FROM wiki_nodes WHERE kind='theme' ORDER BY id",
+            "SELECT n.id, n.parent_id, n.name, COALESCE(g.guidance, '')
+             FROM wiki_nodes n LEFT JOIN wiki_node_guidance g ON g.node_id=n.id
+             WHERE n.kind='theme' ORDER BY n.id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(WikiNode {
@@ -431,13 +470,16 @@ impl WikiStore {
                 parent_id: r.get(1)?,
                 name: r.get(2)?,
                 kind: "theme",
+                guidance: r.get(3)?,
             })
         })?;
         for t in rows {
             themes.push(t?);
         }
         let mut cats_stmt = self.conn.prepare(
-            "SELECT id, parent_id, name, kind FROM wiki_nodes WHERE kind='category' AND parent_id=?1 ORDER BY id",
+            "SELECT n.id, n.parent_id, n.name, COALESCE(g.guidance, '')
+             FROM wiki_nodes n LEFT JOIN wiki_node_guidance g ON g.node_id=n.id
+             WHERE n.kind='category' AND n.parent_id=?1 ORDER BY n.id",
         )?;
         let mut guide_stmt = self
             .conn
@@ -451,6 +493,7 @@ impl WikiStore {
                         parent_id: r.get(1)?,
                         name: r.get(2)?,
                         kind: "category",
+                        guidance: r.get(3)?,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1036,6 +1079,26 @@ fn box_kind(kind: &str) -> &'static str {
     }
 }
 
+pub(crate) fn validate_frame_guidance(guidance: &str) -> Result<()> {
+    anyhow::ensure!(
+        guidance.chars().count() <= MAX_FRAME_GUIDANCE_CHARS,
+        "分类口径最多 {MAX_FRAME_GUIDANCE_CHARS} 字"
+    );
+    Ok(())
+}
+
+fn fill_node_guidance(conn: &Connection, id: i64, guidance: &str) -> Result<()> {
+    let guidance = guidance.trim();
+    validate_frame_guidance(guidance)?;
+    if !guidance.is_empty() {
+        conn.execute(
+            "INSERT OR IGNORE INTO wiki_node_guidance(node_id, guidance) VALUES (?1, ?2)",
+            params![id, guidance],
+        )?;
+    }
+    Ok(())
+}
+
 /// 节点名与 Pi 作业、导入大纲同一口径：非空、不超过 60 字。
 fn validate_node_name(name: &str) -> Result<()> {
     anyhow::ensure!(!name.is_empty(), "名称不能为空");
@@ -1251,98 +1314,78 @@ fn write_links(
     Ok(())
 }
 
-/// 框架导入大纲：一个主题与它名下的分类（两级，不更深）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OutlineTheme {
-    pub name: String,
-    pub categories: Vec<String>,
-}
-
-/// 把用户粘贴的 Markdown 大纲解析成两级框架。
-///
-/// 支持两种写法、可混排：标题式（`# 主题` / `## 分类`）与列表式
-/// （`- 主题` / 缩进一格的 `- 分类`）。第三级直接报错；完全解析不出
-/// 任何主题也报错。重名主题、主题内重名分类在这里就拦下。
-pub(crate) fn parse_frame_outline(text: &str) -> Result<Vec<OutlineTheme>, String> {
-    let mut themes: Vec<OutlineTheme> = Vec::new();
-    let mut list_theme: Option<usize> = None;
+/// 从两级 Markdown 标题或列表导入框架。节点后的 `>` 行是它的分类口径。
+pub(crate) fn parse_frame_outline(text: &str) -> Result<Vec<FrameTheme>, String> {
+    let mut themes: Vec<FrameTheme> = Vec::new();
     for raw in text.lines() {
         let line = raw.trim_end();
-        if line.trim().is_empty() {
-            continue;
-        }
         let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
-            let level = trimmed.chars().take_while(|c| *c == '#').count();
-            let name = trimmed[level..].trim().trim_matches('*').trim().to_string();
-            if name.is_empty() {
-                continue;
-            }
-            match level {
-                1 => {
-                    themes.push(OutlineTheme {
-                        name,
-                        categories: Vec::new(),
-                    });
-                    // 混排时允许标题主题后面接列表式分类。
-                    list_theme = Some(themes.len() - 1);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rule) = trimmed.strip_prefix('>') {
+            let theme = themes.last_mut().ok_or("分类口径前需要一个主题或分类")?;
+            let guidance = theme
+                .categories
+                .last_mut()
+                .map_or(&mut theme.guidance, |category| &mut category.guidance);
+            let rule = rule.trim();
+            if !rule.is_empty() {
+                if !guidance.is_empty() {
+                    guidance.push('\n');
                 }
-                2 => {
-                    let Some(theme) = themes.last_mut() else {
-                        return Err(format!("「{name}」前面没有一级主题（# 主题）"));
-                    };
-                    if theme.categories.contains(&name) {
-                        return Err(format!("主题「{}」下分类「{name}」重复", theme.name));
-                    }
-                    theme.categories.push(name);
-                }
-                _ => return Err("框架只分两级（主题 → 分类），不支持三级标题".into()),
+                guidance.push_str(rule);
+                validate_frame_guidance(guidance).map_err(|error| error.to_string())?;
             }
             continue;
         }
-        // 列表式：按缩进深度定层级（0 = 主题，1 = 分类，更深拒绝）。
-        let body = line.trim_start();
-        let Some(item) = body.strip_prefix("- ") else {
-            return Err(format!("认不出这一行（要用 # / ## 或 - 列表）：{line}"));
-        };
-        let indent = &line[..line.len() - body.len()];
-        if indent.contains('\t') {
-            return Err(format!("列表缩进用两个空格一级，不要用 Tab：{line}"));
-        }
-        let indent_chars = indent.chars().count();
-        if indent_chars % 2 != 0 {
+        let (depth, item) = if trimmed.starts_with('#') {
+            let level = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+            if level > 2 {
+                return Err("框架只分两级（主题 → 分类），不支持三级标题".into());
+            }
+            (level - 1, &trimmed[level..])
+        } else if let Some(item) = trimmed.strip_prefix("- ") {
+            let indent = &line[..line.len() - trimmed.len()];
+            if indent.contains('\t') || indent.chars().count() % 2 != 0 {
+                return Err(format!("列表缩进用两个空格一级，不要用 Tab：{line}"));
+            }
+            let depth = indent.chars().count() / 2;
+            if depth > 1 {
+                return Err("框架只分两级（主题 → 分类），列表缩进不要深于一层".into());
+            }
+            (depth, item)
+        } else {
             return Err(format!(
-                "列表缩进用两个空格一级，当前缩进是 {indent_chars} 个空格：{line}"
+                "认不出这一行（使用 # / ##、- 列表或 > 分类口径）：{line}"
             ));
-        }
-        let depth = indent_chars / 2;
-        if depth > 1 {
-            return Err("框架只分两级（主题 → 分类），列表缩进不要深于一层".into());
-        }
-        let name = item.trim().trim_matches('*').trim().to_string();
+        };
+        let name = item.trim().trim_matches('*').trim().to_owned();
         if name.is_empty() {
             continue;
         }
-        match depth {
-            0 => {
-                themes.push(OutlineTheme {
-                    name,
-                    categories: Vec::new(),
-                });
-                list_theme = Some(themes.len() - 1);
+        if depth == 0 {
+            themes.push(FrameTheme {
+                name,
+                guidance: String::new(),
+                categories: Vec::new(),
+            });
+        } else {
+            let theme = themes
+                .last_mut()
+                .ok_or_else(|| format!("「{name}」前面没有一级主题"))?;
+            if theme
+                .categories
+                .iter()
+                .any(|category| category.name == name)
+            {
+                return Err(format!("主题「{}」下分类「{name}」重复", theme.name));
             }
-            _ => {
-                let Some(index) = list_theme else {
-                    return Err(format!("「{name}」前面没有一级主题（- 主题）"));
-                };
-                if themes[index].categories.contains(&name) {
-                    return Err(format!(
-                        "主题「{}」下分类「{name}」重复",
-                        themes[index].name
-                    ));
-                }
-                themes[index].categories.push(name);
-            }
+            theme.categories.push(FrameCategory {
+                name,
+                guidance: String::new(),
+                doc_ids: Vec::new(),
+            });
         }
     }
     if themes.is_empty() {
@@ -1373,8 +1416,11 @@ pub(crate) fn parse_frame_outline(text: &str) -> Result<Vec<OutlineTheme>, Strin
             ));
         }
         for category in &theme.categories {
-            if category.chars().count() > MAX_NODE_NAME_CHARS {
-                return Err(format!("分类名超过 {MAX_NODE_NAME_CHARS} 字：{category}"));
+            if category.name.chars().count() > MAX_NODE_NAME_CHARS {
+                return Err(format!(
+                    "分类名超过 {MAX_NODE_NAME_CHARS} 字：{}",
+                    category.name
+                ));
             }
         }
     }

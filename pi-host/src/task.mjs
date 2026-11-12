@@ -54,6 +54,7 @@ const WIKI_LIMITS = {
   themes: 30,
   categoriesPerTheme: 20,
   nodeNameChars: 60,
+  guidanceChars: 600,
   writePages: 10,
   updatePages: 5,
   titleChars: 100,
@@ -75,6 +76,14 @@ function isPlainObject(value) {
  *  代理对算两个，含表情的正文会被 host 误判超限）。 */
 function charLength(value) {
   return [...value].length;
+}
+
+function validateFrameGuidance(node, label) {
+  if (!Object.hasOwn(node, "guidance")) return; // 兼容旧交付
+  if (typeof node.guidance !== "string"
+    || charLength(node.guidance.trim()) > WIKI_LIMITS.guidanceChars) {
+    throw new Error(`${label}的 guidance 必须是最多 ${WIKI_LIMITS.guidanceChars} 字的文字`);
+  }
 }
 
 /**
@@ -100,6 +109,7 @@ function validateWikiFrame(themes) {
       throw new Error(`主题「${theme.name.trim()}」重复；主题名必须唯一`);
     }
     themeNames.add(theme.name.trim());
+    validateFrameGuidance(theme, `主题「${theme.name}」`);
     if (!Array.isArray(theme.categories) || theme.categories.length === 0) {
       throw new Error(`主题「${theme.name}」必须包含非空的 categories 数组`);
     }
@@ -120,6 +130,7 @@ function validateWikiFrame(themes) {
         throw new Error(`主题「${theme.name.trim()}」下分类「${category.name.trim()}」重复`);
       }
       categoryNames.add(category.name.trim());
+      validateFrameGuidance(category, `分类「${category.name}」`);
       if (!Array.isArray(category.doc_ids) || category.doc_ids.length === 0
         || category.doc_ids.some((id) => !Number.isSafeInteger(id))) {
         throw new Error(`分类「${category.name}」的 doc_ids 必须是至少一个资料编号；没有依据资料的分类不要交`);

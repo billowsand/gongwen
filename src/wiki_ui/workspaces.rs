@@ -159,7 +159,7 @@ pub(super) fn right_panel(
         });
 }
 
-fn left_panel(ui: &mut egui::Ui, id: &'static str, content: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn left_panel(ui: &mut egui::Ui, id: &'static str, content: impl FnOnce(&mut egui::Ui)) {
     let width = (ui.available_width() * 0.24).clamp(108.0, 236.0);
     egui::Panel::left(id)
         .exact_size(width)
@@ -249,54 +249,7 @@ fn frame(app: &mut GongwenApp, ui: &mut egui::Ui) {
         ui.colored_label(theme::warn(), error);
     }
     match app.wiki.frame_tab {
-        FrameTab::Existing => {
-            left_panel(ui, "wiki_manage_tree", |ui| {
-                tree_pane(app, ui, &mut None, true)
-            });
-            egui::ScrollArea::vertical()
-                .id_salt("wiki_manage_detail")
-                .show(ui, |ui| {
-                    ui.strong("节点详情");
-                    let busy = app.wiki.busy();
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut app.wiki.new_node_name)
-                                .hint_text("新主题名称")
-                                .desired_width(150.0),
-                        );
-                        let name = app.wiki.new_node_name.trim();
-                        if ui
-                            .add_enabled(!busy && !name.is_empty(), egui::Button::new("新增主题"))
-                            .clicked()
-                            && let Some(store) = &app.wiki_store
-                        {
-                            match store.create_theme(name) {
-                                Ok(id) => {
-                                    app.wiki.selected_node = Some(id);
-                                    app.wiki.node_name_edit = name.to_owned();
-                                    app.wiki.new_node_name.clear();
-                                    app.wiki.invalidate();
-                                }
-                                Err(error) => {
-                                    app.wiki.notice = Some(format!("建主题失败：{error:#}"))
-                                }
-                            }
-                        }
-                    });
-                    node_edit_strip(app, ui);
-                    if let Some(id) = app.wiki.selected_node
-                        && let Some(store) = &app.wiki_store
-                        && let Ok(docs) = store.frame_doc_ids(id)
-                        && !docs.is_empty()
-                    {
-                        let refs = docs
-                            .into_iter()
-                            .map(|id| (id, String::new()))
-                            .collect::<Vec<_>>();
-                        evidence(app, ui, &refs);
-                    }
-                });
-        }
+        FrameTab::Existing => framework::existing(app, ui),
         FrameTab::Proposal => frame_proposal(app, ui),
         FrameTab::Import => frame_import(app, ui),
     }
@@ -347,11 +300,13 @@ fn frame_proposal(app: &mut GongwenApp, ui: &mut egui::Ui) {
             }
         });
     });
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    framework::detail_pane(ui, "wiki_proposal_detail", |ui| {
+        ui.weak("同名节点已有的分类口径会沿用；可在「现有框架」修改。");
         if ui.button("新增主题").clicked() {
             *selection = Some((proposal.themes.len(), None));
             proposal.themes.push(FrameTheme {
                 name: String::new(),
+                guidance: String::new(),
                 categories: Vec::new(),
             });
         }
@@ -410,8 +365,12 @@ fn frame_proposal(app: &mut GongwenApp, ui: &mut egui::Ui) {
             let Some(category) = theme.categories.get_mut(child) else {
                 return;
             };
-            ui.label("分类名称");
-            ui.text_edit_singleline(&mut category.name);
+            framework::definition_fields(
+                ui,
+                "分类名称",
+                &mut category.name,
+                &mut category.guidance,
+            );
             let mut parent = index;
             egui::ComboBox::from_id_salt("wiki_proposal_parent")
                 .selected_text(&theme.name)
@@ -437,12 +396,12 @@ fn frame_proposal(app: &mut GongwenApp, ui: &mut egui::Ui) {
                 categories.push(category);
             }
         } else {
-            ui.label("主题名称");
-            ui.text_edit_singleline(&mut theme.name);
+            framework::definition_fields(ui, "主题名称", &mut theme.name, &mut theme.guidance);
             if ui.button("新增分类").clicked() {
                 *selection = Some((index, Some(theme.categories.len())));
                 theme.categories.push(FrameCategory {
                     name: String::new(),
+                    guidance: String::new(),
                     doc_ids: Vec::new(),
                 });
             }
@@ -488,7 +447,7 @@ fn frame_proposal(app: &mut GongwenApp, ui: &mut egui::Ui) {
 
 fn frame_import(app: &mut GongwenApp, ui: &mut egui::Ui) {
     ui.strong("Markdown 大纲");
-    ui.weak("用一级标题表示主题、二级标题表示分类。也可粘贴两级列表。");
+    ui.weak("用一级标题表示主题、二级标题表示分类，也可粘贴两级列表。节点后的 > 行可写分类口径。");
     let parsed = crate::wiki::parse_frame_outline(&app.wiki.import_text);
     if ui
         .add_enabled(
@@ -499,20 +458,6 @@ fn frame_import(app: &mut GongwenApp, ui: &mut egui::Ui) {
         && let Ok(themes) = crate::wiki::parse_frame_outline(&app.wiki.import_text)
         && let Some(store) = &app.wiki_store
     {
-        let themes = themes
-            .into_iter()
-            .map(|theme| FrameTheme {
-                name: theme.name,
-                categories: theme
-                    .categories
-                    .into_iter()
-                    .map(|name| FrameCategory {
-                        name,
-                        doc_ids: Vec::new(),
-                    })
-                    .collect(),
-            })
-            .collect::<Vec<_>>();
         match store.apply_frame(&themes) {
             Ok((created, reused)) => {
                 app.wiki.notice = Some(format!("已导入 {created} 个节点 · 沿用 {reused} 个节点"));
@@ -531,7 +476,7 @@ fn frame_import(app: &mut GongwenApp, ui: &mut egui::Ui) {
                     egui::TextEdit::multiline(&mut app.wiki.import_text)
                         .desired_width(f32::INFINITY)
                         .desired_rows(12)
-                        .hint_text("# 安全生产\n## 监督检查\n## 应急管理"),
+                        .hint_text("# 安全生产\n## 监督检查\n> 收录日常检查和整改复查；应急演练归入应急管理。\n## 应急管理"),
                 );
             });
         egui::ScrollArea::vertical()
@@ -542,9 +487,13 @@ fn frame_import(app: &mut GongwenApp, ui: &mut egui::Ui) {
                     Ok(themes) => {
                         for theme in themes {
                             ui.strong(&theme.name);
-                            for category in &theme.categories {
-                                ui.label(format!("　{category}"));
-                            }
+                            if !theme.guidance.is_empty() { ui.weak(&theme.guidance); }
+                            ui.indent(&theme.name, |ui| {
+                                for category in &theme.categories {
+                                    ui.label(&category.name);
+                                    if !category.guidance.is_empty() { ui.weak(&category.guidance); }
+                                }
+                            });
                         }
                     }
                     Err(error) if !app.wiki.import_text.trim().is_empty() => {

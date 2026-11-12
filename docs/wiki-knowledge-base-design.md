@@ -33,6 +33,11 @@
 
 两级：`主题（theme）→ 分类（category）`，分类下直接挂页面。页面归属为**单分类**（口径 10）。主题与分类节点本身各有一篇**导览页**（口径 11，自动存在，内容由整编生成）——这样 Obsidian 链接也能指向主题/分类（如 `[[××工作]]`）。
 
+每个主题和分类可保存一份「分类口径」（最多 600 字），写明收录范围、排除条件和易混淆资料的归属。
+「框架管理」左侧选节点，主区编辑名称和口径。已有节点可以补填，导入大纲时也可用节点后的 Markdown 引用行（`>`）填写。
+AI 归纳交付的 `guidance` 可在确认前编辑；合并同名节点时只补空白口径。
+再次归纳时模型参考已有口径确定资料映射，整编和更新读取所属主题及分类的口径。依据仍来自资料库，已入库页面的归属由原有流程管理。
+
 ### 3.2 框架建立的两种来源
 
 **A. AI 归纳（冷启动）**
@@ -158,6 +163,7 @@
 挂在 manuscripts.db（SQLCipher 自动覆盖），照 `src/manuscript.rs` 的 DDL 模式（knowledge 系列表同款）：
 
 - `wiki_nodes`：框架节点（id、parent_id 可空、name、kind：theme/category；两级约束由程序保证）；
+- `wiki_node_guidance`：按节点 ID 存储分类口径；旧节点默认留空，删除节点时级联清理。
 - `wiki_pages`：id（UUID）、title、node_id（归属分类）、kind（normal/guide）、status、current_version、created/updated_at；
 - `wiki_page_versions`：id、page_id、version、body 快照、source_run_id、review_edited（bool）、created_at；
 - `wiki_links`：from_page、to_page、to_node（导览页/红链目标）、link_text、resolved（红链未建为 false）；
