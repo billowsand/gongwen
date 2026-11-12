@@ -38,7 +38,8 @@ jobs:
   build-windows:
     name: Build Windows x64
     runs-on: windows-latest
-    timeout-minutes: 90
+    # 两个 release 二进制在冷缓存下串行编译，旧 90 分钟上限不足以完成双版打包。
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
 

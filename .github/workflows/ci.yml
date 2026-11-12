@@ -30,7 +30,8 @@ jobs:
   windows:
     name: fmt / clippy / test (Windows x64)
     runs-on: windows-latest
-    timeout-minutes: 60
+    # 双版需要两轮 Clippy、两轮测试与两轮构建；冷缓存已超过旧 60 分钟上限。
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
 
