@@ -776,12 +776,6 @@ impl GongwenApp {
             }
         }
 
-        // F1 全局切到帮助标签。用 consume_key 而非 consume_shortcut：F1 不是
-        // 组合键，consume_shortcut 对裸键的行为在各平台上不一致。
-        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
-            self.open_page(NavPage::Help);
-        }
-
         if self.showing_doc() && !self.docs.is_empty() {
             let close = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::W);
             if ctx.input_mut(|input| input.consume_shortcut(&close)) {

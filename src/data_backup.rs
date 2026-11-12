@@ -1032,11 +1032,11 @@ fn safe_relative_path(name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// 随包公开的帮助截图副本：名称与字节都与内置资源一致时，真实槽 (`images/`)
-/// 与诱饵槽 (`alt-images/`) 都算公开内容，不要求 GWA2 密封。
+/// 旧版「使用帮助」的截图副本：名称与字节都与旧版随包资源一致时，真实槽
+/// (`images/`) 与诱饵槽 (`alt-images/`) 都算公开内容，不要求 GWA2 密封。
 ///
-/// 诱饵槽里的帮助截图同样是程序自己写出的公开字节，却曾因只认 `images/` 让
-/// 全量备份永久失败；这里按内容判定，不再按槽位路径。
+/// 帮助功能已下线，但旧备份里可能仍带这些明文截图；按内容判定，避免合法旧备份
+/// 被「未加密文件」检查永久拒绝。
 fn public_help_image(rel: &Path, bytes: &[u8]) -> bool {
     let Some(parent) = rel.parent() else {
         return false;
@@ -1047,22 +1047,17 @@ fn public_help_image(rel: &Path, bytes: &[u8]) -> bool {
     let Some(name) = rel.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    crate::help::content::IMAGES
-        .iter()
-        .any(|(bundled, public)| *bundled == name && *public == bytes)
+    crate::retired_help::matches(name, bytes)
 }
 
-/// 这份文件最多先读多少字节才能判定是不是公开帮助截图。
+/// 这份文件最多先读多少字节才能判定是不是旧版公开帮助截图。
 fn public_help_head_len(rel: &Path) -> Option<u64> {
     let parent = rel.parent()?;
     if parent != Path::new("images") && parent != Path::new("alt-images") {
         return None;
     }
     let name = rel.file_name()?.to_str()?;
-    crate::help::content::IMAGES
-        .iter()
-        .find(|(bundled, _)| *bundled == name)
-        .map(|(_, public)| public.len() as u64)
+    crate::retired_help::len_of(name)
 }
 
 /// 还原前仅接受本机加密后的载荷；绝不把归档解密后的业务明文写入隔离目录。
@@ -1337,26 +1332,26 @@ mod tests {
         assert_eq!(fs::read(target.join("keep")).unwrap(), b"original");
     }
 
-    /// 帮助手册 PDF 与帮助截图是随包公开、可重建的明文；它们不能让加密工作区的
-    /// 全量备份永久失败（旧版曾把帮助 PDF 写在配置目录、把截图写进诱饵槽）。
+    /// 旧版「使用帮助」留在配置目录的 PDF 是随包公开、可重建的明文；它不能让
+    /// 加密工作区的全量备份永久失败。帮助功能已下线，但旧备份与旧机器上仍可能留着。
     #[test]
-    fn public_help_plaintext_never_blocks_a_backup() {
+    fn retired_help_plaintext_never_blocks_a_backup() {
         assert!(is_excluded(Path::new("help/公文助手使用帮助-abc.pdf")));
-        // 诱饵槽里的公开截图与真实槽同权：按名称 + 字节判定，不按槽位路径。
-        for &(name, public) in crate::help::content::IMAGES {
-            for base in ["images", "alt-images"] {
-                let rel = Path::new(base).join(name);
-                assert!(
-                    ensure_encrypted_payload(&rel, public).is_ok(),
-                    "{rel:?} 是随包公开字节，不应卡住备份"
-                );
-                assert!(ensure_encrypted_payload(&rel, b"user-private-bytes").is_err());
-            }
-            // 别处同名文件不算公开内容。
-            assert!(ensure_encrypted_payload(&Path::new("help").join(name), public).is_err());
+        // 旧版帮助截图只有与随包字节完全一致才放行；被覆盖成私有内容时照常拒绝。
+        for base in ["images", "alt-images"] {
+            let rel = Path::new(base).join("help-ui-hero.png");
+            assert!(ensure_encrypted_payload(&rel, b"user-private-bytes").is_err());
         }
+        // 别处同名文件不算公开内容。
+        assert!(
+            ensure_encrypted_payload(
+                &Path::new("help").join("help-ui-hero.png"),
+                b"user-private-bytes"
+            )
+            .is_err()
+        );
 
-        // 端到端：配置目录里同时有旧帮助 PDF、诱饵槽公开截图与密封配置，备份应成功。
+        // 端到端：配置目录里有旧帮助 PDF 与密封配置时，备份应成功且不包含 help 组。
         let root = tempfile::tempdir().unwrap();
         let config = root.path().join("config");
         fs::create_dir_all(&config).unwrap();
@@ -1365,18 +1360,12 @@ mod tests {
         crate::vault::set_key_handle(*unlocked.unwrap().dek, true);
         crate::vault::write_path(&config.join("config.json"), "config", b"{}").unwrap();
         write(&config, "help/公文助手使用帮助-old.pdf", b"%PDF-public");
-        for &(name, public) in crate::help::content::IMAGES {
-            write(&config, &format!("alt-images/{name}"), public);
-        }
         let out = root.path().join("backup.7z");
         export_from(&config, &out, PASSWORD).unwrap();
         let info = inspect_backup(&out, PASSWORD).unwrap();
         assert!(!info.groups.iter().any(|group| group.name == "help"));
         let target = root.path().join("restored");
         restore_backup(&out, &target, PASSWORD).unwrap();
-        for &(name, public) in crate::help::content::IMAGES {
-            assert_eq!(read(&target, &format!("alt-images/{name}")), public);
-        }
         crate::vault::clear_key_handle();
         crate::storage::set_test_config_dir(None);
     }

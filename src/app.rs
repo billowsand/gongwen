@@ -248,8 +248,6 @@ pub struct GongwenApp {
     about_window_open: bool,
     /// 关于窗里「检查更新」的当前状态；只留在本次运行。
     update_check: crate::update_check::UpdateCheckState,
-    /// 应用内帮助页（[`NavPage::Help`] 标签）的状态。
-    help: crate::help::HelpState,
     quick_find: Option<quick_find::QuickFind>,
     vocabulary_filter: String,
     /// 词库树上当前选中的词条 id，右侧编辑区显示它的详情。
@@ -806,7 +804,6 @@ impl GongwenApp {
             vocabulary_sort_undo: None,
             about_window_open: false,
             update_check: crate::update_check::UpdateCheckState::default(),
-            help: crate::help::HelpState::default(),
             quick_find: None,
             modal_guard: crate::modal::ModalGuard::default(),
             vocabulary_filter: String::new(),
@@ -1256,22 +1253,11 @@ impl GongwenApp {
                         })
                     }
                     TabRef::Page(NavPage::Settings) => self.settings_ui(&mut content_ui),
-                    TabRef::Page(NavPage::Help) => {
-                        crate::help::help_page(&mut content_ui, &mut self.help)
-                    }
                     TabRef::Pdf(key) => self.pdf_ui(key, &mut content_ui),
                 }
             });
         // 起草页在借出会话的那一帧里做不了的事，到这里统一执行。
         self.apply_draft_actions(&ctx);
-        // 设置页的「打开完整图文手册」只置了个位——它拿不到标签栏，开标签在这儿。
-        if std::mem::take(&mut self.help.request_open) {
-            self.open_page(NavPage::Help);
-        }
-        // 帮助页的「生成 PDF」同理：后台线程与 PDF 标签都归 app 管。
-        if std::mem::take(&mut self.help.request_pdf) {
-            self.start_help_pdf(&ctx);
-        }
         self.auto_create_touched_doc();
         #[cfg(feature = "ai-workbench")]
         if let Some(request) = self.task_ui.request_fill.take() {

@@ -15,7 +15,6 @@
 - `cargo fmt --all -- --check`
 - `cargo test --locked local_fulltext_is_independent_and_highlights_original_text -- --nocapture`
 - `cargo test --locked knowledge::tests -- --nocapture`
-- `cargo test --locked help::`
 - `cargo test --locked local_fulltext_performance_sample_1000_10000_docs -- --ignored --nocapture`
 
 性能样例使用内存之外的临时 SQLite 文件，分别造 1000 / 10000 篇重复公文样本文本，记录索引时间、重开连接后的第一次搜索（连接冷查，操作系统文件缓存未清理）和第二次搜索（热查）；硬件与 SQLite cache 会影响耗时，当前没有硬性阈值。

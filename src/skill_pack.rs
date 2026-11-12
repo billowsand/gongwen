@@ -4,7 +4,7 @@
 //! `.md`。
 //!
 //! 源文件在仓库的 `skills/gongwen-markdown/`，这里用 `include_str!` 整套编进
-//! 二进制：设置页「上手指引」随时能导出，不依赖安装目录里有没有那份 `.skill`。
+//! 二进制：AI 管理页「AI 技能包」随时能导出，不依赖安装目录里有没有那份 `.skill`。
 //! 安装包另带一份现成的 `.skill`（`scripts/package-portable.ps1` 打的），两者内容
 //! 同源。
 //!

@@ -29,6 +29,7 @@ use crate::preview;
 use crate::qa;
 #[cfg(feature = "ai-workbench")]
 use crate::rag;
+#[cfg(feature = "ai-workbench")]
 use crate::storage;
 use crate::system_fonts;
 #[cfg(feature = "ai-workbench")]
@@ -88,8 +89,6 @@ pub(crate) enum WorkerResult {
     SystemFonts(Vec<system_fonts::SystemFont>),
     /// 关于窗的更新检查结果。
     UpdateChecked(Result<crate::update_check::ReleaseInfo, String>),
-    /// 帮助手册排好的 PDF（或出错原因）。
-    HelpPdf(Result<PathBuf, String>),
     /// 导出全量备份：目标路径与文件字节数。
     BackupExported {
         path: PathBuf,
@@ -402,67 +401,6 @@ impl GongwenApp {
         });
     }
 
-    /// 把帮助手册按研究报告版式排成 PDF，排好在 PDF 标签里打开。成品放在**缓存目录**
-    /// 的 `help/` 下，文件名带正文的哈希：同一版手册排过一次就直接打开，不再重排。
-    ///
-    /// 不能放配置目录：帮助手册是随包公开文档、明文可重建，一旦落在配置目录里，
-    /// 全量备份的「内部只许密文」检查会把整个备份拒绝掉，而用户既不知道原因、
-    /// 也没有清理入口。缓存目录不属于备份范围，锁定/退出清理也不影响它。
-    pub(crate) fn start_help_pdf(&mut self, ctx: &egui::Context) {
-        if self.help.pdf_busy {
-            return;
-        }
-        let markdown = crate::help::content::markdown();
-        let hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (markdown, env!("CARGO_PKG_VERSION")).hash(&mut hasher);
-            hasher.finish()
-        };
-        let dir = match storage::cache_dir() {
-            Ok(dir) => dir.join("help"),
-            Err(error) => {
-                self.status = format!("帮助手册排版失败：{error:#}");
-                return;
-            }
-        };
-        let path = dir.join(format!("公文助手使用帮助-{hash:016x}.pdf"));
-        if path.is_file() {
-            self.open_pdf(path, Some("公文助手使用帮助".into()));
-            return;
-        }
-        self.help.pdf_busy = true;
-        self.status = "正在排版帮助手册…".into();
-        let tx = self.sender.clone();
-        let ctx = ctx.clone();
-        thread::spawn(move || {
-            let result = (|| -> anyhow::Result<PathBuf> {
-                crate::help::content::install_images()?;
-                std::fs::create_dir_all(&dir)?;
-                // 先写临时文件再改名：排到一半退出，留下的残件不会被当成排好的成品。
-                // 失败必须删掉残件——明文残件留在磁盘上既没用，也会被以后的口径检查误伤。
-                let partial = path.with_extension("pdf.part");
-                if let Err(error) = crate::export::typst::research::write_pdf(
-                    &partial,
-                    &crate::help::content::draft(),
-                    markdown,
-                    &crate::models::NumberingConfig::default(),
-                ) {
-                    let _ = std::fs::remove_file(&partial);
-                    return Err(error);
-                }
-                if let Err(error) = std::fs::rename(&partial, &path) {
-                    let _ = std::fs::remove_file(&partial);
-                    return Err(error.into());
-                }
-                Ok(path)
-            })()
-            .map_err(|error| format!("{error:#}"));
-            let _ = tx.send(WorkerResult::HelpPdf(result));
-            ctx.request_repaint();
-        });
-    }
-
     /// 检查最新发布。只发一次请求，结果回到关于窗内联显示。
     pub(crate) fn start_update_check(&mut self, ctx: &egui::Context) {
         if matches!(
@@ -673,16 +611,6 @@ impl GongwenApp {
                         }
                         Err(error) => crate::update_check::UpdateCheckState::Failed(error),
                     };
-                }
-                WorkerResult::HelpPdf(result) => {
-                    self.help.pdf_busy = false;
-                    match result {
-                        Ok(path) => {
-                            self.status = "帮助手册的 PDF 已排好。".into();
-                            self.open_pdf(path, Some("公文助手使用帮助".into()));
-                        }
-                        Err(error) => self.status = format!("帮助手册排版失败：{error}"),
-                    }
                 }
                 WorkerResult::BackupExported { path, result } => {
                     self.backup_busy = false;

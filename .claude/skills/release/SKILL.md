@@ -1,13 +1,13 @@
 ---
 name: release
-description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与使用帮助文档、写版本更新说明、bump 版本、推送 main、打 annotated tag 触发 CI/CD、监控 workflow 并验证。当用户要求「发布 / 发版 / 出新版本 / 打 tag / release」时使用。
+description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与安装指南文档、写版本更新说明、bump 版本、推送 main、打 annotated tag 触发 CI/CD、监控 workflow 并验证。当用户要求「发布 / 发版 / 出新版本 / 打 tag / release」时使用。
 ---
 
 # 发布 gongwen 新版本 — Agent Skill Guide
 
 把当前 `main` 上的改动发布为 GitHub 新版本。**硬性要求：release 必须带有手写的版本更新说明，不能只推 tag 或依赖 `--generate-notes` 的占位说明**（用户明确要求）。说明随源码提交在 `docs/release-notes/vX.Y.Z.md`，`release.yml` 发布时直接取用。
 
-**硬性要求二：每次发版都要核对 README 与使用帮助是否跟上了本版功能**（用户明确要求）——功能改了而文档没改，等于发布一个说不清自己的版本。流程见步骤 3，机械检查命令已写在那一节，不要靠印象判断。
+**硬性要求二：每次发版都要核对 README 与安装指南是否跟上了本版功能**（用户明确要求）——功能改了而文档没改，等于发布一个说不清自己的版本。流程见步骤 3，机械检查命令已写在那一节，不要靠印象判断。
 
 ## 仓库事实（勿重新探索）
 
@@ -15,10 +15,10 @@ description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与使�
 - 版本号只维护在 `Cargo.toml`（根包 `version`）+ `Cargo.lock`（根包 `gongwen-assistant` 的 `version`）。**注意 `Cargo.lock` 里另有若干同名版本的依赖**（`block2`、`type-map`、`windows-strings`、`zune-core` 等），只改 `name = "gongwen-assistant"` 那一条。
 - 工作流：`ci.yml` 在 push main 时触发，**当前只跑 Windows x64**（fmt / clippy / test + 随包 Pi 运行时、host 测试、离线验收、manifest 端到端）加一个 RustSec 依赖漏洞扫描；macOS / Linux / Ubuntu 20.04 启动冒烟三个作业 `if: false` 停用。`release.yml` 在 push `v*` tag 时触发，共 8 个 job，但当前只有 build-windows 与 release 会执行（其余 `if: false` 跳过）。
 - **版本更新说明由工作流取仓库文件**：`release.yml` 的 `release` job 读 `docs/release-notes/${GITHUB_REF_NAME}.md`，有则 `gh release create --title "公文助手 vX.Y.Z" --notes-file <该文件>`；**缺文件才回退 `--generate-notes` 并打一条 `::warning::`**。所以说明必须在打 tag 前提交进仓库，不是发完再补。
-- **用户文档有三份，发版时都可能过期**（发版前必查，见步骤 3）：
+- **用户文档有两份，发版时都可能过期**（发版前必查，见步骤 3）：
   - `README.md`（根目录）：面向读者的宣发版，含成堆**会随版本漂移的硬数字**（文种 7 种、导入 24 种格式、校对词表 155 条、文档级规则 21 条、约 21.2 万行 Rust、1852 项自动化测试——括号里是 v0.9.1 的值，**每版都要重新数**，见步骤 3）。打包脚本会把它复制进发布包（`scripts/package-portable.ps1`、`scripts/package-dmg.sh`），所以它是**随包发行**的文档，不是仓库自留物。
-  - 使用帮助：`assets/help/*.md` 是**一篇研究报告**（`00-front.md` 题名、目录、摘要，其后每章一个文件，按文件名升序拼接），应用内用研究报告预览排、「生成 PDF」走研究报告 Typst 链；示意图是正文里的 Mermaid 围栏，只有界面截图是位图（`assets/help/images/help-*.png`）。文件清单在 `src/help/content.rs` 的 `FILES` / `IMAGES`，测试会核对与目录一致。**只此一份，没有副本**。
-  - `docs/install.md`（安装指南）与 `docs/manual.md`（手册目录页，分部表格列出全部章号章名）。
+  - `docs/install.md`（安装指南）。
+- 使用帮助/用户手册已于 2026-11-12 退役：`assets/help/`、`src/help/`、`docs/manual.md` 均已删除，发版时不要再找它们，也不要重新引入手册维护流程。旧版帮助截图与配置目录 `help/` PDF 仅由 `src/retired_help.rs` 与备份排除规则兼容。
 - **Release 资产是 8 个**（v0.10.0 起的口径：四件套各带 `.sha256`。macOS 作业拿不到托管 runner 时 dmg 可缺省、只剩 6 个；Linux AMD64 的 deb 不发布）：
   - `gongwen-assistant-X.Y.Z-win-x64-setup.exe` + `.sha256`
   - `gongwen-assistant-X.Y.Z-macos-arm64.dmg` + `.sha256`（`macos-15` 原生构建；未配置签名 / 公证 secrets 时为 ad-hoc 签名，只能右键打开）
@@ -27,10 +27,10 @@ description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与使�
 - 本机无 `pwsh`：不能跑 `scripts/bump-version.ps1`，版本号用手动编辑。
 - **提交预分诊（可选加速，用 eval 的 `judge_batch`）**：本机 omp 已接入 TypeSafe
   （judge 模型角色 = `typesafe/jev-latest`），一条 `judge_batch` 调用就能把本区间每条提交的
-  类别、所属功能域、是否需要动 README 与使用帮助一次性判完，把「逐条 `git show` 读提交」
+  类别、所属功能域、是否需要动 README 与安装指南一次性判完，把「逐条 `git show` 读提交」
   这段重复劳动换成一张表。Jev 是 System One 模型，只出结构化判断、不生成文字，
   所以它替代的是读提交，不是写说明。
-  **它不替代任何硬性要求**：版本更新说明仍要手写，README / 使用帮助仍要人工过目。
+  **它不替代任何硬性要求**：版本更新说明仍要手写，README / 安装指南仍要人工过目。
   没配 TypeSafe 凭据就跳过，流程完全不变。
 - 历史惯例：tag 为 **annotated tag**（消息为中文概述）；release 标题为「公文助手 vX.Y.Z」；版本号按 **patch** 递增（`v0.5.x` 系列）；发布前有一个 `chore: release vX.Y.Z` 提交（可同时带上说明文件）。
 - 当前 Release 只构建 Windows x64，全程约 30–45 分钟（Rust 编译 + 组装 Pi 运行时 + 离线验收 + PDF 冒烟 + Inno 打包）；`gh run watch` 一轮就能等完。
@@ -74,7 +74,7 @@ judge 角色 = `typesafe/jev-latest`）：把每条提交当成一个 state，�
   （`--format=%x01%H%x02%s%x02%b%x03` 配 `--shortstat --no-merges` 解析，别逐条调 git）。
 - `questions` 三条：`kind`（choice：user_feature / user_fix / internal_refactor / docs /
   test_build / unsure）、`section`（choice：排版导出 / AI 智能体 / 数据接口 / 稿件库与版本 /
-  送批材料 / 输入法 / 校对词表 / 平台打包 / other）、`docs`（bool：要不要动 README 与使用帮助）。
+  送批材料 / 输入法 / 校对词表 / 平台打包 / other）、`docs`（bool：要不要动 README 与安装指南）。
   **criteria 要写足**，官方记录 Jev 偏「字面理解」，判据含糊它就跟着含糊。
 - `b = judge_batch(commits, QUESTIONS)`，然后 **`await b.drain(timeout=30)` 循环取**
   （`drain` 是协程，得 await；不 await 会静默不消费）。取完 `b.status()` / `b.results()` /
@@ -99,9 +99,9 @@ judge 角色 = `typesafe/jev-latest`）：把每条提交当成一个 state，�
   凭据用 `/login typesafe` 或环境变量 `TYPESAFE_API_KEY`，**不要写进仓库任何文件**。
 - **没凭据就照原流程人工读提交，不要卡住发版。**
 
-### 3. 文档同步检查（README 与使用帮助，最容易跳过）
+### 3. 文档同步检查（README 与安装指南，最容易跳过）
 
-**必须在写版本更新说明、bump 之前做完**，改完的文档要进本版提交集，并在说明的「### 文档」小节里交代。已发生过 README 里硬数字随版本漂移、功能上线而手册没跟上的情况，所以这一步不许省。
+**必须在写版本更新说明、bump 之前做完**，改完的文档要进本版提交集，并在说明的「### 文档」小节里交代。已发生过 README 里硬数字随版本漂移、功能上线而安装指南没跟上的情况，所以这一步不许省。
 
 先看本版改了什么，逐条问「文档里有没有对应的说法，还是旧说法」：
 
@@ -111,26 +111,15 @@ git show --stat --format='%s' <commit>       # 逐个看改到了哪些界面 / 
 ```
 
 若步骤 2.5 跑过分诊，先拿它的「文档 = 要改」清单当检查表：那条提交对应到
-README 哪一节、手册哪一章、要不要重截截图。它能保证不漏，但不能保证说得准，
+README 哪一节、安装指南哪一段。它能保证不漏，但不能保证说得准，
 每一条仍要自己看一眼；标「需人工确认」的优先看。分诊没跑或没有 TypeSafe 凭据就按上面的
 `git log` 逐条来，本节的检查要求与分诊无关。
 
-三道机械检查（能自动发现的不靠人眼）：
+README 硬数字逐条重新数（能自动发现的不靠人眼）：
 
 ```bash
-# ① 手册自检：文件清单、截图、交叉引用、Mermaid 图都由测试把关
-cargo test --locked help::
-
-# ② 章节口径：正文 22 章 + 附录 3 篇（另有 00-front.md 是题名、目录与摘要），
-#    与 README「22 章 + 3 附录」、docs/manual.md 的分部表格一致
-ls assets/help/[0-9][0-9]-*.md | grep -v 00-front | wc -l   # 22
-ls assets/help/[a-c]-*.md | wc -l                            # 3
-
-# ③ 整本排一遍 PDF，目视检查（tmp/typst-samples/help/）
-cargo test --locked help_pdf_sample -- --ignored --nocapture
-
-# ④ README「文种、导出与平台」表的硬数字，逐条重新数一遍
-#    （下面是 v0.9.1 的实际值，仅作对照——每版都要重新数，别直接抄）
+# README「文种、导出与平台」表的硬数字，逐条重新数一遍
+# （下面是 v0.9.1 的实际值，仅作对照——每版都要重新数，别直接抄）
 grep -v '^#' proofread-lexicon.tsv | tail -n +2 | wc -l   # 校对词表条数（v0.9.1 时 155）
 find src -name '*.rs' | xargs wc -l | tail -1              # 代码行数（v0.9.1 时约 21.2 万行）
 # 测试数：复用步骤 4 那次 cargo test 的输出汇总（v0.9.1 时 1852）
@@ -139,19 +128,19 @@ cargo test --locked --all-targets --no-fail-fast 2>&1 | grep -oE '[0-9]+ passed'
 
 人眼要过的一遍：
 
-- **新功能**：本版新增的界面、面板、快捷键、导出格式，在 `assets/help/` 里有没有对应章节或段落？没有就补（写法同研究报告，见技能包 `research-report.md`；画图写 Mermaid）。若新增**一整章**，在 `src/help/content.rs` 的 `FILES` 按文件名顺序加一行，章标题挂 `{#chap:…}` 锚点；新截图放进 `assets/help/images/help-*.png` 并登记到 `IMAGES`。
-- **改动的功能**：README 的「为什么是公文助手」「核稿保障」「排版」「开箱即用」「文稿管理」「AI」「文种、导出与平台」各节，以及手册对应章节的描述、示例、截图，是否还是现在这个样子。
-- **界面截图**：界面有可见变化时，`docs/images/readme/`（README 用）与 `assets/help/images/`（手册用）里的过期截图要重截，别挂着旧界面发版。
+- **新功能**：本版新增的界面、面板、快捷键、导出格式，README 里有没有对应段落？没有就补。
+- **改动的功能**：README 的「为什么是公文助手」「核稿保障」「排版」「开箱即用」「文稿管理」「AI」「文种、导出与平台」各节，是否还是现在这个样子。
+- **界面截图**：界面有可见变化时，`docs/images/readme/` 里的过期截图要重截，别挂着旧界面发版。
 - **版本相关表述**：`docs/install.md` 的平台 / 产物清单、README 末尾的 CI 与发布说明，是否仍与 `release.yml` 的实际行为一致。
 
 有改动就提交（可单独 `docs:` 提交，也可并入本版 `chore: release vX.Y.Z`）：
 
 ```bash
-git add README.md docs assets/help src/help/content.rs
-git commit -m "docs: 同步 README 与使用帮助至 vX.Y.Z"
+git add README.md docs
+git commit -m "docs: 同步 README 与安装指南至 vX.Y.Z"
 ```
 
-确认无需改动时，在收尾汇报里明确写一句「README 与使用帮助已核对，本版无需更新」，别默默跳过。
+确认无需改动时，在收尾汇报里明确写一句「README 与安装指南已核对，本版无需更新」，别默默跳过。
 
 ### 4. 本地质量门禁（关键，勿跳过）
 
@@ -260,7 +249,7 @@ cd - && rm -rf /tmp/kw
 
 ### 10. 收尾汇报
 
-向用户报告：版本号、release 链接（`https://github.com/billowsand/gongwen/releases/tag/vX.Y.Z`）、CI 与 Release 两个 workflow 结果、发布说明要点、资产口径、过程中遇到的问题与处理（尤其是未提交改动如何处置、CI 失败根因）、**文档核对结论**（README / 使用帮助 / install.md 是本版更新了哪几处，还是确认无需改动）。跑过分诊的话，附一句它标出多少条「需人工确认」以及这些是怎么处理的——别让分诊悄悄决定文档核对结论。
+向用户报告：版本号、release 链接（`https://github.com/billowsand/gongwen/releases/tag/vX.Y.Z`）、CI 与 Release 两个 workflow 结果、发布说明要点、资产口径、过程中遇到的问题与处理（尤其是未提交改动如何处置、CI 失败根因）、**文档核对结论**（README / install.md 是本版更新了哪几处，还是确认无需改动）。跑过分诊的话，附一句它标出多少条「需人工确认」以及这些是怎么处理的——别让分诊悄悄决定文档核对结论。
 
 ## 版本更新说明模板
 
@@ -282,7 +271,7 @@ cd - && rm -rf /tmp/kw
 
 ### 文档
 
-- <README / 使用帮助 / 安装指南的改动，来自步骤 3 的核对结果；确实没有用户可见的文档改动就省略本节>
+- <README / 安装指南的改动，来自步骤 3 的核对结果；确实没有用户可见的文档改动就省略本节>
 
 ### 质量检查
 
@@ -308,7 +297,7 @@ cd - && rm -rf /tmp/kw
 | 发布后又加了提交 | tag 移到新提交：`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z && git tag -a vX.Y.Z -m "..." <new-commit> && git push origin vX.Y.Z` |
 | release 正文是 generate-notes 占位 | 缺 `docs/release-notes/vX.Y.Z.md`。先记下文件内容，`gh release edit vX.Y.Z --title "公文助手 vX.Y.Z" --notes-file …` 补正；同时把文件补提交，下次同 tag 重跑就不会再回退 |
 | release 标题/正文不对 | `gh release edit vX.Y.Z --title "..." --notes-file ...`（幂等，可重复执行） |
-| 发版后才发现 README / 使用帮助没跟上 | 别指望下版补：优先按步骤 6 移动 tag 重跑（代价是 Release 构建再来一轮）；若只是文字补充、不值得重跑，就单独提 `docs:` 提交并用 `gh release edit vX.Y.Z --notes-file …` 把文档改动补进正文，**同时把步骤 3 的检查固化到下一次发版** |
+| 发版后才发现 README / 安装指南没跟上 | 别指望下版补：优先按步骤 6 移动 tag 重跑（代价是 Release 构建再来一轮）；若只是文字补充、不值得重跑，就单独提 `docs:` 提交并用 `gh release edit vX.Y.Z --notes-file …` 把文档改动补进正文，**同时把步骤 3 的检查固化到下一次发版** |
 | 资产数不是 8（macOS 缺省时不是 6） | `gh release view vX.Y.Z --json assets --jq '.assets[].name'` 对比上面清单；少平台包看对应 build/package job 的日志 |
 | `judge_batch` 的 `drain()` 取不到东西 | `drain` 是协程，必须 `await`；不 await 会静默不消费、循环立刻空转退出 |
 | 报 `unknown judge_batch "<id>"` | `close()` 之后作业引用失效，状态 / 结果 / 失败项必须在 close 前读完；真丢了结果用 `judge_batch.attach(<id>)` 拿回 |

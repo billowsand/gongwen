@@ -79,7 +79,7 @@ python3 scripts/build-editions.py  # 同时产出 AI 全版与非 AI 版二进�
 `split-rust-module`（纯代码移动，每拆一个文件单独提交一次，零警告验证）。
 
 `skills/gongwen-markdown/` 是给外部 AI 工具用的技能包（Agent Skill），讲的是起草页
-Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进制、设置页「上手指引」导出，
+Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进制、AI 管理页「AI 技能包」导出，
 `scripts/package-portable.ps1` 另打一份 `.skill` 随安装包分发。改了解析器语法、标题编号、
 附件或文种规则（`src/export/parse.rs`、`src/prompt.rs`）要同步这里的文档；新增文件要登记进
 `skill_pack::FILES`，测试会检查两边一致。
@@ -92,12 +92,9 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 `model_api_test.md.txt` 或环境变量读），方法与最近一次实测数字见
 `docs/gongwen-skill-model-eval.md`。
 
-使用帮助（菜单「使用帮助」/ `F1`）是 `assets/help/` 下的**一篇研究报告**：按文件名升序拼接
-（`00-front.md` 是题名、目录与摘要，其后每章一个文件，章标题挂 `{#chap:…}`），应用内直接用
-研究报告预览排、「生成 PDF」走研究报告 Typst 链，帮助不再有自己的渲染器。示意图一律写
-Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改帮助就是改研究报告：写法
-见技能包 `research-report.md`，新增文件登记进 `src/help/content.rs` 的 `FILES` / `IMAGES`；
-`cargo test --locked help::` 核对清单、交叉引用与图，`help_pdf_sample`（ignored）整本出 PDF 目视检查。
+用户手册/使用帮助已退役（2026-11-12）：不再内置帮助正文、截图、菜单入口与 `F1`，
+也不再维护 docs 手册。旧版留在 `images/` 的六张帮助截图与配置目录 `help/` 下的 PDF
+只由 `src/retired_help.rs` 和备份排除规则做兼容，不要重新引入手册维护流程。
 
 顶层模块清单在 `src/main.rs`。注意 `mod` 声明里 `outline`、`proofread_rules` 等
 并非全部集中在文件头部，改动前先 `grep -n "^mod " src/main.rs`。
@@ -325,7 +322,7 @@ Mermaid，只有界面截图是位图（`assets/help/images/help-*.png`）。改
   **第一期（探测、解析、换算、`Theme::on_accent`、`ThemeName::Omarchy` 与设置页 / 菜单入口、
   23 套官方样本对比度测试）、第二期（后台每秒轮询即时跟随 `omarchy/watch.rs`、
   `theme::square_chrome()` 直角平面外壳）已完成，待 Omarchy 真机验收**；第三期（`gongwen.toml`
-  覆盖、色卡样张、使用帮助）未开工。代码在 `src/theme/omarchy/`，样本在 `tests/fixtures/omarchy/`。方案、出入与交接见
+  覆盖、色卡样张）未开工。代码在 `src/theme/omarchy/`，样本在 `tests/fixtures/omarchy/`。方案、出入与交接见
   `docs/omarchy-theme-design.md`（单文件，第九节是交接）。只读用户的 Omarchy 配置，不写钩子与模板。
 
 - **任务助手界面改版与「粘贴填表」**（三栏布局 + 视图栏、表单内「从文字填写」、待整理建议视图，

@@ -28,7 +28,6 @@ pub(crate) enum NavPage {
     #[cfg(feature = "ai-workbench")]
     Wiki,
     Settings,
-    Help,
 }
 
 /// 标签栏上的一格：一篇打开的稿件，或一个导航页。稿件和导航页共用同一条
@@ -58,7 +57,6 @@ impl NavPage {
             #[cfg(feature = "ai-workbench")]
             Self::Wiki => "wiki",
             Self::Settings => "settings",
-            Self::Help => "help",
         }
     }
 
@@ -78,7 +76,6 @@ impl NavPage {
             #[cfg(feature = "ai-workbench")]
             "wiki" => Some(Self::Wiki),
             "settings" => Some(Self::Settings),
-            "help" => Some(Self::Help),
             _ => None,
         }
     }
@@ -99,7 +96,6 @@ impl NavPage {
             #[cfg(feature = "ai-workbench")]
             Self::Wiki => "知识库",
             Self::Settings => "设置",
-            Self::Help => "使用帮助",
         }
     }
 
@@ -119,7 +115,6 @@ impl NavPage {
             #[cfg(feature = "ai-workbench")]
             Self::Wiki => theme::Icon::BookmarkCheck,
             Self::Settings => theme::Icon::Settings,
-            Self::Help => theme::Icon::HelpCircle,
         }
     }
 }
@@ -739,7 +734,6 @@ mod tests {
             #[cfg(feature = "ai-workbench")]
             NavPage::Knowledge,
             NavPage::Settings,
-            NavPage::Help,
         ] {
             assert_eq!(
                 NavPage::from_key(page.key()),

@@ -50,7 +50,6 @@ pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::wiki_figure;
 pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};
 pub(crate) use research::outline as research_outline;
-pub(crate) use research::research_preview;
 pub(crate) use research::{LabelKind, LabelTarget, label_targets as research_label_targets};
 pub(crate) use research_anchor::{AnchorRefusal, suggest as suggest_research_anchor};
 
@@ -240,6 +239,7 @@ pub struct PreviewScale {
 
 impl PreviewScale {
     /// 常规情形：自己量宽度，按给定倍率（或自适应）排版。
+    #[cfg(any(feature = "ai-workbench", test))]
     pub fn zoom(zoom: Option<f32>) -> Self {
         Self {
             zoom,

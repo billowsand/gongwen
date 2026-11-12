@@ -9,6 +9,7 @@
 //! 见 `app::provider_settings`）；「模型服务」按功能（智能写作（Pi）/ 文字复核 /
 //! 资料库检索）各自挑一个提供商的模型，不再碰地址密钥。
 
+use super::file_dialog::FileDialogSpec;
 use super::provider_settings::{model_picker, provider_ref_chip};
 use super::settings::{
     DETAIL_MAX_WIDTH, FOOTER_HEIGHT, MENU_COLUMN_WIDTH, MENU_PANEL_MARGIN, MENU_WIDTH,
@@ -32,6 +33,8 @@ pub(crate) enum AiSection {
     ModelService,
     /// 技能：SKILL.md 的管理。
     Skills,
+    /// 供外部 AI 工具使用的公文写作技能包。
+    SkillPack,
     /// 数据接口：内网查询接口。
     DataApis,
     /// 写法风格档案（16.15 C）。
@@ -41,16 +44,20 @@ pub(crate) enum AiSection {
 /// 左侧菜单的分组。
 const MENU_GROUPS: [(&str, &[AiSection]); 3] = [
     ("模型", &[AiSection::Providers, AiSection::ModelService]),
-    ("智能体", &[AiSection::Skills, AiSection::DataApis]),
+    (
+        "智能体",
+        &[AiSection::Skills, AiSection::SkillPack, AiSection::DataApis],
+    ),
     ("写法", &[AiSection::Styles]),
 ];
 
 impl AiSection {
     #[cfg(test)]
-    const ALL: [AiSection; 5] = [
+    const ALL: [AiSection; 6] = [
         AiSection::Providers,
         AiSection::ModelService,
         AiSection::Skills,
+        AiSection::SkillPack,
         AiSection::DataApis,
         AiSection::Styles,
     ];
@@ -61,6 +68,7 @@ impl AiSection {
             AiSection::Providers => "模型服务商管理",
             AiSection::ModelService => "模型服务",
             AiSection::Skills => "技能",
+            AiSection::SkillPack => "AI 技能包",
             AiSection::DataApis => "数据接口",
             AiSection::Styles => "风格",
         }
@@ -71,6 +79,7 @@ impl AiSection {
             AiSection::Providers => theme::Icon::Globe,
             AiSection::ModelService => theme::Icon::PlugZap,
             AiSection::Skills => theme::Icon::WandSparkles,
+            AiSection::SkillPack => theme::Icon::Package,
             AiSection::DataApis => theme::Icon::Braces,
             AiSection::Styles => theme::Icon::Quote,
         }
@@ -88,6 +97,10 @@ impl AiSection {
             AiSection::Skills => {
                 "Pi 标准技能：标准 SKILL.md（YAML frontmatter + 自然语言步骤）与随包辅助文件。\
                  可以编辑、新建、复制内置、启停、恢复内置、导入导出；旧流程技能不再供 Pi 执行。"
+            }
+            AiSection::SkillPack => {
+                "把本程序的 Markdown 标记与九种文种的格式要求打包成 Agent Skill，供 Claude、Codex、\
+                 OpenCode、DeerFlow、pi 等外部工具使用。写出的 .md 可直接粘贴到起草页排版导出。"
             }
             AiSection::DataApis => {
                 "配置内网查询接口（统计、政策库、业务系统、算法服务），供写作时取用数据。只做查询，\
@@ -253,12 +266,79 @@ impl GongwenApp {
                             AiSection::Providers => self.providers_section_ui(ui),
                             AiSection::ModelService => self.model_service_section_ui(ui),
                             AiSection::Skills => self.skills_section_ui(ui),
+                            AiSection::SkillPack => self.skill_pack_section_ui(ui),
                             AiSection::DataApis => self.apis_section_ui(ui),
                             AiSection::Styles => self.styles_section_ui(ui),
                         }
                         ui.add_space(8.0);
                     });
             });
+    }
+
+    /// 把公文 Markdown 规范导出成 Agent Skill，供外部 AI 工具使用。
+    fn skill_pack_section_ui(&mut self, ui: &mut egui::Ui) {
+        // 对话框放到布局之后再开：在闭包里开会阻塞这一帧的布局。
+        let mut export_archive = false;
+        let mut export_folder = false;
+        ui.horizontal(|ui| {
+            export_archive = ui
+                .add(theme::secondary_icon_button(
+                    theme::Icon::Package,
+                    "导出 .skill 技能包",
+                ))
+                .on_hover_text(
+                    "单个文件（zip 格式）：Claude 桌面版 / 网页版在「技能」里上传；\
+                     其他工具解压后放进各自的 skills 目录",
+                )
+                .clicked();
+            export_folder = ui
+                .add(theme::secondary_icon_button(
+                    theme::Icon::Folder,
+                    "导出为技能文件夹",
+                ))
+                .on_hover_text(
+                    "选一个 skills 目录，在里面生成 gongwen-markdown 文件夹：\
+                     如 ~/.claude/skills、~/.agents/skills、~/.config/opencode/skills",
+                )
+                .clicked();
+        });
+
+        if export_archive {
+            self.request_file(
+                FileDialogSpec::save_file()
+                    .filter("技能包", &["skill", "zip"])
+                    .file_name(crate::skill_pack::ARCHIVE_FILE_NAME),
+                |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    app.status = match crate::skill_pack::write_archive(&path) {
+                        Ok(()) => {
+                            let _ = super::reveal_in_os(&path);
+                            format!("已导出 AI 技能包：{}", path.display())
+                        }
+                        Err(error) => format!("导出技能包失败：{error:#}"),
+                    };
+                },
+            );
+        }
+        if export_folder {
+            self.request_file(
+                FileDialogSpec::pick_folder().title("选择要放技能的 skills 目录"),
+                |app, parent| {
+                    let Some(parent) = parent else {
+                        return;
+                    };
+                    app.status = match crate::skill_pack::write_directory(&parent) {
+                        Ok(root) => {
+                            let _ = super::reveal_in_os(&root);
+                            format!("已导出技能文件夹：{}", root.display())
+                        }
+                        Err(error) => format!("导出技能文件夹失败：{error:#}"),
+                    };
+                },
+            );
+        }
     }
 
     /// 底部常驻保存条：数据接口没保存的修改一并落盘。

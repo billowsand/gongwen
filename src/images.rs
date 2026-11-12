@@ -123,34 +123,31 @@ fn app_relative(path: &Path) -> Result<PathBuf> {
     }
     let rest = path.strip_prefix(IMAGE_DIR).unwrap_or(Path::new(""));
     let slot_path = image_dir()?.join(rest);
-    // 使用帮助的截图是随包公开资源，不随槽位复制。诱饵槽里没有副本时回落到
-    // 真实槽的共享目录；用户图片不做这个回落，避免跨槽泄露内容。
+    // 旧版「使用帮助」的截图是随包公开资源，不随槽位复制。诱饵槽里没有副本时
+    // 回落到真实槽的共享目录；用户图片不做这个回落，避免跨槽泄露内容。
     if let Some(name) = rest.file_name().and_then(|name| name.to_str())
         && !slot_path.is_file()
         && let Ok(shared) = storage::config_dir()
     {
         let shared = shared.join(IMAGE_DIR).join(rest);
         // 名称相同不能证明内容公开：用户或旧版程序可能覆盖过这张图。
-        // 只有与随包公开字节完全一致的副本才可跨槽使用。
-        if public_help_copy(&shared, name) {
+        // 只有与旧版随包公开字节完全一致的副本才可跨槽使用。
+        if retired_help_copy(&shared, name) {
             return Ok(shared);
         }
     }
     Ok(slot_path)
 }
 
-fn public_help_copy(path: &Path, name: &str) -> bool {
-    crate::help::content::IMAGES
-        .iter()
-        .find(|(public, _)| *public == name)
-        .is_some_and(|(_, bytes)| {
-            crate::file_limits::read_bytes(path, bytes.len() as u64, "帮助截图")
-                .is_ok_and(|actual| actual == *bytes)
-        })
+fn retired_help_copy(path: &Path, name: &str) -> bool {
+    crate::retired_help::len_of(name).is_some_and(|len| {
+        crate::file_limits::read_bytes(path, len, "旧版帮助截图")
+            .is_ok_and(|actual| crate::retired_help::matches(name, &actual))
+    })
 }
 
-/// 读取应用管理的**文件**（旧图片、旧图表缓存、帮助截图）。新资源进库后由
-/// [`read`] 处理；这个入口保留给迁移、导出中间文件与公开帮助图。
+/// 读取应用管理的**文件**（旧图片、旧图表缓存、旧版帮助截图）。新资源进库后由
+/// [`read`] 处理；这个入口保留给迁移、导出中间文件与公开旧资源。
 pub(crate) fn read_managed_file(path: &Path) -> Result<Vec<u8>> {
     read_managed_file_limited(path, crate::file_limits::MAX_IMAGE_BYTES, "资源文件")
 }
@@ -204,12 +201,12 @@ pub(crate) fn write_managed_file(path: &Path, bytes: &[u8]) -> Result<()> {
     crate::vault::write_path(path, kind, bytes)
 }
 
-/// 随包公开的帮助截图（名称与字节都与内置资源一致）：属于公开内容，不做槽位复制，
-/// 也不参与资源入库与加密迁移；诱饵槽可安全回落到真实槽的共享副本。
-pub(crate) fn is_public_help_file(path: &Path) -> bool {
+/// 旧版「使用帮助」的截图（名称与字节都与随包资源一致）：属于公开内容，不做槽位
+/// 复制，也不参与资源入库与加密迁移；诱饵槽可安全回落到真实槽的共享副本。
+pub(crate) fn is_retired_help_image(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| public_help_copy(path, name))
+        .is_some_and(|name| retired_help_copy(path, name))
 }
 
 /// 可丢弃文件的写入（旧图表缓存回退路径；新缓存进库）：有句柄时密封并允许覆盖
@@ -652,7 +649,7 @@ pub(crate) fn migrate_legacy_files() -> Result<MigrateReport> {
                     .push(format!("{}：文件名不是 UTF-8", path.display()));
                 continue;
             };
-            if is_public_help_file(&path) {
+            if is_retired_help_image(&path) {
                 continue;
             }
             let logical = format!("{IMAGE_DIR}/{name}");
@@ -1088,19 +1085,6 @@ mod tests {
         assert!(resolve_from_base(base, "/etc/passwd").is_err());
         #[cfg(windows)]
         assert!(resolve_from_base(base, "C:\\evil.png").is_err());
-    }
-
-    #[test]
-    #[cfg(feature = "ai-workbench")]
-    fn shared_help_fallback_checks_both_the_bundled_name_and_contents() {
-        let dir = tempfile::tempdir().unwrap();
-        let (name, bytes) = crate::help::content::IMAGES[0];
-        let path = dir.path().join(name);
-        fs::write(&path, bytes).unwrap();
-        assert!(public_help_copy(&path, name));
-        assert!(!public_help_copy(&path, "help-private.png"));
-        fs::write(&path, b"sensitive user image").unwrap();
-        assert!(!public_help_copy(&path, name));
     }
 
     #[test]

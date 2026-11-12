@@ -900,8 +900,8 @@ pub(crate) fn ensure_slot_encrypted() -> Result<()> {
             }
         }
     }
-    // 用户资源：图片、PDF 插图与 Mermaid 缓存整文件 AEAD。帮助截图是随包公开
-    // 内容，永远保持明文（诱饵槽缺图时还要按字节比对回落）。
+    // 用户资源：图片、PDF 插图与 Mermaid 缓存整文件 AEAD。旧版「使用帮助」截图
+    // 若还是随包公开字节则保持明文（诱饵槽缺图时还要按字节比对回落），其余照常加密。
     seal_resource_dirs(&key)?;
     // Pi（工作区、Durable JSONL、来源、接口缓存、用户技能）、个人词表与诊断日志
     // 都是逐文件 GWA2，不在退出时打包，也不允许 host 运行期间写明文。
@@ -987,7 +987,7 @@ fn resource_dirs() -> [(String, bool); 2] {
     ]
 }
 
-/// 把当前槽位资源目录里的明文文件封成密文；已是密文的跳过。公开帮助截图跳过。
+/// 把当前槽位资源目录里的明文文件封成密文；已是密文的跳过。旧版公开帮助截图跳过。
 fn seal_resource_dirs(key: &[u8; DEK_LEN]) -> Result<()> {
     for (name, skip_public) in resource_dirs() {
         let dir = storage::slot_subdir(&name)?;
@@ -1003,7 +1003,7 @@ fn seal_resource_dirs(key: &[u8; DEK_LEN]) -> Result<()> {
             if meta.file_type().is_symlink() || !meta.is_file() {
                 continue;
             }
-            if skip_public && crate::images::is_public_help_file(&path) {
+            if skip_public && crate::images::is_retired_help_image(&path) {
                 continue;
             }
             seal_plaintext_file(&path, key)?;
@@ -1044,7 +1044,7 @@ fn unseal_resource_dirs() -> Result<()> {
     Ok(())
 }
 
-/// 资源目录里是否还有明文文件（帮助截图除外）。只读文件头，不整文件解密。
+/// 资源目录里是否还有明文文件（旧版公开帮助截图除外）。只读文件头，不整文件解密。
 /// 这个探测接口只能返回 bool，所以任何 I/O 错误都按「仍需迁移」处理；真正的
 /// 迁移会再次读取并向用户报告具体错误，而不是把目录跳过并宣称加密完成。
 fn resource_dirs_need_encryption(slot: DataSlot) -> bool {
@@ -1069,7 +1069,7 @@ fn resource_dirs_need_encryption(slot: DataSlot) -> bool {
                 Ok(_) => continue,
                 Err(_) => return true,
             }
-            if skip_public && crate::images::is_public_help_file(&path) {
+            if skip_public && crate::images::is_retired_help_image(&path) {
                 continue;
             }
             if file_head_is_not_sealed(&path) {
@@ -2560,19 +2560,16 @@ mod tests {
         reset();
     }
 
-    /// 启用加密时把用户图片、PDF 插图与 Mermaid 缓存一起密封；随包帮助截图
-    /// 保持明文（诱饵槽缺图时要按字节比对回落）。停用时全部解回明文。
+    /// 启用加密时把用户图片、PDF 插图与 Mermaid 缓存一起密封。旧版公开帮助截图
+    /// 由 [`crate::retired_help`] 按字节识别，不在新数据里生成。
     #[test]
-    fn ensure_slot_encrypted_seals_user_resources_but_not_public_help() {
+    fn ensure_slot_encrypted_seals_user_resources() {
         let dir = use_temp_dir();
         set_key_handle([7u8; DEK_LEN], true);
         let images = crate::images::image_dir().unwrap();
         std::fs::create_dir_all(&images).unwrap();
         let user = images.join("20260101_扫描件.pdf");
         std::fs::write(&user, b"%PDF-user").unwrap();
-        if let Some(&(name, bytes)) = crate::help::content::IMAGES.first() {
-            std::fs::write(images.join(name), bytes).unwrap();
-        }
         let cache = crate::storage::slot_subdir(crate::storage::MERMAID_CACHE_DIR).unwrap();
         std::fs::create_dir_all(&cache).unwrap();
         let diagram = cache.join("abc123.svg");
@@ -2581,13 +2578,6 @@ mod tests {
         assert!(slot_needs_encryption(DataSlot::Real));
         ensure_slot_encrypted().unwrap();
         assert!(is_sealed_file(&std::fs::read(&user).unwrap()));
-        if let Some(&(name, bytes)) = crate::help::content::IMAGES.first() {
-            assert_eq!(
-                std::fs::read(images.join(name)).unwrap(),
-                bytes,
-                "公开帮助截图不参与加密"
-            );
-        }
         assert!(is_sealed_file(&std::fs::read(&diagram).unwrap()));
         assert!(!slot_needs_encryption(DataSlot::Real));
 

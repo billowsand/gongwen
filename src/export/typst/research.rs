@@ -174,6 +174,7 @@ pub(crate) fn compile_pdf_with_base(
 }
 
 /// 排版并写出 PDF；只有调用方明确选择的输出路径会落盘。
+#[cfg(test)]
 pub(crate) fn write_pdf_with_base(
     path: &Path,
     input: &DraftInput,
@@ -194,22 +195,6 @@ pub(crate) fn compile_pdf(
     numbering: &NumberingConfig,
 ) -> Result<TypstOutcome> {
     compile_pdf_with_base(input, markdown, numbering, &crate::storage::config_dir()?)
-}
-
-/// 同上，插图按用户配置目录解析并写入指定路径。
-pub(crate) fn write_pdf(
-    path: &Path,
-    input: &DraftInput,
-    markdown: &str,
-    numbering: &NumberingConfig,
-) -> Result<TypstOutcome> {
-    write_pdf_with_base(
-        path,
-        input,
-        markdown,
-        numbering,
-        &crate::storage::config_dir()?,
-    )
 }
 
 /// 按完整定稿排版数物理页，封面、目录、附录与自动补的空白页均计入。

@@ -78,8 +78,6 @@ pub(crate) enum SettingsSection {
     Vault,
     /// 输入法（应用内词表查询）。
     Input,
-    /// 上手指引。
-    Guide,
 }
 
 /// 左侧主菜单的分组。分组名只是小字标题，不可点击——十几项平铺成一列时，
@@ -107,10 +105,7 @@ const MENU_GROUPS: [(&str, &[SettingsSection]); 5] = [
             SettingsSection::Backup,
         ],
     ),
-    (
-        "网络与帮助",
-        &[SettingsSection::Network, SettingsSection::Guide],
-    ),
+    ("网络", &[SettingsSection::Network]),
 ];
 
 impl SettingsSection {
@@ -129,7 +124,6 @@ impl SettingsSection {
             SettingsSection::Security => "密级规则",
             SettingsSection::Vault => "应用锁",
             SettingsSection::Input => "输入法",
-            SettingsSection::Guide => "上手指引",
         }
     }
 
@@ -148,7 +142,6 @@ impl SettingsSection {
             SettingsSection::Security => theme::Icon::Shield,
             SettingsSection::Vault => theme::Icon::Lock,
             SettingsSection::Input => theme::Icon::Edit,
-            SettingsSection::Guide => theme::Icon::Book,
         }
     }
 
@@ -193,7 +186,6 @@ impl SettingsSection {
             SettingsSection::Input => {
                 "词表输入法按编码查找基础表与公文四码词表，维护后立即生效。单击 Shift 切中英。"
             }
-            SettingsSection::Guide => "第一次用这个程序，按下面的顺序走一遍就能出第一份稿子。",
         }
     }
 }
@@ -318,58 +310,6 @@ pub(super) fn settings_menu_item(
         .corner_radius(egui::CornerRadius::same(7))
         .min_size(egui::vec2(width, 30.0)),
     )
-}
-
-/// 上手指引分区。原先这段话跟着「保存设置」钉在每一屏的底部，无论在配模型还是
-/// 调字号都要滚过一遍；它只在头一次用的时候有用，所以单独成一项。
-fn guide_section_ui(help: &mut crate::help::HelpState, ui: &mut egui::Ui) {
-    for (index, step) in [
-        #[cfg(feature = "ai-workbench")]
-        "在「AI 管理 → 模型服务」里填好接口地址——LM Studio 先启动 Local Server，Ollama 先执行 ollama serve。",
-        #[cfg(feature = "ai-workbench")]
-        "点「测试连接 / 刷新模型」，从下拉里选一个中文指令模型。",
-        "在「标准词库」里维护单位全称、常见错写和联系人电话。",
-        "为每类模板保存默认的发文单位、联系人和呈报领导。",
-        "在起草页填写要素和正文，处理校对提示后导出。",
-    ]
-    .iter()
-    .enumerate()
-    {
-        ui.horizontal_top(|ui| {
-            // 序号要和正文第一行对齐，所以按一行文字的高度分配，不用表单行高：
-            // 后者是按控件算的，会把序号压到第一行下面去。
-            let line = ui.text_style_height(&egui::TextStyle::Body);
-            ui.add_sized(
-                [22.0, line],
-                egui::Label::new(
-                    egui::RichText::new(format!("{}.", index + 1)).color(theme::accent()),
-                ),
-            );
-            ui.label(egui::RichText::new(*step).color(theme::text_soft()));
-        });
-        ui.add_space(4.0);
-    }
-    ui.add_space(10.0);
-    // 直接给一枚按钮，而不是一句「请到菜单里找使用帮助」：这五步不够用的时候
-    // 用户要的是把手册打开，不是再被指路一次。
-    ui.horizontal(|ui| {
-        if ui
-            .add(theme::secondary_icon_button(
-                theme::Icon::HelpCircle,
-                "打开完整图文手册",
-            ))
-            .on_hover_text("在新标签里打开；含截图、流程图与常见问题，按 F1 也能随时回去")
-            .clicked()
-        {
-            // 只置位，开标签由 app 层在本帧末尾接手——这里够不着标签栏。
-            help.open_chapter(crate::help::QUICKSTART_CHAPTER);
-        }
-        ui.label(
-            egui::RichText::new("F1")
-                .color(theme::text_muted())
-                .size(theme::font_sizes::SMALL),
-        );
-    });
 }
 
 /// 字体选择行对应的配置槽位：浏览字体文件的结果要写回这里。
@@ -1471,11 +1411,6 @@ impl GongwenApp {
                             SettingsSection::Security => self.security_section_ui(ui),
                             SettingsSection::Vault => self.vault_section_ui(ui),
                             SettingsSection::Input => self.ime_section_ui(ui),
-                            SettingsSection::Guide => {
-                                guide_section_ui(&mut self.help, ui);
-                                #[cfg(feature = "ai-workbench")]
-                                self.skill_pack_section_ui(ui);
-                            }
                         }
                         ui.add_space(8.0);
                     });
@@ -1654,99 +1589,6 @@ impl GongwenApp {
         );
         ui.add_space(4.0);
         ui.weak("编辑器的字体与字号在「字体」一节设置。");
-    }
-
-    /// 导出格式分区：勾选起草页「导出」按钮产出的格式。
-    /// 上手指引里的「AI 技能包」：把公文 Markdown 规范导出成 Agent Skill，给
-    /// Claude、Codex、OpenCode、DeerFlow、pi 这些外部工具用。内容见 [`crate::skill_pack`]。
-    #[cfg(feature = "ai-workbench")]
-    fn skill_pack_section_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(16.0);
-        ui.separator();
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new("AI 技能包")
-                .color(theme::text())
-                .strong(),
-        );
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(
-                "把本程序的 Markdown 标记与九种文种的格式要求打包成技能（Skill），\
-                 装进 Claude、Codex、OpenCode、DeerFlow、pi 等工具后，它们写出的 .md \
-                 可直接粘贴到起草页排版导出。",
-            )
-            .color(theme::text_soft()),
-        );
-        ui.add_space(8.0);
-        // 对话框放到布局之后再开：在闭包里开会阻塞这一帧的布局。
-        let mut export_archive = false;
-        let mut export_folder = false;
-        ui.horizontal(|ui| {
-            export_archive = ui
-                .add(theme::secondary_icon_button(
-                    theme::Icon::Package,
-                    "导出 .skill 技能包",
-                ))
-                .on_hover_text(
-                    "单个文件（zip 格式）：Claude 桌面版 / 网页版在「技能」里上传；\
-                     其他工具解压后放进各自的 skills 目录",
-                )
-                .clicked();
-            export_folder = ui
-                .add(theme::secondary_icon_button(
-                    theme::Icon::Folder,
-                    "导出为技能文件夹",
-                ))
-                .on_hover_text(
-                    "选一个 skills 目录，在里面生成 gongwen-markdown 文件夹：\
-                     如 ~/.claude/skills、~/.agents/skills、~/.config/opencode/skills",
-                )
-                .clicked();
-        });
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new("各工具的安装位置见使用帮助「设置全解 → 上手指引」。")
-                .size(theme::font_sizes::SMALL)
-                .color(theme::text_muted()),
-        );
-
-        if export_archive {
-            self.request_file(
-                FileDialogSpec::save_file()
-                    .filter("技能包", &["skill", "zip"])
-                    .file_name(crate::skill_pack::ARCHIVE_FILE_NAME),
-                |app, path| {
-                    let Some(path) = path else {
-                        return;
-                    };
-                    app.status = match crate::skill_pack::write_archive(&path) {
-                        Ok(()) => {
-                            let _ = super::reveal_in_os(&path);
-                            format!("已导出 AI 技能包：{}", path.display())
-                        }
-                        Err(error) => format!("导出技能包失败：{error:#}"),
-                    };
-                },
-            );
-        }
-        if export_folder {
-            self.request_file(
-                FileDialogSpec::pick_folder().title("选择要放技能的 skills 目录"),
-                |app, parent| {
-                    let Some(parent) = parent else {
-                        return;
-                    };
-                    app.status = match crate::skill_pack::write_directory(&parent) {
-                        Ok(root) => {
-                            let _ = super::reveal_in_os(&root);
-                            format!("已导出技能文件夹：{}", root.display())
-                        }
-                        Err(error) => format!("导出技能文件夹失败：{error:#}"),
-                    };
-                },
-            );
-        }
     }
 
     fn transmit_tasks_editor(&mut self, ui: &mut egui::Ui) {

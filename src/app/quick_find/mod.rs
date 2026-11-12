@@ -225,7 +225,6 @@ impl GongwenApp {
             #[cfg(feature = "ai-workbench")]
             NavPage::AiPrompts,
             NavPage::Settings,
-            NavPage::Help,
         ] {
             // 四张词表在主菜单里收进了「词库」子菜单，副标题点明位置，
             // 别名让「词库」「错别字」「码表」这类说法也能搜到。
