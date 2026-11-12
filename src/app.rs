@@ -1252,7 +1252,7 @@ impl GongwenApp {
                     #[cfg(feature = "ai-workbench")]
                     TabRef::Page(NavPage::Wiki) => {
                         theme::smartisan::management_page(&mut content_ui, |ui| {
-                            crate::wiki_ui::wiki_ui(self, ui, &self.config.numbering.clone())
+                            crate::wiki_ui::wiki_ui(self, ui)
                         })
                     }
                     TabRef::Page(NavPage::Settings) => self.settings_ui(&mut content_ui),

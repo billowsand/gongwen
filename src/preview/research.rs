@@ -25,8 +25,6 @@ mod numbering;
 #[cfg(test)]
 pub(crate) use crate::export::caption::parse_table_caption;
 pub(crate) use blocks::body_item;
-#[cfg(feature = "ai-workbench")]
-pub(crate) use body::research_body_preview;
 pub(crate) use body::research_preview;
 pub(crate) use cover::cover_sheet;
 pub(crate) use headings::{

@@ -112,7 +112,7 @@ pub(crate) fn set_theme(theme: DiagramTheme) {
     THEME.store(index as u8, Ordering::Relaxed);
 }
 
-fn current_theme() -> DiagramTheme {
+pub(crate) fn current_theme() -> DiagramTheme {
     DiagramTheme::ALL
         .get(THEME.load(Ordering::Relaxed) as usize)
         .copied()
@@ -1065,6 +1065,12 @@ fn render(
         Format::Pdf => to_pdf(&compose(&svg, placement, None)?),
     }?;
     Ok((bytes, size_warning(style, placement)))
+}
+
+/// 维基预览用内存图片，后台渲染与数据槽位的资源库无关。
+#[cfg(feature = "ai-workbench")]
+pub(crate) fn wiki_preview(source: &str, theme: DiagramTheme) -> Result<(Vec<u8>, Option<String>)> {
+    render(source, Style::Official, theme, Format::Png)
 }
 
 /// 画不出来的图记下错误：预览每帧都会来问，改好源码之前不必每帧重排一遍。

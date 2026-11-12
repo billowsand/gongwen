@@ -1067,6 +1067,15 @@ pub(crate) fn image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: 
     figure_block(ui, metrics, alt, src, false);
 }
 
+/// 维基版心按当前栏宽适配插图，资源解析与 PDF 光栅化共用预览的实现。
+#[cfg(feature = "ai-workbench")]
+pub(crate) fn wiki_figure(ui: &mut egui::Ui, alt: &str, src: &str) {
+    let width = ui.available_width().max(1.0);
+    let mut metrics = Metrics::new(width, None);
+    metrics.content = width;
+    ui.vertical_centered(|ui| figure_block(ui, &metrics, alt, src, false));
+}
+
 /// 研究报告的插图：宽度按 `mdx::figure_size` 定、居中，与导出的 TeX（`width=
 /// 0.8\textwidth` 之类加 `\centering`）和 Word 同一规则。
 pub(crate) fn research_image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str) {

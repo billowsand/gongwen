@@ -49,7 +49,7 @@ impl WikiUiState {
     }
 }
 
-pub(super) fn show(app: &mut GongwenApp, ui: &mut egui::Ui, numbering: &NumberingConfig) {
+pub(super) fn show(app: &mut GongwenApp, ui: &mut egui::Ui) {
     let route = app.wiki.route;
     toolbar(app, ui);
     if route != app.wiki.route {
@@ -61,10 +61,10 @@ pub(super) fn show(app: &mut GongwenApp, ui: &mut egui::Ui, numbering: &Numberin
     }
     ui.separator();
     match route {
-        Route::Browse => browse(app, ui, numbering),
+        Route::Browse => browse(app, ui),
         Route::Frame => frame(app, ui),
         Route::Inbox => inbox(app, ui),
-        Route::Review => review(app, ui, numbering),
+        Route::Review => review(app, ui),
         Route::History => history(app, ui),
     }
 }
@@ -181,7 +181,7 @@ fn job_rail(app: &mut GongwenApp, ui: &mut egui::Ui, id: &'static str, frame: bo
     }
 }
 
-fn browse(app: &mut GongwenApp, ui: &mut egui::Ui, numbering: &NumberingConfig) {
+fn browse(app: &mut GongwenApp, ui: &mut egui::Ui) {
     let mut nav = None;
     if !app.wiki.rail_hidden {
         right_panel(ui, "wiki_browse_references", |ui| {
@@ -231,7 +231,7 @@ fn browse(app: &mut GongwenApp, ui: &mut egui::Ui, numbering: &NumberingConfig) 
             });
         }
     });
-    reader(app, ui, &mut nav, numbering);
+    reader(app, ui, &mut nav);
     if let Some(uuid) = nav {
         open_page(app, &uuid);
     }
@@ -332,14 +332,17 @@ fn frame_proposal(app: &mut GongwenApp, ui: &mut egui::Ui) {
     let selection = &mut app.wiki.frame_node;
     left_panel(ui, "wiki_proposed_tree", |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
             for (index, theme) in proposal.themes.iter().enumerate() {
-                ui.selectable_value(selection, Some((index, None)), &theme.name);
+                let node = Some((index, None));
+                if outline_row(ui, &theme.name, 0, None, *selection == node).clicked() {
+                    *selection = node;
+                }
                 for (child, category) in theme.categories.iter().enumerate() {
-                    ui.selectable_value(
-                        selection,
-                        Some((index, Some(child))),
-                        format!("　{}", category.name),
-                    );
+                    let node = Some((index, Some(child)));
+                    if outline_row(ui, &category.name, 1, None, *selection == node).clicked() {
+                        *selection = node;
+                    }
                 }
             }
         });
@@ -673,7 +676,7 @@ fn inbox(app: &mut GongwenApp, ui: &mut egui::Ui) {
         });
 }
 
-fn review(app: &mut GongwenApp, ui: &mut egui::Ui, numbering: &NumberingConfig) {
+fn review(app: &mut GongwenApp, ui: &mut egui::Ui) {
     let Some(state) = &mut app.wiki.review else {
         app.wiki.open_inbox();
         return;
@@ -776,27 +779,11 @@ fn review(app: &mut GongwenApp, ui: &mut egui::Ui, numbering: &NumberingConfig) 
     ui.columns(2, |columns| {
         columns[0].strong("Markdown 源码");
         columns[0].separator();
-        egui::ScrollArea::vertical()
-            .id_salt(("wiki_source_editor", &id))
-            .auto_shrink([false, false])
-            .show(&mut columns[0], |ui| {
-                let font = egui::TextStyle::Monospace.resolve(ui.style());
-                ui.horizontal_top(|ui| {
-                    ui.add_space(32.0);
-                    let output = egui::TextEdit::multiline(&mut state.edit_body)
-                        .id_salt(("wiki_source_text", &id))
-                        .font(font.clone())
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(20)
-                        .show(ui);
-                    crate::draft_page::paint_editor_line_numbers(
-                        ui,
-                        &output,
-                        font.size - 2.0,
-                        font.family,
-                    );
-                });
-            });
+        body::source_pane(
+            &mut columns[0],
+            ("wiki_source_editor", &id),
+            &mut state.edit_body,
+        );
         columns[1].strong(if app.wiki.review_diff {
             "变更对比"
         } else {
@@ -833,12 +820,9 @@ fn review(app: &mut GongwenApp, ui: &mut egui::Ui, numbering: &NumberingConfig) 
             }
             columns[1].weak("变更较大，显示全文预览。");
         }
-        egui::ScrollArea::vertical()
-            .id_salt(("wiki_review_preview", &id))
-            .auto_shrink([false, false])
-            .show(&mut columns[1], |ui| {
-                target = show_page_body(ui, &state.edit_body, &link_map, &page.doc_refs, numbering);
-            });
+        target = body::scroll_pane(&mut columns[1], ("wiki_review_preview", &id), |ui| {
+            show_page_body(ui, &state.edit_body, &link_map, &page.doc_refs)
+        });
     });
     if let Some(target) = target {
         follow_body_target(app, target);
