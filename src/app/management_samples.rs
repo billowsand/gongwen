@@ -169,6 +169,7 @@ pub(crate) fn fixture() -> GongwenApp {
         backup_restore_prompt: None,
         backup_restore_result: None,
         backup_restore_error: None,
+        content_clear_confirm: false,
         #[cfg(feature = "ai-workbench")]
         busy: false,
         sender,

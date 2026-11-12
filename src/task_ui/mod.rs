@@ -186,6 +186,12 @@ pub(crate) struct State {
 }
 
 impl State {
+    /// 资料库被整体清空后，丢弃表单「从文字填写」里的文档标题缓存。
+    #[cfg(feature = "ai-workbench")]
+    pub(crate) fn invalidate_knowledge_cache(&mut self) {
+        self.knowledge_docs = None;
+    }
+
     /// 操作成功：换上新提示，并清掉上一次操作留下的错误。
     fn ok(&mut self, message: impl Into<String>) {
         self.error = None;

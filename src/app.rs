@@ -373,6 +373,8 @@ pub struct GongwenApp {
     backup_restore_result: Option<crate::data_backup::RestoreReport>,
     /// 恢复失败的原因；有值时弹窗告知，而不是只写状态栏。
     backup_restore_error: Option<String>,
+    /// 设置页「清空数据」的独占确认框。
+    content_clear_confirm: bool,
     /// 全局任务（当前只有模型探测）。稿件自己的生成/导出记在各自的会话上。
     #[cfg(feature = "ai-workbench")]
     busy: bool,
@@ -904,6 +906,7 @@ impl GongwenApp {
             backup_restore_prompt: None,
             backup_restore_result: None,
             backup_restore_error: None,
+            content_clear_confirm: false,
             #[cfg(feature = "ai-workbench")]
             busy: false,
             sender,

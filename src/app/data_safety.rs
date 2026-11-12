@@ -31,6 +31,7 @@ impl GongwenApp {
         self.backup_restoring_window(ctx);
         self.backup_restore_done_window(ctx);
         self.backup_restore_error_window(ctx);
+        self.content_clear_confirm_window(ctx);
     }
 
     fn config_recovery_window(&mut self, ctx: &egui::Context) {
@@ -120,12 +121,200 @@ impl GongwenApp {
             ui.add_space(6.0);
             ui.weak("有其他任务正在运行，请完成后再导出或恢复备份。");
         }
+
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(8.0);
+        sub_heading(
+            ui,
+            "清空数据",
+            Some("永久删除标准词库、全部文稿、资料库与维基库；应用设置和任务助手数据保留。"),
+        );
+        ui.add_enabled_ui(idle, |ui| {
+            setting_row(ui, "清空内容", None, |ui| {
+                if ui
+                    .add(theme::warning_icon_button(theme::Icon::Trash, "清空数据…"))
+                    .clicked()
+                {
+                    self.content_clear_confirm = true;
+                }
+                ui.weak("包括归档稿件、版本、附件和插图，不可恢复。");
+            });
+        });
         if export {
             self.start_backup_export();
         }
         if inspect {
             self.start_backup_inspection();
         }
+    }
+
+    fn content_clear_confirm_window(&mut self, ctx: &egui::Context) {
+        if !self.content_clear_confirm {
+            return;
+        }
+        let mut confirm = false;
+        let mut cancel = false;
+        let response = modal::dialog(
+            ctx,
+            egui::Id::unique("content_clear_confirm"),
+            "清空数据",
+            500.0,
+            Dismiss::EscOrBackdrop,
+            |ui| {
+                ui.label(
+                    egui::RichText::new("以下内容将被永久删除，无法撤销：")
+                        .strong()
+                        .color(warn()),
+                );
+                ui.add_space(6.0);
+                ui.label("• 标准词库中的全部词条");
+                ui.label("• 全部文稿，包括归档稿件、历史版本、送批关系与附件");
+                ui.label("• 资料库中的全部文档、切块与检索索引");
+                ui.label("• 维基库中的全部框架、页面、版本与链接");
+                ui.label("• 稿件插图与图表缓存；当前打开的稿件和 PDF 标签将关闭");
+                ui.add_space(8.0);
+                ui.weak("应用设置、公文词库、校对词表、输入法词表和任务助手数据不会删除。建议先导出全量备份。");
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(theme::warning_icon_button(
+                            theme::Icon::Trash,
+                            "确认永久清空",
+                        ))
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancel = true;
+                    }
+                });
+            },
+        );
+        if response.dismissed {
+            cancel = true;
+        }
+        if confirm {
+            self.clear_all_content();
+        } else if cancel {
+            self.content_clear_confirm = false;
+        }
+    }
+
+    /// 清空四类内容并立即让工作区回到空白状态，避免旧标签在退出时重新入库。
+    fn clear_all_content(&mut self) {
+        if self.any_busy() {
+            self.status = "有其他任务正在运行，请完成后再清空数据。".into();
+            return;
+        }
+        if self.manuscript_store.is_none() {
+            self.status = "稿件库不可用，未清空任何内容。".into();
+            return;
+        }
+
+        // 词库在 config.json，其余三类在 SQLite。先落词库；数据库失败时回滚配置，
+        // 避免界面显示已清空而下次启动又恢复旧词库。
+        let previous_vocabulary = std::mem::take(&mut self.config.vocabulary);
+        if let Err(error) = storage::save(&self.config) {
+            self.config.vocabulary = previous_vocabulary;
+            self.status = format!("清空失败：标准词库配置保存失败：{error:#}");
+            return;
+        }
+        let result = self
+            .manuscript_store
+            .as_mut()
+            .expect("上面已检查稿件库")
+            .clear_all_content();
+        if let Err(error) = result {
+            self.config.vocabulary = previous_vocabulary;
+            let rollback = storage::save(&self.config);
+            self.status = match rollback {
+                Ok(()) => format!("清空失败，标准词库已恢复：{error:#}"),
+                Err(rollback_error) => {
+                    format!("清空失败：{error:#}；标准词库配置恢复也失败：{rollback_error:#}")
+                }
+            };
+            return;
+        }
+
+        self.vocabulary_selected = None;
+        self.vocabulary_collapsed.clear();
+        self.vocabulary_delete_confirm = None;
+        self.vocabulary_clear_confirm = false;
+        self.vocabulary_import_conflicts = None;
+        self.vocabulary_sort_undo = None;
+        self.vocabulary_move = None;
+        self.vocabulary_filter.clear();
+        self.vocabulary_dirty = false;
+
+        self.manuscript_rows.clear();
+        self.manuscript_selected.clear();
+        self.manuscript_count = [0; 4];
+        self.manuscript_dirty = false;
+        self.manuscript_applied = Some(self.manuscript_filter.clone());
+        self.manuscript_delete_confirm = None;
+        self.manuscript_delete_refs.clear();
+        self.manuscript_batch_delete = None;
+        self.manuscript_detail = None;
+        self.manuscript_archive_pending = None;
+        self.manuscript_versions.clear();
+        self.manuscript_package_titles.clear();
+        self.manuscript_referrers.clear();
+        self.version_commit = None;
+        self.version_diff = None;
+        self.version_switch = None;
+        self.switch_after_commit = None;
+        self.revert_confirm = None;
+        self.send_package = None;
+
+        self.docs = vec![crate::draft_page::DraftSession::blank(0, &self.config)];
+        self.active_doc = 0;
+        self.pdfs.clear();
+        self.tabs
+            .retain(|tab| matches!(tab, super::TabRef::Page(_)));
+        if !self
+            .tabs
+            .contains(&super::TabRef::Page(super::NavPage::Settings))
+        {
+            self.tabs
+                .push(super::TabRef::Page(super::NavPage::Settings));
+        }
+        self.active_tab = self
+            .tabs
+            .iter()
+            .position(|tab| *tab == super::TabRef::Page(super::NavPage::Settings))
+            .unwrap_or(0);
+
+        #[cfg(feature = "ai-workbench")]
+        {
+            self.knowledge_docs.clear();
+            self.knowledge_chunk_count = 0;
+            self.knowledge_indexed_manuscripts.clear();
+            self.knowledge_embed_models.clear();
+            self.knowledge_unindexed = 0;
+            self.knowledge_delete_confirm = None;
+            self.knowledge_list = Default::default();
+            self.knowledge_retrieval_elapsed = None;
+            self.knowledge_index_result = None;
+            self.knowledge_preview = None;
+            self.knowledge_test_results.clear();
+            self.knowledge_local_results.clear();
+            self.knowledge_search_warnings.clear();
+            self.knowledge_qa_history.clear();
+            self.knowledge_qa_pending = None;
+            self.wiki = Default::default();
+            self.wiki_doc_status.clear();
+            self.wiki_seen_doc_ids = None;
+            self.wiki_new_doc_tip = None;
+            self.wiki_circle = None;
+            self.refresh_knowledge();
+        }
+        #[cfg(all(feature = "task-assistant", feature = "ai-workbench"))]
+        self.task_ui.invalidate_knowledge_cache();
+
+        self.content_clear_confirm = false;
+        self.status = "已清空标准词库、全部文稿、资料库与维基库。".into();
     }
 
     /// 备份与恢复不能和其他写盘任务并行；有任务在跑时说明原因并拒绝开始。
@@ -678,6 +867,7 @@ mod tests {
     use super::*;
     use crate::app::NavPage;
     use crate::app::manuscript_ui::ZipPasswordPurpose;
+    use crate::models::ManuscriptStatus;
     use crate::test_support::harness_ui;
     use egui_kittest::kittest::Queryable;
     use std::cell::RefCell;
@@ -802,6 +992,95 @@ mod tests {
             harness.run();
             drop(harness);
             assert!(app.manuscript_zip_password.is_none(), "取消后应关闭密码框");
+        });
+    }
+
+    #[test]
+    fn content_clear_requires_confirmation_and_clears_all_requested_content() {
+        with_app(|app, _| {
+            app.docs[0].generated_markdown = "# 待归档\n\n正文".into();
+            app.try_save_to_manuscript_library().unwrap();
+            let id = app.docs[0].manuscript_id.unwrap();
+            let store = app.manuscript_store.as_mut().unwrap();
+            store.set_status(id, ManuscriptStatus::Published).unwrap();
+            store.set_status(id, ManuscriptStatus::Archived).unwrap();
+            app.config.vocabulary.clear();
+            app.config.vocabulary.push(crate::models::VocabularyEntry {
+                canonical: "测试单位".into(),
+                ..Default::default()
+            });
+
+            app.content_clear_confirm = true;
+            let mut harness = harness_ui(|ui| app.content_clear_confirm_window(ui.ctx()));
+            harness.run();
+            harness.get_by_label("取消").click();
+            harness.run();
+            drop(harness);
+            assert!(!app.content_clear_confirm);
+            assert_eq!(
+                app.manuscript_store
+                    .as_mut()
+                    .unwrap()
+                    .count_by_status()
+                    .unwrap()[3],
+                1,
+                "取消确认不能删除归档稿件"
+            );
+            assert_eq!(app.config.vocabulary.len(), 1);
+
+            app.content_clear_confirm = true;
+            let mut harness = harness_ui(|ui| app.content_clear_confirm_window(ui.ctx()));
+            harness.run();
+            harness.get_by_label("确认永久清空").click();
+            harness.run();
+            drop(harness);
+
+            assert!(!app.content_clear_confirm);
+            assert!(app.config.vocabulary.is_empty());
+            assert_eq!(
+                app.manuscript_store
+                    .as_mut()
+                    .unwrap()
+                    .count_by_status()
+                    .unwrap(),
+                [0; 4]
+            );
+            assert!(app.manuscript_rows.is_empty());
+            assert!(app.manuscript_selected.is_empty());
+            assert_eq!(app.docs.len(), 1);
+            assert_eq!(app.docs[0].manuscript_id, None);
+            assert!(!app.docs[0].touched());
+            assert!(app.pdfs.is_empty());
+            assert!(
+                app.tabs
+                    .iter()
+                    .all(|tab| matches!(tab, super::super::TabRef::Page(_)))
+            );
+            #[cfg(feature = "ai-workbench")]
+            {
+                assert!(app.knowledge_docs.is_empty());
+                assert_eq!(app.knowledge_chunk_count, 0);
+                assert!(app.wiki_doc_status.is_empty());
+            }
+            let saved = storage::load().unwrap().0;
+            assert!(saved.vocabulary.is_empty(), "标准词库必须写入配置");
+        });
+    }
+
+    #[test]
+    fn content_clear_is_rejected_while_jobs_are_running() {
+        with_app(|app, _| {
+            app.config.vocabulary.clear();
+            app.config.vocabulary.push(crate::models::VocabularyEntry {
+                canonical: "保留单位".into(),
+                ..Default::default()
+            });
+            app.lexicon_busy = true;
+            app.content_clear_confirm = true;
+            app.clear_all_content();
+            assert_eq!(app.config.vocabulary.len(), 1);
+            assert!(app.content_clear_confirm, "忙碌时应保留确认框供稍后重试");
+            assert!(app.status.contains("有其他任务正在运行"));
         });
     }
 

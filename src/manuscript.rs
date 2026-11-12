@@ -647,6 +647,30 @@ impl ManuscriptStore {
         Ok(())
     }
 
+    /// 清空稿件、资料库与维基库，并回收稿件资源。
+    ///
+    /// 这是设置页里由用户明确确认的整库清理，刻意绕过单篇删除的归档保护；
+    /// 配置、配置版本、标准词库与任务助手数据不在本方法范围内。所有表在同一
+    /// 事务里删除，任一步失败都不会留下清了一半的库。
+    pub fn clear_all_content(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        #[cfg(feature = "ai-workbench")]
+        {
+            // wiki_fts 不是外部内容表，没有删除触发器，必须随页面一起清空。
+            tx.execute("DELETE FROM wiki_fts", [])?;
+            tx.execute("DELETE FROM wiki_pages", [])?;
+            tx.execute("DELETE FROM wiki_nodes", [])?;
+            // chunks、局部全文索引与维基资料映射均由外键或触发器清理。
+            tx.execute("DELETE FROM knowledge_docs", [])?;
+        }
+        tx.execute("DELETE FROM manuscripts", [])?;
+        tx.execute("DELETE FROM open_tabs", [])?;
+        tx.execute("DELETE FROM resource_aliases", [])?;
+        tx.execute("DELETE FROM resource_objects", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 原子批量删除：任一稿件不存在、已归档或被已归档呈批件用作送批材料时整批不落库。
     pub fn delete_many(&mut self, ids: &[i64]) -> Result<()> {
         // 事务前先收集正文：图片清理在事务提交后进行，事务失败时不会误删文件。
@@ -1998,6 +2022,115 @@ mod tests {
                 .commit_manuscript_version(id, "v", "", &rec.snapshot, "# 呈批件", "")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn clear_all_content_removes_archived_manuscripts_resources_and_knowledge() {
+        let mut store = mem_store();
+        let id = store
+            .create(
+                &new_manuscript(TemplateKind::OfficialLetter, "# 归档稿"),
+                None,
+            )
+            .unwrap();
+        store.set_status(id, ManuscriptStatus::Published).unwrap();
+        store.set_status(id, ManuscriptStatus::Archived).unwrap();
+        store
+            .add_pdf(id, "扫描件.pdf", b"%PDF-1.4 archived")
+            .unwrap();
+        crate::resources::put_with(
+            &store.conn,
+            "images/archived",
+            "归档插图.png",
+            None,
+            b"\x89PNG\r\n\x1a\narchived",
+        )
+        .unwrap();
+        store.save_open_tabs(&[OpenTab::Manuscript(id)], 0).unwrap();
+        store
+            .commit_config_version("清空前", "应保留", &AppConfig::default())
+            .unwrap();
+
+        #[cfg(feature = "ai-workbench")]
+        {
+            store.conn.execute(
+                "INSERT INTO knowledge_docs(source, title, content_markdown, created_at, updated_at)
+                 VALUES ('markdown', '资料', '资料正文', '', '')",
+                [],
+            ).unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO wiki_nodes(id, name, kind, created_at, updated_at)
+                 VALUES (1, '主题', 'theme', '', '')",
+                    [],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO wiki_pages(seq, uuid, title, node_id, created_at, updated_at)
+                 VALUES (1, 'page-1', '页面', 1, '', '')",
+                    [],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO wiki_page_versions(page_id, version, body, created_at)
+                 VALUES ('page-1', 1, '维基正文', '')",
+                    [],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO wiki_fts(rowid, tokens) VALUES (1, '页面 维基 正文')",
+                    [],
+                )
+                .unwrap();
+        }
+
+        store.clear_all_content().unwrap();
+
+        assert_eq!(store.count_by_status().unwrap(), [0; 4]);
+        assert!(store.get(id).unwrap().is_none());
+        assert!(store.load_open_tabs().unwrap().0.is_empty());
+        assert_eq!(store.list_config_versions().unwrap().len(), 1);
+        for table in [
+            "pdf_attachments",
+            "manuscript_versions",
+            "resource_aliases",
+            "resource_objects",
+        ] {
+            let count: i64 = store
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} 应清空");
+        }
+        #[cfg(feature = "ai-workbench")]
+        for table in [
+            "knowledge_docs",
+            "knowledge_chunks",
+            "knowledge_chunks_fts",
+            "knowledge_local_fts",
+            "wiki_pages",
+            "wiki_page_versions",
+            "wiki_links",
+            "wiki_nodes",
+            "wiki_fts",
+        ] {
+            let count: i64 = store
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} 应清空");
+        }
     }
 
     #[test]
