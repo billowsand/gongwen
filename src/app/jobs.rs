@@ -1353,7 +1353,7 @@ impl GongwenApp {
         }
         if self.config.embedding_model_name().is_empty() {
             self.knowledge_error = Some(
-                "还没有配置 embedding 模型，无法建立索引：请先到「AI 管理 → 模型服务」的知识库检索块选择。文档已在库内，配置好后再点「建立索引」即可。"
+                "还没有配置 embedding 模型，无法建立索引：请先到「AI 管理 → 模型服务」的资料库检索块选择。文档已在库内，配置好后再点「建立索引」即可。"
                     .into(),
             );
             return;

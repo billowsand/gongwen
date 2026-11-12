@@ -7,7 +7,7 @@
 //!
 //! 模型分两层管：「模型服务商管理」只管连接身份（地址、密钥、模型清单缓存，
 //! 见 `app::provider_settings`）；「模型服务」按功能（智能写作（Pi）/ 文字复核 /
-//! 知识库检索）各自挑一个提供商的模型，不再碰地址密钥。
+//! 资料库检索）各自挑一个提供商的模型，不再碰地址密钥。
 
 use super::provider_settings::{model_picker, provider_ref_chip};
 use super::settings::{
@@ -28,7 +28,7 @@ pub(crate) enum AiSection {
     /// 服务提供商：接口地址、密钥与模型清单缓存。
     #[default]
     Providers,
-    /// 按功能配模型：智能写作（Pi）、文字复核、知识库检索。
+    /// 按功能配模型：智能写作（Pi）、文字复核、资料库检索。
     ModelService,
     /// 技能：SKILL.md 的管理。
     Skills,
@@ -329,7 +329,7 @@ impl GongwenApp {
         }
     }
 
-    /// 「模型服务」分区：按功能配模型——智能写作（Pi）、文字复核、知识库检索。
+    /// 「模型服务」分区：按功能配模型——智能写作（Pi）、文字复核、资料库检索。
     /// 地址与密钥不在这里填；模型从「模型服务商管理」缓存的清单里挑，
     /// 选择器按提供商分组、可筛选（与字体选择同一套交互）。
     fn model_service_section_ui(&mut self, ui: &mut egui::Ui) {
@@ -437,23 +437,23 @@ impl GongwenApp {
             self.revise_tasks_ui(ui);
         });
 
-        // ── 知识库检索 ──────────────────────────────────────────────
+        // ── 资料库检索 ──────────────────────────────────────────────
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            sub_heading(ui, "知识库检索", None);
+            sub_heading(ui, "资料库检索", None);
             let mref = self.config.rag.embedding.model_ref.clone();
             provider_ref_chip(ui, &self.config, &mref);
         });
         ui.label(
             egui::RichText::new(
-                "用 embedding 与 rerank 模型检索知识库，Pi 写作时据此取证据。\
+                "用 embedding 与 rerank 模型检索资料库，Pi 写作时据此取证据。\
                  两个模型与写作模型相互独立。",
             )
             .size(theme::font_sizes::SMALL)
             .color(theme::text_muted()),
         );
-        ui.checkbox(&mut self.config.rag.enabled, "启用知识库检索增强")
-            .on_hover_text("关闭后，AI 侧栏输入框底栏的“知识库”开关不生效");
+        ui.checkbox(&mut self.config.rag.enabled, "启用资料库检索增强")
+            .on_hover_text("关闭后，AI 写作不能检索资料库；维基库检索不受影响");
         ui.add_enabled_ui(self.config.rag.enabled, |ui| {
             setting_row(ui, "Embedding 模型", None, |ui| {
                 let (mut filter, mut show_all) = self.picker_state("embedding");
