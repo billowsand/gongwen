@@ -1,6 +1,6 @@
 [package]
 name = "gongwen-assistant"
-version = "0.10.8"
+version = "0.10.9"
 edition = "2024"
 description = "基于 egui 与本地 LM Studio 的离线公文写作助手"
 license = "GPL-3.0-or-later"
@@ -85,7 +85,7 @@ rfd = { version = "0.17.2", default-features = false }
 # SQLCipher 全库加密（应用锁二期）：bundled 编进 libsqlite3-sys，进程内开库带
 # PRAGMA hexkey。SQLCipher 不支持 SQLite 在线备份 API，迁移/备份快照走
 # sqlcipher_export（见 src/vault.rs::export_database），所以不需要 backup 特性。
-rusqlite = { version = "0.41", features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite = { version = "0.42", features = ["bundled-sqlcipher-vendored-openssl"] }
 rust_xlsxwriter = "0.99.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
