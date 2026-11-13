@@ -117,7 +117,7 @@ pub(crate) fn fixture() -> GongwenApp {
         manuscript_selected: BTreeSet::new(),
         manuscript_count: [0; 4],
         manuscript_delete_confirm: None,
-        manuscript_delete_refs: Vec::new(),
+        manuscript_row_click: None,
         manuscript_batch_delete: None,
         manuscript_pdf_export_busy: false,
         manuscript_package_export_busy: false,

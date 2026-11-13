@@ -15,17 +15,20 @@ mod list;
 mod sync_io;
 
 pub(crate) use dialogs::{
-    archive_form, batch_delete_dialog, dialog_notice, large_dialog_size, row_delete_confirm,
+    archive_form, batch_delete_dialog, dialog_notice, large_dialog_size, single_delete_dialog,
 };
 pub(crate) use import::{import_preview_form, pending_merge_form};
 pub(crate) use sync_io::purge_plaintext_caches;
 
 /// 稿件列表上的操作在遍历表格时不能直接改 `self`，先记下来循环结束后再执行。
 pub(crate) enum ManuscriptAction {
-    /// 打开只读详情（归档行或“查看”）。
-    Detail(i64),
-    /// 载入起草页继续编辑。
-    Edit(i64),
+    RowClick {
+        id: i64,
+        double: bool,
+    },
+    /// 打开或切换到公文标签，编辑权限由稿件状态决定。
+    Open(i64),
+    CloseDetail,
     /// 复制该稿件的行文要素和正文，作为一篇尚未入库的新稿载入起草页。
     CreateFromExisting(i64),
     Publish(i64),
@@ -84,6 +87,21 @@ pub(crate) struct PdfExportDialog {
     stamped: bool,
     compiled: bool,
     ids: Vec<i64>,
+}
+
+pub(crate) struct SingleDeleteConfirm {
+    id: i64,
+    title: String,
+    refs: Vec<crate::manuscript::send_package::SendPackageReferrer>,
+    open_in_tab: bool,
+}
+
+fn open_manuscript_label(status: crate::models::ManuscriptStatus) -> &'static str {
+    use crate::models::ManuscriptStatus;
+    match status {
+        ManuscriptStatus::Published | ManuscriptStatus::Archived => "打开查看",
+        ManuscriptStatus::New | ManuscriptStatus::Draft => "打开编辑",
+    }
 }
 
 /// 批量删除确认框的内容，点「批量删除」那一刻算好、冻结。

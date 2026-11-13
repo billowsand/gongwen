@@ -238,13 +238,10 @@ impl GongwenApp {
         self.manuscript_dirty = false;
         self.manuscript_applied = Some(self.manuscript_filter.clone());
         self.manuscript_delete_confirm = None;
-        self.manuscript_delete_refs.clear();
+        self.manuscript_row_click = None;
         self.manuscript_batch_delete = None;
-        self.manuscript_detail = None;
+        self.clear_manuscript_detail();
         self.manuscript_archive_pending = None;
-        self.manuscript_versions.clear();
-        self.manuscript_package_titles.clear();
-        self.manuscript_referrers.clear();
         self.version_commit = None;
         self.version_diff = None;
         self.version_switch = None;

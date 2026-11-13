@@ -749,12 +749,30 @@ impl ManuscriptStore {
 
     /// 完整读取（含 PDF 附件）。
     pub fn get(&mut self, id: i64) -> Result<Option<ManuscriptRecord>> {
+        self.read_record(id, true, true)
+    }
+
+    /// 稿件资料栏仅读元数据和附件清单，打开正文或附件时再读取内容。
+    pub(crate) fn get_for_detail(&self, id: i64) -> Result<Option<ManuscriptRecord>> {
+        self.read_record(id, false, true)
+    }
+
+    pub(crate) fn get_for_editor(&self, id: i64) -> Result<Option<ManuscriptRecord>> {
+        self.read_record(id, true, false)
+    }
+
+    fn read_record(
+        &self,
+        id: i64,
+        include_content: bool,
+        attachments: bool,
+    ) -> Result<Option<ManuscriptRecord>> {
         let data = self
             .conn
             .query_row(
-                "SELECT snapshot_json, content_markdown, notes, title, kind, status, doc_number, doc_date, source_id, created_at, updated_at, published_at, archived_at
+                "SELECT snapshot_json, CASE WHEN ?2 THEN content_markdown ELSE '' END, notes, title, kind, status, doc_number, doc_date, source_id, created_at, updated_at, published_at, archived_at
                  FROM manuscripts WHERE id=?1",
-                [id],
+                params![id, include_content],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -810,7 +828,9 @@ impl ManuscriptStore {
             archived_at,
             pdfs: Vec::new(),
         };
-        record.pdfs = self.pdfs_for(id)?;
+        if attachments {
+            record.pdfs = self.pdfs_for(id, include_content)?;
+        }
         Ok(Some(record))
     }
 
@@ -965,6 +985,21 @@ impl ManuscriptStore {
             params![manuscript_id, file_name, bytes, now, sort],
         )?;
         Ok(())
+    }
+
+    pub(crate) fn pdf_content(
+        &self,
+        manuscript_id: i64,
+        id: i64,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT file_name, bytes FROM pdf_attachments WHERE manuscript_id=?1 AND id=?2",
+                params![manuscript_id, id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
     }
 
     /// 删除一个 PDF 附件。
@@ -1320,11 +1355,11 @@ impl ManuscriptStore {
             .optional()?)
     }
 
-    fn pdfs_for(&self, manuscript_id: i64) -> Result<Vec<PdfAttachment>> {
+    fn pdfs_for(&self, manuscript_id: i64, include_bytes: bool) -> Result<Vec<PdfAttachment>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, file_name, bytes, added_at FROM pdf_attachments WHERE manuscript_id=?1 ORDER BY sort_order, id",
+            "SELECT id, file_name, CASE WHEN ?2 THEN bytes ELSE X'' END, added_at FROM pdf_attachments WHERE manuscript_id=?1 ORDER BY sort_order, id",
         )?;
-        let rows = stmt.query_map([manuscript_id], |row| {
+        let rows = stmt.query_map(params![manuscript_id, include_bytes], |row| {
             Ok(PdfAttachment {
                 id: row.get(0)?,
                 file_name: row.get(1)?,

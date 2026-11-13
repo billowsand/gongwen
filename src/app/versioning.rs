@@ -704,7 +704,6 @@ impl GongwenApp {
                 self.doc_mut().reset_transient();
                 self.doc_mut().mark_saved();
                 self.refresh_committed_baseline(self.active_doc);
-                self.manuscript_detail = None;
                 self.manuscript_dirty = true;
                 self.doc_mut().draft_diff.view.reset();
                 self.draft_page().revalidate();
@@ -795,7 +794,6 @@ impl GongwenApp {
                     name,
                 });
                 self.doc_mut().reset_transient();
-                self.manuscript_detail = None;
                 self.draft_page().revalidate();
                 self.status =
                     format!("已载入版本 v{version_number}，可在起草页继续修改后提交为新版本。");

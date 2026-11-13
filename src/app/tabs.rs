@@ -154,6 +154,7 @@ impl GongwenApp {
         };
         // 切走之前先把手上这篇写回去，免得改了半天停在别的标签上没存。
         if tab != self.active_tab {
+            self.manuscript_row_click = None;
             self.autosave_all();
         }
         self.active_tab = tab;
@@ -443,8 +444,8 @@ impl GongwenApp {
     pub(crate) fn sync_record_status(&mut self, id: i64) {
         let status = self
             .manuscript_store
-            .as_mut()
-            .and_then(|store| store.get(id).ok())
+            .as_ref()
+            .and_then(|store| store.manuscript_brief(id).ok())
             .flatten()
             .map(|record| record.status);
         let Some(status) = status else {
@@ -455,11 +456,12 @@ impl GongwenApp {
         }
     }
 
-    /// 稿件在管理页被删除或归档后，已打开的标签就不再对应库里那条记录了。
+    /// 稿件在管理页被删除后，已打开的标签转为可另存的独立草稿。
     /// 断开关联而不是关掉标签：内容还在，用户可以另存为新稿。
     pub(crate) fn detach_docs_of(&mut self, id: i64) {
         for doc in self.docs.iter_mut().filter(|d| d.manuscript_id == Some(id)) {
             doc.manuscript_id = None;
+            doc.record_status = ManuscriptStatus::Draft;
             doc.loaded_version = None;
             doc.saved_baseline = None;
             doc.committed_baseline = None;

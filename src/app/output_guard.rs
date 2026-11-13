@@ -212,7 +212,8 @@ mod tests {
         store
             .add_pdf(id, "附件.pdf", b"PDF bytes stay in memory")
             .unwrap();
-        let record = store.get(id).unwrap().unwrap();
+        let record = store.get_for_detail(id).unwrap().unwrap();
+        assert!(record.pdfs[0].bytes.is_empty());
         let pdf_id = record.pdfs[0].id;
         h.app.manuscript_detail = Some(record);
         h.app.open_pdf_attachment(pdf_id);

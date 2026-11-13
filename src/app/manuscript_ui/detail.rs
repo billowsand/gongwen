@@ -3,8 +3,12 @@
 //! 由 src/app/manuscript_ui.rs 拆分而来：本文件是模块 `app::manuscript_ui::detail`，与其它子模块共享
 //! `app::manuscript_ui` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use super::list::manuscript_row_commands;
 use crate::app::file_dialog::FileDialogSpec;
-use crate::app::manuscript_ui::{ArchivePending, BatchDeleteConfirm, ManuscriptAction, PdfAction};
+use crate::app::manuscript_ui::{
+    ArchivePending, BatchDeleteConfirm, ManuscriptAction, PdfAction, SingleDeleteConfirm,
+    open_manuscript_label,
+};
 use crate::app::{
     GongwenApp, VersionDiffState, VersionScope, joined_metadata, metadata_grid_row,
     present_or_dash, short_date, status_color, summarize,
@@ -32,9 +36,7 @@ impl GongwenApp {
             ui.heading("稿件资料");
             ui.separator();
             ui.add_space(8.0);
-            ui.weak("单击左侧任意一行，在这里查看该稿件的元数据、版本和附件。");
-            ui.add_space(8.0);
-            ui.weak("双击一行或点“查看详情”，可直接打开公文界面。");
+            ui.weak("单击列表中的稿件查看资料，双击打开公文。");
             return None;
         };
         let mut clear_selection = false;
@@ -67,18 +69,19 @@ impl GongwenApp {
             }
         });
         ui.separator();
-        let open_label = if matches!(
+        let open_label = open_manuscript_label(detail.status);
+        let open_icon = if matches!(
             detail.status,
             ManuscriptStatus::Published | ManuscriptStatus::Archived
         ) {
-            "打开查看"
+            theme::Icon::Eye
         } else {
-            "打开编辑"
+            theme::Icon::PencilLine
         };
         let open_clicked = theme::accent_scope(ui, |ui| {
             ui.add_sized(
                 [ui.available_width(), 30.0],
-                theme::primary_button_widget(theme::Icon::PencilLine, open_label),
+                theme::primary_button_widget(open_icon, open_label),
             )
         })
         .on_hover_text("在独立的公文标签中打开；发布和归档稿自动只读")
@@ -86,24 +89,37 @@ impl GongwenApp {
         if open_clicked {
             open = true;
         }
-        if ui
-            .add_sized(
-                [ui.available_width(), 28.0],
-                theme::icon_text_button(theme::Icon::Copy, "基于此公文新建"),
-            )
-            .on_hover_text("复制行文要素和正文，新稿不会继承状态、版本或 PDF 附件")
-            .clicked()
-        {
-            create_from_existing = true;
-        }
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Copy, "基于此公文新建"))
+                .on_hover_text("复制行文要素和正文，新稿不会继承状态、版本或 PDF 附件")
+                .clicked()
+            {
+                create_from_existing = true;
+            }
+            if detail.status != ManuscriptStatus::Archived {
+                ui.menu_button("更多操作", |ui| {
+                    for (icon, label, item) in manuscript_row_commands(detail_id, detail.status) {
+                        if matches!(item, ManuscriptAction::CreateFromExisting(_)) {
+                            continue;
+                        }
+                        if ui.add(theme::icon_text_button(icon, label)).clicked() {
+                            *action = Some(item);
+                            ui.close();
+                        }
+                    }
+                });
+            }
+        });
         ui.add_space(6.0);
 
         // 元数据是给人看的：先把要素里的身份引用换成名称。历史稿按自己的
         // 词库快照显示，不查当前词库临时补名字（见 docs/vocabulary-identity-design.md 6.2）。
         let readable = crate::units::identity::readable(&detail.snapshot, &self.config.vocabulary);
 
+        let metadata_value_width = (ui.available_width() - 116.0).max(80.0);
         egui::ScrollArea::vertical()
-            .id_salt("manuscript_metadata_scroll")
+            .id_salt(("manuscript_metadata_scroll", detail_id))
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 ui.strong("公文元数据");
@@ -111,6 +127,7 @@ impl GongwenApp {
                 egui::Grid::new("manuscript_metadata_grid")
                     .num_columns(2)
                     .min_col_width(76.0)
+                    .max_col_width(metadata_value_width)
                     .spacing([10.0, 6.0])
                     .show(ui, |ui| {
                         let profile = &readable.profile;
@@ -358,13 +375,11 @@ impl GongwenApp {
             self.open_pending_merge(detail_id, &head);
         }
         if clear_selection {
-            self.manuscript_detail = None;
-            self.manuscript_detail_delete_pdf = None;
-            self.manuscript_versions.clear();
+            *action = Some(ManuscriptAction::CloseDetail);
         } else if create_from_existing {
             *action = Some(ManuscriptAction::CreateFromExisting(detail_id));
         } else if open {
-            *action = Some(ManuscriptAction::Edit(detail_id));
+            *action = Some(ManuscriptAction::Open(detail_id));
         }
         if let Some(pdf_id) = delete_pdf {
             self.manuscript_detail_delete_pdf = None;
@@ -409,8 +424,9 @@ impl GongwenApp {
 
     pub(crate) fn apply_manuscript_action(&mut self, action: ManuscriptAction) {
         match action {
-            ManuscriptAction::Detail(id) => self.refresh_detail(id),
-            ManuscriptAction::Edit(id) => self.open_in_editor(id),
+            ManuscriptAction::RowClick { .. } => {}
+            ManuscriptAction::CloseDetail => self.clear_manuscript_detail(),
+            ManuscriptAction::Open(id) => self.open_in_editor(id),
             ManuscriptAction::CreateFromExisting(id) => self.create_from_existing(id),
             ManuscriptAction::Publish(id) => {
                 self.transition_status(id, ManuscriptStatus::Published);
@@ -421,12 +437,7 @@ impl GongwenApp {
                 self.sync_record_status(id);
             }
             ManuscriptAction::DeletePending(id) => {
-                self.manuscript_delete_refs = self
-                    .manuscript_store
-                    .as_ref()
-                    .and_then(|store| store.send_package_referrers(id).ok())
-                    .unwrap_or_default();
-                self.manuscript_delete_confirm = Some(id);
+                self.prepare_single_delete(id);
             }
             ManuscriptAction::OpenSendPackage(id) => self.open_send_package(id),
             ManuscriptAction::ArchivePending(id) => {
@@ -487,8 +498,8 @@ impl GongwenApp {
                 self.manuscript_dirty = true;
                 match result {
                     Ok(()) => {
-                        self.detach_docs_of(id);
-                        self.status = format!("已删除稿件 #{id}。");
+                        self.finish_manuscript_deletion(&[id]);
+                        self.status = "已删除稿件。".into();
                     }
                     Err(error) => self.status = format!("删除失败：{error:#}"),
                 }
@@ -505,10 +516,7 @@ impl GongwenApp {
                 self.manuscript_dirty = true;
                 match result {
                     Ok(()) => {
-                        for id in &ids {
-                            self.detach_docs_of(*id);
-                            self.manuscript_selected.remove(id);
-                        }
+                        self.finish_manuscript_deletion(&ids);
                         self.status = format!("已批量删除 {} 篇稿件。", ids.len());
                     }
                     Err(error) => self.status = format!("批量删除失败：{error:#}"),
@@ -546,6 +554,55 @@ impl GongwenApp {
                 version_number,
             } => self.revert_confirm = Some((manuscript_id, version_number)),
         }
+    }
+
+    fn prepare_single_delete(&mut self, id: i64) {
+        let result = (|| {
+            let store = self
+                .manuscript_store
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
+            let brief = store
+                .manuscript_brief(id)?
+                .ok_or_else(|| anyhow::anyhow!("稿件不存在或已被删除"))?;
+            anyhow::ensure!(
+                brief.status != ManuscriptStatus::Archived,
+                "归档稿件不可删除"
+            );
+            Ok::<_, anyhow::Error>(SingleDeleteConfirm {
+                id,
+                title: brief.title,
+                refs: store.send_package_referrers(id)?,
+                open_in_tab: self.doc_index_of_manuscript(id).is_some(),
+            })
+        })();
+        match result {
+            Ok(confirm) => self.manuscript_delete_confirm = Some(confirm),
+            Err(error) => self.status = format!("无法删除稿件：{error:#}"),
+        }
+    }
+
+    fn finish_manuscript_deletion(&mut self, ids: &[i64]) {
+        for &id in ids {
+            self.detach_docs_of(id);
+            self.manuscript_selected.remove(&id);
+        }
+        if self
+            .manuscript_detail
+            .as_ref()
+            .is_some_and(|detail| ids.contains(&detail.id))
+        {
+            self.clear_manuscript_detail();
+        }
+        self.remember_session();
+    }
+
+    pub(crate) fn clear_manuscript_detail(&mut self) {
+        self.manuscript_detail = None;
+        self.manuscript_detail_delete_pdf = None;
+        self.manuscript_versions.clear();
+        self.manuscript_package_titles.clear();
+        self.manuscript_referrers.clear();
     }
 
     pub(crate) fn apply_pdf_action(&mut self, action: PdfAction) {
@@ -593,21 +650,24 @@ impl GongwenApp {
                 .manuscript_store
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-            store.get(id)
+            store.get_for_detail(id)
         })();
         match result {
             Ok(Some(record)) => {
+                if self.manuscript_detail.as_ref().map(|detail| detail.id) != Some(id) {
+                    self.manuscript_detail_delete_pdf = None;
+                }
                 self.manuscript_detail = Some(record);
                 self.refresh_manuscript_versions(id);
                 self.refresh_detail_send_package(id);
             }
             Ok(None) => {
                 self.status = "稿件不存在或已被删除。".into();
-                self.manuscript_detail = None;
+                self.clear_manuscript_detail();
             }
             Err(error) => {
                 self.status = format!("读取稿件失败：{error:#}");
-                self.manuscript_detail = None;
+                self.clear_manuscript_detail();
             }
         }
     }
@@ -723,7 +783,7 @@ impl GongwenApp {
                 .manuscript_store
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-            store.get(id)
+            store.get_for_editor(id)
         })();
         match result {
             Ok(Some(record)) => {
@@ -763,7 +823,7 @@ impl GongwenApp {
                 .manuscript_store
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-            store.get(id)
+            store.get_for_editor(id)
         })();
         match result {
             Ok(Some(record)) => {

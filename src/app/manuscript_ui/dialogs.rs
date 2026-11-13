@@ -3,72 +3,65 @@
 //! 由 src/app/manuscript_ui.rs 拆分而来：本文件是模块 `app::manuscript_ui::dialogs`，与其它子模块共享
 //! `app::manuscript_ui` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::app::manuscript_ui::{ArchivePending, BatchDeleteConfirm, ManuscriptAction};
+use crate::app::manuscript_ui::{ArchivePending, BatchDeleteConfirm, SingleDeleteConfirm};
 use crate::app::{short_date, summarize, warn};
-use crate::manuscript::send_package::{PinChoice, PinPreview, RevisionRef, SendPackageReferrer};
+use crate::manuscript::send_package::{PinChoice, PinPreview, RevisionRef};
 use crate::modal;
 use crate::modal::Dismiss;
 use crate::models::ManuscriptStatus;
 use crate::theme;
 use eframe::egui;
 
-/// 单篇删除的二次确认气泡，贴在触发它的按钮下方弹出。
-///
-/// 以前确认条放在列表上方：离删除按钮太远，而且一插进来整个列表就往下挤一截。
-/// 气泡是独立图层，不占版面，点外面或按 Esc 即收起（把 `open` 置为 false）。
-/// 返回 true 表示用户点了「确认删除」。
-pub(crate) fn delete_confirm_popup(
-    anchor: &egui::Response,
-    open: &mut bool,
-    refs: &[SendPackageReferrer],
-) -> bool {
-    let mut confirmed = false;
-    // 被已归档呈批件用作送批材料的稿件删不掉（归档材料不能缺件），确认键直接不给。
-    let archived_owner = refs
-        .iter()
-        .find(|owner| owner.status == ManuscriptStatus::Archived);
-    egui::Popup::from_response(anchor)
-        .id(anchor.id.with("delete_confirm"))
-        .open_bool(open)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .align(egui::RectAlign::BOTTOM_END)
-        .align_alternatives(&[egui::RectAlign::TOP_END])
-        .show(|ui| {
+pub(crate) fn single_delete_dialog(
+    ctx: &egui::Context,
+    confirm: &SingleDeleteConfirm,
+) -> modal::DialogResponse<bool> {
+    modal::dialog(
+        ctx,
+        egui::Id::unique("manuscript_single_delete"),
+        "删除稿件",
+        400.0,
+        Dismiss::EscOrBackdrop,
+        |ui| {
+            ui.label(format!("《{}》", summarize(&confirm.title, 80)));
+            let archived_owner = confirm
+                .refs
+                .iter()
+                .find(|owner| owner.status == ManuscriptStatus::Archived);
             if let Some(owner) = archived_owner {
                 ui.colored_label(
                     warn(),
                     format!(
                         "该稿件是已归档呈批件《{}》的送批材料，不能删除。",
-                        owner.title
+                        summarize(&owner.title, 40),
                     ),
                 );
             } else {
-                ui.colored_label(warn(), "删除后不可恢复，确认删除这篇稿件吗？");
-                if !refs.is_empty() {
-                    let titles = refs
-                        .iter()
-                        .map(|owner| format!("《{}》", owner.title))
-                        .collect::<Vec<_>>()
-                        .join("、");
-                    ui.weak(format!("它是{titles}的送批材料，删除后会从中移除。"));
+                ui.colored_label(warn(), "删除后不可恢复。");
+                if !confirm.refs.is_empty() {
+                    ui.weak(format!(
+                        "该稿件将从引用它的 {} 份送批材料清单中移除。",
+                        confirm.refs.len()
+                    ));
+                }
+                if confirm.open_in_tab {
+                    ui.weak("已打开的公文标签会保留，可将其中的内容另存为新稿。");
                 }
             }
-            ui.add_space(4.0);
+            ui.add_space(10.0);
             ui.horizontal(|ui| {
+                let delete = archived_owner.is_none()
+                    && ui
+                        .add(theme::warning_icon_button(theme::Icon::Trash, "确认删除"))
+                        .clicked();
                 if ui.button("取消").clicked() {
                     ui.close();
                 }
-                if archived_owner.is_none()
-                    && ui
-                        .add(theme::warning_icon_button(theme::Icon::Trash, "确认删除"))
-                        .clicked()
-                {
-                    confirmed = true;
-                    ui.close();
-                }
-            });
-        });
-    confirmed
+                delete
+            })
+            .inner
+        },
+    )
 }
 
 /// 归档确认里的送批材料钉版：列出每件将钉在哪一版；送出之后有件改过时让人选
@@ -138,7 +131,6 @@ pub(crate) fn archive_pin_ui(
     !preview.unpinnable().is_empty()
 }
 
-/// 若 `pending` 正指向这一行，就在 `anchor` 下弹出删除确认；确认或收起后清掉 `pending`。
 /// 批量删除确认框。点了删除返回 `inner == true`；删除范围是打开时冻结的 `confirm`。
 pub(crate) fn batch_delete_dialog(
     ctx: &egui::Context,
@@ -285,24 +277,4 @@ pub(crate) fn archive_form(
         }
     });
     archive
-}
-
-pub(crate) fn row_delete_confirm(
-    anchor: &egui::Response,
-    pending: &mut Option<i64>,
-    refs: &[SendPackageReferrer],
-    id: i64,
-    action: &mut Option<ManuscriptAction>,
-) {
-    if *pending != Some(id) {
-        return;
-    }
-    let mut open = true;
-    if delete_confirm_popup(anchor, &mut open, refs) {
-        *action = Some(ManuscriptAction::Delete(id));
-        open = false;
-    }
-    if !open {
-        *pending = None;
-    }
 }

@@ -890,26 +890,30 @@ impl GongwenApp {
         }
     }
 
+    fn read_detail_pdf(&mut self, id: i64) -> Option<(String, Vec<u8>)> {
+        let detail = self.manuscript_detail.as_ref()?;
+        let store = self.manuscript_store.as_ref()?;
+        match store.pdf_content(detail.id, id) {
+            Ok(Some(pdf)) => Some(pdf),
+            Ok(None) => {
+                self.status = "附件不存在或已被删除。".into();
+                None
+            }
+            Err(error) => {
+                self.status = format!("读取 PDF 附件失败：{error:#}");
+                None
+            }
+        }
+    }
+
     pub(crate) fn open_pdf_attachment(&mut self, id: i64) {
-        let Some((title, bytes)) = self.manuscript_detail.as_ref().and_then(|detail| {
-            detail
-                .pdfs
-                .iter()
-                .find(|pdf| pdf.id == id)
-                .map(|pdf| (pdf.file_name.clone(), pdf.bytes.clone()))
-        }) else {
-            return;
-        };
-        self.open_pdf_memory(id, title, bytes);
+        if let Some((title, bytes)) = self.read_detail_pdf(id) {
+            self.open_pdf_memory(id, title, bytes);
+        }
     }
 
     pub(crate) fn save_pdf_attachment(&mut self, id: i64) {
-        let Some((file_name, bytes)) = self.manuscript_detail.as_ref().and_then(|d| {
-            d.pdfs
-                .iter()
-                .find(|p| p.id == id)
-                .map(|p| (p.file_name.clone(), p.bytes.clone()))
-        }) else {
+        let Some((file_name, bytes)) = self.read_detail_pdf(id) else {
             return;
         };
         self.request_document_output(format!("另存 PDF 附件：{file_name}"), move |app| {
