@@ -300,7 +300,7 @@ impl GongwenApp {
                     .manuscript_store
                     .as_mut()
                     .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))
-                    .and_then(|store| store.get(id));
+                    .and_then(|store| store.manuscript_brief(id));
                 match result {
                     Ok(Some(record)) if record.status == ManuscriptStatus::Archived => {
                         self.manuscript_filter = ManuscriptFilter::default();

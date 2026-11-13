@@ -3,7 +3,7 @@
 //! 由 src/app/manuscript_ui.rs 拆分而来：本文件是模块 `app::manuscript_ui::detail`，与其它子模块共享
 //! `app::manuscript_ui` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use super::list::manuscript_row_commands;
+use super::list::manuscript_menu;
 use crate::app::file_dialog::FileDialogSpec;
 use crate::app::manuscript_ui::{
     ArchivePending, BatchDeleteConfirm, ManuscriptAction, PdfAction, SingleDeleteConfirm,
@@ -32,16 +32,8 @@ impl GongwenApp {
         action: &mut Option<ManuscriptAction>,
         single_page: bool,
     ) -> Option<PdfAction> {
-        let Some(detail_id) = self.manuscript_detail.as_ref().map(|d| d.id) else {
-            ui.heading("稿件资料");
-            ui.separator();
-            ui.add_space(8.0);
-            ui.weak("单击列表中的稿件查看资料，双击打开公文。");
-            return None;
-        };
-        let mut clear_selection = false;
-        let mut open = false;
-        let mut create_from_existing = false;
+        let detail_id = self.manuscript_detail.as_ref()?.id;
+        let mut close = false;
         let mut pdf_action: Option<PdfAction> = None;
         let mut delete_pdf: Option<i64> = None;
         // 附件要挑文件：对话框在后台线程开，这里只记下"用户点了添加"。
@@ -56,14 +48,14 @@ impl GongwenApp {
         let detail = self.manuscript_detail.as_ref()?;
         ui.horizontal(|ui| {
             if single_page && ui.button("← 返回列表").clicked() {
-                clear_selection = true;
+                close = true;
             }
             ui.heading("稿件资料");
             ui.colored_label(status_color(detail.status), detail.status.label());
             if !single_page {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, theme::Icon::X, "清除选择").clicked() {
-                        clear_selection = true;
+                    if theme::icon_button(ui, theme::Icon::X, "关闭资料").clicked() {
+                        close = true;
                     }
                 });
             }
@@ -78,38 +70,17 @@ impl GongwenApp {
         } else {
             theme::Icon::PencilLine
         };
-        let open_clicked = theme::accent_scope(ui, |ui| {
-            ui.add_sized(
-                [ui.available_width(), 30.0],
-                theme::primary_button_widget(open_icon, open_label),
-            )
-        })
-        .on_hover_text("在独立的公文标签中打开；发布和归档稿自动只读")
-        .clicked();
-        if open_clicked {
-            open = true;
-        }
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add(theme::icon_text_button(theme::Icon::Copy, "基于此公文新建"))
-                .on_hover_text("复制行文要素和正文，新稿不会继承状态、版本或 PDF 附件")
-                .clicked()
+            if theme::accent_scope(ui, |ui| {
+                ui.add(theme::primary_button_widget(open_icon, open_label))
+            })
+            .clicked()
             {
-                create_from_existing = true;
+                *action = Some(ManuscriptAction::Open(detail_id));
             }
-            if detail.status != ManuscriptStatus::Archived {
-                ui.menu_button("更多操作", |ui| {
-                    for (icon, label, item) in manuscript_row_commands(detail_id, detail.status) {
-                        if matches!(item, ManuscriptAction::CreateFromExisting(_)) {
-                            continue;
-                        }
-                        if ui.add(theme::icon_text_button(icon, label)).clicked() {
-                            *action = Some(item);
-                            ui.close();
-                        }
-                    }
-                });
-            }
+            ui.menu_button("更多", |ui| {
+                manuscript_menu(ui, detail_id, detail.status, false, action);
+            });
         });
         ui.add_space(6.0);
 
@@ -284,16 +255,20 @@ impl GongwenApp {
                                 ui.weak(summarize(&version.comment, 50));
                             }
                             ui.horizontal_wrapped(|ui| {
-                                if detail.status != ManuscriptStatus::Archived
-                                    && ui.small_button("载入编辑").clicked()
+                                if matches!(
+                                    detail.status,
+                                    ManuscriptStatus::New | ManuscriptStatus::Draft
+                                ) && ui.small_button("载入编辑").clicked()
                                 {
                                     *action = Some(ManuscriptAction::LoadVersion {
                                         manuscript_id: detail_id,
                                         version_number: version.version_number,
                                     });
                                 }
-                                if detail.status != ManuscriptStatus::Archived
-                                    && ui.small_button("回退至此版").clicked()
+                                if matches!(
+                                    detail.status,
+                                    ManuscriptStatus::New | ManuscriptStatus::Draft
+                                ) && ui.small_button("回退至此版").clicked()
                                 {
                                     *action = Some(ManuscriptAction::RevertPending {
                                         manuscript_id: detail_id,
@@ -374,12 +349,8 @@ impl GongwenApp {
         if let Some(head) = pending_to_open {
             self.open_pending_merge(detail_id, &head);
         }
-        if clear_selection {
+        if close {
             *action = Some(ManuscriptAction::CloseDetail);
-        } else if create_from_existing {
-            *action = Some(ManuscriptAction::CreateFromExisting(detail_id));
-        } else if open {
-            *action = Some(ManuscriptAction::Open(detail_id));
         }
         if let Some(pdf_id) = delete_pdf {
             self.manuscript_detail_delete_pdf = None;
@@ -422,13 +393,37 @@ impl GongwenApp {
         pdf_action
     }
 
+    /// 状态流转不能把仍在内存里的修改变成只读且不再提示保存。
+    fn manuscript_transition_blocked(&mut self, id: i64, action: &str) -> bool {
+        let dirty = self
+            .docs
+            .iter()
+            .any(|doc| doc.manuscript_id == Some(id) && doc.is_dirty());
+        if dirty {
+            self.status = format!("这篇稿件在起草页有未保存修改，请先保存后再{action}。");
+        }
+        dirty
+    }
+
     pub(crate) fn apply_manuscript_action(&mut self, action: ManuscriptAction) {
         match action {
-            ManuscriptAction::RowClick { .. } => {}
+            ManuscriptAction::RowClick { .. } => unreachable!("行点击在列表帧末解析"),
+            ManuscriptAction::ShowDetail(id) => self.refresh_detail(id),
             ManuscriptAction::CloseDetail => self.clear_manuscript_detail(),
             ManuscriptAction::Open(id) => self.open_in_editor(id),
             ManuscriptAction::CreateFromExisting(id) => self.create_from_existing(id),
+            ManuscriptAction::PublishPending(id) => {
+                if self.manuscript_transition_blocked(id, "发布") {
+                    return;
+                }
+                if let Some(row) = self.manuscript_rows.iter().find(|row| row.id == id) {
+                    self.manuscript_publish_confirm = Some((id, row.title.clone()));
+                }
+            }
             ManuscriptAction::Publish(id) => {
+                if self.manuscript_transition_blocked(id, "发布") {
+                    return;
+                }
                 self.transition_status(id, ManuscriptStatus::Published);
                 self.sync_record_status(id);
             }
@@ -441,6 +436,9 @@ impl GongwenApp {
             }
             ManuscriptAction::OpenSendPackage(id) => self.open_send_package(id),
             ManuscriptAction::ArchivePending(id) => {
+                if self.manuscript_transition_blocked(id, "归档") {
+                    return;
+                }
                 let send_package = self
                     .manuscript_store
                     .as_ref()
@@ -454,18 +452,18 @@ impl GongwenApp {
                 });
             }
             ManuscriptAction::Archive(id) => {
+                if self.manuscript_transition_blocked(id, "归档") {
+                    self.manuscript_archive_pending = None;
+                    return;
+                }
                 let (pdfs, pin_choice) = self
                     .manuscript_archive_pending
                     .take()
                     .map(|p| (p.pdf_paths, p.pin_choice))
                     .unwrap_or_default();
                 let result: anyhow::Result<()> = (|| {
-                    let store = self
-                        .manuscript_store
-                        .as_mut()
-                        .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-                    // 挂着送批材料时连同钉版在一个事务里完成；没挂的就是普通归档。
-                    store.archive_with_send_package(id, pin_choice)?;
+                    // 文件读取失败时还不能改数据库；读取成功后一次性提交状态、钉版和附件。
+                    let mut attachments = Vec::with_capacity(pdfs.len());
                     for path in &pdfs {
                         let bytes = std::fs::read(path)?;
                         let name = path
@@ -473,9 +471,13 @@ impl GongwenApp {
                             .and_then(|n| n.to_str())
                             .unwrap_or("扫描件.pdf")
                             .to_string();
-                        store.add_pdf(id, &name, &bytes)?;
+                        attachments.push((name, bytes));
                     }
-                    Ok(())
+                    let store = self
+                        .manuscript_store
+                        .as_mut()
+                        .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
+                    store.archive_with_send_package_and_pdfs(id, pin_choice, &attachments)
                 })();
                 self.manuscript_dirty = true;
                 match result {
@@ -548,7 +550,7 @@ impl GongwenApp {
             ManuscriptAction::LoadVersion {
                 manuscript_id,
                 version_number,
-            } => self.load_manuscript_version(manuscript_id, version_number),
+            } => self.request_manuscript_version_load(manuscript_id, version_number),
             ManuscriptAction::RevertPending {
                 manuscript_id,
                 version_number,
@@ -654,6 +656,7 @@ impl GongwenApp {
         })();
         match result {
             Ok(Some(record)) => {
+                self.manuscript_active_row = Some(id);
                 if self.manuscript_detail.as_ref().map(|detail| detail.id) != Some(id) {
                     self.manuscript_detail_delete_pdf = None;
                 }
@@ -767,7 +770,9 @@ impl GongwenApp {
         let Some(id) = self.manuscript_detail.as_ref().map(|d| d.id) else {
             return;
         };
+        let active = self.manuscript_active_row;
         self.refresh_detail(id);
+        self.manuscript_active_row = active;
     }
 
     /// 打开稿件。已经开着就切到那个标签，否则新开一个。不自动改状态
@@ -864,13 +869,17 @@ impl GongwenApp {
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("稿件库不可用，无法保存"))?;
             if let Some(id) = current_id {
-                let record = store
-                    .get(id)?
+                let status = store
+                    .manuscript_brief(id)?
+                    .ok_or_else(|| anyhow::anyhow!("稿件不存在或已被删除"))?
+                    .status;
+                let notes = store
+                    .notes_of(id)?
                     .ok_or_else(|| anyhow::anyhow!("稿件不存在或已被删除"))?;
-                if record.status == ManuscriptStatus::Archived {
+                if status == ManuscriptStatus::Archived {
                     anyhow::bail!("归档稿件不可修改，请在稿件管理页查看。");
                 }
-                if record.status == ManuscriptStatus::Published {
+                if status == ManuscriptStatus::Published {
                     anyhow::bail!("该稿件已发布，请先在稿件管理页“退回草稿”再修改。");
                 }
                 store.update(
@@ -878,7 +887,7 @@ impl GongwenApp {
                     &ManuscriptUpdate {
                         snapshot,
                         content_markdown: content,
-                        notes: record.notes,
+                        notes,
                     },
                 )?;
                 Ok(format!("已更新稿件《{title}》。"))
@@ -979,5 +988,134 @@ impl GongwenApp {
                 Err(error) => app.status = format!("研究报告文件夹导入失败：{error:#}"),
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{VersionTarget, management_samples::fixture};
+
+    fn saved_manuscript() -> (GongwenApp, i64) {
+        let mut app = fixture();
+        app.config.auto_save = false;
+        app.doc_mut().draft.title_hint = "测试稿件".into();
+        app.doc_mut().generated_markdown = "第一版正文。".into();
+        app.try_save_to_manuscript_library().unwrap();
+        let id = app.doc().manuscript_id.unwrap();
+        (app, id)
+    }
+
+    fn commit_first_version(app: &mut GongwenApp, id: i64) {
+        let snapshot = app.doc().draft.clone();
+        let content = app.doc().generated_markdown.clone();
+        app.manuscript_store
+            .as_mut()
+            .unwrap()
+            .commit_manuscript_version(id, "第一版", "", &snapshot, &content, "")
+            .unwrap();
+    }
+
+    #[test]
+    fn detail_version_load_prompts_before_replacing_dirty_editor() {
+        let (mut app, id) = saved_manuscript();
+        commit_first_version(&mut app, id);
+        app.doc_mut().generated_markdown = "尚未保存的修改。".into();
+
+        app.apply_manuscript_action(ManuscriptAction::LoadVersion {
+            manuscript_id: id,
+            version_number: 1,
+        });
+
+        let prompt = app.version_switch.as_ref().expect("应先确认未保存修改");
+        assert_eq!(prompt.manuscript_id, id);
+        assert_eq!(prompt.target, VersionTarget::Version(1));
+        assert_eq!(app.doc().generated_markdown, "尚未保存的修改。");
+        assert!(app.doc().loaded_version.is_none());
+    }
+
+    #[test]
+    fn publish_and_archive_leave_dirty_editor_editable_and_draft() {
+        let (mut app, id) = saved_manuscript();
+        app.doc_mut().generated_markdown = "尚未保存的修改。".into();
+
+        app.apply_manuscript_action(ManuscriptAction::PublishPending(id));
+        assert!(app.manuscript_publish_confirm.is_none());
+        app.apply_manuscript_action(ManuscriptAction::ArchivePending(id));
+        assert!(app.manuscript_archive_pending.is_none());
+        app.apply_manuscript_action(ManuscriptAction::Publish(id));
+        app.apply_manuscript_action(ManuscriptAction::Archive(id));
+
+        assert_eq!(app.doc().record_status, ManuscriptStatus::Draft);
+        assert!(!app.doc().read_only());
+        assert!(app.doc().is_dirty());
+        assert_eq!(app.doc().generated_markdown, "尚未保存的修改。");
+        assert_eq!(
+            app.manuscript_store
+                .as_ref()
+                .unwrap()
+                .manuscript_brief(id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ManuscriptStatus::Draft
+        );
+    }
+
+    #[test]
+    fn published_manuscript_cannot_load_or_revert_version_for_editing() {
+        let (mut app, id) = saved_manuscript();
+        commit_first_version(&mut app, id);
+        app.doc_mut().generated_markdown = "发布时的当前内容。".into();
+        app.try_save_to_manuscript_library().unwrap();
+        app.manuscript_store
+            .as_mut()
+            .unwrap()
+            .set_status(id, ManuscriptStatus::Published)
+            .unwrap();
+        app.doc_mut().record_status = ManuscriptStatus::Published;
+
+        app.load_manuscript_version(id, 1);
+        assert_eq!(app.doc().generated_markdown, "发布时的当前内容。");
+        app.revert_to_version(id, 1);
+
+        let record = app
+            .manuscript_store
+            .as_ref()
+            .unwrap()
+            .get_for_editor(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, ManuscriptStatus::Published);
+        assert_eq!(record.content_markdown, "发布时的当前内容。");
+        assert_eq!(app.doc().record_status, ManuscriptStatus::Published);
+    }
+
+    #[test]
+    fn unreadable_archive_pdf_leaves_manuscript_unarchived() {
+        let (mut app, id) = saved_manuscript();
+        let missing =
+            std::env::temp_dir().join(format!("gongwen-archive-test-{}.pdf", uuid::Uuid::new_v4()));
+        app.manuscript_archive_pending = Some(ArchivePending {
+            manuscript_id: id,
+            pdf_paths: vec![missing],
+            send_package: None,
+            pin_choice: PinChoice::default(),
+        });
+
+        app.apply_manuscript_action(ManuscriptAction::Archive(id));
+
+        assert_eq!(
+            app.manuscript_store
+                .as_ref()
+                .unwrap()
+                .manuscript_brief(id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ManuscriptStatus::Draft
+        );
+        assert!(app.status.contains("归档失败"));
+        assert!(app.manuscript_archive_pending.is_none());
     }
 }

@@ -606,7 +606,9 @@ impl GongwenApp {
                 pair
             }
             None => {
-                let record = store.get(id)?.context("稿件不存在，无法提交版本")?;
+                let record = store
+                    .get_for_editor(id)?
+                    .context("稿件不存在，无法提交版本")?;
                 (record.snapshot, record.content_markdown)
             }
         };

@@ -13,7 +13,7 @@ use crate::app::manuscript_ui::{
 };
 use crate::app::{
     FORM_CONTROL_HEIGHT, GongwenApp, centered_cell_text, centered_header, empty_cell_placeholder,
-    security_level_color, short_date, status_color, warn,
+    security_level_color, short_date, status_color, summarize, warn,
 };
 use crate::manuscript::ManuscriptFilter;
 use crate::manuscript_io;
@@ -65,7 +65,7 @@ impl GongwenApp {
         ui.add_space(8.0);
 
         if !single_page_detail {
-            self.manuscript_filter_bar(ui);
+            self.manuscript_filter_bar(ui, &mut action);
             if self.manuscript_dirty {
                 self.refresh_manuscript_rows();
             }
@@ -74,50 +74,102 @@ impl GongwenApp {
 
         let body_rect = ui.available_rect_before_wrap();
         let mut pdf_action = None;
-        if split {
-            const GAP: f32 = 8.0;
-            let detail_width = (body_rect.width() * 0.30).clamp(320.0, 400.0);
-            let list_right = body_rect.right() - detail_width - GAP;
-            let list_rect =
-                egui::Rect::from_min_max(body_rect.min, egui::pos2(list_right, body_rect.bottom()));
+        if single_page_detail {
+            pdf_action = self.manuscript_detail_ui(ui, &mut action, true);
+        } else if split && body_rect.is_positive() && self.manuscript_detail.is_some() {
+            let detail_width = (body_rect.width() * 0.32).clamp(340.0, 420.0);
             let detail_rect = egui::Rect::from_min_max(
-                egui::pos2(list_right + GAP, body_rect.top()),
-                body_rect.max,
+                egui::pos2(body_rect.right() - detail_width, body_rect.top()),
+                body_rect.right_bottom(),
             );
+            let list_rect = egui::Rect::from_min_max(
+                body_rect.min,
+                egui::pos2(detail_rect.left() - 8.0, body_rect.bottom()),
+            );
+            let clip_rect = ui.clip_rect();
+
             let mut list_ui = ui.new_child(
                 egui::UiBuilder::new()
                     .id_salt("manuscript_list")
                     .max_rect(list_rect),
             );
-            list_ui.shrink_clip_rect(list_rect);
-            self.manuscript_list_ui(&mut list_ui, &mut action);
+            list_ui.set_clip_rect(list_rect.intersect(clip_rect));
+            self.manuscript_list_ui(&mut list_ui, &mut action, false);
 
             let mut detail_ui = ui.new_child(
                 egui::UiBuilder::new()
                     .id_salt("manuscript_details")
                     .max_rect(detail_rect),
             );
-            detail_ui.shrink_clip_rect(detail_rect);
-            detail_ui.painter().line_segment(
-                [detail_rect.left_top(), detail_rect.left_bottom()],
-                egui::Stroke::new(1.0, theme::border()),
-            );
-            pdf_action = theme::panel(theme::surface(), 10)
+            detail_ui.set_clip_rect(detail_rect.intersect(clip_rect));
+            detail_ui.set_width(detail_rect.width());
+            detail_ui.set_height(detail_rect.height());
+            detail_ui
+                .painter()
+                .rect_filled(detail_rect, 0.0, theme::surface());
+            theme::panel(theme::surface(), 10)
+                .stroke(egui::Stroke::new(1.0, theme::border()))
                 .show(&mut detail_ui, |ui| {
-                    self.manuscript_detail_ui(ui, &mut action, false)
-                })
-                .inner;
+                    pdf_action = self.manuscript_detail_ui(ui, &mut action, false);
+                });
             ui.advance_cursor_after_rect(body_rect);
-        } else if single_page_detail {
-            pdf_action = self.manuscript_detail_ui(ui, &mut action, true);
         } else {
             ui.push_id("manuscript_list", |ui| {
-                self.manuscript_list_ui(ui, &mut action)
+                self.manuscript_list_ui(ui, &mut action, !split)
             });
         }
 
-        self.resolve_manuscript_click(ui.ctx(), split, &mut action);
+        if let Some(ManuscriptAction::RowClick {
+            id,
+            double,
+            secondary,
+        }) = action.take_if(|item| matches!(item, ManuscriptAction::RowClick { .. }))
+        {
+            let now = ui.input(|input| input.time);
+            let delay = ui
+                .ctx()
+                .options(|options| options.input_options.max_double_click_delay);
+            let open = double
+                && self
+                    .manuscript_row_click
+                    .is_some_and(|(last, time)| id == last && now - time < delay);
+            if !secondary {
+                self.manuscript_active_row = Some(id);
+            }
+            self.manuscript_row_click = (!secondary && !open).then_some((id, now));
+            if open {
+                action = Some(ManuscriptAction::Open(id));
+            } else if !secondary
+                && self
+                    .manuscript_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.id != id)
+            {
+                self.refresh_detail(id);
+            }
+            ui.ctx().request_repaint();
+        }
+        if action.is_none() && !self.modal_guard.active() && !egui::Popup::is_any_open(ui.ctx()) {
+            if self.manuscript_detail.is_some()
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            {
+                action = Some(ManuscriptAction::CloseDetail);
+            } else if ui.memory(|m| m.focused().is_none())
+                && let Some(id) = self.manuscript_active_row
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+            {
+                action = Some(ManuscriptAction::Open(id));
+            }
+        }
         if let Some(act) = action {
+            self.manuscript_row_click = None;
+            if matches!(
+                act,
+                ManuscriptAction::ShowDetail(_) | ManuscriptAction::CloseDetail
+            ) && let Some(id) = ui.memory(|memory| memory.focused())
+            {
+                ui.memory_mut(|memory| memory.surrender_focus(id));
+            }
             self.apply_manuscript_action(act);
             ui.ctx().request_repaint();
         }
@@ -126,56 +178,7 @@ impl GongwenApp {
         }
     }
 
-    // egui 在指针层计数双击，另核对稿件 ID。单页布局等双击判定结束才切走列表。
-    fn resolve_manuscript_click(
-        &mut self,
-        ctx: &egui::Context,
-        split: bool,
-        action: &mut Option<ManuscriptAction>,
-    ) {
-        let now = ctx.input(|input| input.time);
-        let delay = ctx.options(|options| options.input_options.max_double_click_delay);
-        match action {
-            Some(ManuscriptAction::RowClick { id, double }) => {
-                let id = *id;
-                let same_row = self
-                    .manuscript_row_click
-                    .is_some_and(|(last, time)| last == id && now - time < delay);
-                if *double && same_row {
-                    self.manuscript_row_click = None;
-                    *action = Some(ManuscriptAction::Open(id));
-                } else {
-                    self.manuscript_row_click = Some((id, now));
-                    if split {
-                        if self.manuscript_detail.as_ref().map(|detail| detail.id) != Some(id) {
-                            self.refresh_detail(id);
-                            ctx.request_repaint();
-                        }
-                    } else {
-                        ctx.request_repaint_after(std::time::Duration::from_secs_f64(delay));
-                    }
-                    *action = None;
-                }
-            }
-            Some(_) => self.manuscript_row_click = None,
-            None => {
-                if let Some((id, time)) = self.manuscript_row_click
-                    && now - time >= delay
-                {
-                    self.manuscript_row_click = None;
-                    if !split
-                        && self.manuscript_detail.is_none()
-                        && self.manuscript_rows.iter().any(|row| row.id == id)
-                    {
-                        self.refresh_detail(id);
-                        ctx.request_repaint();
-                    }
-                }
-            }
-        }
-    }
-
-    pub(crate) fn manuscript_filter_bar(&mut self, ui: &mut egui::Ui) {
+    fn manuscript_filter_bar(&mut self, ui: &mut egui::Ui, action: &mut Option<ManuscriptAction>) {
         // 文本框、下拉框和按钮的默认内容边距不同。统一交互高度后，各筛选组的
         // 外框高度一致，组内标签也会落在同一条垂直中线上。
         ui.scope(|ui| {
@@ -307,6 +310,18 @@ impl GongwenApp {
                     self.manuscript_dirty = true;
                 }
                 ui.separator();
+                let active = self.manuscript_rows.iter()
+                    .find(|row| Some(row.id) == self.manuscript_active_row);
+                ui.add_enabled_ui(active.is_some(), |ui| {
+                    if ui.button("查看资料").clicked() && let Some(row) = active {
+                        *action = Some(ManuscriptAction::ShowDetail(row.id));
+                    }
+                    ui.menu_button("更多", |ui| {
+                        if let Some(row) = active {
+                            manuscript_menu(ui, row.id, row.status, true, action);
+                        }
+                    });
+                });
                 let selected = self.manuscript_selected.len();
                 ui.menu_button("批量操作", |ui| {
                     ui.label(format!("已选 {selected} 篇"));
@@ -407,12 +422,27 @@ impl GongwenApp {
         {
             match store.list(&self.manuscript_filter) {
                 Ok(rows) => {
-                    self.manuscript_rows = rows;
-                    let visible = self
+                    let same_filter =
+                        self.manuscript_applied.as_ref() == Some(&self.manuscript_filter);
+                    let old_index = self
                         .manuscript_rows
                         .iter()
-                        .map(|row| row.id)
-                        .collect::<BTreeSet<_>>();
+                        .position(|row| Some(row.id) == self.manuscript_active_row);
+                    let visible = rows.iter().map(|row| row.id).collect::<BTreeSet<_>>();
+                    if self
+                        .manuscript_active_row
+                        .is_some_and(|id| !visible.contains(&id))
+                    {
+                        self.manuscript_active_row =
+                            old_index.filter(|_| same_filter).and_then(|index| {
+                                self.manuscript_rows[index + 1..]
+                                    .iter()
+                                    .chain(self.manuscript_rows[..index].iter().rev())
+                                    .find(|row| visible.contains(&row.id))
+                                    .map(|row| row.id)
+                            });
+                    }
+                    self.manuscript_rows = rows;
                     self.manuscript_selected.retain(|id| visible.contains(id));
                     self.manuscript_count = store.count_by_status().unwrap_or([0; 4]);
                     if let Some(detail_id) = self.manuscript_detail.as_ref().map(|detail| detail.id)
@@ -437,6 +467,34 @@ impl GongwenApp {
         ui: &mut egui::Ui,
         action: &mut Option<ManuscriptAction>,
     ) {
+        if let Some((id, title)) = &self.manuscript_publish_confirm {
+            let dialog = modal::dialog(
+                ui.ctx(),
+                egui::Id::unique("manuscript_publish"),
+                "发布稿件",
+                400.0,
+                Dismiss::EscOrBackdrop,
+                |ui| {
+                    ui.label(format!("《{}》", summarize(title, 80)));
+                    ui.label("发布后公文以只读方式打开，退回草稿后可继续编辑。");
+                    ui.horizontal(|ui| {
+                        let confirm = ui.button("确认发布").clicked();
+                        if ui.button("取消").clicked() {
+                            ui.close();
+                        }
+                        confirm
+                    })
+                    .inner
+                },
+            );
+            if dialog.inner {
+                *action = Some(ManuscriptAction::Publish(*id));
+            }
+            if dialog.inner || dialog.dismissed {
+                self.manuscript_publish_confirm = None;
+            }
+        }
+
         if let Some(confirm) = &self.manuscript_delete_confirm {
             let dialog = single_delete_dialog(ui.ctx(), confirm);
             if dialog.inner {
@@ -585,19 +643,23 @@ impl GongwenApp {
         }
     }
 
-    fn manuscript_list_ui(&mut self, ui: &mut egui::Ui, action: &mut Option<ManuscriptAction>) {
+    fn manuscript_list_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        action: &mut Option<ManuscriptAction>,
+        compact: bool,
+    ) {
         if self.manuscript_rows.is_empty() {
             ui.add_space(12.0);
             ui.weak("没有符合条件的稿件。在起草页点“保存到稿件库”，或调整过滤条件。");
             return;
         }
-        let compact = ui.available_width() < 1100.0;
         egui::ScrollArea::horizontal()
             .id_salt("manuscript_table_horizontal")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if compact {
-                    ui.set_min_width(490.0);
+                    ui.set_min_width(400.0);
                 }
                 self.manuscript_table_ui(ui, action, compact);
             });
@@ -609,7 +671,7 @@ impl GongwenApp {
         action: &mut Option<ManuscriptAction>,
         compact: bool,
     ) {
-        // 紧凑表格按当前宽度调整标题列，保证常用操作留在可视区。
+        // 紧凑表格把剩余宽度留给标题。
         const ROW_HEIGHT: f32 = 26.0;
         let ctx = ui.ctx().clone();
         let mut table = TableBuilder::new(ui)
@@ -625,7 +687,6 @@ impl GongwenApp {
                 .column(Column::remainder().at_least(100.0).clip(true))
                 .column(Column::exact(112.0).clip(true))
                 .column(Column::exact(76.0).clip(true))
-                .column(Column::exact(72.0))
         } else {
             let table = table
                 .column(Column::auto().at_least(28.0)) // 勾选
@@ -640,7 +701,7 @@ impl GongwenApp {
                 ;
             #[cfg(feature = "ai-workbench")]
             let table = table.column(Column::initial(56.0).at_least(44.0)); // 知识库
-            table.column(Column::remainder().at_least(165.0).resizable(false)) // 操作
+            table
         };
         table
             .header(ROW_HEIGHT, |mut header| {
@@ -714,16 +775,9 @@ impl GongwenApp {
                         centered_header(ui, "知识库");
                     });
                 }
-                header.col(|ui| {
-                    theme::smartisan::ledger_header(ui);
-                    ui.strong(if compact { "更多" } else { "操作" });
-                });
-                // response() 是所有表头单元格的并集。
-                header.response().on_hover_text(if compact {
-                    "单击查看资料，双击打开公文"
-                } else {
-                    "拖动列头可调整列宽（操作列除外）"
-                });
+                header
+                    .response()
+                    .on_hover_text("单击选中，双击打开，右键显示操作");
             })
             .body(|mut body| {
                 let ledger_painter = body.ui_mut().painter().clone();
@@ -737,17 +791,14 @@ impl GongwenApp {
                         theme::anim::SLOW,
                     );
                     let mut batch_selected = self.manuscript_selected.contains(&data.id);
-                    let row_selected = self
-                        .manuscript_detail
-                        .as_ref()
-                        .is_some_and(|detail| detail.id == data.id);
-                    // 行点击/双击跨多个单元格收集，用 Cell 避免多个 col 闭包争夺可变借用。
-                    let row_clicked = std::cell::Cell::new(false);
-                    let row_double_clicked = std::cell::Cell::new(false);
-                    // 整行选中高亮：set_selected 让 StripLayout 给整行（含单元格
-                    // 间隙和行高上下空隙）统一铺 selection.bg_fill 淡底；单元格里
-                    // 的 selectable_label 一律传 false，避免在行底之上再叠一格一格
-                    // 的小方块。
+                    let row_selected = self.manuscript_active_row == Some(data.id);
+                    let mut row_response: Option<egui::Response> = None;
+                    let mut collect = |response: egui::Response| {
+                        row_response = Some(match row_response.take() {
+                            Some(previous) => previous.union(response),
+                            None => response,
+                        });
+                    };
                     row.set_selected(row_selected);
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
@@ -766,17 +817,13 @@ impl GongwenApp {
                             egui::RichText::new(data.status.label())
                                 .color(status_color(data.status)),
                         );
-                        row_clicked.set(row_clicked.get() | response.clicked());
-                        row_double_clicked
-                            .set(row_double_clicked.get() | response.double_clicked());
+                        collect(response);
                     });
                     if !compact {
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
                             let response = centered_cell_text(ui, data.kind.label());
-                            row_clicked.set(row_clicked.get() | response.clicked());
-                            row_double_clicked
-                                .set(row_double_clicked.get() | response.double_clicked());
+                            collect(response);
                         });
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
@@ -790,18 +837,14 @@ impl GongwenApp {
                                         .color(security_level_color(security_level)),
                                 )
                             };
-                            row_clicked.set(row_clicked.get() | response.clicked());
-                            row_double_clicked
-                                .set(row_double_clicked.get() | response.double_clicked());
+                            collect(response);
                         });
                     }
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
                         let response =
                             centered_cell_text(ui, &data.title).on_hover_text(&data.title);
-                        row_clicked.set(row_clicked.get() | response.clicked());
-                        row_double_clicked
-                            .set(row_double_clicked.get() | response.double_clicked());
+                        collect(response);
                     });
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
@@ -810,9 +853,7 @@ impl GongwenApp {
                         } else {
                             centered_cell_text(ui, &data.doc_number)
                         };
-                        row_clicked.set(row_clicked.get() | response.clicked());
-                        row_double_clicked
-                            .set(row_double_clicked.get() | response.double_clicked());
+                        collect(response);
                     });
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
@@ -821,17 +862,13 @@ impl GongwenApp {
                         } else {
                             centered_cell_text(ui, short_date(&data.doc_date))
                         };
-                        row_clicked.set(row_clicked.get() | response.clicked());
-                        row_double_clicked
-                            .set(row_double_clicked.get() | response.double_clicked());
+                        collect(response);
                     });
                     if !compact {
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
                             let response = centered_cell_text(ui, short_date(&data.updated_at));
-                            row_clicked.set(row_clicked.get() | response.clicked());
-                            row_double_clicked
-                                .set(row_double_clicked.get() | response.double_clicked());
+                            collect(response);
                         });
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
@@ -841,9 +878,7 @@ impl GongwenApp {
                                 }
                                 _ => empty_cell_placeholder(ui),
                             };
-                            row_clicked.set(row_clicked.get() | response.clicked());
-                            row_double_clicked
-                                .set(row_double_clicked.get() | response.double_clicked());
+                            collect(response);
                         });
                         // 已入库标记：导入前就看得出哪些进过知识库，免得同一篇
                         // 反复导入。跨来源去重虽已兜底，但让用户看见更省事。
@@ -881,76 +916,63 @@ impl GongwenApp {
                             } else {
                                 "尚未加入知识库，可勾选后用工具栏的「导入到知识库」"
                             });
-                            row_clicked.set(row_clicked.get() | response.clicked());
-                            row_double_clicked
-                                .set(row_double_clicked.get() | response.double_clicked());
+                            collect(response);
                         });
                     }
-                    if row_clicked.get() {
-                        *action = Some(ManuscriptAction::RowClick {
-                            id: data.id,
-                            double: row_double_clicked.get(),
-                        });
-                    }
-                    row.col(|ui| {
-                        ui.set_opacity(seen_t);
-                        ui.push_id(data.id, |ui| {
-                            let readonly = matches!(
-                                data.status,
-                                ManuscriptStatus::Published | ManuscriptStatus::Archived
-                            );
-                            let label = open_manuscript_label(data.status);
-                            let icon = if readonly {
-                                theme::Icon::Eye
-                            } else {
-                                theme::Icon::PencilLine
-                            };
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().interact_size.y = ROW_HEIGHT;
-                                if theme::icon_button(ui, icon, label).clicked() {
-                                    *action = Some(ManuscriptAction::Open(data.id));
-                                }
-                                if compact {
-                                    ui.menu_button("•••", |ui| {
-                                        for (icon, label, item) in
-                                            manuscript_row_commands(data.id, data.status)
-                                        {
-                                            if ui
-                                                .add(theme::icon_text_button(icon, label))
-                                                .clicked()
-                                            {
-                                                *action = Some(item);
-                                                ui.close();
-                                            }
-                                        }
-                                    })
-                                    .response
-                                    .on_hover_text("更多稿件操作");
-                                } else {
-                                    for (icon, label, item) in
-                                        manuscript_row_commands(data.id, data.status)
-                                    {
-                                        let response =
-                                            if matches!(item, ManuscriptAction::DeletePending(_)) {
-                                                theme::danger_icon_button(ui, icon, label)
-                                            } else {
-                                                theme::icon_button(ui, icon, label)
-                                            };
-                                        if response.clicked() {
-                                            *action = Some(item);
-                                        }
-                                    }
+                    if let Some(response) = row_response {
+                        if response.clicked() || response.secondary_clicked() {
+                            ctx.memory_mut(|memory| {
+                                if let Some(id) = memory.focused() {
+                                    memory.surrender_focus(id);
                                 }
                             });
-                        });
-                    });
+                            *action = Some(ManuscriptAction::RowClick {
+                                id: data.id,
+                                double: response.double_clicked(),
+                                secondary: response.secondary_clicked(),
+                            });
+                        }
+                        egui::Popup::context_menu(&response)
+                            .id(egui::Id::unique(("manuscript_row_menu", data.id)))
+                            .show(|ui| {
+                                ui.label(summarize(&data.title, 28));
+                                manuscript_menu(ui, data.id, data.status, true, action);
+                            });
+                    }
                     theme::smartisan::index_row(&ledger_painter, row.response().rect, row_selected);
                 });
             });
     }
 }
 
-pub(super) fn manuscript_row_commands(
+pub(super) fn manuscript_menu(
+    ui: &mut egui::Ui,
+    id: i64,
+    status: ManuscriptStatus,
+    include_navigation: bool,
+    action: &mut Option<ManuscriptAction>,
+) {
+    if include_navigation {
+        for (label, item) in [
+            (open_manuscript_label(status), ManuscriptAction::Open(id)),
+            ("查看资料", ManuscriptAction::ShowDetail(id)),
+        ] {
+            if ui.button(label).clicked() {
+                *action = Some(item);
+                ui.close();
+            }
+        }
+        ui.separator();
+    }
+    for (icon, label, item) in manuscript_row_commands(id, status) {
+        if ui.add(theme::icon_text_button(icon, label)).clicked() {
+            *action = Some(item);
+            ui.close();
+        }
+    }
+}
+
+fn manuscript_row_commands(
     id: i64,
     status: ManuscriptStatus,
 ) -> impl Iterator<Item = (theme::Icon, &'static str, ManuscriptAction)> {
@@ -963,7 +985,7 @@ pub(super) fn manuscript_row_commands(
             "基于此公文新建",
             ManuscriptAction::CreateFromExisting(id),
         )),
-        draft.then_some((Icon::Publish, "发布", ManuscriptAction::Publish(id))),
+        draft.then_some((Icon::Publish, "发布", ManuscriptAction::PublishPending(id))),
         (status == ManuscriptStatus::Published).then_some((
             Icon::Undo,
             "退回草稿",
@@ -1030,11 +1052,15 @@ mod tests {
         }
 
         fn click(&mut self, pos: egui::Pos2) {
+            self.click_with(pos, egui::PointerButton::Primary);
+        }
+
+        fn click_with(&mut self, pos: egui::Pos2, button: egui::PointerButton) {
             self.frame(vec![egui::Event::PointerMoved(pos)]);
             for pressed in [true, false] {
                 self.frame(vec![egui::Event::PointerButton {
                     pos,
-                    button: egui::PointerButton::Primary,
+                    button,
                     pressed,
                     modifiers: egui::Modifiers::NONE,
                 }]);
@@ -1084,25 +1110,54 @@ mod tests {
         })
     }
 
+    fn has_text_at(output: &egui::FullOutput, text: &str, expected: egui::Pos2) -> bool {
+        output.shapes.iter().any(|shape| {
+            if let egui::Shape::Text(label) = &shape.shape
+                && label.galley.text() == text
+            {
+                let pos = label.pos + label.galley.size() * 0.5;
+                return pos == expected && shape.clip_rect.contains(pos);
+            }
+            false
+        })
+    }
+
     #[test]
     fn long_list_keeps_its_position_when_detail_opens_and_closes() {
         for width in [680.0, 1280.0] {
             let mut page = Page::new(width);
             let (title, pos, id) = page.scroll_to_middle();
             page.click(pos);
-            page.time += 0.4;
+            let output = page.frame(Vec::new());
+            assert!(page.app.manuscript_detail.is_none());
+            assert_eq!(page.app.manuscript_active_row, Some(id));
+            let date_header = text_pos(&output, "成文日期").unwrap();
+            page.click(text_pos(&output, "查看资料").unwrap());
             page.frame(Vec::new());
             let output = page.frame(Vec::new());
             assert_eq!(page.app.manuscript_detail.as_ref().unwrap().id, id);
             if width > 1100.0 {
-                assert_eq!(text_pos(&output, &title), Some(pos));
-                page.app
-                    .apply_manuscript_action(ManuscriptAction::CloseDetail);
+                assert!(has_text_at(&output, &title, pos));
+                let detail_title = text_pos(&output, "稿件资料").unwrap();
+                assert!(has_text_at(&output, "成文日期", date_header));
+                assert!(
+                    date_header.x < detail_title.x,
+                    "列表最右列不能被详情面板覆盖：成文日期 {date_header:?}，详情标题 {detail_title:?}"
+                );
+                page.frame(vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }]);
             } else {
                 page.click(text_pos(&output, "← 返回列表").unwrap());
             }
             let output = page.frame(Vec::new());
             assert!(page.app.manuscript_detail.is_none());
+            assert!(text_pos(&output, "稿件资料").is_none());
+            assert_eq!(page.app.manuscript_active_row, Some(id));
             assert_eq!(text_pos(&output, &title), Some(pos));
         }
     }
@@ -1127,6 +1182,8 @@ mod tests {
         let mut page = Page::new(1280.0);
         let (_, pos, selected) = page.scroll_to_middle();
         page.click(pos);
+        page.app
+            .apply_manuscript_action(ManuscriptAction::ShowDetail(selected));
         let other = page.app.manuscript_rows[0].id;
         page.app
             .transition_status(other, ManuscriptStatus::Published);
@@ -1147,6 +1204,7 @@ mod tests {
                 .unwrap()
                 .open_in_tab
         );
+        page.frame(Vec::new());
         let output = page.frame(Vec::new());
         page.click(text_pos(&output, "取消").unwrap());
         assert!(page.app.manuscript_delete_confirm.is_none());
@@ -1154,6 +1212,7 @@ mod tests {
 
         page.app
             .apply_manuscript_action(ManuscriptAction::DeletePending(other));
+        page.frame(Vec::new());
         let output = page.frame(Vec::new());
         page.click(text_pos(&output, "确认删除").unwrap());
         assert!(page.app.manuscript_delete_confirm.is_none());
@@ -1162,5 +1221,59 @@ mod tests {
         assert!(page.app.doc().manuscript_id.is_none());
         assert!(!page.app.doc().read_only());
         assert!(!page.app.doc().generated_markdown.is_empty());
+    }
+    #[test]
+    fn context_menu_deletes_the_clicked_row_and_selects_its_neighbor() {
+        let mut page = Page::new(1280.0);
+        let (_, pos, id) = page.scroll_to_middle();
+        let index = page
+            .app
+            .manuscript_rows
+            .iter()
+            .position(|row| row.id == id)
+            .unwrap();
+        let next = page.app.manuscript_rows[index + 1].id;
+        page.click(pos);
+        let output = page.frame(Vec::new());
+        page.click(text_pos(&output, "查看资料").unwrap());
+        page.frame(Vec::new());
+        page.click_with(pos, egui::PointerButton::Secondary);
+        page.frame(Vec::new());
+        let output = page.frame(Vec::new());
+        page.click(text_pos(&output, "删除").expect("right-click menu"));
+        page.frame(Vec::new());
+        assert_eq!(page.app.manuscript_delete_confirm.as_ref().unwrap().id, id);
+        let output = page.frame(Vec::new());
+        page.click(text_pos(&output, "确认删除").unwrap());
+        page.frame(Vec::new());
+        assert!(page.app.manuscript_detail.is_none());
+        assert_eq!(page.app.manuscript_active_row, Some(next));
+    }
+    #[test]
+    fn open_detail_follows_left_click_and_enter_opens_selected_manuscript() {
+        let mut page = Page::new(1280.0);
+        let (_, pos, id) = page.scroll_to_middle();
+        page.click(pos);
+        let output = page.frame(Vec::new());
+        page.click(text_pos(&output, "查看资料").unwrap());
+        page.frame(Vec::new());
+        let output = page.frame(Vec::new());
+        let row = page
+            .app
+            .manuscript_rows
+            .iter()
+            .find(|row| row.id == id - 1)
+            .unwrap();
+        let next = text_pos(&output, &row.title).unwrap();
+        page.click(next);
+        assert_eq!(page.app.manuscript_detail.as_ref().unwrap().id, id - 1);
+        page.frame(vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert_eq!(page.app.doc().manuscript_id, Some(id - 1));
     }
 }

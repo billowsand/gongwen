@@ -238,7 +238,9 @@ impl GongwenApp {
         self.manuscript_dirty = false;
         self.manuscript_applied = Some(self.manuscript_filter.clone());
         self.manuscript_delete_confirm = None;
+        self.manuscript_publish_confirm = None;
         self.manuscript_row_click = None;
+        self.manuscript_active_row = None;
         self.manuscript_batch_delete = None;
         self.clear_manuscript_detail();
         self.manuscript_archive_pending = None;

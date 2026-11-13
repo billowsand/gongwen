@@ -870,7 +870,7 @@ impl GongwenApp {
         let record = self
             .manuscript_store
             .as_mut()
-            .and_then(|store| store.get(id).ok().flatten());
+            .and_then(|store| store.get_for_editor(id).ok().flatten());
         let Some(record) = record else {
             return;
         };

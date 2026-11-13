@@ -985,9 +985,14 @@ impl ManuscriptStore {
         }))
     }
 
-    /// 归档主件；挂着送批材料时在同一事务里把主件和各随行件钉在选定的版本上。
+    /// 归档主件并追加 PDF 附件，钉版、状态流转与全部附件写入在同一事务里完成。
     /// 有一件既没导出过、也没有提交版本（包括本机找不到的）就整体拒绝。
-    pub fn archive_with_send_package(&mut self, owner_id: i64, choice: PinChoice) -> Result<()> {
+    pub fn archive_with_send_package_and_pdfs(
+        &mut self,
+        owner_id: i64,
+        choice: PinChoice,
+        pdfs: &[(String, Vec<u8>)],
+    ) -> Result<()> {
         let preview = self.archive_pin_preview(owner_id)?;
         if let Some(preview) = &preview
             && let Some(entry) = preview
@@ -1023,6 +1028,9 @@ impl ManuscriptStore {
                         )?;
                     }
                 }
+            }
+            for (file_name, bytes) in pdfs {
+                self.add_pdf(owner_id, file_name, bytes)?;
             }
             self.set_status(owner_id, ManuscriptStatus::Archived)
         })();
@@ -1558,7 +1566,7 @@ mod tests {
         assert_eq!(changed, vec![true, true, false]);
 
         store
-            .archive_with_send_package(owner, PinChoice::Exported)
+            .archive_with_send_package_and_pdfs(owner, PinChoice::Exported, &[])
             .unwrap();
         assert_eq!(
             store.manuscript_brief(owner).unwrap().unwrap().status,
@@ -1593,7 +1601,7 @@ mod tests {
         edit(&mut store, letter, "# 函稿\n\n第二稿。");
         commit(&mut store, letter, "修改稿");
         store
-            .archive_with_send_package(owner, PinChoice::Latest)
+            .archive_with_send_package_and_pdfs(owner, PinChoice::Latest, &[])
             .unwrap();
         assert_eq!(plan_versions(&store, owner), vec![Some(1), Some(2)]);
 
@@ -1601,9 +1609,103 @@ mod tests {
         let plain = create(&mut store, TemplateKind::WhitePaper, "另一件");
         assert_eq!(store.archive_pin_preview(plain).unwrap(), None);
         store
-            .archive_with_send_package(plain, PinChoice::Exported)
+            .archive_with_send_package_and_pdfs(plain, PinChoice::Exported, &[])
             .unwrap();
         assert_eq!(store.owner_pin(plain).unwrap(), None);
+    }
+
+    #[test]
+    fn archiving_rolls_back_pins_status_and_all_pdfs_when_one_pdf_fails() {
+        let mut store = store();
+        let owner = create(&mut store, TemplateKind::WhitePaper, "呈批件");
+        let letter = create(&mut store, TemplateKind::OfficialLetter, "函稿");
+        store.add_send_package_item(owner, letter).unwrap();
+        commit(&mut store, owner, "送审稿");
+        commit(&mut store, letter, "初稿");
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_pdf_attachment BEFORE INSERT ON pdf_attachments
+                 WHEN NEW.file_name = '拒绝.pdf'
+                 BEGIN SELECT RAISE(ABORT, '测试拒绝附件'); END",
+            )
+            .unwrap();
+        let pdfs = vec![
+            ("先写入.pdf".to_string(), vec![1, 2]),
+            ("拒绝.pdf".to_string(), vec![3, 4]),
+        ];
+
+        store
+            .archive_with_send_package_and_pdfs(owner, PinChoice::Latest, &pdfs)
+            .unwrap_err();
+
+        assert_eq!(
+            store.manuscript_brief(owner).unwrap().unwrap().status,
+            ManuscriptStatus::Draft
+        );
+        let attachment_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pdf_attachments WHERE manuscript_id=?1",
+                [owner],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attachment_count, 0);
+        assert_eq!(store.owner_pin(owner).unwrap(), None);
+        assert!(
+            store
+                .send_package_items(owner)
+                .unwrap()
+                .iter()
+                .all(|item| item.pinned_revision_uuid.is_none())
+        );
+    }
+
+    #[test]
+    fn archiving_applies_pins_status_and_all_pdfs_together() {
+        let mut store = store();
+        let owner = create(&mut store, TemplateKind::WhitePaper, "呈批件");
+        let letter = create(&mut store, TemplateKind::OfficialLetter, "函稿");
+        store.add_send_package_item(owner, letter).unwrap();
+        commit(&mut store, owner, "送审稿");
+        commit(&mut store, letter, "初稿");
+        let pdfs = vec![
+            ("附件一.pdf".to_string(), vec![1, 2]),
+            ("附件二.pdf".to_string(), vec![3, 4]),
+        ];
+
+        store
+            .archive_with_send_package_and_pdfs(owner, PinChoice::Latest, &pdfs)
+            .unwrap();
+
+        assert_eq!(
+            store.manuscript_brief(owner).unwrap().unwrap().status,
+            ManuscriptStatus::Archived
+        );
+        assert!(store.owner_pin(owner).unwrap().is_some());
+        assert!(
+            store
+                .send_package_items(owner)
+                .unwrap()
+                .iter()
+                .all(|item| item.pinned_revision_uuid.is_some())
+        );
+        let mut stmt = store
+            .conn
+            .prepare(
+                "SELECT file_name, bytes FROM pdf_attachments
+                 WHERE manuscript_id=?1 ORDER BY sort_order, id",
+            )
+            .unwrap();
+        let attachments = stmt
+            .query_map([owner], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(attachments, pdfs);
     }
 
     #[test]
@@ -1616,7 +1718,7 @@ mod tests {
         let preview = store.archive_pin_preview(owner).unwrap().unwrap();
         assert_eq!(preview.unpinnable().len(), 1);
         let error = store
-            .archive_with_send_package(owner, PinChoice::Exported)
+            .archive_with_send_package_and_pdfs(owner, PinChoice::Exported, &[])
             .unwrap_err()
             .to_string();
         assert!(error.contains("《通知》"), "{error}");

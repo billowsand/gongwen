@@ -2074,7 +2074,7 @@ mod send_package_sync_tests {
         let report = create(&mut a, TemplateKind::ResearchReport, "报告");
         a.add_send_package_item(owner, report).unwrap();
         a.add_send_package_item(owner, letter).unwrap();
-        a.archive_with_send_package(owner, PinChoice::Exported)
+        a.archive_with_send_package_and_pdfs(owner, PinChoice::Exported, &[])
             .unwrap();
 
         let zip = dir.path().join("pkg.zip");

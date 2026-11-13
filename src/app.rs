@@ -291,8 +291,10 @@ pub struct GongwenApp {
     manuscript_selected: BTreeSet<i64>,
     /// 各状态稿件数 [新建, 草稿, 发布, 归档]；新建恒为 0（已取消，见 manuscript.rs）。
     manuscript_count: [i64; 4],
+    manuscript_publish_confirm: Option<(i64, String)>,
     manuscript_delete_confirm: Option<manuscript_ui::SingleDeleteConfirm>,
     manuscript_row_click: Option<(i64, f64)>,
+    manuscript_active_row: Option<i64>,
     /// 批量删除确认：点按钮那一刻冻结的删除范围，确认期间改勾选不影响它。
     manuscript_batch_delete: Option<BatchDeleteConfirm>,
     /// 「导出 PDF」批量导出是否正在后台执行（防重复触发）。
@@ -852,7 +854,9 @@ impl GongwenApp {
             manuscript_selected: BTreeSet::new(),
             manuscript_count: [0; 4],
             manuscript_delete_confirm: None,
+            manuscript_publish_confirm: None,
             manuscript_row_click: None,
+            manuscript_active_row: None,
             manuscript_batch_delete: None,
             manuscript_pdf_export_busy: false,
             manuscript_package_export_busy: false,

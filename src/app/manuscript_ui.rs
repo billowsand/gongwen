@@ -25,12 +25,15 @@ pub(crate) enum ManuscriptAction {
     RowClick {
         id: i64,
         double: bool,
+        secondary: bool,
     },
+    ShowDetail(i64),
     /// 打开或切换到公文标签，编辑权限由稿件状态决定。
     Open(i64),
     CloseDetail,
     /// 复制该稿件的行文要素和正文，作为一篇尚未入库的新稿载入起草页。
     CreateFromExisting(i64),
+    PublishPending(i64),
     Publish(i64),
     RevertToDraft(i64),
     /// 归档。PDF 附件来自 `manuscript_archive_pending` 中已选的文件。

@@ -12,7 +12,7 @@ use crate::diff_view;
 use crate::draft_page::{DraftSession, LoadedVersion};
 use crate::manuscript::{ManuscriptStore, ManuscriptUpdate, VersionRecord};
 use crate::modal::{self, Dismiss};
-use crate::models::DraftInput;
+use crate::models::{DraftInput, ManuscriptStatus};
 use crate::storage;
 use crate::theme;
 use crate::units;
@@ -64,6 +64,18 @@ pub(crate) struct VersionSwitchPrompt {
     pub(crate) target: VersionTarget,
     /// 当前内容所基于的版本号，用于文案。
     pub(crate) base_label: String,
+}
+
+fn ensure_version_editable(store: &ManuscriptStore, manuscript_id: i64) -> anyhow::Result<()> {
+    let status = store
+        .manuscript_brief(manuscript_id)?
+        .context("稿件不存在或已被删除")?
+        .status;
+    anyhow::ensure!(
+        matches!(status, ManuscriptStatus::New | ManuscriptStatus::Draft),
+        "已发布或归档稿件的版本为只读；已发布稿件请先退回草稿"
+    );
+    Ok(())
 }
 
 impl GongwenApp {
@@ -669,6 +681,7 @@ impl GongwenApp {
                 .manuscript_store
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
+            ensure_version_editable(store, manuscript_id)?;
             let record = store
                 .get_manuscript_version(manuscript_id, version_number)?
                 .context("版本不存在或已被删除")?;
@@ -763,6 +776,20 @@ impl GongwenApp {
         }
     }
 
+    /// 从稿件管理载入版本：已打开的标签统一走未保存修改确认，未打开才直接载入。
+    pub(crate) fn request_manuscript_version_load(
+        &mut self,
+        manuscript_id: i64,
+        version_number: i64,
+    ) {
+        if let Some(index) = self.doc_index_of_manuscript(manuscript_id) {
+            self.draft_page_at(index)
+                .request_version_switch(VersionTarget::Version(version_number));
+        } else {
+            self.load_manuscript_version(manuscript_id, version_number);
+        }
+    }
+
     /// 把某版本载入起草页继续编辑（不改版本链、不改活稿行）。
     pub(crate) fn load_manuscript_version(&mut self, manuscript_id: i64, version_number: i64) {
         let result: anyhow::Result<Option<VersionRecord>> = (|| {
@@ -770,6 +797,7 @@ impl GongwenApp {
                 .manuscript_store
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
+            ensure_version_editable(store, manuscript_id)?;
             store.get_manuscript_version(manuscript_id, version_number)
         })();
         match result {
