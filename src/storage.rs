@@ -326,6 +326,75 @@ pub fn config_path() -> Result<PathBuf> {
     slot_file("config.json")
 }
 
+/// 锁屏只读取认证过的配置，不触发迁移、留底或工作区初始化。
+fn authenticated_environment_config(
+    key: &crate::vault::KeyHandle,
+) -> Result<Option<serde_json::Value>> {
+    let path = slot_file_for(key.slot(), "config.json")?;
+    let raw = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let plain = crate::vault::open_path_bytes(key, &path, "config", &raw)?;
+    let config: serde_json::Value = serde_json::from_slice(&plain)?;
+    anyhow::ensure!(config.is_object(), "配置内容不是 JSON 对象");
+    Ok(Some(config))
+}
+
+pub(crate) fn read_environment_policy(
+    key: &crate::vault::KeyHandle,
+) -> Result<crate::models::EnvironmentPolicy> {
+    let config = authenticated_environment_config(key)?
+        .context("加密工作区的配置文件缺失，无法确认环境策略")?;
+    let policy = config
+        .as_object()
+        .and_then(|config| config.get("environment"))
+        .cloned();
+    match policy {
+        Some(value) => serde_json::from_value(value).context("环境策略格式不受支持"),
+        None => Ok(crate::models::EnvironmentPolicy::default()),
+    }
+}
+
+pub(crate) fn recover_environment_policy(unlocked: &crate::vault::Unlocked) -> Result<()> {
+    anyhow::ensure!(unlocked.slot == DataSlot::Real, "当前槽位无法恢复环境策略");
+    let key = crate::vault::KeyHandle::from_unlock(unlocked, true);
+    let path = slot_file_for(DataSlot::Real, "config.json")?;
+    let mut config = match fs::read(&path) {
+        Ok(raw) => match crate::vault::open_path_bytes(&key, &path, "config", &raw)
+            .ok()
+            .and_then(|plain| serde_json::from_slice::<serde_json::Value>(&plain).ok())
+            .filter(serde_json::Value::is_object)
+        {
+            Some(config) => config,
+            None => {
+                // 原密文留底；显式恢复会重建默认配置，而不是悄悄丢弃损坏现场。
+                let backup = path.with_file_name("config.json.recovery-backup");
+                atomic_replace(&backup, |file| {
+                    use std::io::Write as _;
+                    file.write_all(&raw)?;
+                    Ok(())
+                })?;
+                serde_json::to_value(crate::models::AppConfig::default())?
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::to_value(crate::models::AppConfig::default())?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    config["environment"] = serde_json::to_value(crate::models::EnvironmentPolicy::default())?;
+    let sealed =
+        crate::vault::seal_path_bytes(&key, &path, "config", &serde_json::to_vec_pretty(&config)?)?;
+    // 锁屏只允许这次经过真实密码认证的密文替换，其他配置写入仍保持关闭。
+    atomic_replace(&path, |file| {
+        use std::io::Write as _;
+        file.write_all(&sealed)?;
+        Ok(())
+    })
+}
+
 /// 启动外壳需要提前读取主题时使用：只读解析，不迁移、不挪走损坏文件。
 ///
 /// 真正的配置读取与损坏兜底留给 `GongwenApp::new`——如果这里也调 [`load`]，
@@ -472,6 +541,13 @@ pub(crate) fn atomic_write(
     if writes_blocked() {
         anyhow::bail!("正在锁定或切换数据槽位，已拒绝写入 {}", path.display());
     }
+    atomic_replace(path, write)
+}
+
+fn atomic_replace(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut fs::File) -> Result<()>,
+) -> Result<()> {
     let parent = path.parent().context("保存路径缺少父目录")?;
     fs::create_dir_all(parent)?;
     #[cfg(unix)]

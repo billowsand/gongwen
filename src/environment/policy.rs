@@ -60,7 +60,19 @@ fn adapter_violation(interface: &NetworkInterface, policy: NetworkPolicy) -> Opt
         return None;
     }
     match policy {
+        NetworkPolicy::NoAdapters if interface.kind == super::NetworkInterfaceKind::System => None,
         NetworkPolicy::NoAdapters => Some(Violation::AdapterPresent(interface.id.clone())),
+        // AirDrop / AWDL / LLW 等系统服务接口常驻且可能只有链路本地地址；
+        // 它们本身不代表外网可达。真正的默认路由仍由快照的独立字段判定。
+        NetworkPolicy::Offline if interface.kind == super::NetworkInterfaceKind::System => None,
+        // VPN 接口的“链路”常常常驻为真，只有取得可路由地址才视为联网。
+        NetworkPolicy::Offline
+            if interface.kind == super::NetworkInterfaceKind::Vpn
+                && interface.non_loopback_address =>
+        {
+            Some(Violation::NetworkAddress(interface.id.clone()))
+        }
+        NetworkPolicy::Offline if interface.kind == super::NetworkInterfaceKind::Vpn => None,
         NetworkPolicy::Offline if interface.link_up => {
             Some(Violation::NetworkLink(interface.id.clone()))
         }
@@ -89,6 +101,22 @@ pub(crate) fn evaluate(
     }
     if observed_unhealthy(snapshot.devices.as_ref(), now, policy.fail_closed) {
         return Some(Violation::DeviceMonitorUnavailable);
+    }
+    evaluate_observed_risk(snapshot, policy, trusted_devices)
+}
+
+pub(crate) fn evaluate_observed_risk(
+    snapshot: &EnvironmentSnapshot,
+    policy: &EnvironmentPolicy,
+    trusted_devices: &BTreeSet<DeviceIdentity>,
+) -> Option<Violation> {
+    if policy.fail_closed {
+        if snapshot.network.as_ref().is_some_and(|item| !item.healthy) {
+            return Some(Violation::NetworkMonitorUnavailable);
+        }
+        if snapshot.devices.as_ref().is_some_and(|item| !item.healthy) {
+            return Some(Violation::DeviceMonitorUnavailable);
+        }
     }
     if let Some(network) = &snapshot.network {
         if let Some(violation) = network
@@ -119,7 +147,9 @@ pub(crate) fn evaluate(
                                 candidate.class == DeviceClass::RemovableStorage
                                     && candidate.identity.as_ref() == Some(identity)
                             })
-                            .count()
+                            .map(|candidate| candidate.id.as_str())
+                            .collect::<BTreeSet<_>>()
+                            .len()
                             == 1
                 });
             !trusted_storage
@@ -231,6 +261,91 @@ mod tests {
         assert_eq!(
             evaluate(&state, &policy, &BTreeSet::new(), true, Instant::now()),
             None
+        );
+    }
+
+    #[test]
+    fn offline_mode_ignores_system_service_interfaces() {
+        let policy = EnvironmentPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut service = interface("awdl0");
+        service.kind = super::super::NetworkInterfaceKind::System;
+        service.link_up = true;
+        service.non_loopback_address = true;
+        let state = snapshot(NetworkSnapshot {
+            interfaces: vec![service.clone()],
+            default_route: false,
+        });
+        assert_eq!(
+            evaluate(&state, &policy, &BTreeSet::new(), true, Instant::now()),
+            None
+        );
+        let no_adapters = EnvironmentPolicy {
+            enabled: true,
+            network: NetworkPolicy::NoAdapters,
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate(&state, &no_adapters, &BTreeSet::new(), true, Instant::now()),
+            None,
+            "系统服务接口不是用户网卡"
+        );
+        service.kind = super::super::NetworkInterfaceKind::Ethernet;
+        let state = snapshot(NetworkSnapshot {
+            interfaces: vec![service],
+            default_route: false,
+        });
+        assert_eq!(
+            evaluate(&state, &no_adapters, &BTreeSet::new(), true, Instant::now()),
+            Some(Violation::AdapterPresent("awdl0".into()))
+        );
+    }
+
+    #[test]
+    fn offline_mode_requires_a_routable_address_for_vpn() {
+        let policy = EnvironmentPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut vpn = interface("utun4");
+        vpn.kind = super::super::NetworkInterfaceKind::Vpn;
+        vpn.link_up = true;
+        vpn.non_loopback_address = false;
+        let mut state = snapshot(NetworkSnapshot {
+            interfaces: vec![vpn.clone()],
+            default_route: false,
+        });
+        assert_eq!(
+            evaluate(&state, &policy, &BTreeSet::new(), true, Instant::now()),
+            None,
+            "只有链路本地地址的常驻 VPN 接口不代表可联网"
+        );
+        vpn.non_loopback_address = true;
+        state.network.as_mut().expect("network").value.interfaces = vec![vpn];
+        assert_eq!(
+            evaluate(&state, &policy, &BTreeSet::new(), true, Instant::now()),
+            Some(Violation::NetworkAddress("utun4".into()))
+        );
+    }
+
+    #[test]
+    fn offline_mode_rejects_connected_physical_interface() {
+        let policy = EnvironmentPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut ethernet = interface("en0");
+        ethernet.kind = super::super::NetworkInterfaceKind::Ethernet;
+        ethernet.link_up = true;
+        let state = snapshot(NetworkSnapshot {
+            interfaces: vec![ethernet],
+            default_route: false,
+        });
+        assert_eq!(
+            evaluate(&state, &policy, &BTreeSet::new(), true, Instant::now()),
+            Some(Violation::NetworkLink("en0".into()))
         );
     }
 

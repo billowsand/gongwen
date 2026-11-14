@@ -75,6 +75,9 @@ enum ShellPhase {
 struct UnlockState {
     rx: std::sync::mpsc::Receiver<Result<Option<crate::vault::Unlocked>, String>>,
     veiled: bool,
+    recover_environment: bool,
+    environment_block: Option<String>,
+    environment_block_auto_clear: bool,
 }
 
 /// 启动时由 `Vault::probe()` 决定的闸门形态。
@@ -101,6 +104,8 @@ struct GateState {
     error: Option<String>,
     /// 中性提示（例如「已取消停用申请」），不是错误、不用危险色。
     notice: Option<String>,
+    environment_block: Option<String>,
+    environment_block_auto_clear: bool,
     /// 首帧把焦点放进第一个密码框。
     focused: bool,
     show_password: bool,
@@ -150,6 +155,8 @@ impl GateState {
             with_decoy: false,
             error: None,
             notice: None,
+            environment_block: None,
+            environment_block_auto_clear: false,
             focused: false,
             show_password: false,
             veiled: false,
@@ -202,6 +209,7 @@ fn other_slot_has_encrypted_data(slot: DataSlot) -> bool {
 /// 锁屏这一次交互要外壳做的事。
 enum GateOutcome {
     Unlock(String),
+    RecoverEnvironment(String),
     Setup { real: String, decoy: Option<String> },
     SkipSetup,
     ClearBroken,
@@ -211,6 +219,16 @@ struct EnvironmentLock {
     reason: String,
     error: Option<String>,
     last_save_attempt: Option<Instant>,
+    confirm_exit: bool,
+    exit_requested: bool,
+}
+
+#[derive(Clone, Copy)]
+enum EnvironmentExitAction {
+    None,
+    Ask,
+    Cancel,
+    Exit,
 }
 
 /// 应用外壳：先过闸门，再进工作区。
@@ -390,30 +408,141 @@ impl AppShell {
         }
     }
 
-    fn evaluate_environment(&mut self) -> Option<crate::environment::Violation> {
+    fn evaluate_environment(
+        &mut self,
+        policy: EnvironmentPolicy,
+    ) -> Option<crate::environment::Violation> {
         let capture_healthy = self
             .capture_guard
-            .update(self.environment_policy.enabled && self.environment_policy.capture_protection);
+            .update(policy.enabled && policy.capture_protection);
         crate::environment::evaluate(
             self.environment.snapshot(),
-            &self.environment_policy,
+            &policy,
             &self.trusted_devices,
             capture_healthy,
             Instant::now(),
         )
     }
 
-    fn poll_environment(&mut self) {
-        let changed = self.environment.poll();
-        if let ShellPhase::Ready(app) = &mut self.phase {
-            self.environment_policy = app.environment_policy();
-            app.set_environment_summary(self.environment.snapshot().summary());
-            if changed {
-                // 设备事件很少；心跳也刷新一次，设置页刚批准的 IS903 能及时生效。
-                self.trusted_devices = super::export_devices::environment_approved_identities();
+    fn finish_settings_save(&mut self, ctx: &egui::Context) {
+        let ShellPhase::Ready(app) = &mut self.phase else {
+            return;
+        };
+        if !std::mem::take(&mut app.save_environment_requested) {
+            return;
+        }
+        self.poll_environment(ctx);
+        if self.environment_lock.is_some() {
+            paint_lock_veil(ctx, 1.0);
+            return;
+        }
+        let ShellPhase::Ready(app) = &mut self.phase else {
+            return;
+        };
+        let previous = app.config.environment;
+        let candidate = app.environment_draft;
+        if candidate.enabled && candidate != previous {
+            if storage::current_slot() != DataSlot::Real
+                || !app.vault_locked
+                || !crate::vault::current_db_key_active()
+            {
+                let message = "环境策略未启用：请先启用应用锁并完成数据加密。".to_owned();
+                app.config.environment = previous;
+                let saved = app.try_persist();
+                let persist_status = app.status.clone();
+                app.status = if saved {
+                    message
+                } else {
+                    format!("{message}；其他设置也未能保存：{persist_status}")
+                };
+                return;
+            }
+            self.trusted_devices = super::export_devices::environment_approved_identities();
+            let violation = self.evaluate_environment(candidate);
+            let ShellPhase::Ready(app) = &mut self.phase else {
+                return;
+            };
+            if let Some(violation) = violation {
+                let message = format!("环境策略未启用：{}", violation.summary());
+                app.config.environment = previous;
+                let saved = app.try_persist();
+                let persist_status = app.status.clone();
+                app.environment_preview = message.clone();
+                app.status = if saved {
+                    message
+                } else {
+                    format!("{message}；其他设置也未能保存：{persist_status}")
+                };
+                return;
             }
         }
-        self.environment_violation = self.evaluate_environment();
+        let ShellPhase::Ready(app) = &mut self.phase else {
+            return;
+        };
+        app.config.environment = candidate;
+        if !app.try_persist() {
+            app.config.environment = previous;
+        }
+        self.poll_environment(ctx);
+        if self.environment_lock.is_some() {
+            paint_lock_veil(ctx, 1.0);
+        }
+    }
+
+    fn poll_environment(&mut self, ctx: &egui::Context) {
+        let ready = matches!(self.phase, ShellPhase::Ready(_));
+        if let ShellPhase::Ready(app) = &self.phase {
+            self.environment_policy = app.environment_policy();
+        }
+        let policy = self.environment_policy;
+        let mut violation = None;
+        let mut refreshed = false;
+        while self.environment.poll_next() {
+            if ready && !refreshed {
+                self.trusted_devices = super::export_devices::environment_approved_identities();
+                refreshed = true;
+            }
+            if ready && policy.enabled {
+                // 初始两类快照分别到达。逐条记录明确风险，缺失与过期在排空后统一判断。
+                violation = violation.or_else(|| {
+                    crate::environment::evaluate_observed_risk(
+                        self.environment.snapshot(),
+                        &policy,
+                        &self.trusted_devices,
+                    )
+                });
+            }
+        }
+        let current = self.evaluate_environment(policy);
+        self.environment_violation = violation.or(current);
+        if let ShellPhase::Gate(gate) = &mut self.phase
+            && gate.environment_block.is_some()
+            && gate.environment_block_auto_clear
+            && self.environment_violation.is_none()
+        {
+            gate.environment_block = None;
+            gate.notice = Some("环境风险已排除，可重新输入密码解锁。".into());
+        }
+        if ready && policy.enabled {
+            // 后端挂起或退出时也要检查快照时效。
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
+        if let ShellPhase::Ready(app) = &mut self.phase {
+            app.set_environment_summary(self.environment.snapshot().summary());
+            let mut candidate = app.environment_draft;
+            candidate.enabled = true;
+            let preview = crate::environment::evaluate(
+                self.environment.snapshot(),
+                &candidate,
+                &self.trusted_devices,
+                true,
+                Instant::now(),
+            );
+            app.environment_preview = preview.map_or_else(
+                || "网络与外设预检通过。".into(),
+                |reason| format!("预检未通过：{}", reason.summary()),
+            );
+        }
         if self.environment_lock.is_none()
             && let Some(violation) = self.environment_violation.clone()
             && let ShellPhase::Ready(app) = &mut self.phase
@@ -423,6 +552,8 @@ impl AppShell {
                 reason: violation.summary(),
                 error: None,
                 last_save_attempt: None,
+                confirm_exit: false,
+                exit_requested: false,
             });
         }
     }
@@ -433,10 +564,27 @@ impl AppShell {
             return false;
         };
         let reason = lock.reason.clone();
-        ctx.input_mut(|input| {
-            input.raw.events.clear();
-            input.pointer = egui::PointerState::default();
-        });
+        let backup_restore_running = matches!(
+            &self.phase,
+            ShellPhase::Ready(app) if app.backup_restore_running
+        );
+        if ctx.input(|input| input.viewport().close_requested()) {
+            let exit_confirmed = lock.exit_requested;
+            if exit_confirmed && !backup_restore_running {
+                // 不发送 CancelClose：让已经二次确认的关闭真正生效。
+                return true;
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if let Some(lock) = &mut self.environment_lock {
+                lock.exit_requested = false;
+                if backup_restore_running {
+                    lock.error = Some("备份恢复仍在进行，完成前不能退出应用。".into());
+                } else {
+                    lock.confirm_exit = true;
+                }
+            }
+            ctx.request_repaint();
+        }
         paint_lock_veil(ctx, 1.0);
 
         let ShellPhase::Ready(app) = &mut self.phase else {
@@ -444,8 +592,16 @@ impl AppShell {
             return false;
         };
         // 不绘制工作区，但继续消费后台终态，让停止标志和忙状态能够收敛。
-        app.poll_worker(ctx);
+        app.poll_workspace_results(ctx);
+        #[cfg(feature = "ai-workbench")]
+        app.task_auto_queue.clear();
+        if app.take_force_relock() {
+            self.lock_now(ctx);
+            self.gate_after_restore(ctx);
+            return true;
+        }
         let busy = app.any_busy();
+        let allow_exit = !app.backup_restore_running;
         let save_due = self.environment_lock.as_ref().is_some_and(|lock| {
             lock.last_save_attempt
                 .is_none_or(|last| last.elapsed() >= Duration::from_secs(2))
@@ -458,7 +614,8 @@ impl AppShell {
                 Ok(()) => {
                     self.lock_now(ctx);
                     if let ShellPhase::Gate(gate) = &mut self.phase {
-                        gate.notice = Some(format!("已因环境安全风险锁定：{reason}"));
+                        gate.environment_block = Some(reason);
+                        gate.environment_block_auto_clear = true;
                     }
                     return true;
                 }
@@ -473,7 +630,37 @@ impl AppShell {
             .environment_lock
             .as_ref()
             .and_then(|lock| lock.error.clone());
-        paint_environment_lock_status(ctx, &reason, busy, error.as_deref());
+        let confirm_exit = self
+            .environment_lock
+            .as_ref()
+            .is_some_and(|lock| lock.confirm_exit);
+        match paint_environment_lock_status(
+            ctx,
+            &reason,
+            busy,
+            error.as_deref(),
+            confirm_exit,
+            allow_exit,
+        ) {
+            EnvironmentExitAction::None => {}
+            EnvironmentExitAction::Ask => {
+                if let Some(lock) = &mut self.environment_lock {
+                    lock.confirm_exit = true;
+                }
+            }
+            EnvironmentExitAction::Cancel => {
+                if let Some(lock) = &mut self.environment_lock {
+                    lock.confirm_exit = false;
+                }
+            }
+            EnvironmentExitAction::Exit => {
+                if let Some(lock) = &mut self.environment_lock {
+                    lock.exit_requested = true;
+                    lock.confirm_exit = false;
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
         ctx.request_repaint_after(if busy {
             Duration::from_millis(100)
         } else {
@@ -488,6 +675,36 @@ impl AppShell {
         ctx.memory_mut(|memory| *memory = egui::Memory::default());
         ctx.data_mut(|data| data.clear());
         super::clipboard::configure(ctx);
+        if slot == DataSlot::Real
+            && let Some(key) = crate::vault::key_handle().filter(|key| key.db_active())
+        {
+            let result = storage::read_environment_policy(&key);
+            self.trusted_devices = super::export_devices::environment_approved_identities();
+            while self.environment.poll_next() {}
+            let (blocked, auto_clear) = match result {
+                Ok(policy) => {
+                    self.environment_policy = policy;
+                    (
+                        self.evaluate_environment(policy)
+                            .map(|reason| reason.summary()),
+                        true,
+                    )
+                }
+                Err(error) => (Some(format!("无法读取环境策略：{error:#}")), false),
+            };
+            if let Some(reason) = blocked {
+                self.lock_now(ctx);
+                if self.compact_startup {
+                    self.restore_workspace_window(ctx);
+                    self.compact_startup = false;
+                }
+                if let ShellPhase::Gate(gate) = &mut self.phase {
+                    gate.environment_block = Some(reason);
+                    gate.environment_block_auto_clear = auto_clear;
+                }
+                return;
+            }
+        }
         storage::set_current_slot(slot);
         // 进入工作区：槽位与密钥句柄都明确，恢复配置目录写入。
         storage::set_writes_blocked(false);
@@ -517,7 +734,7 @@ impl AppShell {
         }
         self.phase = ShellPhase::Ready(Box::new(app));
         // 工作区尚未绘制就先按已保存策略复核；不合格时下一帧也只显示紧急遮蔽。
-        self.poll_environment();
+        self.poll_environment(ctx);
         ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::unique("gate_password_primary")));
         self.unlock_fade_started = Some(ctx.input(|input| input.time));
         if self.compact_startup {
@@ -527,8 +744,15 @@ impl AppShell {
     }
 
     /// 密码派生与锁文件验证放后台；主线程继续处理 Wayland 事件。
-    fn begin_unlock(&mut self, ctx: &egui::Context, password: String) {
-        let veiled = matches!(&self.phase, ShellPhase::Gate(gate) if gate.veiled);
+    fn begin_unlock(&mut self, ctx: &egui::Context, password: String, recover_environment: bool) {
+        let (veiled, environment_block, environment_block_auto_clear) = match &self.phase {
+            ShellPhase::Gate(gate) => (
+                gate.veiled,
+                gate.environment_block.clone(),
+                gate.environment_block_auto_clear,
+            ),
+            _ => (false, None, false),
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         let wake = ctx.clone();
         #[cfg(test)]
@@ -544,7 +768,13 @@ impl AppShell {
             let _ = tx.send(result);
             wake.request_repaint();
         });
-        self.phase = ShellPhase::Unlocking(UnlockState { rx, veiled });
+        self.phase = ShellPhase::Unlocking(UnlockState {
+            rx,
+            veiled,
+            recover_environment,
+            environment_block,
+            environment_block_auto_clear,
+        });
     }
 
     /// 起一个闸门后台任务：数据密钥进句柄，搬运在线程里跑，锁屏显示进度。
@@ -665,8 +895,9 @@ impl AppShell {
     fn apply_outcome(&mut self, ctx: &egui::Context, outcome: GateOutcome) {
         match outcome {
             GateOutcome::Unlock(password) => {
-                self.begin_unlock(ctx, password);
+                self.begin_unlock(ctx, password, false);
             }
+            GateOutcome::RecoverEnvironment(password) => self.begin_unlock(ctx, password, true),
             GateOutcome::Setup { real, decoy } => {
                 match Vault::create(&real, decoy.as_deref(), false) {
                     Ok((_, Some(unlocked))) => {
@@ -731,8 +962,35 @@ impl AppShell {
         let veiled = matches!(&self.phase, ShellPhase::Unlocking(state) if state.veiled);
         let mut gate = GateState::unlock();
         gate.veiled = veiled;
+        if let ShellPhase::Unlocking(state) = &self.phase {
+            gate.environment_block = state.environment_block.clone();
+            gate.environment_block_auto_clear = state.environment_block_auto_clear;
+        }
         match result {
             Ok(Some(unlocked)) => {
+                let recovery = matches!(&self.phase, ShellPhase::Unlocking(state) if state.recover_environment);
+                if recovery {
+                    if unlocked.slot != DataSlot::Real {
+                        // 与正常解锁一样，不在恢复入口区分主密码和第二密码；
+                        // 诱饵密码不写任何文件，也不清除阻断。
+                        gate.error = None;
+                        gate.notice = Some("请重新输入密码。".into());
+                    } else {
+                        match storage::recover_environment_policy(&unlocked) {
+                            Ok(()) => {
+                                self.environment_policy = EnvironmentPolicy::default();
+                                gate.environment_block = None;
+                                gate.environment_block_auto_clear = false;
+                                gate.notice = Some("环境策略已停用，请重新输入密码解锁。".into());
+                            }
+                            Err(error) => {
+                                gate.error = Some(format!("恢复环境策略失败：{error:#}"));
+                            }
+                        }
+                    }
+                    self.phase = ShellPhase::Gate(gate);
+                    return;
+                }
                 // 停用标记必须由「刚解锁的 DEK」认证：伪造的明文标记
                 // 一律无效。停用只对真实槽生效——用诱饵密码不能执行
                 // 真实槽的解密与删锁，否则可否认性与数据都保不住。
@@ -884,7 +1142,7 @@ impl AppShell {
 impl AppShell {
     pub(crate) fn run(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.poll_environment();
+        self.poll_environment(&ctx);
         if self.environment_lock_frame(&ctx) {
             return;
         }
@@ -1040,7 +1298,7 @@ impl AppShell {
             Some(After::WorkDone { kind, slot, result }) => {
                 self.finish_work(&ctx, kind, slot, result)
             }
-            None => {}
+            None => self.finish_settings_save(&ctx),
         }
         // 密码框只接受直接键入；显式关闭系统输入法，避免中文预编辑或候选词进入密码。
         if matches!(self.phase, ShellPhase::Gate(_) | ShellPhase::Unlocking(_)) {
@@ -1092,10 +1350,14 @@ fn paint_environment_lock_status(
     reason: &str,
     busy: bool,
     error: Option<&str>,
-) {
+    confirm_exit: bool,
+    allow_exit: bool,
+) -> EnvironmentExitAction {
+    let mut action = EnvironmentExitAction::None;
     egui::Window::new("环境安全保护")
         .id(egui::Id::unique("environment_lock_status"))
-        .order(egui::Order::Tooltip)
+        // 必须高于遮罩使用的 Tooltip 层，否则说明与按钮会被点击盾牌盖住。
+        .order(egui::Order::Debug)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .title_bar(false)
         .collapsible(false)
@@ -1132,7 +1394,39 @@ fn paint_environment_lock_status(
                     .color(theme::danger()),
                 );
             }
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(6.0);
+            if !allow_exit {
+                ui.label(
+                    egui::RichText::new("备份恢复正在进行，暂不能退出应用。请等待恢复完成。")
+                        .size(theme::font_sizes::SMALL)
+                        .color(theme::text_muted()),
+                );
+            } else if confirm_exit {
+                ui.label(
+                    egui::RichText::new(
+                        "退出会放弃尚未保存的修改。已经落盘的稿件与配置保持加密；下次启动仍按环境策略检查。",
+                    )
+                    .size(theme::font_sizes::SMALL)
+                    .color(theme::danger()),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("继续等待").clicked() {
+                        action = EnvironmentExitAction::Cancel;
+                    }
+                    if ui.button("确认退出并放弃未保存修改").clicked() {
+                        action = EnvironmentExitAction::Exit;
+                    }
+                });
+            } else if ui
+                .button("任务或保存持续无法完成？退出应用…")
+                .clicked()
+            {
+                action = EnvironmentExitAction::Ask;
+            }
         });
+    action
 }
 
 impl eframe::App for AppShell {
@@ -1475,6 +1769,8 @@ fn gate_ui(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateEvent> {
     if gate.mode == GateMode::Unlock {
         if gate.working.is_some() {
             compact_working(ui, gate, &mut event);
+        } else if gate.environment_block.is_some() {
+            egui::ScrollArea::vertical().show(ui, |ui| unlock_form(ui, gate, &mut event));
         } else {
             unlock_form(ui, gate, &mut event);
         }
@@ -1528,7 +1824,9 @@ fn unlock_form(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<GateE
     }
     let available = ui.available_rect_before_wrap();
     let width = (available.width() - 48.0).clamp(180.0, 304.0);
-    let height = if crate::vault::disable_marker_present() {
+    let height = if gate.environment_block.is_some() {
+        280.0
+    } else if crate::vault::disable_marker_present() {
         212.0
     } else {
         154.0
@@ -1625,6 +1923,21 @@ fn unlock_form(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<GateE
                 {
                     crate::vault::cancel_disable();
                     gate.exception_notice();
+                }
+            }
+            if let Some(reason) = &gate.environment_block {
+                ui.label(egui::RichText::new(reason).color(theme::danger()));
+                ui.label("先排除风险再解锁。确需回退策略时，可用访问密码执行恢复。");
+                if ui
+                    .add_enabled(
+                        !gate.password.is_empty(),
+                        egui::Button::new("验证密码并停用环境检测"),
+                    )
+                    .clicked()
+                {
+                    *event = Some(GateEvent::Submit(GateOutcome::RecoverEnvironment(
+                        std::mem::take(&mut gate.password),
+                    )));
                 }
             }
             if let Some(error) = gate.error.as_deref() {
@@ -1990,6 +2303,7 @@ mod lifecycle_tests {
         impl Drop for Reset {
             fn drop(&mut self) {
                 crate::vault::clear_key_handle();
+                storage::set_writes_blocked(false);
                 storage::set_test_config_dir(None);
             }
         }
@@ -2059,6 +2373,8 @@ mod lifecycle_tests {
                 reason: "测试风险".into(),
                 error: None,
                 last_save_attempt: None,
+                confirm_exit: false,
+                exit_requested: false,
             });
             let mut handled = false;
             let mut output = ctx.run_ui(egui::RawInput::default(), |_| {
@@ -2096,12 +2412,21 @@ mod lifecycle_tests {
                 reason: "测试风险".into(),
                 error: None,
                 last_save_attempt: None,
+                confirm_exit: true,
+                exit_requested: false,
             });
             let mut first = ctx.run_ui(egui::RawInput::default(), |_| {
                 shell.environment_lock_frame(&ctx);
             });
             first.textures_delta.clear();
             assert!(matches!(shell.phase, ShellPhase::Ready(_)));
+            assert!(
+                shell
+                    .environment_lock
+                    .as_ref()
+                    .is_some_and(|lock| lock.confirm_exit),
+                "没有点击取消时，退出确认不能被帧循环复位"
+            );
 
             if let ShellPhase::Ready(app) = &shell.phase {
                 app.sender
@@ -2121,6 +2446,441 @@ mod lifecycle_tests {
                 "stale 终态只结算在途任务，随后完成锁定"
             );
             storage::set_writes_blocked(false);
+        });
+    }
+
+    fn protected_environment_fixture() -> (AppShell, crate::vault::Unlocked) {
+        let (_, unlocked) = Vault::create("Test#Valid2026Lock", None, false).unwrap();
+        let unlocked = unlocked.unwrap();
+        crate::vault::set_key_handle_for_slot(*unlocked.dek, true, DataSlot::Real);
+        let mut app = crate::app::management_samples::fixture();
+        app.vault_locked = true;
+        let mut shell = AppShell::gate(GateState::unlock(), None);
+        shell.phase = ShellPhase::Ready(Box::new(app));
+        (shell, unlocked)
+    }
+
+    #[test]
+    fn environment_enable_requires_healthy_preflight_and_explicit_save() {
+        isolated(|| {
+            use crate::environment::{DeviceSnapshot, Monitor, MonitorEvent, NetworkSnapshot};
+            let (mut shell, _) = protected_environment_fixture();
+            let (monitor, sender) = Monitor::test_channel();
+            shell.environment = monitor;
+            let ShellPhase::Ready(app) = &mut shell.phase else {
+                unreachable!()
+            };
+            app.environment_draft.enabled = true;
+            app.config.output_dir = "测试输出目录".into();
+            app.save_environment_requested = true;
+            shell.finish_settings_save(&egui::Context::default());
+            let (saved, _) = storage::load().unwrap();
+            assert!(!saved.environment.enabled);
+            assert_eq!(saved.output_dir, "测试输出目录");
+
+            let ShellPhase::Ready(app) = &mut shell.phase else {
+                unreachable!()
+            };
+            app.save_environment_requested = true;
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Network(Ok(NetworkSnapshot::default())),
+                ))
+                .unwrap();
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Devices(Ok(DeviceSnapshot::default())),
+                ))
+                .unwrap();
+            shell.finish_settings_save(&egui::Context::default());
+            assert!(storage::load().unwrap().0.environment.enabled);
+        });
+    }
+
+    #[test]
+    fn environment_lock_keeps_violation_followed_by_clear_snapshot() {
+        isolated(|| {
+            use crate::environment::{DeviceSnapshot, Monitor, MonitorEvent, NetworkSnapshot};
+            let (mut shell, _) = protected_environment_fixture();
+            let (monitor, sender) = Monitor::test_channel();
+            shell.environment = monitor;
+            let ShellPhase::Ready(app) = &mut shell.phase else {
+                unreachable!()
+            };
+            app.config.environment.enabled = true;
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Devices(Ok(DeviceSnapshot::default())),
+                ))
+                .unwrap();
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Network(Ok(NetworkSnapshot {
+                        default_route: true,
+                        ..Default::default()
+                    })),
+                ))
+                .unwrap();
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Network(Ok(NetworkSnapshot::default())),
+                ))
+                .unwrap();
+            shell.poll_environment(&egui::Context::default());
+            assert_eq!(
+                shell.environment_violation,
+                Some(crate::environment::Violation::DefaultRoute)
+            );
+            assert!(shell.environment_lock.is_some());
+        });
+    }
+
+    #[test]
+    fn environment_stale_queued_snapshot_does_not_extend_freshness() {
+        isolated(|| {
+            use crate::environment::{DeviceSnapshot, Monitor, MonitorEvent, NetworkSnapshot};
+            let (mut shell, _) = protected_environment_fixture();
+            let (monitor, sender) = Monitor::test_channel();
+            shell.environment = monitor;
+            let ShellPhase::Ready(app) = &mut shell.phase else {
+                unreachable!()
+            };
+            app.config.environment.enabled = true;
+            let old = Instant::now() - Duration::from_secs(16);
+            sender
+                .send((old, MonitorEvent::Network(Ok(NetworkSnapshot::default()))))
+                .unwrap();
+            sender
+                .send((old, MonitorEvent::Devices(Ok(DeviceSnapshot::default()))))
+                .unwrap();
+            shell.poll_environment(&egui::Context::default());
+            assert_eq!(
+                shell.environment_violation,
+                Some(crate::environment::Violation::NetworkMonitorUnavailable)
+            );
+            assert!(shell.environment_lock.is_some());
+        });
+    }
+
+    #[test]
+    fn environment_unlock_loads_authorization_without_new_snapshot() {
+        isolated(|| {
+            use crate::environment::{
+                DeviceClass, DeviceIdentity, DeviceInfo, DeviceSnapshot, Monitor, MonitorEvent,
+                NetworkSnapshot,
+            };
+            let (mut shell, unlocked) = protected_environment_fixture();
+            let ShellPhase::Ready(app) = &mut shell.phase else {
+                unreachable!()
+            };
+            app.config.environment.enabled = true;
+            app.persist();
+            let path = storage::slot_file_for(DataSlot::Real, ".export-devices").unwrap();
+            crate::vault::write_path(
+                &path,
+                "config",
+                br#"[{"serial":"test-device","revision":1}]"#,
+            )
+            .unwrap();
+
+            let (monitor, sender) = Monitor::test_channel();
+            shell.environment = monitor;
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Network(Ok(NetworkSnapshot::default())),
+                ))
+                .unwrap();
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Devices(Ok(DeviceSnapshot {
+                        devices: vec![DeviceInfo {
+                            id: "test-storage".into(),
+                            class: DeviceClass::RemovableStorage,
+                            identity: Some(DeviceIdentity {
+                                serial: "test-device".into(),
+                                revision: 1,
+                            }),
+                        }],
+                    })),
+                ))
+                .unwrap();
+            shell.startup = Some(StartupBundle {
+                startup_imports: None,
+                instance: None,
+                forwarded_requests: None,
+                macos_titlebar_metrics: None,
+            });
+            let ctx = egui::Context::default();
+            shell.lock_now(&ctx);
+            shell.poll_environment(&ctx);
+            shell.finish_unlock(&ctx, Ok(Some(unlocked)));
+            assert!(matches!(shell.phase, ShellPhase::Ready(_)));
+            assert!(shell.environment_lock.is_none());
+        });
+    }
+
+    #[test]
+    fn environment_recovery_preserves_encrypted_settings_and_stays_locked() {
+        isolated(|| {
+            let (mut shell, unlocked) = protected_environment_fixture();
+            let ShellPhase::Ready(app) = &mut shell.phase else {
+                unreachable!()
+            };
+            app.config.environment.enabled = true;
+            app.config.auto_lock_minutes = 37;
+            app.persist();
+
+            let ctx = egui::Context::default();
+            shell.lock_now(&ctx);
+            // A normal unlock with no snapshots keeps the workspace closed and shows recovery.
+            shell.finish_unlock(&ctx, Ok(Some(unlocked)));
+            let ShellPhase::Gate(gate) = &shell.phase else {
+                panic!("workspace entered without a snapshot")
+            };
+            assert!(gate.environment_block.is_some());
+            assert!(crate::vault::key_handle().is_none());
+
+            shell.apply_outcome(
+                &ctx,
+                GateOutcome::RecoverEnvironment("Test#Valid2026Lock".into()),
+            );
+            let ShellPhase::Unlocking(state) = &shell.phase else {
+                unreachable!()
+            };
+            let result = state.rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let dek = *result.as_ref().unwrap().as_ref().unwrap().dek;
+            shell.finish_unlock(&ctx, result);
+            assert!(matches!(shell.phase, ShellPhase::Gate(_)));
+            assert!(crate::vault::key_handle().is_none());
+            assert!(storage::writes_blocked());
+            let raw = std::fs::read(storage::config_path().unwrap()).unwrap();
+            assert!(crate::vault::is_sealed_file(&raw));
+            crate::vault::set_key_handle_for_slot(dek, true, DataSlot::Real);
+            let (config, _) = storage::load().unwrap();
+            assert!(!config.environment.enabled);
+            assert_eq!(config.auto_lock_minutes, 37);
+        });
+    }
+
+    #[test]
+    fn environment_lock_finishes_disconnected_import_preparation() {
+        isolated(|| {
+            let mut app = crate::app::management_samples::fixture();
+            let (sender, rx) = std::sync::mpsc::channel();
+            app.import_preparation = Some(super::super::manuscript_ui::ImportPreparation {
+                path: "test.gwx".into(),
+                password: String::new(),
+                remember: false,
+                rx,
+            });
+            drop(sender);
+            let ctx = egui::Context::default();
+            let mut shell = AppShell::gate(GateState::unlock(), None);
+            shell.phase = ShellPhase::Ready(Box::new(app));
+            shell.environment_lock = Some(EnvironmentLock {
+                reason: "测试".into(),
+                error: None,
+                last_save_attempt: None,
+                confirm_exit: false,
+                exit_requested: false,
+            });
+            let mut output = ctx.run_ui(egui::RawInput::default(), |_| {
+                assert!(shell.environment_lock_frame(&ctx));
+            });
+            output.textures_delta.clear();
+            assert!(matches!(shell.phase, ShellPhase::Gate(_)));
+        });
+    }
+
+    #[test]
+    fn environment_gate_clears_block_after_healthy_snapshot() {
+        isolated(|| {
+            use crate::environment::{DeviceSnapshot, Monitor, MonitorEvent, NetworkSnapshot};
+            let (mut shell, _) = protected_environment_fixture();
+            shell.environment_policy.enabled = true;
+            shell.environment_policy.fail_closed = true;
+            let (monitor, sender) = Monitor::test_channel();
+            shell.environment = monitor;
+            let ctx = egui::Context::default();
+            shell.lock_now(&ctx);
+            if let ShellPhase::Gate(gate) = &mut shell.phase {
+                gate.environment_block = Some("旧风险".into());
+                gate.environment_block_auto_clear = true;
+            }
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Network(Ok(NetworkSnapshot::default())),
+                ))
+                .unwrap();
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Devices(Ok(DeviceSnapshot::default())),
+                ))
+                .unwrap();
+            shell.poll_environment(&ctx);
+            let ShellPhase::Gate(gate) = &shell.phase else {
+                panic!("风险解除不能自动解锁")
+            };
+            assert!(gate.environment_block.is_none());
+            assert!(
+                gate.notice
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("已排除")
+            );
+        });
+    }
+
+    #[test]
+    fn environment_gate_keeps_non_risk_block_until_recovery() {
+        isolated(|| {
+            use crate::environment::{DeviceSnapshot, Monitor, MonitorEvent, NetworkSnapshot};
+            let (mut shell, _) = protected_environment_fixture();
+            shell.environment_policy.enabled = true;
+            let (monitor, sender) = Monitor::test_channel();
+            shell.environment = monitor;
+            let ctx = egui::Context::default();
+            shell.lock_now(&ctx);
+            if let ShellPhase::Gate(gate) = &mut shell.phase {
+                gate.environment_block = Some("无法读取环境策略".into());
+                gate.environment_block_auto_clear = false;
+            }
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Network(Ok(NetworkSnapshot::default())),
+                ))
+                .unwrap();
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Devices(Ok(DeviceSnapshot::default())),
+                ))
+                .unwrap();
+            shell.poll_environment(&ctx);
+            let ShellPhase::Gate(gate) = &shell.phase else {
+                panic!("配置读取失败不能解锁")
+            };
+            assert_eq!(gate.environment_block.as_deref(), Some("无法读取环境策略"));
+        });
+    }
+
+    #[test]
+    fn environment_lock_exit_controls_are_reachable_above_the_veil() {
+        use egui_kittest::kittest::Queryable as _;
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let ask = Rc::new(Cell::new(EnvironmentExitAction::None));
+        let observed = Rc::clone(&ask);
+        let mut harness = crate::test_support::harness_ui(move |ui| {
+            paint_lock_veil(ui.ctx(), 1.0);
+            let result =
+                paint_environment_lock_status(ui.ctx(), "测试风险", true, None, false, true);
+            if !matches!(result, EnvironmentExitAction::None) {
+                observed.set(result);
+            }
+        });
+        harness.run_steps(3);
+        harness
+            .get_by_label("任务或保存持续无法完成？退出应用…")
+            .click();
+        harness.run_steps(3);
+        assert!(matches!(ask.get(), EnvironmentExitAction::Ask));
+
+        let exit = Rc::new(Cell::new(EnvironmentExitAction::None));
+        let observed = Rc::clone(&exit);
+        let mut harness = crate::test_support::harness_ui(move |ui| {
+            paint_lock_veil(ui.ctx(), 1.0);
+            let result =
+                paint_environment_lock_status(ui.ctx(), "测试风险", true, None, true, true);
+            if !matches!(result, EnvironmentExitAction::None) {
+                observed.set(result);
+            }
+        });
+        harness.run_steps(3);
+        harness.get_by_label("确认退出并放弃未保存修改").click();
+        harness.run_steps(3);
+        assert!(matches!(exit.get(), EnvironmentExitAction::Exit));
+    }
+
+    #[test]
+    fn environment_recovery_decoy_password_stays_neutral() {
+        isolated(|| {
+            Vault::create("Test#Valid2026Lock", Some("Test#Valid2026Decoy"), false).unwrap();
+            let mut shell = AppShell::gate(GateState::unlock(), None);
+            if let ShellPhase::Gate(gate) = &mut shell.phase {
+                gate.environment_block = Some("环境风险".into());
+                gate.environment_block_auto_clear = false;
+            }
+            let ctx = egui::Context::default();
+            shell.apply_outcome(
+                &ctx,
+                GateOutcome::RecoverEnvironment("Test#Valid2026Decoy".into()),
+            );
+            let result = {
+                let ShellPhase::Unlocking(state) = &shell.phase else {
+                    panic!("恢复密码应在后台验证")
+                };
+                state.rx.recv_timeout(Duration::from_secs(10)).unwrap()
+            };
+            shell.finish_unlock(&ctx, result);
+            let ShellPhase::Gate(gate) = &shell.phase else {
+                panic!("诱饵密码不能进入恢复流程")
+            };
+            assert!(gate.error.is_none());
+            assert_eq!(gate.notice.as_deref(), Some("请重新输入密码。"));
+            assert_eq!(gate.environment_block.as_deref(), Some("环境风险"));
+            assert!(crate::vault::key_handle().is_none());
+        });
+    }
+
+    #[test]
+    fn environment_missing_config_requires_password_recovery() {
+        isolated(|| {
+            let (mut shell, unlocked) = protected_environment_fixture();
+            let ShellPhase::Ready(app) = &mut shell.phase else {
+                unreachable!()
+            };
+            app.config.environment.enabled = true;
+            app.persist();
+            let ctx = egui::Context::default();
+            shell.lock_now(&ctx);
+            std::fs::remove_file(storage::config_path().unwrap()).unwrap();
+            shell.finish_unlock(&ctx, Ok(Some(unlocked)));
+            let ShellPhase::Gate(gate) = &shell.phase else {
+                panic!("配置缺失不能直接进入工作区")
+            };
+            assert!(gate.environment_block.is_some());
+            assert!(!gate.environment_block_auto_clear);
+            assert!(crate::vault::key_handle().is_none());
+
+            shell.apply_outcome(
+                &ctx,
+                GateOutcome::RecoverEnvironment("Test#Valid2026Lock".into()),
+            );
+            let result = {
+                let ShellPhase::Unlocking(state) = &shell.phase else {
+                    panic!("恢复应在后台验证密码")
+                };
+                state.rx.recv_timeout(Duration::from_secs(10)).unwrap()
+            };
+            let dek = *result.as_ref().unwrap().as_ref().unwrap().dek;
+            shell.finish_unlock(&ctx, result);
+            assert!(matches!(shell.phase, ShellPhase::Gate(_)));
+            assert!(storage::config_path().unwrap().is_file());
+            crate::vault::set_key_handle_for_slot(dek, true, DataSlot::Real);
+            let (config, _) = storage::load().unwrap();
+            assert!(!config.environment.enabled);
         });
     }
 

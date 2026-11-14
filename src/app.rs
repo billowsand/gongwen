@@ -552,10 +552,12 @@ pub struct GongwenApp {
     styles_page: style_settings::StylesPage,
     /// 设置页「应用锁」分区的输入草稿与会话内提示。
     vault_page: vault_settings::VaultPageState,
-    /// 只有成功保存后的环境策略才生效，避免未保存的复选框改动突然锁屏。
-    environment_active: crate::models::EnvironmentPolicy,
+    /// 环境策略编辑草稿，只有设置页显式提交后才进入配置。
+    environment_draft: crate::models::EnvironmentPolicy,
     /// 外壳每帧提供的非敏感现场摘要，只用于设置页显示。
     environment_summary: String,
+    environment_preview: String,
+    save_environment_requested: bool,
     /// 已送后台但尚未收到终态的打印任务数；紧急锁定必须等待其收尾。
     print_jobs_in_flight: usize,
     /// 应用锁启用状态：启动时按锁文件探测缓存一份，设置页改动后刷新。
@@ -686,6 +688,20 @@ impl GongwenApp {
                 .display()
                 .to_string();
         }
+        let no_lock_environment_note = if crate::vault::Vault::probe()
+            != crate::vault::Probe::Locked
+            && config.environment.enabled
+        {
+            config.environment.enabled = false;
+            match storage::save(&config) {
+                Ok(()) => Some("未启用应用锁，本次已停用环境安全检测。".to_owned()),
+                Err(error) => Some(format!(
+                    "未启用应用锁，环境安全检测本次未运行；关闭状态保存失败：{error:#}"
+                )),
+            }
+        } else {
+            None
+        };
         // 上次崩溃/强杀可能留下 PDF 预览副本；启动时清一次（只删缓存目录里
         // 自己的 manuscript_*.pdf 命名）。
         crate::app::manuscript_ui::purge_plaintext_caches();
@@ -776,7 +792,7 @@ impl GongwenApp {
             Err(error) => (None, Some(format!("公文词表路径获取失败：{error:#}"))),
         };
         let applied_theme = config.theme;
-        let environment_active = config.environment;
+        let environment_draft = config.environment;
         let mut app = Self {
             config,
             applied_theme,
@@ -1024,8 +1040,10 @@ impl GongwenApp {
             #[cfg(feature = "ai-workbench")]
             styles_page: Default::default(),
             vault_page: Default::default(),
-            environment_active,
+            environment_draft,
             environment_summary: String::new(),
+            environment_preview: String::new(),
+            save_environment_requested: false,
             print_jobs_in_flight: 0,
             #[cfg(feature = "ai-workbench")]
             rerank_verify_busy: false,
@@ -1046,6 +1064,13 @@ impl GongwenApp {
             } else {
                 app.status = format!("{}；{note}", app.status);
             }
+        }
+        if let Some(note) = no_lock_environment_note {
+            app.status = if app.status.starts_with("就绪") {
+                note
+            } else {
+                format!("{}；{note}", app.status)
+            };
         }
         app.seed_samples_once();
         // 词表里的词同步给应用内输入法（静默：失败只写状态栏）。
@@ -1137,20 +1162,8 @@ impl GongwenApp {
         // 代理同理：设置页一改，下一个请求就按新通道走，不必先保存。
         crate::net::set_proxy(&self.config.proxy);
         self.handle_shortcuts(&ctx);
-        self.poll_worker(&ctx);
-        #[cfg(feature = "ai-workbench")]
-        self.poll_task_extraction(&ctx);
-        #[cfg(feature = "ai-workbench")]
-        self.poll_task_fill(&ctx);
-        #[cfg(feature = "ai-workbench")]
-        self.poll_wiki_frame(&ctx);
-        #[cfg(feature = "ai-workbench")]
-        self.poll_wiki_write(&ctx);
-        #[cfg(feature = "ai-workbench")]
-        self.poll_writing_tasks(&ctx);
-        // 系统文件对话框在后台线程开窗，这里问一次结果；用户挑完再接着做那件事。
+        self.poll_workspace_results(&ctx);
         self.poll_file_dialogs(&ctx);
-        self.poll_import_preparation();
         if self.package_staging_busy || self.import_preparation.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -1377,8 +1390,11 @@ impl GongwenApp {
     }
 
     pub(crate) fn environment_policy(&self) -> crate::models::EnvironmentPolicy {
-        if self.vault_locked {
-            self.environment_active
+        if self.vault_locked
+            && storage::current_slot() == storage::DataSlot::Real
+            && crate::vault::current_db_key_active()
+        {
+            self.config.environment
         } else {
             crate::models::EnvironmentPolicy::default()
         }
@@ -1388,9 +1404,28 @@ impl GongwenApp {
         self.environment_summary = summary;
     }
 
+    fn poll_workspace_results(&mut self, ctx: &egui::Context) {
+        self.poll_worker(ctx);
+        #[cfg(feature = "ai-workbench")]
+        self.poll_task_extraction(ctx);
+        #[cfg(feature = "ai-workbench")]
+        self.poll_task_fill(ctx);
+        #[cfg(feature = "ai-workbench")]
+        self.poll_wiki_frame(ctx);
+        #[cfg(feature = "ai-workbench")]
+        self.poll_wiki_write(ctx);
+        #[cfg(feature = "ai-workbench")]
+        self.poll_writing_tasks(ctx);
+        self.poll_import_preparation();
+    }
+
     /// 风险锁定先停止可取消的敏感任务；外壳随后持续遮蔽并等待全部任务收尾。
     pub(crate) fn begin_environment_lock(&mut self) {
         self.cancel_pi_tasks();
+        for doc in &mut self.docs {
+            doc.take_open_after_export();
+            doc.take_print_after_export();
+        }
         #[cfg(feature = "ai-workbench")]
         self.task_auto_queue.clear();
         if let Some(dialog) = &self.print_dialog {

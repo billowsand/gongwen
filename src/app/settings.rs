@@ -1441,7 +1441,7 @@ impl GongwenApp {
             // 与右侧设置卡片的内边距一致，避免按钮贴着窗口左边缘。
             ui.add_space(18.0);
             if theme::primary_icon_button(ui, theme::Icon::Save, "保存设置").clicked() {
-                self.persist();
+                self.save_environment_requested = true;
             }
             ui.add_space(8.0);
             ui.weak("主题、纸面与字体改完立即生效；其余各项要保存后才写入配置文件。");

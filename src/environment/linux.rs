@@ -5,7 +5,7 @@
 
 use super::{
     DeviceClass, DeviceIdentity, DeviceInfo, DeviceSnapshot, MonitorEvent, NetworkInterface,
-    NetworkInterfaceKind, NetworkSnapshot,
+    NetworkInterfaceKind, NetworkSnapshot, TimedEvent,
 };
 use eframe::egui;
 use std::collections::BTreeMap;
@@ -44,7 +44,9 @@ const IFF_LOWER_UP: c_uint = 0x1_0000;
 const RTF_UP: u32 = 0x0001;
 
 const HEARTBEAT: Duration = Duration::from_secs(5);
+const FALLBACK_HEARTBEAT: Duration = Duration::from_secs(1);
 const IDLE_SLEEP: Duration = Duration::from_millis(50);
+const ENOBUFS: i32 = 105;
 
 #[repr(C)]
 struct SockAddr {
@@ -194,6 +196,9 @@ impl NetlinkSocket {
                 return Ok(changed);
             }
             let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ENOBUFS) {
+                return Ok(true);
+            }
             match error.kind() {
                 io::ErrorKind::WouldBlock => return Ok(changed),
                 io::ErrorKind::Interrupted => continue,
@@ -219,16 +224,17 @@ struct InterfaceState {
 }
 
 fn ipv4_is_usable_non_loopback(address: &SockAddrIn) -> bool {
-    // to_ne_bytes保留内存中的网络字节序，因此首字节可直接判断127/8与0.0.0.0。
-    let first = address.sin_addr.s_addr.to_ne_bytes()[0];
-    first != 0 && first != 127
+    // to_ne_bytes保留内存中的网络字节序，因此首字节可直接判断127/8、169.254/16与0.0.0.0。
+    let bytes = address.sin_addr.s_addr.to_ne_bytes();
+    bytes[0] != 0 && bytes[0] != 127 && !(bytes[0] == 169 && bytes[1] == 254)
 }
 
 fn ipv6_is_usable_non_loopback(address: &SockAddrIn6) -> bool {
     let bytes = address.sin6_addr.s6_addr;
     let unspecified = bytes.iter().all(|byte| *byte == 0);
     let loopback = bytes[..15].iter().all(|byte| *byte == 0) && bytes[15] == 1;
-    !unspecified && !loopback
+    let link_local = bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80;
+    !unspecified && !loopback && !link_local
 }
 
 fn read_hex(path: &Path) -> io::Result<u32> {
@@ -262,8 +268,11 @@ fn interface_kind(name: &str, path: &Path, loopback: bool) -> NetworkInterfaceKi
     let is_virtual = path
         .canonicalize()
         .is_ok_and(|real| real.to_string_lossy().contains("/virtual/"));
+    if is_virtual {
+        return NetworkInterfaceKind::System;
+    }
     let ethernet_type = read_hex(&path.join("type")).ok() == Some(1);
-    if ethernet_type && !is_virtual {
+    if ethernet_type {
         NetworkInterfaceKind::Ethernet
     } else {
         NetworkInterfaceKind::Other
@@ -429,9 +438,12 @@ fn read_optional(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
-fn usb_identity(root: &Path, interface_name: &str) -> Option<DeviceIdentity> {
-    let device_name = interface_name.split(':').next()?;
-    let device = root.join(device_name);
+fn usb_device_identity(device: &Path) -> Option<DeviceIdentity> {
+    if read_hex(&device.join("idVendor")).ok()? != 0x1f75
+        || read_hex(&device.join("idProduct")).ok()? != 0x0903
+    {
+        return None;
+    }
     let serial = read_optional(&device.join("serial")).ok().flatten()?;
     if serial.is_empty() {
         return None;
@@ -439,6 +451,19 @@ fn usb_identity(root: &Path, interface_name: &str) -> Option<DeviceIdentity> {
     let revision = read_optional(&device.join("bcdDevice")).ok().flatten()?;
     let revision = u64::from_str_radix(revision.trim_start_matches("0x"), 16).ok()?;
     Some(DeviceIdentity { serial, revision })
+}
+
+fn usb_identity(root: &Path, interface_name: &str) -> Option<DeviceIdentity> {
+    let device_name = interface_name.split(':').next()?;
+    usb_device_identity(&root.join(device_name))
+}
+
+fn block_usb_details(path: &Path) -> Option<(String, Option<DeviceIdentity>)> {
+    let real = path.canonicalize().ok()?;
+    let usb = real
+        .ancestors()
+        .find(|node| node.join("idVendor").is_file())?;
+    Some((format!("usb:{}", usb.display()), usb_device_identity(usb)))
 }
 
 fn usb_device_class(path: &Path, class: u32, protocol: Option<u32>) -> DeviceClass {
@@ -496,6 +521,11 @@ fn collect_devices() -> Result<DeviceSnapshot, String> {
             Ok(None) => continue,
             Err(error) => return Err(format!("读取USB接口{name}类别失败: {error}")),
         };
+        // 类 08 只说明“支持大容量传输”，空读卡器/空光驱也常驻；
+        // 是否有可读介质由下面的块设备与 size 判定。
+        if class == 0x08 {
+            continue;
+        }
         let protocol = read_optional(&path.join("bInterfaceProtocol"))
             .ok()
             .flatten()
@@ -512,7 +542,8 @@ fn collect_devices() -> Result<DeviceSnapshot, String> {
         });
     }
 
-    // 补充MMC/SD等非USB可移动块设备；USB块设备已经由接口类08覆盖。
+    // 以实际存在的块设备为准：空的 USB 读卡器/光驱没有可读容量，不报警。
+    // USB 外置盘即使 removable=0 也按外接存储处理；非 USB 只补充可移动介质。
     let block_root = Path::new("/sys/block");
     let entries = fs::read_dir(block_root)
         .map_err(|error| format!("无法枚举{}: {error}", block_root.display()))?;
@@ -527,81 +558,95 @@ fn collect_devices() -> Result<DeviceSnapshot, String> {
             continue;
         };
         let path = entry.path();
-        match read_optional(&path.join("removable")) {
-            Ok(Some(value)) if value == "1" => {}
-            Ok(_) => continue,
-            Err(error) => return Err(format!("读取块设备{name}属性失败: {error}")),
+        let size = match read_optional(&path.join("size")) {
+            Ok(Some(value)) => value.parse::<u64>().unwrap_or(0),
+            Ok(None) => continue,
+            Err(error) => return Err(format!("读取块设备{name}容量失败: {error}")),
+        };
+        if size == 0 {
+            continue;
         }
-        if !is_usb_block_device(&path) {
-            devices.push(DeviceInfo {
-                id: format!("block:{name}"),
-                class: DeviceClass::RemovableStorage,
-                identity: None,
-            });
+        let usb = is_usb_block_device(&path);
+        if !usb {
+            match read_optional(&path.join("removable")) {
+                Ok(Some(value)) if value == "1" => {}
+                Ok(_) => continue,
+                Err(error) => return Err(format!("读取块设备{name}属性失败: {error}")),
+            }
         }
+        let details = if usb { block_usb_details(&path) } else { None };
+        let (id, identity) =
+            details.map_or_else(|| (format!("block:{name}"), None), |details| details);
+        devices.push(DeviceInfo {
+            id,
+            class: DeviceClass::RemovableStorage,
+            identity,
+        });
     }
 
-    devices.sort_by(|left, right| left.id.cmp(&right.id));
+    devices.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then_with(|| device_class_rank(left.class).cmp(&device_class_rank(right.class)))
+    });
+    devices.dedup_by(|left, right| left.id == right.id && left.class == right.class);
     Ok(DeviceSnapshot { devices })
 }
 
-fn send(sender: &Sender<MonitorEvent>, wake: &egui::Context, event: MonitorEvent) -> bool {
-    let sent = sender.send(event).is_ok();
+fn device_class_rank(class: DeviceClass) -> u8 {
+    match class {
+        DeviceClass::RemovableStorage => 0,
+        DeviceClass::PortableMedia => 1,
+        DeviceClass::HumanInterface => 2,
+        DeviceClass::Imaging => 3,
+        DeviceClass::Other => 4,
+    }
+}
+
+fn send(sender: &Sender<TimedEvent>, wake: &egui::Context, event: MonitorEvent) -> bool {
+    let sent = sender.send((Instant::now(), event)).is_ok();
     wake.request_repaint();
     sent
 }
 
-fn send_network(
-    sender: &Sender<MonitorEvent>,
-    wake: &egui::Context,
-    monitor_available: bool,
-) -> bool {
-    let event = if monitor_available {
-        MonitorEvent::Network(collect_network())
-    } else {
-        MonitorEvent::Network(Err("rtnetlink事件监控不可用".to_owned()))
-    };
-    send(sender, wake, event)
+fn snapshot_with_retry<T>(mut collect: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut last = None;
+    for attempt in 0..3 {
+        match collect() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last = Some(error);
+                if attempt < 2 {
+                    thread::sleep(Duration::from_millis(40));
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| "采集失败".to_owned()))
 }
 
-fn send_devices(
-    sender: &Sender<MonitorEvent>,
-    wake: &egui::Context,
-    monitor_available: bool,
-) -> bool {
-    let event = if monitor_available {
-        MonitorEvent::Devices(collect_devices())
-    } else {
-        MonitorEvent::Devices(Err("kernel uevent设备事件监控不可用".to_owned()))
-    };
-    send(sender, wake, event)
+fn send_network(sender: &Sender<TimedEvent>, wake: &egui::Context) -> bool {
+    send(
+        sender,
+        wake,
+        MonitorEvent::Network(snapshot_with_retry(collect_network)),
+    )
 }
 
-pub(crate) fn run(sender: Sender<MonitorEvent>, stop: Arc<AtomicBool>, wake: egui::Context) {
+fn send_devices(sender: &Sender<TimedEvent>, wake: &egui::Context) -> bool {
+    send(
+        sender,
+        wake,
+        MonitorEvent::Devices(snapshot_with_retry(collect_devices)),
+    )
+}
+
+pub(crate) fn run(sender: Sender<TimedEvent>, stop: Arc<AtomicBool>, wake: egui::Context) {
     // 先订阅再枚举，确保枚举期间发生的热插拔/地址变化也会触发第二次对账。
     let mut route_socket = NetlinkSocket::route().ok();
     let mut uevent_socket = NetlinkSocket::uevents().ok();
 
-    // 启动时先给出真实枚举结果；订阅失败随后置为异常，绝不让Ok快照覆盖该错误。
-    if !send_network(&sender, &wake, true) || !send_devices(&sender, &wake, true) {
-        return;
-    }
-    if route_socket.is_none()
-        && !send(
-            &sender,
-            &wake,
-            MonitorEvent::Network(Err("无法订阅rtnetlink".to_owned())),
-        )
-    {
-        return;
-    }
-    if uevent_socket.is_none()
-        && !send(
-            &sender,
-            &wake,
-            MonitorEvent::Devices(Err("无法订阅kernel uevent".to_owned())),
-        )
-    {
+    if !send_network(&sender, &wake) || !send_devices(&sender, &wake) {
         return;
     }
     let mut last_network = Instant::now();
@@ -614,47 +659,42 @@ pub(crate) fn run(sender: Sender<MonitorEvent>, stop: Arc<AtomicBool>, wake: egu
         let route_result = route_socket.as_ref().map(NetlinkSocket::drain);
         match route_result {
             Some(Ok(changed)) => network_dirty |= changed,
-            Some(Err(error)) => {
+            Some(Err(_)) => {
+                // 订阅只是加速通道；丢掉后仍按周期完整快照检测。
                 route_socket = None;
-                network_dirty = false;
-                if !send(
-                    &sender,
-                    &wake,
-                    MonitorEvent::Network(Err(format!("rtnetlink接收失败: {error}"))),
-                ) {
-                    return;
-                }
+                network_dirty = true;
             }
             None => {}
         }
         let uevent_result = uevent_socket.as_ref().map(NetlinkSocket::drain);
         match uevent_result {
-            Some(Ok(true)) => {
-                device_dirty = true;
-            }
+            Some(Ok(true)) => device_dirty = true,
             Some(Ok(false)) | None => {}
-            Some(Err(error)) => {
+            Some(Err(_)) => {
                 uevent_socket = None;
-                device_dirty = false;
-                if !send(
-                    &sender,
-                    &wake,
-                    MonitorEvent::Devices(Err(format!("kernel uevent接收失败: {error}"))),
-                ) {
-                    return;
-                }
+                device_dirty = true;
             }
         }
 
-        if network_dirty || now.duration_since(last_network) >= HEARTBEAT {
-            if !send_network(&sender, &wake, route_socket.is_some()) {
+        let network_interval = if route_socket.is_some() {
+            HEARTBEAT
+        } else {
+            FALLBACK_HEARTBEAT
+        };
+        if network_dirty || now.duration_since(last_network) >= network_interval {
+            if !send_network(&sender, &wake) {
                 return;
             }
             network_dirty = false;
             last_network = now;
         }
-        if device_dirty || now.duration_since(last_devices) >= HEARTBEAT {
-            if !send_devices(&sender, &wake, uevent_socket.is_some()) {
+        let device_interval = if uevent_socket.is_some() {
+            HEARTBEAT
+        } else {
+            FALLBACK_HEARTBEAT
+        };
+        if device_dirty || now.duration_since(last_devices) >= device_interval {
+            if !send_devices(&sender, &wake) {
                 return;
             }
             device_dirty = false;

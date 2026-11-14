@@ -628,6 +628,10 @@ impl GongwenApp {
     }
 
     pub(crate) fn persist(&mut self) {
+        self.try_persist();
+    }
+
+    pub(super) fn try_persist(&mut self) -> bool {
         // 设置页可在没有任何稿件标签时打开（关掉全部 Doc 标签后 docs 为空），
         // 此时不能索引 docs[active_doc]，否则越界 panic 直接退出进程。
         // 先取出所需的不变数据结束对 docs 的借用，再写回 config。
@@ -643,10 +647,13 @@ impl GongwenApp {
         }
         match storage::save(&self.config) {
             Ok(()) => {
-                self.environment_active = self.config.environment;
                 self.status = "配置已保存到本机。".into();
+                true
             }
-            Err(error) => self.status = format!("保存配置失败：{error:#}"),
+            Err(error) => {
+                self.status = format!("保存配置失败：{error:#}");
+                false
+            }
         }
     }
 

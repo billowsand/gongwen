@@ -475,6 +475,7 @@ impl GongwenApp {
             || self.print_jobs_in_flight > 0
             || self.lexicon_busy
             || self.backup_busy
+            || self.backup_restore_running
             || self.docs.iter().any(|doc| doc.busy || doc.in_flight > 0)
             || self.pdfs.iter().any(PdfSession::busy)
             || self.manuscript_pdf_export_busy

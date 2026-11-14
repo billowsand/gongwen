@@ -2,7 +2,7 @@
 
 use super::{
     DeviceClass, DeviceIdentity, DeviceInfo, DeviceSnapshot, MonitorEvent, NetworkInterface,
-    NetworkInterfaceKind, NetworkSnapshot,
+    NetworkInterfaceKind, NetworkSnapshot, TimedEvent,
 };
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
@@ -10,6 +10,7 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::time::Instant;
 
 type KernReturn = c_int;
 type MachPort = c_uint;
@@ -300,7 +301,7 @@ impl Drop for IfAddrsGuard {
 }
 
 struct MonitorState {
-    sender: mpsc::Sender<MonitorEvent>,
+    sender: mpsc::Sender<TimedEvent>,
     wake: eframe::egui::Context,
     closed: bool,
     device_events_ready: bool,
@@ -311,7 +312,7 @@ impl MonitorState {
         if self.closed {
             return;
         }
-        if self.sender.send(event).is_err() {
+        if self.sender.send((Instant::now(), event)).is_err() {
             self.closed = true;
             return;
         }
@@ -319,12 +320,28 @@ impl MonitorState {
     }
 }
 
+fn snapshot_with_retry<T>(mut collect: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut last = None;
+    for attempt in 0..3 {
+        match collect() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last = Some(error);
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| "采集失败".to_owned()))
+}
+
 fn emit_network(state: &mut MonitorState) {
-    state.send(MonitorEvent::Network(collect_network()));
+    state.send(MonitorEvent::Network(snapshot_with_retry(collect_network)));
 }
 
 fn emit_devices(state: &mut MonitorState) {
-    state.send(MonitorEvent::Devices(collect_devices()));
+    state.send(MonitorEvent::Devices(snapshot_with_retry(collect_devices)));
 }
 
 // SAFETY: info 在 run 内指向固定堆地址的 MonitorState；CFRunLoop 只在该线程串行回调。
@@ -511,7 +528,11 @@ struct Heartbeat {
 }
 
 impl Heartbeat {
-    fn install(run_loop: CfRunLoopRef, state: *mut MonitorState) -> Result<Self, String> {
+    fn install(
+        run_loop: CfRunLoopRef,
+        state: *mut MonitorState,
+        interval: CfTimeInterval,
+    ) -> Result<Self, String> {
         let mut context = CfRunLoopTimerContext {
             version: 0,
             info: state.cast(),
@@ -519,12 +540,12 @@ impl Heartbeat {
             release: None,
             copy_description: None,
         };
-        // SAFETY: context 被 timer 复制；info 生命周期覆盖 timer，时间参数为有限的当前时间加五秒。
+        // SAFETY: context 被 timer 复制；info 生命周期覆盖 timer，时间参数有限。
         let timer = unsafe {
             CFRunLoopTimerCreate(
                 ptr::null(),
-                CFAbsoluteTimeGetCurrent() + HEARTBEAT_SECONDS,
-                HEARTBEAT_SECONDS,
+                CFAbsoluteTimeGetCurrent() + interval,
+                interval,
                 0,
                 0,
                 Some(heartbeat),
@@ -551,7 +572,7 @@ impl Drop for Heartbeat {
 }
 
 pub(crate) fn run(
-    sender: mpsc::Sender<MonitorEvent>,
+    sender: mpsc::Sender<TimedEvent>,
     stop: Arc<AtomicBool>,
     wake: eframe::egui::Context,
 ) {
@@ -578,27 +599,19 @@ pub(crate) fn run(
         return;
     }
 
-    let network_notifications = match NetworkNotifications::install(run_loop, state_pointer) {
-        Ok(value) => Some(value),
-        Err(error) => {
-            state.send(MonitorEvent::Network(Err(error)));
-            None
-        }
-    };
-    let device_notifications = match DeviceNotifications::install(run_loop, state_pointer) {
-        Ok(value) => Some(value),
-        Err(error) => {
-            state.send(MonitorEvent::Devices(Err(error)));
-            None
-        }
-    };
+    let network_notifications = NetworkNotifications::install(run_loop, state_pointer).ok();
+    let device_notifications = DeviceNotifications::install(run_loop, state_pointer).ok();
     state.device_events_ready = true;
     if device_notifications.is_some() {
         // 通知注册期间的初始迭代只用于武装通知，此处重新对账一次。
         emit_devices(&mut state);
     }
-
-    let heartbeat = match Heartbeat::install(run_loop, state_pointer) {
+    let degraded = network_notifications.is_none() || device_notifications.is_none();
+    let heartbeat = match Heartbeat::install(
+        run_loop,
+        state_pointer,
+        if degraded { 1.0 } else { HEARTBEAT_SECONDS },
+    ) {
         Ok(value) => value,
         Err(error) => {
             state.send(MonitorEvent::Network(Err(error.clone())));
@@ -783,20 +796,25 @@ fn network_interface_kinds() -> Result<BTreeMap<String, NetworkInterfaceKind>, S
             continue;
         };
         // SAFETY: 比较的静态常量由 SystemConfiguration 框架提供且进程生命周期内有效。
-        let kind = unsafe {
-            if cf_strings_equal(kind, kSCNetworkInterfaceTypeIEEE80211) {
-                NetworkInterfaceKind::Wifi
-            } else if cf_strings_equal(kind, kSCNetworkInterfaceTypeWWAN) {
-                NetworkInterfaceKind::Cellular
-            } else if cf_strings_equal(kind, kSCNetworkInterfaceTypeIPSec)
-                || cf_strings_equal(kind, kSCNetworkInterfaceTypePPP)
-                || cf_strings_equal(kind, kSCNetworkInterfaceTypeL2TP)
-            {
-                NetworkInterfaceKind::Vpn
-            } else if cf_strings_equal(kind, kSCNetworkInterfaceTypeEthernet) {
-                NetworkInterfaceKind::Ethernet
-            } else {
-                infer_interface_kind(&name)
+        let kind = if is_system_service_interface(&name) {
+            NetworkInterfaceKind::System
+        } else {
+            // SAFETY: 比较的静态常量由 SystemConfiguration 框架提供且进程生命周期内有效。
+            unsafe {
+                if cf_strings_equal(kind, kSCNetworkInterfaceTypeIEEE80211) {
+                    NetworkInterfaceKind::Wifi
+                } else if cf_strings_equal(kind, kSCNetworkInterfaceTypeWWAN) {
+                    NetworkInterfaceKind::Cellular
+                } else if cf_strings_equal(kind, kSCNetworkInterfaceTypeIPSec)
+                    || cf_strings_equal(kind, kSCNetworkInterfaceTypePPP)
+                    || cf_strings_equal(kind, kSCNetworkInterfaceTypeL2TP)
+                {
+                    NetworkInterfaceKind::Vpn
+                } else if cf_strings_equal(kind, kSCNetworkInterfaceTypeEthernet) {
+                    NetworkInterfaceKind::Ethernet
+                } else {
+                    infer_interface_kind(&name)
+                }
             }
         };
         result.insert(name, kind);
@@ -804,19 +822,23 @@ fn network_interface_kinds() -> Result<BTreeMap<String, NetworkInterfaceKind>, S
     Ok(result)
 }
 
+fn is_system_service_interface(name: &str) -> bool {
+    ["awdl", "llw", "anpi", "ap", "bridge", "gif", "stf", "nan"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
 fn infer_interface_kind(name: &str) -> NetworkInterfaceKind {
     if name.starts_with("utun")
-        || name.starts_with("tun")
-        || name.starts_with("tap")
-        || name.starts_with("ppp")
         || name.starts_with("ipsec")
+        || name.starts_with("tap")
+        || name.starts_with("tun")
+        || name.starts_with("ppp")
     {
         NetworkInterfaceKind::Vpn
-    } else if name.starts_with("wlan")
-        || name.starts_with("wifi")
-        || name.starts_with("awdl")
-        || name.starts_with("llw")
-    {
+    } else if is_system_service_interface(name) {
+        NetworkInterfaceKind::System
+    } else if name.starts_with("wlan") || name.starts_with("wifi") {
         NetworkInterfaceKind::Wifi
     } else if name.starts_with("rmnet") || name.starts_with("pdp_ip") {
         NetworkInterfaceKind::Cellular
@@ -920,13 +942,14 @@ fn has_non_loopback_address(address: *mut SockAddr) -> bool {
         AF_INET => {
             // SAFETY: family 为 AF_INET，因此实际对象是 sockaddr_in。
             let bytes = unsafe { (*(address as *const SockAddrIn)).addr.addr.to_ne_bytes() };
-            bytes != [0; 4] && bytes[0] != 127
+            bytes != [0; 4] && bytes[0] != 127 && !(bytes[0] == 169 && bytes[1] == 254)
         }
         AF_INET6 => {
             // SAFETY: family 为 AF_INET6，因此实际对象是 sockaddr_in6。
             let bytes = unsafe { (*(address as *const SockAddrIn6)).addr.addr };
             let loopback = bytes[..15].iter().all(|byte| *byte == 0) && bytes[15] == 1;
-            bytes != [0; 16] && !loopback
+            let link_local = bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80;
+            bytes != [0; 16] && !loopback && !link_local
         }
         _ => false,
     }
@@ -965,7 +988,9 @@ impl UsbClasses {
                     self.push(DeviceClass::PortableMedia);
                 }
             }
-            8 => self.push(DeviceClass::RemovableStorage),
+            // USB 大容量接口本身不代表有介质；空的读卡器、空光驱常驻。
+            // 实际可读介质由 IOMedia 的 External 判定并补报。
+            8 => {}
             9 => {}
             14 => self.push(DeviceClass::Imaging),
             _ => self.push(DeviceClass::Other),
@@ -1015,8 +1040,14 @@ fn insert_device(
 }
 
 fn usb_identity(dictionary: CfDictionaryRef) -> Option<DeviceIdentity> {
+    if property_i64(dictionary, c"idVendor") != Some(0x1f75)
+        || property_i64(dictionary, c"idProduct") != Some(0x0903)
+    {
+        return None;
+    }
     let serial = property_string(dictionary, c"USB Serial Number")
-        .or_else(|| property_string(dictionary, c"kUSBSerialNumberString"))?
+        .or_else(|| property_string(dictionary, c"kUSBSerialNumberString"))
+        .or_else(|| property_string(dictionary, c"Serial Number"))?
         .trim()
         .to_owned();
     if serial.is_empty() {
@@ -1109,21 +1140,16 @@ fn collect_usb_devices(devices: &mut BTreeMap<(String, u8), DeviceInfo>) -> Resu
 }
 
 fn usb_ancestor(media: IoObject) -> Result<Option<(String, Option<DeviceIdentity>)>, String> {
-    let mut current = media;
-    let mut current_owner = None;
+    let mut current_guard: Option<IoHandle> = None;
     for _ in 0..32 {
+        let current = current_guard.as_ref().map_or(media, |handle| handle.0);
         let mut parent = 0;
-        // SAFETY: current 由 media 或 current_owner 保证存活，parent 是有效输出位置。
+        // SAFETY: current 由 media 或 current_guard 保证存活，parent 是有效输出位置。
         let result =
             unsafe { IORegistryEntryGetParentEntry(current, c"IOService".as_ptr(), &mut parent) };
         if result != K_IO_RETURN_SUCCESS {
-            return if current_owner.is_none() {
-                Ok(None)
-            } else {
-                Err(format!(
-                    "IORegistryEntryGetParentEntry 失败: 0x{result:08x}"
-                ))
-            };
+            // 到注册表根或节点在遍历中消失：该介质没有 USB 祖先，仍按可移动介质监控。
+            return Ok(None);
         }
         let Some(parent) = IoHandle::new(parent) else {
             return Ok(None);
@@ -1134,9 +1160,7 @@ fn usb_ancestor(media: IoObject) -> Result<Option<(String, Option<DeviceIdentity
             let dictionary = properties(parent.0)?;
             return Ok(Some((id, usb_identity(dictionary.pointer()))));
         }
-        current = parent.0;
-        // 新 owner 替换旧 owner 后，current 指向仍存活的 parent；旧祖先不再使用。
-        current_owner = Some(parent);
+        current_guard = Some(parent);
     }
     Ok(None)
 }
@@ -1153,10 +1177,10 @@ fn collect_removable_media(devices: &mut BTreeMap<(String, u8), DeviceInfo>) -> 
         };
         let dictionary = properties(media.0)?;
         let leaf = property_bool(dictionary.pointer(), c"Leaf");
-        let removable = property_bool(dictionary.pointer(), c"Removable")
-            || property_bool(dictionary.pointer(), c"Ejectable")
-            || property_bool(dictionary.pointer(), c"External");
-        if !leaf || !removable {
+        // `Removable` / `Ejectable` 也用于内部磁盘映像；只有 External 才代表
+        // 真正脱离本机的外接介质。USB 存储由 collect_usb_devices 单独覆盖。
+        let external = property_bool(dictionary.pointer(), c"External");
+        if !leaf || !external {
             continue;
         }
         let (id, identity) = match usb_ancestor(media.0)? {
@@ -1219,5 +1243,53 @@ mod tests {
     fn null_native_objects_do_not_reach_release() {
         assert!(CfObject::retained(ptr::null()).is_none());
         assert!(IoHandle::new(0).is_none());
+    }
+
+    #[test]
+    #[ignore = "打印本机采集快照，供环境策略真机诊断"]
+    fn macos_live_snapshot_diagnostic() {
+        let network = collect_network();
+        println!("network: {network:#?}");
+        match collect_devices() {
+            Ok(snapshot) => {
+                for device in &snapshot.devices {
+                    println!(
+                        "{:?}: {} (identity {})",
+                        device.class,
+                        device.id,
+                        if device.identity.is_some() {
+                            "present"
+                        } else {
+                            "absent"
+                        }
+                    );
+                }
+            }
+            Err(error) => println!("devices error: {error}"),
+        }
+        if let Ok(Some(iterator)) = matching_services(c"IOMedia") {
+            loop {
+                // SAFETY: iterator 有效，返回对象由 IoHandle 释放。
+                let media = unsafe { IOIteratorNext(iterator.0) };
+                let Some(media) = IoHandle::new(media) else {
+                    break;
+                };
+                let Ok(dictionary) = properties(media.0) else {
+                    continue;
+                };
+                let leaf = property_bool(dictionary.pointer(), c"Leaf");
+                let removable = property_bool(dictionary.pointer(), c"Removable");
+                let ejectable = property_bool(dictionary.pointer(), c"Ejectable");
+                let external = property_bool(dictionary.pointer(), c"External");
+                if leaf && (removable || ejectable || external) {
+                    let bsd = property_string(dictionary.pointer(), c"BSD Name")
+                        .unwrap_or_else(|| "?".into());
+                    println!(
+                        "IOMedia {bsd}: removable={removable} ejectable={ejectable} external={external} whole={}",
+                        property_bool(dictionary.pointer(), c"Whole")
+                    );
+                }
+            }
+        }
     }
 }

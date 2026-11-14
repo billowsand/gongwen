@@ -485,6 +485,15 @@ pub(crate) struct KeyHandle {
 }
 
 impl KeyHandle {
+    pub(crate) fn from_unlock(unlocked: &Unlocked, db_active: bool) -> Self {
+        Self {
+            dek: unlocked.dek.clone(),
+            db_active,
+            unlock_id: rand::random(),
+            slot: unlocked.slot,
+        }
+    }
+
     /// SQLCipher `PRAGMA hexkey` 用的 hex 串（不带引号）。用 `Zeroizing` 包住，
     /// 临时副本在进程内尽量短命；不要把它写日志、错误串或持久文件。
     pub(crate) fn dek_hex(&self) -> Zeroizing<String> {
@@ -536,6 +545,27 @@ pub(crate) fn key_handle() -> Option<KeyHandle> {
         .read()
         .ok()
         .and_then(|guard| guard.as_ref().map(clone_handle))
+}
+
+/// 高频状态检查只读取布尔字段，不克隆包含 DEK 的句柄。
+pub(crate) fn current_db_key_active() -> bool {
+    #[cfg(test)]
+    if let Some(active) = TEST_KEY_HANDLE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|handle| handle.db_active && handle.slot == storage::current_slot())
+    }) {
+        return active;
+    }
+    KEY_HANDLE
+        .read()
+        .ok()
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|handle| handle.db_active && handle.slot == storage::current_slot())
+        })
+        .unwrap_or(false)
 }
 
 /// 仅测试用：按进程当前槽位创建句柄。生产路径一律用 [`set_key_handle_for_slot`]。

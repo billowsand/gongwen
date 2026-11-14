@@ -658,9 +658,15 @@ impl GongwenApp {
         let Some(pending) = self.import_preparation.take() else {
             return;
         };
-        let Ok(result) = pending.rx.try_recv() else {
-            self.import_preparation = Some(pending);
-            return;
+        let result = match pending.rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.import_preparation = Some(pending);
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(anyhow::anyhow!("稿件包读取任务意外退出"))
+            }
         };
         match result {
             Ok(preview) => {

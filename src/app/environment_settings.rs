@@ -13,7 +13,7 @@ impl GongwenApp {
             ui.label(egui::RichText::new("本机未启用环境安全检测。").color(theme::text_soft()));
             return;
         }
-        let encrypted = crate::vault::key_handle().is_some_and(|key| key.db_active());
+        let encrypted = crate::vault::current_db_key_active();
         if !encrypted {
             setting_note(
                 ui,
@@ -23,7 +23,7 @@ impl GongwenApp {
         }
 
         let summary = self.environment_summary.clone();
-        let policy = &mut self.config.environment;
+        let policy = &mut self.environment_draft;
         setting_row(
             ui,
             "启用环境检测",
@@ -33,12 +33,12 @@ impl GongwenApp {
             },
         );
 
-        if policy.enabled {
-            setting_note(ui, &summary);
-        } else {
+        setting_note(ui, &summary);
+        setting_note(ui, &self.environment_preview);
+        if !self.config.environment.enabled {
             setting_note(
                 ui,
-                "当前未启用。保存设置后开始监控；默认不会干预现有工作区。",
+                "当前只观察。可调整检测项并查看预检结果，保存通过后才开始锁定。",
             );
         }
 
@@ -54,13 +54,15 @@ impl GongwenApp {
                     NetworkPolicy::Offline,
                     "网卡可存在，但不得联网",
                 )
-                .on_hover_text("网卡链路连接、取得非回环地址或出现默认路由都会触发锁定。");
+                .on_hover_text("网卡链路连接、取得可路由地址或出现默认路由都会触发锁定。");
                 ui.radio_value(
                     &mut policy.network,
                     NetworkPolicy::NoAdapters,
                     "不得存在网卡",
                 )
-                .on_hover_text("任何非回环物理或虚拟接口存在都会触发锁定，包括禁用状态。");
+                .on_hover_text(
+                    "物理网卡、VPN 等用户网络接口存在即锁定；AirDrop 等系统服务接口除外。",
+                );
             },
         );
 
@@ -69,7 +71,7 @@ impl GongwenApp {
         setting_row(
             ui,
             "检测类别",
-            Some("勾选的设备一旦出现即锁定；已认证 IS903 仅豁免其移动存储功能。"),
+            Some("勾选的设备有可读介质或功能出现即锁定；已认证 IS903 仅豁免其移动存储功能。"),
             |ui| {
                 ui.vertical(|ui| {
                     ui.checkbox(&mut policy.devices.removable_storage, "U 盘 / 移动存储");
@@ -121,7 +123,7 @@ mod samples {
         theme::configure_style(&ctx);
         crate::vault::set_key_handle_for_slot([7; 32], true, DataSlot::Real);
         let mut app = crate::app::management_samples::fixture();
-        app.config.environment.enabled = true;
+        app.environment_draft.enabled = true;
         app.environment_summary = "非回环接口 1 个，已连接 0 个；受监控外设 0 个".into();
         let size = egui::vec2(1000.0, 760.0);
         let mut canvas = crate::ui_snapshot::Canvas::default();

@@ -1,6 +1,6 @@
 use super::{
     DeviceClass, DeviceIdentity, DeviceInfo, DeviceSnapshot, MonitorEvent, NetworkInterface,
-    NetworkInterfaceKind, NetworkSnapshot,
+    NetworkInterfaceKind, NetworkSnapshot, TimedEvent,
 };
 use eframe::egui;
 use std::collections::{BTreeMap, BTreeSet};
@@ -44,6 +44,7 @@ use windows_sys::Win32::{
         Ndis::{IfOperStatusUp, NET_IF_ACCESS_LOOPBACK},
     },
     Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC},
+    Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW},
     System::{
         Ioctl::{GUID_DEVINTERFACE_CDROM, GUID_DEVINTERFACE_DISK},
         LibraryLoader::GetModuleHandleW,
@@ -176,16 +177,21 @@ fn address_is_non_loopback(address: &MIB_UNICASTIPADDRESS_ROW) -> bool {
             // SAFETY: AF_INET establishes that Ipv4 is the active SOCKADDR_INET member.
             let raw = unsafe { address.Address.Ipv4.sin_addr.S_un.S_addr };
             let ip = Ipv4Addr::from(raw.to_ne_bytes());
-            !ip.is_loopback() && !ip.is_unspecified()
+            let octets = ip.octets();
+            !ip.is_loopback() && !ip.is_unspecified() && !(octets[0] == 169 && octets[1] == 254)
         }
         AF_INET6 => {
             // SAFETY: AF_INET6 establishes that Ipv6 is active and its Byte union member is the address storage.
             let bytes = unsafe { address.Address.Ipv6.sin6_addr.u.Byte };
             let ip = Ipv6Addr::from(bytes);
             if let Some(mapped) = ip.to_ipv4_mapped() {
-                return !mapped.is_loopback() && !mapped.is_unspecified();
+                let octets = mapped.octets();
+                return !mapped.is_loopback()
+                    && !mapped.is_unspecified()
+                    && !(octets[0] == 169 && octets[1] == 254);
             }
-            !ip.is_loopback() && !ip.is_unspecified()
+            let link_local = bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80;
+            !ip.is_loopback() && !ip.is_unspecified() && !link_local
         }
         _ => false,
     }
@@ -269,13 +275,27 @@ fn network_snapshot() -> Result<NetworkSnapshot, String> {
             && (addressed.contains(&(luid, row.InterfaceIndex))
                 || addressed.contains(&(luid, 0))
                 || addressed.contains(&(0, row.InterfaceIndex)));
+        let mut kind = interface_kind(row.Type);
+        // MIB_IF_ROW2 的第一位是 HardwareInterface：Hyper-V、WSL、Docker 等
+        // 常驻虚拟网卡可能保持 Up，但不代表本机获得了外网能力。
+        if !loopback
+            && matches!(
+                kind,
+                NetworkInterfaceKind::Ethernet
+                    | NetworkInterfaceKind::Wifi
+                    | NetworkInterfaceKind::Other
+            )
+            && row.InterfaceAndOperStatusFlags._bitfield & 1 == 0
+        {
+            kind = NetworkInterfaceKind::System;
+        }
         result.interfaces.push(NetworkInterface {
             id: if luid == 0 {
                 format!("if-{}", row.InterfaceIndex)
             } else {
                 format!("{luid:016x}")
             },
-            kind: interface_kind(row.Type),
+            kind,
             loopback,
             link_up: row.OperStatus == IfOperStatusUp,
             non_loopback_address,
@@ -739,8 +759,7 @@ fn usb_identity(usb: &UsbDevice) -> Option<DeviceIdentity> {
         .into_iter()
         .filter_map(|id| {
             let id = id.to_ascii_uppercase();
-            let start = id.find("REV_")? + 4;
-            let digits = id.get(start..start + 4)?;
+            let digits = id.strip_prefix(r"USB\VID_1F75&PID_0903&REV_")?;
             u64::from_str_radix(digits, 16).ok()
         })
         .next()?;
@@ -786,21 +805,92 @@ fn add_device(
     }
 }
 
+/// 空的 CD/DVD 驱动器仍会注册设备接口，不能据此判定有可读介质。
+fn optical_media_present() -> bool {
+    const DRIVE_CDROM: u32 = 5;
+    // SAFETY: GetLogicalDrives 无指针参数，返回当前进程可见的盘符位图。
+    let drives = unsafe { GetLogicalDrives() };
+    for index in 0..26 {
+        if drives & (1 << index) == 0 {
+            continue;
+        }
+        let root = [
+            u16::from(b'A') + index as u16,
+            u16::from(b':'),
+            u16::from(b'\\'),
+            0,
+        ];
+        // SAFETY: root 是 NUL 结尾的盘符路径。
+        if unsafe { GetDriveTypeW(root.as_ptr()) } != DRIVE_CDROM {
+            continue;
+        }
+        let mut serial = 0;
+        let mut component = 0;
+        let mut flags = 0;
+        // SAFETY: root 有效；其余可空输出全部传空，失败即表示当前无可用数据介质。
+        let present = unsafe {
+            GetVolumeInformationW(
+                root.as_ptr(),
+                ptr::null_mut(),
+                0,
+                &mut serial,
+                &mut component,
+                &mut flags,
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if present != 0 {
+            return true;
+        }
+    }
+    false
+}
+
 fn device_snapshot() -> Result<DeviceSnapshot, String> {
     let mut devices = BTreeMap::new();
     let mut classified_usb = BTreeSet::new();
 
-    for guid in [&GUID_DEVINTERFACE_DISK, &GUID_DEVINTERFACE_CDROM] {
-        for (node, id) in interface_instances(guid)? {
+    for (node, id) in interface_instances(&GUID_DEVINTERFACE_DISK)? {
+        let ancestry = ancestry(node)?;
+        if !ancestry.removable {
+            continue;
+        }
+        let device_id = ancestry
+            .usb
+            .as_ref()
+            .map_or_else(|| id.clone(), |usb| usb.id.clone());
+        let identity = ancestry.usb.as_ref().and_then(usb_identity);
+        if let Some(usb) = ancestry.usb {
+            classified_usb.insert(usb.id);
+        }
+        add_device(
+            &mut devices,
+            device_id,
+            DeviceClass::RemovableStorage,
+            identity,
+        );
+    }
+    if optical_media_present() {
+        for (node, id) in interface_instances(&GUID_DEVINTERFACE_CDROM)? {
             let ancestry = ancestry(node)?;
             if !ancestry.removable {
                 continue;
             }
+            let device_id = ancestry
+                .usb
+                .as_ref()
+                .map_or_else(|| id.clone(), |usb| usb.id.clone());
             let identity = ancestry.usb.as_ref().and_then(usb_identity);
             if let Some(usb) = ancestry.usb {
                 classified_usb.insert(usb.id);
             }
-            add_device(&mut devices, id, DeviceClass::RemovableStorage, identity);
+            add_device(
+                &mut devices,
+                device_id,
+                DeviceClass::RemovableStorage,
+                identity,
+            );
         }
     }
 
@@ -832,8 +922,9 @@ fn device_snapshot() -> Result<DeviceSnapshot, String> {
         let mapped = match class {
             Some(0x03) => Some(DeviceClass::HumanInterface),
             Some(0x06 | 0x0e) => Some(DeviceClass::Imaging),
-            Some(0x08) => Some(DeviceClass::RemovableStorage),
-            Some(0x09) => None,
+            // 类 08 只表示支持大容量传输；空读卡器/光驱常驻，实际介质由
+            // DISK/CDROM 接口和 optical_media_present 判定。
+            Some(0x08 | 0x09) => None,
             _ => Some(DeviceClass::Other),
         };
         if mapped == Some(DeviceClass::Other) && classified_usb.contains(&id) {
@@ -866,62 +957,78 @@ fn device_snapshot() -> Result<DeviceSnapshot, String> {
     })
 }
 
-fn send_network(sender: &mpsc::Sender<MonitorEvent>, error: Option<&str>) -> bool {
-    let event = match error {
-        Some(error) => Err(error.to_owned()),
-        None => network_snapshot(),
-    };
-    sender.send(MonitorEvent::Network(event)).is_ok()
+fn snapshot_with_retry<T>(mut collect: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut last = None;
+    for attempt in 0..3 {
+        match collect() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last = Some(error);
+                if attempt < 2 {
+                    thread::sleep(Duration::from_millis(40));
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| "采集失败".to_owned()))
 }
 
-fn send_devices(sender: &mpsc::Sender<MonitorEvent>, error: Option<&str>) -> bool {
-    let event = match error {
-        Some(error) => Err(error.to_owned()),
-        None => device_snapshot(),
-    };
-    sender.send(MonitorEvent::Devices(event)).is_ok()
+fn send_network(sender: &mpsc::Sender<TimedEvent>) -> bool {
+    sender
+        .send((
+            Instant::now(),
+            MonitorEvent::Network(snapshot_with_retry(network_snapshot)),
+        ))
+        .is_ok()
 }
 
-pub(crate) fn run(sender: mpsc::Sender<MonitorEvent>, stop: Arc<AtomicBool>, wake: egui::Context) {
+fn send_devices(sender: &mpsc::Sender<TimedEvent>) -> bool {
+    sender
+        .send((
+            Instant::now(),
+            MonitorEvent::Devices(snapshot_with_retry(device_snapshot)),
+        ))
+        .is_ok()
+}
+
+pub(crate) fn run(sender: mpsc::Sender<TimedEvent>, stop: Arc<AtomicBool>, wake: egui::Context) {
     let network_dirty = Arc::new(AtomicBool::new(true));
     let device_dirty = Arc::new(AtomicBool::new(true));
     let network_registrations = register_network_notifications(&network_dirty);
-    let network_error = network_registrations.as_ref().err().cloned();
+    let network_degraded = network_registrations.is_err();
     let _network_notifications = network_registrations.ok();
     let device_context = Arc::as_ptr(&device_dirty).cast::<c_void>();
     let device_monitor = DeviceMonitor::new(device_context);
-    let device_error = device_monitor.as_ref().err().cloned();
+    let device_degraded = device_monitor.is_err();
     let _device_monitor = device_monitor.ok();
 
     network_dirty.store(false, Ordering::Release);
     device_dirty.store(false, Ordering::Release);
-    let connected = send_network(&sender, None) && send_devices(&sender, None);
+    let connected = send_network(&sender) && send_devices(&sender);
     if !connected {
         return;
-    }
-    if let Some(error) = network_error.as_deref() {
-        let _ = send_network(&sender, Some(error));
-    }
-    if let Some(error) = device_error.as_deref() {
-        let _ = send_devices(&sender, Some(error));
     }
     wake.request_repaint();
 
     let mut last_heartbeat = Instant::now();
     while !stop.load(Ordering::Acquire) {
         pump_device_messages();
-        let heartbeat = last_heartbeat.elapsed() >= HEARTBEAT;
+        let heartbeat = if network_degraded || device_degraded {
+            last_heartbeat.elapsed() >= Duration::from_secs(1)
+        } else {
+            last_heartbeat.elapsed() >= HEARTBEAT
+        };
         let network_changed = network_dirty.swap(false, Ordering::AcqRel);
         let device_changed = device_dirty.swap(false, Ordering::AcqRel);
         let mut sent = false;
         if network_changed || heartbeat {
-            if !send_network(&sender, network_error.as_deref()) {
+            if !send_network(&sender) {
                 return;
             }
             sent = true;
         }
         if device_changed || heartbeat {
-            if !send_devices(&sender, device_error.as_deref()) {
+            if !send_devices(&sender) {
                 return;
             }
             sent = true;
