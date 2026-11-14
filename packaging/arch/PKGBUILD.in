@@ -39,7 +39,11 @@ package() {
   # 便携目录：二进制 + runtime（字体、许可证）+ 文档 + AI 技能包
   cp -a "$staging/." "$appdir/"
   chmod 755 "$appdir/gongwen-assistant"
-  install -Dm755 "$appdir/gongwen-assistant" "${pkgdir}/usr/libexec/${pkgname}/gongwen-is903"
+  # IS903 特权助手是同一份二进制按 argv[0] 切模式。这里必须用硬链接：复制会让包
+  # 与安装占用各多出一份 128 MiB；符号链接过不了 helper::trusted_file 的
+  # symlink_metadata + is_file() 检查（会被判定为不安全的助手文件）。
+  install -dm755 "${pkgdir}/usr/libexec/${pkgname}"
+  ln "$appdir/gongwen-assistant" "${pkgdir}/usr/libexec/${pkgname}/gongwen-is903"
 
   # 命令行入口
   ln -s /usr/lib/${pkgname}/gongwen-assistant "${pkgdir}/usr/bin/${pkgname}"
