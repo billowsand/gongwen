@@ -169,7 +169,7 @@ x11-dl = "2.21"
 # NSPasteboard / NSURL 用于把导出成品放进剪贴板（复制文件）。
 objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSImage", "NSPasteboard", "NSResponder", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSArray", "NSData", "NSGeometry", "NSString", "NSURL", "NSUserDefaults"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSData", "NSGeometry", "NSString", "NSURL", "NSUserDefaults"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.31"
