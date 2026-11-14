@@ -67,6 +67,21 @@ pub(crate) enum ManuscriptAction {
     },
 }
 
+/// 确认导入时交给后台线程的快照：预览仍留在界面状态里，失败可直接恢复对话框。
+pub(crate) struct ManuscriptImportJob {
+    pub(super) zip_path: PathBuf,
+    pub(super) password: String,
+    pub(super) manifest_hash: String,
+    pub(super) actions: Vec<manuscript_io::sync::ImportAction>,
+    pub(super) relations: Vec<manuscript_io::sync::RecordPreview>,
+}
+
+/// 后台读取 PDF 附件的任务：读完后回主线程入库，避免大扫描件卡住界面。
+pub(crate) enum AttachmentReadJob {
+    Add { manuscript_id: i64 },
+    Archive { manuscript_id: i64 },
+}
+
 /// 详情窗内 PDF 附件的操作，同样延迟到帧末执行。
 pub(crate) enum PdfAction {
     Open(i64),
@@ -97,6 +112,9 @@ pub(crate) struct SingleDeleteConfirm {
     title: String,
     refs: Vec<crate::manuscript::send_package::SendPackageReferrer>,
     open_in_tab: bool,
+    /// 这篇稿件自己挂着的送批材料件数与导出记录数，删除时一并级联。
+    owned_items: usize,
+    export_count: usize,
 }
 
 fn open_manuscript_label(status: crate::models::ManuscriptStatus) -> &'static str {
@@ -116,6 +134,9 @@ pub(crate) struct BatchDeleteConfirm {
     archived: usize,
     /// 已归档呈批件的送批材料，受保护不删。
     packaged: usize,
+    /// 待删稿件自己挂着的送批材料总件数与导出记录总数。
+    owned_items: usize,
+    export_count: usize,
 }
 
 /// ZIP 密码框之后要做的事。导出范围在打开密码框时就定下来（所选稿件的 id、
@@ -267,6 +288,8 @@ mod dialog_snapshot_tests {
             deletable: vec![1, 2, 3],
             archived: 1,
             packaged: 1,
+            owned_items: 2,
+            export_count: 1,
         };
         snapshot("batch-delete-dialog", egui::vec2(720.0, 420.0), |ui| {
             batch_delete_dialog(ui.ctx(), &confirm);

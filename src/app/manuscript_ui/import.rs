@@ -31,17 +31,36 @@ pub(crate) fn import_preview_form(
     ui.label(format!(
         "共 {total} 篇，已勾选 {selected} 篇。逐篇选择处理方式后才会写入。"
     ));
+    let keyword = preview.keyword.trim().to_lowercase();
+    // 筛选只影响列表显示；全选/全不选也只作用于当前命中的记录，避免把
+    // 用户看不见的稿件一起导入或取消。
+    let visible = preview
+        .manifest
+        .records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| {
+            keyword.is_empty()
+                || record.title.to_lowercase().contains(&keyword)
+                || record.doc_number.to_lowercase().contains(&keyword)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut preview.keyword)
                 .hint_text("按标题/文号过滤")
                 .desired_width(220.0),
         );
-        if ui.button("全选").clicked() {
-            preview.selected.fill(true);
+        if ui.button("全选当前筛选").clicked() {
+            for &index in &visible {
+                preview.selected[index] = true;
+            }
         }
-        if ui.button("全不选").clicked() {
-            preview.selected.fill(false);
+        if ui.button("取消当前筛选").clicked() {
+            for &index in &visible {
+                preview.selected[index] = false;
+            }
         }
     });
     if let Some(vocabulary) = &preview.vocabulary {
@@ -57,7 +76,6 @@ pub(crate) fn import_preview_form(
         );
     }
     ui.add_space(4.0);
-    let keyword = preview.keyword.trim().to_lowercase();
     let list_width = (ui.available_width() * 0.4).clamp(260.0, 380.0);
     // 两栏放进定高的盒子：模态的 Area 不限高，竖分隔线会一路撑到无穷高。
     ui.allocate_ui_with_layout(
@@ -73,13 +91,8 @@ pub(crate) fn import_preview_form(
                         .max_height(body_height)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            for (index, record) in preview.manifest.records.iter().enumerate() {
-                                if !keyword.is_empty()
-                                    && !record.title.to_lowercase().contains(&keyword)
-                                    && !record.doc_number.to_lowercase().contains(&keyword)
-                                {
-                                    continue;
-                                }
+                            for &index in &visible {
+                                let record = &preview.manifest.records[index];
                                 ui.horizontal(|ui| {
                                     ui.checkbox(&mut preview.selected[index], "");
                                     ui.vertical(|ui| {

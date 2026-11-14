@@ -32,6 +32,7 @@ impl GongwenApp {
         self.backup_restore_done_window(ctx);
         self.backup_restore_error_window(ctx);
         self.content_clear_confirm_window(ctx);
+        self.manuscript_import_busy_window(ctx);
     }
 
     fn config_recovery_window(&mut self, ctx: &egui::Context) {
@@ -244,6 +245,11 @@ impl GongwenApp {
         self.manuscript_batch_delete = None;
         self.clear_manuscript_detail();
         self.manuscript_archive_pending = None;
+        self.manuscript_archive_job = None;
+        self.manuscript_attachment_busy = false;
+        self.manuscript_import_busy = false;
+        self.manuscript_pending_heads.clear();
+        self.manuscript_filter_edited_at = None;
         self.version_commit = None;
         self.version_diff = None;
         self.version_switch = None;

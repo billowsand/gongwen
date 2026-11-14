@@ -304,6 +304,7 @@ impl GongwenApp {
                 match result {
                     Ok(Some(record)) if record.status == ManuscriptStatus::Archived => {
                         self.manuscript_filter = ManuscriptFilter::default();
+                        self.manuscript_filter_edited_at = None;
                         self.manuscript_dirty = true;
                         self.open_page(NavPage::Manuscript);
                         self.refresh_detail(id);

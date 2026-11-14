@@ -6,22 +6,24 @@
 use super::list::manuscript_menu;
 use crate::app::file_dialog::FileDialogSpec;
 use crate::app::manuscript_ui::{
-    ArchivePending, BatchDeleteConfirm, ManuscriptAction, PdfAction, SingleDeleteConfirm,
-    open_manuscript_label,
+    ArchivePending, AttachmentReadJob, BatchDeleteConfirm, ManuscriptAction, PdfAction,
+    SingleDeleteConfirm, open_manuscript_label,
 };
 use crate::app::{
-    GongwenApp, VersionDiffState, VersionScope, joined_metadata, metadata_grid_row,
+    GongwenApp, VersionDiffState, VersionScope, WorkerResult, joined_metadata, metadata_grid_row,
     present_or_dash, short_date, status_color, summarize,
 };
 use crate::doc_import;
 use crate::draft_page::DraftSession;
 use crate::export;
+use crate::file_limits::MAX_ATTACHMENT_BYTES;
 use crate::manuscript::send_package::{PinChoice, is_owner_kind};
 use crate::manuscript::{ManuscriptRecord, ManuscriptUpdate, NewManuscript};
 use crate::manuscript_io;
 use crate::models::{ManuscriptStatus, TemplateKind};
 use crate::theme;
 use eframe::egui;
+use std::path::PathBuf;
 
 impl GongwenApp {
     /// 稿件列表右侧的资料卡。列表行只负责切换这里的选中项；正文查看和编辑
@@ -38,11 +40,7 @@ impl GongwenApp {
         let mut delete_pdf: Option<i64> = None;
         // 附件要挑文件：对话框在后台线程开，这里只记下"用户点了添加"。
         let mut pick_pdfs = false;
-        let pending_heads = self
-            .manuscript_store
-            .as_ref()
-            .and_then(|store| store.pending_sync_heads(detail_id).ok())
-            .unwrap_or_default();
+        let pending_heads = self.manuscript_pending_heads.clone();
         let mut pending_to_open: Option<String> = None;
 
         let detail = self.manuscript_detail.as_ref()?;
@@ -79,7 +77,7 @@ impl GongwenApp {
                 *action = Some(ManuscriptAction::Open(detail_id));
             }
             ui.menu_button("更多", |ui| {
-                manuscript_menu(ui, detail_id, detail.status, false, action);
+                manuscript_menu(ui, detail_id, detail.status, false, false, action);
             });
         });
         ui.add_space(6.0);
@@ -222,7 +220,7 @@ impl GongwenApp {
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     ui.strong(format!("版本历史（{}）", self.manuscript_versions.len()));
-                    if !self.manuscript_versions.is_empty()
+                    if self.manuscript_versions.len() >= 2
                         && ui
                             .add(theme::icon_text_button(theme::Icon::Compare, "对照…"))
                             .on_hover_text("默认对照最新版与上一版")
@@ -364,29 +362,29 @@ impl GongwenApp {
                     let Some(paths) = paths else {
                         return;
                     };
-                    let result: anyhow::Result<usize> = (|| {
-                        let store = app
-                            .manuscript_store
-                            .as_mut()
-                            .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-                        let mut added = 0;
-                        for path in &paths {
-                            let bytes = std::fs::read(path)?;
-                            let name = path
-                                .file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("附件.pdf")
-                                .to_string();
-                            store.add_pdf(detail_id, &name, &bytes)?;
-                            added += 1;
-                        }
-                        Ok(added)
-                    })();
-                    app.reload_detail();
-                    match result {
-                        Ok(added) => app.status = format!("已添加 {added} 个附件。"),
-                        Err(error) => app.status = format!("添加附件失败：{error:#}"),
+                    if paths.is_empty() {
+                        return;
                     }
+                    if app.manuscript_attachment_busy {
+                        app.status = "正在读取附件，请稍候再添加。".into();
+                        return;
+                    }
+                    for path in &paths {
+                        if let Err(error) = crate::file_limits::check_file_size(
+                            path,
+                            MAX_ATTACHMENT_BYTES,
+                            "PDF 附件",
+                        ) {
+                            app.status = format!("添加附件失败：{error}");
+                            return;
+                        }
+                    }
+                    app.start_attachment_read(
+                        AttachmentReadJob::Add {
+                            manuscript_id: detail_id,
+                        },
+                        paths,
+                    );
                 },
             );
         }
@@ -456,45 +454,42 @@ impl GongwenApp {
                     self.manuscript_archive_pending = None;
                     return;
                 }
-                let (pdfs, pin_choice) = self
-                    .manuscript_archive_pending
-                    .take()
-                    .map(|p| (p.pdf_paths, p.pin_choice))
-                    .unwrap_or_default();
-                let result: anyhow::Result<()> = (|| {
-                    // 文件读取失败时还不能改数据库；读取成功后一次性提交状态、钉版和附件。
-                    let mut attachments = Vec::with_capacity(pdfs.len());
-                    for path in &pdfs {
-                        let bytes = std::fs::read(path)?;
-                        let name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("扫描件.pdf")
-                            .to_string();
-                        attachments.push((name, bytes));
-                    }
-                    let store = self
-                        .manuscript_store
-                        .as_mut()
-                        .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-                    store.archive_with_send_package_and_pdfs(id, pin_choice, &attachments)
-                })();
-                self.manuscript_dirty = true;
-                match result {
-                    Ok(()) => {
-                        self.sync_record_status(id);
-                        self.status = format!("已归档，附带 {} 个 PDF 附件。", pdfs.len());
-                    }
-                    Err(error) => self.status = format!("归档失败：{error:#}"),
+                let Some(pending) = self.manuscript_archive_pending.take() else {
+                    self.status = "归档信息已失效，请重新打开归档确认。".into();
+                    return;
+                };
+                if pending.pdf_paths.is_empty() {
+                    self.archive_with_files(id, pending, &[]);
+                    return;
                 }
+                if self.manuscript_attachment_busy {
+                    self.manuscript_archive_pending = Some(pending);
+                    self.status = "正在读取附件，请稍候再归档。".into();
+                    return;
+                }
+                for path in &pending.pdf_paths {
+                    if let Err(error) =
+                        crate::file_limits::check_file_size(path, MAX_ATTACHMENT_BYTES, "PDF 附件")
+                    {
+                        self.manuscript_archive_pending = Some(pending);
+                        self.status = format!("归档失败：{error}");
+                        return;
+                    }
+                }
+                let paths = pending.pdf_paths.clone();
+                self.manuscript_archive_job = Some(pending);
+                self.start_attachment_read(AttachmentReadJob::Archive { manuscript_id: id }, paths);
             }
             ManuscriptAction::Delete(id) => {
+                // 界面里还有未保存的正文时，删除后的图片回收不能只看数据库：
+                // 打开的新稿可能仍在引用同一张图。
+                let live = self.open_doc_markdown();
                 let result: anyhow::Result<()> = (|| {
                     let store = self
                         .manuscript_store
                         .as_mut()
                         .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-                    store.delete(id)?;
+                    store.delete_preserving_live(id, &live)?;
                     Ok(())
                 })();
                 self.manuscript_dirty = true;
@@ -507,12 +502,13 @@ impl GongwenApp {
                 }
             }
             ManuscriptAction::DeleteSelected(ids) => {
+                let live = self.open_doc_markdown();
                 let result: anyhow::Result<()> = (|| {
                     let store = self
                         .manuscript_store
                         .as_mut()
                         .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-                    store.delete_many(&ids)?;
+                    store.delete_many_preserving_live(&ids, &live)?;
                     Ok(())
                 })();
                 self.manuscript_dirty = true;
@@ -558,6 +554,99 @@ impl GongwenApp {
         }
     }
 
+    /// 主线程只做大小预检；整文件读取和 PDF 头校验放后台，读完回主线程入库。
+    fn start_attachment_read(&mut self, job: AttachmentReadJob, paths: Vec<PathBuf>) {
+        self.manuscript_attachment_busy = true;
+        self.status = format!("正在读取 {} 个 PDF 附件…", paths.len());
+        let tx = self.sender.clone();
+        std::thread::spawn(move || {
+            let result =
+                manuscript_io::read_pdf_attachments(&paths).map_err(|error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::ManuscriptAttachmentsRead { job, result });
+        });
+    }
+
+    /// 后台附件读取完成：添加的直接批量入库，归档的接着走钉版与状态事务。
+    pub(crate) fn apply_attachment_read(
+        &mut self,
+        job: AttachmentReadJob,
+        result: Result<Vec<(String, Vec<u8>)>, String>,
+    ) {
+        self.manuscript_attachment_busy = false;
+        match job {
+            AttachmentReadJob::Add { manuscript_id } => match result {
+                Ok(files) => {
+                    let added = self
+                        .manuscript_store
+                        .as_mut()
+                        .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))
+                        .and_then(|store| store.add_pdfs(manuscript_id, &files));
+                    self.manuscript_dirty = true;
+                    if self
+                        .manuscript_detail
+                        .as_ref()
+                        .is_some_and(|detail| detail.id == manuscript_id)
+                    {
+                        self.reload_detail();
+                    }
+                    match added {
+                        Ok(count) => self.status = format!("已添加 {count} 个附件。"),
+                        Err(error) => self.status = format!("添加附件失败：{error:#}"),
+                    }
+                }
+                Err(error) => self.status = format!("添加附件失败：{error}"),
+            },
+            AttachmentReadJob::Archive { manuscript_id } => {
+                let Some(pending) = self.manuscript_archive_job.take() else {
+                    self.status = "归档信息已失效，请重新打开归档确认。".into();
+                    return;
+                };
+                match result {
+                    Ok(files) => self.archive_with_files(manuscript_id, pending, &files),
+                    Err(error) => {
+                        self.manuscript_archive_pending = Some(pending);
+                        self.status = format!("归档失败：{error}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// 附件已读齐后执行归档：钉版、附件和状态在同一个事务里落库；失败恢复确认框，
+    /// 用户不必重新选文件。
+    fn archive_with_files(
+        &mut self,
+        id: i64,
+        pending: ArchivePending,
+        files: &[(String, Vec<u8>)],
+    ) {
+        if self.manuscript_transition_blocked(id, "归档") {
+            self.manuscript_archive_pending = Some(pending);
+            return;
+        }
+        let pin_choice = pending.pin_choice;
+        let result = self
+            .manuscript_store
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))
+            .and_then(|store| store.archive_with_send_package_and_pdfs(id, pin_choice, files));
+        self.manuscript_dirty = true;
+        match result {
+            Ok(()) => {
+                self.sync_record_status(id);
+                self.status = if files.is_empty() {
+                    "已归档。".into()
+                } else {
+                    format!("已归档，附带 {} 个 PDF 附件。", files.len())
+                };
+            }
+            Err(error) => {
+                self.manuscript_archive_pending = Some(pending);
+                self.status = format!("归档失败：{error:#}");
+            }
+        }
+    }
+
     fn prepare_single_delete(&mut self, id: i64) {
         let result = (|| {
             let store = self
@@ -576,6 +665,8 @@ impl GongwenApp {
                 title: brief.title,
                 refs: store.send_package_referrers(id)?,
                 open_in_tab: self.doc_index_of_manuscript(id).is_some(),
+                owned_items: store.send_package_items(id)?.len(),
+                export_count: store.send_package_exports(id)?.len(),
             })
         })();
         match result {
@@ -599,12 +690,22 @@ impl GongwenApp {
         self.remember_session();
     }
 
+    /// 当前打开的全部正文（含未保存的新稿和版本载入内容），供删除后的图片回收
+    /// 判断“还有谁在引用”。删除本身不需要这些内容写库。
+    fn open_doc_markdown(&self) -> Vec<String> {
+        self.docs
+            .iter()
+            .map(|doc| doc.generated_markdown.clone())
+            .collect()
+    }
+
     pub(crate) fn clear_manuscript_detail(&mut self) {
         self.manuscript_detail = None;
         self.manuscript_detail_delete_pdf = None;
         self.manuscript_versions.clear();
         self.manuscript_package_titles.clear();
         self.manuscript_referrers.clear();
+        self.manuscript_pending_heads.clear();
     }
 
     pub(crate) fn apply_pdf_action(&mut self, action: PdfAction) {
@@ -663,6 +764,11 @@ impl GongwenApp {
                 self.manuscript_detail = Some(record);
                 self.refresh_manuscript_versions(id);
                 self.refresh_detail_send_package(id);
+                self.manuscript_pending_heads = self
+                    .manuscript_store
+                    .as_ref()
+                    .and_then(|store| store.pending_sync_heads(id).ok())
+                    .unwrap_or_default();
             }
             Ok(None) => {
                 self.status = "稿件不存在或已被删除。".into();
@@ -727,12 +833,24 @@ impl GongwenApp {
             .collect::<Vec<_>>();
         let (blocked, deletable): (Vec<i64>, Vec<i64>) =
             candidates.into_iter().partition(|&id| used_by_archived(id));
+        let mut owned_items = 0;
+        let mut export_count = 0;
+        if let Some(store) = self.manuscript_store.as_ref() {
+            for id in &deletable {
+                owned_items += store.send_package_items(*id).map_or(0, |items| items.len());
+                export_count += store
+                    .send_package_exports(*id)
+                    .map_or(0, |exports| exports.len());
+            }
+        }
         BatchDeleteConfirm {
             archived: self
                 .manuscript_selected
                 .len()
                 .saturating_sub(deletable.len() + blocked.len()),
             packaged: blocked.len(),
+            owned_items,
+            export_count,
             deletable,
         }
     }
@@ -1092,6 +1210,63 @@ mod tests {
     }
 
     #[test]
+    fn background_attachment_read_completes_add_and_archive() {
+        let (mut app, id) = saved_manuscript();
+        app.apply_attachment_read(
+            AttachmentReadJob::Add { manuscript_id: id },
+            Ok(vec![("扫描件.pdf".into(), b"%PDF-1.4 scan".to_vec())]),
+        );
+        let record = app
+            .manuscript_store
+            .as_mut()
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.pdfs.len(), 1);
+        assert!(!app.manuscript_attachment_busy);
+
+        app.manuscript_archive_job = Some(ArchivePending {
+            manuscript_id: id,
+            pdf_paths: Vec::new(),
+            send_package: None,
+            pin_choice: PinChoice::default(),
+        });
+        app.apply_attachment_read(
+            AttachmentReadJob::Archive { manuscript_id: id },
+            Ok(vec![("盖章件.pdf".into(), b"%PDF-1.4 stamp".to_vec())]),
+        );
+        let record = app
+            .manuscript_store
+            .as_mut()
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, ManuscriptStatus::Archived);
+        assert_eq!(record.pdfs.len(), 2);
+        assert!(app.status.contains("已归档"));
+    }
+
+    #[test]
+    fn failed_background_archive_read_restores_confirmation() {
+        let (mut app, id) = saved_manuscript();
+        app.manuscript_archive_job = Some(ArchivePending {
+            manuscript_id: id,
+            pdf_paths: vec![PathBuf::from("missing.pdf")],
+            send_package: None,
+            pin_choice: PinChoice::default(),
+        });
+        app.apply_attachment_read(
+            AttachmentReadJob::Archive { manuscript_id: id },
+            Err("读取失败".into()),
+        );
+        assert!(app.manuscript_archive_pending.is_some());
+        assert!(app.status.contains("归档失败"));
+        assert!(!app.manuscript_attachment_busy);
+    }
+
+    #[test]
     fn unreadable_archive_pdf_leaves_manuscript_unarchived() {
         let (mut app, id) = saved_manuscript();
         let missing =
@@ -1116,6 +1291,9 @@ mod tests {
             ManuscriptStatus::Draft
         );
         assert!(app.status.contains("归档失败"));
-        assert!(app.manuscript_archive_pending.is_none());
+        assert!(
+            app.manuscript_archive_pending.is_some(),
+            "读取失败应保留已选文件，让用户换一个或移除"
+        );
     }
 }

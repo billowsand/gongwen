@@ -13,6 +13,13 @@ use std::path::Path;
 pub const MAX_DOCUMENT_BYTES: u64 = 256 * 1024 * 1024;
 /// 打印用 PDF 的体积上限。
 pub const MAX_PDF_BYTES: u64 = 200 * 1024 * 1024;
+/// 稿件 PDF 附件的体积上限。
+///
+/// 与稿件包内单个 PDF 的上限保持一致：直接加进来的附件必须能原样再导入，
+/// 否则会出现「包能导出、对方导入失败」的往返断点（见 `manuscript_io`）。
+pub const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
+/// 一次添加/归档操作的附件合计上限：防止一次挑几十个大扫描件把内存撑爆。
+pub const MAX_ATTACHMENT_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 /// 字体文件的体积上限。
 pub const MAX_FONT_BYTES: u64 = 64 * 1024 * 1024;
 /// 纯文本文件（txt / md / csv 等）的体积上限。
@@ -32,6 +39,18 @@ pub const MAX_PACKAGE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// 当没有富文本，退回纯文本粘贴——纯文本本来也在剪贴板里，用户不会丢内容。
 /// 8 MiB 足够覆盖几十页公文，又挡住了「复制了一个网页」这种几十 MB 的情况。
 pub const MAX_CLIPBOARD_HTML_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 只检查文件大小，不读取内容：主线程挑完文件后先做一次快速拒绝。
+///
+/// 文件不存在或拿不到元数据会直接报错；真正读的时候还有 [`read_bytes`]
+/// 的二次上限兜底。
+pub fn check_file_size(path: &Path, max: u64, label: &str) -> io::Result<u64> {
+    let declared = std::fs::metadata(path)?.len();
+    if declared > max {
+        return Err(too_large(label, max));
+    }
+    Ok(declared)
+}
 
 /// 读一个文件，超过上限就报错，不进内存。
 ///
@@ -69,5 +88,8 @@ mod tests {
         assert_eq!(read_bytes(&path, 5, "测试").unwrap(), b"12345");
         let error = read_bytes(&path, 4, "测试").unwrap_err();
         assert!(error.to_string().contains("测试超过"), "{error}");
+        assert!(check_file_size(&path, 5, "测试").is_ok());
+        assert!(check_file_size(&path, 4, "测试").is_err());
+        assert!(check_file_size(&dir.path().join("missing.txt"), 5, "测试").is_err());
     }
 }

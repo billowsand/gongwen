@@ -307,9 +307,19 @@ pub struct GongwenApp {
     /// 用户明确勾选“记住密码”后加载到内存的密码；不写入 AppConfig。
     remembered_zip_password: Option<String>,
     manuscript_archive_pending: Option<ArchivePending>,
+    /// 归档已点确认、附件在后台读取时的暂存；读取失败要恢复确认框。
+    manuscript_archive_job: Option<ArchivePending>,
+    /// 正在后台读取 PDF 附件（添加或归档），防重复触发。
+    manuscript_attachment_busy: bool,
     manuscript_detail: Option<ManuscriptRecord>,
     manuscript_detail_delete_pdf: Option<i64>,
     manuscript_import_preview: Option<ImportPreview>,
+    /// 确认导入已转到后台执行；期间挡住重复点击与其他写操作。
+    manuscript_import_busy: bool,
+    /// 详情面板缓存的待处理同步分支；以前每帧都要查一次库。
+    manuscript_pending_heads: Vec<String>,
+    /// 搜索框/日期框最后一次改动时间，用于防抖，避免每敲一个字就全表重查。
+    manuscript_filter_edited_at: Option<std::time::Instant>,
     /// 等着导入的稿件包（暂存目录里的副本）：按钮、启动参数、拖放进来的都排在这里，
     /// 前一个的口令框 / 导入预览关掉后再弹下一个。
     pending_imports: VecDeque<PathBuf>,
@@ -864,9 +874,14 @@ impl GongwenApp {
             manuscript_zip_password: None,
             remembered_zip_password: storage::load_remembered_zip_password().ok().flatten(),
             manuscript_archive_pending: None,
+            manuscript_archive_job: None,
+            manuscript_attachment_busy: false,
             manuscript_detail: None,
             manuscript_detail_delete_pdf: None,
             manuscript_import_preview: None,
+            manuscript_import_busy: false,
+            manuscript_pending_heads: Vec::new(),
+            manuscript_filter_edited_at: None,
             pending_imports: VecDeque::new(),
             pending_package_staging: VecDeque::new(),
             package_staging_busy: false,

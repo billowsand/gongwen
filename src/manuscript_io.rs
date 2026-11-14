@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 #[cfg(test)]
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(test)]
 use zip::write::SimpleFileOptions;
 #[cfg(test)]
@@ -40,14 +40,48 @@ pub const VOCABULARY_SCHEMA: u32 = 2;
 const VOCABULARY_NAME: &str = "vocabulary.json";
 /// 词库 JSON 体积上限（约 10 MB），远超正常词库规模，防恶意包撑爆内存。
 const VOCABULARY_MAX_BYTES: u64 = 10 * 1024 * 1024;
-/// 单个 PDF 附件上限（约 100 MB），超限跳过，避免导入超大文件撑爆库。
-const MAX_PDF_BYTES: u64 = 100 * 1024 * 1024;
+/// 单个 PDF 附件上限：与直接添加附件共用同一值，保证导出的包还能导入。
+const MAX_PDF_BYTES: u64 = crate::file_limits::MAX_ATTACHMENT_BYTES;
 /// 单张图片的上限（解压后），与插图入库同一个值，插得进去的图就带得回来。
 const MAX_IMAGE_BYTES: u64 = crate::file_limits::MAX_IMAGE_BYTES;
 /// 一次导入要读进内存的图片合计上限（解压后）：防 zip 炸弹，又给大稿件库
 /// 留足余量。
 const MAX_IMAGES_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MANIFEST_MAX_BYTES: u64 = 50 * 1024 * 1024;
+/// 后台准备稿件包时一次持有的正文/附件/图片合计上限；超过就要求分批导出，
+/// 避免几十个大扫描件把内存顶满。
+const MAX_PREPARED_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// 读取一批用户选中的 PDF 附件：主线程只做大小预检，整文件读取放到后台。
+///
+/// 只接受 PDF 文件头出现在前 1 KiB 的文件；文件名取路径末段，读不出来、
+/// 超限或不是 PDF 都整批失败，避免只加进去一半。
+pub(crate) fn read_pdf_attachments(paths: &[PathBuf]) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut files = Vec::with_capacity(paths.len());
+    let mut total = 0u64;
+    for path in paths {
+        let bytes = crate::file_limits::read_bytes(path, MAX_PDF_BYTES, "PDF 附件")
+            .map_err(|error| anyhow::anyhow!("读取《{}》失败：{error}", path.display()))?;
+        if !bytes.windows(5).take(1024).any(|window| window == b"%PDF-") {
+            bail!("《{}》不是 PDF 文件", path.display());
+        }
+        total = total.saturating_add(bytes.len() as u64);
+        if total > crate::file_limits::MAX_ATTACHMENT_TOTAL_BYTES {
+            bail!(
+                "本次附件合计超过 {} MB 上限，请分批添加",
+                crate::file_limits::MAX_ATTACHMENT_TOTAL_BYTES / 1024 / 1024
+            );
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("附件.pdf")
+            .to_string();
+        files.push((name, bytes));
+    }
+    Ok(files)
+}
 
 /// 导出密码规则：与应用锁共用同一套判据（`crate::password_policy`）——
 /// 不少于 10 个字符，且至少覆盖三类字符；同时拒绝常见口令、
@@ -199,6 +233,7 @@ pub fn export_zip(
     if include_send_package {
         ids = store.with_send_package_items(&ids)?;
     }
+    store.ensure_sync_heads(&ids)?;
     export_zip_ids(store, &ids, vocabulary, zip_path, password)
 }
 
@@ -219,6 +254,7 @@ pub fn export_zip_selected(
     } else {
         ids.to_vec()
     };
+    store.ensure_sync_heads(&ids)?;
     export_zip_ids(store, &ids, vocabulary, zip_path, password)
 }
 
@@ -251,13 +287,20 @@ pub(crate) fn prepare_package(
     }
     let mut records = Vec::new();
     let mut pdf_blobs: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut prepared_bytes = 0u64;
     for &id in ids {
-        let head = store.sync_checkpoint(id)?;
+        let head = store.sync_checkpoint_view(id)?;
         let Some(record) = store.get(id)? else {
             continue;
         };
         let (document_uuid, _) = store.document_identity(id)?;
-        let revisions = store.sync_revisions(id)?;
+        let mut revisions = store.sync_revisions(id)?;
+        if !revisions
+            .iter()
+            .any(|revision| revision.revision_uuid == head.revision_uuid)
+        {
+            revisions.push(head.clone());
+        }
         let aliases = store.document_aliases(id)?;
         let export_id = record.source_id.unwrap_or(record.id);
         // 呈批件一律带上清单（哪怕是空的）：对方据此知道这边把清单清空了。
@@ -269,6 +312,20 @@ pub(crate) fn prepare_package(
         };
         let mut pdfs = Vec::new();
         for (idx, pdf) in record.pdfs.iter().enumerate() {
+            if pdf.bytes.len() as u64 > MAX_PDF_BYTES {
+                bail!(
+                    "附件《{}》超过 {} MB，无法随稿件包导出；请先压缩或拆分后再导出",
+                    pdf.file_name,
+                    MAX_PDF_BYTES / 1024 / 1024
+                );
+            }
+            prepared_bytes = prepared_bytes.saturating_add(pdf.bytes.len() as u64);
+            if prepared_bytes > MAX_PREPARED_BYTES {
+                bail!(
+                    "稿件包内容超过 {} MB，请分批导出",
+                    MAX_PREPARED_BYTES / 1024 / 1024
+                );
+            }
             let entry = format!(
                 "pdf/{document_uuid}_{idx}_{}",
                 sanitize_entry_name(&pdf.file_name)
@@ -305,6 +362,15 @@ pub(crate) fn prepare_package(
     }
     // 全部历史版本引用的图片也必须随包保存，不能只收活稿。
     let (assets, image_blobs) = collect_sync_images(&records)?;
+    for (_, bytes) in &image_blobs {
+        prepared_bytes = prepared_bytes.saturating_add(bytes.len() as u64);
+        if prepared_bytes > MAX_PREPARED_BYTES {
+            bail!(
+                "稿件包内容超过 {} MB，请分批导出",
+                MAX_PREPARED_BYTES / 1024 / 1024
+            );
+        }
+    }
     let manifest = Manifest {
         schema: MANIFEST_SCHEMA,
         exported_at: Local::now().to_rfc3339(),
@@ -530,7 +596,7 @@ fn collect_sync_images(records: &[ManifestRecord]) -> Result<(Vec<ManifestAsset>
     for path in paths {
         // 稿件包里的资源必须是明文：资源库/旧文件都在这里读完并解密。
         let bytes = crate::images::read(&path).with_context(|| format!("稿件图片缺失：{path}"))?;
-        if bytes.len() as u64 > MAX_PDF_BYTES {
+        if bytes.len() as u64 > MAX_IMAGE_BYTES {
             bail!("稿件图片过大：{path}");
         }
         assets.push(ManifestAsset {

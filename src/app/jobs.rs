@@ -112,6 +112,16 @@ pub(crate) enum WorkerResult {
         result: Result<manuscript_io::ExportSummary, String>,
         remembered_password: Option<String>,
     },
+    /// 确认导入在后台完成；预览仍留在界面状态里，失败可恢复。
+    ManuscriptImportDone {
+        manifest_hash: String,
+        result: Result<manuscript_io::sync::SyncImportSummary, String>,
+    },
+    /// 后台读取完用户选中的 PDF 附件；真正的入库仍在主线程。
+    ManuscriptAttachmentsRead {
+        job: crate::app::manuscript_ui::AttachmentReadJob,
+        result: Result<Vec<(String, Vec<u8>)>, String>,
+    },
     /// 稿件 PDF 批量导出的结果。`path` 是保存的 7z 路径。
     ManuscriptPdfExport {
         path: PathBuf,
@@ -707,6 +717,13 @@ impl GongwenApp {
                         Err(error) => self.status = format!("导出稿件包失败：{error}"),
                     }
                 }
+                WorkerResult::ManuscriptImportDone {
+                    manifest_hash,
+                    result,
+                } => self.apply_manuscript_import_done(manifest_hash, result),
+                WorkerResult::ManuscriptAttachmentsRead { job, result } => {
+                    self.apply_attachment_read(job, result);
+                }
                 WorkerResult::ManuscriptPdfExport { path, result } => {
                     self.manuscript_pdf_export_busy = false;
                     match result {
@@ -1143,7 +1160,7 @@ impl GongwenApp {
         let mut items = Vec::new();
         let mut failed: Vec<(String, String)> = Vec::new();
         for id in ids {
-            match manuscripts.get(id) {
+            match manuscripts.get_for_editor(id) {
                 Ok(Some(record)) => items.push(knowledge::KnowledgeImportItem {
                     source: knowledge::KnowledgeSource::Manuscript,
                     source_manuscript_id: Some(record.id),

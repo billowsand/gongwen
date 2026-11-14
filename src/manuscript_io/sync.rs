@@ -270,7 +270,7 @@ pub struct PendingPreview {
 }
 
 pub fn inspect_pending(store: &mut ManuscriptStore, id: i64, head: &str) -> Result<PendingPreview> {
-    let current = store.get(id)?.context("稿件不存在")?;
+    let current = store.get_for_editor(id)?.context("稿件不存在")?;
     let graph = store
         .sync_revisions(id)?
         .into_iter()
@@ -349,7 +349,7 @@ pub fn merge_pending(
     {
         bail!("本机稿件自分支预览后发生变化，请重新打开合并预览");
     }
-    let current = store.get(id)?.context("稿件不存在")?;
+    let current = store.get_for_editor(id)?.context("稿件不存在")?;
     if current.status == crate::models::ManuscriptStatus::Archived {
         bail!("归档稿件不可合并");
     }
@@ -541,6 +541,7 @@ pub fn import_with_actions(
     let mut archive = super::PackageReader::open(zip_path, password)?;
     let images = read_images(&mut archive, &manifest, password, actions)?;
     let mut pdfs = Vec::<Vec<(String, Vec<u8>)>>::new();
+    let mut total_pdf_bytes = 0u64;
     for (record, action) in manifest.records.iter().zip(actions) {
         let mut record_pdfs = Vec::new();
         if !matches!(action, ImportAction::Skip) {
@@ -551,6 +552,13 @@ pub fn import_with_actions(
                             && super::bytes_hash(&bytes) != *expected
                         {
                             bail!("PDF 附件校验失败：{}", pdf.file_name);
+                        }
+                        total_pdf_bytes = total_pdf_bytes.saturating_add(bytes.len() as u64);
+                        if total_pdf_bytes > super::MAX_PREPARED_BYTES {
+                            bail!(
+                                "稿件包附件合计超过 {} MB，请分批导入",
+                                super::MAX_PREPARED_BYTES / 1024 / 1024
+                            );
                         }
                         record_pdfs.push((pdf.file_name.clone(), bytes));
                     }
@@ -783,28 +791,30 @@ pub fn import_with_actions(
                     id
                 }
             };
+            // 现有附件一次读齐：以前每加一个都重新 store.get(id)，一篇有 m 个
+            // 附件就会重复读 m² 量级的 BLOB。
+            let existing = store.pdf_attachments(id)?;
+            let mut hashes = existing
+                .iter()
+                .map(|pdf| super::bytes_hash(&pdf.bytes))
+                .collect::<HashSet<_>>();
+            let mut names = existing
+                .iter()
+                .map(|pdf| pdf.file_name.clone())
+                .collect::<HashSet<_>>();
             for (file_name, bytes) in &pdfs[index] {
-                let present = store
-                    .get(id)?
-                    .expect("刚导入的稿件")
-                    .pdfs
-                    .iter()
-                    .any(|pdf| super::bytes_hash(&pdf.bytes) == super::bytes_hash(bytes));
-                if !present {
-                    let same_name = store
-                        .get(id)?
-                        .expect("刚导入的稿件")
-                        .pdfs
-                        .iter()
-                        .any(|pdf| pdf.file_name == *file_name);
-                    let name = if same_name {
-                        format!("{}（导入）", file_name)
-                    } else {
-                        file_name.clone()
-                    };
-                    store.add_pdf(id, &name, bytes)?;
-                    summary.pdfs_added += 1;
+                let hash = super::bytes_hash(bytes);
+                if !hashes.insert(hash) {
+                    continue;
                 }
+                let name = if names.contains(file_name) {
+                    format!("{}（导入）", file_name)
+                } else {
+                    file_name.clone()
+                };
+                names.insert(name.clone());
+                store.add_pdf(id, &name, bytes)?;
+                summary.pdfs_added += 1;
             }
         }
         for (id, package) in &packages {
@@ -915,7 +925,7 @@ fn apply_status(
     id: i64,
     incoming: crate::models::ManuscriptStatus,
 ) -> Result<()> {
-    let current = store.get(id)?.context("稿件不存在")?.status;
+    let current = store.manuscript_brief(id)?.context("稿件不存在")?.status;
     if current != incoming {
         store.set_status(id, incoming)?;
     }

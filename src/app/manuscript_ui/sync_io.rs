@@ -5,12 +5,14 @@
 
 use crate::app::file_dialog::FileDialogSpec;
 use crate::app::manuscript_ui::{
-    ImportPreparation, ImportPreview, PendingMergeDialog, ZipPasswordDialog, ZipPasswordPurpose,
+    ImportPreparation, ImportPreview, ManuscriptImportJob, PendingMergeDialog, ZipPasswordDialog,
+    ZipPasswordPurpose,
 };
 use crate::app::{GongwenApp, NavPage, WorkerResult};
 use crate::draft_page::DraftSession;
 use crate::manuscript::{ManuscriptFilter, ManuscriptStore, ManuscriptUpdate};
 use crate::manuscript_io;
+use crate::modal::{self, Dismiss};
 use crate::models::ManuscriptStatus;
 use crate::package_file;
 use crate::storage;
@@ -19,6 +21,12 @@ use crate::vocabulary_xlsx;
 use anyhow::Context;
 use std::path::PathBuf;
 use std::thread;
+
+/// 导出源在打开密码框时冻结：后续改筛选/勾选不影响这一次导出。
+enum PackageExportSource {
+    Filtered(ManuscriptFilter),
+    Selected(Vec<i64>),
+}
 
 impl GongwenApp {
     pub(crate) fn open_zip_password_dialog(&mut self, purpose: ZipPasswordPurpose) {
@@ -104,18 +112,21 @@ impl GongwenApp {
                 .manuscript_store
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-            let record = store
-                .get(id)?
+            let brief = store
+                .manuscript_brief(id)?
                 .ok_or_else(|| anyhow::anyhow!("正在编辑的稿件不存在"))?;
-            if record.status != ManuscriptStatus::Draft {
-                anyhow::bail!("稿件《{}》不是草稿，不能同步未保存修改", record.title);
+            if brief.status != ManuscriptStatus::Draft {
+                anyhow::bail!("稿件《{}》不是草稿，不能同步未保存修改", brief.title);
             }
+            let notes = store
+                .notes_of(id)?
+                .ok_or_else(|| anyhow::anyhow!("正在编辑的稿件不存在"))?;
             store.update(
                 id,
                 &ManuscriptUpdate {
                     snapshot,
                     content_markdown,
-                    notes: record.notes,
+                    notes,
                 },
             )?;
             self.docs[index].mark_saved();
@@ -160,22 +171,13 @@ impl GongwenApp {
                         app.status = format!("导出前保存当前工作稿失败：{error:#}");
                         return;
                     }
-                    let prepared = (|| -> anyhow::Result<_> {
-                        let store = app.manuscript_store.as_mut().context("稿件库不可用")?;
-                        let mut ids = store
-                            .list(&filter)?
-                            .into_iter()
-                            .map(|row| row.id)
-                            .collect::<Vec<_>>();
-                        if include_send_package {
-                            ids = store.with_send_package_items(&ids)?;
-                        }
-                        manuscript_io::prepare_package(store, &ids, &app.config.vocabulary)
-                    })();
-                    match prepared {
-                        Ok(prepared) => app.start_package_write(prepared, path, password, remember),
-                        Err(error) => app.status = format!("导出失败：{error:#}"),
-                    }
+                    app.start_package_export(
+                        PackageExportSource::Filtered(filter),
+                        include_send_package,
+                        path,
+                        password,
+                        remember,
+                    );
                 });
             },
         );
@@ -215,35 +217,42 @@ impl GongwenApp {
                     };
                     let path = package_file::with_package_extension(path);
                     // 随行件也要进包时，它们在起草页里开着的工作稿同样先存一下。
-                    if include_send_package
-                        && let Some(store) = app.manuscript_store.as_ref()
-                        && let Ok(expanded) = store.with_send_package_items(&ids)
-                    {
-                        ids = expanded;
+                    if include_send_package {
+                        let Some(store) = app.manuscript_store.as_ref() else {
+                            app.status = "稿件库不可用，无法展开送批材料。".into();
+                            return;
+                        };
+                        match store.with_send_package_items(&ids) {
+                            Ok(expanded) => ids = expanded,
+                            Err(error) => {
+                                app.status = format!("导出所选稿件失败：{error:#}");
+                                return;
+                            }
+                        }
                     }
                     if let Err(error) = app.save_open_manuscripts_for_zip(Some(&ids)) {
                         app.status = format!("导出前保存所选工作稿失败：{error:#}");
                         return;
                     }
-                    let prepared = app
-                        .manuscript_store
-                        .as_mut()
-                        .context("稿件库不可用")
-                        .and_then(|store| {
-                            manuscript_io::prepare_package(store, &ids, &app.config.vocabulary)
-                        });
-                    match prepared {
-                        Ok(prepared) => app.start_package_write(prepared, path, password, remember),
-                        Err(error) => app.status = format!("导出所选稿件失败：{error:#}"),
-                    }
+                    // 随行件已并进 ids，后台不再重复展开。
+                    app.start_package_export(
+                        PackageExportSource::Selected(ids),
+                        false,
+                        path,
+                        password,
+                        remember,
+                    );
                 });
             },
         );
     }
 
-    fn start_package_write(
+    /// 后台准备并写出稿件包：读取正文/历史版本/PDF/图片、算校验值和 7z 加密
+    /// 全部离开主线程；用只读事务固定导出瞬间的内容。
+    fn start_package_export(
         &mut self,
-        prepared: manuscript_io::PreparedPackage,
+        source: PackageExportSource,
+        include_send_package: bool,
         path: PathBuf,
         password: String,
         remember: bool,
@@ -252,16 +261,51 @@ impl GongwenApp {
             self.status = "已有稿件包正在导出，请完成后再试。".into();
             return;
         }
+        let db_path = match storage::manuscript_db_path() {
+            Ok(path) => path,
+            Err(error) => {
+                self.status = format!("稿件库路径不可用，无法导出：{error:#}");
+                return;
+            }
+        };
+        let vocabulary = self.config.vocabulary.clone();
         self.manuscript_package_export_busy = true;
-        self.status = "正在加密稿件包内容与文件名…".into();
+        self.status = "正在准备并加密稿件包内容与文件名…".into();
         let tx = self.sender.clone();
         thread::spawn(move || {
-            let result = prepared
-                .write(&path, &password)
-                .map_err(|error| format!("{error:#}"));
+            #[cfg(test)]
+            if let Some(handle) = crate::vault::key_handle() {
+                crate::vault::set_key_handle_for_slot(
+                    *handle.dek(),
+                    handle.db_active(),
+                    handle.slot(),
+                );
+            }
+            let result: anyhow::Result<manuscript_io::ExportSummary> = (|| {
+                let mut store = ManuscriptStore::open(&db_path)
+                    .with_context(|| format!("无法打开稿件库 {}", db_path.display()))?;
+                let mut ids = match source {
+                    PackageExportSource::Filtered(filter) => store
+                        .list(&filter)?
+                        .into_iter()
+                        .map(|row| row.id)
+                        .collect::<Vec<_>>(),
+                    PackageExportSource::Selected(ids) => ids,
+                };
+                if include_send_package {
+                    ids = store.with_send_package_items(&ids)?;
+                }
+                // 先把检查点写进本机版本图，再开只读快照；否则每次导出都生成
+                // 一个本机没有的 head，多机往返会找不到共同祖先。
+                store.ensure_sync_heads(&ids)?;
+                let prepared = store.with_read_snapshot(|store| {
+                    manuscript_io::prepare_package(store, &ids, &vocabulary)
+                })?;
+                prepared.write(&path, &password)
+            })();
             let _ = tx.send(WorkerResult::ManuscriptPackageExport {
                 path,
-                result,
+                result: result.map_err(|error| format!("{error:#}")),
                 remembered_password: remember.then_some(password),
             });
         });
@@ -701,20 +745,86 @@ impl GongwenApp {
                 return;
             }
         }
-        let result = (|| {
-            let store = self
-                .manuscript_store
-                .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-            manuscript_io::sync::import_with_actions(
-                store,
-                &preview.zip_path,
-                &preview.password,
-                &preview.manifest_hash,
-                &actions,
-                &preview.relations,
-            )
-        })();
+        if self.any_busy() {
+            self.status = "有其他任务正在运行，请完成后再导入。".into();
+            preview.notice = Some(self.status.clone());
+            self.manuscript_import_preview = Some(preview);
+            return;
+        }
+        // 大包的 PDF/图片读入与整包落库都可能在几百毫秒以上，必须离开主线程；
+        // 预览保留在界面状态里，失败时原样恢复。真正开始前先保存一份当前标签
+        // 的未保存内容检查（上面已经逐篇拒绝有改动且有冲突的稿件）。
+        let db_path = match storage::manuscript_db_path() {
+            Ok(path) => path,
+            Err(error) => {
+                self.status = format!("稿件库不可用：{error:#}");
+                preview.notice = Some(self.status.clone());
+                self.manuscript_import_preview = Some(preview);
+                return;
+            }
+        };
+        let job = ManuscriptImportJob {
+            zip_path: preview.zip_path.clone(),
+            password: preview.password.clone(),
+            manifest_hash: preview.manifest_hash.clone(),
+            actions,
+            relations: preview.relations.clone(),
+        };
+        self.manuscript_import_preview = Some(preview);
+        self.manuscript_import_busy = true;
+        self.status = "正在导入稿件包，请稍候…".into();
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            // 导出任务也这样显式带密钥：测试构建的句柄是线程局部的。
+            #[cfg(test)]
+            if let Some(handle) = crate::vault::key_handle() {
+                crate::vault::set_key_handle_for_slot(
+                    *handle.dek(),
+                    handle.db_active(),
+                    handle.slot(),
+                );
+            }
+            let ManuscriptImportJob {
+                zip_path,
+                password,
+                manifest_hash,
+                actions,
+                relations,
+            } = job;
+            let result: anyhow::Result<manuscript_io::sync::SyncImportSummary> = (|| {
+                let mut store = ManuscriptStore::open(&db_path)
+                    .with_context(|| format!("无法打开稿件库 {}", db_path.display()))?;
+                manuscript_io::sync::import_with_actions(
+                    &mut store,
+                    &zip_path,
+                    &password,
+                    &manifest_hash,
+                    &actions,
+                    &relations,
+                )
+            })();
+            let _ = tx.send(WorkerResult::ManuscriptImportDone {
+                manifest_hash,
+                result: result.map_err(|error| format!("{error:#}")),
+            });
+        });
+    }
+
+    /// 后台导入完成：主线程这里只做标签刷新、词库合并和提示。
+    pub(crate) fn apply_manuscript_import_done(
+        &mut self,
+        manifest_hash: String,
+        result: Result<manuscript_io::sync::SyncImportSummary, String>,
+    ) {
+        self.manuscript_import_busy = false;
+        let Some(mut preview) = self.manuscript_import_preview.take() else {
+            return;
+        };
+        if preview.manifest_hash != manifest_hash {
+            // 不是当前预览对应的结果（例如期间数据被清空），直接丢弃。
+            self.manuscript_import_preview = Some(preview);
+            return;
+        }
         match result {
             Ok(summary) => {
                 self.manuscript_dirty = true;
@@ -764,11 +874,31 @@ impl GongwenApp {
                 self.status = message;
             }
             Err(error) => {
-                self.status = format!("导入失败：{error:#}");
+                self.status = format!("导入失败：{error}");
                 preview.notice = Some(self.status.clone());
                 self.manuscript_import_preview = Some(preview);
             }
         }
+    }
+
+    /// 导入进行中的全局遮罩：挡住重复确认、切标签或编辑正在被导入的稿件。
+    pub(crate) fn manuscript_import_busy_window(&mut self, ctx: &egui::Context) {
+        if !self.manuscript_import_busy {
+            return;
+        }
+        let _ = modal::dialog(
+            ctx,
+            egui::Id::unique("manuscript_import_busy"),
+            "正在导入稿件包",
+            420.0,
+            Dismiss::ButtonsOnly,
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("正在写入稿件、版本、附件与图片，请稍候…");
+                });
+            },
+        );
     }
 
     pub(crate) fn open_pending_merge(&mut self, id: i64, head: &str) {

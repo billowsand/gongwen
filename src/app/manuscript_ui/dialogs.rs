@@ -47,6 +47,15 @@ pub(crate) fn single_delete_dialog(
                 if confirm.open_in_tab {
                     ui.weak("已打开的公文标签会保留，可将其中的内容另存为新稿。");
                 }
+                if confirm.owned_items > 0 || confirm.export_count > 0 {
+                    ui.colored_label(
+                        warn(),
+                        format!(
+                            "该稿件挂着的 {} 件送批材料和 {} 条导出记录会一并删除。",
+                            confirm.owned_items, confirm.export_count
+                        ),
+                    );
+                }
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -159,6 +168,15 @@ pub(crate) fn batch_delete_dialog(
                     "另有 {} 篇是已归档呈批件的送批材料，将保留不动。",
                     confirm.packaged
                 ));
+            }
+            if confirm.owned_items > 0 || confirm.export_count > 0 {
+                ui.colored_label(
+                    warn(),
+                    format!(
+                        "待删稿件挂着的 {} 件送批材料和 {} 条导出记录会一并删除。",
+                        confirm.owned_items, confirm.export_count
+                    ),
+                );
             }
             ui.add_space(10.0);
             let mut delete = false;

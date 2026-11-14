@@ -24,6 +24,7 @@ use crate::theme;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 impl GongwenApp {
     pub(crate) fn manuscript_ui(&mut self, ui: &mut egui::Ui) {
@@ -39,7 +40,7 @@ impl GongwenApp {
         let mut action: Option<ManuscriptAction> = None;
         const SPLIT_MIN_WIDTH: f32 = 1100.0;
         let split = ui.available_width() >= SPLIT_MIN_WIDTH;
-        self.refresh_manuscript_rows();
+        self.refresh_manuscript_rows(ui.ctx());
         let single_page_detail = !split && self.manuscript_detail.is_some();
 
         ui.add_space(8.0);
@@ -48,14 +49,14 @@ impl GongwenApp {
                 ui.heading("稿件管理");
                 let total: i64 = self.manuscript_count.iter().sum();
                 ui.weak(format!(
-                    "共 {total} 篇 · 草稿 {} · 发布 {} · 归档 {} · 仅保存在本机",
+                    "共 {total} 篇 · 草稿 {} · 发布 {} · 归档 {}（全部只保存在本机）",
                     self.manuscript_count[1], self.manuscript_count[2], self.manuscript_count[3],
                 ));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add(theme::icon_text_button(theme::Icon::FilePlus, "新建稿件"))
-                    .on_hover_text("清空起草页，开始一份全新的稿件")
+                    .on_hover_text("新开一个空白稿件标签，当前稿不受影响")
                     .clicked()
                 {
                     self.new_blank_manuscript();
@@ -67,7 +68,7 @@ impl GongwenApp {
         if !single_page_detail {
             self.manuscript_filter_bar(ui, &mut action);
             if self.manuscript_dirty {
-                self.refresh_manuscript_rows();
+                self.refresh_manuscript_rows(ui.ctx());
             }
         }
         self.manuscript_confirm_groups(ui, &mut action);
@@ -94,7 +95,9 @@ impl GongwenApp {
                     .max_rect(list_rect),
             );
             list_ui.set_clip_rect(list_rect.intersect(clip_rect));
-            self.manuscript_list_ui(&mut list_ui, &mut action, false);
+            // 分栏后列表只剩窗口的约三分之二：按列表实际宽度选紧凑列，
+            // 否则 1100–1250 宽的窗口会拿到一套放不下、必须横向滚动的完整列。
+            self.manuscript_list_ui(&mut list_ui, &mut action, list_rect.width() < 860.0);
 
             let mut detail_ui = ui.new_child(
                 egui::UiBuilder::new()
@@ -194,7 +197,7 @@ impl GongwenApp {
                         )
                         .changed()
                     {
-                        self.manuscript_dirty = true;
+                        self.manuscript_filter_text_changed();
                     }
                 });
                 ui.horizontal(|ui| {
@@ -216,6 +219,7 @@ impl GongwenApp {
                                 )
                                 .changed()
                             {
+                                self.manuscript_filter_edited_at = None;
                                 self.manuscript_dirty = true;
                             }
                             for status in ManuscriptStatus::ALL {
@@ -230,6 +234,7 @@ impl GongwenApp {
                                     )
                                     .changed()
                                 {
+                                    self.manuscript_filter_edited_at = None;
                                     self.manuscript_dirty = true;
                                 }
                             }
@@ -254,6 +259,7 @@ impl GongwenApp {
                                 )
                                 .changed()
                             {
+                                self.manuscript_filter_edited_at = None;
                                 self.manuscript_dirty = true;
                             }
                             for kind in TemplateKind::ALL {
@@ -265,6 +271,7 @@ impl GongwenApp {
                                     )
                                     .changed()
                                 {
+                                    self.manuscript_filter_edited_at = None;
                                     self.manuscript_dirty = true;
                                 }
                             }
@@ -284,7 +291,7 @@ impl GongwenApp {
                         )
                         .changed()
                     {
-                        self.manuscript_dirty = true;
+                        self.manuscript_filter_text_changed();
                     }
                     ui.label("至");
                     if ui
@@ -295,7 +302,7 @@ impl GongwenApp {
                         )
                         .changed()
                     {
-                        self.manuscript_dirty = true;
+                        self.manuscript_filter_text_changed();
                     }
                 });
                 let filter_active = !self.manuscript_filter.keyword.trim().is_empty()
@@ -307,6 +314,7 @@ impl GongwenApp {
                     .clicked()
                 {
                     self.manuscript_filter = ManuscriptFilter::default();
+                    self.manuscript_filter_edited_at = None;
                     self.manuscript_dirty = true;
                 }
                 ui.separator();
@@ -318,7 +326,7 @@ impl GongwenApp {
                     }
                     ui.menu_button("更多", |ui| {
                         if let Some(row) = active {
-                            manuscript_menu(ui, row.id, row.status, true, action);
+                            manuscript_menu(ui, row.id, row.status, true, true, action);
                         }
                     });
                 });
@@ -406,7 +414,24 @@ impl GongwenApp {
         ui.add_space(6.0);
     }
 
-    pub(crate) fn refresh_manuscript_rows(&mut self) {
+    /// 搜索/日期这类连续输入先攒 180ms，不要每敲一个字就全表重查。
+    fn manuscript_filter_text_changed(&mut self) {
+        self.manuscript_filter_edited_at = Some(std::time::Instant::now());
+        self.manuscript_dirty = true;
+    }
+
+    pub(crate) fn refresh_manuscript_rows(&mut self, ctx: &egui::Context) {
+        if self.manuscript_dirty
+            && let Some(at) = self.manuscript_filter_edited_at
+        {
+            const DEBOUNCE: Duration = Duration::from_millis(180);
+            let elapsed = at.elapsed();
+            if elapsed < DEBOUNCE {
+                ctx.request_repaint_after(DEBOUNCE - elapsed);
+                return;
+            }
+            self.manuscript_filter_edited_at = None;
+        }
         // 「已入库」标记要在稿件管理页上也是准的，哪怕用户从没打开过知识库页。
         #[cfg(feature = "ai-workbench")]
         if self.knowledge_dirty
@@ -454,6 +479,7 @@ impl GongwenApp {
                         }
                     }
                     self.manuscript_dirty = false;
+                    self.manuscript_filter_edited_at = None;
                     self.manuscript_applied = Some(self.manuscript_filter.clone());
                 }
                 Err(error) => self.status = format!("查询稿件失败：{error:#}"),
@@ -476,7 +502,7 @@ impl GongwenApp {
                 Dismiss::EscOrBackdrop,
                 |ui| {
                     ui.label(format!("《{}》", summarize(title, 80)));
-                    ui.label("发布后公文以只读方式打开，退回草稿后可继续编辑。");
+                    ui.label("发布后稿件为只读；需要修改时先在稿件管理页退回草稿。");
                     ui.horizontal(|ui| {
                         let confirm = ui.button("确认发布").clicked();
                         if ui.button("取消").clicked() {
@@ -606,7 +632,9 @@ impl GongwenApp {
             );
         }
 
-        if let Some(preview) = self.manuscript_import_preview.as_mut() {
+        if !self.manuscript_import_busy
+            && let Some(preview) = self.manuscript_import_preview.as_mut()
+        {
             let (width, body) = large_dialog_size(ui.ctx());
             // 逐篇选好的处理方式重来一遍要再输一次密码，只认按钮，Esc、遮罩都不关。
             let dialog = modal::dialog(
@@ -936,7 +964,7 @@ impl GongwenApp {
                             .id(egui::Id::unique(("manuscript_row_menu", data.id)))
                             .show(|ui| {
                                 ui.label(summarize(&data.title, 28));
-                                manuscript_menu(ui, data.id, data.status, true, action);
+                                manuscript_menu(ui, data.id, data.status, true, true, action);
                             });
                     }
                     theme::smartisan::index_row(&ledger_painter, row.response().rect, row_selected);
@@ -950,6 +978,7 @@ pub(super) fn manuscript_menu(
     id: i64,
     status: ManuscriptStatus,
     include_navigation: bool,
+    include_copy: bool,
     action: &mut Option<ManuscriptAction>,
 ) {
     if include_navigation {
@@ -965,6 +994,9 @@ pub(super) fn manuscript_menu(
         ui.separator();
     }
     for (icon, label, item) in manuscript_row_commands(id, status) {
+        if !include_copy && matches!(item, ManuscriptAction::CreateFromExisting(_)) {
+            continue;
+        }
         if ui.add(theme::icon_text_button(icon, label)).clicked() {
             *action = Some(item);
             ui.close();

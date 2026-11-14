@@ -436,9 +436,37 @@ impl ManuscriptStore {
     }
 
     pub fn sync_checkpoint(&mut self, id: i64) -> Result<SyncRevision> {
-        let record = self.get(id)?.context("稿件不存在")?;
+        let (revision, exists) = self.sync_checkpoint_parts(id)?;
+        if !exists {
+            insert_revision(&self.conn, id, &revision)?;
+            self.set_sync_head(id, &revision.revision_uuid)?;
+        }
+        Ok(revision)
+    }
+
+    /// 导出前把当前内容固化成同步检查点：后台连接先写，再开只读快照。
+    /// 这样本地版本图保留一个共同祖先，多机往返不会退化成 NoBase。
+    pub(crate) fn ensure_sync_heads(&mut self, ids: &[i64]) -> Result<()> {
+        for &id in ids {
+            self.sync_checkpoint(id)?;
+        }
+        Ok(())
+    }
+
+    /// 只计算“当前内容应有的检查点”，不写库。
+    ///
+    /// 稿件包导出在后台的只读快照里运行；如果用户恰好在这期间自动保存，
+    /// 写检查点会尝试把只读事务升级成写事务。导出只需要清单里有一个可用的
+    /// head，未落库的检查点随包带走、对方导入时再建即可。
+    pub(crate) fn sync_checkpoint_view(&self, id: i64) -> Result<SyncRevision> {
+        Ok(self.sync_checkpoint_parts(id)?.0)
+    }
+
+    fn sync_checkpoint_parts(&self, id: i64) -> Result<(SyncRevision, bool)> {
+        let (snapshot, content) = self.snapshot_of(id)?.context("稿件不存在")?;
+        let notes = self.notes_of(id)?.context("稿件不存在")?;
         let (_, head) = self.document_identity(id)?;
-        let hash = payload_hash(&record.snapshot, &record.content_markdown, &record.notes)?;
+        let hash = payload_hash(&snapshot, &content, &notes)?;
         if let Some(ref uuid) = head
             && let Some(revision) = self
                 .sync_revisions(id)?
@@ -446,20 +474,18 @@ impl ManuscriptStore {
                 .find(|revision| &revision.revision_uuid == uuid)
             && revision.payload_hash == hash
         {
-            return Ok(revision);
+            return Ok((revision, true));
         }
         let revision = SyncRevision::new(
             head.into_iter().collect(),
-            record.snapshot,
-            record.content_markdown,
-            record.notes,
+            snapshot,
+            content,
+            notes,
             String::new(),
             String::new(),
             None,
         )?;
-        insert_revision(&self.conn, id, &revision)?;
-        self.set_sync_head(id, &revision.revision_uuid)?;
-        Ok(revision)
+        Ok((revision, false))
     }
 
     pub fn set_sync_head(&self, id: i64, uuid: &str) -> Result<()> {

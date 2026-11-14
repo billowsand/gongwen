@@ -476,7 +476,7 @@ impl GongwenApp {
                     let Some(store) = self.manuscript_store.as_mut() else {
                         continue;
                     };
-                    let Ok(Some(record)) = store.get(*id) else {
+                    let Ok(Some(record)) = store.get_for_editor(*id) else {
                         continue;
                     };
                     let mut session = DraftSession::from_parts(
@@ -591,7 +591,7 @@ impl GongwenApp {
 
     /// 定时自动保存：把有改动且已入库的稿件静默写回。
     pub(crate) fn autosave_tick(&mut self) {
-        if !self.config.auto_save {
+        if !self.config.auto_save || self.manuscript_import_busy {
             return;
         }
         let interval =
@@ -604,7 +604,7 @@ impl GongwenApp {
     }
 
     pub(crate) fn autosave_all(&mut self) {
-        if !self.config.auto_save {
+        if !self.config.auto_save || self.manuscript_import_busy {
             return;
         }
         let targets: Vec<usize> = (0..self.docs.len())

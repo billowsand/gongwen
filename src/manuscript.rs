@@ -9,6 +9,7 @@
 //! 统一升为“草稿”，不再产生新的“新建”记录（枚举保留仅为解析旧库与旧 ZIP 包）。
 
 use crate::export::document_title;
+use crate::file_limits::MAX_ATTACHMENT_BYTES;
 use crate::models::{AppConfig, DraftInput, ManuscriptStatus, TemplateKind};
 use anyhow::{Context, Result, bail};
 use chrono::Local;
@@ -29,6 +30,17 @@ pub(crate) mod registry;
 mod search;
 pub(crate) mod send_package;
 pub(crate) mod sync;
+
+/// 稿件附件与稿件包内单个 PDF 使用同一上限。
+fn ensure_attachment_size(bytes: &[u8]) -> Result<()> {
+    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        bail!(
+            "PDF 附件超过 {} MB 上限",
+            MAX_ATTACHMENT_BYTES / 1024 / 1024
+        );
+    }
+    Ok(())
+}
 
 /// schema 版本 1：稿件表 + PDF 附件表。
 const DDL_V1: &str = r#"
@@ -629,21 +641,34 @@ impl ManuscriptStore {
     /// 删除稿件（连同附件级联）。归档行拒绝删除；被已归档呈批件用作送批材料的也拒绝，
     /// 被其他呈批件用作送批材料的连同关联一起删除。
     /// 删除后清理仅被该稿件引用的孤儿图片文件（见 `purge_orphan_images`）。
+    ///
+    /// 界面走 [`Self::delete_preserving_live`]；这里保留给不涉及打开标签的调用与测试。
+    #[cfg(test)]
     pub fn delete(&mut self, id: i64) -> Result<()> {
+        self.delete_preserving_live(id, &[])
+    }
+
+    /// 删除稿件，并把界面里尚未保存的正文也当作“仍在使用图片”的证据。
+    ///
+    /// 未保存的新稿（例如“基于此公文新建”）在数据库里没有行，孤儿图片回收如果
+    /// 只看库表，会把两边共享的图片误删。界面线程把自己的打开稿正文传进来。
+    pub fn delete_preserving_live(&mut self, id: i64, live_contents: &[String]) -> Result<()> {
         let current = self.status_of(id)?.context("稿件不存在")?;
         if current == ManuscriptStatus::Archived {
             bail!("归档稿件不可删除");
         }
         // 只取正文用于删除后的孤儿图片清理：刻意不解码快照，免得一份读不出来的
-        // 快照（例如旧版本遇到新文种）把删除也挡在门外。
-        let content = self.content_of(id)?;
+        // 快照（例如旧版本遇到新文种）把删除也挡在门外。历史版本里的图片也算
+        // 被这篇稿件使用过，否则删除后别名会一直留着。
+        let mut deleted = self.version_contents_of(id)?;
+        if let Some(content) = self.content_of(id)? {
+            deleted.push(content);
+        }
         let tx = self.conn.transaction()?;
         send_package::detach_before_delete(&tx, id)?;
         tx.execute("DELETE FROM manuscripts WHERE id=?1", [id])?;
         tx.commit()?;
-        if let Some(content) = content {
-            self.purge_orphan_images(&[content]);
-        }
+        self.purge_orphan_images(&deleted, live_contents);
         Ok(())
     }
 
@@ -672,11 +697,22 @@ impl ManuscriptStore {
     }
 
     /// 原子批量删除：任一稿件不存在、已归档或被已归档呈批件用作送批材料时整批不落库。
+    #[cfg(test)]
     pub fn delete_many(&mut self, ids: &[i64]) -> Result<()> {
+        self.delete_many_preserving_live(ids, &[])
+    }
+
+    /// 批量删除，并把界面里尚未保存的正文也当作“仍在使用图片”的证据。
+    pub fn delete_many_preserving_live(
+        &mut self,
+        ids: &[i64],
+        live_contents: &[String],
+    ) -> Result<()> {
         // 事务前先收集正文：图片清理在事务提交后进行，事务失败时不会误删文件。
-        // 同样不解码快照，快照读不出来也要允许删除。
+        // 同样不解码快照，快照读不出来也要允许删除。历史版本里的图片也收进来。
         let mut deleted = Vec::new();
         for &id in ids {
+            deleted.extend(self.version_contents_of(id)?);
             if let Some(content) = self.content_of(id)? {
                 deleted.push(content);
             }
@@ -697,16 +733,25 @@ impl ManuscriptStore {
             tx.execute("DELETE FROM manuscripts WHERE id=?1", [id])?;
         }
         tx.commit()?;
-        self.purge_orphan_images(&deleted);
+        self.purge_orphan_images(&deleted, live_contents);
         Ok(())
+    }
+
+    /// 一篇稿件全部历史版本的正文；删除前用来找出版本里引用过的图片。
+    fn version_contents_of(&self, manuscript_id: i64) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT content_markdown FROM manuscript_versions WHERE manuscript_id=?1")?;
+        let rows = stmt.query_map([manuscript_id], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// 清理孤儿图片：删除稿件后，其 markdown 引用的图片若不再被任何剩余稿件
     /// （含全部历史版本）引用，则删除资源别名，并回收没有引用指向的对象。
     /// 引用比较前统一规范化（分隔符、`./` 前缀），避免手写别名被误判为不同而
-    /// 漏删；共享引用与库外引用（未保存草稿或手写引用）无法感知，一律保留。
-    /// 清理尽力而为，失败不阻断稿件删除。
-    fn purge_orphan_images(&mut self, deleted_contents: &[String]) {
+    /// 漏删；`live_contents` 是界面里尚未保存的正文，也必须算作引用，否则
+    /// 未保存的新稿会丢图。清理尽力而为，失败不阻断稿件删除。
+    fn purge_orphan_images(&mut self, deleted_contents: &[String], live_contents: &[String]) {
         let deleted_refs: HashSet<String> = deleted_contents
             .iter()
             .flat_map(|content| crate::images::image_refs(content))
@@ -718,6 +763,13 @@ impl ManuscriptStore {
         // 只扫正文，不解码快照：任何一份快照读不出来都不该让孤儿图片清理整个作废。
         // 历史版本也一起扫：删一篇稿件不该让别的稿件的旧版本丢图。
         let mut remaining_refs = HashSet::new();
+        for content in live_contents {
+            remaining_refs.extend(
+                crate::images::image_refs(content)
+                    .into_iter()
+                    .map(|src| crate::images::normalize_ref(&src)),
+            );
+        }
         for sql in [
             "SELECT content_markdown FROM manuscripts",
             "SELECT content_markdown FROM manuscript_versions",
@@ -745,6 +797,29 @@ impl ManuscriptStore {
             }
         }
         let _ = self.gc_resources();
+    }
+
+    /// 在一个只读快照里执行导出准备：后台线程读库时不会被主线程的自动保存
+    /// 或编辑插进来，保证一份稿件包对应同一时刻的内容。
+    pub(crate) fn with_read_snapshot<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        self.conn.execute_batch("BEGIN DEFERRED")?;
+        let result = f(self);
+        match result {
+            Ok(value) => {
+                if let Err(error) = self.conn.execute_batch("COMMIT") {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(error.into());
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
     }
 
     /// 完整读取（含 PDF 附件）。
@@ -837,7 +912,18 @@ impl ManuscriptStore {
     /// 按过滤条件列出稿件（轻量行）。
     pub fn list(&mut self, filter: &ManuscriptFilter) -> Result<Vec<ManuscriptRow>> {
         let mut sql = String::from(
-            "SELECT id, title, kind, status, doc_number, doc_date, updated_at, archived_at, snapshot_json FROM manuscripts WHERE 1=1",
+            "SELECT id, title, kind, status, doc_number, doc_date, updated_at, archived_at,
+             CAST(CASE
+               WHEN kind = 'ResearchReport' THEN
+                 CASE WHEN json_valid(snapshot_json)
+                      THEN COALESCE(json_extract(snapshot_json, '$.research.security'), '')
+                      ELSE '' END
+               ELSE
+                 CASE WHEN json_valid(snapshot_json)
+                      THEN COALESCE(json_extract(snapshot_json, '$.profile.security_level'), '')
+                      ELSE '' END
+             END AS TEXT)
+             FROM manuscripts WHERE 1=1",
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         let keyword = filter.keyword.trim();
@@ -870,10 +956,6 @@ impl ManuscriptStore {
         let mapped = stmt.query_map(
             rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
             |row| {
-                let snapshot_json: String = row.get(8)?;
-                let security_level = serde_json::from_str::<DraftInput>(&snapshot_json)
-                    .map(|snapshot| snapshot.security_marking().0.to_string())
-                    .unwrap_or_default();
                 Ok(ManuscriptRow {
                     id: row.get(0)?,
                     title: row.get(1)?,
@@ -881,7 +963,7 @@ impl ManuscriptStore {
                         .unwrap_or(TemplateKind::OfficialLetter),
                     status: str_to_status(&row.get::<_, String>(3)?)
                         .unwrap_or(ManuscriptStatus::Draft),
-                    security_level,
+                    security_level: row.get(8)?,
                     doc_number: row.get(4)?,
                     doc_date: row.get(5)?,
                     updated_at: row.get(6)?,
@@ -965,7 +1047,10 @@ impl ManuscriptStore {
     }
 
     /// 为稿件追加一个 PDF 附件（任何状态下都允许）。
+    ///
+    /// 附件上限与稿件包内单个 PDF 一致，保证导出的包能被重新导入。
     pub fn add_pdf(&mut self, manuscript_id: i64, file_name: &str, bytes: &[u8]) -> Result<()> {
+        ensure_attachment_size(bytes)?;
         let exists: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM manuscripts WHERE id=?1)",
             [manuscript_id],
@@ -983,6 +1068,72 @@ impl ManuscriptStore {
         self.conn.execute(
             "INSERT INTO pdf_attachments (manuscript_id, file_name, bytes, added_at, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![manuscript_id, file_name, bytes, now, sort],
+        )?;
+        self.touch_updated_at(manuscript_id, &now)?;
+        Ok(())
+    }
+
+    /// 一次性追加多个附件：先校验全部大小，再在同一个事务里写入。
+    /// 中途任一附件失败都不会留下半批数据。
+    pub fn add_pdfs(&mut self, manuscript_id: i64, files: &[(String, Vec<u8>)]) -> Result<usize> {
+        if files.is_empty() {
+            return Ok(0);
+        }
+        let mut total = 0u64;
+        for (_, bytes) in files {
+            ensure_attachment_size(bytes)?;
+            total = total.saturating_add(bytes.len() as u64);
+        }
+        if total > crate::file_limits::MAX_ATTACHMENT_TOTAL_BYTES {
+            bail!(
+                "本次附件合计超过 {} MB 上限",
+                crate::file_limits::MAX_ATTACHMENT_TOTAL_BYTES / 1024 / 1024
+            );
+        }
+        let tx = self.conn.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM manuscripts WHERE id=?1)",
+            [manuscript_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            bail!("稿件不存在，无法添加附件");
+        }
+        let now = Local::now().to_rfc3339();
+        let first_sort: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM pdf_attachments WHERE manuscript_id=?1",
+            [manuscript_id],
+            |row| row.get(0),
+        )?;
+        for (offset, (file_name, bytes)) in files.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO pdf_attachments (manuscript_id, file_name, bytes, added_at, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    manuscript_id,
+                    file_name,
+                    bytes,
+                    now,
+                    first_sort + offset as i64
+                ],
+            )?;
+        }
+        tx.execute(
+            "UPDATE manuscripts SET updated_at=?1 WHERE id=?2",
+            params![now, manuscript_id],
+        )?;
+        tx.commit()?;
+        Ok(files.len())
+    }
+
+    /// 读取附件清单（含字节），供导入去重等需要内容校验的场景一次读齐。
+    pub(crate) fn pdf_attachments(&self, manuscript_id: i64) -> Result<Vec<PdfAttachment>> {
+        self.pdfs_for(manuscript_id, true)
+    }
+
+    fn touch_updated_at(&self, manuscript_id: i64, now: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE manuscripts SET updated_at=?1 WHERE id=?2",
+            params![now, manuscript_id],
         )?;
         Ok(())
     }
@@ -1004,8 +1155,19 @@ impl ManuscriptStore {
 
     /// 删除一个 PDF 附件。
     pub fn remove_pdf(&mut self, attachment_id: i64) -> Result<()> {
+        let manuscript_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT manuscript_id FROM pdf_attachments WHERE id=?1",
+                [attachment_id],
+                |row| row.get(0),
+            )
+            .optional()?;
         self.conn
             .execute("DELETE FROM pdf_attachments WHERE id=?1", [attachment_id])?;
+        if let Some(id) = manuscript_id {
+            self.touch_updated_at(id, &Local::now().to_rfc3339())?;
+        }
         Ok(())
     }
 
@@ -1539,6 +1701,56 @@ mod tests {
     }
 
     #[test]
+    fn delete_preserving_live_keeps_images_used_by_unsaved_drafts() {
+        let shared = seed_test_image("unsaved_shared");
+        let orphan = seed_test_image("unsaved_orphan");
+        let mut store = mem_store();
+        let id = store
+            .create(
+                &new_manuscript(
+                    TemplateKind::OfficialLetter,
+                    &format!("# A\n\n![s](images/{shared})\n\n![o](images/{orphan})"),
+                ),
+                None,
+            )
+            .unwrap();
+        // 未保存的新稿仍引用 shared；删除原稿时不能把它回收掉。
+        store
+            .delete_preserving_live(id, &[format!("![s](images/{shared})")])
+            .unwrap();
+        let dir = crate::images::image_dir().unwrap();
+        assert!(
+            dir.join(&shared).exists(),
+            "未保存新稿仍在引用的图片必须保留"
+        );
+        assert!(!dir.join(&orphan).exists(), "无人引用的孤儿图片应清理");
+        let _ = fs::remove_file(dir.join(&shared));
+        let _ = fs::remove_file(dir.join(&orphan));
+    }
+
+    #[test]
+    fn add_pdfs_is_atomic_when_one_attachment_fails() {
+        let mut store = mem_store();
+        let id = store
+            .create(&new_manuscript(TemplateKind::OfficialLetter, "# 甲"), None)
+            .unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_pdf_name BEFORE INSERT ON pdf_attachments
+                 WHEN NEW.file_name = '拒绝.pdf'
+                 BEGIN SELECT RAISE(ABORT, '测试拒绝附件'); END",
+            )
+            .unwrap();
+        let files = vec![
+            ("先写入.pdf".to_string(), b"%PDF-1.4 first".to_vec()),
+            ("拒绝.pdf".to_string(), b"%PDF-1.4 second".to_vec()),
+        ];
+        assert!(store.add_pdfs(id, &files).is_err());
+        assert!(store.get(id).unwrap().unwrap().pdfs.is_empty());
+    }
+
+    #[test]
     fn delete_many_purges_orphan_images_after_commit() {
         let orphan_a = seed_test_image("batch_a");
         let orphan_b = seed_test_image("batch_b");
@@ -1889,6 +2101,36 @@ mod tests {
         assert_eq!(record.pdfs[1].file_name, "盖章件.pdf");
         // 不存在的稿件不能加附件。
         assert!(store.add_pdf(999, "x.pdf", b"x").is_err());
+    }
+
+    #[test]
+    fn read_snapshot_rolls_back_on_error() {
+        let mut store = mem_store();
+        store
+            .create(&new_manuscript(TemplateKind::OfficialLetter, "# 甲"), None)
+            .unwrap();
+        assert!(
+            store
+                .with_read_snapshot(|_| -> Result<()> { Err(anyhow::anyhow!("测试失败")) })
+                .is_err()
+        );
+        // 回滚后连接仍可正常读写，不会停在未结束的事务里。
+        assert_eq!(store.list(&ManuscriptFilter::default()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_reads_research_security_without_full_snapshot_decode() {
+        let mut store = mem_store();
+        let mut research = new_manuscript(TemplateKind::ResearchReport, "# 报告\n\n正文");
+        research.snapshot.research.security = "内部".into();
+        let id = store.create(&research, None).unwrap();
+        let row = store
+            .list(&ManuscriptFilter::default())
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        assert_eq!(row.security_level, "内部");
     }
 
     #[test]
