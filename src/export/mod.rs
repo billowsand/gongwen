@@ -426,6 +426,11 @@ pub(crate) fn export_artifacts(
     version_name: Option<&str>,
     transmit_defaults: &TransmitDefaults,
 ) -> Result<ExportArtifacts> {
+    // 成品经 mdx 的 write_output 直接写盘（不走 atomic_write），锁定开始后
+    // 晚到的导出线程必须在这里停住，不能以「无密钥」状态把明文写回磁盘。
+    if crate::storage::writes_blocked() {
+        anyhow::bail!("工作区正在锁定或切换，已取消导出");
+    }
     // 捕获整批成品后再加密，附属清单也不能绕过；预览/打印的内存捕获不落盘。
     if !mdx::memory_files::output_is_captured()
         && let Some(protection) = protection::Protection::current()?

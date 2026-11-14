@@ -172,10 +172,7 @@ fn save_password(password: &str, handle: &crate::vault::KeyHandle) -> anyhow::Re
     );
     let current =
         crate::vault::key_handle().ok_or_else(|| anyhow::anyhow!("当前已锁定，未保存导出密码"))?;
-    ensure!(
-        current.slot() == handle.slot() && current.dek() == handle.dek(),
-        "工作区已变化，未保存导出密码"
-    );
+    ensure!(current.same_unlock(handle), "工作区已变化，未保存导出密码");
     let mut policy = crate::export::protection::ExportPolicy::load()?;
     policy.password = password.to_owned();
     policy.save(handle)

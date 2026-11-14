@@ -2,9 +2,8 @@ use anyhow::{Context, Result, ensure};
 use windows::Win32::Foundation::{VARIANT_FALSE, VARIANT_TRUE};
 use windows::Win32::Storage::Imapi::{
     IBurnVerification, IDiscFormat2Data, IDiscMaster2, IDiscRecorder2, IDiscRecorder2Ex,
-    IMAPI_BURN_VERIFICATION_FULL, IMAPI_FORMAT2_DATA_MEDIA_STATE_FINALIZED, IMAPI_MEDIA_TYPE_CDR,
-    IMAPI_MEDIA_TYPE_DVDDASHR, IMAPI_MEDIA_TYPE_DVDPLUSR, MsftDiscFormat2Data, MsftDiscMaster2,
-    MsftDiscRecorder2,
+    IMAPI_BURN_VERIFICATION_FULL, IMAPI_MEDIA_TYPE_CDR, IMAPI_MEDIA_TYPE_DVDDASHR,
+    IMAPI_MEDIA_TYPE_DVDPLUSR, MsftDiscFormat2Data, MsftDiscMaster2, MsftDiscRecorder2,
 };
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
@@ -199,13 +198,14 @@ pub(super) fn burn(target: &Drive, iso: &[u8], authorize: &dyn Fn() -> Result<()
             "刻录机或空白盘状态已变化"
         );
         authorize()?;
+        // Write 是同步的：返回成功时 IStream 已录制完成；IBurnVerification=FULL
+        // 的写后校验失败会以 E_IMAPI_BURN_VERIFICATION_FAILED 返回。这才是
+        // 刻录成功的判据。不要再要求 CurrentMediaStatus 含 FINALIZED 位：
+        // 已封盘的盘常只报 WRITE_PROTECTED(0x2000)（多会话盘还会带 0x8000），
+        // 有的驱动器要弹出/重新上电后才刷新状态，按 0x4000 判断会把成功误报失败。
         writer
             .Write(&stream)
             .context("光盘刻录或回读校验失败，请将此光盘按可能含明文处置")?;
-        ensure!(
-            writer.CurrentMediaStatus()?.0 & IMAPI_FORMAT2_DATA_MEDIA_STATE_FINALIZED.0 != 0,
-            "刻录后无法确认光盘已封盘，请将此光盘按可能含明文处置"
-        );
     }
     Ok(())
 }

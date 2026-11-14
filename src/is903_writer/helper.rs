@@ -84,6 +84,14 @@ pub(super) fn run(
     let mut args = std::env::args_os();
     let name = args.next()?;
     if Path::new(&name).file_name()?.to_str()? != "gongwen-is903" {
+        // 以 root 身份落回完整图形界面不在支持范围内：用户把助手参数传给了
+        // 应用主程序时，宁可失败，也不要在管理员权限下打开会读配置、开文件框
+        // 和联网的完整应用。
+        // SAFETY: geteuid has no arguments or preconditions.
+        if unsafe { geteuid() } == 0 {
+            eprintln!("公文助手不应以管理员身份启动；IS903 助手只能由应用调用。");
+            return Some(1);
+        }
         return None;
     }
     let result = (|| {

@@ -203,9 +203,11 @@ impl GongwenApp {
                         );
                     }
                 });
-            } else if let Some(target) = chooser.chosen
-                && let Some(index) = self.doc_index_of_key(chooser.document)
-            {
+            } else if let Some(target) = chooser.chosen {
+                let Some(index) = self.doc_index_of_key(chooser.document) else {
+                    self.status = "稿件已关闭，已取消刻录。".into();
+                    return;
+                };
                 if self.any_busy() {
                     self.status = "请等待当前任务结束后再刻录。".into();
                     return;

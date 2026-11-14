@@ -2163,7 +2163,9 @@ impl GongwenApp {
             DocJob::MediaExported(result) => {
                 self.status = match result {
                     Ok(count) => format!("{prefix}已刻录并回读校验 {count} 个文件。"),
-                    Err(error) => format!("{prefix}刻录失败：{error}"),
+                    // 写入已经开始后失败，介质里可能已有数据；用「未完成」而不是
+                    // 简单的「失败」，避免把已经写好的盘误报成没写。
+                    Err(error) => format!("{prefix}刻录未完成：{error}"),
                 };
             }
             DocJob::MemoryPrintPdf(result) => match result {

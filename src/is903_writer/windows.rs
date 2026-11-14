@@ -4,6 +4,7 @@ use std::ffi::c_void;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem::{offset_of, size_of, size_of_val};
 use std::ptr::{self, addr_of_mut};
+use std::time::{Duration, Instant};
 use windows_sys::Win32::{
     Devices::{
         DeviceAndDriverInstallation::{
@@ -412,6 +413,63 @@ fn recheck_open_volume(drive: &Drive, target: &Target) -> Result<()> {
     Ok(())
 }
 
+/// 写入和收尾命令已经成功后，介质会变成只读，IS903 也可能重新枚举。
+/// 回读校验先试旧句柄，失败再等新的连接并用只读句柄重试；不能因为
+/// 写后的卷卸载/重新枚举失败就把已经写好的盘报成「刻录失败」。
+fn verify_after_burn(target: &Target, drive: Drive, image: &[u8]) -> Result<()> {
+    // 介质已封盘时锁卷/卸载可能直接失败；它只影响卷缓存，不影响 SCSI 回读。
+    let _ = drive.dismount();
+    let old_error = if recheck_open_volume(&drive, target).is_ok() {
+        verify(&drive, image).err()
+    } else {
+        None
+    };
+    drop(drive);
+
+    let mut errors = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match connections() {
+            Ok(devices) => {
+                let mut matching = devices
+                    .iter()
+                    .filter(|(device, _)| device.serial == target.serial);
+                let candidate = matching.next();
+                if candidate.is_some() && matching.next().is_some() {
+                    errors.push(anyhow::anyhow!("IS903 序列号冲突"));
+                } else if let Some((device, _)) = candidate {
+                    if device.revision != target.revision {
+                        errors.push(anyhow::anyhow!("刷新后的 IS903 版本不一致"));
+                    } else {
+                        match Drive::volume(&device.disk, GENERIC_READ) {
+                            Ok(drive) => match recheck_open_volume(&drive, device) {
+                                Ok(()) => match verify(&drive, image) {
+                                    Ok(()) => return Ok(()),
+                                    Err(error) => errors.push(error),
+                                },
+                                Err(error) => errors.push(error),
+                            },
+                            Err(error) => errors.push(error),
+                        }
+                    }
+                } else {
+                    errors.push(anyhow::anyhow!("未找到 IS903 光驱"));
+                }
+            }
+            Err(error) => errors.push(error),
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err(errors
+        .pop()
+        .or(old_error)
+        .unwrap_or_else(|| anyhow::anyhow!("等待 IS903 光盘重新枚举超时")))
+    .context("IS903 已写入，但回读校验未通过；介质可能已有明文")
+}
+
 pub(super) fn write(
     target: &Target,
     image: &[u8],
@@ -430,7 +488,5 @@ pub(super) fn write(
         recheck_open_volume(&drive, target)?;
         authorize()
     })?;
-    drive.dismount().context("IS903 写入后刷新卷缓存失败")?;
-    recheck_open_volume(&drive, target)?;
-    verify(&drive, image)
+    verify_after_burn(target, drive, image)
 }

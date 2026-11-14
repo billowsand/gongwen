@@ -177,7 +177,8 @@ fn burn_and_verify(target: &Target, image: &[u8], ready: &dyn Fn() -> Result<()>
     let drive = lib.claim(&updated)?;
     verify(&drive, image)?;
     drive.release()?;
-    refreshed(&updated)?;
+    // 回读是只读操作，不会再让光盘重新枚举；这里若继续等 media_registry_id
+    // 变化，会把已成功刻录并校验的盘误报成「等待重新枚举超时」。
     Ok(())
 }
 

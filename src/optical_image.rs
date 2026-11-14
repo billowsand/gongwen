@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, ensure};
+use zeroize::Zeroizing;
 
 const BLOCK: usize = 2048;
 const MAX_FILES: usize = 4096;
@@ -23,7 +24,8 @@ const VOLUME_DATE: &[u8; 16] = b"2000010100000000";
 struct File {
     primary: Vec<u8>,
     joliet: Vec<u8>,
-    bytes: Vec<u8>,
+    /// 成品字节只在内存里；复制进镜像后立即清零，避免残留释放后的堆。
+    bytes: Zeroizing<Vec<u8>>,
     sector: usize,
 }
 
@@ -35,6 +37,12 @@ pub(crate) fn build(files: BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>> {
         "光盘文件数须在 1 至 {MAX_FILES} 之间"
     );
     let mut seen = BTreeSet::new();
+    // 先把所有字节收进 Zeroizing：任一文件名校验失败提前返回时，未处理完的
+    // 成品也会在 Drop 时清零。
+    let files = files
+        .into_iter()
+        .map(|(name, bytes)| (name, Zeroizing::new(bytes)))
+        .collect::<Vec<_>>();
     let mut files = files
         .into_iter()
         .enumerate()
@@ -56,8 +64,13 @@ pub(crate) fn build(files: BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>> {
                 .take(3)
                 .map(|c| c.to_ascii_uppercase())
                 .collect();
+            let primary = if extension.is_empty() {
+                format!("F{index:07};1")
+            } else {
+                format!("F{index:07}.{extension};1")
+            };
             Ok(File {
-                primary: format!("F{index:07}.{extension};1").into_bytes(),
+                primary: primary.into_bytes(),
                 joliet,
                 bytes,
                 sector: 0,
@@ -114,7 +127,7 @@ pub(crate) fn build(files: BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>> {
     );
     for file in files {
         let start = file.sector * BLOCK;
-        image[start..start + file.bytes.len()].copy_from_slice(&file.bytes);
+        image[start..start + file.bytes.len()].copy_from_slice(&file.bytes[..]);
     }
 
     Ok(image)

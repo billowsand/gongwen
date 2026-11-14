@@ -102,6 +102,10 @@ pub fn export_files(
     fonts: &FontConfig,
     numbering: &NumberingConfig,
 ) -> Result<Vec<PathBuf>> {
+    // 花脸稿同样经 mdx::write_output 落盘；锁定开始后不能再写明文。
+    if crate::storage::writes_blocked() {
+        anyhow::bail!("工作区正在锁定或切换，已取消导出");
+    }
     if !mdx::memory_files::output_is_captured()
         && let Some(protection) = export::protection::Protection::current()?
     {
