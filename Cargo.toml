@@ -112,6 +112,7 @@ zeroize = "1"
 datamatrix = "0.3.3"
 ms-offcrypto-writer = "1.0.7"
 rand = "0.9"
+raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
@@ -140,11 +141,18 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Controls_Dialogs",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Devices_PortableDevices",
     "Win32_Devices_Properties",
+    "Win32_Devices_Usb",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
     "Win32_Storage_FileSystem",
     "Win32_Storage_IscsiDisc",
     "Win32_System_Ioctl",
     "Win32_System_IO",
+    "Win32_System_LibraryLoader",
     "Win32_Security",
 ] }
 
@@ -162,7 +170,6 @@ x11-dl = "2.21"
 objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSImage", "NSPasteboard", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSArray", "NSData", "NSGeometry", "NSString", "NSURL", "NSUserDefaults"] }
-raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.31"

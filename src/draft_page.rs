@@ -484,6 +484,8 @@ pub(crate) struct DraftSession {
     pub(crate) highlighter: MarkdownHighlighter,
     /// 本篇正在跑生成/优化/导出。任务按篇计数，切到别的稿件照常编辑。
     pub(crate) busy: bool,
+    /// 已发起但尚未收到终态的后台任务数；取消会作废旧结果，但不会提前清零。
+    pub(crate) in_flight: usize,
     /// 本篇已发起的后台任务序号；结果回投时对不上就说明已被新任务取代。
     pub(crate) job_seq: u64,
     /// 本次优化用的提示词名称，只用于完成后的状态栏文案。
@@ -627,6 +629,7 @@ impl DraftSession {
             table_size: (3, 3),
             highlighter: MarkdownHighlighter::default(),
             busy: false,
+            in_flight: 0,
             job_seq: 0,
             #[cfg(feature = "ai-workbench")]
             ai_prompt_last_label: String::new(),

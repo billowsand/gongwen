@@ -340,6 +340,26 @@ pub(crate) enum DocJob {
     Reviewed(Result<crate::revise_model::ReviewOutcome, String>),
 }
 
+impl DocJob {
+    /// 每个 begin_job 最终只应回投一次终态；进度、用量和 Pi 中间事件不计入。
+    fn is_terminal(&self) -> bool {
+        match self {
+            #[cfg(feature = "ai-workbench")]
+            Self::PiDone(_)
+            | Self::SkillDone(_)
+            | Self::AiCompactDone(_)
+            | Self::GapRevised(_)
+            | Self::Reviewed(_) => true,
+            Self::Exported(_)
+            | Self::RedlineExported(_)
+            | Self::RedlinePrintPreview(_)
+            | Self::MemoryPrintPdf(_)
+            | Self::MediaExported(_) => true,
+            _ => false,
+        }
+    }
+}
+
 impl GongwenApp {
     pub(crate) fn start_file_copy(&mut self, path: PathBuf, wake: egui::Context) {
         self.status = format!(
@@ -497,6 +517,12 @@ impl GongwenApp {
 
     pub(crate) fn poll_worker(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.receiver.try_recv() {
+            if let WorkerResult::Doc { key, job, .. } = &result
+                && job.is_terminal()
+                && let Some(doc) = self.docs.iter_mut().find(|doc| doc.key == *key)
+            {
+                doc.in_flight = doc.in_flight.saturating_sub(1);
+            }
             match result {
                 #[cfg(feature = "ai-workbench")]
                 WorkerResult::ProviderModels {

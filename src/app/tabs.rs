@@ -472,9 +472,10 @@ impl GongwenApp {
         #[cfg(not(feature = "ai-workbench"))]
         let ai_busy = false;
         ai_busy
+            || self.print_jobs_in_flight > 0
             || self.lexicon_busy
             || self.backup_busy
-            || self.docs.iter().any(|doc| doc.busy)
+            || self.docs.iter().any(|doc| doc.busy || doc.in_flight > 0)
             || self.pdfs.iter().any(PdfSession::busy)
             || self.manuscript_pdf_export_busy
             || self.manuscript_package_export_busy

@@ -31,6 +31,7 @@ mod doc_import;
 mod document_reference;
 mod draft_page;
 mod element_fields;
+mod environment;
 mod export;
 // FFI 模块：Win32 / AppKit 剪贴板调用，每个 unsafe 块都带 SAFETY 注释。
 #[allow(unsafe_code)]

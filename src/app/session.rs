@@ -638,8 +638,14 @@ impl GongwenApp {
             self.config.last_template = kind;
             self.config.upsert_profile(profile);
         }
+        if !self.vault_locked {
+            self.config.environment.enabled = false;
+        }
         match storage::save(&self.config) {
-            Ok(()) => self.status = "配置已保存到本机。".into(),
+            Ok(()) => {
+                self.environment_active = self.config.environment;
+                self.status = "配置已保存到本机。".into();
+            }
             Err(error) => self.status = format!("保存配置失败：{error:#}"),
         }
     }

@@ -8,12 +8,14 @@
 //! - 诱饵密码进入的空白系统与真实系统共用同一套界面，只是数据槽位不同。
 
 use super::GongwenApp;
-use crate::models::{DiagramTheme, FontConfig, PaperMode};
+use crate::models::{DiagramTheme, EnvironmentPolicy, FontConfig, PaperMode};
 use crate::storage::{self, DataSlot};
 use crate::theme;
 use crate::vault::{Probe, Vault};
 use eframe::egui;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 mod backdrop;
 
@@ -205,6 +207,12 @@ enum GateOutcome {
     ClearBroken,
 }
 
+struct EnvironmentLock {
+    reason: String,
+    error: Option<String>,
+    last_save_attempt: Option<Instant>,
+}
+
 /// 应用外壳：先过闸门，再进工作区。
 pub(crate) struct AppShell {
     phase: ShellPhase,
@@ -214,6 +222,12 @@ pub(crate) struct AppShell {
     saved_maximized: bool,
     saved_fullscreen: bool,
     unlock_fade_started: Option<f64>,
+    environment: crate::environment::Monitor,
+    capture_guard: crate::environment::CaptureGuard,
+    environment_policy: EnvironmentPolicy,
+    trusted_devices: BTreeSet<crate::environment::DeviceIdentity>,
+    environment_violation: Option<crate::environment::Violation>,
+    environment_lock: Option<EnvironmentLock>,
 }
 
 impl AppShell {
@@ -279,6 +293,12 @@ impl AppShell {
                 .as_ref()
                 .map_or(window.fullscreen, |p| p.fullscreen),
             unlock_fade_started: None,
+            environment: crate::environment::Monitor::start(&cc.egui_ctx),
+            capture_guard: crate::environment::CaptureGuard::new(cc),
+            environment_policy: EnvironmentPolicy::default(),
+            trusted_devices: BTreeSet::new(),
+            environment_violation: None,
+            environment_lock: None,
         };
         match Vault::probe() {
             // 没有锁文件：只有在磁盘上也没有加密数据时才走首次设置；否则绝不能
@@ -305,7 +325,10 @@ impl AppShell {
                 shell.phase = ShellPhase::Gate(GateState::unlock());
                 shell
             }
-            Probe::Broken(_) => Self::gate(GateState::broken(), shell.startup),
+            Probe::Broken(_) => {
+                shell.phase = ShellPhase::Gate(GateState::broken());
+                shell
+            }
         }
     }
 
@@ -348,6 +371,7 @@ impl AppShell {
         }
     }
 
+    #[cfg(test)]
     fn gate(gate: GateState, startup: Option<StartupBundle>) -> Self {
         Self {
             phase: ShellPhase::Gate(gate),
@@ -357,7 +381,105 @@ impl AppShell {
             saved_maximized: false,
             saved_fullscreen: false,
             unlock_fade_started: None,
+            environment: crate::environment::Monitor::disabled_for_test(),
+            capture_guard: crate::environment::CaptureGuard::disabled_for_test(),
+            environment_policy: EnvironmentPolicy::default(),
+            trusted_devices: BTreeSet::new(),
+            environment_violation: None,
+            environment_lock: None,
         }
+    }
+
+    fn evaluate_environment(&mut self) -> Option<crate::environment::Violation> {
+        let capture_healthy = self
+            .capture_guard
+            .update(self.environment_policy.enabled && self.environment_policy.capture_protection);
+        crate::environment::evaluate(
+            self.environment.snapshot(),
+            &self.environment_policy,
+            &self.trusted_devices,
+            capture_healthy,
+            Instant::now(),
+        )
+    }
+
+    fn poll_environment(&mut self) {
+        let changed = self.environment.poll();
+        if let ShellPhase::Ready(app) = &mut self.phase {
+            self.environment_policy = app.environment_policy();
+            app.set_environment_summary(self.environment.snapshot().summary());
+            if changed {
+                // 设备事件很少；心跳也刷新一次，设置页刚批准的 IS903 能及时生效。
+                self.trusted_devices = super::export_devices::environment_approved_identities();
+            }
+        }
+        self.environment_violation = self.evaluate_environment();
+        if self.environment_lock.is_none()
+            && let Some(violation) = self.environment_violation.clone()
+            && let ShellPhase::Ready(app) = &mut self.phase
+        {
+            app.begin_environment_lock();
+            self.environment_lock = Some(EnvironmentLock {
+                reason: violation.summary(),
+                error: None,
+                last_save_attempt: None,
+            });
+        }
+    }
+
+    /// 返回 true 表示本帧完全由紧急锁定接管，不得再绘制工作区。
+    fn environment_lock_frame(&mut self, ctx: &egui::Context) -> bool {
+        let Some(lock) = &self.environment_lock else {
+            return false;
+        };
+        let reason = lock.reason.clone();
+        ctx.input_mut(|input| {
+            input.raw.events.clear();
+            input.pointer = egui::PointerState::default();
+        });
+        paint_lock_veil(ctx, 1.0);
+
+        let ShellPhase::Ready(app) = &mut self.phase else {
+            self.environment_lock = None;
+            return false;
+        };
+        // 不绘制工作区，但继续消费后台终态，让停止标志和忙状态能够收敛。
+        app.poll_worker(ctx);
+        let busy = app.any_busy();
+        let save_due = self.environment_lock.as_ref().is_some_and(|lock| {
+            lock.last_save_attempt
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(2))
+        });
+        if !busy && save_due {
+            if let Some(lock) = &mut self.environment_lock {
+                lock.last_save_attempt = Some(Instant::now());
+            }
+            match app.save_before_lock() {
+                Ok(()) => {
+                    self.lock_now(ctx);
+                    if let ShellPhase::Gate(gate) = &mut self.phase {
+                        gate.notice = Some(format!("已因环境安全风险锁定：{reason}"));
+                    }
+                    return true;
+                }
+                Err(error) => {
+                    if let Some(lock) = &mut self.environment_lock {
+                        lock.error = Some(format!("{error:#}"));
+                    }
+                }
+            }
+        }
+        let error = self
+            .environment_lock
+            .as_ref()
+            .and_then(|lock| lock.error.clone());
+        paint_environment_lock_status(ctx, &reason, busy, error.as_deref());
+        ctx.request_repaint_after(if busy {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_millis(500)
+        });
+        true
     }
 
     /// 构造工作区并切过去。`notice` 是解锁后要放进状态栏的一句话。
@@ -394,6 +516,8 @@ impl AppShell {
             _ => {}
         }
         self.phase = ShellPhase::Ready(Box::new(app));
+        // 工作区尚未绘制就先按已保存策略复核；不合格时下一帧也只显示紧急遮蔽。
+        self.poll_environment();
         ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::unique("gate_password_primary")));
         self.unlock_fade_started = Some(ctx.input(|input| input.time));
         if self.compact_startup {
@@ -698,6 +822,9 @@ impl AppShell {
     /// 退回锁屏：丢掉整个工作区（数据库连接、内存数据随 Drop 释放），
     /// 数据密钥句柄一并清掉——锁定状态内存里不留密钥。
     fn lock_now(&mut self, ctx: &egui::Context) {
+        self.environment_lock = None;
+        self.trusted_devices.clear();
+        self.unlock_fade_started = None;
         // 停写在前：被丢弃的工作区里晚到的线程不能以「无密钥」状态把明文写回
         // 配置目录；槽位复位也在 drop 之前，晚到线程至少拿到真实槽路径。
         crate::storage::set_writes_blocked(true);
@@ -757,6 +884,10 @@ impl AppShell {
 impl AppShell {
     pub(crate) fn run(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_environment();
+        if self.environment_lock_frame(&ctx) {
+            return;
+        }
         if matches!(self.phase, ShellPhase::Gate(_) | ShellPhase::Unlocking(_))
             && theme::current().label == theme::omarchy::LABEL
             && theme::omarchy::palette().is_some_and(|palette| palette != theme::current())
@@ -954,6 +1085,54 @@ fn paint_lock_veil(ctx: &egui::Context, opacity: f32) {
     let layer = egui::LayerId::new(egui::Order::Tooltip, id);
     ctx.move_to_top(layer);
     backdrop::paint(&ctx.layer_painter(layer), rect, opacity);
+}
+
+fn paint_environment_lock_status(
+    ctx: &egui::Context,
+    reason: &str,
+    busy: bool,
+    error: Option<&str>,
+) {
+    egui::Window::new("环境安全保护")
+        .id(egui::Id::unique("environment_lock_status"))
+        .order(egui::Order::Tooltip)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(false)
+        .frame(theme::card())
+        .show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(20.0));
+                ui.label(
+                    egui::RichText::new("环境变化，正在保护工作区")
+                        .size(theme::font_sizes::HEADING)
+                        .strong()
+                        .color(theme::text()),
+                );
+            });
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(reason).color(theme::text()));
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(if busy {
+                    "已遮蔽并停止接收操作，正在等待后台任务收尾…"
+                } else {
+                    "已遮蔽并停止接收操作，正在保存加密数据…"
+                })
+                .color(theme::text_muted()),
+            );
+            if let Some(error) = error {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "保存尚未完成，工作区继续保持遮蔽：{error}。将自动重试。"
+                    ))
+                    .color(theme::danger()),
+                );
+            }
+        });
 }
 
 impl eframe::App for AppShell {
@@ -1861,6 +2040,87 @@ mod lifecycle_tests {
             assert_eq!(app.active_doc, 1);
             assert!(app.docs[0].is_dirty());
             assert_eq!(app.docs[0].generated_markdown, "# 仍在内存中的修改");
+        });
+    }
+
+    #[test]
+    fn environment_lock_save_failure_never_reopens_workspace() {
+        isolated(|| {
+            let mut app = crate::app::management_samples::fixture();
+            app.docs[0].generated_markdown = "# 风险发生时仍未保存的正文".into();
+            app.docs[0].manuscript_id = Some(-1);
+            app.docs
+                .push(crate::draft_page::DraftSession::blank(1, &app.config));
+            app.active_doc = 1;
+            let ctx = egui::Context::default();
+            let mut shell = AppShell::gate(GateState::unlock(), None);
+            shell.phase = ShellPhase::Ready(Box::new(app));
+            shell.environment_lock = Some(EnvironmentLock {
+                reason: "测试风险".into(),
+                error: None,
+                last_save_attempt: None,
+            });
+            let mut handled = false;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |_| {
+                handled = shell.environment_lock_frame(&ctx);
+            });
+            output.textures_delta.clear();
+            assert!(handled, "保存失败时本帧仍应由遮蔽层接管");
+            assert!(matches!(shell.phase, ShellPhase::Ready(_)));
+            assert!(
+                shell
+                    .environment_lock
+                    .as_ref()
+                    .and_then(|lock| lock.error.as_ref())
+                    .is_some()
+            );
+            if let ShellPhase::Ready(app) = &shell.phase {
+                assert_eq!(app.docs[0].generated_markdown, "# 风险发生时仍未保存的正文");
+            }
+        });
+    }
+
+    #[test]
+    fn environment_lock_waits_for_cancelled_job_terminal() {
+        isolated(|| {
+            let mut app = crate::app::management_samples::fixture();
+            let key = app.docs[0].key;
+            app.docs[0].job_seq = 1;
+            app.docs[0].in_flight = 1;
+            // 取消后的状态：界面 busy 已清，真实后台任务还没有终态。
+            app.docs[0].busy = false;
+            let ctx = egui::Context::default();
+            let mut shell = AppShell::gate(GateState::unlock(), None);
+            shell.phase = ShellPhase::Ready(Box::new(app));
+            shell.environment_lock = Some(EnvironmentLock {
+                reason: "测试风险".into(),
+                error: None,
+                last_save_attempt: None,
+            });
+            let mut first = ctx.run_ui(egui::RawInput::default(), |_| {
+                shell.environment_lock_frame(&ctx);
+            });
+            first.textures_delta.clear();
+            assert!(matches!(shell.phase, ShellPhase::Ready(_)));
+
+            if let ShellPhase::Ready(app) = &shell.phase {
+                app.sender
+                    .send(crate::app::WorkerResult::Doc {
+                        key,
+                        seq: 0,
+                        job: crate::app::DocJob::MemoryPrintPdf(Ok(Vec::new())),
+                    })
+                    .unwrap();
+            }
+            let mut second = ctx.run_ui(egui::RawInput::default(), |_| {
+                shell.environment_lock_frame(&ctx);
+            });
+            second.textures_delta.clear();
+            assert!(
+                matches!(shell.phase, ShellPhase::Gate(_)),
+                "stale 终态只结算在途任务，随后完成锁定"
+            );
+            storage::set_writes_blocked(false);
         });
     }
 

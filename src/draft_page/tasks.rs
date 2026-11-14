@@ -126,6 +126,7 @@ impl DraftPage<'_> {
     /// 发起一次后台任务：记在本篇名下并推进序号，结果只认这一对标识。
     pub(crate) fn begin_job(&mut self) -> (DocKey, u64) {
         self.doc.busy = true;
+        self.doc.in_flight += 1;
         self.doc.job_seq += 1;
         (self.doc.key, self.doc.job_seq)
     }

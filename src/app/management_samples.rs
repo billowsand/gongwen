@@ -13,6 +13,7 @@ pub(crate) fn fixture() -> GongwenApp {
         ..Default::default()
     };
     let ime = crate::ime::Ime::new(session::ime_settings_of(&config.ime));
+    let environment_active = config.environment;
     let docs = vec![DraftSession::blank(0, &config)];
     let (sender, receiver) = mpsc::channel();
     // 内存库打开失败也不阻塞启动：记下错误，界面照常走。
@@ -148,6 +149,9 @@ pub(crate) fn fixture() -> GongwenApp {
         force_relock: false,
         enable_encrypt_requested: false,
         vault_page: Default::default(),
+        environment_active,
+        environment_summary: String::new(),
+        print_jobs_in_flight: 0,
         forwarded_requests: None,
         pending_merge: None,
         version_commit: None,

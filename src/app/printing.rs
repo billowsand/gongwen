@@ -286,6 +286,7 @@ impl GongwenApp {
         dialog: Option<u64>,
         result: Result<PrintOutcome, String>,
     ) {
+        self.print_jobs_in_flight = self.print_jobs_in_flight.saturating_sub(1);
         self.status = match &result {
             Ok(PrintOutcome::Printed { job }) => match (printer, job) {
                 (Some(printer), Some(job)) => format!(
@@ -367,6 +368,7 @@ impl GongwenApp {
             let _ = crate::storage::save(&self.config);
         }
         self.status = format!("正在打印 {}…", job.path.display());
+        self.print_jobs_in_flight += 1;
         let tx = self.sender.clone();
         let ctx = ctx.clone();
         let progress_tx = self.sender.clone();
@@ -414,6 +416,7 @@ impl GongwenApp {
             .iter()
             .find(|pdf| pdf.path() == path)
             .and_then(|pdf| pdf.memory_bytes());
+        self.print_jobs_in_flight += 1;
         let tx = self.sender.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {

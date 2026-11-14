@@ -222,6 +222,20 @@ fn unique_serial(devices: &[Device], expected: &Device) -> bool {
         == 1
 }
 
+/// 环境监控只读取已经批准的 IS903 身份；读取失败时返回空集合，按未授权处理。
+/// 这项豁免在策略层仅对移动存储功能有效，不放行同一设备的其他接口。
+pub(super) fn environment_approved_identities() -> BTreeSet<crate::environment::DeviceIdentity> {
+    crate::vault::key_handle()
+        .and_then(|key| approvals(&key).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|identity| crate::environment::DeviceIdentity {
+            serial: identity.serial,
+            revision: identity.revision,
+        })
+        .collect()
+}
+
 pub(super) fn approved_targets(key: &crate::vault::KeyHandle) -> Result<Vec<Device>> {
     let approvals = approvals(key)?;
     let devices = crate::is903_writer::scan()?;

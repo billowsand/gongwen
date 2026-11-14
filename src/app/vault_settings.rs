@@ -471,6 +471,8 @@ impl GongwenApp {
         }
         match crate::vault::request_disable() {
             Ok(()) => {
+                self.config.environment.enabled = false;
+                self.environment_active.enabled = false;
                 self.vault_page.disable_confirm = false;
                 self.notice_vault("已申请停用：应用即将锁定，输入一次密码完成解密。".into());
                 self.request_lock();

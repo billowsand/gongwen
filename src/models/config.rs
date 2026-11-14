@@ -4,9 +4,9 @@
 //! `models` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::models::{
-    DEFAULT_TRANSMIT_TASKS, DiagramTheme, EditorFontScheme, ExportSelection, FontConfig, ImeConfig,
-    NumberingConfig, PaperMode, PrintConfig, ProofreadConfig, ProxyConfig, RibbonTab,
-    SecurityRules, TemplateKind, TemplateProfile, ThemeName, VocabularyEntry,
+    DEFAULT_TRANSMIT_TASKS, DiagramTheme, EditorFontScheme, EnvironmentPolicy, ExportSelection,
+    FontConfig, ImeConfig, NumberingConfig, PaperMode, PrintConfig, ProofreadConfig, ProxyConfig,
+    RibbonTab, SecurityRules, TemplateKind, TemplateProfile, ThemeName, VocabularyEntry,
     VocabularySetupStatus,
 };
 #[cfg(feature = "ai-workbench")]
@@ -75,6 +75,9 @@ pub struct AppConfig {
     /// 按 15 分钟处理。
     #[serde(default = "default_auto_lock_minutes")]
     pub auto_lock_minutes: u32,
+    /// 环境安全检测默认关闭；启用前必须已经启用应用锁并完成加密。
+    #[serde(default)]
+    pub environment: EnvironmentPolicy,
     pub security_rules: SecurityRules,
     /// 允许在词库之外手工填写单位、联系人等字段。
     pub allow_free_text: bool,
@@ -177,6 +180,7 @@ impl Default for AppConfig {
             auto_save: true,
             auto_save_interval_secs: DEFAULT_AUTO_SAVE_INTERVAL_SECS,
             auto_lock_minutes: default_auto_lock_minutes(),
+            environment: EnvironmentPolicy::default(),
             security_rules: SecurityRules::default(),
             allow_free_text: true,
             show_editor_line_numbers: true,

@@ -76,6 +76,8 @@ pub(crate) enum SettingsSection {
     Security,
     /// 应用锁：启动密码、空白系统第二密码与闲置自动锁定。
     Vault,
+    /// 网络、外设与窗口防护的环境安全检测。
+    Environment,
     /// 输入法（应用内词表查询）。
     Input,
 }
@@ -95,7 +97,14 @@ const MENU_GROUPS: [(&str, &[SettingsSection]); 5] = [
         "公文排版",
         &[SettingsSection::Numbering, SettingsSection::Transmit],
     ),
-    ("安全", &[SettingsSection::Vault, SettingsSection::Security]),
+    (
+        "安全",
+        &[
+            SettingsSection::Vault,
+            SettingsSection::Environment,
+            SettingsSection::Security,
+        ],
+    ),
     (
         "文件与现场",
         &[
@@ -123,6 +132,7 @@ impl SettingsSection {
             SettingsSection::Backup => "数据备份",
             SettingsSection::Security => "密级规则",
             SettingsSection::Vault => "应用锁",
+            SettingsSection::Environment => "环境检测",
             SettingsSection::Input => "输入法",
         }
     }
@@ -141,6 +151,7 @@ impl SettingsSection {
             SettingsSection::Backup => theme::Icon::Archive,
             SettingsSection::Security => theme::Icon::Shield,
             SettingsSection::Vault => theme::Icon::Lock,
+            SettingsSection::Environment => theme::Icon::Shield,
             SettingsSection::Input => theme::Icon::Edit,
         }
     }
@@ -182,6 +193,9 @@ impl SettingsSection {
             SettingsSection::Vault => {
                 "启动要输入密码；可另设一个进入空白系统的第二密码。忘记密码无法恢复数据，\
                  闲置超时自动退回锁屏。"
+            }
+            SettingsSection::Environment => {
+                "持续检测网卡、链路、路由和外部设备；风险出现时先遮蔽，再保存并锁定。"
             }
             SettingsSection::Input => {
                 "词表输入法按编码查找基础表与公文四码词表，维护后立即生效。单击 Shift 切中英。"
@@ -1410,6 +1424,7 @@ impl GongwenApp {
                             SettingsSection::Backup => self.backup_section_ui(ui),
                             SettingsSection::Security => self.security_section_ui(ui),
                             SettingsSection::Vault => self.vault_section_ui(ui),
+                            SettingsSection::Environment => self.environment_section_ui(ui),
                             SettingsSection::Input => self.ime_section_ui(ui),
                         }
                         ui.add_space(8.0);

@@ -43,6 +43,7 @@ mod auxiliary_export;
 mod chrome;
 pub(crate) mod clipboard;
 mod data_safety;
+mod environment_settings;
 mod export_devices;
 mod export_password;
 pub(crate) mod file_dialog;
@@ -551,6 +552,12 @@ pub struct GongwenApp {
     styles_page: style_settings::StylesPage,
     /// 设置页「应用锁」分区的输入草稿与会话内提示。
     vault_page: vault_settings::VaultPageState,
+    /// 只有成功保存后的环境策略才生效，避免未保存的复选框改动突然锁屏。
+    environment_active: crate::models::EnvironmentPolicy,
+    /// 外壳每帧提供的非敏感现场摘要，只用于设置页显示。
+    environment_summary: String,
+    /// 已送后台但尚未收到终态的打印任务数；紧急锁定必须等待其收尾。
+    print_jobs_in_flight: usize,
     /// 应用锁启用状态：启动时按锁文件探测缓存一份，设置页改动后刷新。
     /// 未启用时不锁定、菜单里也没有「锁定」入口。
     vault_locked: bool,
@@ -769,6 +776,7 @@ impl GongwenApp {
             Err(error) => (None, Some(format!("公文词表路径获取失败：{error:#}"))),
         };
         let applied_theme = config.theme;
+        let environment_active = config.environment;
         let mut app = Self {
             config,
             applied_theme,
@@ -1016,6 +1024,9 @@ impl GongwenApp {
             #[cfg(feature = "ai-workbench")]
             styles_page: Default::default(),
             vault_page: Default::default(),
+            environment_active,
+            environment_summary: String::new(),
+            print_jobs_in_flight: 0,
             #[cfg(feature = "ai-workbench")]
             rerank_verify_busy: false,
             #[cfg(feature = "ai-workbench")]
@@ -1363,6 +1374,31 @@ impl GongwenApp {
     /// 外壳每帧问一次：为真时丢掉整个工作区并把数据迁成密文。
     pub(crate) fn take_enable_encrypt_requested(&mut self) -> bool {
         std::mem::take(&mut self.enable_encrypt_requested)
+    }
+
+    pub(crate) fn environment_policy(&self) -> crate::models::EnvironmentPolicy {
+        if self.vault_locked {
+            self.environment_active
+        } else {
+            crate::models::EnvironmentPolicy::default()
+        }
+    }
+
+    pub(crate) fn set_environment_summary(&mut self, summary: String) {
+        self.environment_summary = summary;
+    }
+
+    /// 风险锁定先停止可取消的敏感任务；外壳随后持续遮蔽并等待全部任务收尾。
+    pub(crate) fn begin_environment_lock(&mut self) {
+        self.cancel_pi_tasks();
+        #[cfg(feature = "ai-workbench")]
+        self.task_auto_queue.clear();
+        if let Some(dialog) = &self.print_dialog {
+            dialog
+                .cancel_token()
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.lock_requested = false;
     }
 
     /// 手动（菜单）或超时（空闲）锁定：停掉在跑的 Pi 任务，外壳下一帧丢弃
