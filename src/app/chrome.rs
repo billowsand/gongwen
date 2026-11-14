@@ -281,14 +281,19 @@ impl GongwenApp {
     /// Windows 与传统 Linux 桌面使用右侧三枚自绘窗口按钮；Hyprland 平铺会话
     /// 只保留关闭按钮，避免显示 compositor 不采用的最小化/最大化语义。
     pub(crate) fn window_titlebar(&mut self, ui: &mut egui::Ui) {
-        let height = if theme::smartisan::active() && self.macos_titlebar_metrics.is_none() {
+        let ctx = ui.ctx().clone();
+        let native_size = self
+            .macos_titlebar_metrics
+            .map(|metrics| metrics.reserved_size(&ctx));
+        let height = if let Some(size) = native_size {
+            34.0_f32.max(size.y)
+        } else if theme::smartisan::active() {
             30.0
         } else {
             34.0
         };
         const BTN_W: f32 = 46.0;
 
-        let ctx = ui.ctx().clone();
         let maximized = ctx
             .input(|input| input.viewport().maximized)
             .unwrap_or(false);
@@ -309,8 +314,8 @@ impl GongwenApp {
 
         theme::smartisan::chrome(ui.painter(), rect);
 
-        if let Some(metrics) = self.macos_titlebar_metrics {
-            self.macos_titlebar(ui, rect, metrics.reserved_width, title_color);
+        if let Some(size) = native_size {
+            self.macos_titlebar(ui, rect, size.x, title_color);
             return;
         }
 

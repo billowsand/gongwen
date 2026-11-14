@@ -780,11 +780,10 @@ impl AppShell {
                 }
             }
         }
-        // 无边框窗口（Windows / 传统 Linux）：锁屏也要有一条能拖动、
-        // 能关窗的标题栏。只在锁屏期画——工作区自己的标题栏由
-        // update_workspace 画，这里再画一条就成了双标题栏。
+        // 锁屏和解锁等待共用标题栏，进入工作区后由 update_workspace 接管。
         if matches!(self.phase, ShellPhase::Gate(_) | ShellPhase::Unlocking(_)) {
             let minimal = self.compact_startup;
+            let native = self.startup.as_ref().and_then(|s| s.macos_titlebar_metrics);
             egui::Panel::top("gate_titlebar")
                 .show_separator_line(!theme::smartisan::active())
                 .frame(
@@ -792,7 +791,7 @@ impl AppShell {
                         .fill(theme::surface())
                         .inner_margin(egui::Margin::ZERO),
                 )
-                .show(ui, |ui| bare_titlebar(ui, minimal));
+                .show(ui, |ui| bare_titlebar(ui, minimal, native));
         }
 
         enum After {
@@ -1000,11 +999,17 @@ impl eframe::App for AppShell {
     }
 }
 
-/// 锁屏的标题栏：品牌标 + 居中应用名 + 右侧窗口控制。比工作区的标题栏
-/// 少掉快速访问与标签标题，其余视觉语言一致。
-fn bare_titlebar(ui: &mut egui::Ui, minimal: bool) {
+/// 锁屏标题栏。macOS 的窗口控件由 AppKit 绘制，Windows / Linux 由 egui 绘制。
+fn bare_titlebar(
+    ui: &mut egui::Ui,
+    minimal: bool,
+    native: Option<crate::macos_window::NativeTitlebarMetrics>,
+) {
     let ctx = ui.ctx().clone();
-    let height = if theme::smartisan::active() {
+    let native_size = native.map(|metrics| metrics.reserved_size(&ctx));
+    let height = if let Some(size) = native_size {
+        34.0_f32.max(size.y)
+    } else if theme::smartisan::active() {
         30.0
     } else {
         34.0
@@ -1029,7 +1034,9 @@ fn bare_titlebar(ui: &mut egui::Ui, minimal: bool) {
     theme::smartisan::chrome(ui.painter(), rect);
 
     let hyprland = crate::linux_desktop::hyprland_session();
-    let buttons: &[TitlebarBtn] = if minimal || hyprland {
+    let buttons: &[TitlebarBtn] = if native.is_some() {
+        &[]
+    } else if minimal || hyprland {
         &[TitlebarBtn::Close]
     } else {
         &[
@@ -1041,11 +1048,14 @@ fn bare_titlebar(ui: &mut egui::Ui, minimal: bool) {
     let controls_width = buttons.len() as f32 * BTN_W;
 
     let title_rect = egui::Rect::from_min_max(
-        egui::pos2(rect.left() + 14.0, rect.top()),
+        egui::pos2(
+            rect.left() + native_size.map_or(14.0, |size| size.x),
+            rect.top(),
+        ),
         egui::pos2(rect.right() - controls_width, rect.bottom()),
     );
     let mut text_right = title_rect.left();
-    if title_rect.width() > 60.0 {
+    if native.is_none() && title_rect.width() > 60.0 {
         let brand_rect = egui::Rect::from_center_size(
             title_rect.left_center() + egui::vec2(9.0, 0.0),
             egui::vec2(18.0, 18.0),
@@ -1061,7 +1071,7 @@ fn bare_titlebar(ui: &mut egui::Ui, minimal: bool) {
             .on_hover_text(crate::version::APP_TITLE);
         text_right = brand_rect.right();
     }
-    if minimal {
+    if minimal && native.is_none() {
         ui.painter().text(
             egui::pos2(text_right + 8.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
@@ -1069,10 +1079,9 @@ fn bare_titlebar(ui: &mut egui::Ui, minimal: bool) {
             egui::TextStyle::Body.resolve(ui.style()),
             title_color,
         );
-    }
-    // 应用名按整窗几何中心摆放，左右让开品牌标与窗口按钮。
-    {
-        let center_x = if minimal { -1000.0 } else { rect.center().x };
+    } else {
+        // 应用名按整窗几何中心摆放，左右让开品牌标与窗口按钮。
+        let center_x = rect.center().x;
         let half_width = (center_x - (text_right + 16.0))
             .min(rect.right() - controls_width - 16.0 - center_x)
             .max(0.0);
@@ -1095,8 +1104,12 @@ fn bare_titlebar(ui: &mut egui::Ui, minimal: bool) {
         ui.scope_id().with("gate_titlebar_drag"),
         egui::Sense::click_and_drag(),
     );
-    if drag.double_clicked() && !hyprland {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    if drag.double_clicked() {
+        if native.is_some() {
+            crate::macos_window::perform_titlebar_double_click();
+        } else if !hyprland {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+        }
     } else if drag.drag_started() {
         ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
@@ -1755,7 +1768,11 @@ mod samples {
                                     .inner_margin(egui::Margin::ZERO),
                             )
                             .show(ui, |ui| {
-                                bare_titlebar(ui, mode == GateMode::Unlock && !veiled)
+                                bare_titlebar(
+                                    ui,
+                                    mode == GateMode::Unlock && !veiled,
+                                    crate::macos_window::configure_native_titlebar_fallback(),
+                                )
                             });
                         egui::CentralPanel::default()
                             .frame(egui::Frame::new().fill(theme::canvas()))

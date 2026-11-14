@@ -1,7 +1,18 @@
 /// AppKit 标题栏中需要由 egui 避让的原生控件尺寸。
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct NativeTitlebarMetrics {
-    pub(crate) reserved_width: f32,
+    traffic_lights_size: egui::Vec2,
+}
+
+impl NativeTitlebarMetrics {
+    #[cfg(target_os = "macos")]
+    const FALLBACK: Self = Self {
+        traffic_lights_size: egui::vec2(78.0, 34.0),
+    };
+
+    pub(crate) fn reserved_size(self, ctx: &egui::Context) -> egui::Vec2 {
+        self.traffic_lights_size / ctx.zoom_factor().max(0.1) + egui::vec2(10.0, 0.0)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -10,11 +21,7 @@ pub(crate) fn configure_native_titlebar(
 ) -> Option<NativeTitlebarMetrics> {
     // 即使极少数环境下拿不到 raw handle，也仍然是由 main.rs 创建的原生
     // AppKit 标题栏；只对避让宽度使用标准尺寸兜底，不能误画一套右侧按钮。
-    Some(
-        configure_native_titlebar_impl(cc).unwrap_or(NativeTitlebarMetrics {
-            reserved_width: 88.0,
-        }),
-    )
+    Some(configure_native_titlebar_impl(cc).unwrap_or(NativeTitlebarMetrics::FALLBACK))
 }
 
 #[cfg(target_os = "macos")]
@@ -79,10 +86,8 @@ fn configure_native_titlebar_impl(
     }
 
     let chrome = eframe::WindowChromeMetrics::from_window_handle(&raw_handle)?;
-    let zoom = cc.egui_ctx.zoom_factor().max(0.1);
     Some(NativeTitlebarMetrics {
-        // 系统测出的按钮组宽度已包含左右边距，再加 10pt 隔开交互区。
-        reserved_width: chrome.traffic_lights_size.x / zoom + 10.0,
+        traffic_lights_size: chrome.traffic_lights_size,
     })
 }
 
@@ -97,9 +102,7 @@ pub(crate) fn configure_native_titlebar(
 /// macOS 顶栏的避让宽度，与创建时测量失败后的兜底值一致。
 #[cfg(target_os = "macos")]
 pub(crate) fn configure_native_titlebar_fallback() -> Option<NativeTitlebarMetrics> {
-    Some(NativeTitlebarMetrics {
-        reserved_width: 88.0,
-    })
+    Some(NativeTitlebarMetrics::FALLBACK)
 }
 
 /// 其它平台没有原生标题栏，兜底同样是无。
