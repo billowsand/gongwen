@@ -424,6 +424,24 @@ impl AppShell {
         )
     }
 
+    /// 首次启用或修改策略时的准入复核：即使候选策略关闭 fail_closed，
+    /// 也必须先拿到网络与外设两份健康且未过期的初始样本。
+    fn evaluate_initial_environment(
+        &mut self,
+        policy: EnvironmentPolicy,
+    ) -> Option<crate::environment::Violation> {
+        let capture_healthy = self
+            .capture_guard
+            .update(policy.enabled && policy.capture_protection);
+        crate::environment::initial_admission_violation(
+            self.environment.snapshot(),
+            &policy,
+            &self.trusted_devices,
+            capture_healthy,
+            Instant::now(),
+        )
+    }
+
     fn finish_settings_save(&mut self, ctx: &egui::Context) {
         let ShellPhase::Ready(app) = &mut self.phase else {
             return;
@@ -458,7 +476,7 @@ impl AppShell {
                 return;
             }
             self.trusted_devices = super::export_devices::environment_approved_identities();
-            let violation = self.evaluate_environment(candidate);
+            let violation = self.evaluate_initial_environment(candidate);
             let ShellPhase::Ready(app) = &mut self.phase else {
                 return;
             };
@@ -531,7 +549,7 @@ impl AppShell {
             app.set_environment_summary(self.environment.snapshot().summary());
             let mut candidate = app.environment_draft;
             candidate.enabled = true;
-            let preview = crate::environment::evaluate(
+            let preview = crate::environment::initial_admission_violation(
                 self.environment.snapshot(),
                 &candidate,
                 &self.trusted_devices,
@@ -899,6 +917,16 @@ impl AppShell {
             }
             GateOutcome::RecoverEnvironment(password) => self.begin_unlock(ctx, password, true),
             GateOutcome::Setup { real, decoy } => {
+                // 全新目录里还没有 config.json。迁移只密封已存在的文件，若不在
+                // 这里先补一份默认关闭的配置，迁移后的环境闸门会把正常首设误判成
+                // “已有加密工作区丢失配置”。已有数据的工作区缺配置时该函数不改
+                // 磁盘，继续由环境闸门阻断并走恢复。
+                if let Err(error) = storage::prepare_first_setup_config() {
+                    let mut gate = GateState::first_run();
+                    gate.error = Some(format!("初始化新工作区配置失败：{error:#}"));
+                    self.phase = ShellPhase::Gate(gate);
+                    return;
+                }
                 match Vault::create(&real, decoy.as_deref(), false) {
                     Ok((_, Some(unlocked))) => {
                         self.begin_work(
@@ -1927,7 +1955,7 @@ fn unlock_form(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<GateE
             }
             if let Some(reason) = &gate.environment_block {
                 ui.label(egui::RichText::new(reason).color(theme::danger()));
-                ui.label("先排除风险再解锁。确需回退策略时，可用访问密码执行恢复。");
+                ui.label("先排除风险再解锁。确需回退策略时，可用访问密码执行恢复：配置不可读时会重建默认设置，影响范围可能超出环境策略；原密文会另存留证。");
                 if ui
                     .add_enabled(
                         !gate.password.is_empty(),
@@ -2477,6 +2505,89 @@ mod lifecycle_tests {
             let (saved, _) = storage::load().unwrap();
             assert!(!saved.environment.enabled);
             assert_eq!(saved.output_dir, "测试输出目录");
+
+            let ShellPhase::Ready(app) = &mut shell.phase else {
+                unreachable!()
+            };
+            app.save_environment_requested = true;
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Network(Ok(NetworkSnapshot::default())),
+                ))
+                .unwrap();
+            sender
+                .send((
+                    Instant::now(),
+                    MonitorEvent::Devices(Ok(DeviceSnapshot::default())),
+                ))
+                .unwrap();
+            shell.finish_settings_save(&egui::Context::default());
+            assert!(storage::load().unwrap().0.environment.enabled);
+        });
+    }
+
+    #[test]
+    fn first_setup_writes_and_seals_initial_config_before_entering_workspace() {
+        isolated(|| {
+            let ctx = egui::Context::default();
+            let mut shell = AppShell::gate(GateState::first_run(), None);
+            shell.apply_outcome(
+                &ctx,
+                GateOutcome::Setup {
+                    real: "Test#Valid2026Lock".into(),
+                    decoy: None,
+                },
+            );
+            let ShellPhase::Gate(gate) = &shell.phase else {
+                panic!("首次设置应进入加密进度页")
+            };
+            let working = gate.working.as_ref().expect("应启动加密迁移");
+            let result = working
+                .rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("加密迁移应完成");
+            assert!(result.is_ok(), "迁移失败：{result:?}");
+            shell.finish_work(&ctx, WorkKind::Encrypt, DataSlot::Real, result);
+            let ShellPhase::Gate(gate) = &shell.phase else {
+                panic!("测试没有启动资源，应停留在闸门");
+            };
+            assert!(
+                gate.environment_block.is_none(),
+                "全新目录首设不应被误判成配置丢失：{:?}",
+                gate.environment_block
+            );
+            let raw = std::fs::read(storage::config_path().unwrap()).unwrap();
+            assert!(crate::vault::is_sealed_file(&raw), "首设配置应已加密");
+            let key = crate::vault::key_handle().expect("迁移后仍有密钥句柄");
+            let policy = storage::read_environment_policy(&key).unwrap();
+            assert!(!policy.enabled);
+        });
+    }
+
+    #[test]
+    fn initial_preflight_requires_samples_even_when_fail_closed_is_off() {
+        isolated(|| {
+            use crate::environment::{DeviceSnapshot, Monitor, MonitorEvent, NetworkSnapshot};
+            let (mut shell, _) = protected_environment_fixture();
+            let (monitor, sender) = Monitor::test_channel();
+            shell.environment = monitor;
+            let ShellPhase::Ready(app) = &mut shell.phase else {
+                unreachable!()
+            };
+            app.environment_draft.enabled = true;
+            app.environment_draft.fail_closed = false;
+            app.save_environment_requested = true;
+            shell.finish_settings_save(&egui::Context::default());
+            let (saved, _) = storage::load().unwrap();
+            assert!(
+                !saved.environment.enabled,
+                "关闭失效锁定不能绕过首次准入的采样要求"
+            );
+            let ShellPhase::Ready(app) = &shell.phase else {
+                unreachable!()
+            };
+            assert!(app.environment_preview.contains("尚未取得"));
 
             let ShellPhase::Ready(app) = &mut shell.phase else {
                 unreachable!()

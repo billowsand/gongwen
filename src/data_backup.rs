@@ -6,9 +6,10 @@
 //! 提供一个范围明确、可校验、可回滚的 ZIP 备份。
 //!
 //! 取舍：
-//! - **排除瞬态与诊断文件**：`logs/`、`.unseen-crash`、`*.损坏-*`。它们只对
-//!   本机排查有用，恢复后反而可能让程序误报「上次异常退出」。**排除只用于导出**：
-//!   恢复校验另有独立遍历，不继承这份清单（见 [`collect_validation_files`]）。
+//! - **排除瞬态与诊断文件**：`logs/`、`.unseen-crash`、`*.损坏-*` 与恢复留证
+//!   `recovery/`。它们只对本机排查有用，恢复后反而可能让程序误报「上次异常退出」。
+//!   **排除只用于导出**：恢复校验另有独立遍历，不继承这份清单（见
+//!   [`collect_validation_files`]）。
 //! - **文件名净化**：恢复时任何含 `..`、绝对路径、盘符或控制字符的条目都会
 //!   被拒绝，整个恢复在动当前目录之前就中止，防 ZipSlip。
 //! - **容量上限与导出预检**：条目总数、单条尺寸、整包解压总量共用一份
@@ -974,6 +975,10 @@ fn is_excluded(rel: &Path) -> bool {
         name.eq_ignore_ascii_case(LOG_DIR)
             || name.eq_ignore_ascii_case(DECOY_LOG_DIR)
             || name.eq_ignore_ascii_case("help")
+            // 恢复留证是绑定旧路径、当前密钥通常解不开的原始密文，只用于
+            // 本机人工排查；带进备份既不能恢复工作区，也会让备份多出一份
+            // 无法认证用途的数据。
+            || name.eq_ignore_ascii_case(crate::storage::RECOVERY_EVIDENCE_DIR)
     }) {
         return true;
     }
@@ -1389,6 +1394,9 @@ mod tests {
             "pi/workspaces/doc-1/run-1/host-owner.lock"
         )));
         assert!(!is_excluded(Path::new("pi/skills/custom/notes.lock.txt")));
+        assert!(is_excluded(Path::new(
+            "recovery/config-20260101-000000-abc.bin"
+        )));
     }
 
     fn write(root: &Path, rel: &str, bytes: &[u8]) {

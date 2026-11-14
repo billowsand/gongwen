@@ -899,6 +899,9 @@ fn read_dir_if_exists(path: &Path) -> Result<Option<std::fs::ReadDir>> {
 /// 幂等：已是密文就直接返回。任何一步失败返回 Err，由闸门翻译成提示。
 pub(crate) fn ensure_slot_encrypted() -> Result<()> {
     let key = key_dek()?;
+    // 旧版固定名恢复留底绑定的是原 `config.json` 路径，不能当配置副本重新
+    // 密封或解封；先迁到独立留证范围，再走正常迁移。
+    crate::storage::migrate_legacy_recovery_evidence()?;
     recover_database_migration(&storage::manuscript_db_path()?)?;
     migrate_database(&storage::manuscript_db_path()?, Migration::ToEncrypted)?;
     for name in SEALED_FILE_NAMES {
@@ -1247,6 +1250,13 @@ fn directory_has_encrypted_data(path: PathBuf) -> bool {
 /// 改名，再以明文写回默认配置（静默降级），并且看起来「数据全没了」。
 /// 这里只做文件头嗅探，不打开数据库。
 pub(crate) fn slot_has_encrypted_data(slot: DataSlot) -> bool {
+    // 旧版固定名恢复留底也证明这个槽位曾经有加密配置；锁文件丢失时不能
+    // 因为主配置恰好不在就按普通工作区直接进入。
+    if storage::slot_file_for(slot, "config.json.recovery-backup")
+        .is_ok_and(|path| sealed_header_at(&path))
+    {
+        return true;
+    }
     // 先看「明确的密文证据」：密封的配置/密钥文件、密封的动态目录（apis/pi/ime/
     // skills/logs 与图片/图表缓存）。
     let sealed_names = SEALED_FILE_NAMES
@@ -1289,6 +1299,14 @@ pub(crate) fn slot_has_encrypted_data(slot: DataSlot) -> bool {
 pub(crate) fn slot_needs_encryption(slot: DataSlot) -> bool {
     #[cfg(feature = "ai-workbench")]
     if crate::pi_agent::sealed_tree::pending(slot) {
+        return true;
+    }
+    // 旧固定名留底需要迁到独立留证范围；即使其他文件都已加密，也要走一次
+    // 迁移，否则停用加密时仍会把它当配置副本解封而失败。
+    if slot == DataSlot::Real
+        && storage::slot_file_for(slot, "config.json.recovery-backup")
+            .is_ok_and(|path| path.is_file())
+    {
         return true;
     }
     if storage::slot_file_for(slot, "manuscripts.db")
@@ -1440,6 +1458,9 @@ fn file_head_is_not_sealed(path: &Path) -> bool {
 
 /// 停用的最后一步：把当前槽位的密文数据解回明文（库导出、小文件解封）。
 pub(crate) fn decrypt_slot_files() -> Result<()> {
+    // 旧固定名留底不能按 `config.json.*` 解封：它绑定的是原路径且可能是
+    // 另一代密钥。先迁走，停用扫描才不会把它当可正常解开的配置。
+    crate::storage::migrate_legacy_recovery_evidence()?;
     migrate_database(&storage::manuscript_db_path()?, Migration::ToPlain)?;
     unseal_resource_dirs()?;
     let handle = key_handle().context("停用加密需要当前槽位密钥")?;
@@ -2455,6 +2476,43 @@ mod tests {
         // 幂等：再来一遍不报错也不动数据。
         ensure_slot_encrypted().unwrap();
         assert_eq!(table_bodies(&path), vec!["公文", "助手"]);
+        drop(dir);
+        reset();
+    }
+
+    #[test]
+    fn legacy_recovery_backup_does_not_block_disable() {
+        let dir = use_temp_dir();
+        crate::storage::set_current_slot(DataSlot::Real);
+        std::fs::write(
+            crate::storage::config_path().unwrap(),
+            b"{\"output_dir\":\"x\"}",
+        )
+        .unwrap();
+        let (_vault, unlocked) = Vault::create(REAL_PW, None, false).unwrap();
+        let dek = *unlocked.unwrap().dek;
+        set_key_handle(dek, true);
+        ensure_slot_encrypted().unwrap();
+        let path = crate::storage::config_path().unwrap();
+        let sealed = std::fs::read(&path).unwrap();
+        let legacy = crate::storage::legacy_recovery_evidence_path().unwrap();
+        std::fs::write(&legacy, &sealed).unwrap();
+        assert!(
+            slot_needs_encryption(DataSlot::Real),
+            "只有旧留底时也要走一次迁移，才能把它移出停用扫描范围"
+        );
+
+        // 停用会把所有 config.json.* 当可解封配置；旧固定名留底必须先移走，
+        // 否则这里会因 AAD 路径不符而整体失败。
+        decrypt_slot_files().unwrap();
+        assert!(!legacy.exists());
+        assert!(!is_sealed_file(&std::fs::read(&path).unwrap()));
+        let evidence = std::fs::read_dir(crate::storage::config_dir().unwrap().join("recovery"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read(evidence.path()).unwrap(), sealed);
         drop(dir);
         reset();
     }

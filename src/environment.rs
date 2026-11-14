@@ -20,7 +20,7 @@ mod macos;
 #[allow(unsafe_code)]
 mod windows;
 
-pub(crate) use policy::{Violation, evaluate, evaluate_observed_risk};
+pub(crate) use policy::{Violation, evaluate, evaluate_observed_risk, initial_admission_violation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkInterfaceKind {
@@ -28,8 +28,12 @@ pub(crate) enum NetworkInterfaceKind {
     Wifi,
     Cellular,
     Vpn,
-    /// macOS AirDrop、AWDL、低功耗唤醒等常驻系统接口。
+    /// 平台已确认的常驻系统服务接口（如 macOS AWDL、LLW、ANPI）。
+    /// 只有这一类接口享受「可存在 / 可常驻链路 / 可持有自身地址」的例外。
     System,
+    /// 虚拟或软件接口（bridge、veth、Hyper-V、WSL 等）。常驻链路本身
+    /// 不判为联网，但取得可路由地址必须按普通接口处理。
+    Virtual,
     Other,
 }
 

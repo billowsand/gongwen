@@ -269,7 +269,9 @@ fn interface_kind(name: &str, path: &Path, loopback: bool) -> NetworkInterfaceKi
         .canonicalize()
         .is_ok_and(|real| real.to_string_lossy().contains("/virtual/"));
     if is_virtual {
-        return NetworkInterfaceKind::System;
+        // 桥接、veth、docker、虚拟机网卡等都能承载真实流量。它们可以常驻
+        // 链路，但不能像系统服务接口那样连可路由地址也豁免。
+        return NetworkInterfaceKind::Virtual;
     }
     let ethernet_type = read_hex(&path.join("type")).ok() == Some(1);
     if ethernet_type {
@@ -575,8 +577,7 @@ fn collect_devices() -> Result<DeviceSnapshot, String> {
             }
         }
         let details = if usb { block_usb_details(&path) } else { None };
-        let (id, identity) =
-            details.map_or_else(|| (format!("block:{name}"), None), |details| details);
+        let (id, identity) = details.unwrap_or_else(|| (format!("block:{name}"), None));
         devices.push(DeviceInfo {
             id,
             class: DeviceClass::RemovableStorage,

@@ -16,6 +16,8 @@ pub(crate) enum Violation {
     Device(DeviceClass),
     NetworkMonitorUnavailable,
     DeviceMonitorUnavailable,
+    InitialNetworkSampleRequired,
+    InitialDeviceSampleRequired,
     CaptureProtectionFailed,
 }
 
@@ -33,6 +35,8 @@ impl Violation {
             Self::Device(DeviceClass::Other) => "检测到未授权外部设备".into(),
             Self::NetworkMonitorUnavailable => "网络环境监控失效或快照过期".into(),
             Self::DeviceMonitorUnavailable => "设备环境监控失效或快照过期".into(),
+            Self::InitialNetworkSampleRequired => "尚未取得有效的网络采样，请稍候重试".into(),
+            Self::InitialDeviceSampleRequired => "尚未取得有效的外设采样，请稍候重试".into(),
             Self::CaptureProtectionFailed => "窗口捕获排除未生效".into(),
         }
     }
@@ -59,20 +63,34 @@ fn adapter_violation(interface: &NetworkInterface, policy: NetworkPolicy) -> Opt
     if interface.loopback {
         return None;
     }
+    // 三种例外分别对应：可存在、可常驻链路、可持有自身地址。
+    // 只有平台确认的系统服务接口（System）享受全部三项。Offline 下虚拟接口
+    // 与 VPN 可存在、可常驻链路，但取得可路由地址即视为联网；NoAdapters 下
+    // 虚拟接口与 VPN 仍算网卡存在。默认路由始终单独判定。
+    let confirmed_system_service = interface.kind == super::NetworkInterfaceKind::System;
+    let persistent_link = matches!(
+        interface.kind,
+        super::NetworkInterfaceKind::System
+            | super::NetworkInterfaceKind::Virtual
+            | super::NetworkInterfaceKind::Vpn
+    );
     match policy {
-        NetworkPolicy::NoAdapters if interface.kind == super::NetworkInterfaceKind::System => None,
+        NetworkPolicy::NoAdapters if confirmed_system_service => None,
         NetworkPolicy::NoAdapters => Some(Violation::AdapterPresent(interface.id.clone())),
-        // AirDrop / AWDL / LLW 等系统服务接口常驻且可能只有链路本地地址；
-        // 它们本身不代表外网可达。真正的默认路由仍由快照的独立字段判定。
-        NetworkPolicy::Offline if interface.kind == super::NetworkInterfaceKind::System => None,
-        // VPN 接口的“链路”常常常驻为真，只有取得可路由地址才视为联网。
-        NetworkPolicy::Offline
-            if interface.kind == super::NetworkInterfaceKind::Vpn
-                && interface.non_loopback_address =>
-        {
-            Some(Violation::NetworkAddress(interface.id.clone()))
+        // AirDrop / AWDL / LLW / ANPI 等已确认的系统服务接口常驻且可能只有
+        // 链路本地地址；它们本身不代表外网可达。真正的默认路由仍由快照的
+        // 独立字段判定。
+        NetworkPolicy::Offline if confirmed_system_service => None,
+        // 虚拟网桥、Hyper-V / WSL 网卡与 VPN 的链路常常常驻为真：没有可路由
+        // 地址时不能据此认定联网；一旦取得地址，即使没有默认路由也可能访问
+        // 直连网段，必须锁定。
+        NetworkPolicy::Offline if persistent_link => {
+            if interface.non_loopback_address {
+                Some(Violation::NetworkAddress(interface.id.clone()))
+            } else {
+                None
+            }
         }
-        NetworkPolicy::Offline if interface.kind == super::NetworkInterfaceKind::Vpn => None,
         NetworkPolicy::Offline if interface.link_up => {
             Some(Violation::NetworkLink(interface.id.clone()))
         }
@@ -103,6 +121,34 @@ pub(crate) fn evaluate(
         return Some(Violation::DeviceMonitorUnavailable);
     }
     evaluate_observed_risk(snapshot, policy, trusted_devices)
+}
+
+/// 首次启用/修改策略时的准入判定：无论用户是否选择「失效时立即锁定」，
+/// 都必须先拿到网络与外设两份健康且未过期的样本。运行期后端故障是否立即
+/// 锁定仍由 `fail_closed` 决定，两者不能共用一个开关。
+pub(crate) fn initial_admission_violation(
+    snapshot: &EnvironmentSnapshot,
+    policy: &EnvironmentPolicy,
+    trusted_devices: &BTreeSet<DeviceIdentity>,
+    capture_protection_healthy: bool,
+    now: Instant,
+) -> Option<Violation> {
+    if !policy.enabled {
+        return None;
+    }
+    if observed_unhealthy(snapshot.network.as_ref(), now, true) {
+        return Some(Violation::InitialNetworkSampleRequired);
+    }
+    if observed_unhealthy(snapshot.devices.as_ref(), now, true) {
+        return Some(Violation::InitialDeviceSampleRequired);
+    }
+    evaluate(
+        snapshot,
+        policy,
+        trusted_devices,
+        capture_protection_healthy,
+        now,
+    )
 }
 
 pub(crate) fn evaluate_observed_risk(
@@ -300,6 +346,102 @@ mod tests {
         assert_eq!(
             evaluate(&state, &no_adapters, &BTreeSet::new(), true, Instant::now()),
             Some(Violation::AdapterPresent("awdl0".into()))
+        );
+    }
+
+    #[test]
+    fn offline_mode_allows_idle_virtual_link_but_rejects_its_address() {
+        let policy = EnvironmentPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut bridge = interface("bridge0");
+        bridge.kind = super::super::NetworkInterfaceKind::Virtual;
+        bridge.link_up = true;
+        bridge.non_loopback_address = false;
+        let mut state = snapshot(NetworkSnapshot {
+            interfaces: vec![bridge.clone()],
+            default_route: false,
+        });
+        assert_eq!(
+            evaluate(&state, &policy, &BTreeSet::new(), true, Instant::now()),
+            None,
+            "常驻但未取得可路由地址的虚拟网桥不单独判为联网"
+        );
+
+        bridge.non_loopback_address = true;
+        state.network.as_mut().expect("network").value.interfaces = vec![bridge];
+        assert_eq!(
+            evaluate(&state, &policy, &BTreeSet::new(), true, Instant::now()),
+            Some(Violation::NetworkAddress("bridge0".into())),
+            "有可路由地址的虚拟网桥即使没有默认路由也可能访问直连网段"
+        );
+    }
+
+    #[test]
+    fn no_adapter_mode_counts_virtual_interface_as_adapter() {
+        let policy = EnvironmentPolicy {
+            enabled: true,
+            network: NetworkPolicy::NoAdapters,
+            ..Default::default()
+        };
+        let mut virtual_adapter = interface("vEthernet (WSL)");
+        virtual_adapter.kind = super::super::NetworkInterfaceKind::Virtual;
+        let state = snapshot(NetworkSnapshot {
+            interfaces: vec![virtual_adapter],
+            default_route: false,
+        });
+        assert_eq!(
+            evaluate(&state, &policy, &BTreeSet::new(), true, Instant::now()),
+            Some(Violation::AdapterPresent("vEthernet (WSL)".into())),
+            "只有平台确认的系统服务接口才享受存在例外"
+        );
+    }
+
+    #[test]
+    fn initial_admission_requires_both_fresh_samples_when_not_fail_closed() {
+        let policy = EnvironmentPolicy {
+            enabled: true,
+            fail_closed: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            initial_admission_violation(
+                &EnvironmentSnapshot::default(),
+                &policy,
+                &BTreeSet::new(),
+                true,
+                Instant::now(),
+            ),
+            Some(Violation::InitialNetworkSampleRequired),
+            "首次启用不能因为关闭失效锁定就跳过初始采样"
+        );
+
+        let state = snapshot(NetworkSnapshot::default());
+        assert_eq!(
+            initial_admission_violation(&state, &policy, &BTreeSet::new(), true, Instant::now(),),
+            None
+        );
+
+        let mut no_devices = snapshot(NetworkSnapshot::default());
+        no_devices.devices = None;
+        assert_eq!(
+            initial_admission_violation(
+                &no_devices,
+                &policy,
+                &BTreeSet::new(),
+                true,
+                Instant::now(),
+            ),
+            Some(Violation::InitialDeviceSampleRequired)
+        );
+
+        let mut stale = snapshot(NetworkSnapshot::default());
+        stale.network.as_mut().expect("network").observed_at =
+            Instant::now() - SNAPSHOT_MAX_AGE - Duration::from_secs(1);
+        assert_eq!(
+            initial_admission_violation(&stale, &policy, &BTreeSet::new(), true, Instant::now(),),
+            Some(Violation::InitialNetworkSampleRequired)
         );
     }
 

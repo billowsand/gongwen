@@ -54,14 +54,14 @@ impl GongwenApp {
                     NetworkPolicy::Offline,
                     "网卡可存在，但不得联网",
                 )
-                .on_hover_text("网卡链路连接、取得可路由地址或出现默认路由都会触发锁定。");
+                .on_hover_text("网卡链路连接、取得可路由地址或出现默认路由都会触发锁定；系统服务接口与常驻虚拟链路按各自规则判定。");
                 ui.radio_value(
                     &mut policy.network,
                     NetworkPolicy::NoAdapters,
                     "不得存在网卡",
                 )
                 .on_hover_text(
-                    "物理网卡、VPN 等用户网络接口存在即锁定；AirDrop 等系统服务接口除外。",
+                    "物理网卡、虚拟网卡、VPN 等存在即锁定；只有确认的系统服务接口除外。",
                 );
             },
         );

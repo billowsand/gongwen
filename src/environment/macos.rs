@@ -798,6 +798,8 @@ fn network_interface_kinds() -> Result<BTreeMap<String, NetworkInterfaceKind>, S
         // SAFETY: 比较的静态常量由 SystemConfiguration 框架提供且进程生命周期内有效。
         let kind = if is_system_service_interface(&name) {
             NetworkInterfaceKind::System
+        } else if is_virtual_interface(&name) {
+            NetworkInterfaceKind::Virtual
         } else {
             // SAFETY: 比较的静态常量由 SystemConfiguration 框架提供且进程生命周期内有效。
             unsafe {
@@ -823,7 +825,15 @@ fn network_interface_kinds() -> Result<BTreeMap<String, NetworkInterfaceKind>, S
 }
 
 fn is_system_service_interface(name: &str) -> bool {
-    ["awdl", "llw", "anpi", "ap", "bridge", "gif", "stf", "nan"]
+    // 只收平台确认常驻、且通常只有链路本地地址的系统服务接口。
+    // bridge / ap / vmenet 属于虚拟网卡，不能借这个例外跳过地址检查。
+    ["awdl", "llw", "anpi", "nan"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+fn is_virtual_interface(name: &str) -> bool {
+    ["bridge", "ap", "vmenet", "vmnet"]
         .iter()
         .any(|prefix| name.starts_with(prefix))
 }
@@ -834,10 +844,14 @@ fn infer_interface_kind(name: &str) -> NetworkInterfaceKind {
         || name.starts_with("tap")
         || name.starts_with("tun")
         || name.starts_with("ppp")
+        || name.starts_with("gif")
+        || name.starts_with("stf")
     {
         NetworkInterfaceKind::Vpn
     } else if is_system_service_interface(name) {
         NetworkInterfaceKind::System
+    } else if is_virtual_interface(name) {
+        NetworkInterfaceKind::Virtual
     } else if name.starts_with("wlan") || name.starts_with("wifi") {
         NetworkInterfaceKind::Wifi
     } else if name.starts_with("rmnet") || name.starts_with("pdp_ip") {
@@ -1243,6 +1257,21 @@ mod tests {
     fn null_native_objects_do_not_reach_release() {
         assert!(CfObject::retained(ptr::null()).is_none());
         assert!(IoHandle::new(0).is_none());
+    }
+
+    #[test]
+    fn virtual_bridges_do_not_get_the_system_service_exemption() {
+        assert_eq!(
+            infer_interface_kind("bridge0"),
+            NetworkInterfaceKind::Virtual
+        );
+        assert_eq!(infer_interface_kind("ap1"), NetworkInterfaceKind::Virtual);
+        assert_eq!(
+            infer_interface_kind("awdl0"),
+            NetworkInterfaceKind::System,
+            "只有确认的系统服务接口才享受地址例外"
+        );
+        assert_eq!(infer_interface_kind("gif0"), NetworkInterfaceKind::Vpn);
     }
 
     #[test]

@@ -369,13 +369,8 @@ pub(crate) fn recover_environment_policy(unlocked: &crate::vault::Unlocked) -> R
         {
             Some(config) => config,
             None => {
-                // 原密文留底；显式恢复会重建默认配置，而不是悄悄丢弃损坏现场。
-                let backup = path.with_file_name("config.json.recovery-backup");
-                atomic_replace(&backup, |file| {
-                    use std::io::Write as _;
-                    file.write_all(&raw)?;
-                    Ok(())
-                })?;
+                // 原密文放入独立留证范围；显式恢复会重建默认配置，而不是悄悄丢弃损坏现场。
+                preserve_recovery_evidence(&raw)?;
                 serde_json::to_value(crate::models::AppConfig::default())?
             }
         },
@@ -393,6 +388,120 @@ pub(crate) fn recover_environment_policy(unlocked: &crate::vault::Unlocked) -> R
         file.write_all(&sealed)?;
         Ok(())
     })
+}
+
+/// 恢复留证目录名。与 `config.json.*` 副本分开：留证里的字节绑定的是**旧**
+/// 逻辑路径，不能再按 `config.json` 的 AAD 解封，也不属于工作区配置。
+pub(crate) const RECOVERY_EVIDENCE_DIR: &str = "recovery";
+
+/// 把无法解开的配置原密文放进独立留证范围，并用唯一文件名保存。
+///
+/// 这些字节只用于人工排查/恢复，不能参与启用加密时的迁移或停用加密时的
+/// 解封；因此它与 `config.json.*` 副本彻底分开，且不进入全量备份。
+pub(crate) fn preserve_recovery_evidence(raw: &[u8]) -> Result<PathBuf> {
+    let dir = config_dir()?.join(RECOVERY_EVIDENCE_DIR);
+    fs::create_dir_all(&dir).with_context(|| format!("创建留证目录 {} 失败", dir.display()))?;
+    harden_dir(&dir);
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = dir.join(format!(
+        "config-{stamp}-{}.bin",
+        uuid::Uuid::new_v4().simple()
+    ));
+    // 恢复是在锁屏写入被暂停时执行的显式认证操作，和替换配置一样走
+    // `atomic_replace`，不能被 `writes_blocked` 挡住留证。
+    atomic_replace(&path, |file| {
+        use std::io::Write as _;
+        file.write_all(raw)?;
+        Ok(())
+    })
+    .with_context(|| format!("保存恢复留证 {} 失败", path.display()))?;
+    Ok(path)
+}
+
+/// 旧版环境策略恢复留下的固定文件名。它原样复制了绑定 `config.json` 路径的
+/// GWA2 密文，按新路径解不开，必须迁到独立留证范围；不能继续参与启用/停用扫描。
+pub(crate) fn legacy_recovery_evidence_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("config.json.recovery-backup"))
+}
+
+/// 把旧固定名留底移动到独立留证范围。先写新证据，成功后才删旧文件；
+/// 中途失败时两份都在，下次重试会生成新证据并继续清理旧文件。
+pub(crate) fn migrate_legacy_recovery_evidence() -> Result<()> {
+    if current_slot() != DataSlot::Real {
+        return Ok(());
+    }
+    let legacy = legacy_recovery_evidence_path()?;
+    if !legacy.is_file() {
+        return Ok(());
+    }
+    let raw =
+        fs::read(&legacy).with_context(|| format!("读取旧恢复留底 {} 失败", legacy.display()))?;
+    preserve_recovery_evidence(&raw)?;
+    fs::remove_file(&legacy)
+        .with_context(|| format!("删除旧恢复留底 {} 失败", legacy.display()))?;
+    Ok(())
+}
+
+/// 是否已有可确认的工作区数据。首次设置密码只允许在真正的空白目录里补默认
+/// 配置；已有稿件库、资源目录或未知文件时，缺配置必须继续走恢复阻断。
+pub(crate) fn workspace_has_existing_data() -> bool {
+    let Ok(dir) = config_dir() else {
+        return true;
+    };
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        // 全新安装时配置目录还不存在，这正是「没有既有数据」的正常形态；
+        // 其他读取错误无法确认现场，继续按已有数据处理。
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if matches!(
+            name.as_str(),
+            ".unseen-crash"
+                | "instance.lock"
+                | "instance.endpoint"
+                | ".DS_Store"
+                | "Thumbs.db"
+                | "desktop.ini"
+        ) || name.starts_with(".tmp")
+        {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            return true;
+        };
+        if meta.is_dir() {
+            // 日志、旧帮助与进程转交目录不是工作区数据；其余目录只要存在
+            // 就按已有数据处理，宁可继续阻断也不覆盖现场。
+            if matches!(name.as_str(), "logs" | "alt-logs" | "help" | "inbox") {
+                continue;
+            }
+            return true;
+        }
+        if meta.is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+/// 全新目录首次设置密码前补一份默认配置（环境检测默认关闭）。此文件随后由
+/// 解锁迁移密封成密文；只在确认没有既有工作区数据时写入，避免把“已有工作区
+/// 丢失配置”误当成新装而悄悄重建。
+pub(crate) fn prepare_first_setup_config() -> Result<()> {
+    if workspace_has_existing_data() {
+        return Ok(());
+    }
+    let path = slot_file_for(DataSlot::Real, "config.json")?;
+    let bytes = serde_json::to_vec_pretty(&AppConfig::default()).context("配置序列化失败")?;
+    atomic_write(&path, |file| {
+        use std::io::Write as _;
+        file.write_all(&bytes)?;
+        Ok(())
+    })
+    .context("首次设置密码时写入默认配置失败")
 }
 
 /// 启动外壳需要提前读取主题时使用：只读解析，不迁移、不挪走损坏文件。
@@ -875,6 +984,101 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(fs::read(&path).unwrap(), b"previous config");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn first_setup_config_is_created_before_the_directory_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("尚未创建的配置目录");
+        set_test_config_dir(Some(fresh.clone()));
+        assert!(!workspace_has_existing_data());
+        prepare_first_setup_config().unwrap();
+        assert!(fresh.join("config.json").is_file());
+        set_test_config_dir(None);
+    }
+
+    #[test]
+    fn first_setup_config_is_only_created_for_an_empty_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        set_test_config_dir(Some(dir.path().to_owned()));
+        assert!(!workspace_has_existing_data());
+        prepare_first_setup_config().unwrap();
+        let config: AppConfig =
+            serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap()).unwrap();
+        assert!(!config.environment.enabled, "首设默认必须关闭环境检测");
+
+        // 已有工作区数据但配置缺失：不能补默认配置，继续交给恢复阻断。
+        fs::remove_file(dir.path().join("config.json")).unwrap();
+        fs::write(dir.path().join("manuscripts.db"), b"").unwrap();
+        assert!(workspace_has_existing_data());
+        prepare_first_setup_config().unwrap();
+        assert!(!dir.path().join("config.json").exists());
+        set_test_config_dir(None);
+    }
+
+    #[test]
+    fn recovery_evidence_is_unique_and_outside_config_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        set_test_config_dir(Some(dir.path().to_owned()));
+        let first = preserve_recovery_evidence(b"first ciphertext").unwrap();
+        let second = preserve_recovery_evidence(b"second ciphertext").unwrap();
+        assert_ne!(first, second, "多次恢复不能覆盖上一份留证");
+        let evidence_dir = dir.path().join(RECOVERY_EVIDENCE_DIR);
+        assert_eq!(first.parent(), Some(evidence_dir.as_path()));
+        assert_eq!(fs::read(&first).unwrap(), b"first ciphertext");
+        assert_eq!(fs::read(&second).unwrap(), b"second ciphertext");
+        assert!(
+            workspace_has_existing_data(),
+            "留证也是现有现场，不能按全新目录覆盖"
+        );
+        set_test_config_dir(None);
+    }
+
+    #[test]
+    fn unreadable_recovery_keeps_original_bytes_in_evidence_and_rebuilds_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        set_test_config_dir(Some(dir.path().to_owned()));
+        let (_, unlocked) = crate::vault::Vault::create("Test#Valid2026Lock", None, false).unwrap();
+        let unlocked = unlocked.unwrap();
+        let path = config_path().unwrap();
+        // 另一把密钥封出的配置：当前解锁密钥解不开，恢复必须留证而不是覆盖。
+        let raw = crate::vault::seal_bytes(&[9u8; 32], br#"{"auto_lock_minutes":37}"#).unwrap();
+        fs::write(&path, &raw).unwrap();
+        // 锁屏恢复时配置写入是暂停的；认证后的恢复和留证仍必须能落盘。
+        crate::storage::set_writes_blocked(true);
+        recover_environment_policy(&unlocked).unwrap();
+        crate::storage::set_writes_blocked(false);
+        let evidence = fs::read_dir(dir.path().join(RECOVERY_EVIDENCE_DIR))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(fs::read(evidence.path()).unwrap(), raw);
+        let key = crate::vault::KeyHandle::from_unlock(&unlocked, true);
+        let stored =
+            crate::vault::open_path_bytes(&key, &path, "config", &fs::read(&path).unwrap())
+                .unwrap();
+        let config: AppConfig = serde_json::from_slice(&stored).unwrap();
+        assert!(!config.environment.enabled);
+        crate::vault::clear_key_handle();
+        set_test_config_dir(None);
+    }
+
+    #[test]
+    fn legacy_recovery_backup_moves_into_the_evidence_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        set_test_config_dir(Some(dir.path().to_owned()));
+        let legacy = legacy_recovery_evidence_path().unwrap();
+        fs::write(&legacy, b"path-bound ciphertext").unwrap();
+        migrate_legacy_recovery_evidence().unwrap();
+        assert!(!legacy.exists(), "旧固定名文件必须移走，停用扫描不能再碰它");
+        let evidence = fs::read_dir(dir.path().join(RECOVERY_EVIDENCE_DIR))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(fs::read(evidence.path()).unwrap(), b"path-bound ciphertext");
+        set_test_config_dir(None);
     }
 
     #[test]

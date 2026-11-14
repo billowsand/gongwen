@@ -5,6 +5,7 @@ use super::{
 use eframe::egui;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
+use std::io;
 use std::mem::{size_of, size_of_val};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::ptr::{self, addr_of, addr_of_mut};
@@ -29,24 +30,33 @@ use windows_sys::Win32::{
         Properties::{DEVPKEY_Device_InstanceId, DEVPROP_TYPE_STRING},
         Usb::GUID_DEVINTERFACE_USB_DEVICE,
     },
-    Foundation::{HANDLE, HINSTANCE, HWND},
+    Foundation::{
+        CloseHandle, ERROR_DEVICE_NOT_CONNECTED, ERROR_FILE_NOT_FOUND, ERROR_NOT_READY,
+        ERROR_PATH_NOT_FOUND, GENERIC_READ, HANDLE, HINSTANCE, HWND, INVALID_HANDLE_VALUE,
+    },
     NetworkManagement::{
         IpHelper::{
             CancelMibChangeNotify2, FreeMibTable, GetIfTable2, GetIpForwardTable2,
             GetUnicastIpAddressTable, IF_TYPE_ETHERNET_CSMACD, IF_TYPE_FASTETHER,
             IF_TYPE_FASTETHER_FX, IF_TYPE_GIGABITETHERNET, IF_TYPE_IEEE80211, IF_TYPE_PPP,
-            IF_TYPE_PPPMULTILINKBUNDLE, IF_TYPE_PROP_VIRTUAL, IF_TYPE_PROP_WIRELESS_P2P,
-            IF_TYPE_SOFTWARE_LOOPBACK, IF_TYPE_TUNNEL, IF_TYPE_WWANPP, IF_TYPE_WWANPP2,
-            MIB_IF_TABLE2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_NOTIFICATION_TYPE,
-            MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE, NotifyIpInterfaceChange,
-            NotifyRouteChange2, NotifyUnicastIpAddressChange,
+            IF_TYPE_PPPMULTILINKBUNDLE, IF_TYPE_PROP_WIRELESS_P2P, IF_TYPE_SOFTWARE_LOOPBACK,
+            IF_TYPE_TUNNEL, IF_TYPE_WWANPP, IF_TYPE_WWANPP2, MIB_IF_TABLE2, MIB_IPFORWARD_ROW2,
+            MIB_IPFORWARD_TABLE2, MIB_NOTIFICATION_TYPE, MIB_UNICASTIPADDRESS_ROW,
+            MIB_UNICASTIPADDRESS_TABLE, NotifyIpInterfaceChange, NotifyRouteChange2,
+            NotifyUnicastIpAddressChange,
         },
         Ndis::{IfOperStatusUp, NET_IF_ACCESS_LOOPBACK},
     },
     Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC},
-    Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW},
+    Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    },
     System::{
-        Ioctl::{GUID_DEVINTERFACE_CDROM, GUID_DEVINTERFACE_DISK},
+        IO::DeviceIoControl,
+        Ioctl::{
+            GET_LENGTH_INFORMATION, GUID_DEVINTERFACE_CDROM, GUID_DEVINTERFACE_DISK,
+            IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_CHECK_VERIFY,
+        },
         LibraryLoader::GetModuleHandleW,
     },
     UI::WindowsAndMessaging::{
@@ -205,9 +215,10 @@ fn interface_kind(kind: u32) -> NetworkInterfaceKind {
         | IF_TYPE_GIGABITETHERNET => NetworkInterfaceKind::Ethernet,
         IF_TYPE_IEEE80211 | IF_TYPE_PROP_WIRELESS_P2P => NetworkInterfaceKind::Wifi,
         IF_TYPE_WWANPP | IF_TYPE_WWANPP2 => NetworkInterfaceKind::Cellular,
-        IF_TYPE_PPP | IF_TYPE_PPPMULTILINKBUNDLE | IF_TYPE_TUNNEL | IF_TYPE_PROP_VIRTUAL => {
-            NetworkInterfaceKind::Vpn
-        }
+        IF_TYPE_PPP | IF_TYPE_PPPMULTILINKBUNDLE | IF_TYPE_TUNNEL => NetworkInterfaceKind::Vpn,
+        // `IF_TYPE_PROP_VIRTUAL` 既可能是 Hyper-V/WSL，也可能是硬件厂商的
+        // 虚拟功能；统一归入 Other，再由 HardwareInterface 标志决定是否
+        // 按虚拟接口处理。
         _ => NetworkInterfaceKind::Other,
     }
 }
@@ -277,7 +288,9 @@ fn network_snapshot() -> Result<NetworkSnapshot, String> {
                 || addressed.contains(&(0, row.InterfaceIndex)));
         let mut kind = interface_kind(row.Type);
         // MIB_IF_ROW2 的第一位是 HardwareInterface：Hyper-V、WSL、Docker 等
-        // 常驻虚拟网卡可能保持 Up，但不代表本机获得了外网能力。
+        // 常驻虚拟网卡可能保持 Up，也可能取得可路由地址（例如 WSL 的
+        // vEthernet）。它们不能按确认的系统服务接口豁免，必须单独归为
+        // Virtual，由策略检查地址。
         if !loopback
             && matches!(
                 kind,
@@ -287,7 +300,7 @@ fn network_snapshot() -> Result<NetworkSnapshot, String> {
             )
             && row.InterfaceAndOperStatusFlags._bitfield & 1 == 0
         {
-            kind = NetworkInterfaceKind::System;
+            kind = NetworkInterfaceKind::Virtual;
         }
         result.interfaces.push(NetworkInterface {
             id: if luid == 0 {
@@ -565,7 +578,7 @@ fn interface_instance(path: &[u16]) -> Result<Option<(u32, String)>, String> {
     Ok(Some((node, instance)))
 }
 
-fn interface_instances(guid: &GUID) -> Result<Vec<(u32, String)>, String> {
+fn interface_instances(guid: &GUID) -> Result<Vec<(u32, String, Vec<u16>)>, String> {
     for _ in 0..3 {
         let mut length = 0;
         // SAFETY: length is writable and a null device ID requests all present interfaces of this class.
@@ -610,10 +623,15 @@ fn interface_instances(guid: &GUID) -> Result<Vec<(u32, String)>, String> {
         {
             let path: Vec<u16> = path.iter().copied().chain(std::iter::once(0)).collect();
             if let Some((node, id)) = interface_instance(&path)? {
-                nodes.entry(node).or_insert(id);
+                // 同一 devnode 的多个接口路径保留第一个；介质检查只需要一个
+                // 能打开的设备句柄。
+                nodes.entry(node).or_insert((id, path));
             }
         }
-        return Ok(nodes.into_iter().collect());
+        return Ok(nodes
+            .into_iter()
+            .map(|(node, (id, path))| (node, id, path))
+            .collect());
     }
     Err("设备接口列表在枚举期间持续变化".into())
 }
@@ -689,7 +707,7 @@ fn registry_strings(node: u32, property: u32) -> Result<Vec<String>, String> {
         return Ok(buffer[..units]
             .split(|&unit| unit == 0)
             .filter(|entry| !entry.is_empty())
-            .map(|entry| String::from_utf16_lossy(entry))
+            .map(String::from_utf16_lossy)
             .collect());
     }
     Err(format!("设备字符串属性 {property} 在读取期间持续变化"))
@@ -772,12 +790,11 @@ fn usb_identity(usb: &UsbDevice) -> Option<DeviceIdentity> {
 fn usb_class(node: u32) -> Result<Option<u8>, String> {
     for id in registry_strings(node, CM_DRP_COMPATIBLEIDS)? {
         let id = id.to_ascii_uppercase();
-        if let Some(start) = id.find("CLASS_") {
-            if let Some(digits) = id.get(start + 6..start + 8) {
-                if let Ok(class) = u8::from_str_radix(digits, 16) {
-                    return Ok(Some(class));
-                }
-            }
+        if let Some(start) = id.find("CLASS_")
+            && let Some(digits) = id.get(start + 6..start + 8)
+            && let Ok(class) = u8::from_str_radix(digits, 16)
+        {
+            return Ok(Some(class));
         }
     }
     Ok(None)
@@ -805,55 +822,79 @@ fn add_device(
     }
 }
 
-/// 空的 CD/DVD 驱动器仍会注册设备接口，不能据此判定有可读介质。
-fn optical_media_present() -> bool {
-    const DRIVE_CDROM: u32 = 5;
-    // SAFETY: GetLogicalDrives 无指针参数，返回当前进程可见的盘符位图。
-    let drives = unsafe { GetLogicalDrives() };
-    for index in 0..26 {
-        if drives & (1 << index) == 0 {
-            continue;
-        }
-        let root = [
-            u16::from(b'A') + index as u16,
-            u16::from(b':'),
-            u16::from(b'\\'),
-            0,
-        ];
-        // SAFETY: root 是 NUL 结尾的盘符路径。
-        if unsafe { GetDriveTypeW(root.as_ptr()) } != DRIVE_CDROM {
-            continue;
-        }
-        let mut serial = 0;
-        let mut component = 0;
-        let mut flags = 0;
-        // SAFETY: root 有效；其余可空输出全部传空，失败即表示当前无可用数据介质。
-        let present = unsafe {
-            GetVolumeInformationW(
-                root.as_ptr(),
-                ptr::null_mut(),
-                0,
-                &mut serial,
-                &mut component,
-                &mut flags,
-                ptr::null_mut(),
-                0,
-            )
-        };
-        if present != 0 {
-            return true;
-        }
+/// 空的 CD/DVD 驱动器、空读卡器仍会注册设备接口或 devnode。只有能对
+/// **该设备句柄**证明介质可读时才登记；无法判断时按有介质处理（fail-closed）。
+fn media_error_means_absent(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(code)
+            if code == ERROR_NOT_READY as i32
+                || code == ERROR_FILE_NOT_FOUND as i32
+                || code == ERROR_PATH_NOT_FOUND as i32
+                || code == ERROR_DEVICE_NOT_CONNECTED as i32
+    )
+}
+
+fn device_media_present(path: &[u16], ioctl: u32) -> bool {
+    // SAFETY: path 来自设备接口列表且保持 NUL 结尾；其余参数为固定只读访问。
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return !media_error_means_absent(&io::Error::last_os_error());
     }
-    false
+    let mut info = GET_LENGTH_INFORMATION { Length: 0 };
+    let mut returned = 0u32;
+    let (output, output_size) = if ioctl == IOCTL_DISK_GET_LENGTH_INFO {
+        (
+            addr_of_mut!(info).cast::<c_void>(),
+            size_of_val(&info) as u32,
+        )
+    } else {
+        // CHECK_VERIFY 不需要输出缓冲区；传非空缓冲区可能被部分驱动拒绝。
+        (ptr::null_mut(), 0)
+    };
+    // SAFETY: handle 由 CreateFileW 打开且在本调用期间有效；输出缓冲区按 IOCTL 约定提供。
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            ioctl,
+            ptr::null(),
+            0,
+            output,
+            output_size,
+            &mut returned,
+            ptr::null_mut(),
+        )
+    };
+    let error = (ok == 0).then(io::Error::last_os_error);
+    // SAFETY: handle 来自本函数的 CreateFileW，尚未转移所有权。
+    unsafe {
+        CloseHandle(handle);
+    }
+    match error {
+        // 光驱的 CHECK_VERIFY 成功即表示有介质；磁盘再看实际长度，避免
+        // 空读卡器/零容量虚拟盘被登记成移动存储。
+        None => ioctl != IOCTL_DISK_GET_LENGTH_INFO || info.Length > 0,
+        Some(error) => !media_error_means_absent(&error),
+    }
 }
 
 fn device_snapshot() -> Result<DeviceSnapshot, String> {
     let mut devices = BTreeMap::new();
     let mut classified_usb = BTreeSet::new();
 
-    for (node, id) in interface_instances(&GUID_DEVINTERFACE_DISK)? {
+    for (node, id, path) in interface_instances(&GUID_DEVINTERFACE_DISK)? {
         let ancestry = ancestry(node)?;
-        if !ancestry.removable {
+        if !ancestry.removable || !device_media_present(&path, IOCTL_DISK_GET_LENGTH_INFO) {
             continue;
         }
         let device_id = ancestry
@@ -871,30 +912,28 @@ fn device_snapshot() -> Result<DeviceSnapshot, String> {
             identity,
         );
     }
-    if optical_media_present() {
-        for (node, id) in interface_instances(&GUID_DEVINTERFACE_CDROM)? {
-            let ancestry = ancestry(node)?;
-            if !ancestry.removable {
-                continue;
-            }
-            let device_id = ancestry
-                .usb
-                .as_ref()
-                .map_or_else(|| id.clone(), |usb| usb.id.clone());
-            let identity = ancestry.usb.as_ref().and_then(usb_identity);
-            if let Some(usb) = ancestry.usb {
-                classified_usb.insert(usb.id);
-            }
-            add_device(
-                &mut devices,
-                device_id,
-                DeviceClass::RemovableStorage,
-                identity,
-            );
+    for (node, id, path) in interface_instances(&GUID_DEVINTERFACE_CDROM)? {
+        let ancestry = ancestry(node)?;
+        if !ancestry.removable || !device_media_present(&path, IOCTL_STORAGE_CHECK_VERIFY) {
+            continue;
         }
+        let device_id = ancestry
+            .usb
+            .as_ref()
+            .map_or_else(|| id.clone(), |usb| usb.id.clone());
+        let identity = ancestry.usb.as_ref().and_then(usb_identity);
+        if let Some(usb) = ancestry.usb {
+            classified_usb.insert(usb.id);
+        }
+        add_device(
+            &mut devices,
+            device_id,
+            DeviceClass::RemovableStorage,
+            identity,
+        );
     }
 
-    for (node, id) in interface_instances(&GUID_DEVINTERFACE_WPD)? {
+    for (node, id, _) in interface_instances(&GUID_DEVINTERFACE_WPD)? {
         let usb = ancestry(node)?.usb;
         let identity = usb.as_ref().and_then(usb_identity);
         if let Some(usb) = usb {
@@ -907,7 +946,7 @@ fn device_snapshot() -> Result<DeviceSnapshot, String> {
         (&GUID_DEVINTERFACE_HID, DeviceClass::HumanInterface),
         (&GUID_DEVINTERFACE_IMAGE, DeviceClass::Imaging),
     ] {
-        for (node, id) in interface_instances(guid)? {
+        for (node, id, _) in interface_instances(guid)? {
             let Some(usb) = ancestry(node)?.usb else {
                 continue;
             };
@@ -917,13 +956,13 @@ fn device_snapshot() -> Result<DeviceSnapshot, String> {
         }
     }
 
-    for (node, id) in interface_instances(&GUID_DEVINTERFACE_USB_DEVICE)? {
+    for (node, id, _) in interface_instances(&GUID_DEVINTERFACE_USB_DEVICE)? {
         let class = usb_class(node)?;
         let mapped = match class {
             Some(0x03) => Some(DeviceClass::HumanInterface),
             Some(0x06 | 0x0e) => Some(DeviceClass::Imaging),
             // 类 08 只表示支持大容量传输；空读卡器/光驱常驻，实际介质由
-            // DISK/CDROM 接口和 optical_media_present 判定。
+            // DISK/CDROM 接口逐设备检查。
             Some(0x08 | 0x09) => None,
             _ => Some(DeviceClass::Other),
         };

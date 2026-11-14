@@ -75,10 +75,15 @@ impl CaptureGuard {
             }
             self.healthy = if self.hwnd.is_null() {
                 !requested
-            } else if requested {
-                set_affinity(self.hwnd, true) && affinity_is_protected(self.hwnd)
-            } else {
+            } else if !requested {
                 set_affinity(self.hwnd, false)
+            } else if self.requested {
+                // 持续复核只读当前状态：保护被移除时不能先偷偷补设再报健康，
+                // 否则界面承诺的「被移除时锁定」永远触发不了。
+                affinity_is_protected(self.hwnd)
+            } else {
+                // 首次启用或从关闭切回启用时，才允许主动设置。
+                set_affinity(self.hwnd, true) && affinity_is_protected(self.hwnd)
             };
             self.requested = requested;
             self.last_check = Some(now);
