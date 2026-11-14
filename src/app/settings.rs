@@ -1768,8 +1768,11 @@ impl GongwenApp {
         ui.add_space(8.0);
         let can_change_export = !self.any_busy()
             && self.pending_output.is_none()
+            && self.media_export.is_none()
             && self.pending_file_dialogs.is_empty();
         ui.add_enabled_ui(can_change_export, |ui| self.vault_page.export.ui(ui));
+        ui.separator();
+        self.vault_page.export_devices.ui(ui, can_change_export);
         self.print_trace_settings_ui(ui);
     }
 

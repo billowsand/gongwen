@@ -83,6 +83,7 @@ fn render_export_to(
     config: &crate::models::AppConfig,
     kind: ExportKind,
     target: &Path,
+    protection: Option<&export::protection::Protection>,
 ) -> anyhow::Result<crate::app::widgets::ExportOutcome> {
     let memory_root = Path::new("memory-export");
     let mut selection = kind.selection(true, false);
@@ -116,7 +117,7 @@ fn render_export_to(
     } else {
         target.to_path_buf()
     };
-    let target = export::protection::write_final(&logical_target, &bytes)?;
+    let target = export::protection::write_final_with(protection, &logical_target, &bytes)?;
     outcome.files = vec![target];
     Ok(outcome)
 }
@@ -172,11 +173,20 @@ impl DraftPage<'_> {
             self.start_confirmed_export(selection, open, print);
             return;
         }
-        if !print || crate::vault::key_handle().is_some() {
-            if !print && let Err(error) = export::protection::Protection::current() {
-                *self.status = format!("无法导出：{error:#}");
-                return;
-            }
+        if print {
+            self.start_confirmed_export(selection, None, true);
+            return;
+        }
+        if crate::vault::key_handle().is_some() {
+            self.actions.push(DraftAction::ChooseDraftDelivery {
+                key: self.doc.key,
+                selection,
+                open,
+                copy: None,
+            });
+            return;
+        }
+        {
             let key = self.doc.key;
             let mut formats = Vec::new();
             if selection.pdf {
@@ -195,16 +205,10 @@ impl DraftPage<'_> {
                 formats.push("随行单据");
             }
             let operation = format!(
-                "{}\n格式：{}\n输出目录：{}",
-                if print {
-                    "打印前生成 PDF"
-                } else {
-                    "导出当前稿件"
-                },
+                "导出当前稿件\n格式：{}\n输出目录：{}",
                 formats.join("、"),
                 self.config.output_dir,
             );
-            // 这里只确认 PDF 文件落盘；打印队列与纸件风险在实际点击「打印」时另行确认。
             let warning = super::super::app::output_guard::DOCUMENT_WARNING;
             self.actions.push(DraftAction::ConfirmPlaintextOutput {
                 operation,
@@ -216,9 +220,7 @@ impl DraftPage<'_> {
                     }
                 }),
             });
-            return;
         }
-        self.start_confirmed_export(selection, open, print);
     }
 
     /// 仅由统一确认回调或未启用加密的入口调用，不持久化任何“已确认”状态。
@@ -233,6 +235,10 @@ impl DraftPage<'_> {
         }
         if self.doc.generated_markdown.trim().is_empty() {
             *self.status = "还没有可导出的内容：请先生成草稿，或直接在右侧粘贴稿件。".into();
+            return;
+        }
+        if crate::storage::writes_blocked() {
+            *self.status = "工作区正在锁定，已取消导出。".into();
             return;
         }
         if !selection.any() {
@@ -264,6 +270,17 @@ impl DraftPage<'_> {
             self.doc.result_drawer_open = true;
         }
 
+        let protection = if print {
+            None
+        } else {
+            match export::protection::Protection::current() {
+                Ok(protection) => protection,
+                Err(error) => {
+                    *self.status = format!("无法导出：{error:#}");
+                    return;
+                }
+            }
+        };
         let (key, seq) = self.begin_job();
         *self.status = "正在导出当前审校稿…".into();
         self.doc.open_after_export = open;
@@ -319,30 +336,125 @@ impl DraftPage<'_> {
                 });
                 return;
             }
-            let result = export_and_compile(
-                &output_dir,
-                &input,
-                &markdown,
-                &selection,
-                &vocabulary,
-                &fonts,
-                &numbering,
-                &transmit_defaults,
-                None,
-                |message| {
-                    let _ = tx.send(WorkerResult::Doc {
-                        key,
-                        seq,
-                        job: DocJob::ExportProgress(message.into()),
-                    });
-                },
-            )
-            .map_err(|error: anyhow::Error| format!("{error:#}"));
+            let render = || {
+                export_and_compile(
+                    &output_dir,
+                    &input,
+                    &markdown,
+                    &selection,
+                    &vocabulary,
+                    &fonts,
+                    &numbering,
+                    &transmit_defaults,
+                    None,
+                    |message| {
+                        let _ = tx.send(WorkerResult::Doc {
+                            key,
+                            seq,
+                            job: DocJob::ExportProgress(message.into()),
+                        });
+                    },
+                )
+            };
+            let result = if let Some(protection) = protection {
+                let (result, files) = mdx::memory_files::capture_outputs(render);
+                result.and_then(|mut outcome| {
+                    let paths = protection.persist(files)?;
+                    for path in &mut outcome.files {
+                        *path = paths
+                            .get(path)
+                            .cloned()
+                            .ok_or_else(|| anyhow::anyhow!("加密输出缺失：{}", path.display()))?;
+                    }
+                    for path in paths.into_values() {
+                        if !outcome.files.contains(&path) {
+                            outcome.files.push(path);
+                        }
+                    }
+                    Ok(outcome)
+                })
+            } else {
+                render()
+            }
+            .map_err(|error| format!("{error:#}"));
             let _ = tx.send(WorkerResult::Doc {
                 key,
                 seq,
                 job: DocJob::Exported(result),
             });
+        });
+    }
+
+    pub(crate) fn start_media_export(
+        &mut self,
+        mut selection: ExportSelection,
+        medium: crate::app::media_export::Medium,
+        workspace: crate::vault::KeyHandle,
+        wake: egui::Context,
+    ) {
+        if self.doc.busy || self.doc.generated_markdown.trim().is_empty() || !selection.any() {
+            *self.status = "当前稿件没有可刻录的内容。".into();
+            return;
+        }
+        selection.overwrite = true;
+        let (key, seq) = self.begin_job();
+        let input = self.doc.draft.clone();
+        let markdown = self.doc.generated_markdown.clone();
+        let config = self.config.clone();
+        let tx = self.sender.clone();
+        *self.status = "正在内存中生成刻录文件…".into();
+        thread::spawn(move || {
+            let result = (|| {
+                use anyhow::{Context as _, ensure};
+                crate::app::media_export::require_workspace(&workspace)?;
+                let (result, captured) = mdx::memory_files::capture_outputs(|| {
+                    export_and_compile(
+                        Path::new("media-export"),
+                        &input,
+                        &markdown,
+                        &selection,
+                        &config.vocabulary,
+                        &config.fonts,
+                        &config.numbering,
+                        &config.transmit_defaults,
+                        None,
+                        |_| {},
+                    )
+                });
+                let outcome = result?;
+                if let Some(error) = outcome.compile_error {
+                    anyhow::bail!("生成 PDF 失败：{error}");
+                }
+                ensure!(!captured.is_empty(), "未生成任何刻录文件");
+                let mut files = std::collections::BTreeMap::new();
+                for (path, data) in captured {
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .context("刻录文件名无效")?;
+                    ensure!(
+                        files.insert(name.to_owned(), data).is_none(),
+                        "刻录文件同名：{name}"
+                    );
+                }
+                let count = files.len();
+                let image = zeroize::Zeroizing::new(crate::optical_image::build(files)?);
+                let _ = tx.send(WorkerResult::Doc {
+                    key,
+                    seq,
+                    job: DocJob::ExportProgress("正在刻录并回读校验…".into()),
+                });
+                wake.request_repaint();
+                medium.burn(&workspace, &image)?;
+                Ok::<_, anyhow::Error>(count)
+            })()
+            .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::Doc {
+                key,
+                seq,
+                job: DocJob::MediaExported(result),
+            });
+            wake.request_repaint();
         });
     }
 
@@ -576,7 +688,12 @@ impl DraftPage<'_> {
     }
 
     /// 由应用层单次明文输出确认和异步文件框回调进入；后台重新生成，绝不复制旧缓存。
-    pub(crate) fn export_current_to(&mut self, kind: ExportKind, target: PathBuf) {
+    pub(crate) fn export_current_to(
+        &mut self,
+        kind: ExportKind,
+        target: PathBuf,
+        protection: Option<export::protection::Protection>,
+    ) {
         if self.doc.busy || self.doc.generated_markdown.trim().is_empty() {
             return;
         }
@@ -590,8 +707,15 @@ impl DraftPage<'_> {
         *self.status = "正在按当前内容重新导出…".into();
         let tx = self.sender.clone();
         thread::spawn(move || {
-            let result = render_export_to(&input, &markdown, &config, kind, &target)
-                .map_err(|error| format!("{error:#}"));
+            let result = render_export_to(
+                &input,
+                &markdown,
+                &config,
+                kind,
+                &target,
+                protection.as_ref(),
+            )
+            .map_err(|error| format!("{error:#}"));
             let _ = tx.send(WorkerResult::Doc {
                 key,
                 seq,
@@ -759,6 +883,7 @@ mod delivery_tests {
             &crate::models::AppConfig::default(),
             ExportKind::Word,
             &target,
+            None,
         )
         .unwrap();
         assert_eq!(outcome.files, vec![target.clone()]);

@@ -39,9 +39,11 @@ mod ai_manage;
 pub(crate) mod ai_proposal;
 #[cfg(feature = "ai-workbench")]
 mod api_settings;
+mod auxiliary_export;
 mod chrome;
 pub(crate) mod clipboard;
 mod data_safety;
+mod export_devices;
 mod export_password;
 pub(crate) mod file_dialog;
 pub(crate) mod gate;
@@ -51,6 +53,7 @@ mod jobs;
 mod knowledge_local;
 mod lexicon_jobs;
 mod manuscript_ui;
+pub(crate) mod media_export;
 pub(crate) mod output_guard;
 #[cfg(feature = "ai-workbench")]
 mod pi_jobs;
@@ -230,6 +233,7 @@ pub struct GongwenApp {
     /// 还没问完结果的系统文件对话框；后台线程开窗，主线程每帧问一次。
     pending_file_dialogs: Vec<file_dialog::PendingFileDialog>,
     pending_output: Option<output_guard::PendingOutput>,
+    media_export: Option<media_export::Chooser>,
     clipboard: clipboard::Clipboard,
     /// 送批材料面板；None 表示未打开。
     send_package: Option<SendPackagePanel>,
@@ -775,6 +779,7 @@ impl GongwenApp {
             next_print_dialog: 1,
             pending_file_dialogs: Vec::new(),
             pending_output: None,
+            media_export: None,
             clipboard: clipboard::Clipboard::default(),
             send_package: None,
             send_package_export: None,
@@ -1316,6 +1321,7 @@ impl GongwenApp {
         self.zip_password_window(&ctx);
         // 损坏配置、崩溃日志、备份恢复都是全局提示，不依附任何标签页。
         self.data_safety_windows(&ctx);
+        self.media_export_window(&ctx);
         self.output_risk_window(&ctx);
         // 缩放边框放在最后：它要盖在所有浮窗之上，贴边那几像素归窗口缩放。
         self.window_resize_borders(&ctx);

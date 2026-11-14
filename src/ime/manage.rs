@@ -348,9 +348,14 @@ impl Ime {
         self.page.request = Some(PageAction::ImportWordTable { four });
     }
 
+    pub(crate) fn export_personal_snapshot(&self) -> super::table::Personal {
+        self.table.personal.clone()
+    }
+
     /// 把最终生效的词表写到用户选定的位置。
     pub(crate) fn export_final_word_table_to(&mut self, path: &Path) {
-        self.manager.message = match data::save_bytes(path, self.table.export().as_bytes()) {
+        let text = self.export_word_table_text(false);
+        self.manager.message = match data::save_bytes(path, text.as_bytes()) {
             Ok(()) => "最终词表已导出。".into(),
             Err(e) => e.to_string(),
         };

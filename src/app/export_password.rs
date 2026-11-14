@@ -23,31 +23,8 @@ impl PasswordSettings {
             return;
         }
         match crate::export::protection::ExportPolicy::load() {
-            Ok(mut policy) => {
-                let mut enabled = policy.enabled;
-                let encryption = ui
-                    .add_enabled(
-                        self.saving.is_none(),
-                        egui::Checkbox::new(&mut enabled, "加密导出文档"),
-                    )
-                    .on_hover_text(concat!(
-                        "Word、PDF 和随行单据使用打开密码，源码包及份号清单使用加密 7z。\n",
-                        "明文导出、打印和复制到系统剪贴板仍须确认。修改密码只影响今后的导出。",
-                    ));
-                if encryption.changed() {
-                    policy.enabled = enabled;
-                    if let Some(handle) = crate::vault::key_handle() {
-                        self.notice = match policy.save(&handle) {
-                            Ok(()) => if enabled {
-                                "已启用加密导出；加密文件导出不再提示风险。"
-                            } else {
-                                "已关闭导出加密；每次明文导出前会确认安全风险。"
-                            }
-                            .into(),
-                            Err(error) => format!("设置保存失败：{error:#}"),
-                        };
-                    }
-                }
+            Ok(_) => {
+                ui.weak("加密工作区导出到普通文件时，每次须输入独立导出密码。");
             }
             Err(error) => {
                 // fail-closed：解不开就不导出。但用户必须有一条恢复路径，
@@ -155,7 +132,7 @@ impl PasswordSettings {
                     "尚未设置密码"
                 })
                 .on_hover_text(if configured {
-                    "启用加密导出时将使用已保存的密码。"
+                    "导出加密文件时，请输入此密码。"
                 } else {
                     "加密导出前需要先保存密码。"
                 });

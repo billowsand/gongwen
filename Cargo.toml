@@ -114,6 +114,7 @@ ms-offcrypto-writer = "1.0.7"
 rand = "0.9"
 
 [target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Storage_Imapi", "Win32_System_Com", "Win32_System_Variant", "Win32_UI_Shell"] }
 # 应用内打印走原生 GDI：不依赖任何第三方 PDF 软件注册 print 谓词。
 # 该 crate 已随 winit 在依赖树中，这里只是声明直接引用。
 # Graphics_Printing 用于打印对话框列打印机、查状态、改 DEVMODE。
@@ -128,6 +129,13 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Memory",
     "Win32_UI_Controls_Dialogs",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_IscsiDisc",
+    "Win32_System_Ioctl",
+    "Win32_System_IO",
+    "Win32_Security",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

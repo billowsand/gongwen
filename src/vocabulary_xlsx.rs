@@ -718,6 +718,18 @@ pub fn to_xlsx(
     path: &Path,
     existing_unit_codes: &[String],
 ) -> Result<()> {
+    build_xlsx(entries, existing_unit_codes)?.save(path)?;
+    Ok(())
+}
+
+pub(crate) fn xlsx_bytes(
+    entries: &[VocabularyEntry],
+    existing_unit_codes: &[String],
+) -> Result<Vec<u8>> {
+    Ok(build_xlsx(entries, existing_unit_codes)?.save_to_buffer()?)
+}
+
+fn build_xlsx(entries: &[VocabularyEntry], existing_unit_codes: &[String]) -> Result<Workbook> {
     let mut workbook = Workbook::new();
     let header_format = Format::new()
         .set_bold()
@@ -845,8 +857,7 @@ pub fn to_xlsx(
 
     let _ = locked_format;
 
-    workbook.save(path)?;
-    Ok(())
+    Ok(workbook)
 }
 
 fn write_unit_row(sheet: &mut Worksheet, row: u32, entry: &VocabularyEntry) -> Result<()> {

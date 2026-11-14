@@ -21,4 +21,4 @@ libglx0, libfontconfig1, libfreetype6, libdbus-1-3, zlib1g"
 
 # 打印走 CUPS 的 lp。列为 Recommends 而不是 Depends：apt 默认会装上，但缺了
 # 也只是打印按钮置灰，不该拦住整个应用的安装。
-RECOMMENDS="cups-client"
+RECOMMENDS="cups-client, libburn4t64 | libburn4, pkexec | policykit-1, udisks2"

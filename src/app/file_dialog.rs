@@ -105,11 +105,14 @@ impl FileDialogSpec {
 
 /// 用户挑完之后的回调：拿到对话框的结果。
 type FileCallback<T> = Box<dyn FnOnce(&mut GongwenApp, T)>;
+type FileCallbackWithContext =
+    Box<dyn FnOnce(&mut GongwenApp, Option<PathBuf>, eframe::egui::Context)>;
 
 /// 用户挑完之后的回调：单选与多选各一种。
 enum FileDialogCallback {
     One(FileCallback<Option<PathBuf>>),
     Many(FileCallback<Option<Vec<PathBuf>>>),
+    WithContext(FileCallbackWithContext),
 }
 
 /// 一个还没问完结果的对话框。
@@ -129,6 +132,15 @@ impl GongwenApp {
         on_done: impl FnOnce(&mut GongwenApp, Option<PathBuf>) + 'static,
     ) {
         self.push_file_dialog(spec, FileDialogCallback::One(Box::new(on_done)));
+    }
+
+    /// 提供重绘句柄，供文件对话框之后启动的后台任务通知主线程。
+    pub(super) fn request_file_with_context(
+        &mut self,
+        spec: FileDialogSpec,
+        on_done: impl FnOnce(&mut GongwenApp, Option<PathBuf>, eframe::egui::Context) + 'static,
+    ) {
+        self.push_file_dialog(spec, FileDialogCallback::WithContext(Box::new(on_done)));
     }
 
     /// 挑多个文件。用户挑完（或取消）后回调拿到路径清单。
@@ -160,6 +172,13 @@ impl GongwenApp {
                     on_done(self, result.and_then(|paths| paths.into_iter().next()));
                 }
                 FileDialogCallback::Many(on_done) => on_done(self, result),
+                FileDialogCallback::WithContext(on_done) => {
+                    on_done(
+                        self,
+                        result.and_then(|paths| paths.into_iter().next()),
+                        ctx.clone(),
+                    );
+                }
             }
         }
     }

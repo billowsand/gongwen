@@ -1145,6 +1145,17 @@ impl DraftPage<'_> {
             *self.status = "当前修订与基准版一致，没有可出的花脸稿。".into();
             return;
         }
+        let protection = if print_preview {
+            None
+        } else {
+            match crate::export::protection::Protection::current() {
+                Ok(protection) => protection,
+                Err(error) => {
+                    *self.status = format!("无法导出：{error:#}");
+                    return;
+                }
+            }
+        };
         let output_dir = PathBuf::from(&self.config.output_dir);
         let (key, seq) = self.begin_job();
         *self.status = if print_preview {
@@ -1174,7 +1185,7 @@ impl DraftPage<'_> {
                     .map_err(|e| format!("{e:#}")),
                 )
             } else {
-                DocJob::RedlineExported(
+                let render = || {
                     redline::export_files(
                         &output_dir,
                         &input,
@@ -1184,8 +1195,18 @@ impl DraftPage<'_> {
                         &fonts,
                         &numbering,
                     )
-                    .map_err(|e| format!("{e:#}")),
-                )
+                };
+                let result = if let Some(protection) = protection {
+                    let (result, files) = mdx::memory_files::capture_outputs(render);
+                    result.and_then(|_| {
+                        protection
+                            .persist(files)
+                            .map(|paths| paths.into_values().collect())
+                    })
+                } else {
+                    render()
+                };
+                DocJob::RedlineExported(result.map_err(|error| format!("{error:#}")))
             };
             let _ = tx.send(WorkerResult::Doc { key, seq, job });
         });

@@ -417,6 +417,21 @@ impl GongwenApp {
                     self.agent_settings.apis.message = Some((false, "还没有接口可以导出。".into()));
                     return;
                 }
+                if self.auxiliary_requires_protection() {
+                    self.request_protected_archive(
+                        format!("导出数据接口配置（{} 个服务）", files.len()),
+                        "数据接口配置.7z",
+                        move || {
+                            files
+                                .into_iter()
+                                .map(|(name, doc)| {
+                                    Ok((name, apidef::to_text(&doc, false)?.into_bytes()))
+                                })
+                                .collect()
+                        },
+                    );
+                    return;
+                }
                 if files.len() == 1 {
                     let (name, doc) = files.into_iter().next().expect("刚检查过有一个文件");
                     let operation = format!("导出数据接口配置：{name}");

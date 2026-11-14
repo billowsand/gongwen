@@ -57,6 +57,8 @@ mod linux_desktop;
 mod lmstudio;
 // FFI 模块：AppKit 窗口调用，每个 unsafe 块都带 SAFETY 注释。
 #[allow(unsafe_code)]
+mod is903_writer;
+#[allow(unsafe_code)]
 mod macos_window;
 mod manuscript;
 mod manuscript_io;
@@ -66,6 +68,9 @@ mod metrics;
 mod modal;
 mod models;
 mod net;
+#[allow(unsafe_code)]
+mod optical_burn;
+mod optical_image;
 mod orphan_probe;
 mod package_file;
 mod password_policy;
@@ -141,6 +146,10 @@ use std::rc::Rc;
 use app::gate::AppShell;
 
 fn main() -> eframe::Result {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(code) = is903_writer::helper_main() {
+        std::process::exit(code);
+    }
     if std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == "--build-edition")

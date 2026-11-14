@@ -327,6 +327,22 @@ impl GongwenApp {
             self.lexicon_error = Some("当前口径下没有可导出的词。".into());
             return;
         }
+        if self.auxiliary_requires_protection() {
+            let file_name = export::suggested_file_name();
+            let report_name = export::suggested_conflict_file_name();
+            self.request_protected_archive(
+                "导出公文四码词表",
+                std::path::Path::new(&file_name).with_extension("7z"),
+                move || {
+                    let mut entries = vec![(file_name, built.table.into_bytes())];
+                    if !built.conflicts.is_empty() {
+                        entries.push((report_name, built.conflicts.into_bytes()));
+                    }
+                    Ok(entries)
+                },
+            );
+            return;
+        }
         let spec = FileDialogSpec::save_file()
             .filter("公文四码词表", &["txt"])
             .file_name(export::suggested_file_name());

@@ -949,7 +949,13 @@ fn is_excluded(rel: &Path) -> bool {
     if rel.components().next().is_some_and(|c| {
         matches!(
             c.as_os_str().to_str(),
-            Some("inbox" | "instance.lock" | "instance.endpoint")
+            Some(
+                "inbox"
+                    | "instance.lock"
+                    | "instance.endpoint"
+                    | ".export-devices"
+                    | "alt-.export-devices"
+            )
         )
     }) || crate::vault::is_transient_private_file(rel)
     {

@@ -43,6 +43,7 @@ pub fn export_send_package(
     output: &Path,
     mut compile: impl FnMut(&DraftInput, &str, &str) -> Result<Vec<u8>>,
     mut progress: impl FnMut(&str),
+    protection: Option<&crate::export::protection::Protection>,
 ) -> Result<SendPackageOutcome> {
     if let Some(entry) = plan.entries.iter().find(|entry| entry.revision.is_none()) {
         let reason = entry.blocker.map(|b| b.reason()).unwrap_or("取不到版本");
@@ -91,7 +92,7 @@ pub fn export_send_package(
     }
     progress("正在合并 PDF…");
     let merged = merge_pdfs(&parts)?;
-    write_atomically(output, &merged.bytes)?;
+    crate::export::protection::write_final_with(protection, output, &merged.bytes)?;
 
     let (toc, item_parts) = if with_toc {
         (Some(merged.parts[0]), &merged.parts[1..])
@@ -320,12 +321,6 @@ fn inherited_attributes(doc: &Document, page_id: ObjectId) -> Result<Vec<(Vec<u8
     Ok(found)
 }
 
-/// 先写同目录下的临时文件，成功后改名到目标路径。
-fn write_atomically(output: &Path, bytes: &[u8]) -> Result<()> {
-    crate::export::protection::write_final(output, bytes)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +525,7 @@ mod tests {
                 Ok(fake_pdf(&snapshot.title_hint, pages, (595, 842), true))
             },
             |_| {},
+            None,
         )
         .unwrap();
         // 先逐件编译，目录页最后排（要用到各件页数）。
@@ -576,9 +572,16 @@ mod tests {
             entry("请示", TemplateKind::WhitePaper, Some(1)),
             entry("通知", TemplateKind::PlainDocument, None),
         ]);
-        let error = export_send_package(&blocked, false, &output, |_, _, _| unreachable!(), |_| {})
-            .unwrap_err()
-            .to_string();
+        let error = export_send_package(
+            &blocked,
+            false,
+            &output,
+            |_, _, _| unreachable!(),
+            |_| {},
+            None,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("《通知》不能进包"), "{error}");
 
         let failing = plan(vec![
@@ -596,6 +599,7 @@ mod tests {
                 Ok(fake_pdf("x", 1, (595, 842), false))
             },
             |_| {},
+            None,
         )
         .unwrap_err();
         assert!(

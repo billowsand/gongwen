@@ -102,36 +102,32 @@ impl GongwenApp {
                 });
             }
             PiSkillDialog::Export(name) => {
-                let file_name = format!("{name}.zip");
-                let spec = FileDialogSpec::save_file()
-                    .file_name(file_name)
-                    .filter("标准技能包", &["zip"]);
-                // 用户技能包含自己写的提示词与引用的材料；内置技能是随包的公开内容，
-                // 判断不出来源时按用户技能处理。加密工作区里导出成普通 ZIP 要先确认风险。
+                // 用户技能可能附带参考材料；公开内置技能照常直接导出。
                 let user_skill = self
                     .agent_settings
                     .skills
                     .catalog
                     .get(&name)
                     .is_none_or(|entry| entry.user);
-                let operation = format!("导出用户技能包：{name}");
-                let action = move |app: &mut GongwenApp| {
-                    app.request_file(spec, move |app, path| {
-                        let Some(path) = path else {
-                            return;
-                        };
-                        app.agent_settings.skills.export_skill(&name, &path);
+                if user_skill && self.auxiliary_requires_protection() {
+                    let operation = format!("导出技能包：{name}");
+                    let archive_name = format!("{name}.7z");
+                    self.request_protected_archive(operation, archive_name, move || {
+                        let package =
+                            pi_skills::store::load_package(&name).map_err(anyhow::Error::msg)?;
+                        Ok(vec![(format!("{name}.zip"), package.zip_bytes(&name)?)])
                     });
-                };
-                if user_skill {
-                    self.request_output_with_warning(
-                        operation,
-                        super::output_guard::PLAINTEXT_WARNING,
-                        action,
-                    );
-                } else {
-                    action(self);
+                    return;
                 }
+                let spec = FileDialogSpec::save_file()
+                    .file_name(format!("{name}.zip"))
+                    .filter("标准技能包", &["zip"]);
+                self.request_file(spec, move |app, path| {
+                    let Some(path) = path else {
+                        return;
+                    };
+                    app.agent_settings.skills.export_skill(&name, &path);
+                });
             }
         }
     }

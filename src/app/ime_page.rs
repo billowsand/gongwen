@@ -10,6 +10,37 @@ impl GongwenApp {
     /// 处理输入法词表页登记的动作。
     pub(crate) fn apply_ime_page_action(&mut self, action: crate::ime::PageAction) {
         use crate::ime::PageAction;
+        if self.auxiliary_requires_protection() {
+            let text_export = match &action {
+                PageAction::ExportWordTable { filtered: true } => {
+                    Some(("词表输入法-筛选结果.txt", true))
+                }
+                PageAction::ExportWordTable { filtered: false } => {
+                    Some(("词表输入法-生效词表.txt", false))
+                }
+                PageAction::ExportFinalWordTable => Some(("词表输入法-最终词表.txt", false)),
+                _ => None,
+            };
+            if let Some((name, filtered)) = text_export {
+                let text = self.ime.export_word_table_text(filtered);
+                self.request_protected_archive("导出输入法词表", name, move || {
+                    Ok(vec![(name.into(), text.into_bytes())])
+                });
+                return;
+            }
+            let personal_export = match &action {
+                PageAction::ExportPersonalSettings => Some("词表输入法-个人设置.json"),
+                PageAction::ExportPersonalBackup => Some("词表输入法-个人备份.json"),
+                _ => None,
+            };
+            if let Some(name) = personal_export {
+                let personal = self.ime.export_personal_snapshot();
+                self.request_protected_archive("导出输入法个人数据", name, move || {
+                    Ok(vec![(name.into(), serde_json::to_vec_pretty(&personal)?)])
+                });
+                return;
+            }
+        }
         match action {
             PageAction::SyncLexicon => self.sync_lexicon_to_ime(true),
             PageAction::ImportWordTable { four } => {

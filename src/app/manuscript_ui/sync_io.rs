@@ -30,13 +30,10 @@ enum PackageExportSource {
 
 impl GongwenApp {
     pub(crate) fn open_zip_password_dialog(&mut self, purpose: ZipPasswordPurpose) {
-        let remembered = if matches!(
-            purpose,
-            ZipPasswordPurpose::BackupExport | ZipPasswordPurpose::BackupImport(_)
-        ) {
-            None
-        } else {
+        let remembered = if matches!(&purpose, ZipPasswordPurpose::Import(_)) {
             self.remembered_zip_password.as_deref()
+        } else {
+            None
         };
         self.manuscript_zip_password = Some(ZipPasswordDialog::new(purpose, remembered));
     }
@@ -1047,6 +1044,13 @@ impl GongwenApp {
             return;
         };
         self.request_document_output(format!("另存 PDF 附件：{file_name}"), move |app| {
+            let protection = match crate::export::protection::Protection::current() {
+                Ok(protection) => protection,
+                Err(error) => {
+                    app.status = format!("无法导出：{error:#}");
+                    return;
+                }
+            };
             app.request_file(
                 FileDialogSpec::save_file()
                     .filter("PDF", &["pdf"])
@@ -1055,7 +1059,11 @@ impl GongwenApp {
                     let Some(path) = path else {
                         return;
                     };
-                    match crate::export::protection::write_final(&path, &bytes) {
+                    match crate::export::protection::write_final_with(
+                        protection.as_ref(),
+                        &path,
+                        &bytes,
+                    ) {
                         Ok(_) => app.status = format!("已保存附件到 {}。", path.display()),
                         Err(error) => app.status = format!("保存附件失败：{error}"),
                     }

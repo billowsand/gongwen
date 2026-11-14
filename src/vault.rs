@@ -478,6 +478,7 @@ fn wrap_dek(wrap_key: &[u8; KEY_LEN], dek: &[u8; DEK_LEN]) -> Result<String> {
 pub(crate) struct KeyHandle {
     dek: Zeroizing<[u8; DEK_LEN]>,
     db_active: bool,
+    unlock_id: u128,
     /// 句柄创建时绑定的数据槽位。后台任务复制句柄后，即使全局当前槽位改变，
     /// 资源 AAD 与路径校验仍固定在原槽位，不能拿新槽位重写旧任务的数据。
     slot: DataSlot,
@@ -488,6 +489,10 @@ impl KeyHandle {
     /// 临时副本在进程内尽量短命；不要把它写日志、错误串或持久文件。
     pub(crate) fn dek_hex(&self) -> Zeroizing<String> {
         Zeroizing::new(hex_encode(&self.dek[..]))
+    }
+
+    pub(crate) fn same_unlock(&self, other: &Self) -> bool {
+        self.unlock_id == other.unlock_id
     }
 
     pub(crate) fn db_active(&self) -> bool {
@@ -517,6 +522,7 @@ fn clone_handle(handle: &KeyHandle) -> KeyHandle {
     KeyHandle {
         dek: Zeroizing::new(*handle.dek),
         db_active: handle.db_active,
+        unlock_id: handle.unlock_id,
         slot: handle.slot,
     }
 }
@@ -538,6 +544,7 @@ pub(crate) fn set_key_handle(dek: [u8; DEK_LEN], db_active: bool) {
     let handle = Some(KeyHandle {
         dek: Zeroizing::new(dek),
         db_active,
+        unlock_id: rand::random(),
         slot: storage::current_slot(),
     });
     #[cfg(test)]
@@ -554,6 +561,7 @@ pub(crate) fn set_key_handle_for_slot(dek: [u8; DEK_LEN], db_active: bool, slot:
     let handle = Some(KeyHandle {
         dek: Zeroizing::new(dek),
         db_active,
+        unlock_id: rand::random(),
         slot,
     });
     #[cfg(test)]
@@ -844,7 +852,7 @@ pub(crate) fn read_path(path: &Path, kind: &str, max_bytes: u64) -> Result<Vec<u
 /// 应用锁启用后必须整份密封的文件名单。唯一来源是 [`crate::storage::SEALED_FILE_NAMES`]，
 /// 这里只做转出：解锁迁移、明文嗅探、解封、擦除都必须用同一份，漏一项就是永久明文。
 /// 数据库不在这份名单里（走 SQLCipher 迁移）。
-pub(crate) const SEALED_FILE_NAMES: [&str; 9] = crate::storage::SEALED_FILE_NAMES;
+pub(crate) const SEALED_FILE_NAMES: [&str; 10] = crate::storage::SEALED_FILE_NAMES;
 
 // ── 明文 ⇄ 密文迁移 ─────────────────────────────────────────────────
 
@@ -1443,7 +1451,10 @@ pub(crate) fn decrypt_slot_files() -> Result<()> {
         }
     }
     for name in SEALED_FILE_NAMES {
-        if matches!(name, ".zip-password" | ".export-password") {
+        if matches!(
+            name,
+            ".zip-password" | ".export-password" | ".export-devices"
+        ) {
             let password = storage::slot_file(name)?;
             if password.is_file() {
                 erase_file_checked(&password)?;

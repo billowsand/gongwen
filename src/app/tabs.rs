@@ -335,70 +335,59 @@ impl GongwenApp {
                 }
                 PdfViewerAction::ReleaseMemory {
                     bytes,
-                    mut request,
+                    request,
                     print,
                 } => {
                     if print {
                         self.open_print_dialog(*request, ctx);
                         continue;
                     }
-                    let ctx = ctx.clone();
                     let name = crate::export::safe_filename(&request.title);
                     let name = if name.to_ascii_lowercase().ends_with(".pdf") {
                         name
                     } else {
                         format!("{name}.pdf")
                     };
-                    self.request_output_with_warning(
-                        format!(
-                            "{} PDF 附件：{}。请选择 PDF 的保存位置。",
-                            if print {
-                                "另存并打印"
-                            } else {
-                                "另存并系统打开"
-                            },
-                            request.title
-                        ),
-                        if print {
-                            super::output_guard::PRINT_WARNING
-                        } else {
-                            super::output_guard::DOCUMENT_WARNING
-                        },
+                    self.request_document_output(
+                        format!("另存并系统打开 PDF 附件：{}", request.title),
                         move |app| {
+                            let protection = match crate::export::protection::Protection::current()
+                            {
+                                Ok(protection) => protection,
+                                Err(error) => {
+                                    app.status = format!("无法导出：{error:#}");
+                                    return;
+                                }
+                            };
                             app.request_file(
                                 super::file_dialog::FileDialogSpec::save_file()
                                     .filter("PDF", &["pdf"])
                                     .file_name(name),
                                 move |app, path| {
                                     let Some(path) = path else { return };
-                                    let result =
-                                        crate::export::protection::write_final(&path, &bytes);
+                                    let result = crate::export::protection::write_final_with(
+                                        protection.as_ref(),
+                                        &path,
+                                        &bytes,
+                                    );
                                     if let Err(error) = result {
                                         app.status = format!("保存 PDF 附件失败：{error:#}");
                                         return;
                                     }
-                                    if print {
-                                        request.path = path;
-                                        // 保存+打印风险已经在上面确认过，不再重复弹框。
-                                        app.open_print_dialog_confirmed(*request, &ctx);
-                                    } else {
-                                        app.request_output_with_warning(
-                                            format!("用系统程序打开 PDF 附件：{}", path.display()),
-                                            super::output_guard::EXTERNAL_OPEN_WARNING,
-                                            move |app| {
-                                                app.status = match open_in_os(&path) {
-                                                    Ok(()) => {
-                                                        "已保存 PDF 附件并用系统程序打开。".into()
-                                                    }
-                                                    Err(error) => {
-                                                        format!(
-                                                            "PDF 已保存，但系统打开失败：{error}"
-                                                        )
-                                                    }
-                                                };
-                                            },
-                                        );
-                                    }
+                                    app.request_output_with_warning(
+                                        format!("用系统程序打开 PDF 附件：{}", path.display()),
+                                        super::output_guard::EXTERNAL_OPEN_WARNING,
+                                        move |app| {
+                                            app.status = match open_in_os(&path) {
+                                                Ok(()) => {
+                                                    "已保存 PDF 附件并用系统程序打开。".into()
+                                                }
+                                                Err(error) => {
+                                                    format!("PDF 已保存，但系统打开失败：{error}")
+                                                }
+                                            };
+                                        },
+                                    );
                                 },
                             );
                         },
@@ -559,6 +548,14 @@ impl GongwenApp {
                 } => {
                     self.request_output_with_warning(operation, warning, action);
                 }
+                DraftAction::ChooseDraftDelivery {
+                    key,
+                    selection,
+                    open,
+                    copy,
+                } => {
+                    self.choose_draft_delivery(ctx, key, selection, open, copy);
+                }
                 DraftAction::CopyFile { path } => {
                     let wake = ctx.clone();
                     self.request_output_with_warning(
@@ -604,13 +601,7 @@ impl GongwenApp {
                 }
                 #[cfg(feature = "ai-workbench")]
                 DraftAction::ExportWritingArtifact { name, text } => {
-                    let encrypted = match crate::export::protection::encryption_enabled() {
-                        Ok(enabled) => enabled,
-                        Err(error) => {
-                            self.status = format!("导出设置读取失败：{error:#}");
-                            continue;
-                        }
-                    };
+                    let encrypted = crate::export::protection::encryption_enabled();
                     let name = if encrypted {
                         std::path::Path::new(&name)
                             .with_extension("7z")
@@ -626,9 +617,17 @@ impl GongwenApp {
                             &[if encrypted { "7z" } else { "md" }],
                         );
                     self.request_document_output("导出写作成果 Markdown", move |app| {
+                        let protection = match crate::export::protection::Protection::current() {
+                            Ok(protection) => protection,
+                            Err(error) => {
+                                app.status = format!("无法导出：{error:#}");
+                                return;
+                            }
+                        };
                         app.request_file(spec, move |app, path| {
                             if let Some(path) = path {
-                                app.status = match crate::export::protection::write_final(
+                                app.status = match crate::export::protection::write_final_with(
+                                    protection.as_ref(),
                                     &if encrypted {
                                         path.with_extension("md")
                                     } else {
@@ -660,19 +659,7 @@ impl GongwenApp {
                     kind,
                     mut name,
                 } => {
-                    let encrypted = match crate::export::protection::encryption_enabled() {
-                        Ok(enabled) => enabled,
-                        Err(error) => {
-                            self.status = format!("导出设置读取失败：{error:#}");
-                            continue;
-                        }
-                    };
-                    if encrypted
-                        && let Err(error) = crate::export::protection::Protection::current()
-                    {
-                        self.status = format!("无法导出：{error:#}");
-                        continue;
-                    }
+                    let encrypted = crate::export::protection::encryption_enabled();
                     let extension = if encrypted && kind == crate::draft_page::ExportKind::Typst {
                         name = name.trim_end_matches(".zip").to_owned() + ".7z";
                         "7z"
@@ -682,20 +669,28 @@ impl GongwenApp {
                     let spec = super::file_dialog::FileDialogSpec::save_file()
                         .file_name(name)
                         .filter(kind.label(), &[extension]);
-                    self.request_document_output(
-                        "按当前正文和表单重新导出到所选位置",
-                        move |app| {
-                            app.request_file(spec, move |app, target| {
-                                let Some(target) = target else {
-                                    return;
-                                };
-                                let Some(index) = app.doc_index_of_key(key) else {
-                                    return;
-                                };
-                                app.draft_page_at(index).export_current_to(kind, target);
-                            });
-                        },
-                    );
+                    let save: super::output_guard::OutputAction = Box::new(move |app| {
+                        let protection = match crate::export::protection::Protection::current() {
+                            Ok(protection) => protection,
+                            Err(error) => {
+                                app.status = format!("无法导出：{error:#}");
+                                return;
+                            }
+                        };
+                        app.request_file(spec, move |app, target| {
+                            let Some(target) = target else { return };
+                            if let Some(index) = app.doc_index_of_key(key) {
+                                app.draft_page_at(index)
+                                    .export_current_to(kind, target, protection);
+                            }
+                        });
+                    });
+                    if encrypted {
+                        let selection = kind.selection(true, false);
+                        self.choose_draft_delivery(ctx, key, selection, None, Some(save));
+                    } else {
+                        self.request_document_output("按当前正文和表单重新导出到所选位置", save);
+                    }
                 }
                 DraftAction::ImportBibliography { key } => {
                     self.request_file(

@@ -27,6 +27,7 @@ fn setting_note_colored(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
 #[derive(Default)]
 pub(crate) struct VaultPageState {
     pub(super) export: super::export_password::PasswordSettings,
+    pub(super) export_devices: super::export_devices::DeviceSettings,
     /// 启用表单：主密码与确认。
     enable_real: String,
     enable_real_confirm: String,

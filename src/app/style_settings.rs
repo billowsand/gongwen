@@ -554,9 +554,17 @@ impl GongwenApp {
                 return;
             }
             PageAction::ChooseExportFile => {
+                const FILE_NAME: &str = "风格档案.json";
+                if self.auxiliary_requires_protection() {
+                    let book = self.styles_page.book.clone();
+                    self.request_protected_archive("导出风格档案", FILE_NAME, move || {
+                        Ok(vec![(FILE_NAME.into(), serde_json::to_vec_pretty(&book)?)])
+                    });
+                    return;
+                }
                 let spec = FileDialogSpec::save_file()
                     .filter("风格档案", &["json"])
-                    .file_name("风格档案.json");
+                    .file_name(FILE_NAME);
                 let count = self.styles_page.book.styles.len();
                 // 风格档案含样稿原文片段与稿件标题，加密工作区里写成普通文件要先确认风险。
                 self.request_output_with_warning(

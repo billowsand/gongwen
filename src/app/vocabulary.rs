@@ -245,9 +245,19 @@ impl GongwenApp {
     }
 
     pub(crate) fn export_vocabulary_xlsx(&mut self) {
+        const FILE_NAME: &str = "公文助手标准词库.xlsx";
+        if self.auxiliary_requires_protection() {
+            let vocabulary = self.config.vocabulary.clone();
+            self.request_protected_archive("导出标准词库 Excel", FILE_NAME, move || {
+                let codes = vocabulary_unit_codes(&vocabulary);
+                let bytes = vocabulary_xlsx::xlsx_bytes(&vocabulary, &codes)?;
+                Ok(vec![(FILE_NAME.into(), bytes)])
+            });
+            return;
+        }
         let spec = FileDialogSpec::save_file()
             .filter("Excel", &["xlsx"])
-            .file_name("公文助手标准词库.xlsx");
+            .file_name(FILE_NAME);
         // 标准词库含姓名、职务、联系电话与个人简介，加密工作区里导出成普通表格要先确认风险。
         self.request_output_with_warning(
             "导出标准词库 Excel（含姓名、职务、联系电话、个人简介）",
@@ -257,16 +267,8 @@ impl GongwenApp {
                     let Some(path) = path else {
                         return;
                     };
-                    let existing_codes: Vec<String> = app
-                        .config
-                        .vocabulary
-                        .iter()
-                        .filter(|e| e.category == VocabularyCategory::Unit)
-                        .map(|e| e.code.trim().to_string())
-                        .filter(|c| !c.is_empty())
-                        .collect();
-                    let result =
-                        vocabulary_xlsx::to_xlsx(&app.config.vocabulary, &path, &existing_codes);
+                    let codes = vocabulary_unit_codes(&app.config.vocabulary);
+                    let result = vocabulary_xlsx::to_xlsx(&app.config.vocabulary, &path, &codes);
                     match result {
                         Ok(()) => app.status = format!("词库已导出到 {}。", path.display()),
                         Err(error) => app.status = format!("词库导出失败：{error}"),
@@ -277,9 +279,19 @@ impl GongwenApp {
     }
 
     pub(crate) fn export_blank_vocabulary_template(&mut self) {
+        const FILE_NAME: &str = "公文助手标准词库模板.xlsx";
+        if self.auxiliary_requires_protection() {
+            let vocabulary = self.config.vocabulary.clone();
+            self.request_protected_archive("导出词库模板 Excel", FILE_NAME, move || {
+                let codes = vocabulary_unit_codes(&vocabulary);
+                let bytes = vocabulary_xlsx::xlsx_bytes(&[], &codes)?;
+                Ok(vec![(FILE_NAME.into(), bytes)])
+            });
+            return;
+        }
         let spec = FileDialogSpec::save_file()
             .filter("Excel", &["xlsx"])
-            .file_name("公文助手标准词库模板.xlsx");
+            .file_name(FILE_NAME);
         // 模板本身是空白表，但数据校验列表会带出配置里的单位代字（可反推发文单位），
         // 与标准词库导出同属普通文件出口，加密工作区里先确认风险。
         self.request_output_with_warning(
@@ -290,14 +302,7 @@ impl GongwenApp {
                     let Some(path) = path else {
                         return;
                     };
-                    let codes: Vec<String> = app
-                        .config
-                        .vocabulary
-                        .iter()
-                        .filter(|e| e.category == VocabularyCategory::Unit)
-                        .map(|e| e.code.trim().to_string())
-                        .filter(|c| !c.is_empty())
-                        .collect();
+                    let codes = vocabulary_unit_codes(&app.config.vocabulary);
                     let result = vocabulary_xlsx::to_xlsx(&[], &path, &codes);
                     match result {
                         Ok(()) => app.status = format!("空白词库模板已导出到 {}。", path.display()),
@@ -2168,6 +2173,16 @@ impl GongwenApp {
     }
 }
 
+fn vocabulary_unit_codes(vocabulary: &[VocabularyEntry]) -> Vec<String> {
+    vocabulary
+        .iter()
+        .filter(|entry| entry.category == VocabularyCategory::Unit)
+        .map(|entry| entry.code.trim())
+        .filter(|code| !code.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2189,6 +2204,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         storage::set_test_config_dir(Some(dir.path().to_path_buf()));
         crate::vault::set_key_handle([23; 32], true);
+        crate::export::protection::ExportPolicy {
+            enabled: true,
+            password: "Jade!River7Cloud".into(),
+        }
+        .save(&crate::vault::key_handle().unwrap())
+        .unwrap();
         (crate::app::management_samples::fixture(), dir, Reset)
     }
 
@@ -2217,7 +2238,8 @@ mod tests {
         assert!(app.pending_output.is_none());
         assert!(app.pending_file_dialogs.is_empty(), "取消后不能打开保存框");
         assert!(
-            !dir.path().join("公文助手标准词库.xlsx").exists(),
+            !dir.path().join("公文助手标准词库.xlsx").exists()
+                && !dir.path().join("公文助手标准词库.7z").exists(),
             "取消后不能生成词库文件"
         );
     }
@@ -2235,7 +2257,8 @@ mod tests {
         assert!(app.pending_output.is_none());
         assert!(app.pending_file_dialogs.is_empty(), "取消后不能打开保存框");
         assert!(
-            !dir.path().join("词表输入法-生效词表.txt").exists(),
+            !dir.path().join("词表输入法-生效词表.txt").exists()
+                && !dir.path().join("词表输入法-生效词表.7z").exists(),
             "取消后不能生成词表文件"
         );
     }

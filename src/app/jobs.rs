@@ -41,6 +41,7 @@ use std::path::PathBuf;
 use std::thread;
 
 pub(crate) enum WorkerResult {
+    AuxiliaryArchiveExported(Result<PathBuf, String>),
     /// 外部程序把文件放进系统剪贴板的结果，后台线程执行。
     FileCopied {
         path: PathBuf,
@@ -62,7 +63,11 @@ pub(crate) enum WorkerResult {
     RerankVerify(Result<String, String>),
     /// 某一篇稿件的任务结果。`key` 认稿件、`seq` 认这一次任务：稿件关了或者
     /// 同一篇又发起了新任务，回来的结果就已作废。
-    Doc { key: DocKey, seq: u64, job: DocJob },
+    Doc {
+        key: DocKey,
+        seq: u64,
+        job: DocJob,
+    },
     /// 版本对照右栏的花脸稿在后台算好了。不走 `Doc` 的任务序号：它不占用
     /// 「忙」状态，也不该被同一篇稿件的其他任务作废；是否过期按稿件、基准版与
     /// 正文哈希三者判断——只看正文哈希的话，任务在途时换了基准版，晚到的旧基准
@@ -75,7 +80,9 @@ pub(crate) enum WorkerResult {
         doc: Box<crate::redline::RedlineDoc>,
     },
     /// 后台读取剪贴板并转换完成；真正的正文替换在主线程按粘贴快照执行。
-    SmartPasteDone { key: DocKey },
+    SmartPasteDone {
+        key: DocKey,
+    },
     ExternalPaste {
         sequence: u64,
         result: Result<String, String>,
@@ -152,7 +159,11 @@ pub(crate) enum WorkerResult {
         result: Result<Option<Vec<u8>>, String>,
     },
     /// 打印进度：已送页数 / 总页数（Windows 每页一次，CUPS 不报）。
-    PrintProgress { dialog: u64, done: u32, total: u32 },
+    PrintProgress {
+        dialog: u64,
+        done: u32,
+        total: u32,
+    },
     /// 打印对话框打开时从 PDF 自身测得的版式事实。读不出来是 `None`。
     PdfInspected {
         dialog: u64,
@@ -323,6 +334,7 @@ pub(crate) enum DocJob {
     /// 花脸稿打印预览：只出 PDF、落在临时目录，编完在内置查看器里打开。
     RedlinePrintPreview(Result<Vec<u8>, String>),
     MemoryPrintPdf(Result<Vec<u8>, String>),
+    MediaExported(Result<usize, String>),
     /// 小模型逐句文字复核的结果。只产出待确认的建议，不碰正文。
     #[cfg(feature = "ai-workbench")]
     Reviewed(Result<crate::revise_model::ReviewOutcome, String>),
@@ -539,6 +551,12 @@ impl GongwenApp {
                             self.status = format!("「{name}」连接失败：{error}");
                         }
                     }
+                }
+                WorkerResult::AuxiliaryArchiveExported(result) => {
+                    self.status = match result {
+                        Ok(path) => format!("已导出加密文件：{}", path.display()),
+                        Err(error) => format!("导出失败：{error}"),
+                    };
                 }
                 WorkerResult::FileCopied { path, result } => {
                     let name = path
@@ -2141,6 +2159,12 @@ impl GongwenApp {
             }
             DocJob::RedlineExported(Err(error)) => {
                 self.status = format!("{prefix}花脸稿导出失败：{error}");
+            }
+            DocJob::MediaExported(result) => {
+                self.status = match result {
+                    Ok(count) => format!("{prefix}已刻录并回读校验 {count} 个文件。"),
+                    Err(error) => format!("{prefix}刻录失败：{error}"),
+                };
             }
             DocJob::MemoryPrintPdf(result) => match result {
                 Ok(bytes) => {

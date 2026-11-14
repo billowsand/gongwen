@@ -13,7 +13,7 @@ const MAX_REMEMBERED_PASSWORD_BYTES: u64 = 1024;
 /// 擦除（[`wipe_slot_files`]）与读写侧（`ai_services::persistence`）都从这里派生。
 /// 名单漏一项的后果是「启用加密后该文件永久明文」——二期曾漏掉 `api-envs.json`
 /// 与 `api-tests.json`，`styles.json` 里还有样稿原文片段，所以统一放这里。
-pub(crate) const SEALED_FILE_NAMES: [&str; 9] = [
+pub(crate) const SEALED_FILE_NAMES: [&str; 10] = [
     "config.json",
     // 旧版（v0.8 之前）数据接口配置曾写在根目录 `apis.json`；新版只在打开
     // 「数据接口」页时才把它迁成 `apis/services.json`。它含内网地址、请求头与
@@ -21,6 +21,7 @@ pub(crate) const SEALED_FILE_NAMES: [&str; 9] = [
     "apis.json",
     ZIP_PASSWORD_FILE,
     ".export-password",
+    ".export-devices",
     "api-secrets.json",
     "api-envs.json",
     "api-tests.json",
@@ -120,12 +121,13 @@ pub fn slot_subdir_for(slot: DataSlot, name: &str) -> Result<PathBuf> {
 /// 不可读，物理删除不留残留。目录整棵删掉；删不掉的单个文件尽力而为。
 pub(crate) fn wipe_slot_files(slot: DataSlot) {
     // 单文件和库的 WAL/SHM 一起删；`manuscripts.db` 另有 `-wal/-shm` 后缀。
-    const FILES: [&str; 10] = [
+    const FILES: [&str; 11] = [
         "manuscripts.db",
         "config.json",
         "apis.json",
         ".zip-password",
         ".export-password",
+        ".export-devices",
         "api-secrets.json",
         "api-envs.json",
         "api-tests.json",

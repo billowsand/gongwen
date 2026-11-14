@@ -21,8 +21,10 @@ pub(super) struct PendingOutput {
     operation: String,
     warning: &'static str,
     slot: crate::storage::DataSlot,
-    requires_key: bool,
+    unlock: Option<crate::vault::KeyHandle>,
     action: OutputAction,
+    password: Option<zeroize::Zeroizing<String>>,
+    password_error: String,
 }
 
 impl GongwenApp {
@@ -78,7 +80,8 @@ impl GongwenApp {
         action: OutputAction,
     ) {
         let document = warning == DOCUMENT_WARNING;
-        let has_key = crate::vault::key_handle().is_some();
+        let unlock = crate::vault::key_handle();
+        let has_key = unlock.is_some();
         if self.vault_locked && !has_key {
             self.status = "当前未解锁，已取消本次导出。".into();
             return;
@@ -91,19 +94,20 @@ impl GongwenApp {
             action(self);
             return;
         }
-        if document {
+        let mut password = None;
+        if document && has_key {
             match crate::export::protection::Protection::current() {
-                Ok(Some(_)) => {
-                    action(self);
+                Ok(Some(_)) => password = Some(Default::default()),
+                Ok(None) => {
+                    self.status = "当前无法使用加密导出。".into();
                     return;
                 }
-                Ok(None) => {} // 明文导出，包括未启用应用锁的工作区，每次确认。
                 Err(error) => {
                     self.status = format!("无法导出：{error:#}");
                     return;
                 }
             }
-        } else if !has_key && warning != CLIPBOARD_WARNING {
+        } else if !document && !has_key && warning != CLIPBOARD_WARNING {
             action(self);
             return;
         }
@@ -116,19 +120,24 @@ impl GongwenApp {
             operation,
             warning,
             slot: crate::storage::current_slot(),
-            requires_key: has_key,
+            unlock,
             action,
+            password,
+            password_error: String::new(),
         });
     }
 
     pub(super) fn output_risk_window(&mut self, ctx: &egui::Context) {
-        let Some(pending) = self.pending_output.as_ref() else {
+        let Some(pending) = self.pending_output.as_mut() else {
             return;
         };
         // 锁定会丢弃整个工作区；此处还防范确认期间状态被其它入口改变。
-        if pending.requires_key != crate::vault::key_handle().is_some()
-            || pending.slot != crate::storage::current_slot()
-        {
+        let unlock_matches = match (&pending.unlock, crate::vault::key_handle()) {
+            (Some(expected), Some(current)) => expected.same_unlock(&current),
+            (None, None) => true,
+            _ => false,
+        };
+        if !unlock_matches || pending.slot != crate::storage::current_slot() {
             self.pending_output = None;
             self.status = "加密状态已变化，本次导出已取消。".into();
             return;
@@ -139,7 +148,9 @@ impl GongwenApp {
         let response = modal::dialog(
             ctx,
             egui::Id::unique("plaintext_output_risk"),
-            if clipboard {
+            if pending.password.is_some() {
+                "输入导出密码"
+            } else if clipboard {
                 "剪贴板内容可能泄露"
             } else {
                 "导出文件可能泄露信息"
@@ -149,13 +160,28 @@ impl GongwenApp {
             |ui| {
                 ui.label(&pending.operation);
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new(pending.warning).color(crate::theme::danger()));
+                if let Some(password) = pending.password.as_mut() {
+                    crate::ime::exempt(
+                        ui.add(egui::TextEdit::singleline(&mut **password).password(true)),
+                    );
+                    if !pending.password_error.is_empty() {
+                        ui.colored_label(crate::theme::danger(), &pending.password_error);
+                    }
+                } else {
+                    ui.label(egui::RichText::new(pending.warning).color(crate::theme::danger()));
+                }
                 ui.add_space(8.0);
                 ui.weak(if clipboard { "本次确认仅用于此次操作。取消不向剪贴板释放内容；锁定应用不能撤回外部副本。" } else { "本次确认仅用于此次操作。取消不会生成文件。文件保存后，锁定应用不会撤回这些文件；已加密成果仍由独立导出密码保护。" });
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     cancelled = ui.button("取消").clicked();
-                    confirmed = ui.button("确认风险并继续").clicked();
+                    confirmed = ui
+                        .button(if pending.password.is_some() {
+                            "加密导出"
+                        } else {
+                            "确认风险并继续"
+                        })
+                        .clicked();
                 });
             },
         );
@@ -167,8 +193,20 @@ impl GongwenApp {
                 "已取消导出，未生成文件。"
             }
             .into();
-        } else if confirmed && let Some(pending) = self.pending_output.take() {
-            (pending.action)(self);
+        } else if confirmed {
+            if let Some(password) = pending.password.as_mut() {
+                use zeroize::Zeroize as _;
+                let matches = crate::export::protection::Protection::current()
+                    .is_ok_and(|p| p.is_some_and(|p| p.matches_password(password)));
+                if !matches {
+                    password.zeroize();
+                    pending.password_error = "导出密码不正确或导出设置已变化。".into();
+                    return;
+                }
+            }
+            if let Some(pending) = self.pending_output.take() {
+                (pending.action)(self);
+            }
         }
     }
 }
@@ -462,68 +500,65 @@ mod tests {
     }
 
     #[test]
-    fn quick_export_and_print_wait_without_attaching_followup_to_other_jobs() {
+    fn quick_export_queues_media_choice_without_opening_or_writing() {
         let mut h = Harness::new(true);
-        crate::vault::write_path(
-            &h.dir.path().join(crate::export::protection::PASSWORD_FILE),
-            "config",
-            b"Jade!River7Cloud",
-        )
-        .unwrap();
-        let mut policy = crate::export::protection::ExportPolicy::load().unwrap();
-        policy.enabled = false;
-        policy.save(&crate::vault::key_handle().unwrap()).unwrap();
         h.app.docs[0].generated_markdown = "# 标题\n\n正文。".into();
         for kind in ExportKind::ALL {
             h.app.draft_page().start_export_and_open(kind);
             assert!(!h.app.docs[0].busy);
             assert!(h.app.docs[0].open_after_export.is_none());
             h.app.apply_draft_actions(&h.ctx);
-            assert!(h.app.pending_output.is_some());
-            h.click("取消");
+            assert!(h.app.media_export.is_some());
+            h.app.media_export = None;
         }
-        // 「打印…」先走一次导出确认（含打印意图）；取消后不导出、不打印，
-        // 打开/打印意图也不能提前挂到别的任务上。
-        h.app.draft_page().start_export_for_print();
-        h.app.apply_draft_actions(&h.ctx);
-        assert!(h.app.pending_output.is_some());
-        assert!(!h.app.docs[0].print_after_export);
-        assert!(!h.app.docs[0].busy);
-        h.click("取消");
-        assert!(h.app.pending_output.is_none());
-        assert!(!h.app.docs[0].print_after_export);
         assert!(!h.dir.path().join("output").exists());
     }
 
     #[test]
-    fn encrypted_documents_skip_confirmation_but_plaintext_requires_it_every_time() {
+    fn encrypted_documents_require_the_password_even_with_a_legacy_plaintext_setting() {
         let mut h = Harness::new(true);
-        crate::vault::write_path(
-            &h.dir.path().join(crate::export::protection::PASSWORD_FILE),
-            "config",
-            b"Jade!River7Cloud",
-        )
-        .unwrap();
-        h.app
-            .request_document_output("加密导出", |app| app.status = "已执行加密导出".into());
-        assert!(h.app.pending_output.is_none());
-        assert_eq!(h.app.status, "已执行加密导出");
-        let mut policy = crate::export::protection::ExportPolicy::load().unwrap();
-        policy.enabled = false;
+        let policy = crate::export::protection::ExportPolicy {
+            enabled: false,
+            password: "Jade!River7Cloud".into(),
+        };
         policy.save(&crate::vault::key_handle().unwrap()).unwrap();
-        for _ in 0..2 {
-            h.app.request_document_output("明文导出", |app| {
-                app.status = "已执行明文导出".into()
-            });
-            let pending = h.app.pending_output.as_ref().unwrap();
-            assert_eq!(pending.warning, DOCUMENT_WARNING);
-            h.click("取消");
-            assert_ne!(h.app.status, "已执行明文导出");
-        }
         h.app
-            .request_document_output("明文导出", |app| app.status = "已执行明文导出".into());
-        h.click("确认风险并继续");
-        assert_eq!(h.app.status, "已执行明文导出");
+            .request_document_output("导出", |app| app.status = "已执行".into());
+        h.app
+            .pending_output
+            .as_mut()
+            .unwrap()
+            .password
+            .as_mut()
+            .unwrap()
+            .push_str("wrong");
+        h.click("加密导出");
+        assert!(h.app.pending_output.is_some());
+        assert_ne!(h.app.status, "已执行");
+        h.app
+            .pending_output
+            .as_mut()
+            .unwrap()
+            .password
+            .as_mut()
+            .unwrap()
+            .push_str("Jade!River7Cloud");
+        h.click("加密导出");
+        assert!(h.app.pending_output.is_none());
+        assert_eq!(h.app.status, "已执行");
+        h.app
+            .request_document_output("再次导出", |_| panic!("取消不得执行"));
+        assert!(
+            h.app
+                .pending_output
+                .as_ref()
+                .unwrap()
+                .password
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
+        h.click("取消");
     }
 
     #[test]

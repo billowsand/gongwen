@@ -62,10 +62,7 @@ impl ExportPolicy {
     }
     pub(crate) fn save(&self, handle: &crate::vault::KeyHandle) -> Result<()> {
         let current = crate::vault::key_handle().context("当前已锁定，未保存导出设置")?;
-        ensure!(
-            current.slot() == handle.slot() && current.dek() == handle.dek(),
-            "工作区已变化，未保存导出设置"
-        );
+        ensure!(current.same_unlock(handle), "工作区已变化，未保存导出设置");
         let path = crate::storage::slot_file_for(handle.slot(), PASSWORD_FILE)?;
         let bytes = Zeroizing::new(serde_json::to_vec(self)?);
         let sealed = crate::vault::seal_path_bytes(handle, &path, "config", &bytes)?;
@@ -76,11 +73,8 @@ impl ExportPolicy {
     }
 }
 
-pub(crate) fn encryption_enabled() -> Result<bool> {
-    if crate::vault::key_handle().is_none() {
-        return Ok(false);
-    }
-    Ok(ExportPolicy::load()?.enabled)
+pub(crate) fn encryption_enabled() -> bool {
+    crate::vault::key_handle().is_some()
 }
 
 pub(crate) struct Protection {
@@ -90,7 +84,7 @@ pub(crate) struct Protection {
 
 impl Protection {
     pub(crate) fn current() -> Result<Option<Self>> {
-        if !encryption_enabled()? {
+        if !encryption_enabled() {
             return Ok(None);
         }
         Self::saved_password()
@@ -110,7 +104,6 @@ impl Protection {
         Ok(Some(Self { password, handle }))
     }
 
-    #[cfg(test)]
     pub(crate) fn matches_password(&self, password: &str) -> bool {
         self.password.as_str() == password
     }
@@ -122,7 +115,7 @@ impl Protection {
         );
         let current = crate::vault::key_handle().context("当前已锁定，已取消导出")?;
         ensure!(
-            current.slot() == self.handle.slot() && current.dek() == self.handle.dek(),
+            current.same_unlock(&self.handle),
             "加密状态已变化，已取消导出"
         );
         Ok(())
@@ -153,6 +146,41 @@ impl Protection {
             })?;
         }
         Ok(paths)
+    }
+
+    pub(crate) fn persist_archive(
+        &self,
+        path: &Path,
+        entries: Vec<(String, Vec<u8>)>,
+    ) -> Result<PathBuf> {
+        self.check_slot()?;
+        ensure!(!entries.is_empty(), "没有可归档的内容");
+        let mut names = std::collections::HashSet::new();
+        let mut total = 0u64;
+        for (name, bytes) in &entries {
+            ensure!(
+                !name.is_empty()
+                    && !matches!(name.as_str(), "." | "..")
+                    && !name.contains(['/', '\\', ':', '\0'])
+                    && names.insert(name),
+                "归档文件名无效或重复"
+            );
+            total = total
+                .checked_add(bytes.len() as u64)
+                .context("压缩包大小溢出")?;
+        }
+        ensure!(
+            total <= crate::file_limits::MAX_PACKAGE_BYTES,
+            "压缩包超过大小上限"
+        );
+        let bytes = encrypt_archive(entries, &self.password)?;
+        self.check_slot()?;
+        let path = path.with_extension("7z");
+        crate::storage::atomic_write(&path, |file| {
+            file.write_all(&bytes)?;
+            Ok(())
+        })?;
+        Ok(path)
     }
 
     pub(crate) fn encode(&self, path: &Path, bytes: &[u8]) -> Result<(PathBuf, Vec<u8>)> {
@@ -207,11 +235,24 @@ impl Protection {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn write_final(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
-    if let Some(protection) = Protection::current()? {
+    write_final_with(Protection::current()?.as_ref(), path, bytes)
+}
+
+pub(crate) fn write_final_with(
+    protection: Option<&Protection>,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<PathBuf> {
+    if let Some(protection) = protection {
         let paths = protection.persist(HashMap::from([(path.to_path_buf(), bytes.to_vec())]))?;
         return paths.get(path).cloned().context("加密输出未生成");
     }
+    ensure!(
+        crate::vault::key_handle().is_none(),
+        "工作区加密状态已变化，已取消导出"
+    );
     crate::storage::atomic_write(path, |file| {
         file.write_all(bytes)?;
         Ok(())
@@ -633,17 +674,18 @@ mod tests {
     }
 
     #[test]
-    fn disabled_encryption_writes_plaintext_and_keeps_old_pdf_password_available() {
+    fn legacy_disabled_setting_still_writes_encrypted_and_keeps_old_pdf_access() {
         let workspace = Workspace::new();
         workspace.configure();
         let encrypted = encrypt_pdf(&pdf(), PASSWORD).unwrap();
         let mut policy = ExportPolicy::load().unwrap();
         policy.enabled = false;
         policy.save(&crate::vault::key_handle().unwrap()).unwrap();
-        assert!(Protection::current().unwrap().is_none());
-        let path = workspace.0.path().join("明文.md");
-        assert_eq!(write_final(&path, b"plain body").unwrap(), path);
-        assert_eq!(std::fs::read(path).unwrap(), b"plain body");
+        assert!(Protection::current().unwrap().is_some());
+        let path = workspace.0.path().join("成品.md");
+        let output = write_final(&path, b"protected body").unwrap();
+        assert_eq!(output, path.with_extension("7z"));
+        assert!(!path.exists());
         assert!(
             !Document::load_metadata_mem(&pdf_for_use(encrypted).unwrap())
                 .unwrap()

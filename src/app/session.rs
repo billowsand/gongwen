@@ -56,6 +56,12 @@ pub(crate) enum DraftAction {
         warning: &'static str,
         action: super::output_guard::OutputAction,
     },
+    ChooseDraftDelivery {
+        key: DocKey,
+        selection: crate::models::ExportSelection,
+        open: Option<crate::draft_page::ExportKind>,
+        copy: Option<super::output_guard::OutputAction>,
+    },
     /// 后台把已有成品放进系统剪贴板；Linux 的外部剪贴板工具不在主线程等待。
     CopyFile { path: PathBuf },
     /// 导入文档：应用层开文件框，选好后把正文插进这篇稿件。

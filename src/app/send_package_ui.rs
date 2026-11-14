@@ -1527,6 +1527,13 @@ impl GongwenApp {
 
     /// 真正导出时再从面板取确认计划；期间计划被刷新或失效就放弃这次导出。
     fn run_confirmed_send_package_export(&mut self, path: PathBuf) {
+        let protection = match crate::export::protection::Protection::current() {
+            Ok(protection) => protection,
+            Err(error) => {
+                self.status = format!("无法导出：{error:#}");
+                return;
+            }
+        };
         let Some(panel) = self.send_package.as_mut() else {
             self.status = "导出计划已失效，请重新发起导出。".into();
             return;
@@ -1566,6 +1573,7 @@ impl GongwenApp {
                             text: text.to_string(),
                         }));
                 },
+                protection.as_ref(),
             );
             let _ = tx.send(WorkerResult::SendPackage(SendPackageEvent::Done {
                 owner_id,

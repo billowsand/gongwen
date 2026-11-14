@@ -76,6 +76,7 @@ mkdir -p "$APP_DIR"
 # Copy the full portable tree into the install root.
 cp -a "$STAGING"/. "$APP_DIR"/
 chmod 755 "$APP_DIR/gongwen-assistant"
+install -Dm755 "$APP_DIR/gongwen-assistant" "$PKG_ROOT/usr/libexec/$PACKAGE/gongwen-is903"
 
 # Command-line entry point.
 mkdir -p "$PKG_ROOT/usr/bin"

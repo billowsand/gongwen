@@ -338,7 +338,18 @@ impl Package {
 
     /// 写成 ZIP；`prefix` 是包内统一前缀（通常是技能名），空串表示直接放根下。
     pub(crate) fn write_zip(&self, target: &Path, prefix: &str) -> Result<()> {
-        let mut zip = zip::ZipWriter::new(std::fs::File::create(target)?);
+        self.zip_into(std::fs::File::create(target)?, prefix)?;
+        Ok(())
+    }
+
+    pub(crate) fn zip_bytes(&self, prefix: &str) -> Result<Vec<u8>> {
+        Ok(self
+            .zip_into(std::io::Cursor::new(Vec::new()), prefix)?
+            .into_inner())
+    }
+
+    fn zip_into<W: Write + std::io::Seek>(&self, writer: W, prefix: &str) -> Result<W> {
+        let mut zip = zip::ZipWriter::new(writer);
         for (name, bytes) in &self.files {
             let full = if prefix.is_empty() {
                 name.clone()
@@ -349,8 +360,7 @@ impl Package {
             zip.start_file(full, zip::write::SimpleFileOptions::default())?;
             zip.write_all(bytes)?;
         }
-        zip.finish()?;
-        Ok(())
+        Ok(zip.finish()?)
     }
 
     /// 写到目录下；目标目录可以不存在，但每个已存在的前缀都必须是目录且不是链接。

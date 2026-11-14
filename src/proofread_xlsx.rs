@@ -62,6 +62,17 @@ impl ImportReport {
 
 /// 把当前生效的词表导出成 xlsx。
 pub fn to_xlsx(config: &ProofreadConfig, path: &Path) -> Result<()> {
+    build_xlsx(config)?
+        .save(path)
+        .with_context(|| format!("无法写入 {}", path.display()))?;
+    Ok(())
+}
+
+pub(crate) fn xlsx_bytes(config: &ProofreadConfig) -> Result<Vec<u8>> {
+    Ok(build_xlsx(config)?.save_to_buffer()?)
+}
+
+fn build_xlsx(config: &ProofreadConfig) -> Result<Workbook> {
     let lexicon = proofread::Lexicon::resolved(config);
     let mut workbook = Workbook::new();
     let sheet = workbook.add_worksheet();
@@ -91,10 +102,7 @@ pub fn to_xlsx(config: &ProofreadConfig, path: &Path) -> Result<()> {
         sheet.write_string(row, 7, if rule.enabled { "是" } else { "否" })?;
     }
 
-    workbook
-        .save(path)
-        .with_context(|| format!("无法写入 {}", path.display()))?;
-    Ok(())
+    Ok(workbook)
 }
 
 /// 读 xlsx，解析成规则行。格式问题逐行记进 warnings，不中断整份导入。

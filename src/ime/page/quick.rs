@@ -162,16 +162,20 @@ impl Ime {
 
     /// 把词表写到用户选定的位置。
     pub(crate) fn export_text_to(&mut self, path: &Path, filtered: bool) {
-        let text = if filtered {
+        let text = self.export_word_table_text(filtered);
+        let result = super::super::data::save_bytes(path, text.as_bytes());
+        self.report(result, "词表已导出。");
+    }
+
+    pub(crate) fn export_word_table_text(&mut self, filtered: bool) -> String {
+        if filtered {
             self.filtered_rows()
                 .into_iter()
                 .map(|row| format!("{},{}={}\n", row.code, row.position.unwrap_or(1), row.text))
                 .collect::<String>()
         } else {
             self.table.export()
-        };
-        let result = super::super::data::save_bytes(path, text.as_bytes());
-        self.report(result, "词表已导出。");
+        }
     }
 
     /// 导出个人设置：文件对话框由应用层开，这里只登记请求。

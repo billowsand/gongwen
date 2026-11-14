@@ -284,10 +284,6 @@ pub(crate) fn zip_password_form(
     dialog: &mut ZipPasswordDialog,
     importing: bool,
 ) -> bool {
-    let backup = matches!(
-        dialog.purpose,
-        ZipPasswordPurpose::BackupExport | ZipPasswordPurpose::BackupImport(_)
-    );
     match &dialog.purpose {
         ZipPasswordPurpose::BackupExport | ZipPasswordPurpose::BackupImport(_) => {
             ui.label("全量备份使用独立密码加密内容与文件名。恢复需要备份密码，以及备份当时的应用锁密码。备份密码不在本机保存；仅支持新版 7z 备份。");
@@ -333,7 +329,8 @@ pub(crate) fn zip_password_form(
         ui.weak(crate::password_policy::EXPORT_HINT);
     }
     ui.horizontal(|ui| {
-        let can_remember = !backup && crate::vault::key_handle().is_some();
+        let can_remember = matches!(&dialog.purpose, ZipPasswordPurpose::Import(_))
+            && crate::vault::key_handle().is_some();
         if !can_remember {
             dialog.remember = false;
         }

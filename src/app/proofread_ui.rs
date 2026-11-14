@@ -280,9 +280,18 @@ impl GongwenApp {
     }
 
     fn export_proofread_xlsx(&mut self) {
+        const FILE_NAME: &str = "公文助手校对词表.xlsx";
+        if self.auxiliary_requires_protection() {
+            let config = self.config.proofread.clone();
+            self.request_protected_archive("导出校对词表 Excel", FILE_NAME, move || {
+                let bytes = crate::proofread_xlsx::xlsx_bytes(&config)?;
+                Ok(vec![(FILE_NAME.into(), bytes)])
+            });
+            return;
+        }
         let spec = FileDialogSpec::save_file()
             .filter("Excel", &["xlsx"])
-            .file_name("公文助手校对词表.xlsx");
+            .file_name(FILE_NAME);
         // 校对词表含稿件派生的用语与人名单位，加密工作区里导出成普通表格要先确认风险。
         self.request_output_with_warning(
             "导出校对词表 Excel（含从稿件派生的用语）",

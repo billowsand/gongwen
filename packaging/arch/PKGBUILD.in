@@ -12,6 +12,9 @@ depends=(
 )
 optdepends=(
   'cups: 应用内直接打印 PDF（提供 lp 命令）'
+  'libburn: 刻录实体光盘'
+  'polkit: 授权 IS903 虚拟光盘写入'
+  'udisks2: 卸载已挂载的 IS903 光盘'
   'noto-fonts-cjk: 额外的系统中文字形（公文正文用字已随包携带）'
   'xdg-desktop-portal-hyprland: Hyprland / Omarchy 的文件选择框后端'
 )
@@ -36,6 +39,7 @@ package() {
   # 便携目录：二进制 + runtime（字体、许可证）+ 文档 + AI 技能包
   cp -a "$staging/." "$appdir/"
   chmod 755 "$appdir/gongwen-assistant"
+  install -Dm755 "$appdir/gongwen-assistant" "${pkgdir}/usr/libexec/${pkgname}/gongwen-is903"
 
   # 命令行入口
   ln -s /usr/lib/${pkgname}/gongwen-assistant "${pkgdir}/usr/bin/${pkgname}"

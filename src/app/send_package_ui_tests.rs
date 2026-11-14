@@ -380,7 +380,7 @@ fn never_committed_items_block_export_and_are_pending() {
 }
 
 #[test]
-fn plaintext_send_package_waits_for_confirmation_before_starting_or_writing() {
+fn protected_send_package_waits_for_password_before_starting_or_writing() {
     let (store, panel) = package();
     let mut app = super::super::management_samples::fixture();
     app.manuscript_store = Some(store);
@@ -391,7 +391,7 @@ fn plaintext_send_package_waits_for_confirmation_before_starting_or_writing() {
     crate::vault::set_key_handle([71; 32], true);
     let policy = crate::export::protection::ExportPolicy {
         enabled: false,
-        password: String::new(),
+        password: "Jade!River7Cloud".into(),
     };
     policy.save(&crate::vault::key_handle().unwrap()).unwrap();
     struct Reset;
