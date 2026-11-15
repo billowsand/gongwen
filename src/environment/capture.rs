@@ -48,12 +48,12 @@ impl CaptureGuard {
                     _ => None,
                 })
                 .unwrap_or_else(ptr::null_mut);
-            return Self {
+            Self {
                 hwnd,
                 requested: false,
                 healthy: true,
                 last_check: None,
-            };
+            }
         }
         #[cfg(not(windows))]
         {
@@ -87,7 +87,7 @@ impl CaptureGuard {
             };
             self.requested = requested;
             self.last_check = Some(now);
-            return self.healthy;
+            self.healthy
         }
         #[cfg(not(windows))]
         {
