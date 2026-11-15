@@ -2969,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "gongwen-assistant"
-version = "0.10.9"
+version = "0.10.10"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
