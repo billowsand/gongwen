@@ -76,7 +76,10 @@ mkdir -p "$APP_DIR"
 # Copy the full portable tree into the install root.
 cp -a "$STAGING"/. "$APP_DIR"/
 chmod 755 "$APP_DIR/gongwen-assistant"
-install -Dm755 "$APP_DIR/gongwen-assistant" "$PKG_ROOT/usr/libexec/$PACKAGE/gongwen-is903"
+# IS903 特权助手是同一份二进制按 argv[0] 切模式：硬链接而不是复制，否则包与安装
+# 占用各多一份完整二进制；符号链接会让 helper::trusted_file 的 is_file() 检查失败。
+mkdir -p "$PKG_ROOT/usr/libexec/$PACKAGE"
+ln "$APP_DIR/gongwen-assistant" "$PKG_ROOT/usr/libexec/$PACKAGE/gongwen-is903"
 
 # Command-line entry point.
 mkdir -p "$PKG_ROOT/usr/bin"
