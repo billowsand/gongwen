@@ -195,7 +195,7 @@ impl SettingsSection {
                  闲置超时自动退回锁屏。"
             }
             SettingsSection::Environment => {
-                "持续检测网卡、链路、路由和外部设备；风险出现时先遮蔽，再保存并锁定。"
+                "持续检测移动存储、便携设备、人机接口等外部设备；风险出现时先遮蔽，再保存并锁定。"
             }
             SettingsSection::Input => {
                 "词表输入法按编码查找基础表与公文四码词表，维护后立即生效。单击 Shift 切中英。"
