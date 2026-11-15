@@ -59,8 +59,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force -Path dist/editions | Out-Null
           Copy-Item target/release/gongwen-assistant.exe dist/editions/gongwen-assistant.exe -Force
-          $edition = (& dist/editions/gongwen-assistant.exe --build-edition).Trim()
-          if ($edition -ne "ai") { throw "expected ai edition, got '$edition'" }
+          # 版本由上面的 --features 固定，不再回问程序：windows_subsystem = "windows"
+          # 的可执行文件在 PowerShell 管道里拿不到 stdout（The pipe is being closed）。
 
       - name: Download runtime assets
         shell: pwsh
