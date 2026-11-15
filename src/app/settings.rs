@@ -132,7 +132,7 @@ impl SettingsSection {
             SettingsSection::Backup => "数据备份",
             SettingsSection::Security => "密级规则",
             SettingsSection::Vault => "应用锁",
-            SettingsSection::Environment => "环境检测",
+            SettingsSection::Environment => "外设感知",
             SettingsSection::Input => "输入法",
         }
     }

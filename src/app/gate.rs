@@ -425,7 +425,7 @@ impl AppShell {
     }
 
     /// 首次启用或修改策略时的准入复核：即使候选策略关闭 fail_closed，
-    /// 也必须先拿到网络与外设两份健康且未过期的初始样本。
+    /// 也必须先拿到健康且未过期的外设初始样本。
     fn evaluate_initial_environment(
         &mut self,
         policy: EnvironmentPolicy,
@@ -521,7 +521,7 @@ impl AppShell {
                 refreshed = true;
             }
             if ready && policy.enabled {
-                // 初始两类快照分别到达。逐条记录明确风险，缺失与过期在排空后统一判断。
+                // 逐条记录明确风险，缺失与过期在排空后统一判断。
                 violation = violation.or_else(|| {
                     crate::environment::evaluate_observed_risk(
                         self.environment.snapshot(),
@@ -557,7 +557,7 @@ impl AppShell {
                 Instant::now(),
             );
             app.environment_preview = preview.map_or_else(
-                || "网络与外设预检通过。".into(),
+                || "外设预检通过。".into(),
                 |reason| format!("预检未通过：{}", reason.summary()),
             );
         }
@@ -1959,7 +1959,7 @@ fn unlock_form(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<GateE
                 if ui
                     .add_enabled(
                         !gate.password.is_empty(),
-                        egui::Button::new("验证密码并停用环境检测"),
+                        egui::Button::new("验证密码并停用外设感知"),
                     )
                     .clicked()
                 {
@@ -2491,7 +2491,7 @@ mod lifecycle_tests {
     #[test]
     fn environment_enable_requires_healthy_preflight_and_explicit_save() {
         isolated(|| {
-            use crate::environment::{DeviceSnapshot, Monitor, MonitorEvent, NetworkSnapshot};
+            use crate::environment::{DeviceSnapshot, Monitor};
             let (mut shell, _) = protected_environment_fixture();
             let (monitor, sender) = Monitor::test_channel();
             shell.environment = monitor;
@@ -2511,16 +2511,7 @@ mod lifecycle_tests {
             };
             app.save_environment_requested = true;
             sender
-                .send((
-                    Instant::now(),
-                    MonitorEvent::Network(Ok(NetworkSnapshot::default())),
-                ))
-                .unwrap();
-            sender
-                .send((
-                    Instant::now(),
-                    MonitorEvent::Devices(Ok(DeviceSnapshot::default())),
-                ))
+                .send((Instant::now(), Ok(DeviceSnapshot::default())))
                 .unwrap();
             shell.finish_settings_save(&egui::Context::default());
             assert!(storage::load().unwrap().0.environment.enabled);
@@ -2568,7 +2559,7 @@ mod lifecycle_tests {
     #[test]
     fn initial_preflight_requires_samples_even_when_fail_closed_is_off() {
         isolated(|| {
-            use crate::environment::{DeviceSnapshot, Monitor, MonitorEvent, NetworkSnapshot};
+            use crate::environment::{DeviceSnapshot, Monitor};
             let (mut shell, _) = protected_environment_fixture();
             let (monitor, sender) = Monitor::test_channel();
             shell.environment = monitor;
@@ -2594,16 +2585,7 @@ mod lifecycle_tests {
             };
             app.save_environment_requested = true;
             sender
-                .send((
-                    Instant::now(),
-                    MonitorEvent::Network(Ok(NetworkSnapshot::default())),
-                ))
-                .unwrap();
-            sender
-                .send((
-                    Instant::now(),
-                    MonitorEvent::Devices(Ok(DeviceSnapshot::default())),
-                ))
+                .send((Instant::now(), Ok(DeviceSnapshot::default())))
                 .unwrap();
             shell.finish_settings_save(&egui::Context::default());
             assert!(storage::load().unwrap().0.environment.enabled);
@@ -2613,7 +2595,7 @@ mod lifecycle_tests {
     #[test]
     fn environment_lock_keeps_violation_followed_by_clear_snapshot() {
         isolated(|| {
-            use crate::environment::{DeviceSnapshot, Monitor, MonitorEvent, NetworkSnapshot};
+            use crate::environment::{DeviceSnapshot, Monitor};
             let (mut shell, _) = protected_environment_fixture();
             let (monitor, sender) = Monitor::test_channel();
             shell.environment = monitor;
@@ -2622,30 +2604,29 @@ mod lifecycle_tests {
             };
             app.config.environment.enabled = true;
             sender
-                .send((
-                    Instant::now(),
-                    MonitorEvent::Devices(Ok(DeviceSnapshot::default())),
-                ))
+                .send((Instant::now(), Ok(DeviceSnapshot::default())))
                 .unwrap();
             sender
                 .send((
                     Instant::now(),
-                    MonitorEvent::Network(Ok(NetworkSnapshot {
-                        default_route: true,
-                        ..Default::default()
-                    })),
+                    Ok(DeviceSnapshot {
+                        devices: vec![crate::environment::DeviceInfo {
+                            id: "storage".into(),
+                            class: crate::environment::DeviceClass::RemovableStorage,
+                            identity: None,
+                        }],
+                    }),
                 ))
                 .unwrap();
             sender
-                .send((
-                    Instant::now(),
-                    MonitorEvent::Network(Ok(NetworkSnapshot::default())),
-                ))
+                .send((Instant::now(), Ok(DeviceSnapshot::default())))
                 .unwrap();
             shell.poll_environment(&egui::Context::default());
             assert_eq!(
                 shell.environment_violation,
-                Some(crate::environment::Violation::DefaultRoute)
+                Some(crate::environment::Violation::Device(
+                    crate::environment::DeviceClass::RemovableStorage
+                ))
             );
             assert!(shell.environment_lock.is_some());
         });
@@ -2654,7 +2635,7 @@ mod lifecycle_tests {
     #[test]
     fn environment_stale_queued_snapshot_does_not_extend_freshness() {
         isolated(|| {
-            use crate::environment::{DeviceSnapshot, Monitor, MonitorEvent, NetworkSnapshot};
+            use crate::environment::{DeviceSnapshot, Monitor};
             let (mut shell, _) = protected_environment_fixture();
             let (monitor, sender) = Monitor::test_channel();
             shell.environment = monitor;
@@ -2663,16 +2644,11 @@ mod lifecycle_tests {
             };
             app.config.environment.enabled = true;
             let old = Instant::now() - Duration::from_secs(16);
-            sender
-                .send((old, MonitorEvent::Network(Ok(NetworkSnapshot::default()))))
-                .unwrap();
-            sender
-                .send((old, MonitorEvent::Devices(Ok(DeviceSnapshot::default()))))
-                .unwrap();
+            sender.send((old, Ok(DeviceSnapshot::default()))).unwrap();
             shell.poll_environment(&egui::Context::default());
             assert_eq!(
                 shell.environment_violation,
-                Some(crate::environment::Violation::NetworkMonitorUnavailable)
+                Some(crate::environment::Violation::DeviceMonitorUnavailable)
             );
             assert!(shell.environment_lock.is_some());
         });
@@ -2682,8 +2658,7 @@ mod lifecycle_tests {
     fn environment_unlock_loads_authorization_without_new_snapshot() {
         isolated(|| {
             use crate::environment::{
-                DeviceClass, DeviceIdentity, DeviceInfo, DeviceSnapshot, Monitor, MonitorEvent,
-                NetworkSnapshot,
+                DeviceClass, DeviceIdentity, DeviceInfo, DeviceSnapshot, Monitor,
             };
             let (mut shell, unlocked) = protected_environment_fixture();
             let ShellPhase::Ready(app) = &mut shell.phase else {
@@ -2704,13 +2679,7 @@ mod lifecycle_tests {
             sender
                 .send((
                     Instant::now(),
-                    MonitorEvent::Network(Ok(NetworkSnapshot::default())),
-                ))
-                .unwrap();
-            sender
-                .send((
-                    Instant::now(),
-                    MonitorEvent::Devices(Ok(DeviceSnapshot {
+                    Ok(DeviceSnapshot {
                         devices: vec![DeviceInfo {
                             id: "test-storage".into(),
                             class: DeviceClass::RemovableStorage,
@@ -2719,7 +2688,7 @@ mod lifecycle_tests {
                                 revision: 1,
                             }),
                         }],
-                    })),
+                    }),
                 ))
                 .unwrap();
             shell.startup = Some(StartupBundle {
@@ -2813,7 +2782,7 @@ mod lifecycle_tests {
     #[test]
     fn environment_gate_clears_block_after_healthy_snapshot() {
         isolated(|| {
-            use crate::environment::{DeviceSnapshot, Monitor, MonitorEvent, NetworkSnapshot};
+            use crate::environment::{DeviceSnapshot, Monitor};
             let (mut shell, _) = protected_environment_fixture();
             shell.environment_policy.enabled = true;
             shell.environment_policy.fail_closed = true;
@@ -2826,16 +2795,7 @@ mod lifecycle_tests {
                 gate.environment_block_auto_clear = true;
             }
             sender
-                .send((
-                    Instant::now(),
-                    MonitorEvent::Network(Ok(NetworkSnapshot::default())),
-                ))
-                .unwrap();
-            sender
-                .send((
-                    Instant::now(),
-                    MonitorEvent::Devices(Ok(DeviceSnapshot::default())),
-                ))
+                .send((Instant::now(), Ok(DeviceSnapshot::default())))
                 .unwrap();
             shell.poll_environment(&ctx);
             let ShellPhase::Gate(gate) = &shell.phase else {
@@ -2854,7 +2814,7 @@ mod lifecycle_tests {
     #[test]
     fn environment_gate_keeps_non_risk_block_until_recovery() {
         isolated(|| {
-            use crate::environment::{DeviceSnapshot, Monitor, MonitorEvent, NetworkSnapshot};
+            use crate::environment::{DeviceSnapshot, Monitor};
             let (mut shell, _) = protected_environment_fixture();
             shell.environment_policy.enabled = true;
             let (monitor, sender) = Monitor::test_channel();
@@ -2866,16 +2826,7 @@ mod lifecycle_tests {
                 gate.environment_block_auto_clear = false;
             }
             sender
-                .send((
-                    Instant::now(),
-                    MonitorEvent::Network(Ok(NetworkSnapshot::default())),
-                ))
-                .unwrap();
-            sender
-                .send((
-                    Instant::now(),
-                    MonitorEvent::Devices(Ok(DeviceSnapshot::default())),
-                ))
+                .send((Instant::now(), Ok(DeviceSnapshot::default())))
                 .unwrap();
             shell.poll_environment(&ctx);
             let ShellPhase::Gate(gate) = &shell.phase else {

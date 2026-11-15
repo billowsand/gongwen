@@ -1,15 +1,10 @@
-use super::{
-    DeviceClass, DeviceIdentity, DeviceInfo, DeviceSnapshot, MonitorEvent, NetworkInterface,
-    NetworkInterfaceKind, NetworkSnapshot, TimedEvent,
-};
+use super::{DeviceClass, DeviceIdentity, DeviceInfo, DeviceSnapshot, TimedEvent};
 use eframe::egui;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
 use std::io;
 use std::mem::{size_of, size_of_val};
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::ptr::{self, addr_of, addr_of_mut};
-use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -31,23 +26,9 @@ use windows_sys::Win32::{
         Usb::GUID_DEVINTERFACE_USB_DEVICE,
     },
     Foundation::{
-        CloseHandle, ERROR_DEVICE_NOT_CONNECTED, ERROR_FILE_NOT_FOUND, ERROR_NOT_READY,
-        ERROR_PATH_NOT_FOUND, GENERIC_READ, HANDLE, HINSTANCE, HWND, INVALID_HANDLE_VALUE,
+        CloseHandle, ERROR_DEVICE_NOT_CONNECTED, ERROR_FILE_NOT_FOUND, ERROR_NO_MEDIA_IN_DRIVE,
+        ERROR_NOT_READY, ERROR_PATH_NOT_FOUND, GENERIC_READ, HINSTANCE, HWND, INVALID_HANDLE_VALUE,
     },
-    NetworkManagement::{
-        IpHelper::{
-            CancelMibChangeNotify2, FreeMibTable, GetIfTable2, GetIpForwardTable2,
-            GetUnicastIpAddressTable, IF_TYPE_ETHERNET_CSMACD, IF_TYPE_FASTETHER,
-            IF_TYPE_FASTETHER_FX, IF_TYPE_GIGABITETHERNET, IF_TYPE_IEEE80211, IF_TYPE_PPP,
-            IF_TYPE_PPPMULTILINKBUNDLE, IF_TYPE_PROP_WIRELESS_P2P, IF_TYPE_SOFTWARE_LOOPBACK,
-            IF_TYPE_TUNNEL, IF_TYPE_WWANPP, IF_TYPE_WWANPP2, MIB_IF_TABLE2, MIB_IPFORWARD_ROW2,
-            MIB_IPFORWARD_TABLE2, MIB_NOTIFICATION_TYPE, MIB_UNICASTIPADDRESS_ROW,
-            MIB_UNICASTIPADDRESS_TABLE, NotifyIpInterfaceChange, NotifyRouteChange2,
-            NotifyUnicastIpAddressChange,
-        },
-        Ndis::{IfOperStatusUp, NET_IF_ACCESS_LOOPBACK},
-    },
-    Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC},
     Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     },
@@ -55,7 +36,7 @@ use windows_sys::Win32::{
         IO::DeviceIoControl,
         Ioctl::{
             GET_LENGTH_INFORMATION, GUID_DEVINTERFACE_CDROM, GUID_DEVINTERFACE_DISK,
-            IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_CHECK_VERIFY,
+            IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_CHECK_VERIFY2,
         },
         LibraryLoader::GetModuleHandleW,
     },
@@ -76,257 +57,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_DEVICE_PATHS: u32 = 1024 * 1024;
 const GUID_DEVINTERFACE_IMAGE: GUID = GUID::from_u128(0x6bdd1fc6_810f_11d0_bec7_08002be2092f);
 
-struct MibTable(*mut c_void);
-
-impl Drop for MibTable {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: The IP Helper API allocated this table and ownership has not been released elsewhere.
-            unsafe { FreeMibTable(self.0) };
-        }
-    }
-}
-
-struct MibNotification(HANDLE);
-
-impl Drop for MibNotification {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: This is a live notification handle owned by this guard; cancellation is ignored during teardown.
-            unsafe {
-                CancelMibChangeNotify2(self.0);
-            }
-        }
-    }
-}
-
 fn mark_dirty(context: *const c_void) {
     if let Some(dirty) = (!context.is_null()).then(|| {
-        // SAFETY: Every network callback receives an Arc<AtomicBool> pointer that outlives notification cancellation.
+        // SAFETY: The device window stores an Arc<AtomicBool> pointer until its destruction.
         unsafe { &*context.cast::<AtomicBool>() }
     }) {
         dirty.store(true, Ordering::Release);
     }
-}
-
-unsafe extern "system" fn ip_interface_changed(
-    context: *const c_void,
-    _row: *const windows_sys::Win32::NetworkManagement::IpHelper::MIB_IPINTERFACE_ROW,
-    _kind: MIB_NOTIFICATION_TYPE,
-) {
-    mark_dirty(context);
-}
-
-unsafe extern "system" fn unicast_address_changed(
-    context: *const c_void,
-    _row: *const MIB_UNICASTIPADDRESS_ROW,
-    _kind: MIB_NOTIFICATION_TYPE,
-) {
-    mark_dirty(context);
-}
-
-unsafe extern "system" fn route_changed(
-    context: *const c_void,
-    _row: *const MIB_IPFORWARD_ROW2,
-    _kind: MIB_NOTIFICATION_TYPE,
-) {
-    mark_dirty(context);
-}
-
-fn register_network_notifications(dirty: &Arc<AtomicBool>) -> Result<Vec<MibNotification>, String> {
-    let context = Arc::as_ptr(dirty).cast::<c_void>();
-    let mut registrations = Vec::with_capacity(3);
-    let mut handle = ptr::null_mut();
-    // SAFETY: The callback has the required ABI; its context remains alive until all returned guards are cancelled.
-    let status = unsafe {
-        NotifyIpInterfaceChange(
-            AF_UNSPEC,
-            Some(ip_interface_changed),
-            context,
-            false,
-            &mut handle,
-        )
-    };
-    if status != 0 {
-        return Err(format!("无法注册网络接口通知（{status}）"));
-    }
-    registrations.push(MibNotification(handle));
-
-    handle = ptr::null_mut();
-    // SAFETY: The callback and context have the same lifetime guarantees as the interface notification above.
-    let status = unsafe {
-        NotifyUnicastIpAddressChange(
-            AF_UNSPEC,
-            Some(unicast_address_changed),
-            context,
-            false,
-            &mut handle,
-        )
-    };
-    if status != 0 {
-        return Err(format!("无法注册 IP 地址通知（{status}）"));
-    }
-    registrations.push(MibNotification(handle));
-
-    handle = ptr::null_mut();
-    // SAFETY: The callback and context have the same lifetime guarantees as the interface notification above.
-    let status =
-        unsafe { NotifyRouteChange2(AF_UNSPEC, Some(route_changed), context, false, &mut handle) };
-    if status != 0 {
-        return Err(format!("无法注册路由通知（{status}）"));
-    }
-    registrations.push(MibNotification(handle));
-    Ok(registrations)
-}
-
-fn address_is_non_loopback(address: &MIB_UNICASTIPADDRESS_ROW) -> bool {
-    // SAFETY: si_family selects the corresponding active union member in the OS-provided socket address.
-    let family = unsafe { address.Address.si_family };
-    match family {
-        AF_INET => {
-            // SAFETY: AF_INET establishes that Ipv4 is the active SOCKADDR_INET member.
-            let raw = unsafe { address.Address.Ipv4.sin_addr.S_un.S_addr };
-            let ip = Ipv4Addr::from(raw.to_ne_bytes());
-            let octets = ip.octets();
-            !ip.is_loopback() && !ip.is_unspecified() && !(octets[0] == 169 && octets[1] == 254)
-        }
-        AF_INET6 => {
-            // SAFETY: AF_INET6 establishes that Ipv6 is active and its Byte union member is the address storage.
-            let bytes = unsafe { address.Address.Ipv6.sin6_addr.u.Byte };
-            let ip = Ipv6Addr::from(bytes);
-            if let Some(mapped) = ip.to_ipv4_mapped() {
-                let octets = mapped.octets();
-                return !mapped.is_loopback()
-                    && !mapped.is_unspecified()
-                    && !(octets[0] == 169 && octets[1] == 254);
-            }
-            let link_local = bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80;
-            !ip.is_loopback() && !ip.is_unspecified() && !link_local
-        }
-        _ => false,
-    }
-}
-
-fn interface_kind(kind: u32) -> NetworkInterfaceKind {
-    match kind {
-        IF_TYPE_ETHERNET_CSMACD
-        | IF_TYPE_FASTETHER
-        | IF_TYPE_FASTETHER_FX
-        | IF_TYPE_GIGABITETHERNET => NetworkInterfaceKind::Ethernet,
-        IF_TYPE_IEEE80211 | IF_TYPE_PROP_WIRELESS_P2P => NetworkInterfaceKind::Wifi,
-        IF_TYPE_WWANPP | IF_TYPE_WWANPP2 => NetworkInterfaceKind::Cellular,
-        IF_TYPE_PPP | IF_TYPE_PPPMULTILINKBUNDLE | IF_TYPE_TUNNEL => NetworkInterfaceKind::Vpn,
-        // `IF_TYPE_PROP_VIRTUAL` 既可能是 Hyper-V/WSL，也可能是硬件厂商的
-        // 虚拟功能；统一归入 Other，再由 HardwareInterface 标志决定是否
-        // 按虚拟接口处理。
-        _ => NetworkInterfaceKind::Other,
-    }
-}
-
-fn network_snapshot() -> Result<NetworkSnapshot, String> {
-    let mut raw_interfaces = ptr::null_mut();
-    // SAFETY: raw_interfaces is writable and receives an IP-Helper-owned table on success.
-    let status = unsafe { GetIfTable2(&mut raw_interfaces) };
-    let interfaces = MibTable(raw_interfaces.cast());
-    if status != 0 || interfaces.0.is_null() {
-        return Err(format!("GetIfTable2 失败（{status}）"));
-    }
-
-    let mut raw_addresses = ptr::null_mut();
-    // SAFETY: raw_addresses is writable and AF_UNSPEC requests both IP address families.
-    let status = unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &mut raw_addresses) };
-    let addresses = MibTable(raw_addresses.cast());
-    if status != 0 || addresses.0.is_null() {
-        return Err(format!("GetUnicastIpAddressTable 失败（{status}）"));
-    }
-
-    let mut raw_routes = ptr::null_mut();
-    // SAFETY: raw_routes is writable and AF_UNSPEC requests both IP route families.
-    let status = unsafe { GetIpForwardTable2(AF_UNSPEC, &mut raw_routes) };
-    let routes = MibTable(raw_routes.cast());
-    if status != 0 || routes.0.is_null() {
-        return Err(format!("GetIpForwardTable2 失败（{status}）"));
-    }
-
-    // SAFETY: Each successful table remains allocated by its guard; NumEntries describes its flexible array tail.
-    let (interface_rows, address_rows, route_rows) = unsafe {
-        let interface_table = &*interfaces.0.cast::<MIB_IF_TABLE2>();
-        let address_table = &*addresses.0.cast::<MIB_UNICASTIPADDRESS_TABLE>();
-        let route_table = &*routes.0.cast::<MIB_IPFORWARD_TABLE2>();
-        (
-            slice::from_raw_parts(
-                interface_table.Table.as_ptr(),
-                interface_table.NumEntries as usize,
-            ),
-            slice::from_raw_parts(
-                address_table.Table.as_ptr(),
-                address_table.NumEntries as usize,
-            ),
-            slice::from_raw_parts(route_table.Table.as_ptr(), route_table.NumEntries as usize),
-        )
-    };
-
-    let mut addressed = BTreeSet::new();
-    for row in address_rows
-        .iter()
-        .filter(|row| address_is_non_loopback(row))
-    {
-        // SAFETY: Value reads the complete LUID union without depending on its bitfield representation.
-        let luid = unsafe { row.InterfaceLuid.Value };
-        addressed.insert((luid, row.InterfaceIndex));
-    }
-
-    let mut result = NetworkSnapshot::default();
-    for row in interface_rows {
-        // SAFETY: Value reads the complete LUID union supplied by GetIfTable2.
-        let luid = unsafe { row.InterfaceLuid.Value };
-        let loopback =
-            row.Type == IF_TYPE_SOFTWARE_LOOPBACK || row.AccessType == NET_IF_ACCESS_LOOPBACK;
-        let non_loopback_address = !loopback
-            && (addressed.contains(&(luid, row.InterfaceIndex))
-                || addressed.contains(&(luid, 0))
-                || addressed.contains(&(0, row.InterfaceIndex)));
-        let mut kind = interface_kind(row.Type);
-        // MIB_IF_ROW2 的第一位是 HardwareInterface：Hyper-V、WSL、Docker 等
-        // 常驻虚拟网卡可能保持 Up，也可能取得可路由地址（例如 WSL 的
-        // vEthernet）。它们不能按确认的系统服务接口豁免，必须单独归为
-        // Virtual，由策略检查地址。
-        if !loopback
-            && matches!(
-                kind,
-                NetworkInterfaceKind::Ethernet
-                    | NetworkInterfaceKind::Wifi
-                    | NetworkInterfaceKind::Other
-            )
-            && row.InterfaceAndOperStatusFlags._bitfield & 1 == 0
-        {
-            kind = NetworkInterfaceKind::Virtual;
-        }
-        result.interfaces.push(NetworkInterface {
-            id: if luid == 0 {
-                format!("if-{}", row.InterfaceIndex)
-            } else {
-                format!("{luid:016x}")
-            },
-            kind,
-            loopback,
-            link_up: row.OperStatus == IfOperStatusUp,
-            non_loopback_address,
-        });
-    }
-    result
-        .interfaces
-        .sort_by(|left, right| left.id.cmp(&right.id));
-
-    result.default_route = route_rows.iter().any(|route| {
-        if route.Loopback || route.DestinationPrefix.PrefixLength != 0 {
-            return false;
-        }
-        // SAFETY: Reading the family does not access any inactive union member.
-        let family = unsafe { route.DestinationPrefix.Prefix.si_family };
-        family == AF_INET || family == AF_INET6
-    });
-    Ok(result)
 }
 
 struct WindowClass {
@@ -823,24 +560,31 @@ fn add_device(
 }
 
 /// 空的 CD/DVD 驱动器、空读卡器仍会注册设备接口或 devnode。只有能对
-/// **该设备句柄**证明介质可读时才登记；无法判断时按有介质处理（fail-closed）。
+/// 区分空介质和查询失败；后者按采集异常交给策略判定。
 fn media_error_means_absent(error: &io::Error) -> bool {
     matches!(
         error.raw_os_error(),
         Some(code)
-            if code == ERROR_NOT_READY as i32
+            if code == ERROR_NO_MEDIA_IN_DRIVE as i32
+                || code == ERROR_NOT_READY as i32
                 || code == ERROR_FILE_NOT_FOUND as i32
                 || code == ERROR_PATH_NOT_FOUND as i32
                 || code == ERROR_DEVICE_NOT_CONNECTED as i32
     )
 }
 
-fn device_media_present(path: &[u16], ioctl: u32) -> bool {
+fn device_media_present(path: &[u16], ioctl: u32) -> Result<bool, String> {
+    // CHECK_VERIFY2 允许零访问权限打开设备。磁盘长度查询要求读权限。
+    let access = if ioctl == IOCTL_DISK_GET_LENGTH_INFO {
+        GENERIC_READ
+    } else {
+        0
+    };
     // SAFETY: path 来自设备接口列表且保持 NUL 结尾；其余参数为固定只读访问。
     let handle = unsafe {
         CreateFileW(
             path.as_ptr(),
-            GENERIC_READ,
+            access,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             ptr::null(),
             OPEN_EXISTING,
@@ -849,7 +593,12 @@ fn device_media_present(path: &[u16], ioctl: u32) -> bool {
         )
     };
     if handle == INVALID_HANDLE_VALUE {
-        return !media_error_means_absent(&io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        return if media_error_means_absent(&error) {
+            Ok(false)
+        } else {
+            Err(format!("打开外设以查询介质失败：{error}"))
+        };
     }
     let mut info = GET_LENGTH_INFORMATION { Length: 0 };
     let mut returned = 0u32;
@@ -883,8 +632,9 @@ fn device_media_present(path: &[u16], ioctl: u32) -> bool {
     match error {
         // 光驱的 CHECK_VERIFY 成功即表示有介质；磁盘再看实际长度，避免
         // 空读卡器/零容量虚拟盘被登记成移动存储。
-        None => ioctl != IOCTL_DISK_GET_LENGTH_INFO || info.Length > 0,
-        Some(error) => !media_error_means_absent(&error),
+        None => Ok(ioctl != IOCTL_DISK_GET_LENGTH_INFO || info.Length > 0),
+        Some(error) if media_error_means_absent(&error) => Ok(false),
+        Some(error) => Err(format!("查询外设介质状态失败：{error}")),
     }
 }
 
@@ -894,7 +644,7 @@ fn device_snapshot() -> Result<DeviceSnapshot, String> {
 
     for (node, id, path) in interface_instances(&GUID_DEVINTERFACE_DISK)? {
         let ancestry = ancestry(node)?;
-        if !ancestry.removable || !device_media_present(&path, IOCTL_DISK_GET_LENGTH_INFO) {
+        if !ancestry.removable || !device_media_present(&path, IOCTL_DISK_GET_LENGTH_INFO)? {
             continue;
         }
         let device_id = ancestry
@@ -914,7 +664,7 @@ fn device_snapshot() -> Result<DeviceSnapshot, String> {
     }
     for (node, id, path) in interface_instances(&GUID_DEVINTERFACE_CDROM)? {
         let ancestry = ancestry(node)?;
-        if !ancestry.removable || !device_media_present(&path, IOCTL_STORAGE_CHECK_VERIFY) {
+        if !ancestry.removable || !device_media_present(&path, IOCTL_STORAGE_CHECK_VERIFY2)? {
             continue;
         }
         let device_id = ancestry
@@ -1012,38 +762,21 @@ fn snapshot_with_retry<T>(mut collect: impl FnMut() -> Result<T, String>) -> Res
     Err(last.unwrap_or_else(|| "采集失败".to_owned()))
 }
 
-fn send_network(sender: &mpsc::Sender<TimedEvent>) -> bool {
-    sender
-        .send((
-            Instant::now(),
-            MonitorEvent::Network(snapshot_with_retry(network_snapshot)),
-        ))
-        .is_ok()
-}
-
 fn send_devices(sender: &mpsc::Sender<TimedEvent>) -> bool {
     sender
-        .send((
-            Instant::now(),
-            MonitorEvent::Devices(snapshot_with_retry(device_snapshot)),
-        ))
+        .send((Instant::now(), snapshot_with_retry(device_snapshot)))
         .is_ok()
 }
 
 pub(crate) fn run(sender: mpsc::Sender<TimedEvent>, stop: Arc<AtomicBool>, wake: egui::Context) {
-    let network_dirty = Arc::new(AtomicBool::new(true));
     let device_dirty = Arc::new(AtomicBool::new(true));
-    let network_registrations = register_network_notifications(&network_dirty);
-    let network_degraded = network_registrations.is_err();
-    let _network_notifications = network_registrations.ok();
     let device_context = Arc::as_ptr(&device_dirty).cast::<c_void>();
     let device_monitor = DeviceMonitor::new(device_context);
     let device_degraded = device_monitor.is_err();
     let _device_monitor = device_monitor.ok();
 
-    network_dirty.store(false, Ordering::Release);
     device_dirty.store(false, Ordering::Release);
-    let connected = send_network(&sender) && send_devices(&sender);
+    let connected = send_devices(&sender);
     if !connected {
         return;
     }
@@ -1052,27 +785,16 @@ pub(crate) fn run(sender: mpsc::Sender<TimedEvent>, stop: Arc<AtomicBool>, wake:
     let mut last_heartbeat = Instant::now();
     while !stop.load(Ordering::Acquire) {
         pump_device_messages();
-        let heartbeat = if network_degraded || device_degraded {
+        let heartbeat = if device_degraded {
             last_heartbeat.elapsed() >= Duration::from_secs(1)
         } else {
             last_heartbeat.elapsed() >= HEARTBEAT
         };
-        let network_changed = network_dirty.swap(false, Ordering::AcqRel);
         let device_changed = device_dirty.swap(false, Ordering::AcqRel);
-        let mut sent = false;
-        if network_changed || heartbeat {
-            if !send_network(&sender) {
-                return;
-            }
-            sent = true;
-        }
         if device_changed || heartbeat {
             if !send_devices(&sender) {
                 return;
             }
-            sent = true;
-        }
-        if sent {
             wake.request_repaint();
         }
         if heartbeat {

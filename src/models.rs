@@ -45,7 +45,7 @@ pub(crate) use draft::ResearchPalette;
 pub(crate) use draft::ResearchTemplate;
 pub(crate) use draft::ReviewNote;
 pub(crate) use draft::StyleMode;
-pub(crate) use environment::{DevicePolicy, EnvironmentPolicy, NetworkPolicy};
+pub(crate) use environment::{DevicePolicy, EnvironmentPolicy};
 pub(crate) use network::ProxyConfig;
 pub(crate) use network::ProxyMode;
 #[cfg(feature = "ai-workbench")]
