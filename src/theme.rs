@@ -46,6 +46,8 @@ pub(crate) use icons::apply_macos_dock_icon;
 pub(crate) use icons::{
     Icon, app_icon, brand_image, chrome_radius, configure_icons, primary_shortcut, square_chrome,
 };
+#[cfg(test)]
+pub(crate) use palette::current_paper;
 pub(crate) use palette::{
     MdPalette, PaperFamily, Theme, accent, accent_active, accent_hover, accent_soft, border,
     border_strong, by_name, canvas, current, danger, danger_soft, info, revision, set_current,

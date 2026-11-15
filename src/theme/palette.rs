@@ -310,6 +310,14 @@ pub(crate) fn current() -> Theme {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// 当前纸面显示模式。测试在全局状态跑完后按它还原，免得后续用例换一种排版。
+#[cfg(test)]
+pub(crate) fn current_paper() -> PaperMode {
+    *CURRENT_PAPER
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// 切换并立即生效的纸面显示模式。
 pub(crate) fn set_current_paper(mode: PaperMode) {
     *CURRENT_PAPER

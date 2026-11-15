@@ -2321,21 +2321,31 @@ mod lifecycle_tests {
     use super::*;
 
     fn isolated(test: impl FnOnce()) {
+        // 主题与纸面是进程级全局状态：这些用例会照槽位配置重套主题，跑完必须还回去，
+        // 否则后面的界面量宽用例会按上一个用例留下的主题排版。
+        let previous_theme = crate::models::ThemeName::ALL
+            .iter()
+            .copied()
+            .find(|name| theme::by_name(*name).label == theme::current().label)
+            .unwrap_or_default();
+        let previous_paper = theme::current_paper();
         // 临时目录放在仓库的 `tmp/` 下（不入库，干净检出的 CI 上不存在），
         // 用前先建出来；`tempdir_in` 不会自建父目录。
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp");
         std::fs::create_dir_all(&root).expect("应能建立测试临时目录");
         let dir = tempfile::tempdir_in(&root).unwrap();
         storage::set_test_config_dir(Some(dir.path().to_path_buf()));
-        struct Reset;
+        struct Reset(crate::models::ThemeName, crate::models::PaperMode);
         impl Drop for Reset {
             fn drop(&mut self) {
                 crate::vault::clear_key_handle();
                 storage::set_writes_blocked(false);
                 storage::set_test_config_dir(None);
+                theme::set_current(self.0);
+                theme::set_current_paper(self.1);
             }
         }
-        let _reset = Reset;
+        let _reset = Reset(previous_theme, previous_paper);
         test();
     }
 
