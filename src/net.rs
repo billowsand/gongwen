@@ -146,7 +146,7 @@ fn push_proxy_env(env: &mut Vec<(String, String)>, name: &str, value: &str) {
 
 /// 为访问 `target`（接口地址）建一个客户端。
 pub fn client(target: &str, timeout_seconds: u64) -> Result<Client> {
-    build(&current_proxy(), target, timeout_seconds)
+    client_with_proxy(&current_proxy(), target, timeout_seconds)
 }
 
 /// 数据接口只能访问用户配置的地址，不能把自定义鉴权头或请求体转发到重定向目标。
@@ -177,7 +177,11 @@ pub fn stream_client(target: &str, timeout_seconds: u64) -> Result<Client> {
     build_with(&current_proxy(), target, builder)
 }
 
-fn build(config: &ProxyConfig, target: &str, timeout_seconds: u64) -> Result<Client> {
+pub(crate) fn client_with_proxy(
+    config: &ProxyConfig,
+    target: &str,
+    timeout_seconds: u64,
+) -> Result<Client> {
     let builder = Client::builder().timeout(Duration::from_secs(timeout_seconds.max(5)));
     build_with(config, target, builder)
 }
@@ -366,7 +370,7 @@ mod tests {
         for scheme in SCHEMES {
             let config = custom(&format!("{scheme}://127.0.0.1:1080"));
             assert!(
-                build(&config, "https://api.example.com/v1", 30).is_ok(),
+                client_with_proxy(&config, "https://api.example.com/v1", 30).is_ok(),
                 "{scheme}"
             );
         }
@@ -374,13 +378,13 @@ mod tests {
 
     #[test]
     fn custom_mode_without_url_fails_instead_of_going_direct() {
-        let err = build(&custom(""), "https://api.example.com/v1", 30).unwrap_err();
+        let err = client_with_proxy(&custom(""), "https://api.example.com/v1", 30).unwrap_err();
         assert!(format!("{err:#}").contains("没有填写代理地址"));
     }
 
     #[test]
     fn loopback_target_ignores_broken_custom_proxy() {
-        assert!(build(&custom(""), "http://127.0.0.1:1234/v1", 30).is_ok());
+        assert!(client_with_proxy(&custom(""), "http://127.0.0.1:1234/v1", 30).is_ok());
     }
 
     /// 起一个只接一次连接的本机服务，把收到的头几个字节交回来，再答一个
@@ -412,7 +416,7 @@ Connection: close
             stream.write_all(OK).unwrap();
             buf[..n].to_vec()
         });
-        let client = build(
+        let client = client_with_proxy(
             &custom(&format!("127.0.0.1:{port}")),
             "http://model.example.invalid/v1",
             10,
@@ -457,7 +461,7 @@ Connection: close
             stream.write_all(OK).unwrap();
             host
         });
-        let client = build(
+        let client = client_with_proxy(
             &custom(&format!("socks5h://127.0.0.1:{port}")),
             "http://model.example.invalid/v1",
             10,

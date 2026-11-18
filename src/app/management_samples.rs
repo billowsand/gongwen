@@ -12,7 +12,7 @@ pub(crate) fn fixture() -> GongwenApp {
         vocabulary_setup: VocabularySetupStatus::Completed,
         ..Default::default()
     };
-    let ime = crate::ime::Ime::new(session::ime_settings_of(&config.ime));
+    let ime = crate::ime::Ime::new(session::ime_settings_of(&config.ime, false));
     let environment_draft = config.environment;
     let docs = vec![DraftSession::blank(0, &config)];
     let (sender, receiver) = mpsc::channel();
@@ -60,6 +60,8 @@ pub(crate) fn fixture() -> GongwenApp {
         export_links: ExportLinks::default(),
         #[cfg(feature = "ai-workbench")]
         provider_status: std::collections::HashMap::new(),
+        #[cfg(feature = "ai-workbench")]
+        model_health: Default::default(),
         #[cfg(feature = "ai-workbench")]
         provider_edit: std::collections::HashSet::new(),
         #[cfg(feature = "ai-workbench")]

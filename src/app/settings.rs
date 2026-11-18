@@ -1908,13 +1908,20 @@ impl GongwenApp {
 
     /// 词表输入法设置：查询行为、候选窗与词表维护。
     fn ime_section_ui(&mut self, ui: &mut egui::Ui) {
-        setting_toggle(
-            ui,
-            "启用",
-            None,
-            &mut self.config.ime.enabled,
-            "应用内词表输入法",
-        );
+        let mut enabled = self.ime_settings().enabled;
+        let tip = self
+            .vault_locked
+            .then_some("加密工作区自动启用内置输入法。");
+        if setting_row(ui, "启用", tip, |ui| {
+            ui.add_enabled(
+                !self.vault_locked,
+                egui::Checkbox::new(&mut enabled, "应用内词表输入法"),
+            )
+        })
+        .changed()
+        {
+            self.config.ime.enabled = enabled;
+        }
         if let Some(brief) = self.ime.data_brief() {
             setting_note(ui, &brief);
         } else {

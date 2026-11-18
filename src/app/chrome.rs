@@ -1680,8 +1680,6 @@ impl GongwenApp {
             ui.style_mut().spacing.interact_size.y = ROW_HEIGHT;
 
             let status = self.status.clone();
-            #[cfg(feature = "ai-workbench")]
-            let model = self.config.pi_model_label();
             let show_doc_controls = self.showing_doc();
             // 输入法状态：常显的一小块，点一下切中英。
             let ime_active = self.ime.active();
@@ -1891,22 +1889,12 @@ impl GongwenApp {
                     })
                     .inner;
 
-                // 中：模型名。画在左右两组之间的空档里，仍属于这一行，不额外占纵向空间。
+                // 中：写作模型状态。画在左右两组之间的空档里，不额外占纵向空间。
                 #[cfg(feature = "ai-workbench")]
                 {
                     let gap_left = left_bound + 10.0;
                     let gap_right = _right_bound - 10.0;
                     if gap_right - gap_left > 80.0 {
-                        let model_text = if model.is_empty() {
-                            "模型：未选择".to_string()
-                        } else {
-                            format!("模型：{}", truncate_middle(&model, 36))
-                        };
-                        let (fg, bg) = if model.is_empty() {
-                            (theme::warn(), theme::warn_soft())
-                        } else {
-                            (theme::success(), theme::surface_sunk())
-                        };
                         // 对齐整条状态栏的中线；只有窗口太窄、居中会压到两侧时才让位。
                         let chip_width = (gap_right - gap_left).min(420.0);
                         let center_x = ui
@@ -1922,7 +1910,7 @@ impl GongwenApp {
                             egui::UiBuilder::new()
                                 .max_rect(chip_rect)
                                 .layout(egui::Layout::top_down(egui::Align::Center)),
-                            |ui| theme::chip(ui, &model_text, fg, bg),
+                            |ui| self.writing_model_chip(ui),
                         );
                     }
                 }

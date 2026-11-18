@@ -676,10 +676,9 @@ impl GongwenApp {
         }
     }
 
-    /// 配置里的输入法设置。每帧调一次，设置没变是空操作，
-    /// 而在设置页改一项就能当场生效。
+    /// 当前工作区的输入法设置。每帧调一次，设置页改动可当场生效。
     pub(crate) fn ime_settings(&self) -> crate::ime::ImeSettings {
-        ime_settings_of(&self.config.ime)
+        ime_settings_of(&self.config.ime, self.vault_locked)
     }
 
     /// 应用级快捷键要在各个文本框处理输入前消费，避免保存/查找
@@ -923,9 +922,28 @@ impl GongwenApp {
     }
 }
 
-/// 配置里的输入法设置换成引擎那边的写法。启动时（还没有 `GongwenApp`）也要用。
-pub(crate) fn ime_settings_of(ime: &crate::models::ImeConfig) -> crate::ime::ImeSettings {
-    crate::ime::ImeSettings::from_config(ime)
+/// 加密工作区总是启用内置输入法，普通工作区沿用用户设置。
+pub(crate) fn ime_settings_of(
+    ime: &crate::models::ImeConfig,
+    vault_locked: bool,
+) -> crate::ime::ImeSettings {
+    let mut settings = crate::ime::ImeSettings::from_config(ime);
+    settings.enabled |= vault_locked;
+    settings
+}
+
+#[cfg(test)]
+#[test]
+fn encrypted_workspace_enables_ime_without_changing_the_plain_workspace_preference() {
+    let mut config = crate::models::ImeConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    assert!(!ime_settings_of(&config, false).enabled);
+    assert!(ime_settings_of(&config, true).enabled);
+    assert!(!ime_settings_of(&config, false).enabled);
+    config.enabled = true;
+    assert!(ime_settings_of(&config, false).enabled);
 }
 
 /// 立即写下一篇稿件的 AI 会话（关标签、关窗前）。

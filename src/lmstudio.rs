@@ -124,6 +124,14 @@ fn request_headers(
 /// 列出任意 OpenAI 兼容端点已加载的模型。各提供商探测时各用各的地址。
 pub fn list_models_at(base_url: &str, api_key: &str, timeout_seconds: u64) -> Result<Vec<String>> {
     let client = crate::net::client(base_url, timeout_seconds)?;
+    list_models_with_client(&client, base_url, api_key)
+}
+
+pub(crate) fn list_models_with_client(
+    client: &Client,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut request = client.get(url);
     if !api_key.trim().is_empty() {

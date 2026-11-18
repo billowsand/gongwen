@@ -56,6 +56,8 @@ mod knowledge_local;
 mod lexicon_jobs;
 mod manuscript_ui;
 pub(crate) mod media_export;
+#[cfg(feature = "ai-workbench")]
+mod model_health;
 pub(crate) mod output_guard;
 #[cfg(feature = "ai-workbench")]
 mod pi_jobs;
@@ -190,6 +192,8 @@ pub struct GongwenApp {
     /// 各提供商的探测状态（本进程内）：连接结果与提示语。模型清单缓存在配置里。
     #[cfg(feature = "ai-workbench")]
     pub(crate) provider_status: std::collections::HashMap<String, ProviderProbe>,
+    #[cfg(feature = "ai-workbench")]
+    model_health: model_health::ModelHealth,
     /// 提供商卡片哪些处于展开编辑态。
     #[cfg(feature = "ai-workbench")]
     pub(crate) provider_edit: std::collections::HashSet<String>,
@@ -724,8 +728,8 @@ impl GongwenApp {
             },
             Err(error) => Some(format!("资源库打开失败，图片暂按文件存储：{error:#}")),
         };
-        // 按配置装：配置里关掉了输入法就不装配引擎，不白读词库和语言模型。
-        let ime = crate::ime::Ime::new(session::ime_settings_of(&config.ime));
+        let vault_locked = crate::vault::Vault::probe() == crate::vault::Probe::Locked;
+        let ime = crate::ime::Ime::new(session::ime_settings_of(&config.ime, vault_locked));
         let (sender, receiver) = mpsc::channel();
         // 先摆一篇空白稿兜底；下面会话恢复成功就把它换掉。
         let docs = vec![DraftSession::blank(0, &config)];
@@ -820,6 +824,8 @@ impl GongwenApp {
             export_links: ExportLinks::default(),
             #[cfg(feature = "ai-workbench")]
             provider_status: std::collections::HashMap::new(),
+            #[cfg(feature = "ai-workbench")]
+            model_health: Default::default(),
             #[cfg(feature = "ai-workbench")]
             provider_edit: std::collections::HashSet::new(),
             #[cfg(feature = "ai-workbench")]
@@ -1054,7 +1060,7 @@ impl GongwenApp {
             rerank_verify_result: None,
             #[cfg(feature = "ai-workbench")]
             knowledge_preview: None,
-            vault_locked: crate::vault::Vault::probe() == crate::vault::Probe::Locked,
+            vault_locked,
             last_activity_secs: ctx.input(|input| input.time),
             lock_requested: false,
             force_relock: false,
@@ -1358,6 +1364,8 @@ impl GongwenApp {
         self.ime.candidates_ui(&ctx);
         // 所有编辑框都画完了，这时 `output.ime` 才是本帧最终的那一个。
         self.ime.end_frame(&ctx);
+        #[cfg(feature = "ai-workbench")]
+        self.tick_model_health(&ctx);
         if self.any_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }

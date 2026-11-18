@@ -58,6 +58,11 @@ pub(crate) enum WorkerResult {
         result: Result<Vec<String>, String>,
         probed_kinds: std::collections::HashMap<String, ModelKind>,
     },
+    #[cfg(feature = "ai-workbench")]
+    WritingModelHealth {
+        revision: u64,
+        result: super::model_health::ProbeResult,
+    },
     /// 真跑一次 rerank 的验证结果（端点路径 + 响应字段是否对得上）。
     #[cfg(feature = "ai-workbench")]
     RerankVerify(Result<String, String>),
@@ -587,6 +592,10 @@ impl GongwenApp {
                             self.status = format!("「{name}」连接失败：{error}");
                         }
                     }
+                }
+                #[cfg(feature = "ai-workbench")]
+                WorkerResult::WritingModelHealth { revision, result } => {
+                    self.model_health.complete(revision, result);
                 }
                 WorkerResult::AuxiliaryArchiveExported(result) => {
                     self.status = match result {

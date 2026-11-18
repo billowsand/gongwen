@@ -440,6 +440,7 @@ impl Ime {
         self.exempt = super::exempt::take(ctx);
         if !self.active() {
             // 不接管键盘：光标矩形照旧报给系统输入法。
+            self.system_ime_off = false;
             let anchor = ctx.output(|output| output.ime.map(|ime| ime.cursor_rect));
             self.record_focus(anchor);
             super::follow_cursor(ctx);
