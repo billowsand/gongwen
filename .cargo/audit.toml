@@ -4,26 +4,22 @@
 
 [advisories]
 ignore = [
-    # zip 8.x：只影响 `ZipArchive::extract` / `ZipStreamReader::extract` 整包解压
-    # （SUID 位、软链接目标、经软链接改权限、声明超大软链接目标导致分配中止）。
-    # 本项目所有 ZIP 都逐个条目读取、自行校验路径，从不调用 extract（anydoc、
-    # calamine、docx-rs、rust_xlsxwriter 也只读写条目）。calamine 0.38 已改用它
-    # 自己的 zip 9，但其余四个依赖仍锁在 zip 8；升到 zip 9 要等它们一起跟上，
-    # 届时删掉这四条。
+    # zip 8.6：只剩 docx-rs 0.4.22（crates.io 最新）这一条路径，它关掉默认特性、
+    # 只开 deflate，只用 ZipWriter 写 DOCX、ZipArchive::by_name 逐条读；不调
+    # extract / ZipStreamReader，也没有 aes-crypto / legacy-zip 特性。下面八条
+    # （整包解压的软链接与权限越界、AES 截断不校验 HMAC、legacy 解码器按声明
+    # 大小预分配、本地头与中央目录名字不一致）在本项目里都不可达。自有的 zip
+    # 已升到 9.7，anydoc 与 rust_xlsxwriter 一并跟上；docx-rs 换到 zip 9 后删掉。
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
     "RUSTSEC-2026-0429",
+    "RUSTSEC-2026-0545",
+    "RUSTSEC-2026-0546",
+    "RUSTSEC-2026-0547",
+    "RUSTSEC-2026-0548",
     # quick-xml 0.38：只经 hayagriva → citationberg 解析编进程序的 CSL 样式，
     # 用户输入（BibLaTeX 文献库）不走 XML。hayagriva 升级 quick-xml 后删掉。
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
-    # zstd 0.13.3 / zstd-safe 7.2.4：只剩 zip 8.6 这一条路径（jieba 的
-    # include-flate 已升到 zstd 0.14.3）。zip 只用 `Decoder::with_buffer`
-    # 为每个条目新建解码器，不碰 Seekable（seekable 特性未开）、不复用上下文，
-    # 写只用 Encoder、不用 write::Decoder；zip 对 zstd 还关掉了默认特性，
-    # experimental / zstdmt 均未启用。zip 升到 9 后删掉这三条。
-    "RUSTSEC-2026-0391",
-    "RUSTSEC-2026-0398",
-    "RUSTSEC-2026-0403",
 ]

@@ -140,7 +140,10 @@ impl PackageReader {
 
     pub(super) fn file_names(&self) -> Vec<String> {
         match self {
-            Self::Zip(archive) => archive.file_names().map(str::to_string).collect(),
+            Self::Zip(archive) => archive
+                .file_names()
+                .filter_map(|name| name.ok().map(|name| name.into_owned()))
+                .collect(),
             Self::SevenZ { archive, .. } => {
                 archive.files.iter().map(|e| e.name().to_string()).collect()
             }

@@ -91,7 +91,7 @@ pub fn validate_export_password(password: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-fn encrypted_options(password: &str) -> zip::write::FileOptions<'_, ()> {
+fn encrypted_options(password: &str) -> zip::write::FileOptions<'_, '_, ()> {
     SimpleFileOptions::default().with_aes_encryption(AesMode::Aes256, password)
 }
 

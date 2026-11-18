@@ -2046,6 +2046,7 @@ mod tests {
         assert!(
             archive
                 .file_names()
+                .filter_map(Result::ok)
                 .any(|name| name.starts_with("word/media/"))
         );
         let mut xml = String::new();

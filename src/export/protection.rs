@@ -211,7 +211,7 @@ impl Protection {
                     );
                     let mut body = Vec::new();
                     entry.read_to_end(&mut body)?;
-                    entries.push((entry.name().to_owned(), body));
+                    entries.push((entry.name()?.into_owned(), body));
                 }
                 Ok((
                     path.with_extension("7z"),

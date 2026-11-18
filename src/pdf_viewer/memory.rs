@@ -88,6 +88,7 @@ mod tests {
         let mut zip = zip::ZipArchive::new(std::fs::File::open(output).unwrap()).unwrap();
         let name = zip
             .file_names()
+            .filter_map(Result::ok)
             .find(|name| name.starts_with("word/media/") && !name.ends_with('/'))
             .unwrap()
             .to_string();

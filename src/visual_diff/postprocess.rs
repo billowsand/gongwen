@@ -27,7 +27,7 @@ pub(crate) fn redline_research_docx(path: &Path) -> Result<()> {
     let mut document_xml: Option<String> = None;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index)?;
-        let name = entry.name().to_string();
+        let name = entry.name()?.into_owned();
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes)?;
         if name == "word/document.xml" {

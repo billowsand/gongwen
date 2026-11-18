@@ -290,8 +290,9 @@ fn image_paragraph_embeds_bitmap_and_docx_contains_media() {
     let archive = zip::ZipArchive::new(file).unwrap();
     let media: Vec<String> = archive
         .file_names()
+        .filter_map(Result::ok)
         .filter(|name| name.starts_with("word/media/"))
-        .map(str::to_string)
+        .map(|name| name.to_string())
         .collect();
     assert!(!media.is_empty(), "docx 应含 word/media/ 图片文件");
     let xml = zip_text(&docx_path, "word/document.xml");
@@ -321,6 +322,7 @@ fn image_paragraph_renders_pdf_as_attachment_note() {
     assert!(
         archive
             .file_names()
+            .filter_map(Result::ok)
             .all(|name| !name.starts_with("word/media/")),
         "PDF 附件说明不应产生媒体文件"
     );
@@ -1628,8 +1630,9 @@ fn header_text(path: &Path) -> String {
     let mut archive = zip::ZipArchive::new(file).unwrap();
     let mut names = archive
         .file_names()
+        .filter_map(Result::ok)
         .filter(|name| name.starts_with("word/header"))
-        .map(str::to_string)
+        .map(|name| name.to_string())
         .collect::<Vec<_>>();
     names.sort();
     let mut text = String::new();
@@ -1883,7 +1886,7 @@ fn western_fonts_follow_chinese_fonts_in_exported_docx() {
         let mut checked = 0;
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).unwrap();
-            if !entry.name().ends_with(".xml") {
+            if !entry.name().unwrap().ends_with(".xml") {
                 continue;
             }
             let mut xml = String::new();

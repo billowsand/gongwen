@@ -313,7 +313,8 @@ impl Package {
             if entry.is_dir() {
                 continue;
             }
-            let name = relative_path_with(entry.name(), limits)?;
+            let entry_name = entry.name()?.into_owned();
+            let name = relative_path_with(&entry_name, limits)?;
             anyhow::ensure!(
                 entry.size() <= limits.max_file,
                 "文件超过 {} MB：{name}",

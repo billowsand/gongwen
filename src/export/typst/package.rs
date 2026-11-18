@@ -383,7 +383,7 @@ mod tests {
         let file = fs::File::open(path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         (0..archive.len())
-            .map(|index| archive.by_index(index).unwrap().name().to_string())
+            .map(|index| archive.by_index(index).unwrap().name().unwrap().to_string())
             .collect()
     }
 
@@ -402,7 +402,7 @@ mod tests {
         let mut archive = zip::ZipArchive::new(file).unwrap();
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).unwrap();
-            let target = dir.join(entry.name());
+            let target = dir.join(entry.name().unwrap().as_ref());
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).unwrap();
             }

@@ -556,7 +556,7 @@ pub(crate) mod typst_tests {
         for index in 0..zip.len() {
             use std::io::Read;
             let mut entry = zip.by_index(index).expect("条目");
-            let name = entry.name().to_string();
+            let name = entry.name().expect("条目名").into_owned();
             let mut buffer = String::new();
             if entry.read_to_string(&mut buffer).is_err() {
                 continue; // 二进制条目（图片等）跳过
@@ -1004,7 +1004,8 @@ mod consistency_tests {
         let mut xml = String::new();
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).expect("读取 DOCX 部件");
-            if entry.name().starts_with("word/") && entry.name().ends_with(".xml") {
+            let name = entry.name().expect("读取 DOCX 部件名");
+            if name.starts_with("word/") && name.ends_with(".xml") {
                 entry.read_to_string(&mut xml).expect("读取 Word XML");
             }
         }

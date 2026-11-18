@@ -15,7 +15,7 @@ pub(super) fn style_docx(path: &Path) -> Result<()> {
         .compression_method(zip::CompressionMethod::Deflated);
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        let name = entry.name().to_owned();
+        let name = entry.name()?.into_owned();
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes)?;
         if name.starts_with("word/") && name.ends_with(".xml") {

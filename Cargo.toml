@@ -86,7 +86,7 @@ rfd = { version = "0.17.2", default-features = false }
 # PRAGMA hexkey。SQLCipher 不支持 SQLite 在线备份 API，迁移/备份快照走
 # sqlcipher_export（见 src/vault.rs::export_database），所以不需要 backup 特性。
 rusqlite = { version = "0.42", features = ["bundled-sqlcipher-vendored-openssl"] }
-rust_xlsxwriter = "0.99.1"
+rust_xlsxwriter = "0.102"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # 技能文件（SKILL.md）的 YAML 开头。已经是 hayagriva 的依赖，不新增下载。
@@ -104,7 +104,7 @@ typst-layout = "0.15.1"
 typst-pdf = "0.15.1"
 url = "2.5"
 uuid = { version = "1.24", features = ["v4"] }
-zip = "8.6"
+zip = "9.7"
 # 稿件包与 PDF 集合：7z AES-256 同时加密正文与文件名；旧 ZIP 仍由 zip 读取。
 sevenz-rust2 = { version = "0.25", default-features = false, features = ["aes256", "compress"] }
 # 锁屏与密钥派生的缓冲清零（argon2 已带，这里直接引用其 trait）。

@@ -369,6 +369,7 @@ mod tests {
         let mut zip = zip::ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
         assert!(
             zip.file_names()
+                .filter_map(Result::ok)
                 .any(|name| name.starts_with("word/media/") && !name.ends_with('/'))
         );
         assert!(zip.by_name("word/document.xml").is_ok());
