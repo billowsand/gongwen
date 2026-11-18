@@ -5,7 +5,7 @@
 use super::{DeviceClass, DeviceIdentity, DeviceInfo, DeviceSnapshot, TimedEvent};
 use eframe::egui;
 use std::collections::BTreeMap;
-use std::ffi::{CStr, c_void};
+use std::ffi::c_void;
 use std::fs;
 use std::io;
 use std::os::raw::c_int;
