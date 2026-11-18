@@ -260,6 +260,7 @@ impl GongwenApp {
         self.docs = vec![crate::draft_page::DraftSession::blank(0, &self.config)];
         self.active_doc = 0;
         self.pdfs.clear();
+        self.draft_pdfs.tabs.clear();
         self.tabs
             .retain(|tab| matches!(tab, super::TabRef::Page(_)));
         if !self

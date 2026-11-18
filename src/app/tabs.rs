@@ -37,6 +37,7 @@ pub(crate) enum TabRef {
     Doc(DocKey),
     Page(NavPage),
     Pdf(PdfKey),
+    DraftPdf(DocKey),
 }
 
 impl NavPage {
@@ -478,6 +479,7 @@ impl GongwenApp {
             || self.backup_restore_running
             || self.docs.iter().any(|doc| doc.busy || doc.in_flight > 0)
             || self.pdfs.iter().any(PdfSession::busy)
+            || self.draft_pdf_is_compiling()
             || self.manuscript_pdf_export_busy
             || self.manuscript_package_export_busy
             || self.manuscript_attachment_busy
@@ -526,6 +528,7 @@ impl GongwenApp {
         for action in std::mem::take(&mut self.draft_actions) {
             match action {
                 DraftAction::SaveToLibrary => self.save_to_manuscript_library(),
+                DraftAction::PreviewPdf(key) => self.start_draft_pdf(key, ctx, false),
                 DraftAction::OpenSendPackage(id) => self.open_send_package(id),
                 DraftAction::OpenManuscript(id) => self.open_in_editor(id),
                 DraftAction::OpenVersionCommit(scope) => self.open_version_commit(scope),

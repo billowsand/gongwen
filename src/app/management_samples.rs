@@ -52,6 +52,7 @@ pub(crate) fn fixture() -> GongwenApp {
         macos_titlebar_metrics: None,
         docs,
         pdfs: Vec::new(),
+        draft_pdfs: Default::default(),
         active_doc: 0,
         next_doc_key: 1,
         next_pdf_key: 1,

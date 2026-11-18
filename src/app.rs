@@ -43,6 +43,7 @@ mod auxiliary_export;
 mod chrome;
 pub(crate) mod clipboard;
 mod data_safety;
+mod draft_pdf;
 mod environment_settings;
 mod export_devices;
 mod export_password;
@@ -176,6 +177,7 @@ pub struct GongwenApp {
     docs: Vec<DraftSession>,
     /// 应用内打开的 PDF，只在本次运行中保留，不写入会话恢复表。
     pdfs: Vec<PdfSession>,
+    draft_pdfs: draft_pdf::DraftPdfPreviews,
     /// `docs` 中当前显示的那一篇；`view` 不是 `View::Doc` 时无意义。
     active_doc: usize,
     /// 下一篇打开的稿件用的 key，只增不减。
@@ -810,6 +812,7 @@ impl GongwenApp {
             macos_titlebar_metrics,
             docs,
             pdfs: Vec::new(),
+            draft_pdfs: Default::default(),
             active_doc: 0,
             next_doc_key: 1,
             next_pdf_key: 1,
@@ -1301,6 +1304,7 @@ impl GongwenApp {
                     }
                     TabRef::Page(NavPage::Settings) => self.settings_ui(&mut content_ui),
                     TabRef::Pdf(key) => self.pdf_ui(key, &mut content_ui),
+                    TabRef::DraftPdf(key) => self.draft_pdf_ui(key, &mut content_ui),
                 }
             });
         // 起草页在借出会话的那一帧里做不了的事，到这里统一执行。
@@ -1421,6 +1425,7 @@ impl GongwenApp {
 
     /// 风险锁定先停止可取消的敏感任务；外壳随后持续遮蔽并等待全部任务收尾。
     pub(crate) fn begin_environment_lock(&mut self) {
+        self.discard_draft_pdf_previews();
         self.cancel_pi_tasks();
         for doc in &mut self.docs {
             doc.take_open_after_export();
@@ -1442,6 +1447,7 @@ impl GongwenApp {
         if !self.vault_locked {
             return;
         }
+        self.discard_draft_pdf_previews();
         self.cancel_pi_tasks();
         #[cfg(feature = "ai-workbench")]
         self.task_auto_queue.clear();

@@ -492,6 +492,9 @@ impl PdfSession {
             PdfMessage::Opened { page_sizes } => {
                 self.slots = (0..page_sizes.len()).map(|_| PageSlot::default()).collect();
                 self.page_sizes = page_sizes;
+                let last_page = self.page_count().saturating_sub(1);
+                self.current_page = self.current_page.min(last_page);
+                self.scroll_to = self.scroll_to.map(|page| page.min(last_page));
                 self.error = None;
             }
             PdfMessage::Page {
@@ -540,22 +543,47 @@ impl PdfSession {
 
     /// 绘制查看器并返回需要外壳执行的动作。
     pub(crate) fn ui(&mut self, ui: &mut egui::Ui) -> Vec<PdfAction> {
+        self.show(ui, true)
+    }
+
+    /// 稿件预览只提供阅读操作；打印和导出从稿件入口发起。
+    pub(crate) fn reading_ui(&mut self, ui: &mut egui::Ui) {
+        self.show(ui, false);
+    }
+
+    fn show(&mut self, ui: &mut egui::Ui, allow_output: bool) -> Vec<PdfAction> {
         let mut actions = Vec::new();
         self.frame += 1;
         self.ensure_worker(ui.ctx());
         // 起草页「打印…」导出的 PDF：打开完就弹一次打印对话框。
-        if let Some(action) = self.take_print_when_ready() {
+        if allow_output && let Some(action) = self.take_print_when_ready() {
             actions.push(action);
         }
 
         egui::Panel::top(egui::Id::unique("pdf_toolbar").with(self.key))
             .frame(theme::panel(theme::surface(), 10))
-            .show(ui, |ui| self.toolbar(ui, &mut actions));
+            .show(ui, |ui| {
+                self.toolbar(ui, allow_output.then_some(&mut actions))
+            });
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::canvas()))
-            .show(ui, |ui| self.viewer(ui));
+            .show(ui, |ui| self.viewer(ui, allow_output));
         actions
+    }
+
+    pub(crate) fn inherit_view(&mut self, previous: &Self) {
+        self.mode = previous.mode;
+        self.fit = previous.fit;
+        self.zoom = previous.zoom;
+        self.shown_scale = previous.shown_scale;
+        self.scroll_to = Some(previous.current_page);
+    }
+
+    pub(crate) fn go_to_page(&mut self, index: usize) {
+        if index < self.page_count() {
+            self.scroll_to = Some(index);
+        }
     }
 
     /// 首帧启动渲染线程。放在这里是因为要等 `egui::Context` 才能让线程主动唤醒 UI。
@@ -607,7 +635,7 @@ impl PdfSession {
         (sizes, tops, y)
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<PdfAction>) {
+    fn toolbar(&mut self, ui: &mut egui::Ui, actions: Option<&mut Vec<PdfAction>>) {
         ui.horizontal(|ui| {
             let count = self.page_count();
             let previous = self.step_target(false);
@@ -707,6 +735,9 @@ impl PdfSession {
                 self.scroll_to = Some(self.current_page);
             }
 
+            let Some(actions) = actions else {
+                return;
+            };
             ui.separator();
             // 打印能力每帧探测一次代价太高（Unix 要扫 PATH），进程内只算一次。
             let can_print = crate::print::printing_available_cached();
@@ -759,15 +790,17 @@ impl PdfSession {
         self.scroll_to = Some(self.current_page);
     }
 
-    fn viewer(&mut self, ui: &mut egui::Ui) {
+    fn viewer(&mut self, ui: &mut egui::Ui, allow_output: bool) {
         if let Some(error) = self.error.clone() {
             ui.vertical_centered(|ui| {
                 ui.add_space(64.0);
                 ui.colored_label(theme::danger(), "无法在应用内预览这个 PDF");
                 ui.add_space(6.0);
                 ui.label(error);
-                ui.add_space(4.0);
-                ui.label("可以使用上方“系统打开”继续查看。");
+                if allow_output {
+                    ui.add_space(4.0);
+                    ui.label("可以使用上方“系统打开”继续查看。");
+                }
             });
             return;
         }

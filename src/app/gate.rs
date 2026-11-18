@@ -1264,8 +1264,12 @@ impl AppShell {
                         input.pointer = egui::PointerState::default();
                     });
                 }
-                app.update_workspace(ui, frame);
-                app.publish_approved_copy(&ctx);
+                if app.lock_requested && app.draft_pdf_is_compiling() {
+                    app.poll_workspace_results(&ctx);
+                } else {
+                    app.update_workspace(ui, frame);
+                    app.publish_approved_copy(&ctx);
+                }
                 if app.take_force_relock() {
                     // 备份恢复：目录已整体替换，保存会拿旧密钥覆盖新数据；
                     // 恢复后还需要按新磁盘重新 probe（可能变成无锁/跳过/损坏）。
@@ -1295,7 +1299,13 @@ impl AppShell {
                         }
                     }
                 } else if app.take_lock_requested() {
-                    if app.ai_jobs_stopping() {
+                    if app.draft_pdf_is_compiling() {
+                        // 排版仍可能读取当前槽位的资源。遮住工作区，等它退出后再切槽。
+                        paint_lock_veil(&ctx, 1.0);
+                        app.request_lock();
+                        ctx.request_repaint_after(Duration::from_millis(100));
+                        None
+                    } else if app.ai_jobs_stopping() {
                         // Pi 的停止由后台收尾，收完结果再释放工作区与密钥。
                         app.status = "正在等待后台作业结束后锁定…".into();
                         app.request_lock();

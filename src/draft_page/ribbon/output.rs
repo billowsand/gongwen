@@ -1,4 +1,4 @@
-//! 输出分区：一行紧凑命令，动作仍走原有导出路径。
+//! 输出分区：预览、导出、打印与成品入口。
 
 use crate::draft_page::{DraftPage, toolbar_separator};
 use crate::models::ExportSelection;
@@ -8,9 +8,8 @@ use eframe::egui;
 impl DraftPage<'_> {
     pub(crate) fn ribbon_output(&mut self, ui: &mut egui::Ui) {
         self.ribbon_export_formats(ui);
-        if theme::smartisan::active() && ui.available_width() >= 320.0 {
-            // 宽窗左侧负责生成，右侧负责找到成品；窄窗仍连续排布并沿用横向滚动。
-            // 预留目录按钮、三个成品按钮与分隔线的完整宽度，避免向左溢出覆盖格式组。
+        if theme::smartisan::active() && ui.available_width() >= 380.0 {
+            // 宽窗右对齐文件相关入口，窄窗沿用横向滚动。
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 self.export_open_buttons(ui);
                 toolbar_separator(ui);
@@ -43,15 +42,14 @@ impl DraftPage<'_> {
         {
             self.start_export_current();
         }
-        // 起草页直接打印：先按覆盖策略导出一份只含 PDF 的成品，导完由外壳打开
-        // 并弹打印对话框。打印能力探测一次就够（Unix 要扫 PATH），不能每帧都问。
+        // 打印能力探测一次就够（Unix 要扫 PATH），不能每帧都问。
         let can_print = crate::print::printing_available_cached();
         let print_button = ui.add_enabled(
             ready && can_print,
             theme::icon_text_button(theme::Icon::Print, "打印…"),
         );
         let print_button = if can_print {
-            print_button.on_hover_text("先按覆盖策略导出一份 PDF，再打开打印对话框")
+            print_button.on_hover_text("在内存中排版当前稿件，再打开打印对话框")
         } else {
             print_button.on_disabled_hover_text(
                 "未检测到打印服务（CUPS），请导出 PDF 后用系统程序打开再打印",
@@ -60,8 +58,7 @@ impl DraftPage<'_> {
         if print_button.clicked() {
             self.start_export_for_print();
         }
-        // PDF / Word / Typst 包由右侧的成品图标一键导出并打开；Markdown 源码包
-        // 没有可打开的单个成品，仍留一个临时导出入口。
+        // Markdown 源码包没有可打开的单个成品，留一个临时导出入口。
         let mut button = theme::icon_text_button(theme::Icon::PencilLine, "仅 Markdown");
         if theme::smartisan::active() {
             button = button.frame_when_inactive(false);

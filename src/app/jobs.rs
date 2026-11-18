@@ -140,6 +140,16 @@ pub(crate) enum WorkerResult {
         key: PdfKey,
         message: pdf_viewer::PdfMessage,
     },
+    DraftPdf {
+        doc: DocKey,
+        key: PdfKey,
+        result: Result<crate::typst_engine::TypstOutcome, String>,
+    },
+    DraftPdfSearch {
+        key: PdfKey,
+        scan: u64,
+        result: Result<Vec<usize>, String>,
+    },
     /// 打印对话框的打印机清单（后台线程查好）。`dialog` 对不上的是已关掉的对话框的。
     PrintersListed {
         dialog: u64,
@@ -803,6 +813,18 @@ impl GongwenApp {
                 WorkerResult::Pdf { key, message } => {
                     if let Some(index) = self.pdf_index_of_key(key) {
                         self.pdfs[index].apply_message(ctx, message);
+                    } else if let Some(preview) = self.draft_pdfs.by_pdf_key(key)
+                        && let Some(pdf) = &mut preview.pdf
+                    {
+                        pdf.apply_message(ctx, message);
+                    }
+                }
+                WorkerResult::DraftPdf { doc, key, result } => {
+                    self.finish_draft_pdf(doc, key, result);
+                }
+                WorkerResult::DraftPdfSearch { key, scan, result } => {
+                    if let Some(preview) = self.draft_pdfs.by_pdf_key(key) {
+                        preview.search.receive(scan, result);
                     }
                 }
                 WorkerResult::PrintersListed { dialog, result } => {

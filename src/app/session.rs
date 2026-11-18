@@ -31,6 +31,8 @@ pub(crate) struct ExitPrompt {
 pub(crate) enum DraftAction {
     /// 保存当前稿件到稿件库（新建或更新）。
     SaveToLibrary,
+    /// 查看当前稿件的内存 PDF。
+    PreviewPdf(DocKey),
     /// 打开提交版本对话框。
     OpenVersionCommit(VersionScope),
     /// 打开某篇呈批件的送批材料面板。
@@ -107,7 +109,7 @@ impl GongwenApp {
                     self.close_tab(tab);
                 }
             }
-            Some(TabRef::Page(_) | TabRef::Pdf(_)) => {
+            Some(TabRef::Page(_) | TabRef::Pdf(_) | TabRef::DraftPdf(_)) => {
                 self.close_confirm_running = false;
                 self.close_tab(tab);
             }
@@ -119,7 +121,9 @@ impl GongwenApp {
         if tab >= self.tabs.len() {
             return;
         }
-        if let TabRef::Doc(key) = self.tabs[tab]
+        let closing = self.tabs[tab];
+        let closing_active = tab == self.active_tab;
+        if let TabRef::Doc(key) = closing
             && let Some(index) = self.doc_index_of_key(key)
         {
             // 候选区里还没来得及写下去的字，关标签前补写一次。
@@ -155,23 +159,38 @@ impl GongwenApp {
             }
             self.active_doc = self.active_doc.min(self.docs.len().saturating_sub(1));
         }
-        if let TabRef::Pdf(key) = self.tabs[tab]
+        if let TabRef::Pdf(key) = closing
             && let Some(index) = self.pdf_index_of_key(key)
         {
             self.pdfs.remove(index);
         }
+        if let TabRef::DraftPdf(key) = closing {
+            self.draft_pdfs.tabs.remove(&key);
+        }
         self.tabs.remove(tab);
+        let mut next = self.active_tab - usize::from(tab < self.active_tab);
+        if let TabRef::Doc(key) = closing
+            && let Some(preview_tab) = self
+                .tabs
+                .iter()
+                .position(|item| *item == TabRef::DraftPdf(key))
+        {
+            self.draft_pdfs.tabs.remove(&key);
+            self.tabs.remove(preview_tab);
+            next -= usize::from(preview_tab < next);
+        }
         if self.tabs.is_empty() {
             // 一格不剩就回到稿件管理，而不是停在空白页。
             self.open_page(NavPage::Manuscript);
             return;
         }
+        if closing_active
+            && let TabRef::DraftPdf(key) = closing
+            && let Some(source) = self.tabs.iter().position(|item| *item == TabRef::Doc(key))
+        {
+            next = source;
+        }
         // 关掉当前这格时顺位接管后一格；关掉前面的则保持指着同一格。
-        let next = if tab < self.active_tab {
-            self.active_tab - 1
-        } else {
-            self.active_tab
-        };
         self.activate_tab(next.min(self.tabs.len() - 1));
         self.remember_session();
     }
@@ -534,7 +553,7 @@ impl GongwenApp {
                     Some(manuscript::OpenTab::Manuscript(id))
                 }
                 TabRef::Page(page) => Some(manuscript::OpenTab::Page(page.key().to_string())),
-                TabRef::Pdf(_) => None,
+                TabRef::Pdf(_) | TabRef::DraftPdf(_) => None,
             })
             .collect();
         // 过滤掉未入库的稿件后下标会错位，按身份重新定位当前这一格。
@@ -551,7 +570,7 @@ impl GongwenApp {
                 TabRef::Page(page) => tabs
                     .iter()
                     .position(|t| *t == manuscript::OpenTab::Page(page.key().to_string())),
-                TabRef::Pdf(_) => None,
+                TabRef::Pdf(_) | TabRef::DraftPdf(_) => None,
             })
             .unwrap_or(0);
         if let Some(store) = self.manuscript_store.as_mut() {
@@ -795,11 +814,14 @@ impl GongwenApp {
             }
         }
 
-        if self.showing_doc() && !self.docs.is_empty() {
+        if self.showing_doc() || matches!(self.tabs.get(self.active_tab), Some(TabRef::DraftPdf(_)))
+        {
             let close = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::W);
             if ctx.input_mut(|input| input.consume_shortcut(&close)) {
                 self.request_close_tab(self.active_tab);
             }
+        }
+        if self.showing_doc() && !self.docs.is_empty() {
             // macOS 的 Command+Tab 由系统用于切换应用，因此稿件前后切换特意
             // 保留 Control+Tab / Control+Shift+Tab；其他平台沿用原有组合。
             let next = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Tab);

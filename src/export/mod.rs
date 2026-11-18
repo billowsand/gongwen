@@ -719,6 +719,31 @@ pub(crate) fn compile_pdf(
     }
 }
 
+/// 主稿 PDF 预览使用导出的版式，但图表、正文和 PDF 产物都不写盘。
+pub(crate) fn compile_pdf_preview(
+    input: &DraftInput,
+    markdown: &str,
+    vocabulary: &[crate::models::VocabularyEntry],
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+    base_dir: &Path,
+) -> Result<typst_engine::TypstOutcome> {
+    let display = UnitDisplay::new(vocabulary);
+    display
+        .for_input(input)
+        .ensure_resolved(input)
+        .map_err(anyhow::Error::msg)?;
+    let (fonts, mut warnings) = crate::system_fonts::resolve(fonts);
+    let mut outcome = if input.kind.is_research() {
+        self::typst::research::compile_pdf_with_base(input, markdown, numbering, base_dir)?
+    } else {
+        self::typst::compile_preview(input, markdown, &display, &fonts, numbering, base_dir)?
+    };
+    warnings.append(&mut outcome.warnings);
+    outcome.warnings = warnings;
+    Ok(outcome)
+}
+
 /// 排一份 PDF 写到 `path`；只有用户明确选择的输出文件与份号清单会落盘。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_pdf(

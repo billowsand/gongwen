@@ -146,7 +146,7 @@ impl DraftPage<'_> {
         );
     }
 
-    /// 「输出」分区的 PDF / Word / Typst 包图标：只导这一种，导完由外壳打开
+    /// 「输出」分区的成品命令：只导这一种，导完由外壳打开
     /// （PDF 在应用内、Word 用系统程序、Typst 包在文件管理器里定位）。
     pub(crate) fn start_export_and_open(&mut self, kind: ExportKind) {
         self.request_export(
@@ -569,8 +569,7 @@ impl DraftPage<'_> {
         crate::app::widgets::open_output_dir(&self.config.output_dir, self.status);
     }
 
-    /// 成品入口：PDF / Word / Typst 包。单击按当前审校稿只导这一种并打开，
-    /// 不必先导出再另找按钮打开。右键可复制、定位已有成品，或重新生成并导出到别处。
+    /// PDF 单击直接看内存预览，下拉是成品命令。Word / Typst 包仍单击导出。
     pub(crate) fn export_open_buttons(&mut self, ui: &mut egui::Ui) {
         // 导出目录里同一文稿的文件夹都以“去掉时间戳的导出主干”为前缀，
         // 用它过滤出属于当前文稿的目录，避免打开别的文稿的成品。
@@ -585,6 +584,38 @@ impl DraftPage<'_> {
         let mut export = None;
         for kind in ExportKind::ALL {
             let path = self.export_links.path(kind).map(Path::to_path_buf);
+            if kind == ExportKind::Pdf {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if ui
+                        .add_enabled(ready, theme::icon_text_button(kind.icon(), "PDF 预览"))
+                        .on_hover_text("在应用内查看当前稿件的实际分页，无需导出")
+                        .clicked()
+                    {
+                        self.actions.push(DraftAction::PreviewPdf(self.doc.key));
+                    }
+                    let menu = theme::icon_button_enabled(
+                        ui,
+                        ready || path.is_some(),
+                        theme::Icon::ChevronDown,
+                        "PDF 导出与文件操作",
+                    );
+                    egui::Popup::menu(&menu).show(|ui| {
+                        if ui
+                            .add_enabled(
+                                ready,
+                                theme::menu_item(theme::Icon::FileDown, "导出 PDF 并打开"),
+                            )
+                            .clicked()
+                        {
+                            export = Some(kind);
+                            ui.close();
+                        }
+                        action = export_file_menu(ui, kind, path.as_deref(), ready);
+                    });
+                });
+                continue;
+            }
             let label = kind.label();
             let tint = if ready { accent() } else { theme::text_muted() };
             let response = ui.add_enabled(
@@ -606,33 +637,7 @@ impl DraftPage<'_> {
                 export = Some(kind);
             }
             response.context_menu(|ui| {
-                if ui
-                    .add_enabled(
-                        path.is_some(),
-                        theme::menu_item(theme::Icon::Copy, "复制文件"),
-                    )
-                    .clicked()
-                {
-                    action = Some(FileAction::CopyToClipboard(path.clone().unwrap()));
-                    ui.close();
-                }
-                if ui
-                    .add(theme::menu_item(theme::Icon::FileDown, "导出到…"))
-                    .clicked()
-                {
-                    action = Some(FileAction::SaveAs(kind));
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(
-                        path.is_some(),
-                        theme::menu_item(theme::Icon::Reveal, "在文件管理器中定位"),
-                    )
-                    .clicked()
-                {
-                    action = Some(FileAction::Reveal(path.clone().unwrap()));
-                    ui.close();
-                }
+                action = export_file_menu(ui, kind, path.as_deref(), ready);
             });
         }
         if let Some(action) = action {
@@ -818,6 +823,36 @@ impl DraftPage<'_> {
             self.open_result_drawer();
         }
     }
+}
+
+fn export_file_menu(
+    ui: &mut egui::Ui,
+    kind: ExportKind,
+    path: Option<&Path>,
+    ready: bool,
+) -> Option<FileAction> {
+    let copy = ui.add_enabled(
+        path.is_some(),
+        theme::menu_item(theme::Icon::Copy, "复制文件"),
+    );
+    let save = ui.add_enabled(ready, theme::menu_item(theme::Icon::FileDown, "导出到…"));
+    let reveal = ui.add_enabled(
+        path.is_some(),
+        theme::menu_item(theme::Icon::Reveal, "在文件管理器中定位"),
+    );
+    let action = if copy.clicked() {
+        path.map(|path| FileAction::CopyToClipboard(path.to_owned()))
+    } else if save.clicked() {
+        Some(FileAction::SaveAs(kind))
+    } else if reveal.clicked() {
+        path.map(|path| FileAction::Reveal(path.to_owned()))
+    } else {
+        None
+    };
+    if action.is_some() {
+        ui.close();
+    }
+    action
 }
 
 #[cfg(test)]

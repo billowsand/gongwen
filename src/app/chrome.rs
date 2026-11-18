@@ -1303,6 +1303,9 @@ impl GongwenApp {
                 Some(index) => ("", self.pdfs[index].title().to_string()),
                 None => ("", "已关闭 PDF".to_string()),
             },
+            Some(TabRef::DraftPdf(key)) => {
+                ("", format!("PDF 预览 · {}", self.doc_title_of_key(*key)))
+            }
             None => ("", String::new()),
         }
     }
@@ -1381,6 +1384,11 @@ impl GongwenApp {
                 ),
                 None => (Some(theme::Icon::FileTypePdf), title.clone(), false),
             },
+            TabRef::DraftPdf(key) => (
+                Some(theme::Icon::FileTypePdf),
+                title.clone(),
+                self.draft_pdfs.is_compiling(key),
+            ),
         };
 
         // 先占位拿到交互状态，才能在同一帧内驱动颜色动画。

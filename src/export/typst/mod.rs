@@ -22,7 +22,7 @@ pub(crate) mod runs;
 mod sample_tests;
 pub(crate) mod transmit;
 
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result};
 
@@ -49,13 +49,13 @@ pub(crate) fn document_json(
 
 /// 去掉找不到文件的插图，返回被去掉的引用。TeX 路径下缺图同样不进 PDF；这里
 /// 不让一张丢失的图拖垮整份排版，改由调用方提示。
-fn drop_missing_images(doc: &mut Doc, base_dir: &Path) -> Vec<String> {
+fn drop_missing_images(doc: &mut Doc, exists: impl Fn(&str) -> bool) -> Vec<String> {
     let mut missing = Vec::new();
     let mut keep = |block: &Block| match block {
         Block::Image { src, .. } => {
             // 图片可能已进稿件库的资源表（逻辑引用 `images/<uuid>`），存在性
             // 判断必须走资源层；外部基准目录与旧文件仍回退到磁盘读取。
-            let ok = crate::images::exists_from_base(base_dir, src);
+            let ok = exists(src);
             if !ok {
                 missing.push(src.clone());
             }
@@ -81,11 +81,21 @@ pub(crate) fn compile_pdf_with_base(
     elements: &ElementMarks,
     base_dir: &Path,
 ) -> Result<TypstOutcome> {
-    let (doc, set, missing) = prepare(
+    let prepared = prepare(
         input, markdown, display, fonts, numbering, elements, base_dir,
     )?;
+    compile_prepared(prepared, base_dir, HashMap::new())
+}
+
+fn compile_prepared(
+    (doc, set, missing): (Doc, typst_engine::FontSet, Vec<String>),
+    base_dir: &Path,
+    files: HashMap<String, Vec<u8>>,
+) -> Result<TypstOutcome> {
     let data = serde_json::to_string(&doc).context("无法序列化 Typst 文档数据")?;
-    let mut outcome = typst_engine::compile(&TypstJob::official(data, base_dir), &set)?;
+    let mut job = TypstJob::official(data, base_dir);
+    job.files = files;
+    let mut outcome = typst_engine::compile(&job, &set)?;
     for src in missing {
         outcome
             .warnings
@@ -165,12 +175,7 @@ pub(crate) fn prepare_package(
 ) -> Result<(String, String, Vec<String>)> {
     // 物化与插图解析用同一个 base：真机是配置目录；样张 / 测试用临时目录时
     // Mermaid 缓存也落在那里，不会被当成缺图略过。
-    let rendered = crate::mermaid::materialize_with_base(
-        base_dir,
-        markdown,
-        crate::mermaid::Style::Official,
-        crate::mermaid::Format::Pdf,
-    )?;
+    let rendered = materialize_diagrams(base_dir, markdown)?;
     let mut doc = frame::document(
         input,
         &rendered,
@@ -179,9 +184,20 @@ pub(crate) fn prepare_package(
         elements,
         package::placeholder_fonts(),
     );
-    let missing = drop_missing_images(&mut doc, base_dir);
+    let missing = drop_missing_images(&mut doc, |src| {
+        crate::images::exists_from_base(base_dir, src)
+    });
     let data = serde_json::to_string(&doc).context("无法序列化 Typst 文档数据")?;
     Ok((rendered, data, missing))
+}
+
+fn materialize_diagrams(base_dir: &Path, markdown: &str) -> Result<String> {
+    crate::mermaid::materialize_with_base(
+        base_dir,
+        markdown,
+        crate::mermaid::Style::Official,
+        crate::mermaid::Format::Pdf,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -198,24 +214,38 @@ fn prepare(
         .for_input(input)
         .ensure_resolved(input)
         .map_err(anyhow::Error::msg)?;
-    // 物化与插图解析用同一个 base：真机是配置目录；样张 / 测试用临时目录时
-    // Mermaid 缓存也落在那里，不会被当成缺图略过。
-    let rendered = crate::mermaid::materialize_with_base(
-        base_dir,
-        markdown,
-        crate::mermaid::Style::Official,
-        crate::mermaid::Format::Pdf,
-    )?;
+    let rendered = materialize_diagrams(base_dir, markdown)?;
+    prepare_document(
+        input,
+        &rendered,
+        display,
+        fonts,
+        numbering,
+        elements,
+        |src| crate::images::exists_from_base(base_dir, src),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_document(
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+    elements: &ElementMarks,
+    image_exists: impl Fn(&str) -> bool,
+) -> Result<(Doc, typst_engine::FontSet, Vec<String>)> {
     let set = typst_engine::font_set(fonts)?;
     let mut doc = frame::document(
         input,
-        &rendered,
+        markdown,
         display,
         numbering,
         elements,
         set.families.clone(),
     );
-    let missing = drop_missing_images(&mut doc, base_dir);
+    let missing = drop_missing_images(&mut doc, image_exists);
     Ok((doc, set, missing))
 }
 
@@ -238,4 +268,30 @@ pub(crate) fn compile_pdf(
         elements,
         &crate::storage::config_dir()?,
     )
+}
+
+/// 公文预览沿用正式模板，图表 PDF 作为虚拟文件传给 Typst。
+pub(super) fn compile_preview(
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+    base_dir: &Path,
+) -> Result<TypstOutcome> {
+    let (rendered, files) = crate::mermaid::materialize_memory(
+        markdown,
+        crate::mermaid::Style::Official,
+        crate::mermaid::Format::Pdf,
+    )?;
+    let prepared = prepare_document(
+        input,
+        &rendered,
+        display,
+        fonts,
+        numbering,
+        &Default::default(),
+        |src| files.contains_key(src) || crate::images::exists_from_base(base_dir, src),
+    )?;
+    compile_prepared(prepared, base_dir, files)
 }
