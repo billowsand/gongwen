@@ -457,10 +457,12 @@ jobs:
     name: 依赖漏洞扫描（RustSec）
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    # audit-check 把结果写成一条检查记录，需要 checks: write；忽略清单见 .cargo/audit.toml。
+    # audit-check 把结果写成一条检查记录，需要 checks: write；定期跑时还会为维护状态
+    # 警告建一条 issue（没有 issues: write 时作业在最后一步失败）；忽略清单见 .cargo/audit.toml。
     permissions:
       contents: read
       checks: write
+      issues: write
     steps:
       - uses: actions/checkout@v7
 
