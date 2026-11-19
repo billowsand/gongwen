@@ -611,6 +611,59 @@ mod tests {
     }
 
     #[test]
+    fn protected_workbook_from_an_independent_agile_writer_imports() {
+        // 夹具由 msoffcrypto-tool（Python 独立实现）按同一套 Agile 参数加密，内容是
+        // 模拟词库。它验证读取端不只认本程序 writer 的输出。
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/vocabulary/agile-encrypted-standard-vocabulary.xlsx"
+        ))
+        .unwrap();
+        let plaintext = office::decrypt(&bytes, "Fixture!Pass2026").unwrap();
+        assert!(plaintext.starts_with(b"PK"));
+        let parsed = crate::vocabulary_xlsx::parse_bytes(&plaintext, &[]).unwrap();
+        assert!(!parsed.entries.is_empty());
+    }
+
+    #[test]
+    fn protected_workbook_rejects_unsupported_encryption_parameters() {
+        use std::io::{Read, Seek, SeekFrom};
+        let workspace = Workspace::new();
+        workspace.configure();
+        let raw = crate::vocabulary_xlsx::xlsx_bytes(&[], &[]).unwrap();
+        let path = workspace.0.path().join("模板.xlsx");
+        write_final(&path, &raw).unwrap();
+        let encrypted = std::fs::read(&path).unwrap();
+
+        // 同一长度的 SHA512 → SHA256：模拟 Excel/WPS 用本程序不支持的算法，
+        // 读取端应明确拒绝，不能按 SHA-512 硬解出一堆垃圾。
+        let mut compound = cfb::CompoundFile::open(Cursor::new(encrypted)).unwrap();
+        let mut info = compound.open_stream("/EncryptionInfo").unwrap();
+        let mut metadata = Vec::new();
+        info.read_to_end(&mut metadata).unwrap();
+        let patched = String::from_utf8(metadata.clone())
+            .unwrap()
+            .replace("SHA512", "SHA256");
+        assert_eq!(patched.len(), metadata.len());
+        info.seek(SeekFrom::Start(0)).unwrap();
+        info.write_all(patched.as_bytes()).unwrap();
+        info.flush().unwrap();
+        drop(info);
+        let error = office::decrypt(&compound.into_inner().into_inner(), PASSWORD).unwrap_err();
+        assert!(format!("{error:#}").contains("不受支持"), "{error:#}");
+    }
+
+    #[test]
+    #[ignore = "需要真实 Excel/WPS 生成的加密工作簿：GONGWEN_ENCRYPTED_XLSX / GONGWEN_ENCRYPTED_XLSX_PASSWORD"]
+    fn real_excel_encrypted_workbook_imports() {
+        let path = std::env::var_os("GONGWEN_ENCRYPTED_XLSX").expect("请指定加密工作簿路径");
+        let password = std::env::var("GONGWEN_ENCRYPTED_XLSX_PASSWORD").expect("请指定工作簿密码");
+        let bytes = std::fs::read(path).unwrap();
+        let plaintext = office::decrypt(&bytes, &password).unwrap();
+        assert!(plaintext.starts_with(b"PK"), "解密结果应是 OOXML 包");
+    }
+
+    #[test]
     fn live_letter_exports_partial_snapshot_and_only_its_referenced_workbook() {
         use crate::models::{
             DraftInput, ExportSelection, JointContact, VocabularyCategory, VocabularyEntry,
