@@ -461,7 +461,10 @@ impl GongwenApp {
         self.status = "正在恢复备份，请勿关闭应用…".into();
         // Windows 下不能替换正被占用的 manuscripts.db；留底目录改名也要求
         // 没有进程继续写这些文件。界面恢复期间是独占模态，不会再有读写。
+        // 仍然显式停写：晚到的定时器/后台线程不能把旧数据写进正在被 rename
+        // 的目录或换入后的新目录。
         self.close_local_stores();
+        crate::storage::set_writes_blocked(true);
         let tx = self.sender.clone();
         thread::spawn(move || {
             let result = data_backup::restore_backup(&zip, &config_dir, &password)
@@ -941,6 +944,33 @@ mod tests {
             assert!(app.lexicon_store.is_some());
             app.lexicon_busy = false;
             assert!(app.backup_ready());
+        });
+    }
+
+    #[test]
+    fn restore_blocks_writes_and_resets_the_barrier_after_failure() {
+        with_app(|app, dir| {
+            storage::set_writes_blocked(false);
+            app.backup_restore_password = Some(zeroize::Zeroizing::new("Backup#Pass2026".into()));
+            app.begin_backup_restore(dir.join("missing.7z"));
+            assert!(app.backup_restore_running);
+            assert!(storage::writes_blocked(), "恢复期间必须停写");
+
+            // 恢复线程对不存在的包会很快失败；等它把结果送回主线程。
+            let ctx = egui::Context::default();
+            for _ in 0..200 {
+                app.poll_workspace_results(&ctx);
+                if !app.backup_restore_running {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(!app.backup_restore_running, "恢复应在失败后收尾");
+            assert!(
+                !storage::writes_blocked(),
+                "恢复失败后必须恢复写入，否则所有后续保存都会被拒绝"
+            );
+            assert!(app.backup_restore_error.is_some());
         });
     }
 

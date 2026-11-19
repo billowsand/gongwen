@@ -738,8 +738,9 @@ impl GongwenApp {
                             self.request_force_relock();
                         }
                         Err(error) => {
-                            // 恢复中途失败时数据已按留底目录回滚；连接要重新打开，
-                            // 否则界面会一直停在「稿件库不可用」。
+                            // 恢复中途失败时数据已按留底目录回滚；先恢复写入，
+                            // 再重新打开连接，否则界面会一直停在「稿件库不可用」。
+                            crate::storage::set_writes_blocked(false);
                             self.reopen_local_stores();
                             self.status = format!("恢复备份失败：{error}");
                             self.backup_restore_error = Some(error);
