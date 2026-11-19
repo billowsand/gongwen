@@ -285,7 +285,7 @@ python3 scripts/build-editions.py
 ## 项目结构与开发
 
 ```text
-src/                应用代码（约 35.0 万行 Rust，3173 项自动化测试）
+src/                应用代码（约 35.0 万行 Rust，3176 项自动化测试）
 assets/             图标与界面资源
 examples/           示例公文
 skills/             gongwen-markdown 技能包（Agent Skill，随安装包分发）
