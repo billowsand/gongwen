@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 mod detail;
 mod dialogs;
+mod disposal;
 mod import;
 mod list;
 mod sync_io;
@@ -17,6 +18,7 @@ mod sync_io;
 pub(crate) use dialogs::{
     archive_form, batch_delete_dialog, dialog_notice, large_dialog_size, single_delete_dialog,
 };
+pub(crate) use disposal::{DisposalDialog, DisposalReview};
 pub(crate) use import::{import_preview_form, pending_merge_form};
 pub(crate) use sync_io::purge_plaintext_caches;
 

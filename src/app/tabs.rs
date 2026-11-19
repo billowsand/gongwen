@@ -486,6 +486,7 @@ impl GongwenApp {
             || self.pdfs.iter().any(PdfSession::busy)
             || self.draft_pdf_is_compiling()
             || self.manuscript_pdf_export_busy
+            || self.disposal_forms_busy()
             || self.manuscript_package_export_busy
             || self.manuscript_attachment_busy
             || self.manuscript_import_busy

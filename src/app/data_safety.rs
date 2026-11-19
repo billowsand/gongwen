@@ -244,6 +244,7 @@ impl GongwenApp {
         self.manuscript_row_click = None;
         self.manuscript_active_row = None;
         self.manuscript_batch_delete = None;
+        self.manuscript_disposal = None;
         self.clear_manuscript_detail();
         self.manuscript_archive_pending = None;
         self.manuscript_archive_job = None;

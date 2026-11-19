@@ -17,6 +17,7 @@ pub(crate) mod table;
 pub(crate) mod title;
 pub(crate) mod typst;
 pub(crate) mod vocabulary;
+pub(crate) use docx::disposal::build_disposal_docx;
 pub(crate) use docx::record::automatic_print_copies;
 #[allow(unused_imports)]
 pub(crate) use docx::{write_docx, write_docx_with_numbering};

@@ -315,6 +315,7 @@ pub struct GongwenApp {
     manuscript_package_export_busy: bool,
     /// 「导出 PDF」选项弹窗；None 表示未打开。
     manuscript_pdf_export: Option<PdfExportDialog>,
+    manuscript_disposal: Option<manuscript_ui::DisposalDialog>,
     /// ZIP 导入/导出密码弹窗；所有 ZIP 操作必须先经过这里。
     manuscript_zip_password: Option<ZipPasswordDialog>,
     /// 用户明确勾选“记住密码”后加载到内存的密码；不写入 AppConfig。
@@ -913,6 +914,7 @@ impl GongwenApp {
             manuscript_pdf_export_busy: false,
             manuscript_package_export_busy: false,
             manuscript_pdf_export: None,
+            manuscript_disposal: None,
             manuscript_zip_password: None,
             remembered_zip_password: storage::load_remembered_zip_password().ok().flatten(),
             manuscript_archive_pending: None,
@@ -1355,6 +1357,7 @@ impl GongwenApp {
         self.knowledge_preview_window(&ctx);
         self.about_window(&ctx);
         self.quick_find_window(&ctx);
+        self.disposal_forms_window(&ctx);
         // 压缩包密码框既服务稿件库页，也服务设置页的备份导出/恢复，放在全局窗口这层。
         self.zip_password_window(&ctx);
         // 损坏配置、崩溃日志、备份恢复都是全局提示，不依附任何标签页。

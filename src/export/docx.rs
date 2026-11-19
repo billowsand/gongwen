@@ -20,6 +20,7 @@ use std::fs::File;
 use std::path::Path;
 
 mod content;
+pub(crate) mod disposal;
 mod header;
 mod minutes;
 mod paragraphs;

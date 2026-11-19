@@ -140,6 +140,8 @@ pub(crate) enum WorkerResult {
         path: PathBuf,
         result: Result<manuscript_io::PdfExportSummary, String>,
     },
+    DisposalFormsPrepared(Result<crate::manuscript::disposal::DisposalBatch, String>),
+    DisposalFormsExported(Result<PathBuf, (crate::app::manuscript_ui::DisposalReview, String)>),
     /// PDF 渲染线程的消息：打开完成、某一页光栅化完成或失败。
     /// 纹理在主线程收到后创建。
     Pdf {
@@ -825,6 +827,12 @@ impl GongwenApp {
                                 format!("导出 PDF 失败：{error}（未生成 {}）", path.display());
                         }
                     }
+                }
+                WorkerResult::DisposalFormsPrepared(result) => {
+                    self.disposal_forms_prepared(result);
+                }
+                WorkerResult::DisposalFormsExported(result) => {
+                    self.disposal_forms_exported(result);
                 }
                 WorkerResult::Pdf { key, message } => {
                     if let Some(index) = self.pdf_index_of_key(key) {

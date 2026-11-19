@@ -131,6 +131,7 @@ pub(crate) fn fixture() -> GongwenApp {
         manuscript_pdf_export_busy: false,
         manuscript_package_export_busy: false,
         manuscript_pdf_export: None,
+        manuscript_disposal: None,
         manuscript_zip_password: None,
         remembered_zip_password: None,
         manuscript_archive_pending: None,
