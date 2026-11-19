@@ -565,176 +565,154 @@ pub(crate) fn single_select(
     changed
 }
 
-/// 联合发文承办单位 ↔ 联系人成对录入：每行一个承办单位 + 一个联系人（自动带出
-/// 绑定电话），数量天然一致、一一对应，从源头避免“承办单位 3 个、联系人只有 2 个”
-/// 这类错配；联系人按该行承办单位过滤（规格 §2.3“人随事走”）。返回本帧是否有改动。
+/// 承办单位、联系人和电话逐行配对。联系人按同行承办单位过滤。
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn joint_responsible_editor(
+pub(crate) fn responsible_editor(
     ui: &mut egui::Ui,
     profile: &mut crate::models::TemplateProfile,
+    kind: crate::models::TemplateKind,
     unit_options: &[SelectOption],
     vocabulary: &[VocabularyEntry],
     manual_fields: &mut BTreeSet<String>,
     allow_free_text: bool,
     width: f32,
-    max_rows: Option<usize>,
-) -> bool {
-    use crate::models::{JointContact, JointResponsibleEntry, sync_joint_responsible};
+) {
+    use crate::models::{JointIssuanceMode, TemplateKind, sync_joint_responsible};
+    let single = kind == TemplateKind::OfficialLetter
+        && profile.joint_issuance_mode == JointIssuanceMode::Single;
+    let mut entries = if single {
+        profile.single_responsible_rows()
+    } else {
+        profile.joint_responsible_rows()
+    };
+    let mode = if single { "single" } else { "joint" };
     let display = crate::units::UnitDisplay::new(vocabulary);
-    // 旧稿件可能只有承办单位字符串、没有联系人条目：补齐成对条目，避免既有单位
-    // 丢失。行数以较大者为准——旧数据承办单位与联系人按索引配对，数量不必相等。
-    {
-        let units = split_units(&profile.joint_responsible_units);
-        if units.len() > profile.joint_contacts.len() {
-            profile
-                .joint_contacts
-                .extend(
-                    units
-                        .iter()
-                        .skip(profile.joint_contacts.len())
-                        .map(|unit| JointContact {
-                            unit: unit.clone(),
-                            name: String::new(),
-                            phone: String::new(),
-                        }),
-                );
-        }
-    }
-    // 在副本上编辑，避免渲染中与 profile 反复借用冲突；结束后整体写回并同步两个字段。
-    let mut entries = profile.joint_contacts.clone();
     let mut changed = false;
     let mut refresh = Vec::new();
     let mut remove_index = None;
-    // 该编辑器位于 Grid 的横向单元格中：必须用 vertical 包住，每行 ui.horizontal
-    // 才会向下堆叠；否则多个承办单位会在同一行向右排开。
+    let max_rows = kind.max_responsible_entries();
     ui.vertical(|ui| {
         let row_count = entries.len();
-        // 去掉常驻手填列后，这一行只剩「承办单位 + 联系人 + 删除」三样，
-        // 省下的宽度全部还给两个下拉。
         let unit_width = ((width - 40.0) * 0.52).max(120.0);
         let contact_width = (width - unit_width - 40.0).max(96.0);
-        for (index, entry) in entries.iter_mut().enumerate() {
-            let unit_key = format!("joint_resp_unit_{index}");
-            let unit_manual = manual_fields.contains(&unit_key) || unit_options.is_empty();
-            let people = display.responsible_people_of(&entry.unit);
+        if row_count > 0 {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                // 承办单位：下拉选择，或（允许手填时）切换为文本框。
-                if unit_manual {
-                    if unit_options.is_empty() && !allow_free_text {
-                        ui.colored_label(warn(), "标准词库中暂无单位，请先到“标准词库”页维护");
-                    } else {
-                        let back = !unit_options.is_empty();
-                        let text_width = if back {
-                            (unit_width - MANUAL_BACK_WIDTH - 6.0).max(80.0)
-                        } else {
-                            unit_width
-                        };
-                        changed |= ui
-                            .add(
-                                egui::TextEdit::singleline(&mut entry.unit)
-                                    .hint_text("承办单位")
-                                    .desired_width(text_width),
-                            )
-                            .changed();
-                        if back {
-                            back_to_select_button(ui, &unit_key, manual_fields);
-                        }
+                ui.add_sized(
+                    [unit_width, 16.0],
+                    egui::Label::new("承办单位").halign(egui::Align::Min),
+                );
+                ui.label("联系人");
+            });
+        }
+        for (index, entry) in entries.iter_mut().enumerate() {
+            let unit_key = format!("{mode}_resp_unit_{index}");
+            let contact_key = format!("{mode}_resp_contact_{index}");
+            let mut manual_contact = false;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let mut unit = entry.unit.clone();
+                if single_select(
+                    ui,
+                    &unit_key,
+                    &mut unit,
+                    unit_options,
+                    vocabulary,
+                    manual_fields,
+                    allow_free_text,
+                    unit_width,
+                    "承办单位",
+                ) {
+                    let still_eligible = display
+                        .responsible_people_of(&unit)
+                        .iter()
+                        .any(|(name, _)| name == &entry.name);
+                    if unit != entry.unit && !still_eligible {
+                        entry.name.clear();
+                        entry.phone.clear();
                     }
+                    refresh.push(unit.clone());
+                    entry.unit = unit;
+                    changed = true;
+                }
+                let people = if single && entry.unit.trim().is_empty() {
+                    vocabulary
+                        .iter()
+                        .filter(|person| {
+                            person.category == crate::models::VocabularyCategory::Person
+                        })
+                        .map(|person| (person.key(), person.phone.trim().to_string()))
+                        .collect()
                 } else {
-                    let selected_text = if entry.unit.trim().is_empty() {
-                        "（未选择）".to_string()
+                    display.responsible_people_of(&entry.unit)
+                };
+                let names = person_options(&people, vocabulary);
+                manual_contact = single
+                    && allow_free_text
+                    && (manual_fields.contains(&contact_key) || names.is_empty());
+                if names.is_empty() && !manual_contact {
+                    let name = if entry.name.trim().is_empty() {
+                        "暂无可选联系人".into()
                     } else {
-                        unit_options
-                            .iter()
-                            .find(|option| option.value == entry.unit)
-                            .map(|option| option.full.clone())
-                            // 词条已失效或不在候选池（历史稿按快照显示）时，
-                            // 仍要给名称，不能把身份引用原样摆在下拉框上。
-                            .unwrap_or_else(|| display.full_name(&entry.unit))
+                        display.person_name(&entry.name)
                     };
-                    egui::ComboBox::from_id_salt(&unit_key)
-                        .selected_text(selected_text)
-                        .width(unit_width)
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    egui::ComboBox::from_id_salt(&contact_key)
+                        .selected_text(name)
+                        .width(contact_width)
                         .show_ui(ui, |ui| {
-                            let filtered = search_options(ui, &unit_key, unit_options, unit_width);
-                            if ui
-                                .selectable_label(entry.unit.trim().is_empty(), "（未选择）")
-                                .clicked()
+                            ui.weak("该单位下暂无可选联系人");
+                            if (!entry.name.trim().is_empty() || !entry.phone.trim().is_empty())
+                                && ui.selectable_label(false, "清除联系人").clicked()
                             {
-                                entry.unit.clear();
                                 entry.name.clear();
                                 entry.phone.clear();
                                 changed = true;
-                                ui.close();
-                            }
-                            for option in &filtered {
-                                let response = ui.selectable_label(
-                                    entry.unit == option.value,
-                                    indented_label(option),
-                                );
-                                let response = if option.full == option.label {
-                                    response
-                                } else {
-                                    response.on_hover_text(&option.full)
-                                };
-                                if response.clicked() {
-                                    if entry.unit != option.value {
-                                        entry.name.clear();
-                                        entry.phone.clear();
-                                    }
-                                    refresh.push(option.value.clone());
-                                    entry.unit = option.value.clone();
-                                    changed = true;
-                                    ui.close();
-                                }
-                            }
-                            if allow_free_text {
-                                manual_entry_item(ui, &unit_key, manual_fields);
                             }
                         });
-                }
-                // 联系人：按该行承办单位过滤，选中后自动带出绑定电话。
-                let contact_selected = if entry.name.trim().is_empty() {
-                    "（未选择）".to_string()
                 } else {
-                    crate::units::identity::label(vocabulary, &entry.name)
-                };
-                egui::ComboBox::from_id_salt(format!("joint_resp_contact_{index}"))
-                    .selected_text(contact_selected)
-                    .width(contact_width)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(entry.name.trim().is_empty(), "（未选择）")
-                            .clicked()
-                        {
-                            entry.name.clear();
-                            entry.phone.clear();
-                            changed = true;
+                    let mut person = entry.name.clone();
+                    if single_select(
+                        ui,
+                        &contact_key,
+                        &mut person,
+                        &names,
+                        vocabulary,
+                        manual_fields,
+                        single && allow_free_text,
+                        contact_width,
+                        "联系人",
+                    ) {
+                        if !manual_contact {
+                            entry.phone = people
+                                .iter()
+                                .find(|(name, _)| name == &person)
+                                .map_or_else(String::new, |(_, phone)| phone.clone());
                         }
-                        if people.is_empty() && !entry.unit.trim().is_empty() {
-                            ui.weak("该单位下暂无可选联系人");
-                        }
-                        for (candidate, phone) in &people {
-                            if ui
-                                .selectable_label(
-                                    entry.name == *candidate,
-                                    crate::units::identity::label(vocabulary, candidate),
-                                )
-                                .clicked()
-                            {
-                                refresh.push(candidate.clone());
-                                entry.name = candidate.clone();
-                                entry.phone = phone.clone();
-                                changed = true;
-                            }
-                        }
-                    });
+                        refresh.push(person.clone());
+                        entry.name = person;
+                        changed = true;
+                    }
+                }
                 if row_count > 1
                     && theme::danger_icon_button(ui, theme::Icon::Trash, "删除该行").clicked()
                 {
                     remove_index = Some(index);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("电话");
+                if manual_contact {
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(&mut entry.phone)
+                                .hint_text("座机或手机")
+                                .desired_width((width - 40.0).max(110.0)),
+                        )
+                        .changed();
+                } else if entry.phone.trim().is_empty() {
+                    ui.weak("选择联系人后自动带出");
+                } else {
+                    ui.label(&entry.phone);
                 }
             });
             if remove_index.is_some() {
@@ -745,13 +723,12 @@ pub(crate) fn joint_responsible_editor(
             entries.remove(index);
             changed = true;
         }
-        // 红头呈批件的承办区在首页底部，条目数有硬上限；到顶后停用按钮并说明原因。
         let full = max_rows.is_some_and(|max| entries.len() >= max);
         let response = ui.add_enabled(!full, egui::Button::new("＋ 添加一行"));
         if full && let Some(max) = max_rows {
             response.on_hover_text(format!("最多 {max} 条承办信息，首页承办区放不下更多"));
         } else if response.clicked() {
-            entries.push(JointContact::default());
+            entries.push(Default::default());
             changed = true;
         }
     });
@@ -759,19 +736,12 @@ pub(crate) fn joint_responsible_editor(
         crate::units::identity::refresh_snapshot(profile, vocabulary, &key);
     }
     if changed {
-        sync_joint_responsible(
-            profile,
-            &entries
-                .iter()
-                .map(|contact| JointResponsibleEntry {
-                    unit: contact.unit.clone(),
-                    name: contact.name.clone(),
-                    phone: contact.phone.clone(),
-                })
-                .collect::<Vec<_>>(),
-        );
+        if single {
+            profile.set_single_responsible_rows(entries);
+        } else {
+            sync_joint_responsible(profile, &entries);
+        }
     }
-    changed
 }
 
 /// 主送、抄送等多值字段：勾选多个规范名称，界面上以标签形式回显，配置中以顿号分隔存储。
@@ -1058,6 +1028,26 @@ pub(crate) fn receiving_contacts_editor(
     changed
 }
 
+fn person_options(
+    contacts: &[(String, String)],
+    vocabulary: &[VocabularyEntry],
+) -> Vec<SelectOption> {
+    contacts
+        .iter()
+        .map(|(key, _)| {
+            let label = crate::units::identity::label(vocabulary, key);
+            SelectOption {
+                value: key.clone(),
+                label: label.clone(),
+                full: label,
+                search_terms: key.clone(),
+                parent: String::new(),
+                depth: 0,
+            }
+        })
+        .collect()
+}
+
 /// 联系人与电话是一组：从词库选人时自动带出绑定电话，电话框只读回显。
 /// 带出电话走的是 `element_fields::apply_profile_field`，与 AI 建议采纳同一条写值路径；
 /// 手填的人名不查词库、不动电话。
@@ -1072,20 +1062,7 @@ pub(crate) fn contact_pair(
     allow_free_text: bool,
     width: f32,
 ) {
-    let names = contacts
-        .iter()
-        .map(|(key, _)| {
-            let label = crate::units::identity::label(vocabulary, key);
-            SelectOption {
-                value: key.clone(),
-                label: label.clone(),
-                full: label,
-                search_terms: key.clone(),
-                parent: String::new(),
-                depth: 0,
-            }
-        })
-        .collect::<Vec<_>>();
+    let names = person_options(contacts, vocabulary);
     let manual = manual_fields.contains("contact_person") || names.is_empty();
     ui.vertical(|ui| {
         if single_select(

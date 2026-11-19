@@ -8,9 +8,11 @@
 //! 给人确认；确认后整份计划交给后台线程逐件编译、合并，确认之后再提交的版本不会混进来。
 
 use super::file_dialog::FileDialogSpec;
+use super::media_export::{Medium, require_workspace};
 use crate::app::{
     GongwenApp, VersionDiffState, VersionScope, WorkerResult, short_date, status_color, summarize,
 };
+use crate::export::protection::Protection;
 use crate::manuscript::send_package::{
     AddBlock, ExportRecord, ManuscriptBrief, PackageItemState, SendPackagePlan,
 };
@@ -18,9 +20,11 @@ use crate::manuscript::{ManuscriptFilter, ManuscriptRow, ManuscriptStore, Manusc
 use crate::manuscript_io::send_package::SendPackageOutcome;
 use crate::models::{ManuscriptStatus, TemplateKind};
 use crate::theme;
+use crate::vault::KeyHandle;
 use anyhow::Context as _;
 use eframe::egui;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// 面板状态自动重查的间隔。
@@ -56,9 +60,10 @@ impl egui_dnd::DragDropItem for &PackageRow {
     }
 }
 
-/// 导出前的确认：计划已生成，等人勾选目录页、选保存位置。
+/// 导出前的确认：计划已生成，等人勾选目录页、选交付方式。
+#[derive(Clone)]
 struct ExportConfirm {
-    plan: SendPackagePlan,
+    plan: Arc<SendPackagePlan>,
     with_toc: bool,
 }
 
@@ -77,6 +82,16 @@ struct SortUndo {
     after: Vec<String>,
 }
 
+enum Destination {
+    File(PathBuf, Option<Protection>),
+    Medium(Medium, KeyHandle),
+}
+
+pub(crate) enum DeliveryReceipt {
+    File(PathBuf),
+    Medium(String),
+}
+
 /// 后台导出线程发回的消息。
 pub(crate) enum SendPackageEvent {
     Progress {
@@ -85,7 +100,7 @@ pub(crate) enum SendPackageEvent {
     Done {
         owner_id: i64,
         with_toc: bool,
-        result: Result<SendPackageOutcome, String>,
+        result: Result<(SendPackageOutcome, DeliveryReceipt), String>,
     },
 }
 
@@ -207,7 +222,7 @@ impl SendPackagePanel {
         store.reorder_send_package(self.owner_id, order)?;
         // 确认清单是导出计划的快照，排序后须重新生成，不能沿用旧顺序。
         if let Some(mut confirm) = self.confirm.take() {
-            confirm.plan = store.send_package_plan(self.owner_id)?;
+            confirm.plan = Arc::new(store.send_package_plan(self.owner_id)?);
             self.confirm = Some(confirm);
         }
         Ok(())
@@ -555,7 +570,7 @@ impl GongwenApp {
                     });
                 });
                 if let Some(error) = &panel.export_error {
-                    ui.colored_label(theme::danger(), format!("上次导出失败，没有生成文件：{error}"));
+                    ui.colored_label(theme::danger(), format!("上次导出失败：{error}"));
                 }
                 if !archived && let Some(picker) = &mut panel.picker {
                     picker_ui(ui, picker, &mut action);
@@ -567,7 +582,7 @@ impl GongwenApp {
         }
         self.send_package = Some(panel);
         if let Some(action) = action {
-            self.apply_send_package_action(action);
+            self.apply_send_package_action(action, ctx);
         }
     }
 
@@ -697,7 +712,7 @@ impl GongwenApp {
         }
     }
 
-    fn apply_send_package_action(&mut self, action: PanelAction) {
+    fn apply_send_package_action(&mut self, action: PanelAction, ctx: &egui::Context) {
         if matches!(action, PanelAction::Commit { .. } | PanelAction::CommitAll) {
             self.apply_commit_action(action);
             return;
@@ -763,7 +778,7 @@ impl GongwenApp {
                     panel.picker = None;
                     panel.export_error = None;
                     panel.confirm = Some(ExportConfirm {
-                        plan: store.send_package_plan(owner_id)?,
+                        plan: Arc::new(store.send_package_plan(owner_id)?),
                         with_toc: panel.confirm.as_ref().is_some_and(|c| c.with_toc),
                     });
                     Ok(None)
@@ -803,7 +818,7 @@ impl GongwenApp {
                     pair: crate::version_pair_view::VersionPairViewState::default(),
                 });
             }
-            After::StartExport => self.start_send_package_export(),
+            After::StartExport => self.start_send_package_export(ctx),
             After::OpenFile(path) => self.open_pdf(path, None),
             After::Reload => {
                 // 清单或引用关系变了，稿件库详情卡里的送批材料 / 被引用也要跟着刷新。
@@ -1327,12 +1342,12 @@ fn confirm_ui(
             let export = if ready {
                 ui.add(theme::primary_button_widget(
                     theme::Icon::FileDown,
-                    "选择位置并导出",
+                    "选择交付方式…",
                 ))
             } else {
                 ui.add_enabled(
                     false,
-                    theme::icon_text_button(theme::Icon::FileDown, "选择位置并导出"),
+                    theme::icon_text_button(theme::Icon::FileDown, "选择交付方式…"),
                 )
             };
             if export.clicked() {
@@ -1418,10 +1433,14 @@ fn history_ui(ui: &mut egui::Ui, exports: &[ExportRecord], action: &mut Option<P
                 .show(ui, |ui| {
                     for record in exports {
                         let path = PathBuf::from(&record.output_path);
-                        let name = path
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| record.output_path.clone());
+                        let on_medium = record.output_path.is_empty();
+                        let name = if on_medium {
+                            "外部介质刻录".to_string()
+                        } else {
+                            path.file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| record.output_path.clone())
+                        };
                         let toc = if record.with_toc { " · 含目录" } else { "" };
                         egui::CollapsingHeader::new(format!(
                             "{} · {} 页{toc} · {name}",
@@ -1440,6 +1459,9 @@ fn history_ui(ui: &mut egui::Ui, exports: &[ExportRecord], action: &mut Option<P
                                     summarize(&item.title, 30),
                                     item.page_count
                                 ));
+                            }
+                            if on_medium {
+                                return;
                             }
                             ui.horizontal(|ui| {
                                 ui.add(
@@ -1463,88 +1485,93 @@ fn history_ui(ui: &mut egui::Ui, exports: &[ExportRecord], action: &mut Option<P
 }
 
 impl GongwenApp {
-    /// 确认后选保存位置，把计划交给后台线程编译合并。
-    fn start_send_package_export(&mut self) {
+    fn start_send_package_export(&mut self, ctx: &egui::Context) {
         if self.send_package_export.is_some() {
             self.status = "已有送批材料正在导出，请稍候。".into();
             return;
         }
-        let Some(panel) = self.send_package.as_mut() else {
-            return;
-        };
-        let Some(confirm) = panel.confirm.as_ref() else {
+        let Some(confirm) = self
+            .send_package
+            .as_ref()
+            .and_then(|panel| panel.confirm.clone())
+        else {
             return;
         };
         if !confirm.plan.ready() {
             return;
         }
-        let default_name = format!(
-            "{}（送批材料）.pdf",
-            crate::export::safe_filename(confirm.plan.owner_title())
-        );
-        self.request_file(
-            FileDialogSpec::save_file()
-                .filter("PDF", &["pdf"])
-                .file_name(default_name),
-            |app, path| {
-                let Some(path) = path else {
-                    return;
-                };
-                let path = if path
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-                {
-                    path
-                } else {
-                    path.with_extension("pdf")
-                };
-                app.run_send_package_export(path);
-            },
-        );
+        let operation = format!("导出《{}》的送批材料", confirm.plan.owner_title());
+        let file_confirm = confirm.clone();
+        let wake = ctx.clone();
+        let file = Box::new(move |app: &mut Self| app.choose_send_package_file(file_confirm, wake));
+        if crate::export::protection::encryption_enabled() {
+            self.choose_document_delivery(ctx, operation, file, move |app, medium, key, wake| {
+                app.run_confirmed_send_package_export(
+                    confirm,
+                    Destination::Medium(medium, key),
+                    wake,
+                );
+            });
+        } else {
+            self.request_document_output(operation, file);
+        }
     }
 
-    /// 先只读面板上的确认计划生成风险确认文案；确认前不取走计划，
-    /// 用户取消或稍后再确认时计划仍留在面板上。
-    fn run_send_package_export(&mut self, path: PathBuf) {
-        let operation = {
-            let Some(panel) = self.send_package.as_ref() else {
-                return;
-            };
-            let Some(confirm) = panel.confirm.as_ref() else {
-                return;
-            };
-            // 送批材料含主件正文、随行件与人员信息，加密工作区里合并成普通 PDF 要先确认风险。
-            format!(
-                "导出送批材料（含主件、随行件及目录）：《{}》\n输出位置：{}",
-                confirm.plan.owner_title(),
-                path.display()
-            )
-        };
-        self.request_document_output(operation, move |app| {
-            app.run_confirmed_send_package_export(path)
-        });
-    }
-
-    /// 真正导出时再从面板取确认计划；期间计划被刷新或失效就放弃这次导出。
-    fn run_confirmed_send_package_export(&mut self, path: PathBuf) {
-        let protection = match crate::export::protection::Protection::current() {
+    fn choose_send_package_file(&mut self, confirm: ExportConfirm, wake: egui::Context) {
+        let protection = match Protection::current() {
             Ok(protection) => protection,
             Err(error) => {
                 self.status = format!("无法导出：{error:#}");
                 return;
             }
         };
-        let Some(panel) = self.send_package.as_mut() else {
+        self.request_file(
+            FileDialogSpec::save_file()
+                .filter("PDF", &["pdf"])
+                .file_name(send_package_filename(&confirm.plan)),
+            move |app, path| {
+                if let Some(path) = path {
+                    let path = if path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+                    {
+                        path
+                    } else {
+                        path.with_extension("pdf")
+                    };
+                    app.run_confirmed_send_package_export(
+                        confirm,
+                        Destination::File(path, protection),
+                        wake,
+                    );
+                }
+            },
+        );
+    }
+
+    /// 保存框或介质选择期间若重新检查了计划，须由用户按新清单重发。
+    fn run_confirmed_send_package_export(
+        &mut self,
+        confirm: ExportConfirm,
+        destination: Destination,
+        wake: egui::Context,
+    ) {
+        if self.send_package_export.is_some() {
+            self.status = "已有送批材料正在导出，请稍候。".into();
+            return;
+        }
+        let Some(panel) = self.send_package.as_mut().filter(|panel| {
+            panel.confirm.as_ref().is_some_and(|current| {
+                Arc::ptr_eq(&current.plan, &confirm.plan) && current.with_toc == confirm.with_toc
+            })
+        }) else {
             self.status = "导出计划已失效，请重新发起导出。".into();
             return;
         };
-        let Some(confirm) = panel.confirm.take() else {
-            self.status = "导出计划已失效，请重新发起导出。".into();
-            return;
-        };
+        panel.confirm = None;
+        panel.export_error = None;
         let owner_id = panel.owner_id;
-        let with_toc = confirm.with_toc;
-        let plan = confirm.plan;
+        let ExportConfirm { plan, with_toc } = confirm;
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
         let numbering = self.config.numbering;
@@ -1555,31 +1582,54 @@ impl GongwenApp {
         });
         self.status = format!("正在导出《{}》的送批材料…", plan.owner_title());
         std::thread::spawn(move || {
-            let display = crate::units::UnitDisplay::new(&vocabulary);
-            let (fonts, _warnings) = crate::system_fonts::resolve(&fonts);
-            let progress_tx = tx.clone();
-            let result = crate::manuscript_io::send_package::export_send_package(
-                &plan,
-                with_toc,
-                &path,
-                |snapshot, markdown, _stem| {
-                    crate::manuscript_io::compile_snapshot_pdf(
-                        snapshot, markdown, &display, &fonts, &numbering,
-                    )
-                },
-                |text| {
-                    let _ =
-                        progress_tx.send(WorkerResult::SendPackage(SendPackageEvent::Progress {
-                            text: text.to_string(),
-                        }));
-                },
-                protection.as_ref(),
-            );
+            let result = (|| {
+                if let Destination::Medium(_, workspace) = &destination {
+                    require_workspace(workspace)?;
+                }
+                let display = crate::units::UnitDisplay::new(&vocabulary);
+                let (fonts, _warnings) = crate::system_fonts::resolve(&fonts);
+                let progress = |text: &str| {
+                    let _ = tx.send(WorkerResult::SendPackage(SendPackageEvent::Progress {
+                        text: text.to_string(),
+                    }));
+                    wake.request_repaint();
+                };
+                crate::manuscript_io::send_package::export_send_package(
+                    &plan,
+                    with_toc,
+                    |snapshot, markdown, _stem| {
+                        crate::manuscript_io::compile_snapshot_pdf(
+                            snapshot, markdown, &display, &fonts, &numbering,
+                        )
+                    },
+                    progress,
+                    |pdf| {
+                        Ok(match destination {
+                            Destination::File(path, protection) => {
+                                DeliveryReceipt::File(crate::export::protection::write_final_with(
+                                    protection.as_ref(),
+                                    &path,
+                                    &pdf,
+                                )?)
+                            }
+                            Destination::Medium(medium, workspace) => {
+                                let files = [(send_package_filename(&plan), pdf)].into();
+                                let image =
+                                    zeroize::Zeroizing::new(crate::optical_image::build(files)?);
+                                progress("正在刻录并回读校验…");
+                                medium.burn(&workspace, &image)?;
+                                DeliveryReceipt::Medium(medium.label())
+                            }
+                        })
+                    },
+                )
+            })();
             let _ = tx.send(WorkerResult::SendPackage(SendPackageEvent::Done {
                 owner_id,
                 with_toc,
                 result: result.map_err(|error| format!("{error:#}")),
             }));
+            wake.request_repaint();
         });
     }
 
@@ -1599,7 +1649,15 @@ impl GongwenApp {
             } => {
                 self.send_package_export = None;
                 match result {
-                    Ok(outcome) => {
+                    Ok((outcome, receipt)) => {
+                        let (path, location) = match &receipt {
+                            DeliveryReceipt::File(path) => {
+                                (path.to_string_lossy(), path.display().to_string())
+                            }
+                            DeliveryReceipt::Medium(label) => {
+                                ("".into(), format!("已刻录并校验：{label}"))
+                            }
+                        };
                         let blanks: i64 = outcome
                             .items
                             .iter()
@@ -1609,7 +1667,7 @@ impl GongwenApp {
                         let recorded = self.manuscript_store.as_mut().map(|store| {
                             store.record_send_package_export(
                                 owner_id,
-                                &outcome.path.to_string_lossy(),
+                                &path,
                                 with_toc,
                                 outcome.total_pages as i64,
                                 &outcome.items,
@@ -1624,7 +1682,7 @@ impl GongwenApp {
                             "已导出《{title}》的送批材料：{} 件，共 {} 页（含 {blanks} 张双面打印补白页），{}。",
                             outcome.items.len(),
                             outcome.total_pages,
-                            outcome.path.display()
+                            location
                         );
                         if let Some(Err(error)) = recorded {
                             message.push_str(&format!("但导出记录没写进去：{error:#}"));
@@ -1636,18 +1694,19 @@ impl GongwenApp {
                         {
                             panel.reload(store);
                         }
-                        // 应用内的 PDF 标签自带打印、系统打开与定位。
-                        self.open_pdf_with_hints(
-                            outcome.path,
-                            Some(format!("{title}（送批材料）")),
-                            crate::print::PrintHints {
-                                duplex_typeset: false,
-                                send_package: true,
-                            },
-                        );
+                        if let DeliveryReceipt::File(path) = receipt {
+                            self.open_pdf_with_hints(
+                                path,
+                                Some(format!("{title}（送批材料）")),
+                                crate::print::PrintHints {
+                                    duplex_typeset: false,
+                                    send_package: true,
+                                },
+                            );
+                        }
                     }
                     Err(error) => {
-                        self.status = format!("送批材料导出失败，没有生成文件：{error}");
+                        self.status = format!("送批材料导出失败：{error}");
                         if let Some(panel) = self.send_package.as_mut()
                             && panel.owner_id == owner_id
                         {
@@ -1663,4 +1722,11 @@ impl GongwenApp {
     pub(crate) fn send_package_exporting(&self) -> bool {
         self.send_package_export.is_some()
     }
+}
+
+fn send_package_filename(plan: &SendPackagePlan) -> String {
+    format!(
+        "{}（送批材料）.pdf",
+        crate::export::safe_filename(plan.owner_title())
+    )
 }

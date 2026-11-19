@@ -399,6 +399,40 @@ fn single_character_issuing_unit_is_centered() {
 }
 
 #[test]
+fn single_letter_exports_each_responsible_contact_and_copy_number() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("single-letter.docx");
+    let mut input = DraftInput::default();
+    input.profile.issuing_unit = "发文局".into();
+    input.profile.recipient = "收文局".into();
+    input.profile.responsible_unit = "办公室".into();
+    input.profile.contact_person = "张三".into();
+    input.profile.contact_phone = "010-12345678".into();
+    input.profile.number_copies = true;
+    input
+        .profile
+        .additional_responsible_contacts
+        .push(JointContact {
+            unit: "业务处".into(),
+            name: "李四".into(),
+            phone: "010-87654321".into(),
+        });
+    let input: DraftInput = serde_json::from_slice(&serde_json::to_vec(&input).unwrap()).unwrap();
+    write_docx_ok(&path, &input, "# 测试公函\n\n正文。").unwrap();
+    let xml = zip_text(&path, "word/document.xml");
+    assert_eq!(xml.matches("承办单位：").count(), 1);
+    assert!(xml.contains("承办单位：办公室"));
+    assert!(xml.contains("业务处"));
+    assert!(xml.contains("李\u{2003}四"));
+    assert!(xml.contains("010-87654321"));
+    assert!(xml.contains("（共印3份）"));
+    assert_eq!(crate::export::copy_count(&input), 3);
+    let roster = crate::export::copy_roster(&input).unwrap();
+    assert!(roster.contains("02\t办公室\t承办"));
+    assert!(roster.contains("03\t业务处\t承办"));
+}
+
+#[test]
 fn hierarchical_units_expand_to_full_names_in_header_and_addressee() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("hierarchy.docx");

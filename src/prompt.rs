@@ -1,6 +1,4 @@
-use crate::models::{
-    DraftInput, JointIssuanceMode, TemplateKind, VocabularyEntry, join_units, split_units,
-};
+use crate::models::{DraftInput, JointIssuanceMode, TemplateKind, VocabularyEntry, split_units};
 use crate::units::UnitDisplay;
 use chrono::{DateTime, Datelike, Duration, FixedOffset, Local, NaiveDate, Weekday};
 use regex::Regex;
@@ -439,23 +437,33 @@ pub fn build_draft_prompt(
     let joint_mode = input.kind == TemplateKind::OfficialLetter
         && input.profile.joint_issuance_mode == JointIssuanceMode::Mode1;
     let display = UnitDisplay::new(vocabulary).for_input(input);
-    let single_contact_name = display.person_name(&input.profile.contact_person);
-    let joint_contact_names = join_units(
-        &input
-            .profile
-            .joint_contacts
-            .iter()
-            .map(|contact| display.person_name(&contact.name))
-            .collect::<Vec<_>>(),
-    );
-    let joint_contact_phones = join_units(
-        &input
-            .profile
-            .joint_contacts
-            .iter()
-            .map(|contact| contact.phone.clone())
-            .collect::<Vec<_>>(),
-    );
+    let responsible = match input.kind {
+        TemplateKind::OfficialLetter => input.profile.letter_responsible_entries(),
+        TemplateKind::RedHeadApproval => crate::models::joint_responsible_entries(&input.profile),
+        _ => vec![crate::models::JointContact {
+            unit: input.profile.responsible_unit.clone(),
+            name: input.profile.contact_person.clone(),
+            phone: input.profile.contact_phone.clone(),
+        }],
+    };
+    let responsible_display = responsible
+        .iter()
+        .map(|row| display.abbr(&row.unit))
+        .filter(|unit| !unit.is_empty())
+        .collect::<Vec<_>>()
+        .join("、");
+    let contact_names = responsible
+        .iter()
+        .map(|row| display.person_name(&row.name))
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>()
+        .join("、");
+    let contact_phones = responsible
+        .iter()
+        .map(|row| row.phone.trim())
+        .filter(|phone| !phone.is_empty())
+        .collect::<Vec<_>>()
+        .join("、");
 
     // 规格 §2.2/3.1：锁定元数据按层级展开与简称规则显示，让模型看到最终成品形式。
     let external_names = input.uses_external_unit_names();
@@ -474,16 +482,6 @@ pub fn build_draft_prompt(
         display.join_hierarchical_for(&split_units(&input.profile.recipient), external_names);
     let copies_display =
         display.join_hierarchical_for(&split_units(&input.profile.copies_to), external_names);
-    let multiple_responsible = joint_mode || input.kind == TemplateKind::RedHeadApproval;
-    let responsible_display = if multiple_responsible {
-        split_units(&input.profile.joint_responsible_units)
-            .iter()
-            .map(|unit| display.abbr(unit))
-            .collect::<Vec<_>>()
-            .join("、")
-    } else {
-        display.abbr(&input.profile.responsible_unit)
-    };
     let leaders_display = display.reporting_leaders(&input.profile.reporting_leaders);
     // 落款与三个导出端同一份显示计划：稿件没有快照时也要出名称，不能给「词条失效」。
     let signing_display =
@@ -570,16 +568,8 @@ pub fn build_draft_prompt(
         } else {
             String::new()
         }),
-        contact = value_or_none(if multiple_responsible {
-            &joint_contact_names
-        } else {
-            &single_contact_name
-        }),
-        phone = value_or_none(if multiple_responsible {
-            &joint_contact_phones
-        } else {
-            &input.profile.contact_phone
-        }),
+        contact = value_or_none(&contact_names),
+        phone = value_or_none(&contact_phones),
         security_level = value_or_none(&input.profile.security_level),
         security_period = value_or_none(&input.profile.security_period),
         glossary = glossary,

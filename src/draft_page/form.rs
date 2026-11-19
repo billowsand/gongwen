@@ -5,9 +5,8 @@
 
 use crate::app::{
     CONTENT_WIDTH, DraftAction, FORM_CONTROL_HEIGHT, FORM_FIELD_MIN_WIDTH, FORM_LAYOUT_GUTTER,
-    LABEL_WIDTH, SelectOption, contact_pair, joint_responsible_editor, layout_options,
-    multi_select, plain_options, row_label, row_label_with_info, single_select,
-    switch_template_profile, warn,
+    LABEL_WIDTH, SelectOption, layout_options, multi_select, plain_options, responsible_editor,
+    row_label, row_label_with_info, single_select, switch_template_profile, warn,
 };
 use crate::draft_page::DraftPage;
 use crate::element_fields::{self, FieldId};
@@ -22,7 +21,7 @@ use crate::units;
 use crate::units::UnitDisplay;
 use crate::validator;
 use eframe::egui;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 mod research;
 
@@ -980,50 +979,18 @@ impl DraftPage<'_> {
             .collect()
     }
 
-    /// 规格 §2.3“人随事走”：只保留属于给定单位的人员；单位列表为空时不过滤。
-    /// 公函可带承办上级单位人员；白头件呈报领导取落款单位及其上级单位的领导。
-    /// 返回 `(人员, 是否应用了过滤)`，供界面提示。
-    pub(crate) fn filtered_contacts(
-        &self,
-        units: &[String],
-        include_parent_unit_handlers: bool,
-        include_leader_superiors: bool,
-    ) -> (Vec<(String, String)>, bool) {
-        let clean = units
-            .iter()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>();
-        if clean.is_empty() {
-            return (self.contacts(), false);
+    /// 呈报领导取落款单位及其各级上级单位的领导。
+    fn leaders_for_signing_units(&self, units: &[String]) -> Vec<(String, String)> {
+        if units.is_empty() {
+            return self.contacts();
         }
         let display = UnitDisplay::new(&self.config.vocabulary);
-        let mut seen = std::collections::HashSet::new();
-        let mut matched = Vec::new();
-        for unit in &clean {
-            let people = if include_parent_unit_handlers {
-                display.responsible_people_of(unit)
-            } else if include_leader_superiors {
-                display.leaders_of(unit)
-            } else {
-                display.people_of(unit)
-            };
-            for (name, phone) in people {
-                if seen.insert(name.clone()) {
-                    matched.push((name, phone));
-                }
-            }
-        }
-        if matched.is_empty() {
-            if include_parent_unit_handlers {
-                // 公函版记严格执行承办权限，不能因候选为空而回落显示未授权人员。
-                (matched, true)
-            } else {
-                (matched, true)
-            }
-        } else {
-            (matched, true)
-        }
+        let mut seen = HashSet::new();
+        units
+            .iter()
+            .flat_map(|unit| display.leaders_of(unit))
+            .filter(|(name, _)| seen.insert(name.clone()))
+            .collect()
     }
 
     /// 顶部常驻区：文种、稿件版本、套版和版面缩略导航图。这几样决定"这是什么文、
@@ -1252,36 +1219,15 @@ impl DraftPage<'_> {
         let blocked_for_recipient = [picked_as_copy.clone(), picked_as_issuing.clone()].concat();
         let blocked_for_copies = [picked_as_recipient.clone(), picked_as_issuing].concat();
         // 规格 §2.3“人随事走”：联系人按承办单位过滤，呈报领导按落款单位过滤。
-        let filter_units = match self.doc.draft.kind {
-            TemplateKind::OfficialLetter
-                if self.doc.draft.profile.joint_issuance_mode == JointIssuanceMode::Mode1 =>
-            {
-                split_units(&self.doc.draft.profile.joint_responsible_units)
-            }
-            TemplateKind::OfficialLetter => vec![self.doc.draft.profile.responsible_unit.clone()],
-            TemplateKind::WhitePaper => split_units(&self.doc.draft.profile.signing_unit),
-            TemplateKind::RedHeadApproval => split_units(&self.doc.draft.profile.signing_unit),
-            _ => vec![],
+        let approval = self.doc.draft.kind.is_approval();
+        let signing_units = split_units(&self.doc.draft.profile.signing_unit);
+        let contacts = if approval {
+            self.leaders_for_signing_units(&signing_units)
+        } else {
+            Vec::new()
         };
-        let (contacts, people_filtered) = self.filtered_contacts(
-            &filter_units,
-            self.doc.draft.kind == TemplateKind::OfficialLetter,
-            self.doc.draft.kind.is_approval(),
-        );
-        let people_filter_note = if people_filtered {
+        let people_filter_note = if approval && !signing_units.is_empty() {
             match self.doc.draft.kind {
-                TemplateKind::OfficialLetter
-                    if self.doc.draft.profile.joint_issuance_mode == JointIssuanceMode::Mode1 =>
-                {
-                    Some("联系人已按所选承办单位过滤。".to_string())
-                }
-                TemplateKind::OfficialLetter => Some(format!(
-                    "联系人已按承办单位“{}”过滤。",
-                    crate::units::identity::display_values(
-                        &self.config.vocabulary,
-                        &self.doc.draft.profile.responsible_unit
-                    )
-                )),
                 TemplateKind::WhitePaper => {
                     let units = split_units(&self.doc.draft.profile.signing_unit);
                     if units.is_empty() {
@@ -2046,61 +1992,50 @@ impl DraftPage<'_> {
                             }
                             ui.end_row();
 
-                            row_label(ui, "承办单位");
-                            if self.doc.draft.profile.joint_issuance_mode
-                                == JointIssuanceMode::Mode1
-                            {
-                                // 联合发文：承办单位与联系人成对录入，数量天然一致、一一对应。
-                                joint_responsible_editor(
-                                    ui,
-                                    &mut self.doc.draft.profile,
-                                    &units,
-                                    &self.config.vocabulary,
-                                    &mut self.doc.manual_fields,
-                                    free_text,
-                                    field_width,
-                                    TemplateKind::OfficialLetter.max_responsible_entries(),
-                                );
-                            } else if single_select(
+                            let single = self.doc.draft.profile.joint_issuance_mode == JointIssuanceMode::Single;
+                            let mut responsible_units = Vec::new();
+                            if single && let Some(issuing) = units::identity::resolve(
+                                &self.config.vocabulary,
+                                VocabularyCategory::Unit,
+                                &self.doc.draft.profile.issuing_unit,
+                            ) {
+                                let issuing_key = issuing.key();
+                                // 候选池按树形顺序排列，上级总在下级之前。
+                                let mut subtree = HashSet::new();
+                                for unit in &unit_pool {
+                                    if unit.value == issuing_key || subtree.contains(unit.parent.as_str()) {
+                                        subtree.insert(unit.value.as_str());
+                                    }
+                                }
+                                let (mut preferred, other): (Vec<_>, Vec<_>) = units.iter().cloned()
+                                    .partition(|unit| subtree.contains(unit.value.as_str()));
+                                if let Some(root) = preferred.first_mut() {
+                                    let depth = root.depth;
+                                    root.label = root.full.clone();
+                                    for unit in &mut preferred {
+                                        unit.depth = unit.depth.saturating_sub(depth);
+                                    }
+                                }
+                                preferred.extend(other);
+                                responsible_units = preferred;
+                            }
+                            let responsible_units = if responsible_units.is_empty() { &units } else { &responsible_units };
+                            row_label_with_info(ui, "承办信息", if single {
+                                "每行填写一组承办单位、联系人和电话。优先列出发文单位及其下级单位。"
+                            } else {
+                                "每行填写一组承办单位、联系人和电话。"
+                            });
+                            responsible_editor(
                                 ui,
-                                "responsible_unit",
-                                &mut self.doc.draft.profile.responsible_unit,
-                                &units,
+                                &mut self.doc.draft.profile,
+                                TemplateKind::OfficialLetter,
+                                responsible_units,
                                 &self.config.vocabulary,
                                 &mut self.doc.manual_fields,
                                 free_text,
                                 field_width,
-                                "处室/部门标准名称",
-                            ) {
-                                let value = self.doc.draft.profile.responsible_unit.clone();
-                                element_fields::apply_field(
-                                    &mut self.doc.draft,
-                                    FieldId::ResponsibleUnit,
-                                    &value,
-                                    &self.config.vocabulary,
-                                );
-                            }
+                            );
                             ui.end_row();
-
-                            if self.doc.draft.profile.joint_issuance_mode
-                                != JointIssuanceMode::Mode1
-                            {
-                                let contact_tip = people_filter_note.clone().unwrap_or_else(|| {
-                                    "联系人从标准词库选择，并自动带出与姓名绑定的电话。".to_string()
-                                });
-                                row_label_with_info(ui, "联系人\n及电话", contact_tip);
-                                contact_pair(
-                                    ui,
-                                    &mut self.doc.draft.profile,
-                                    self.doc.draft.kind,
-                                    &contacts,
-                                    &self.config.vocabulary,
-                                    &mut self.doc.manual_fields,
-                                    free_text,
-                                    field_width,
-                                );
-                                ui.end_row();
-                            }
                         }
                         TemplateKind::RedHeadApproval => {
                             row_label_with_info(
@@ -2108,15 +2043,15 @@ impl DraftPage<'_> {
                                 "承办信息",
                                 "每行一组承办单位、联系人和电话，最多 4 条；条目增加时首页底栏向上扩展。单位名放不下时自动横向压缩，不换行。",
                             );
-                            joint_responsible_editor(
+                            responsible_editor(
                                 ui,
                                 &mut self.doc.draft.profile,
+                                TemplateKind::RedHeadApproval,
                                 &units,
                                 &self.config.vocabulary,
                                 &mut self.doc.manual_fields,
                                 free_text,
                                 field_width,
-                                TemplateKind::RedHeadApproval.max_responsible_entries(),
                             );
                             ui.end_row();
                             field_error(ui, &check, "red_approval_responsible");

@@ -297,6 +297,12 @@ fn cases() -> Vec<Case> {
             },
         },
         Case {
+            name: "letter-single-responsible",
+            kind: TemplateKind::OfficialLetter,
+            markdown: SHORT.into(),
+            tweak: add_second_letter_contact,
+        },
+        Case {
             name: "letter-joint",
             kind: TemplateKind::OfficialLetter,
             markdown: SHORT.replace("请示", "通知").replace("妥否，请批示。", "请遵照执行。"),
@@ -457,6 +463,17 @@ fn minutes_tweak(input: &mut DraftInput) {
     input.profile.meeting_location = "局三楼会议室".into();
     input.profile.document_number = "3".into();
     input.profile.copies_to = "市财政局、市卫生健康委".into();
+}
+
+fn add_second_letter_contact(input: &mut DraftInput) {
+    input
+        .profile
+        .additional_responsible_contacts
+        .push(JointContact {
+            unit: "社会保障处".into(),
+            name: "李四".into(),
+            phone: "010-87654321".into(),
+        });
 }
 
 fn sample_dir() -> PathBuf {
@@ -653,7 +670,10 @@ fn typst_samples() {
         std::fs::write(dir.join("doc.json"), data).unwrap();
         if matches!(
             case.name,
-            "letter-cell-breaks" | "letter-record-pushed" | "letter-captions"
+            "letter-cell-breaks"
+                | "letter-record-pushed"
+                | "letter-captions"
+                | "letter-single-responsible"
         ) {
             crate::export::docx::write_docx(
                 &dir.join("word.docx"),
@@ -1209,6 +1229,28 @@ fn text_fonts(
     )
     .unwrap();
     (items, set)
+}
+
+#[test]
+fn single_letter_responsible_rows_fit_in_the_typst_record() {
+    if crate::portable_runtime::find_font_dir().is_none() {
+        return;
+    }
+    let mut input = base_input(TemplateKind::OfficialLetter);
+    let (old, _) = text_fonts(&input, SHORT, &NumberingConfig::default());
+    add_second_letter_contact(&mut input);
+    let (items, _) = text_fonts(&input, SHORT, &NumberingConfig::default());
+    let find_unit = |text| items.iter().find(|item| item.text.contains(text)).unwrap();
+    let first = find_unit("养老服务处");
+    let second = find_unit("社会保障处");
+    let single = old
+        .iter()
+        .find(|item| item.text.contains("养老服务处"))
+        .unwrap();
+    assert_eq!(first.page, second.page);
+    assert!(second.baseline_pt - first.baseline_pt > 18.0);
+    assert!((second.baseline_pt - single.baseline_pt).abs() < 0.1);
+    assert!(items.iter().any(|item| item.text.contains("010-87654321")));
 }
 
 /// 版记按真实折行向上扩展，印数始终整块靠右且不压住承办行。

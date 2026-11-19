@@ -188,17 +188,6 @@ fn room_closing(input: &DraftInput, display: &UnitDisplay, elements: &ElementMar
     }
 }
 
-/// TeX `\CountUnits`：按「，」「、」数单位个数，空串为 0。
-fn count_units(text: &str) -> u32 {
-    if text.trim().is_empty() {
-        return 0;
-    }
-    // 单位个数不会大到溢出 u32；真溢出就按 u32::MAX 封顶，不做静默截断。
-    let count =
-        u64::try_from(text.matches('，').count() + text.matches('、').count()).unwrap_or(u64::MAX);
-    u32::try_from(1u64.saturating_add(count)).unwrap_or(u32::MAX)
-}
-
 /// 联合发文模式 1 的成文日期压在主发文单位那一列下。
 fn joint_closing(input: &DraftInput, display: &UnitDisplay, date: Runs) -> Closing {
     let units = split_units(&input.profile.joint_issuing_units);
@@ -298,43 +287,24 @@ fn letter_frame(input: &DraftInput, display: &UnitDisplay, elements: &ElementMar
     } else {
         Some(plain_runs(&copies_display))
     };
-    let responsible_display = if joint_mode_one {
-        split_units(&input.profile.joint_responsible_units)
-            .iter()
-            .map(|unit| display.abbr(unit))
-            .collect::<Vec<_>>()
-            .join("、")
-    } else {
-        display.abbr(&input.profile.responsible_unit)
-    };
     let copy_numbering = input.profile.number_copies && input.kind.has_copy_numbering();
     let print_copies = if copy_numbering {
         crate::export::copy_count(input)
     } else {
-        count_units(&recipient_display)
-            + count_units(&copies_display)
-            + count_units(&responsible_display)
+        crate::export::automatic_print_copies(input) as u32
     };
-    let rows = if joint_mode_one {
-        let entries = crate::models::joint_responsible_entries(&input.profile);
-        let count = entries.len().max(1);
-        (0..count)
-            .map(|index| {
-                let entry = entries.get(index);
-                RecordRow {
-                    unit: display.abbr(entry.map_or("", |value| value.unit.as_str())),
-                    contact: entry.map_or(String::new(), |value| display.person_name(&value.name)),
-                    phone: entry.map_or(String::new(), |value| value.phone.clone()),
-                }
-            })
-            .collect()
-    } else {
-        vec![RecordRow {
-            unit: responsible_display,
-            contact: display.person_name(&input.profile.contact_person),
-            phone: input.profile.contact_phone.clone(),
-        }]
-    };
+    let mut entries = input.profile.letter_responsible_entries();
+    if entries.is_empty() {
+        entries.push(Default::default());
+    }
+    let rows = entries
+        .into_iter()
+        .map(|entry| RecordRow {
+            unit: display.abbr(&entry.unit),
+            contact: display.person_name(&entry.name),
+            phone: entry.phone.trim().to_string(),
+        })
+        .collect();
     doc.record = Some(Record {
         copies_to,
         print_copies,
@@ -605,13 +575,6 @@ pub(crate) fn document(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn counts_units_like_the_class_file() {
-        assert_eq!(count_units(""), 0);
-        assert_eq!(count_units("甲单位"), 1);
-        assert_eq!(count_units("甲单位、乙单位，丙单位"), 3);
-    }
 
     #[test]
     fn short_signature_units_are_spread_to_five_chars() {

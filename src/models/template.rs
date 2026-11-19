@@ -213,13 +213,16 @@ pub struct JointContact {
     pub phone: String,
 }
 
-/// 联合发文承办条目（成对视图）：承办单位 ↔ 联系人 ↔ 电话 一一对应。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct JointResponsibleEntry {
-    pub unit: String,
-    pub name: String,
-    pub phone: String,
+impl JointContact {
+    pub(crate) fn has_values(&self) -> bool {
+        [&self.unit, &self.name, &self.phone]
+            .into_iter()
+            .any(|value| !value.trim().is_empty())
+    }
 }
+
+/// 承办单位、联系人、电话一一对应。
+pub type JointResponsibleEntry = JointContact;
 
 /// 公函收件人：每个接收单位一条，收件人与电话填进《传发任务单》。
 ///
@@ -287,46 +290,29 @@ pub(crate) fn resolve_transmit_task(
 /// 不能因为没配联系人就被丢掉。
 /// 完全空白（单位与联系人都没填）的占位行会被过滤，避免版记出现空行。
 pub(crate) fn joint_responsible_entries(profile: &TemplateProfile) -> Vec<JointResponsibleEntry> {
-    let units = split_units(&profile.joint_responsible_units);
-    let count = units.len().max(profile.joint_contacts.len());
-    (0..count)
-        .map(|index| {
-            let contact = profile.joint_contacts.get(index);
-            let bound = contact.map_or("", |contact| contact.unit.trim());
-            JointResponsibleEntry {
-                unit: if bound.is_empty() {
-                    units.get(index).cloned().unwrap_or_default()
-                } else {
-                    bound.to_string()
-                },
-                name: contact.map_or(String::new(), |contact| contact.name.clone()),
-                phone: contact.map_or(String::new(), |contact| contact.phone.clone()),
-            }
-        })
+    profile
+        .joint_responsible_rows()
+        .into_iter()
         .filter(|entry| !entry.unit.trim().is_empty() || !entry.name.trim().is_empty())
         .collect()
 }
 
-/// 从成对承办条目同步 `joint_responsible_units` 与 `joint_contacts` 两个字段，
-/// 保证两者数量与顺序一致（成对录入的唯一数据源是条目列表）。
+/// 从成对承办条目同步 `joint_responsible_units` 与 `joint_contacts`。
 pub(crate) fn sync_joint_responsible(
     profile: &mut TemplateProfile,
     entries: &[JointResponsibleEntry],
 ) {
-    profile.joint_responsible_units = entries
+    profile.joint_contacts = entries.to_vec();
+    for row in &mut profile.joint_contacts {
+        row.unit = row.unit.trim().to_string();
+    }
+    profile.joint_responsible_units = profile
+        .joint_contacts
         .iter()
-        .map(|entry| entry.unit.trim().to_string())
+        .map(|entry| entry.unit.as_str())
         .filter(|unit| !unit.is_empty())
         .collect::<Vec<_>>()
         .join("、");
-    profile.joint_contacts = entries
-        .iter()
-        .map(|entry| JointContact {
-            unit: entry.unit.trim().to_string(),
-            name: entry.name.clone(),
-            phone: entry.phone.clone(),
-        })
-        .collect();
 }
 
 /// 收文单位清单：主送在前、抄送在后，按身份去重。
@@ -415,6 +401,9 @@ pub struct TemplateProfile {
     pub contact_person: String,
     pub contact_phone: String,
     pub joint_contacts: Vec<JointContact>,
+    /// 单独发文公函的续行。首行仍用原有的三个字段，兼容旧稿件和单值表单字段。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub additional_responsible_contacts: Vec<JointContact>,
     /// 公函收件人清单：按接收单位（主送 + 抄送）逐个记收件人与电话，
     /// 导出《传发任务单》时按单位取用。空时导出留白手写。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -481,6 +470,7 @@ impl Default for TemplateProfile {
             contact_person: String::new(),
             contact_phone: String::new(),
             joint_contacts: Vec::new(),
+            additional_responsible_contacts: Vec::new(),
             receiving_contacts: Vec::new(),
             transmit_task: String::new(),
             reporting_leaders: String::new(),
@@ -505,6 +495,74 @@ impl Default for TemplateProfile {
 }
 
 impl TemplateProfile {
+    pub(crate) fn joint_responsible_rows(&self) -> Vec<JointResponsibleEntry> {
+        let units = split_units(&self.joint_responsible_units);
+        let bound = self
+            .joint_contacts
+            .iter()
+            .map(|entry| entry.unit.trim())
+            .filter(|unit| !unit.is_empty());
+        if units.iter().map(String::as_str).eq(bound) {
+            return self.joint_contacts.clone();
+        }
+        // 旧版列表按索引配对。现代条目自身带单位，投影省略空单位，不能用于填补空行。
+        (0..units.len().max(self.joint_contacts.len()))
+            .map(|index| {
+                let mut row = self.joint_contacts.get(index).cloned().unwrap_or_default();
+                if row.unit.trim().is_empty() {
+                    row.unit = units.get(index).cloned().unwrap_or_default();
+                }
+                row
+            })
+            .collect()
+    }
+
+    pub(crate) fn single_responsible_rows(&self) -> Vec<JointResponsibleEntry> {
+        std::iter::once(JointContact {
+            unit: self.responsible_unit.clone(),
+            name: self.contact_person.clone(),
+            phone: self.contact_phone.clone(),
+        })
+        .chain(self.additional_responsible_contacts.iter().cloned())
+        .collect()
+    }
+
+    pub(crate) fn single_responsible_entries(&self) -> Vec<JointResponsibleEntry> {
+        self.single_responsible_rows()
+            .into_iter()
+            .filter(JointContact::has_values)
+            .collect()
+    }
+
+    pub(crate) fn set_single_responsible_rows(&mut self, rows: Vec<JointResponsibleEntry>) {
+        let mut rows = rows.into_iter();
+        let first = rows.next().unwrap_or_default();
+        self.responsible_unit = first.unit;
+        self.contact_person = first.name;
+        self.contact_phone = first.phone;
+        self.additional_responsible_contacts = rows.collect();
+    }
+
+    pub(crate) fn letter_responsible_entries(&self) -> Vec<JointResponsibleEntry> {
+        if self.joint_issuance_mode == JointIssuanceMode::Mode1 {
+            joint_responsible_entries(self)
+        } else {
+            self.single_responsible_entries()
+        }
+    }
+
+    /// 版记印数与份号清单共用的承办单位顺序。
+    pub(crate) fn letter_responsible_units(&self) -> Vec<String> {
+        if self.joint_issuance_mode == JointIssuanceMode::Mode1 {
+            split_units(&self.joint_responsible_units)
+        } else {
+            self.single_responsible_rows()
+                .iter()
+                .flat_map(|row| split_units(&row.unit))
+                .collect()
+        }
+    }
+
     pub(crate) fn for_kind(kind: TemplateKind) -> Self {
         Self {
             kind,

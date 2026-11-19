@@ -5,10 +5,14 @@ use crate::manuscript::NewManuscript;
 use crate::models::{DraftInput, TemplateProfile};
 
 fn package() -> (ManuscriptStore, SendPackagePanel) {
+    package_with_owner(TemplateKind::WhitePaper)
+}
+
+fn package_with_owner(kind: TemplateKind) -> (ManuscriptStore, SendPackagePanel) {
     let mut store = ManuscriptStore::open(std::path::Path::new(":memory:")).unwrap();
     let mut ids = Vec::new();
     for (kind, title) in [
-        (TemplateKind::WhitePaper, "Owner"),
+        (kind, "Owner"),
         (TemplateKind::OfficialLetter, "Letter"),
         (TemplateKind::ResearchReport, "Report"),
         (TemplateKind::PlainDocument, "Notice"),
@@ -41,7 +45,7 @@ fn package() -> (ManuscriptStore, SendPackagePanel) {
     let mut panel = SendPackagePanel::new(ids[0]);
     panel.reload(&store);
     panel.confirm = Some(ExportConfirm {
-        plan: store.send_package_plan(ids[0]).unwrap(),
+        plan: Arc::new(store.send_package_plan(ids[0]).unwrap()),
         with_toc: true,
     });
     (store, panel)
@@ -380,20 +384,11 @@ fn never_committed_items_block_export_and_are_pending() {
 }
 
 #[test]
-fn protected_send_package_waits_for_password_before_starting_or_writing() {
-    let (store, panel) = package();
-    let mut app = super::super::management_samples::fixture();
-    app.manuscript_store = Some(store);
-    app.send_package = Some(panel);
+fn protected_send_package_offers_media_even_without_export_password() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("send-package.pdf");
     crate::storage::set_test_config_dir(Some(dir.path().to_owned()));
     crate::vault::set_key_handle([71; 32], true);
-    let policy = crate::export::protection::ExportPolicy {
-        enabled: false,
-        password: "Jade!River7Cloud".into(),
-    };
-    policy.save(&crate::vault::key_handle().unwrap()).unwrap();
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -402,10 +397,16 @@ fn protected_send_package_waits_for_password_before_starting_or_writing() {
         }
     }
     let _reset = Reset;
-    app.run_send_package_export(path.clone());
-    assert!(app.pending_output.is_some());
-    assert!(!app.send_package_exporting());
-    assert!(!path.exists());
-    app.pending_output = None;
-    assert!(!path.exists(), "取消不得生成合并 PDF");
+    for kind in [TemplateKind::WhitePaper, TemplateKind::RedHeadApproval] {
+        let (store, panel) = package_with_owner(kind);
+        let mut app = super::super::management_samples::fixture();
+        app.manuscript_store = Some(store);
+        app.send_package = Some(panel);
+        app.start_send_package_export(&egui::Context::default());
+        assert!(app.media_export.is_some(), "{kind:?}");
+        assert!(app.pending_output.is_none());
+        assert!(!app.send_package_exporting());
+        assert!(!path.exists());
+        assert!(app.send_package.as_ref().unwrap().confirm.is_some());
+    }
 }

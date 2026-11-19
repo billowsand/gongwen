@@ -1,4 +1,4 @@
-//! 从起草页选择交付介质。后台仅将内存中的成品交给选定的刻录后端。
+//! 选择文档交付介质。后台仅将内存中的成品交给选定的刻录后端。
 use std::sync::mpsc::{self, Receiver};
 
 use anyhow::{Context, Result, ensure};
@@ -18,7 +18,7 @@ pub(crate) enum Medium {
 }
 
 impl Medium {
-    fn label(&self) -> String {
+    pub(super) fn label(&self) -> String {
         match self {
             Self::Is903(target) => format!("IS903 虚拟光盘 · {} · {}", target.serial, target.disk),
             Self::Optical(drive) => format!("实体光盘 · {}", drive.label()),
@@ -51,12 +51,13 @@ struct MediaScan {
     notices: Vec<String>,
 }
 
+type BurnAction = Box<dyn FnOnce(&mut GongwenApp, Medium, KeyHandle, egui::Context)>;
+
 pub(super) struct Chooser {
     key: KeyHandle,
-    document: DocKey,
-    selection: ExportSelection,
-    open: Option<ExportKind>,
-    copy: Option<OutputAction>,
+    operation: String,
+    file: OutputAction,
+    burn: BurnAction,
     chosen: Option<Medium>,
     scan: Option<Receiver<MediaScan>>,
     media: MediaScan,
@@ -100,6 +101,37 @@ impl GongwenApp {
         open: Option<ExportKind>,
         copy: Option<OutputAction>,
     ) {
+        let file_selection = selection.clone();
+        let file = copy.unwrap_or_else(|| {
+            Box::new(move |app| {
+                if let Some(index) = app.doc_index_of_key(document) {
+                    app.draft_page_at(index)
+                        .start_confirmed_export(file_selection, open, false);
+                }
+            })
+        });
+        self.choose_document_delivery(
+            ctx,
+            "导出当前稿件".into(),
+            file,
+            move |app, medium, key, ctx| {
+                let Some(index) = app.doc_index_of_key(document) else {
+                    app.status = "稿件已关闭，已取消刻录。".into();
+                    return;
+                };
+                app.draft_page_at(index)
+                    .start_media_export(selection, medium, key, ctx);
+            },
+        );
+    }
+
+    pub(super) fn choose_document_delivery(
+        &mut self,
+        ctx: &egui::Context,
+        operation: String,
+        file: OutputAction,
+        burn: impl FnOnce(&mut Self, Medium, KeyHandle, egui::Context) + 'static,
+    ) {
         if self.media_export.is_some() || self.pending_output.is_some() {
             self.status = "请先处理当前的导出请求。".into();
             return;
@@ -111,10 +143,9 @@ impl GongwenApp {
         self.media_export = Some(Chooser {
             scan: Some(start_scan(ctx, crate::vault::key_handle())),
             key,
-            document,
-            selection,
-            open,
-            copy,
+            operation,
+            file,
+            burn: Box::new(burn),
             chosen: None,
             media: MediaScan::default(),
         });
@@ -192,32 +223,13 @@ impl GongwenApp {
                 return;
             };
             if encrypted {
-                self.request_document_output("导出当前稿件", move |app| {
-                    if let Some(copy) = chooser.copy {
-                        copy(app);
-                    } else if let Some(index) = app.doc_index_of_key(chooser.document) {
-                        app.draft_page_at(index).start_confirmed_export(
-                            chooser.selection,
-                            chooser.open,
-                            false,
-                        );
-                    }
-                });
+                self.request_document_output(chooser.operation, chooser.file);
             } else if let Some(target) = chooser.chosen {
-                let Some(index) = self.doc_index_of_key(chooser.document) else {
-                    self.status = "稿件已关闭，已取消刻录。".into();
-                    return;
-                };
                 if self.any_busy() {
                     self.status = "请等待当前任务结束后再刻录。".into();
                     return;
                 }
-                self.draft_page_at(index).start_media_export(
-                    chooser.selection,
-                    target,
-                    chooser.key,
-                    ctx.clone(),
-                );
+                (chooser.burn)(self, target, chooser.key, ctx.clone());
             }
         }
     }

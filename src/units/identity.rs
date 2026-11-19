@@ -325,7 +325,11 @@ fn fields(profile: &mut TemplateProfile, mut visit: impl FnMut(&mut String, Cate
     for value in [&mut profile.contact_person, &mut profile.reporting_leaders] {
         visit(value, Category::Person);
     }
-    for contact in &mut profile.joint_contacts {
+    for contact in profile
+        .joint_contacts
+        .iter_mut()
+        .chain(&mut profile.additional_responsible_contacts)
+    {
         visit(&mut contact.unit, Category::Unit);
         visit(&mut contact.name, Category::Person);
     }
@@ -968,7 +972,11 @@ fn readable_profile_with(
     for value in [&mut out.contact_person, &mut out.reporting_leaders] {
         *value = text_list(display, fallback, Category::Person, value.as_str());
     }
-    for contact in &mut out.joint_contacts {
+    for contact in out
+        .joint_contacts
+        .iter_mut()
+        .chain(&mut out.additional_responsible_contacts)
+    {
         contact.unit = text_list(display, fallback, Category::Unit, &contact.unit);
         contact.name = text_list(display, fallback, Category::Person, &contact.name);
     }

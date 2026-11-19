@@ -4,8 +4,7 @@
 //! - 每件用计划里取好的版本快照编译，版式与它单独导出时完全一样，页码各自独立；
 //! - 每一部分（目录页、主件、各随行件）都从奇数页开始：页数为奇数的部分后面补一张
 //!   与其末页同尺寸的空白页（最后一部分不补），双面打印后各件能拆开分别装订；
-//! - 任何一件编译失败整个导出失败，先写临时文件、成功后才改名到目标路径，
-//!   不留缺件的半成品，也不截断已有的同名文件。
+//! - 所有版本编译合并成功后，才把成品交给文件或刻录出口。
 //!
 //! 编译函数由调用方传入：正式导出走 Typst，测试里换成现成的 PDF 字节。
 
@@ -13,7 +12,8 @@ use crate::manuscript::send_package::{ExportItemRecord, PlanEntry, SendPackagePl
 use crate::models::{DraftInput, TemplateKind, TemplateProfile};
 use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document, Object, ObjectId};
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// 目录页的标题。
 pub const TOC_TITLE: &str = "送批材料目录";
@@ -28,7 +28,6 @@ pub struct PartPages {
 /// 一次合并导出的结果，供写导出记录与提示用。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendPackageOutcome {
-    pub path: PathBuf,
     pub total_pages: usize,
     pub toc: Option<PartPages>,
     /// 主件在前，随行件按顺序；页数不含补的空白页。
@@ -36,15 +35,14 @@ pub struct SendPackageOutcome {
 }
 
 /// 按计划导出。`compile(要素, 正文, 文件名主干)` 返回一件的 PDF 字节；
-/// `progress` 收到的是给状态栏看的进度文字。
-pub fn export_send_package(
+/// `progress` 收到状态文字；`deliver` 收到完整的内存 PDF，交付后返回回执。
+pub fn export_send_package<T>(
     plan: &SendPackagePlan,
     with_toc: bool,
-    output: &Path,
     mut compile: impl FnMut(&DraftInput, &str, &str) -> Result<Vec<u8>>,
     mut progress: impl FnMut(&str),
-    protection: Option<&crate::export::protection::Protection>,
-) -> Result<SendPackageOutcome> {
+    deliver: impl FnOnce(Vec<u8>) -> Result<T>,
+) -> Result<(SendPackageOutcome, T)> {
     if let Some(entry) = plan.entries.iter().find(|entry| entry.revision.is_none()) {
         let reason = entry.blocker.map(|b| b.reason()).unwrap_or("取不到版本");
         let title = if entry.title.is_empty() {
@@ -92,7 +90,6 @@ pub fn export_send_package(
     }
     progress("正在合并 PDF…");
     let merged = merge_pdfs(&parts)?;
-    crate::export::protection::write_final_with(protection, output, &merged.bytes)?;
 
     let (toc, item_parts) = if with_toc {
         (Some(merged.parts[0]), &merged.parts[1..])
@@ -117,12 +114,15 @@ pub fn export_send_package(
             blank_pages: part.blanks as i64,
         });
     }
-    Ok(SendPackageOutcome {
-        path: output.to_path_buf(),
-        total_pages: merged.total_pages,
-        toc,
-        items,
-    })
+    let receipt = deliver(merged.bytes)?;
+    Ok((
+        SendPackageOutcome {
+            total_pages: merged.total_pages,
+            toc,
+            items,
+        },
+        receipt,
+    ))
 }
 
 /// 目录页的行文要素：普通公文版式（只有密级、标题、正文），密级沿用主件，
@@ -509,10 +509,9 @@ mod tests {
         ]);
         let output = temp_output("ok");
         let mut compiled = Vec::new();
-        let outcome = export_send_package(
+        let (outcome, _) = export_send_package(
             &plan,
             true,
-            &output,
             |snapshot, markdown, _stem| {
                 compiled.push((snapshot.title_hint.clone(), markdown.to_string()));
                 let pages = match snapshot.title_hint.as_str() {
@@ -525,7 +524,7 @@ mod tests {
                 Ok(fake_pdf(&snapshot.title_hint, pages, (595, 842), true))
             },
             |_| {},
-            None,
+            |pdf| crate::export::protection::write_final_with(None, &output, &pdf),
         )
         .unwrap();
         // 先逐件编译，目录页最后排（要用到各件页数）。
@@ -564,6 +563,34 @@ mod tests {
     }
 
     #[test]
+    fn merged_approval_pdf_can_go_directly_into_the_disc_image() {
+        let plan = plan(vec![
+            entry("红头呈批件", TemplateKind::RedHeadApproval, Some(1)),
+            entry("函稿", TemplateKind::OfficialLetter, Some(2)),
+        ]);
+        let filename = "报批材料（送批材料）.pdf";
+        let (outcome, image) = export_send_package(
+            &plan,
+            true,
+            |_, _, _| Ok(fake_pdf("x", 1, (595, 842), false)),
+            |_| {},
+            |pdf| {
+                assert_eq!(page_count(&pdf)?, 5);
+                crate::optical_image::build([(filename.to_owned(), pdf)].into())
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome.total_pages, 5);
+        assert_eq!(outcome.items.len(), 2);
+        let name = filename
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect::<Vec<_>>();
+        assert!(image.windows(name.len()).any(|bytes| bytes == name));
+        assert!(image.windows(5).any(|bytes| bytes == b"%PDF-"));
+    }
+
+    #[test]
     fn export_fails_whole_without_touching_existing_file() {
         let output = temp_output("fail");
         std::fs::write(&output, b"old").unwrap();
@@ -575,10 +602,9 @@ mod tests {
         let error = export_send_package(
             &blocked,
             false,
-            &output,
             |_, _, _| unreachable!(),
             |_| {},
-            None,
+            |pdf| crate::export::protection::write_final_with(None, &output, &pdf),
         )
         .unwrap_err()
         .to_string();
@@ -591,7 +617,6 @@ mod tests {
         let error = export_send_package(
             &failing,
             false,
-            &output,
             |snapshot, _, _| {
                 if snapshot.title_hint == "函稿" {
                     bail!("TeX 报错");
@@ -599,7 +624,7 @@ mod tests {
                 Ok(fake_pdf("x", 1, (595, 842), false))
             },
             |_| {},
-            None,
+            |pdf| crate::export::protection::write_final_with(None, &output, &pdf),
         )
         .unwrap_err();
         assert!(

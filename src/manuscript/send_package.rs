@@ -253,6 +253,7 @@ pub struct ExportItemRecord {
 pub struct ExportRecord {
     pub id: i64,
     pub exported_at: String,
+    /// 刻录到外部介质时为空。
     pub output_path: String,
     pub with_toc: bool,
     pub total_pages: i64,

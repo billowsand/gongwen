@@ -157,11 +157,7 @@ pub(crate) fn copy_roster(input: &DraftInput) -> Option<String> {
     if !input.profile.number_copies || !input.kind.has_copy_numbering() {
         return None;
     }
-    let responsible = if self::docx::is_joint_mode_one(input) {
-        &input.profile.joint_responsible_units
-    } else {
-        &input.profile.responsible_unit
-    };
+    let responsible = input.profile.letter_responsible_units().join("、");
     let groups = if input.kind == TemplateKind::MeetingMinutes {
         self::docx::record::minutes_recipients(input).to_vec()
     } else {

@@ -705,6 +705,12 @@ pub fn profile_changes(a: &TemplateProfile, b: &TemplateProfile) -> Vec<FieldCha
     field(&mut out, "联系电话", &a.contact_phone, &b.contact_phone);
     field(
         &mut out,
+        "其余承办信息",
+        responsible_rows(&a.additional_responsible_contacts),
+        responsible_rows(&b.additional_responsible_contacts),
+    );
+    field(
+        &mut out,
         "联合联系人",
         joint_contacts(&a.joint_contacts),
         joint_contacts(&b.joint_contacts),
@@ -1110,6 +1116,19 @@ fn font_choice_label(choice: &FontChoice) -> String {
     } else {
         "内置".to_string()
     }
+}
+
+fn responsible_rows(contacts: &[JointContact]) -> String {
+    contacts
+        .iter()
+        .filter(|row| row.has_values())
+        .map(|row| {
+            format!("{} {} {}", row.unit, row.name, row.phone)
+                .trim()
+                .to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("；")
 }
 
 fn joint_contacts(contacts: &[JointContact]) -> String {

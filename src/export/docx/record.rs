@@ -19,14 +19,14 @@ pub(crate) fn automatic_print_copies(input: &DraftInput) -> usize {
             .map(|(_, value)| split_units(value).len())
             .sum();
     }
-    let responsible = if is_joint_mode_one(input) {
-        &input.profile.joint_responsible_units
+    let responsible = if input.kind == crate::models::TemplateKind::OfficialLetter {
+        input.profile.letter_responsible_units()
     } else {
-        &input.profile.responsible_unit
+        split_units(&input.profile.responsible_unit)
     };
     split_units(&input.profile.recipient).len()
         + split_units(&input.profile.copies_to).len()
-        + split_units(responsible).len()
+        + responsible.len()
 }
 
 /// 会议纪要每人每单位各印一份，依次是出席、列席、分送、抄送；份号也按这个顺序编。
@@ -99,17 +99,7 @@ pub(crate) fn add_footer_record(
             .add_paragraph(copies_paragraph),
     ]));
 
-    let mut record_rows = if is_joint_mode_one(input) {
-        joint_record_rows(input, display)
-    } else if input.profile.responsible_unit.trim().is_empty()
-        && input.profile.contact_person.trim().is_empty()
-        && input.profile.contact_phone.trim().is_empty()
-    {
-        Vec::new()
-    } else {
-        vec![single_record_row(input, display)]
-    };
-    rows.append(&mut record_rows);
+    rows.extend(responsible_record_rows(input, display));
 
     let borders = TableBorders::new()
         .clear_all()
@@ -198,59 +188,24 @@ pub(crate) fn record_cell_sized(
         .add_paragraph(paragraph)
 }
 
-pub(crate) fn record_cell(text: &str, width: usize, alignment: AlignmentType) -> TableCell {
-    record_cell_sized(text, width, alignment, FOOTER_SIZE, 0)
-}
-
-/// 单独发文的版记行：承办单位（简称）/ 联系人 / 联系电话。
-pub(crate) fn single_record_row(input: &DraftInput, display: &UnitDisplay) -> TableRow {
+/// 承办单位、联系人、联系电话一一对应；续行与第一行的名称对齐。
+fn responsible_record_rows(input: &DraftInput, display: &UnitDisplay) -> Vec<TableRow> {
     let grid = [
         RECORD_OTHER_COLUMN_TWIPS,
         RECORD_OTHER_COLUMN_TWIPS,
         RECORD_PHONE_COLUMN_TWIPS,
     ];
-    let responsible = display.abbr(&input.profile.responsible_unit);
-    let (contact_text, contact_size) = docx_name(
-        &display.person_name(&input.profile.contact_person),
-        FOOTER_SIZE,
-    );
-    TableRow::new(vec![
-        record_cell(
-            &format!("承办单位：{responsible}"),
-            grid[0],
-            AlignmentType::Left,
-        ),
-        record_cell_sized(
-            &format!("联系人：{contact_text}"),
-            grid[1],
-            AlignmentType::Center,
-            contact_size,
-            0,
-        ),
-        record_cell(
-            &format!("联系电话：{}", input.profile.contact_phone.trim()),
-            grid[2],
-            AlignmentType::Right,
-        ),
-    ])
-    .cant_split()
-}
-
-/// 联合发文的版记行：承办单位、联系人、联系电话一一对应；第 2 行起用左缩进对齐名称。
-pub(crate) fn joint_record_rows(input: &DraftInput, display: &UnitDisplay) -> Vec<TableRow> {
-    let grid = [
-        RECORD_OTHER_COLUMN_TWIPS,
-        RECORD_OTHER_COLUMN_TWIPS,
-        RECORD_PHONE_COLUMN_TWIPS,
-    ];
-    let entries = crate::models::joint_responsible_entries(&input.profile);
-    let row_count = entries.len().max(1);
-    (0..row_count)
-        .map(|index| {
-            let entry = entries.get(index);
-            let responsible_name = display.abbr(entry.map_or("", |value| value.unit.as_str()));
+    let mut entries = input.profile.letter_responsible_entries();
+    if entries.is_empty() && is_joint_mode_one(input) {
+        entries.push(Default::default());
+    }
+    entries
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let responsible_name = display.abbr(&entry.unit);
             let (contact_text, contact_size) =
-                docx_name(entry.map_or("", |value| value.name.as_str()), FOOTER_SIZE);
+                docx_name(&display.person_name(&entry.name), FOOTER_SIZE);
             // “承办单位：”5 字 ≈ 1400 twips，“联系人：”4 字 ≈ 1120 twips。
             let unit_left = if index == 0 { 0 } else { 1400 };
             let contact_left = if index == 0 { 0 } else { 1120 };
@@ -281,7 +236,7 @@ pub(crate) fn joint_record_rows(input: &DraftInput, display: &UnitDisplay) -> Ve
                     &format!(
                         "{}{}",
                         if index == 0 { "联系电话：" } else { "" },
-                        entry.map_or("", |value| value.phone.as_str())
+                        entry.phone.trim()
                     ),
                     grid[2],
                     AlignmentType::Right,

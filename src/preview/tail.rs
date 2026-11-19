@@ -436,41 +436,23 @@ fn draw_footer_record(
     ui.add_space(metrics.mm(RECORD_GAP_MM));
     let font = metrics.font(theme::FONT_FANGSONG, RECORD_PT);
     let line = metrics.pt(TABLE_LINE_PT);
-    let joint = is_joint_mode_one(input);
-
-    // 共印份数 = 主送 + 抄送 + 承办单位数（类中的 autocalc）。
-    let responsible_field = if joint {
-        &input.profile.joint_responsible_units
-    } else {
-        &input.profile.responsible_unit
-    };
-    let copies = split_units(&input.profile.recipient).len()
-        + split_units(&input.profile.copies_to).len()
-        + split_units(responsible_field).len();
+    let copies = crate::export::automatic_print_copies(input);
     let copies_to = crate::export::element_display::copies_to_display(input, display);
 
-    // 承办单位/联系人/电话：联合发文有多行，其余只有一行。联合发文的承办单位
-    // 与联系人成对录入（一一对应），旧稿件按索引回落配对。
-    let rows: Vec<[String; 3]> = if joint {
-        let entries = crate::models::joint_responsible_entries(&input.profile);
-        let count = entries.len().max(1);
-        (0..count)
-            .map(|index| {
-                let entry = entries.get(index);
-                [
-                    display.abbr(entry.map_or("", |value| value.unit.as_str())),
-                    entry.map_or(String::new(), |value| display.person_name(&value.name)),
-                    entry.map_or(String::new(), |value| value.phone.clone()),
-                ]
-            })
-            .collect()
-    } else {
-        vec![[
-            display.abbr(&input.profile.responsible_unit),
-            display.person_name(&input.profile.contact_person),
-            input.profile.contact_phone.trim().to_string(),
-        ]]
-    };
+    let mut entries = input.profile.letter_responsible_entries();
+    if entries.is_empty() {
+        entries.push(Default::default());
+    }
+    let rows: Vec<[String; 3]> = entries
+        .into_iter()
+        .map(|entry| {
+            [
+                display.abbr(&entry.unit),
+                display.person_name(&entry.name),
+                entry.phone.trim().to_string(),
+            ]
+        })
+        .collect();
 
     let phone_column = metrics.pt(RECORD_PT) * RECORD_PHONE_COLUMN_EM;
     let column = (metrics.content - phone_column) / 2.0;

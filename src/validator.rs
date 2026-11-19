@@ -1,7 +1,7 @@
 use crate::export::{self, MarkdownBlock, MarkdownSection};
 use crate::models::{
     DraftInput, JointIssuanceMode, ReviewNote, SecurityLevel, SecurityRules, TemplateKind,
-    VocabularyCategory, VocabularyEntry, join_units, split_units,
+    VocabularyCategory, VocabularyEntry, split_units,
 };
 use chrono::{Datelike, NaiveDate, Weekday};
 use regex::Regex;
@@ -691,107 +691,75 @@ fn validate_metadata(
         }
     }
 
-    if (input.kind == TemplateKind::OfficialLetter
-        && input.profile.joint_issuance_mode == JointIssuanceMode::Mode1)
-        || input.kind == TemplateKind::RedHeadApproval
-    {
-        // 承办单位与联系人成对录入（一一对应），旧稿件按索引回落配对。
-        let entries = crate::models::joint_responsible_entries(profile);
-        for (index, entry) in entries.iter().enumerate() {
-            if entry.unit.trim().is_empty() {
-                warnings.push(format!("第 {} 行承办单位未填写", index + 1));
-            }
-            if entry.phone.trim().is_empty() {
-                warnings.push(format!(
-                    "联系人“{}”缺少联系电话",
-                    unit_display.person_name(&entry.name)
-                ));
-            }
-            if let Some(vocab) =
-                crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, &entry.name)
-                && !vocab.phone.trim().is_empty()
-                && vocab.phone.trim() != entry.phone.trim()
-            {
-                warnings.push(format!(
-                    "联系人“{}”在标准词库中的电话为“{}”，与当前填写的“{}”不一致",
-                    unit_display.person_name(&entry.name),
-                    vocab.phone.trim(),
-                    entry.phone.trim()
-                ));
-            }
-            // 规格 §2.3/2.5：承办单位、联系人、电话一一对应，联系人应属于同行承办单位。
-            if let Some(vocab) =
-                crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, &entry.name)
-            {
-                let bound = vocab.unit.trim();
-                let responsible = entry.unit.trim();
-                if !bound.is_empty()
-                    && !responsible.is_empty()
-                    && !unit_display.same_unit(bound, responsible)
-                {
-                    warnings.push(format!(
-                        "联系人“{}”属于“{}”，与第 {} 行承办单位“{}”不一致",
-                        unit_display.person_name(&entry.name),
-                        unit_display.full_name(bound),
-                        index + 1,
-                        unit_display.full_name(responsible)
-                    ));
-                }
-            }
+    let single_letter = input.kind == TemplateKind::OfficialLetter
+        && profile.joint_issuance_mode == JointIssuanceMode::Single;
+    let responsible_entries = match input.kind {
+        TemplateKind::OfficialLetter if single_letter => profile.single_responsible_rows(),
+        TemplateKind::OfficialLetter => profile.letter_responsible_entries(),
+        TemplateKind::RedHeadApproval => crate::models::joint_responsible_entries(profile),
+        _ => Vec::new(),
+    };
+    let resolve_unit = |unit: &str| {
+        crate::units::identity::resolve(vocabulary, VocabularyCategory::Unit, unit).is_some()
+    };
+    for (index, entry) in responsible_entries.iter().enumerate() {
+        if !entry.has_values() {
+            continue;
         }
-    } else if input.kind == TemplateKind::OfficialLetter {
-        let contact = profile.contact_person.trim();
-        let phone = profile.contact_phone.trim();
-        match (contact.is_empty(), phone.is_empty()) {
-            (false, true) => warnings.push(format!(
-                "联系人“{}”缺少联系电话，二者必须成对填写",
-                unit_display.person_name(contact)
-            )),
-            (true, false) => warnings.push(format!(
-                "填写了联系电话“{phone}”但没有联系人，二者必须成对填写"
-            )),
-            _ => {}
-        }
-        if !contact.is_empty()
-            && let Some(entry) =
-                crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, contact)
-            && !entry.phone.trim().is_empty()
-            && entry.phone.trim() != phone
+        let unit = entry.unit.trim();
+        let name = entry.name.trim();
+        let phone = entry.phone.trim();
+        let row = index + 1;
+        if unit.is_empty() {
+            warnings.push(format!("第 {row} 行承办单位未填写"));
+        } else if single_letter
+            && resolve_unit(unit)
+            && resolve_unit(&profile.issuing_unit)
+            && !unit_display.is_unit_or_descendant(unit, &profile.issuing_unit)
         {
             warnings.push(format!(
-                "联系人“{}”在标准词库中的电话为“{}”，与当前填写的“{phone}”不一致",
-                unit_display.person_name(contact),
-                entry.phone.trim()
+                "第 {row} 行承办单位“{}”通常应为发文单位或其下级单位，请核对",
+                unit_display.full_name(unit)
             ));
         }
-        // 规格 §2.3“人随事走”：联系人应属于承办单位。
-        if !contact.is_empty()
-            && let Some(entry) =
-                crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, contact)
+        let displayed_name = unit_display.person_name(name);
+        if phone.is_empty() && (!name.is_empty() || !single_letter) {
+            warnings.push(format!("联系人“{displayed_name}”缺少联系电话"));
+        } else if name.is_empty() && !phone.is_empty() {
+            warnings.push(format!(
+                "第 {row} 行填写了联系电话“{phone}”但没有联系人，二者必须成对填写"
+            ));
+        }
+        if let Some(person) =
+            crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, name)
         {
-            let bound = entry.unit.trim();
-            let responsible = profile.responsible_unit.trim();
-            if !bound.is_empty()
-                && !responsible.is_empty()
-                && !unit_display.same_unit(bound, responsible)
+            let expected_phone = person.phone.trim();
+            if !expected_phone.is_empty() && expected_phone != phone {
+                warnings.push(format!(
+                    "联系人“{displayed_name}”在标准词库中的电话为“{expected_phone}”，与当前填写的“{phone}”不一致"
+                ));
+            }
+            if !person.unit.trim().is_empty()
+                && !unit.is_empty()
+                && !unit_display
+                    .responsible_people_of(unit)
+                    .iter()
+                    .any(|(key, _)| *key == person.key())
             {
                 warnings.push(format!(
-                    "联系人“{}”属于“{}”，与承办单位“{}”不一致",
-                    unit_display.person_name(contact),
-                    unit_display.full_name(bound),
-                    unit_display.full_name(responsible)
+                    "联系人“{displayed_name}”属于“{}”，与第 {row} 行承办单位“{}”不一致",
+                    unit_display.full_name(&person.unit),
+                    unit_display.full_name(unit)
                 ));
             }
         }
     }
-
-    let joint_contact_names = join_units(
-        &profile
-            .joint_contacts
-            .iter()
-            .map(|contact| contact.name.clone())
-            .collect::<Vec<_>>(),
-    );
+    let contact_names = responsible_entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .filter(|name| !name.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("、");
 
     match input.kind {
         TemplateKind::OfficialLetter => {
@@ -832,22 +800,14 @@ fn validate_metadata(
                 warnings,
             );
             check_units(
-                if profile.joint_issuance_mode == JointIssuanceMode::Mode1 {
-                    &profile.joint_responsible_units
-                } else {
-                    &profile.responsible_unit
-                },
+                &profile.letter_responsible_units().join("、"),
                 &[VocabularyCategory::Unit],
                 "承办单位",
                 vocabulary,
                 warnings,
             );
             check_units(
-                if profile.joint_issuance_mode == JointIssuanceMode::Mode1 {
-                    &joint_contact_names
-                } else {
-                    &profile.contact_person
-                },
+                &contact_names,
                 &[VocabularyCategory::Person],
                 "联系人",
                 vocabulary,
@@ -976,7 +936,7 @@ fn validate_metadata(
                 warnings,
             );
             check_units(
-                &joint_contact_names,
+                &contact_names,
                 &[VocabularyCategory::Person],
                 "联系人",
                 vocabulary,
@@ -2038,6 +1998,75 @@ mod tests {
         assert!(
             !warnings.iter().any(|warning| warning.contains("缺少密级")),
             "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn single_letter_checks_issuer_relationship_and_each_contact() {
+        let vocabulary = vec![
+            VocabularyEntry {
+                canonical: "发文局".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                canonical: "业务处".into(),
+                parent: "发文局".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                canonical: "综合科".into(),
+                parent: "业务处".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                canonical: "协办局".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                category: VocabularyCategory::Person,
+                canonical: "李四".into(),
+                unit: "综合科".into(),
+                phone: "010-87654321".into(),
+                can_handle_parent_unit: true,
+                ..Default::default()
+            },
+        ];
+        let mut input = DraftInput::default();
+        input.profile.issuing_unit = "发文局".into();
+        input.profile.recipient = "收文局".into();
+        input.profile.responsible_unit = "发文局".into();
+        input.profile.additional_responsible_contacts = vec![
+            crate::models::JointContact {
+                unit: "业务处".into(),
+                name: "李四".into(),
+                phone: "010-87654321".into(),
+            },
+            crate::models::JointContact {
+                unit: "综合科".into(),
+                name: "李四".into(),
+                phone: String::new(),
+            },
+            crate::models::JointContact {
+                unit: "协办局".into(),
+                ..Default::default()
+            },
+        ];
+        let warnings = validate(&input, "# 标题\n\n正文。", &vocabulary, &rules());
+        let related = warnings
+            .iter()
+            .filter(|warning| warning.contains("通常应为发文单位"))
+            .collect::<Vec<_>>();
+        assert_eq!(related.len(), 1, "{warnings:?}");
+        assert!(related[0].contains("第 4 行") && related[0].contains("协办局"));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("李四”缺少联系电话"))
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.contains("行承办单位“业务处”不一致"))
         );
     }
 

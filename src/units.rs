@@ -862,6 +862,14 @@ impl<'a> UnitDisplay<'a> {
         }
     }
 
+    /// 同一单位或词库明确登记的下级单位。
+    pub(crate) fn is_unit_or_descendant(&self, unit: &str, parent: &str) -> bool {
+        self.find(parent).is_some_and(|parent| {
+            let parent_key = parent.key();
+            self.same_unit(unit, &parent_key) || self.ancestor_keys(unit).contains(&parent_key)
+        })
+    }
+
     /// 简称：优先取词条 `abbr`，空则回落规范名称。
     pub fn abbr(&self, key: &str) -> String {
         if let Some(entry) = self.find(key) {

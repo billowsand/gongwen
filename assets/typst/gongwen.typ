@@ -474,7 +474,7 @@
     let last = 15.20 + (k - 1) * 6.81
     (copies: 6.41, mid: 9.24 + extra, first: 15.20 + extra, step: 6.81, offsets: row-offsets, bottom: last + 2.99 + extra + rows-extra)
   } else {
-    (copies: 5.84, mid: 8.41 + extra, first: 13.80 + extra, step: 6.81, offsets: row-offsets, bottom: 16.52 + extra + rows-extra)
+    (copies: 5.84, mid: 8.41 + extra, first: 13.80 + extra, step: 6.81, offsets: row-offsets, bottom: 16.52 + (k - 1) * 6.81 + extra + rows-extra)
   }
 }
 #let record-height(r) = (record-geometry(r).bottom - 1.46) * 1mm

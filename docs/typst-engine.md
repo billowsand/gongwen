@@ -485,3 +485,10 @@ docx-rs 不写这个属性，打包前由 `export::docx::record::with_record_gap
 ### 2026-10-30 标准词库身份修复
 
 公函普通／联合版记改为复用 `record-row` 测量实际折行高度；同名单位逐级补前缀后长名称不会越过底线，短单行保留原几何。专门样张为 `typst_samples_identity`，完整交接见 `docs/vocabulary-identity-design.md` 第十节。
+
+
+## 单独发文的承办版记（2026-11-19）
+
+预览、Word 和 PDF 逐行排入承办信息，份号清单按各行承办单位的顺序生成。
+旧稿原有承办信息作为首行，续行独立保存。候选优先列出发文单位及其下级。
+Typst 量版记时把续行和实际折行的高度一起计入，样张见 `letter-single-responsible`。

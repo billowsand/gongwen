@@ -129,28 +129,32 @@ impl GongwenApp {
                                 present_or_dash(&profile.signing_unit),
                             );
                         }
-                        metadata_grid_row(
-                            ui,
-                            "承办单位",
-                            present_or_dash(if detail.kind == TemplateKind::RedHeadApproval {
-                                &profile.joint_responsible_units
-                            } else {
-                                &profile.responsible_unit
-                            }),
-                        );
-                        let contacts_metadata = if detail.kind == TemplateKind::RedHeadApproval {
-                            profile
-                                .joint_contacts
-                                .iter()
-                                .map(|contact| format!("{} {}", contact.name, contact.phone))
-                                .collect::<Vec<_>>()
-                                .join("；")
-                        } else {
-                            joined_metadata(&[
-                                profile.contact_person.as_str(),
-                                profile.contact_phone.as_str(),
-                            ])
+                        let responsible = match detail.kind {
+                            TemplateKind::OfficialLetter => profile.letter_responsible_entries(),
+                            TemplateKind::RedHeadApproval => {
+                                crate::models::joint_responsible_entries(profile)
+                            }
+                            _ => profile
+                                .single_responsible_rows()
+                                .into_iter()
+                                .take(1)
+                                .collect(),
                         };
+                        let responsible_units = responsible
+                            .iter()
+                            .map(|row| row.unit.as_str())
+                            .filter(|unit| !unit.trim().is_empty())
+                            .collect::<Vec<_>>()
+                            .join("、");
+                        metadata_grid_row(ui, "承办单位", present_or_dash(&responsible_units));
+                        let contacts_metadata = responsible
+                            .iter()
+                            .filter(|row| {
+                                !row.name.trim().is_empty() || !row.phone.trim().is_empty()
+                            })
+                            .map(|row| joined_metadata(&[&row.name, &row.phone]))
+                            .collect::<Vec<_>>()
+                            .join("；");
                         metadata_grid_row(ui, "联系人", present_or_dash(&contacts_metadata));
                         if !detail.snapshot.meeting_time.trim().is_empty() {
                             metadata_grid_row(ui, "会议时间", &detail.snapshot.meeting_time);
