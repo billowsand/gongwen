@@ -32,6 +32,7 @@ const SHELL_KEY: &str = "gongwen_shell_v1";
 
 /// 外壳持有的启动参数：解锁成功后才交给工作区。锁屏期间双击 .gwx 之类
 /// 转交进来的请求排队等解锁，不绕过闸门。
+#[derive(Default)]
 struct StartupBundle {
     startup_imports: Option<Vec<PathBuf>>,
     instance: Option<crate::single_instance::Instance>,
@@ -80,11 +81,13 @@ struct UnlockState {
     environment_block_auto_clear: bool,
 }
 
-/// 启动时由 `Vault::probe()` 决定的闸门形态。
+/// 启动探测和用户选择对应的界面。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GateMode {
-    /// 没有锁文件：第一次启动，引导设置密码（也可明确跳过）。
+    /// 首次启动，选择是否启用应用锁。
     FirstRun,
+    /// 用户主动选择加密后设置新密码。
+    SetupPassword,
     /// 正常待解锁。
     Unlock,
     /// 锁文件损坏：不许猜着解锁，只能清除后重启。
@@ -171,6 +174,28 @@ impl GateState {
             mode: GateMode::Unlock,
             ..Self::first_run()
         }
+    }
+
+    fn setup_password() -> Self {
+        Self {
+            mode: GateMode::SetupPassword,
+            ..Self::first_run()
+        }
+    }
+
+    fn submit_password_setup(&mut self) -> Option<GateOutcome> {
+        if self.password != self.confirm {
+            self.error = Some("两次输入的访问密码不一致。".into());
+            return None;
+        }
+        if self.with_decoy && self.decoy != self.decoy_confirm {
+            self.error = Some("两次输入的第二密码不一致。".into());
+            return None;
+        }
+        Some(GateOutcome::Setup {
+            real: self.password.clone(),
+            decoy: self.with_decoy.then(|| self.decoy.clone()),
+        })
     }
 
     fn broken() -> Self {
@@ -283,10 +308,10 @@ impl AppShell {
         let startup = StartupBundle {
             startup_imports: Some(startup_imports),
             instance,
-            forwarded_requests: None,
             macos_titlebar_metrics,
+            ..Default::default()
         };
-        let mut shell = Self {
+        let shell = Self {
             phase: ShellPhase::Gate(GateState::first_run()),
             startup: Some(startup),
             compact_startup: false,
@@ -318,44 +343,38 @@ impl AppShell {
             environment_violation: None,
             environment_lock: None,
         };
+        shell.boot_from_disk(&cc.egui_ctx)
+    }
+
+    fn boot_from_disk(mut self, ctx: &egui::Context) -> Self {
         match Vault::probe() {
             // 没有锁文件：只有在磁盘上也没有加密数据时才走首次设置；否则绝不能
             // 以「没有密钥」的工作区进入（那会把密封配置当损坏改名并写回明文）。
             Probe::Absent => {
                 if encrypted_data_on_disk() {
-                    shell.phase = ShellPhase::Gate(GateState::lock_lost());
-                    shell
-                } else {
-                    shell
+                    self.phase = ShellPhase::Gate(GateState::lock_lost());
                 }
             }
             Probe::Skipped => {
                 if encrypted_data_on_disk() {
-                    shell.phase = ShellPhase::Gate(GateState::lock_lost());
-                    shell
+                    self.phase = ShellPhase::Gate(GateState::lock_lost());
                 } else {
-                    shell.boot_direct(&cc.egui_ctx)
+                    self.boot_direct_mut(ctx);
                 }
             }
             Probe::Locked => {
-                shell.compact_gate(&cc.egui_ctx);
-                shell.compact_startup = true;
-                shell.phase = ShellPhase::Gate(GateState::unlock());
-                shell
+                self.compact_gate(ctx);
+                self.compact_startup = true;
+                self.phase = ShellPhase::Gate(GateState::unlock());
             }
             Probe::Broken(_) => {
-                shell.phase = ShellPhase::Gate(GateState::broken());
-                shell
+                self.phase = ShellPhase::Gate(GateState::broken());
             }
         }
-    }
-
-    /// 未启用（或用户选过跳过）：直接进工作区，等价于旧行为。
-    fn boot_direct(mut self, ctx: &egui::Context) -> Self {
-        self.boot_direct_mut(ctx);
         self
     }
 
+    /// 未启用（或用户选过跳过）：直接进工作区，等价于旧行为。
     fn boot_direct_mut(&mut self, ctx: &egui::Context) {
         self.restore_workspace_window(ctx);
         self.enter_workspace(ctx, DataSlot::Real, None);
@@ -922,7 +941,7 @@ impl AppShell {
                 // “已有加密工作区丢失配置”。已有数据的工作区缺配置时该函数不改
                 // 磁盘，继续由环境闸门阻断并走恢复。
                 if let Err(error) = storage::prepare_first_setup_config() {
-                    let mut gate = GateState::first_run();
+                    let mut gate = GateState::setup_password();
                     gate.error = Some(format!("初始化新工作区配置失败：{error:#}"));
                     self.phase = ShellPhase::Gate(gate);
                     return;
@@ -938,14 +957,14 @@ impl AppShell {
                         );
                     }
                     Ok((_, None)) => {
-                        let mut gate = GateState::first_run();
+                        let mut gate = GateState::setup_password();
                         gate.error = Some("锁设置保存失败，请重试".into());
                         self.phase = ShellPhase::Gate(gate);
                     }
                     // 密码不合要求时把**具体原因**告诉用户（哪一条不满足），
                     // 否则用户只会看到一句“保存失败”，不知道该改哪里。
                     Err(error) => {
-                        let mut gate = GateState::first_run();
+                        let mut gate = GateState::setup_password();
                         gate.error = Some(format!("{error:#}"));
                         self.phase = ShellPhase::Gate(gate);
                     }
@@ -958,11 +977,8 @@ impl AppShell {
                     return;
                 }
                 if let Err(error) = Vault::create("", None, true) {
-                    // 写跳过标记失败不阻塞进入，下次启动再引导一次。
                     let mut skipped = GateState::first_run();
-                    skipped.error = Some(format!(
-                        "记住「暂不设置」的选择失败，下次启动会再询问：{error:#}"
-                    ));
+                    skipped.error = Some(format!("无法保存普通模式设置，请重试：{error:#}"));
                     self.phase = ShellPhase::Gate(skipped);
                     return;
                 }
@@ -2062,15 +2078,16 @@ fn working_card(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<Gate
     }
 }
 
-/// 卡片内容：首帧聚焦第一个密码框，Enter 提交，失败文案统一挂在卡片底部。
+/// 卡片内容：进入密码设置时聚焦第一个密码框，失败文案显示在卡片底部。
 fn gate_card(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
-    if !gate.focused {
+    if gate.mode == GateMode::SetupPassword && !gate.focused {
         gate.focused = true;
         ui.memory_mut(|memory| memory.request_focus(egui::Id::unique("gate_password_primary")));
     }
     let mut outcome = None;
     let heading = match gate.mode {
-        GateMode::FirstRun => "设置访问密码",
+        GateMode::FirstRun => "选择工作区保护方式",
+        GateMode::SetupPassword => "设置访问密码",
         GateMode::Unlock => "欢迎回来",
         GateMode::Broken => "锁设置已损坏",
     };
@@ -2095,6 +2112,33 @@ fn gate_card(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
     match gate.mode {
         GateMode::Unlock => unreachable!("解锁由紧凑表单处理"),
         GateMode::FirstRun => {
+            ui.label("应用锁尚未启用。你可以设置密码加密本机数据，也可以使用普通模式。");
+            ui.add_space(12.0);
+            if theme::accent_scope(ui, |ui| {
+                ui.add_sized(
+                    [CARD_WIDTH, GATE_CONTROL_HEIGHT],
+                    theme::primary_button_widget(theme::Icon::Shield, "设置密码并启用加密"),
+                )
+            })
+            .clicked()
+            {
+                *gate = GateState::setup_password();
+            }
+            ui.add_space(14.0);
+            ui.label(egui::RichText::new("普通模式下，稿件、人员资料、模型密钥及本机配置将以明文保存。获得这些文件的人可以直接读取；以后启用加密也不能保证擦除历史副本。").color(theme::danger()));
+            ui.checkbox(&mut gate.plaintext_acknowledged, "我已了解明文保存风险");
+            if ui
+                .add_enabled(
+                    gate.plaintext_acknowledged,
+                    egui::Button::new("以普通模式进入（无需密码）"),
+                )
+                .on_hover_text("之后随时可以在「设置 → 应用锁」里启用加密。")
+                .clicked()
+            {
+                outcome = Some(GateOutcome::SkipSetup);
+            }
+        }
+        GateMode::SetupPassword => {
             ui.label(
                 egui::RichText::new(
                     "设置后，启动与闲置超时都要输入密码才能进入；忘记密码无法恢复数据。",
@@ -2147,26 +2191,11 @@ fn gate_card(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
             })
             .clicked();
             if enable {
-                outcome = Some(GateOutcome::Setup {
-                    real: gate.password.clone(),
-                    decoy: gate.with_decoy.then(|| gate.decoy.clone()),
-                });
+                outcome = gate.submit_password_setup();
             }
             ui.add_space(8.0);
-            ui.label(egui::RichText::new("不启用应用锁时，稿件、人员资料、模型密钥及本机配置将以明文保存。获得这些文件的人可以直接读取；以后启用加密也不能保证擦除历史副本。").color(theme::danger()));
-            ui.checkbox(
-                &mut gate.plaintext_acknowledged,
-                "我已了解明文保存风险，仍选择不加密",
-            );
-            if ui
-                .add_enabled(
-                    gate.plaintext_acknowledged,
-                    egui::Button::new("暂不设置，直接进入").frame(false),
-                )
-                .on_hover_text("本次跳过；之后随时可以在「设置 → 应用锁」里启用。")
-                .clicked()
-            {
-                outcome = Some(GateOutcome::SkipSetup);
+            if ui.button("返回保护方式选择").clicked() {
+                *gate = GateState::first_run();
             }
         }
         GateMode::Broken => {
@@ -2265,15 +2294,27 @@ mod samples {
             for (mode, mode_tag, size, veiled) in [
                 (GateMode::Unlock, "unlock", egui::vec2(380.0, 250.0), false),
                 (GateMode::Unlock, "veil", egui::vec2(1280.0, 820.0), true),
-                (GateMode::FirstRun, "setup", egui::vec2(820.0, 680.0), false),
+                (
+                    GateMode::FirstRun,
+                    "choice",
+                    egui::vec2(820.0, 680.0),
+                    false,
+                ),
+                (
+                    GateMode::SetupPassword,
+                    "setup",
+                    egui::vec2(820.0, 680.0),
+                    false,
+                ),
             ] {
                 let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
                 let mut gate = match mode {
                     GateMode::Unlock => GateState::unlock(),
                     GateMode::FirstRun => GateState::first_run(),
+                    GateMode::SetupPassword => GateState::setup_password(),
                     GateMode::Broken => GateState::broken(),
                 };
-                if mode == GateMode::FirstRun {
+                if mode == GateMode::SetupPassword {
                     gate.with_decoy = true;
                 }
                 gate.veiled = veiled;
@@ -2357,6 +2398,97 @@ mod lifecycle_tests {
         }
         let _reset = Reset(previous_theme, previous_paper);
         test();
+    }
+
+    #[test]
+    fn first_setup_requires_matching_password_confirmations() {
+        let mut gate = GateState::setup_password();
+        gate.password = "Test#Valid2026Lock".into();
+        assert!(gate.submit_password_setup().is_none());
+
+        gate.confirm = gate.password.clone();
+        assert!(matches!(
+            gate.submit_password_setup(),
+            Some(GateOutcome::Setup { decoy: None, .. })
+        ));
+
+        gate.with_decoy = true;
+        gate.decoy = "Test#Valid2026Decoy".into();
+        assert!(gate.submit_password_setup().is_none());
+
+        gate.decoy_confirm = gate.decoy.clone();
+        assert!(matches!(
+            gate.submit_password_setup(),
+            Some(GateOutcome::Setup { decoy: Some(_), .. })
+        ));
+    }
+
+    #[test]
+    fn clean_start_can_enter_and_save_plaintext_choice_without_a_password() {
+        isolated(|| {
+            let ctx = egui::Context::default();
+            assert_eq!(Vault::probe(), Probe::Absent);
+            assert!(!encrypted_data_on_disk());
+
+            let mut shell = start_from_disk(&ctx);
+            assert!(
+                matches!(&shell.phase, ShellPhase::Gate(gate) if gate.mode == GateMode::FirstRun)
+            );
+            shell.apply_outcome(&ctx, GateOutcome::SkipSetup);
+            assert!(matches!(shell.phase, ShellPhase::Ready(_)));
+            assert_eq!(Vault::probe(), Probe::Skipped);
+            assert!(!encrypted_data_on_disk());
+            assert!(crate::vault::key_handle().is_none());
+        });
+    }
+
+    #[test]
+    fn upgrade_keeps_existing_plaintext_workspace_accessible_without_a_password() {
+        isolated(|| {
+            let config = crate::models::AppConfig {
+                output_dir: "旧版输出目录".into(),
+                ..Default::default()
+            };
+            storage::save(&config).unwrap();
+            let path = storage::manuscript_db_path().unwrap();
+            let mut store = crate::manuscript::ManuscriptStore::open(&path).unwrap();
+            let manuscript = crate::manuscript::NewManuscript {
+                content_markdown: "旧版原稿正文。".into(),
+                ..Default::default()
+            };
+            let id = store.create(&manuscript, None).unwrap();
+            drop(store);
+            assert_eq!(Vault::probe(), Probe::Absent);
+            assert!(!encrypted_data_on_disk());
+
+            let ctx = egui::Context::default();
+            let mut shell = start_from_disk(&ctx);
+            assert!(
+                matches!(&shell.phase, ShellPhase::Gate(gate) if gate.mode == GateMode::FirstRun)
+            );
+            shell.apply_outcome(&ctx, GateOutcome::SkipSetup);
+            assert_eq!(Vault::probe(), Probe::Skipped);
+            drop(shell);
+
+            let shell = start_from_disk(&ctx);
+            let ShellPhase::Ready(mut app) = shell.phase else {
+                panic!("升级后应以普通模式直接打开旧工作区");
+            };
+            assert!(!app.vault_locked);
+            assert_eq!(app.config.output_dir, config.output_dir);
+            let stored = app
+                .manuscript_store
+                .as_mut()
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.content_markdown, manuscript.content_markdown);
+        });
+    }
+
+    fn start_from_disk(ctx: &egui::Context) -> AppShell {
+        AppShell::gate(GateState::first_run(), Some(StartupBundle::default())).boot_from_disk(ctx)
     }
 
     #[test]
@@ -2542,7 +2674,7 @@ mod lifecycle_tests {
     fn first_setup_writes_and_seals_initial_config_before_entering_workspace() {
         isolated(|| {
             let ctx = egui::Context::default();
-            let mut shell = AppShell::gate(GateState::first_run(), None);
+            let mut shell = AppShell::gate(GateState::setup_password(), None);
             shell.apply_outcome(
                 &ctx,
                 GateOutcome::Setup {
