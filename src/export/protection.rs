@@ -79,6 +79,21 @@ pub(crate) fn encryption_enabled() -> bool {
     crate::vault::key_handle().is_some()
 }
 
+/// 只有「从未启用应用锁」或「用户明确选过普通模式」的工作区才允许明文写盘。
+/// 锁文件存在（Locked/Broken）而当前没有密钥，说明处在锁定或备份恢复的过渡，
+/// 不能按普通工作区继续写明文。
+fn plaintext_workspace() -> bool {
+    #[cfg(test)]
+    if !crate::storage::test_config_dir_configured() {
+        // 单元测试默认没有配置目录：按普通工作区处理，避免读开发机真实配置。
+        return true;
+    }
+    matches!(
+        crate::vault::Vault::probe(),
+        crate::vault::Probe::Absent | crate::vault::Probe::Skipped
+    )
+}
+
 pub(crate) struct Protection {
     password: Zeroizing<String>,
     handle: crate::vault::KeyHandle,
@@ -87,6 +102,10 @@ pub(crate) struct Protection {
 impl Protection {
     pub(crate) fn current() -> Result<Option<Self>> {
         if !encryption_enabled() {
+            ensure!(
+                plaintext_workspace(),
+                "工作区已锁定或加密设置异常，已取消导出"
+            );
             return Ok(None);
         }
         Self::saved_password()
@@ -255,6 +274,11 @@ pub(crate) fn write_final_with(
     ensure!(
         crate::vault::key_handle().is_none(),
         "工作区加密状态已变化，已取消导出"
+    );
+    // 锁已启用但当前没有密钥（锁定/恢复过渡）：不能把成品按普通工作区写明文。
+    ensure!(
+        plaintext_workspace(),
+        "工作区已锁定或加密设置异常，已取消明文导出"
     );
     crate::storage::atomic_write(path, |file| {
         file.write_all(bytes)?;
@@ -661,6 +685,94 @@ mod tests {
         let bytes = std::fs::read(path).unwrap();
         let plaintext = office::decrypt(&bytes, &password).unwrap();
         assert!(plaintext.starts_with(b"PK"), "解密结果应是 OOXML 包");
+    }
+
+    #[test]
+    fn encrypted_export_replaces_previous_plaintext_siblings_and_manifest() {
+        use crate::models::{ExportSelection, TemplateKind};
+        let workspace = Workspace::new();
+        let output_dir = workspace.0.path().join("out");
+        let mut input = crate::models::DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        input.profile.issuing_unit = "示例机关".into();
+        input.profile.recipient = "收文机关".into();
+        input.profile.signing_unit = "示例机关".into();
+        let selection = ExportSelection {
+            markdown: true,
+            docx: false,
+            pdf: false,
+            typst: false,
+            receipt: false,
+            referenced_vocabulary: false,
+            overwrite: true,
+            print_trace: Default::default(),
+        };
+        let export = |selection: &ExportSelection| {
+            crate::export::export_artifacts(
+                &output_dir,
+                &input,
+                "# 测试公文\n\n正文。",
+                selection,
+                &crate::units::UnitDisplay::new(&[]),
+                &Default::default(),
+                &Default::default(),
+                None,
+                &Default::default(),
+            )
+            .unwrap()
+        };
+
+        // 1) 普通工作区先导出一次：留下明文源码包与导出清单。
+        crate::vault::clear_key_handle();
+        let plaintext = export(&selection);
+        let plaintext_zip = plaintext
+            .files
+            .iter()
+            .find(|path| path.extension().is_some_and(|ext| ext == "zip"))
+            .expect("应生成明文源码包")
+            .clone();
+        assert!(plaintext_zip.is_file());
+        let document_dir = plaintext_zip.parent().unwrap().to_path_buf();
+        let manifest = document_dir.join(".gongwen-exports.json");
+        assert!(manifest.is_file());
+
+        // 2) 同一篇改按加密工作区导出：新产物是 .7z，旧明文源码包与清单里的旧名
+        //    要一起收掉，不能让用户以为再导出一次就只剩加密成品。
+        crate::vault::set_key_handle([37; 32], true);
+        workspace.configure();
+        let encrypted = export(&selection);
+        assert!(
+            encrypted
+                .files
+                .iter()
+                .any(|path| path.extension().is_some_and(|ext| ext == "7z")),
+            "{:?}",
+            encrypted.files
+        );
+        assert!(!plaintext_zip.exists(), "旧的明文源码包应被清理");
+        let manifest_text = std::fs::read_to_string(&manifest).unwrap();
+        assert!(!manifest_text.contains("-源码包.zip"), "{manifest_text}");
+        assert!(manifest_text.contains("-源码包.7z"), "{manifest_text}");
+    }
+
+    #[test]
+    fn plaintext_export_is_refused_when_the_vault_is_locked() {
+        let workspace = Workspace::new();
+        // 锁文件存在 = 已启用应用锁；清掉密钥模拟锁定/备份恢复的过渡。
+        let _ = crate::vault::Vault::create("Test#Valid2026Lock", None, false).unwrap();
+        crate::vault::clear_key_handle();
+        assert!(matches!(
+            crate::vault::Vault::probe(),
+            crate::vault::Probe::Locked
+        ));
+
+        assert!(Protection::current().is_err(), "锁定时不能当普通工作区");
+        let path = workspace.0.path().join("out.pdf");
+        let error = write_final_with(None, &path, b"%PDF-1.7").unwrap_err();
+        assert!(format!("{error:#}").contains("已锁定"), "{error:#}");
+        assert!(!path.exists());
     }
 
     #[test]

@@ -463,11 +463,30 @@ pub(crate) fn export_artifacts(
                     .with_context(|| format!("加密输出缺失：{}", p.display()))
             })
             .collect::<Result<Vec<_>>>()?;
+        let title = document_title(input, markdown);
+        let export_stem = document_stem_prefix(input, &title);
+        let file_stem = export_file_stem(input, &title, version_name, "")?;
+        let document_dir = output_dir.join(&export_stem);
+        // 加密后扩展名可能变化（.zip / .txt → .7z）：清理上一次明文导出的同名旧文件。
+        naming::remove_replaced_plaintext(&document_dir, &paths)?;
         // 清单不参与主格式查找，但用户也应能找到加密后的清单。
-        for path in paths.into_values() {
-            if !artifacts.files.contains(&path) {
-                artifacts.files.push(path);
+        for path in paths.values() {
+            if !artifacts.files.contains(path) {
+                artifacts.files.push(path.clone());
             }
+        }
+        // 加密出口同样要更新导出清单：否则上一次明文导出的同名兄弟文件
+        // （-源码包.zip、.份号清单.txt）会一直留在输出目录里，用户以为
+        // 再导出一次就只剩加密成品了。清单只记文件名，不含正文。
+        if !artifacts.files.is_empty() {
+            naming::record_outputs(
+                &document_dir,
+                input,
+                &file_stem,
+                &artifacts.files,
+                selection.receipt && input.kind == TemplateKind::OfficialLetter,
+                artifacts.compile_error.is_none(),
+            )?;
         }
         return Ok(artifacts);
     }

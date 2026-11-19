@@ -217,6 +217,59 @@ fn update_slot(
     Ok(())
 }
 
+/// 加密导出把某个成品换成新文件名（如 `.zip` / `.txt` → `.7z`）时，上一次明文
+/// 导出留下的同名旧文件要一起删掉。只处理清单里登记过、确属本程序产物的名字，
+/// 不碰用户自己的文件。
+pub(super) fn remove_replaced_plaintext(
+    dir: &Path,
+    final_paths: &std::collections::HashMap<PathBuf, PathBuf>,
+) -> Result<()> {
+    let path = dir.join(".gongwen-exports.json");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Ok(());
+    };
+    let mut entries: BTreeMap<String, Outputs> =
+        serde_json::from_slice(&bytes).context("导出文件清单损坏，未清理旧成品")?;
+    let mut changed = false;
+    for (logical_path, final_path) in final_paths {
+        if logical_path.file_name() == final_path.file_name() {
+            continue;
+        }
+        let Some(name) = logical_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        let mut tracked = false;
+        for slot in entries.values_mut() {
+            if let Some(index) = slot.files.iter().position(|old| old == &name) {
+                slot.files.remove(index);
+                tracked = true;
+                changed = true;
+            }
+        }
+        if tracked {
+            let old = dir.join(&name);
+            match std::fs::remove_file(&old) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("无法清理旧导出文件：{}", old.display()));
+                }
+            }
+        }
+    }
+    if changed {
+        crate::storage::atomic_write(&path, |file| {
+            serde_json::to_writer(file, &entries)?;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
