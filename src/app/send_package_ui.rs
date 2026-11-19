@@ -102,6 +102,8 @@ pub(crate) enum SendPackageEvent {
         owner_id: i64,
         with_toc: bool,
         result: Result<(SendPackageOutcome, DeliveryReceipt), String>,
+        /// 随附引用词库没生成时的原因；不影响送批材料本身是否导出成功。
+        vocabulary_warning: Option<String>,
     },
 }
 
@@ -1606,6 +1608,7 @@ impl GongwenApp {
         });
         self.status = format!("正在导出《{}》的送批材料…", plan.owner_title());
         std::thread::spawn(move || {
+            let mut vocabulary_warning = None;
             let result = (|| {
                 if let Destination::Medium(_, workspace) = &destination {
                     require_workspace(workspace)?;
@@ -1613,21 +1616,9 @@ impl GongwenApp {
                 let display = crate::units::UnitDisplay::new(&vocabulary);
                 use crate::export::vocabulary as references;
                 let workbook = if with_vocabulary {
-                    let mut seen = std::collections::HashSet::new();
-                    let entries = plan
-                        .entries
-                        .iter()
-                        .filter_map(|entry| entry.revision.as_ref())
-                        .flat_map(|revision| {
-                            references::referenced_entries(
-                                &revision.snapshot,
-                                &display.for_input(&revision.snapshot),
-                                false,
-                            )
-                        })
-                        .filter(|entry| seen.insert(entry.key()))
-                        .collect::<Vec<_>>();
-                    references::workbook(&entries)?
+                    let (workbook, warning) = send_package_workbook(&plan, &display);
+                    vocabulary_warning = warning;
+                    workbook
                 } else {
                     None
                 };
@@ -1684,6 +1675,7 @@ impl GongwenApp {
                 owner_id,
                 with_toc,
                 result: result.map_err(|error| format!("{error:#}")),
+                vocabulary_warning,
             }));
             wake.request_repaint();
         });
@@ -1702,6 +1694,7 @@ impl GongwenApp {
                 owner_id,
                 with_toc,
                 result,
+                vocabulary_warning,
             } => {
                 self.send_package_export = None;
                 match result {
@@ -1747,6 +1740,10 @@ impl GongwenApp {
                         );
                         if let Some(Err(error)) = recorded {
                             message.push_str(&format!("但导出记录没写进去：{error:#}"));
+                        }
+                        if let Some(warning) = vocabulary_warning {
+                            message.push(' ');
+                            message.push_str(&warning);
                         }
                         self.status = message;
                         if let (Some(panel), Some(store)) =
@@ -1794,4 +1791,36 @@ fn send_package_stem(plan: &SendPackagePlan) -> String {
         "{}（送批材料）",
         crate::export::safe_filename(plan.owner_title())
     )
+}
+
+/// 随附引用词库：取各件提交版快照里的引用词条及上级，同一永久身份取首条。
+/// 生成失败（数据冲突等）只降级为提示，不连累主件与随行件。
+fn send_package_workbook(
+    plan: &SendPackagePlan,
+    display: &crate::units::UnitDisplay,
+) -> (Option<Vec<u8>>, Option<String>) {
+    use crate::export::vocabulary as references;
+    let mut seen = std::collections::HashSet::new();
+    let entries = plan
+        .entries
+        .iter()
+        .filter_map(|entry| entry.revision.as_ref())
+        .flat_map(|revision| {
+            references::referenced_entries(
+                &revision.snapshot,
+                &display.for_input(&revision.snapshot),
+                false,
+            )
+        })
+        .filter(|entry| seen.insert(entry.key()))
+        .collect::<Vec<_>>();
+    match references::workbook(&entries) {
+        Ok(workbook) => (workbook, None),
+        Err(error) => (
+            None,
+            Some(format!(
+                "随附引用词库未生成：{error:#}；如需只导出送批材料，请取消勾选后重发"
+            )),
+        ),
+    }
 }

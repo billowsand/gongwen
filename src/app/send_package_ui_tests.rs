@@ -411,3 +411,127 @@ fn protected_send_package_offers_media_even_without_export_password() {
         assert!(app.send_package.as_ref().unwrap().confirm.is_some());
     }
 }
+
+fn plan_with_snapshots(snapshots: Vec<DraftInput>) -> SendPackagePlan {
+    SendPackagePlan {
+        owner_id: 1,
+        entries: snapshots
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, snapshot)| crate::manuscript::send_package::PlanEntry {
+                    manuscript_id: Some(index as i64 + 1),
+                    document_uuid: format!("doc-{index}"),
+                    title: format!("稿件{index}"),
+                    kind: snapshot.kind,
+                    revision: Some(crate::manuscript::send_package::PlannedRevision {
+                        revision_uuid: format!("rev-{index}"),
+                        payload_hash: format!("hash-{index}"),
+                        visible_number: Some(1),
+                        snapshot,
+                        content_markdown: format!("# 稿件{index}\n\n正文。"),
+                    }),
+                    blocker: None,
+                    has_uncommitted: false,
+                    has_pending_branch: false,
+                    pinned: false,
+                },
+            )
+            .collect(),
+    }
+}
+
+#[test]
+fn send_package_workbook_keeps_only_entries_referenced_by_submitted_versions() {
+    use crate::models::{VocabularyCategory, VocabularyEntry};
+    use crate::units::UnitDisplay;
+    let unit = VocabularyEntry {
+        code: "01".into(),
+        canonical: "发文局".into(),
+        identity: uuid::Uuid::new_v4().to_string(),
+        ..Default::default()
+    };
+    let child = VocabularyEntry {
+        code: "0101".into(),
+        canonical: "业务处".into(),
+        parent: "01".into(),
+        identity: uuid::Uuid::new_v4().to_string(),
+        owner_identity: unit.identity.clone(),
+        ..Default::default()
+    };
+    let unused = VocabularyEntry {
+        code: "02".into(),
+        canonical: "未引用单位".into(),
+        identity: uuid::Uuid::new_v4().to_string(),
+        ..Default::default()
+    };
+    let person = VocabularyEntry {
+        category: VocabularyCategory::Person,
+        code: "01".into(),
+        canonical: "张三".into(),
+        identity: uuid::Uuid::new_v4().to_string(),
+        owner_identity: child.identity.clone(),
+        unit: child.code.clone(),
+        phone: "010-12345678".into(),
+        ..Default::default()
+    };
+    let vocabulary = vec![unit.clone(), child.clone(), unused, person.clone()];
+    let mut snapshot = DraftInput {
+        kind: TemplateKind::OfficialLetter,
+        ..Default::default()
+    };
+    snapshot.profile.issuing_unit = unit.key();
+    snapshot.profile.responsible_unit = child.key();
+    snapshot.profile.contact_person = person.key();
+    snapshot.profile.vocabulary_snapshot = vec![unit.clone(), child.clone(), person.clone()];
+    let plan = plan_with_snapshots(vec![snapshot]);
+
+    let (workbook, warning) = send_package_workbook(&plan, &UnitDisplay::new(&vocabulary));
+    assert!(warning.is_none(), "{warning:?}");
+    let bytes = workbook.expect("应生成随附引用词库");
+    let parsed = crate::vocabulary_xlsx::parse_bytes(&bytes, &[]).unwrap();
+    let names = parsed
+        .entries
+        .iter()
+        .map(|entry| entry.canonical.as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"发文局"), "{names:?}");
+    assert!(names.contains(&"业务处"), "{names:?}");
+    assert!(names.contains(&"张三"), "{names:?}");
+    assert!(!names.contains(&"未引用单位"), "{names:?}");
+}
+
+#[test]
+fn send_package_workbook_conflicts_degrade_to_a_warning_instead_of_blocking_the_package() {
+    use crate::models::VocabularyEntry;
+    use crate::units::UnitDisplay;
+    let unit_a = VocabularyEntry {
+        code: "01".into(),
+        canonical: "甲局".into(),
+        identity: uuid::Uuid::new_v4().to_string(),
+        ..Default::default()
+    };
+    let unit_b = VocabularyEntry {
+        code: "01".into(),
+        canonical: "乙局".into(),
+        identity: uuid::Uuid::new_v4().to_string(),
+        ..Default::default()
+    };
+    let vocabulary = vec![unit_a.clone(), unit_b.clone()];
+    let snapshot = |unit: &VocabularyEntry| {
+        let mut snapshot = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        snapshot.profile.issuing_unit = unit.key();
+        snapshot.profile.vocabulary_snapshot = vec![unit.clone()];
+        snapshot
+    };
+    let plan = plan_with_snapshots(vec![snapshot(&unit_a), snapshot(&unit_b)]);
+
+    let (workbook, warning) = send_package_workbook(&plan, &UnitDisplay::new(&vocabulary));
+    assert!(workbook.is_none(), "冲突时不应生成半成品工作簿");
+    let warning = warning.expect("应降级为提示");
+    assert!(warning.contains("随附引用词库未生成"), "{warning}");
+    assert!(warning.contains("取消勾选"), "{warning}");
+}
