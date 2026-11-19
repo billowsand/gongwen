@@ -51,7 +51,9 @@ directories = "6.0"
 docx-rs = "0.4.22"
 # Word 里的 EMF / WMF 矢量图转 SVG（再经 resvg 出 PNG），见 src/metafile.rs。
 emf-core = { version = "0.1.1", default-features = false, features = ["svg"] }
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "persistence", "wayland", "x11"] }
+# 不启用 accesskit：公文助手不做屏幕阅读器等无障碍支持（2026-11-20 产品确认）。
+# 去掉后 Linux 不再带 atspi / zbus / async 这一摞辅助功能依赖。
+eframe = { version = "0.37.0", default-features = false, features = ["clipboard", "default_fonts", "glow", "persistence", "wayland", "x11"] }
 # 系统剪贴板：外部粘贴在后台读取（见 src/rich_paste/）。egui-winit 已经
 # 间接引入 3.6.1，这里只是声明直接引用；关掉默认的 image-data，不新增系统依赖。
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
