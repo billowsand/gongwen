@@ -2090,9 +2090,11 @@ mod tests {
             |ui, app: &mut GongwenApp| app.media_export_window(ui.ctx()),
             app,
         );
-        harness.run();
+        // 介质扫描在后台线程跑，窗口里的进度环会让 `run`（要求尽快稳定）超步；
+        // 这里只要把窗口画出来、点取消，用固定步数即可。
+        harness.run_steps(2);
         harness.get_by_label("取消").click();
-        harness.run();
+        harness.run_steps(2);
         let app = harness.into_state();
         assert!(app.media_export.is_none());
         assert!(app.pending_output.is_none());
