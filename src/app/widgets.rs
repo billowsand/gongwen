@@ -726,7 +726,12 @@ pub(crate) fn responsible_editor(
         let full = max_rows.is_some_and(|max| entries.len() >= max);
         let response = ui.add_enabled(!full, egui::Button::new("＋ 添加一行"));
         if full && let Some(max) = max_rows {
-            response.on_hover_text(format!("最多 {max} 条承办信息，首页承办区放不下更多"));
+            let reason = if kind == TemplateKind::RedHeadApproval {
+                "首页承办区放不下更多"
+            } else {
+                "版记放不下更多"
+            };
+            response.on_hover_text(format!("最多 {max} 条承办信息，{reason}"));
         } else if response.clicked() {
             entries.push(Default::default());
             changed = true;

@@ -91,6 +91,7 @@ pub(crate) use template::JointContact;
 pub(crate) use template::JointIssuanceMode;
 pub(crate) use template::JointResponsibleEntry;
 pub(crate) use template::LetterVersion;
+pub(crate) use template::MAX_LETTER_RESPONSIBLE_ROWS;
 pub(crate) use template::RED_APPROVAL_MAX_RESPONSIBLE;
 pub(crate) use template::ReceivingContact;
 pub(crate) use template::TemplateKind;

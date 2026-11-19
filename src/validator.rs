@@ -754,6 +754,17 @@ fn validate_metadata(
             }
         }
     }
+    // 版记每条承办信息占一行；超过上限会挤出页面（PDF）或跨页拆开（Word）。
+    // 红头呈批件的同类检查在它自己的分支里，这里只补公函。
+    if input.kind == TemplateKind::OfficialLetter
+        && responsible_entries.len() > crate::models::MAX_LETTER_RESPONSIBLE_ROWS
+    {
+        warnings.push(format!(
+            "公函承办信息最多 {} 行，当前 {} 行，版记会超出页面或跨页拆开，请合并或删减",
+            crate::models::MAX_LETTER_RESPONSIBLE_ROWS,
+            responsible_entries.len()
+        ));
+    }
     let contact_names = responsible_entries
         .iter()
         .map(|entry| entry.name.as_str())
@@ -2067,6 +2078,32 @@ mod tests {
             !warnings
                 .iter()
                 .any(|warning| warning.contains("行承办单位“业务处”不一致"))
+        );
+    }
+
+    #[test]
+    fn single_letter_warns_when_responsible_rows_exceed_the_record_limit() {
+        let mut input = DraftInput::default();
+        input.profile.issuing_unit = "发文局".into();
+        input.profile.responsible_unit = "发文局".into();
+        input.profile.additional_responsible_contacts = (0
+            ..crate::models::MAX_LETTER_RESPONSIBLE_ROWS)
+            .map(|index| crate::models::JointContact {
+                unit: "发文局".into(),
+                name: format!("联系人{index}"),
+                phone: "010-12345678".into(),
+            })
+            .collect();
+        let warnings = validate(&input, "# 标题\n\n正文。", &[], &rules());
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.contains("承办信息最多")
+                    && warning.contains(&format!(
+                        "当前 {} 行",
+                        crate::models::MAX_LETTER_RESPONSIBLE_ROWS + 1
+                    ))
+            }),
+            "{warnings:?}"
         );
     }
 

@@ -122,10 +122,12 @@ impl TemplateKind {
     }
 
     /// 承办条目数量上限。红头呈批件的承办区在首页底部、每条占一行，条目过多会
-    /// 把批示框和正文区压没，因此限定 4 条；其他文种的版记不受此限。
+    /// 把批示框和正文区压没，因此限定 4 条；公函版记同样每条占一行，超过上限
+    /// 会把版记挤出页面（PDF）或跨页拆开（Word）；其他文种没有版记承办行。
     pub(crate) fn max_responsible_entries(self) -> Option<usize> {
         match self {
             Self::RedHeadApproval => Some(RED_APPROVAL_MAX_RESPONSIBLE),
+            Self::OfficialLetter => Some(MAX_LETTER_RESPONSIBLE_ROWS),
             _ => None,
         }
     }
@@ -242,6 +244,11 @@ pub struct ReceivingContact {
 /// 红头呈批件承办条目数量上限：首页底部承办区每条占一行，超过 4 条会把批示框
 /// 和首页正文区挤没，界面按此上限封顶，旧稿件超限时由校验提示。
 pub const RED_APPROVAL_MAX_RESPONSIBLE: usize = 4;
+
+/// 公函版记承办信息行数上限。每条占一行、行高约 6.81mm；超过后 Typst 版记会
+/// 超出页面被裁掉、Word 版记表可能跨页拆开，界面按此上限封顶，旧稿件超限时
+/// 由校验提示。
+pub const MAX_LETTER_RESPONSIBLE_ROWS: usize = 8;
 
 /// 传输任务类型（《传发任务单》的题名）默认项。
 ///
