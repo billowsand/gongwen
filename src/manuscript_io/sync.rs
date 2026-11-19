@@ -504,7 +504,8 @@ fn link_aliases(store: &ManuscriptStore, id: i64, record: &ManifestRecord) -> Re
 /// 包里的一张图片：逻辑引用、原文件名（旧包按路径末段兜底）与明文字节。
 type ImageBlob = (String, String, Vec<u8>);
 
-/// 校验预览后重新读取的同一份清单和所有资源，再整体写入。
+/// 测试直接调用：不做工作区自检的导入（生产导入走 [`import_with_actions_guarded`]）。
+#[cfg(test)]
 pub fn import_with_actions(
     store: &mut ManuscriptStore,
     zip_path: &std::path::Path,
@@ -513,6 +514,31 @@ pub fn import_with_actions(
     actions: &[ImportAction],
     expected_previews: &[RecordPreview],
 ) -> Result<SyncImportSummary> {
+    import_with_actions_guarded(
+        store,
+        zip_path,
+        password,
+        expected_manifest_hash,
+        actions,
+        expected_previews,
+        || Ok(()),
+    )
+}
+
+/// 校验预览后重新读取的同一份清单和所有资源，再整体写入；提交事务前调用
+/// `guard`：后台导入期间工作区锁定或切槽后整批回滚，不提交进错误的库。
+pub(crate) fn import_with_actions_guarded<G>(
+    store: &mut ManuscriptStore,
+    zip_path: &std::path::Path,
+    password: &str,
+    expected_manifest_hash: &str,
+    actions: &[ImportAction],
+    expected_previews: &[RecordPreview],
+    guard: G,
+) -> Result<SyncImportSummary>
+where
+    G: Fn() -> Result<()>,
+{
     use super::{MAX_PDF_BYTES, read_manifest};
     use crate::manuscript::ManuscriptUpdate;
     let manifest = read_manifest(zip_path, password)?;
@@ -832,6 +858,10 @@ pub fn import_with_actions(
     })();
     match result {
         Ok(summary) => {
+            // 导入期间工作区被锁定或切槽：整批回滚，不能提交进错误的库。
+            guard().inspect_err(|_| {
+                let _ = store.rollback_sync_import();
+            })?;
             store.commit_sync_import()?;
             Ok(summary)
         }
@@ -1071,6 +1101,34 @@ mod round_trip_tests {
         let hash = super::super::bytes_hash(&serde_json::to_vec(&manifest)?);
         let previews = inspect(store, &manifest)?;
         import_with_actions(store, path, PASSWORD, &hash, &actions, &previews)
+    }
+
+    #[test]
+    fn import_guard_failure_rolls_back_the_whole_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = ManuscriptStore::open(&dir.path().join("a.db")).unwrap();
+        let mut b = ManuscriptStore::open(&dir.path().join("b.db")).unwrap();
+        let id_a = create(&mut a, "甲。", "守卫稿");
+        let package = dir.path().join("guard.zip");
+        export(&mut a, id_a, &package);
+        let manifest = super::super::read_manifest(&package, PASSWORD).unwrap();
+        let hash = super::super::bytes_hash(&serde_json::to_vec(&manifest).unwrap());
+        let previews = inspect(&mut b, &manifest).unwrap();
+        let error = import_with_actions_guarded(
+            &mut b,
+            &package,
+            PASSWORD,
+            &hash,
+            &[ImportAction::New],
+            &previews,
+            || anyhow::bail!("工作区已锁定或切换"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("工作区已锁定"), "{error:#}");
+        assert!(
+            b.list(&Default::default()).unwrap().is_empty(),
+            "守卫失败必须整批回滚，不能留下半批稿件"
+        );
     }
 
     #[test]

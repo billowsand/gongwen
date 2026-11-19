@@ -1144,8 +1144,19 @@ impl GongwenApp {
         self.knowledge_index_result = None;
         self.knowledge_progress_verb = "正在导入";
         self.knowledge_index_progress = Some((0, total, String::new()));
+        let workspace_slot = storage::current_slot();
+        let workspace_unlock = crate::vault::key_handle();
         let tx = self.sender.clone();
         thread::spawn(move || {
+            // 测试构建的句柄是线程局部的：与稿件包导入一样，把父线程这份带进线程。
+            #[cfg(test)]
+            if let Some(handle) = workspace_unlock.as_ref() {
+                crate::vault::set_key_handle_for_slot(
+                    *handle.dek(),
+                    handle.db_active(),
+                    handle.slot(),
+                );
+            }
             let mut ok = 0usize;
             let mut failed: Vec<(String, String)> = Vec::new();
             let mut auto_materials = Vec::new();
@@ -1164,6 +1175,11 @@ impl GongwenApp {
             };
             for (index, path) in paths.iter().enumerate() {
                 let name = doc_import::file_label(path);
+                // 导入途中工作区被锁定/切换：别再往错误的库写。
+                if !crate::vault::workspace_matches(workspace_unlock.as_ref(), workspace_slot) {
+                    failed.push((name.clone(), "工作区已锁定或切换，已取消导入".into()));
+                    break;
+                }
                 let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::IndexProgress {
                     done: index,
                     total,

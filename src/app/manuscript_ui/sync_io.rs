@@ -779,11 +779,14 @@ impl GongwenApp {
         self.manuscript_import_preview = Some(preview);
         self.manuscript_import_busy = true;
         self.status = "正在导入稿件包，请稍候…".into();
+        let workspace_slot = storage::current_slot();
+        let workspace_unlock = crate::vault::key_handle();
         let tx = self.sender.clone();
         thread::spawn(move || {
-            // 导出任务也这样显式带密钥：测试构建的句柄是线程局部的。
+            // 测试构建的句柄是线程局部的：把父线程这份显式带进线程，
+            // 守卫才能用同一把 DEK / 槽位比对。
             #[cfg(test)]
-            if let Some(handle) = crate::vault::key_handle() {
+            if let Some(handle) = workspace_unlock.as_ref() {
                 crate::vault::set_key_handle_for_slot(
                     *handle.dek(),
                     handle.db_active(),
@@ -797,16 +800,24 @@ impl GongwenApp {
                 actions,
                 relations,
             } = job;
+            let guard = || {
+                anyhow::ensure!(
+                    crate::vault::workspace_matches(workspace_unlock.as_ref(), workspace_slot),
+                    "工作区已锁定或切换，已取消导入"
+                );
+                Ok(())
+            };
             let result: anyhow::Result<manuscript_io::sync::SyncImportSummary> = (|| {
                 let mut store = ManuscriptStore::open(&db_path)
                     .with_context(|| format!("无法打开稿件库 {}", db_path.display()))?;
-                manuscript_io::sync::import_with_actions(
+                manuscript_io::sync::import_with_actions_guarded(
                     &mut store,
                     &zip_path,
                     &password,
                     &manifest_hash,
                     &actions,
                     &relations,
+                    guard,
                 )
             })();
             let _ = tx.send(WorkerResult::ManuscriptImportDone {

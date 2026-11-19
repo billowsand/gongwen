@@ -517,6 +517,25 @@ impl KeyHandle {
     }
 }
 
+/// 后台任务开始时的密钥与槽位是否仍是当前这一份：没有开始锁定、槽位未变，
+/// 且（有密钥时）DEK 相同。导入 worker 在提交前用它自检，避免锁定/切槽后
+/// 仍把数据写进错误的库。
+pub(crate) fn workspace_matches(
+    expected: Option<&KeyHandle>,
+    slot: crate::storage::DataSlot,
+) -> bool {
+    if crate::storage::writes_blocked() || crate::storage::current_slot() != slot {
+        return false;
+    }
+    match (expected, key_handle()) {
+        (Some(expected), Some(current)) => {
+            expected.slot() == current.slot() && expected.dek() == current.dek()
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 static KEY_HANDLE: RwLock<Option<KeyHandle>> = RwLock::new(None);
 
 // 测试按线程覆盖句柄：测试并行跑，全局句柄会被先跑完的测试的
