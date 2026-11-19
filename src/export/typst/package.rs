@@ -598,6 +598,7 @@ mod tests {
             pdf: false,
             typst: true,
             receipt: false,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let artifacts = crate::export::export_artifacts(
@@ -646,6 +647,7 @@ mod tests {
             pdf: false,
             typst: true,
             receipt: false,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let first = crate::export::export_artifacts(

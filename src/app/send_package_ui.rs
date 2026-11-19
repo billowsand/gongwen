@@ -65,6 +65,7 @@ impl egui_dnd::DragDropItem for &PackageRow {
 struct ExportConfirm {
     plan: Arc<SendPackagePlan>,
     with_toc: bool,
+    with_vocabulary: bool,
 }
 
 /// 卡片里展开的行内提交表单：同一时刻只开一张。
@@ -88,7 +89,7 @@ enum Destination {
 }
 
 pub(crate) enum DeliveryReceipt {
-    File(PathBuf),
+    File(PathBuf, Option<PathBuf>),
     Medium(String),
 }
 
@@ -780,6 +781,12 @@ impl GongwenApp {
                     panel.confirm = Some(ExportConfirm {
                         plan: Arc::new(store.send_package_plan(owner_id)?),
                         with_toc: panel.confirm.as_ref().is_some_and(|c| c.with_toc),
+                        with_vocabulary: panel
+                            .confirm
+                            .as_ref()
+                            .map_or(self.config.export.referenced_vocabulary, |c| {
+                                c.with_vocabulary
+                            }),
                     });
                     Ok(None)
                 }
@@ -1325,6 +1332,8 @@ fn confirm_ui(
             .show(ui, |ui| confirm_rows(ui, &confirm.plan, unsaved_in_editor));
         ui.add_space(6.0);
         ui.checkbox(&mut confirm.with_toc, "前面加一页送批材料目录");
+        ui.checkbox(&mut confirm.with_vocabulary, "随文附引用词库（Excel）")
+            .on_hover_text("仅随附各件引用的单位、人员及其上级单位。词表可能包含电话和个人简介。");
         wrapped_soft(
             ui,
             "每件从奇数页开始：页数为奇数的件后面自动补一张空白页，双面打印后各件能拆开分别装订。各件页码保持原样。",
@@ -1500,18 +1509,27 @@ impl GongwenApp {
         if !confirm.plan.ready() {
             return;
         }
-        let operation = format!("导出《{}》的送批材料", confirm.plan.owner_title());
+        let mut operation = format!("导出《{}》的送批材料", confirm.plan.owner_title());
+        if confirm.with_vocabulary {
+            operation.push_str("，并附引用词库 Excel");
+        }
         let file_confirm = confirm.clone();
         let wake = ctx.clone();
         let file = Box::new(move |app: &mut Self| app.choose_send_package_file(file_confirm, wake));
         if crate::export::protection::encryption_enabled() {
-            self.choose_document_delivery(ctx, operation, file, move |app, medium, key, wake| {
-                app.run_confirmed_send_package_export(
-                    confirm,
-                    Destination::Medium(medium, key),
-                    wake,
-                );
-            });
+            self.choose_document_delivery(
+                ctx,
+                "导出密码加密文件…",
+                operation,
+                file,
+                move |app, medium, key, wake| {
+                    app.run_confirmed_send_package_export(
+                        confirm,
+                        Destination::Medium(medium, key),
+                        wake,
+                    );
+                },
+            );
         } else {
             self.request_document_output(operation, file);
         }
@@ -1562,7 +1580,9 @@ impl GongwenApp {
         }
         let Some(panel) = self.send_package.as_mut().filter(|panel| {
             panel.confirm.as_ref().is_some_and(|current| {
-                Arc::ptr_eq(&current.plan, &confirm.plan) && current.with_toc == confirm.with_toc
+                Arc::ptr_eq(&current.plan, &confirm.plan)
+                    && current.with_toc == confirm.with_toc
+                    && current.with_vocabulary == confirm.with_vocabulary
             })
         }) else {
             self.status = "导出计划已失效，请重新发起导出。".into();
@@ -1571,7 +1591,11 @@ impl GongwenApp {
         panel.confirm = None;
         panel.export_error = None;
         let owner_id = panel.owner_id;
-        let ExportConfirm { plan, with_toc } = confirm;
+        let ExportConfirm {
+            plan,
+            with_toc,
+            with_vocabulary,
+        } = confirm;
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
         let numbering = self.config.numbering;
@@ -1587,6 +1611,26 @@ impl GongwenApp {
                     require_workspace(workspace)?;
                 }
                 let display = crate::units::UnitDisplay::new(&vocabulary);
+                use crate::export::vocabulary as references;
+                let workbook = if with_vocabulary {
+                    let mut seen = std::collections::HashSet::new();
+                    let entries = plan
+                        .entries
+                        .iter()
+                        .filter_map(|entry| entry.revision.as_ref())
+                        .flat_map(|revision| {
+                            references::referenced_entries(
+                                &revision.snapshot,
+                                &display.for_input(&revision.snapshot),
+                                false,
+                            )
+                        })
+                        .filter(|entry| seen.insert(entry.key()))
+                        .collect::<Vec<_>>();
+                    references::workbook(&entries)?
+                } else {
+                    None
+                };
                 let (fonts, _warnings) = crate::system_fonts::resolve(&fonts);
                 let progress = |text: &str| {
                     let _ = tx.send(WorkerResult::SendPackage(SendPackageEvent::Progress {
@@ -1598,6 +1642,7 @@ impl GongwenApp {
                     &plan,
                     with_toc,
                     |snapshot, markdown, _stem| {
+                        crate::units::identity::ensure_historical_references(snapshot)?;
                         crate::manuscript_io::compile_snapshot_pdf(
                             snapshot, markdown, &display, &fonts, &numbering,
                         )
@@ -1606,14 +1651,25 @@ impl GongwenApp {
                     |pdf| {
                         Ok(match destination {
                             Destination::File(path, protection) => {
-                                DeliveryReceipt::File(crate::export::protection::write_final_with(
-                                    protection.as_ref(),
-                                    &path,
-                                    &pdf,
-                                )?)
+                                let (document, workbook) =
+                                    references::write_document_with_workbook(
+                                        protection.as_ref(),
+                                        &path,
+                                        pdf,
+                                        workbook,
+                                    )?;
+                                DeliveryReceipt::File(document, workbook)
                             }
                             Destination::Medium(medium, workspace) => {
-                                let files = [(send_package_filename(&plan), pdf)].into();
+                                let name = send_package_filename(&plan);
+                                let mut files = std::collections::BTreeMap::from([(name, pdf)]);
+                                if let Some(workbook) = workbook {
+                                    let name = send_package_stem(&plan);
+                                    files.insert(
+                                        format!("{name}{}", references::FILE_SUFFIX),
+                                        workbook,
+                                    );
+                                }
                                 let image =
                                     zeroize::Zeroizing::new(crate::optical_image::build(files)?);
                                 progress("正在刻录并回读校验…");
@@ -1651,8 +1707,13 @@ impl GongwenApp {
                 match result {
                     Ok((outcome, receipt)) => {
                         let (path, location) = match &receipt {
-                            DeliveryReceipt::File(path) => {
-                                (path.to_string_lossy(), path.display().to_string())
+                            DeliveryReceipt::File(path, workbook) => {
+                                let mut location = path.display().to_string();
+                                if let Some(workbook) = workbook {
+                                    location
+                                        .push_str(&format!("，引用词库 {}", workbook.display()));
+                                }
+                                (path.to_string_lossy(), location)
                             }
                             DeliveryReceipt::Medium(label) => {
                                 ("".into(), format!("已刻录并校验：{label}"))
@@ -1694,7 +1755,7 @@ impl GongwenApp {
                         {
                             panel.reload(store);
                         }
-                        if let DeliveryReceipt::File(path) = receipt {
+                        if let DeliveryReceipt::File(path, _) = receipt {
                             self.open_pdf_with_hints(
                                 path,
                                 Some(format!("{title}（送批材料）")),
@@ -1725,8 +1786,12 @@ impl GongwenApp {
 }
 
 fn send_package_filename(plan: &SendPackagePlan) -> String {
+    format!("{}.pdf", send_package_stem(plan))
+}
+
+fn send_package_stem(plan: &SendPackagePlan) -> String {
     format!(
-        "{}（送批材料）.pdf",
+        "{}（送批材料）",
         crate::export::safe_filename(plan.owner_title())
     )
 }

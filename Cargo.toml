@@ -30,6 +30,13 @@ anyhow = "1.0"
 # 应用锁：Argon2id 派生密钥 + AES-256-GCM 验证器（见 docs/security-lock-design.md）。
 argon2 = "0.6"
 aes-gcm = "0.11"
+# 用于原生 Excel 打开密码与密文完整性校验，与 Office 导出共用传递依赖。
+aes = "0.8"
+base64 = "0.22"
+cbc = "0.1"
+cfb = "0.10"
+hmac = "0.13"
+roxmltree = "0.21"
 # 研究报告的 .bib 解析：起草页文献引用下拉、悬停卡与审校要作者、题名、年份与出错行号。
 # 与 mdx、hayagriva 用的是同一份。
 biblatex = "0.12"

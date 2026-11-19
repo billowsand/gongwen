@@ -3,6 +3,9 @@ use super::UnitDisplay;
 use crate::models::{TemplateProfile, VocabularyCategory as Category, VocabularyEntry as Entry};
 use std::collections::{HashMap, HashSet};
 
+mod document_fields;
+pub(crate) use document_fields::active_keys;
+
 pub(crate) fn assign(entries: &mut [Entry]) -> bool {
     let mut changed = false;
     for entry in entries {
@@ -433,6 +436,57 @@ fn capture_with_keys(profile: &mut TemplateProfile, vocabulary: &[Entry], extra:
     profile.vocabulary_snapshot = snapshots;
 }
 
+/// 补齐活稿排版副本内缺少的永久引用，优先保留随稿快照的值和归属。
+pub(crate) fn complete_live_export(input: &mut crate::models::DraftInput, vocabulary: &[Entry]) {
+    let keys = active_keys(input, true).into_iter().map(|(key, _, _)| key);
+    let saved = &mut input.profile.vocabulary_snapshot;
+    // 无快照的旧稿仍由显示层按词库解析旧文本。有快照后只按永久身份补缺。
+    if saved.is_empty() {
+        return;
+    }
+    let mut entries = std::mem::take(saved);
+    let mut known: HashSet<_> = entries.iter().map(Entry::key).collect();
+    let mut owners = entries
+        .iter()
+        .filter(|entry| !entry.owner_identity.is_empty())
+        .map(|entry| format!("@unit:{}", entry.owner_identity))
+        .collect::<Vec<_>>();
+    owners.extend(keys);
+    while let Some(key) = owners.pop() {
+        let category = if key.starts_with("@unit:") {
+            Category::Unit
+        } else if key.starts_with("@person:") {
+            Category::Person
+        } else {
+            continue;
+        };
+        if known.contains(&key) {
+            continue;
+        }
+        let Some(entry) = resolve(vocabulary, category, &key) else {
+            continue;
+        };
+        if !known.insert(entry.key()) {
+            continue;
+        }
+        if let Some(owner) = parent(vocabulary, entry) {
+            owners.push(owner.key());
+        }
+        entries.push(entry.clone());
+    }
+    *saved = entries;
+}
+
+/// 带永久引用的历史件必须携带这些引用的快照。无引用的旧版保留原有文字回显。
+pub(crate) fn ensure_historical_references(
+    input: &crate::models::DraftInput,
+) -> anyhow::Result<()> {
+    UnitDisplay::new(&[])
+        .for_input(input)
+        .ensure_resolved(input)
+        .map_err(|error| anyhow::anyhow!("提交版本的词库引用需要核对：{error}"))
+}
+
 impl<'a> UnitDisplay<'a> {
     /// 历史与当前稿均优先用稿件快照，整稿同名项使用一份显示计划。
     pub(crate) fn for_input(&self, input: &crate::models::DraftInput) -> UnitDisplay<'static> {
@@ -441,17 +495,13 @@ impl<'a> UnitDisplay<'a> {
         } else {
             input.profile.vocabulary_snapshot.clone()
         };
-        let mut keys = selected(&input.profile);
-        keys.extend(extra_keys(input));
-        let chosen: Vec<_> = entries
+        let keys = active_keys(input, true);
+        let mut seen = HashSet::new();
+        let chosen: Vec<_> = keys
             .iter()
-            .filter(|e| {
-                e.category == Category::Unit
-                    && keys.iter().any(|k| {
-                        resolve(&entries, Category::Unit, k)
-                            .is_some_and(|entry| entry.key() == e.key())
-                    })
-            })
+            .filter(|(_, category, _)| *category == Category::Unit)
+            .filter_map(|(key, category, _)| resolve(&entries, *category, key))
+            .filter(|entry| seen.insert(entry.key()))
             .collect();
         let (labels, ambiguous) =
             qualified_labels(&entries, &chosen, input.uses_external_unit_names());
@@ -462,6 +512,10 @@ impl<'a> UnitDisplay<'a> {
             internal_labels: std::sync::OnceLock::new(),
             external_labels: std::sync::OnceLock::new(),
         }
+    }
+
+    pub(crate) fn entries(&self) -> &[Entry] {
+        &self.vocab
     }
 
     pub(crate) fn person_name(&self, key: &str) -> String {
@@ -557,42 +611,32 @@ pub(crate) fn display_values(entries: &[Entry], value: &str) -> String {
 
 impl UnitDisplay<'_> {
     pub(crate) fn ensure_resolved(&self, input: &crate::models::DraftInput) -> Result<(), String> {
-        let mut profile = input.profile.clone();
         let mut errors = Vec::new();
-        fields(&mut profile, |value, category| {
-            for key in crate::models::split_units(value) {
-                let matches = self
-                    .vocab
-                    .iter()
-                    .filter(|e| {
-                        e.category == category
-                            && (e.key() == key
-                                || e.canonical.trim() == key
-                                || (category == Category::Unit && e.code == key))
-                    })
-                    .count();
-                if (is_ref(&key) && resolve(&self.vocab, category, &key).is_none()) || matches > 1 {
-                    errors.push(format!(
-                        "要素存在同名歧义或失效引用，请在表单重新选择：{}",
-                        label(&self.vocab, &key)
-                    ));
-                }
-            }
-        });
-        for key in extra_keys(input) {
-            let category = if key.starts_with("@person:") {
-                Category::Person
-            } else {
-                Category::Unit
-            };
-            if is_ref(&key) && resolve(&self.vocab, category, &key).is_none() {
-                errors.push("名单／来电／印发单位有失效引用，请重新选择".into());
+        let keys = active_keys(input, true);
+        for (key, category, field) in &keys {
+            let matches = self
+                .vocab
+                .iter()
+                .filter(|entry| {
+                    entry.category == *category
+                        && (entry.key() == *key
+                            || entry.canonical.trim() == key
+                            || (*category == Category::Unit && entry.code == *key))
+                })
+                .count();
+            if (is_ref(key) && resolve(&self.vocab, *category, key).is_none()) || matches > 1 {
+                errors.push(format!(
+                    "“{field}”存在同名歧义或失效引用，请核对：{}",
+                    label(&self.vocab, key)
+                ));
             }
         }
-        let chosen = selected(&input.profile);
-        let people: Vec<_> = chosen
+        let mut seen = HashSet::new();
+        let people: Vec<_> = keys
             .iter()
-            .filter_map(|key| resolve(&self.vocab, Category::Person, key))
+            .filter(|(_, category, _)| *category == Category::Person)
+            .filter_map(|(key, category, _)| resolve(&self.vocab, *category, key))
+            .filter(|person| seen.insert(person.key()))
             .collect();
         for person in &people {
             if people.iter().any(|other| {
@@ -605,15 +649,22 @@ impl UnitDisplay<'_> {
                 ));
             }
         }
-        let mut pairs = crate::models::joint_responsible_entries(&input.profile)
-            .into_iter()
-            .map(|e| (e.unit, e.name))
-            .collect::<Vec<_>>();
-        pairs.push((
-            input.profile.responsible_unit.clone(),
-            input.profile.contact_person.clone(),
-        ));
-        for (unit, person) in pairs {
+        use crate::models::TemplateKind;
+        let pairs = match input.kind {
+            TemplateKind::OfficialLetter => input.profile.letter_responsible_entries(),
+            TemplateKind::RedHeadApproval => {
+                crate::models::joint_responsible_entries(&input.profile)
+            }
+            TemplateKind::PhoneRecord => input
+                .profile
+                .single_responsible_rows()
+                .into_iter()
+                .take(1)
+                .collect(),
+            _ => Vec::new(),
+        };
+        for row in pairs {
+            let (unit, person) = (row.unit, row.name);
             if !unit.is_empty()
                 && person.starts_with("@person:")
                 && !self

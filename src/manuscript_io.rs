@@ -172,6 +172,8 @@ pub struct VocabularyFile {
 pub struct ExportSummary {
     pub records: usize,
     pub pdfs: usize,
+    pub vocabulary_units: usize,
+    pub vocabulary_people: usize,
 }
 
 /// 稿件 PDF 批量导出的选项：盖章件直接取附件，非盖章件编译 TeX 生成。
@@ -393,6 +395,26 @@ impl PreparedPackage {
             vocabulary,
             blobs,
         } = self;
+        let units = vocabulary
+            .iter()
+            .filter(|entry| entry.category == crate::models::VocabularyCategory::Unit)
+            .count();
+        let people = vocabulary.len() - units;
+        let vocabulary_bytes = if vocabulary.is_empty() {
+            None
+        } else {
+            let bytes = serde_json::to_vec(&VocabularyFile {
+                schema: VOCABULARY_SCHEMA,
+                exported_at: Local::now().to_rfc3339(),
+                entries: vocabulary,
+            })?;
+            anyhow::ensure!(
+                bytes.len() as u64 <= VOCABULARY_MAX_BYTES,
+                "标准词库超过 {} MiB，无法随稿件包导出",
+                VOCABULARY_MAX_BYTES / 1024 / 1024
+            );
+            Some(bytes)
+        };
         let parent = zip_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -401,18 +423,8 @@ impl PreparedPackage {
             .with_context(|| format!("无法在目标目录创建临时稿件包：{}", parent.display()))?;
         let mut archive = PackageWriter::new(temporary.reopen()?, password)?;
         archive.write(MANIFEST_NAME, &serde_json::to_vec_pretty(&manifest)?, true)?;
-        // 词库非空才随包：与旧包相同的清单，不改变版本图与词库身份。
-        if !vocabulary.is_empty() {
-            let vocab_file = VocabularyFile {
-                schema: VOCABULARY_SCHEMA,
-                exported_at: Local::now().to_rfc3339(),
-                entries: vocabulary,
-            };
-            archive.write(
-                VOCABULARY_NAME,
-                &serde_json::to_vec_pretty(&vocab_file)?,
-                true,
-            )?;
+        if let Some(bytes) = vocabulary_bytes {
+            archive.write(VOCABULARY_NAME, &bytes, true)?;
         }
         // 图片与 PDF 已压缩，只加密；不生成明文中间文件。
         for (path, bytes) in &blobs {
@@ -427,6 +439,8 @@ impl PreparedPackage {
             .with_context(|| format!("无法完成稿件包：{}", zip_path.display()))?;
         Ok(ExportSummary {
             records: manifest.records.len(),
+            vocabulary_units: units,
+            vocabulary_people: people,
             pdfs: manifest
                 .records
                 .iter()
@@ -542,8 +556,14 @@ fn compile_record_pdf(
     fonts: &FontConfig,
     numbering: &NumberingConfig,
 ) -> Result<Vec<u8>> {
+    let mut snapshot = record.snapshot.clone();
+    if record.status == crate::models::ManuscriptStatus::Archived {
+        crate::units::identity::ensure_historical_references(&snapshot)?;
+    } else {
+        crate::units::identity::complete_live_export(&mut snapshot, display.entries());
+    }
     compile_snapshot_pdf(
-        &record.snapshot,
+        &snapshot,
         &record.content_markdown,
         display,
         fonts,
@@ -1458,7 +1478,7 @@ mod tests {
         let zip_path = dir.path().join("稿件.zip");
         let mut store = mem_store();
         seed(&mut store);
-        export_zip(
+        let summary = export_zip(
             &mut store,
             &ManuscriptFilter::default(),
             &sample_vocabulary(),
@@ -1467,6 +1487,11 @@ mod tests {
             false,
         )
         .unwrap();
+
+        assert_eq!(
+            (summary.vocabulary_units, summary.vocabulary_people),
+            (1, 1)
+        );
 
         let read = read_vocabulary(&zip_path, TEST_PASSWORD)
             .unwrap()
@@ -1489,6 +1514,28 @@ mod tests {
         assert_eq!(person.unit, "00");
         assert_eq!(person.phone, "13800000000");
         assert_eq!(person.position, "处长");
+    }
+
+    #[test]
+    fn package_rejects_a_vocabulary_larger_than_the_import_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("词库超限.gwx");
+        std::fs::write(&path, b"previous").unwrap();
+        let mut store = mem_store();
+        seed(&mut store);
+        let mut vocabulary = sample_vocabulary();
+        vocabulary[0].note = "a".repeat(VOCABULARY_MAX_BYTES as usize);
+        let error = export_zip(
+            &mut store,
+            &ManuscriptFilter::default(),
+            &vocabulary,
+            &path,
+            TEST_PASSWORD,
+            false,
+        )
+        .expect_err("超限的词库不能写包");
+        assert!(error.to_string().contains("标准词库超过"), "{error:#}");
+        assert_eq!(std::fs::read(path).unwrap(), b"previous");
     }
 
     #[test]

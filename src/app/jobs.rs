@@ -42,6 +42,7 @@ use std::thread;
 
 pub(crate) enum WorkerResult {
     AuxiliaryArchiveExported(Result<PathBuf, String>),
+    VocabularyWorkbookExported(Result<String, String>),
     /// 外部程序把文件放进系统剪贴板的结果，后台线程执行。
     FileCopied {
         path: PathBuf,
@@ -597,6 +598,10 @@ impl GongwenApp {
                 WorkerResult::WritingModelHealth { revision, result } => {
                     self.model_health.complete(revision, result);
                 }
+                WorkerResult::VocabularyWorkbookExported(result) => {
+                    self.vocabulary_export_busy = false;
+                    self.status = result.unwrap_or_else(|error| format!("Excel 导出失败：{error}"));
+                }
                 WorkerResult::AuxiliaryArchiveExported(result) => {
                     self.status = match result {
                         Ok(path) => format!("已导出加密文件：{}", path.display()),
@@ -770,9 +775,11 @@ impl GongwenApp {
                     match result {
                         Ok(summary) => {
                             self.status = format!(
-                                "已导出 {} 篇稿件、{} 个 PDF 附件到 {}。",
+                                "已导出 {} 篇稿件、{} 个 PDF 附件及标准词库（{} 个单位、{} 名人员）到 {}。",
                                 summary.records,
                                 summary.pdfs,
+                                summary.vocabulary_units,
+                                summary.vocabulary_people,
                                 path.display()
                             );
                             self.update_remembered_zip_password(remembered_password);

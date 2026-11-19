@@ -200,6 +200,7 @@ pub(crate) struct ImportPreview {
     focused: Option<usize>,
     /// 包内随附的标准词库；旧包无此条目时为 None。
     vocabulary: Option<manuscript_io::VocabularyFile>,
+    vocabulary_error: Option<String>,
     /// 是否把包内词库增量合并到本机词库，默认勾选。
     merge_vocabulary: bool,
     /// 仅在这次预览/确认导入期间驻留内存，不写入稿件或应用配置。
@@ -382,6 +383,7 @@ mod dialog_snapshot_tests {
             package_diffs: vec![None; count],
             focused: Some(0),
             vocabulary: None,
+            vocabulary_error: None,
             merge_vocabulary: true,
             password: String::new(),
             notice: Some("请先逐篇查看合并候选和规则复核结果，再确认导入。".into()),

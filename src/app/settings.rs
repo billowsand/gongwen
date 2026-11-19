@@ -1772,6 +1772,13 @@ impl GongwenApp {
             "公函勾选后每次导出都出两类随行单据：纸质《公文签收记录单》一份（收件人手写签名），\
              电子《传发任务单》每家接收单位一份（只出 PDF，不用签字）。都与原公函分开成文件；其他文种不生成",
         );
+        ui.checkbox(
+            &mut self.config.export.referenced_vocabulary,
+            "随文附引用词库（Excel）",
+        )
+        .on_hover_text(
+            "另附稿件要素所引用的单位、人员及必要的上级单位。词库可能包含人员电话和简介。",
+        );
         #[cfg(feature = "ai-workbench")]
         ui.checkbox(
             &mut self.config.auto_export,

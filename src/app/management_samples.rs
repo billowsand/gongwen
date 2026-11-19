@@ -69,6 +69,8 @@ pub(crate) fn fixture() -> GongwenApp {
         #[cfg(feature = "ai-workbench")]
         model_picker_show_all: std::collections::HashSet::new(),
         vocabulary_import_conflicts: None,
+        vocabulary_import: None,
+        vocabulary_export_busy: false,
         vocabulary_dirty: false,
         vocabulary_setup_name: String::new(),
         #[cfg(feature = "ai-workbench")]

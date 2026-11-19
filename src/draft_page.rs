@@ -148,6 +148,7 @@ impl ExportKind {
             pdf: self == Self::Pdf,
             typst: self == Self::Typst,
             receipt: receipt && matches!(self, Self::Pdf | Self::Word),
+            referenced_vocabulary: false,
             overwrite,
         }
     }

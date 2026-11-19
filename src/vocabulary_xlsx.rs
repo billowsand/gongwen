@@ -8,12 +8,15 @@
 
 use crate::models::{VocabularyCategory, VocabularyEntry};
 use crate::units;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use calamine::{Data, Reader, Xlsx};
 use rust_xlsxwriter::{DataValidation, Format, FormatAlign, FormatBorder, Workbook, Worksheet};
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(test)]
 use std::fs::File;
+#[cfg(test)]
 use std::io::BufReader;
+#[cfg(test)]
 use std::path::Path;
 
 #[cfg(test)]
@@ -111,8 +114,35 @@ impl std::error::Error for ImportError {}
 ///
 /// `existing_unit_codes` 用于校验"人员所属单位编码"：值为空的视为未归属人员，
 /// 非空但不在任何已知单位集合内则视为冲突。
+#[cfg(test)]
 pub fn parse(path: &Path, existing_unit_codes: &[String]) -> Result<ImportReport, ImportError> {
-    let mut report = parse_only(path).map_err(|error| ImportError {
+    validate_workbook(parse_only(path), existing_unit_codes)
+}
+
+pub(crate) fn parse_bytes(
+    bytes: &[u8],
+    existing_unit_codes: &[String],
+) -> Result<ImportReport, ImportError> {
+    let report = (|| -> anyhow::Result<ImportReport> {
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(bytes)).context("工作簿 ZIP 无效")?;
+        let limit = crate::file_limits::MAX_DOCUMENT_BYTES;
+        let mut total = 0u64;
+        for index in 0..archive.len() {
+            let entry = archive.by_index_raw(index)?;
+            total = total.saturating_add(entry.size());
+            anyhow::ensure!(total <= limit, "工作簿解压后超过大小上限");
+        }
+        parse_reader(std::io::Cursor::new(bytes))
+    })();
+    validate_workbook(report, existing_unit_codes)
+}
+
+fn validate_workbook(
+    report: anyhow::Result<ImportReport>,
+    existing_unit_codes: &[String],
+) -> Result<ImportReport, ImportError> {
+    let mut report = report.map_err(|error| ImportError {
         conflicts: Vec::new(),
         summary: format!("读取 xlsx 失败：{error:#}"),
     })?;
@@ -128,10 +158,15 @@ pub fn parse(path: &Path, existing_unit_codes: &[String]) -> Result<ImportReport
 }
 
 /// 仅读 xlsx 生成 entries，不做校验。给 `units::normalize` 之前的临时数据用。
+#[cfg(test)]
 fn parse_only(path: &Path) -> Result<ImportReport> {
     let file = File::open(path).map_err(|error| anyhow::anyhow!("打开 xlsx 失败：{error}"))?;
-    let mut workbook: Xlsx<BufReader<File>> = Xlsx::new(BufReader::new(file))
-        .map_err(|error| anyhow::anyhow!("解析 xlsx 失败：{error}"))?;
+    parse_reader(BufReader::new(file))
+}
+
+fn parse_reader<R: std::io::Read + std::io::Seek>(reader: R) -> Result<ImportReport> {
+    let mut workbook =
+        Xlsx::new(reader).map_err(|error| anyhow::anyhow!("解析 xlsx 失败：{error}"))?;
 
     let mut entries = Vec::new();
 
@@ -165,8 +200,8 @@ fn parse_only(path: &Path) -> Result<ImportReport> {
     })
 }
 
-fn read_sheet(
-    workbook: &mut Xlsx<BufReader<File>>,
+fn read_sheet<R: std::io::Read + std::io::Seek>(
+    workbook: &mut Xlsx<R>,
     sheet_name: &str,
     width: usize,
 ) -> Result<Vec<Vec<String>>> {
@@ -711,8 +746,19 @@ pub struct MergeReport {
     pub unchanged: usize,
 }
 
+pub(crate) fn unit_codes(vocabulary: &[VocabularyEntry]) -> Vec<String> {
+    vocabulary
+        .iter()
+        .filter(|entry| entry.category == VocabularyCategory::Unit)
+        .map(|entry| entry.code.trim())
+        .filter(|code| !code.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// 把当前词库导出为 xlsx 模板。`existing_unit_codes` 由调用方传入（通常是词库整理后的单位编码列表）；
 /// 也用于给"人员.所属单位编码"列提供数据验证下拉。
+#[cfg(test)]
 pub fn to_xlsx(
     entries: &[VocabularyEntry],
     path: &Path,

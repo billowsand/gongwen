@@ -56,6 +56,7 @@ type BurnAction = Box<dyn FnOnce(&mut GongwenApp, Medium, KeyHandle, egui::Conte
 pub(super) struct Chooser {
     key: KeyHandle,
     operation: String,
+    file_label: &'static str,
     file: OutputAction,
     burn: BurnAction,
     chosen: Option<Medium>,
@@ -110,9 +111,15 @@ impl GongwenApp {
                 }
             })
         });
+        let operation = if selection.referenced_vocabulary {
+            "导出当前稿件，并附引用词库 Excel"
+        } else {
+            "导出当前稿件"
+        };
         self.choose_document_delivery(
             ctx,
-            "导出当前稿件".into(),
+            "导出密码加密文件…",
+            operation.into(),
             file,
             move |app, medium, key, ctx| {
                 let Some(index) = app.doc_index_of_key(document) else {
@@ -128,6 +135,7 @@ impl GongwenApp {
     pub(super) fn choose_document_delivery(
         &mut self,
         ctx: &egui::Context,
+        file_label: &'static str,
         operation: String,
         file: OutputAction,
         burn: impl FnOnce(&mut Self, Medium, KeyHandle, egui::Context) + 'static,
@@ -144,6 +152,7 @@ impl GongwenApp {
             scan: Some(start_scan(ctx, crate::vault::key_handle())),
             key,
             operation,
+            file_label,
             file,
             burn: Box::new(burn),
             chosen: None,
@@ -183,7 +192,8 @@ impl GongwenApp {
             540.0,
             Dismiss::EscOnly,
             |ui| {
-                encrypted = ui.button("导出密码加密文件…").clicked();
+                ui.label(&chooser.operation);
+                encrypted = ui.button(chooser.file_label).clicked();
                 ui.separator();
                 ui.strong("刻录明文");
                 ui.weak("获得介质的人可以读取并复制其内容。写入 IS903 会覆盖原光盘内容。刻录完成前请保持所选介质插入。");

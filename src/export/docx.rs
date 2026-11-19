@@ -264,7 +264,15 @@ pub fn write_docx_with_numbering(
     // 领导阅件：之后各部件取正文字号、行距、字体都按大字版（见 `LeaderScope`）。
     let _leader = LeaderScope::enter(input.leader_reading());
     if input.kind == TemplateKind::PhoneRecord {
-        return phone_record::write(path, input, markdown, fonts, numbering, elements);
+        return phone_record::write(
+            path,
+            input,
+            markdown,
+            &scoped_display,
+            fonts,
+            numbering,
+            elements,
+        );
     }
     if input.kind == TemplateKind::MeetingAgenda {
         return write_meeting_agenda_docx(path, input, markdown, fonts, numbering, elements);

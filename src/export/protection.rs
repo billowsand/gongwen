@@ -1,5 +1,7 @@
 //! 对外交付加密：明文只在内存中生成，加密后才允许写目标文件。
 //! 导出口令独立设置，不由登录口令或本地 DEK 派生。
+pub(crate) mod office;
+
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -129,6 +131,7 @@ impl Protection {
         let mut protected = Vec::new();
         let mut paths = HashMap::new();
         for (path, bytes) in files {
+            let bytes = Zeroizing::new(bytes);
             let (target, encrypted) = self.encode(&path, &bytes)?;
             ensure!(
                 !paths.values().any(|p| p == &target),
@@ -192,7 +195,7 @@ impl Protection {
             .to_ascii_lowercase();
         match ext.as_str() {
             "pdf" => Ok((path.into(), encrypt_pdf(bytes, &self.password)?)),
-            "docx" => Ok((path.into(), encrypt_word(bytes, &self.password)?)),
+            "docx" | "xlsx" => Ok((path.into(), encrypt_office(bytes, &self.password)?)),
             "zip" => {
                 // 输入是程序刚生成的 ZIP；逐项转入 7z，不先解压到磁盘。
                 let mut zip = zip::ZipArchive::new(Cursor::new(bytes))?;
@@ -260,16 +263,16 @@ pub(crate) fn write_final_with(
     Ok(path.to_path_buf())
 }
 
-fn encrypt_word(bytes: &[u8], password: &str) -> Result<Vec<u8>> {
-    ensure!(bytes.starts_with(b"PK"), "Word 产物不是有效的 OOXML 包");
+fn encrypt_office(bytes: &[u8], password: &str) -> Result<Vec<u8>> {
+    ensure!(bytes.starts_with(b"PK"), "Office 产物不是有效的 OOXML 包");
     let mut writer = ms_offcrypto_writer::Ecma376AgileWriter::create(
         &mut rand::rng(),
         password,
         Cursor::new(Vec::new()),
     )
-    .context("无法初始化 Word 加密")?;
+    .context("无法初始化 Office 加密")?;
     writer.write_all(bytes)?;
-    Ok(writer.into_inner().context("Word 加密失败")?.into_inner())
+    Ok(writer.into_inner().context("Office 加密失败")?.into_inner())
 }
 
 fn encrypt_pdf(bytes: &[u8], password: &str) -> Result<Vec<u8>> {
@@ -538,7 +541,7 @@ mod tests {
             .pack(&mut bytes)
             .unwrap();
         let bytes = bytes.into_inner();
-        let encrypted = encrypt_word(&bytes, PASSWORD).unwrap();
+        let encrypted = encrypt_office(&bytes, PASSWORD).unwrap();
         assert_eq!(&encrypted[..8], b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1");
         // 此独立读取库不验证口令，错误口令会返回垃圾字节；必须比较解密内容。
         assert_ne!(
@@ -551,6 +554,196 @@ mod tests {
             office_crypto::decrypt_from_bytes(encrypted, PASSWORD).unwrap(),
             bytes
         );
+    }
+
+    #[test]
+    fn protected_workbook_round_trips_and_rejects_wrong_password_or_modified_ciphertext() {
+        use crate::models::{VocabularyCategory, VocabularyEntry};
+        use std::io::{Read, Seek, SeekFrom};
+        let workspace = Workspace::new();
+        workspace.configure();
+        let unit = VocabularyEntry {
+            code: "01".into(),
+            canonical: "示例机关".into(),
+            identity: uuid::Uuid::new_v4().to_string(),
+            ..Default::default()
+        };
+        let person = VocabularyEntry {
+            category: VocabularyCategory::Person,
+            code: "01".into(),
+            canonical: "张三".into(),
+            identity: uuid::Uuid::new_v4().to_string(),
+            owner_identity: unit.identity.clone(),
+            unit: "01".into(),
+            phone: "010-12345678".into(),
+            profile: "示例简介".into(),
+            ..Default::default()
+        };
+        let entries = [unit, person];
+        let raw = crate::vocabulary_xlsx::xlsx_bytes(&entries, &["01".into()]).unwrap();
+        let path = workspace.0.path().join("标准词库.xlsx");
+        assert_eq!(write_final(&path, &raw).unwrap(), path);
+        let encrypted = std::fs::read(&path).unwrap();
+        assert!(encrypted.starts_with(&office::COMPOUND_MAGIC));
+        assert_eq!(
+            office_crypto::decrypt_from_bytes(encrypted.clone(), PASSWORD).unwrap(),
+            raw
+        );
+        let plaintext = office::decrypt(&encrypted, PASSWORD).unwrap();
+        assert_eq!(&*plaintext, &raw);
+        let parsed = crate::vocabulary_xlsx::parse_bytes(&plaintext, &[]).unwrap();
+        assert_eq!(parsed.entries[1].identity, entries[1].identity);
+        assert_eq!(parsed.entries[1].owner_identity, entries[0].identity);
+        assert_eq!(parsed.entries[1].phone, entries[1].phone);
+        assert_eq!(parsed.entries[1].profile, entries[1].profile);
+        assert!(office::decrypt(&encrypted, "wrong").is_err());
+
+        let mut compound = cfb::CompoundFile::open(Cursor::new(encrypted)).unwrap();
+        let mut stream = compound.open_stream("/EncryptedPackage").unwrap();
+        let mut byte = [0];
+        stream.seek(SeekFrom::Start(8)).unwrap();
+        stream.read_exact(&mut byte).unwrap();
+        stream.seek(SeekFrom::Start(8)).unwrap();
+        stream.write_all(&[byte[0] ^ 1]).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+        assert!(office::decrypt(&compound.into_inner().into_inner(), PASSWORD).is_err());
+    }
+
+    #[test]
+    fn live_letter_exports_partial_snapshot_and_only_its_referenced_workbook() {
+        use crate::models::{
+            DraftInput, ExportSelection, JointContact, VocabularyCategory, VocabularyEntry,
+        };
+        let workspace = Workspace::new();
+        workspace.configure();
+        let stored = VocabularyEntry {
+            canonical: "归档机关名".into(),
+            identity: uuid::Uuid::new_v4().to_string(),
+            code: "01".into(),
+            ..Default::default()
+        };
+        let child = VocabularyEntry {
+            canonical: "业务处".into(),
+            code: "0101".into(),
+            identity: uuid::Uuid::new_v4().to_string(),
+            owner_identity: stored.identity.clone(),
+            parent: stored.code.clone(),
+            ..Default::default()
+        };
+        let contact = VocabularyEntry {
+            canonical: "李四".into(),
+            category: VocabularyCategory::Person,
+            phone: "010-22223333".into(),
+            code: "01".into(),
+            identity: uuid::Uuid::new_v4().to_string(),
+            owner_identity: child.identity.clone(),
+            unit: child.code.clone(),
+            ..Default::default()
+        };
+        let inactive = VocabularyEntry {
+            canonical: contact.canonical.clone(),
+            code: "02".into(),
+            identity: uuid::Uuid::new_v4().to_string(),
+            phone: "010-99999999".into(),
+            ..contact.clone()
+        };
+        let live = VocabularyEntry {
+            canonical: "改名后的机关".into(),
+            ..stored.clone()
+        };
+        let entries = [live, child.clone(), contact.clone(), inactive.clone()];
+        let mut input = DraftInput::default();
+        input.profile.issuing_unit = stored.key();
+        input.profile.responsible_unit = stored.key();
+        input.profile.recipient = "收文单位".into();
+        input.profile.joint_contacts.push(JointContact {
+            unit: child.key(),
+            name: inactive.key(),
+            phone: inactive.phone.clone(),
+        });
+        input
+            .profile
+            .additional_responsible_contacts
+            .push(JointContact {
+                unit: child.key(),
+                name: contact.key(),
+                phone: contact.phone.clone(),
+            });
+        input.profile.vocabulary_snapshot.push(stored.clone());
+        assert!(crate::units::identity::ensure_historical_references(&input).is_err());
+
+        let mut selection = ExportSelection {
+            docx: true,
+            pdf: crate::portable_runtime::find_font_dir().is_some(),
+            markdown: false,
+            ..Default::default()
+        };
+        let export = |selection: &ExportSelection| {
+            crate::export::export_artifacts(
+                workspace.0.path(),
+                &input,
+                "# 测试公函\n\n正文。",
+                selection,
+                &crate::units::UnitDisplay::new(&entries),
+                &Default::default(),
+                &Default::default(),
+                None,
+                &Default::default(),
+            )
+            .unwrap()
+        };
+        let without = export(&selection);
+        assert!(
+            without
+                .files
+                .iter()
+                .all(|path| path.extension().unwrap() != "xlsx")
+        );
+        selection.referenced_vocabulary = true;
+        let with = export(&selection);
+        assert!(with.compile_error.is_none(), "{:?}", with.compile_error);
+        let workbook = with
+            .files
+            .iter()
+            .find(|path| path.extension().unwrap() == "xlsx")
+            .unwrap();
+        let bytes = office::decrypt(&std::fs::read(workbook).unwrap(), PASSWORD).unwrap();
+        let sheet = crate::vocabulary_xlsx::parse_bytes(&bytes, &[]).unwrap();
+        assert_eq!(sheet.entries.len(), 3);
+        assert!(
+            sheet
+                .entries
+                .iter()
+                .any(|row| row.identity == stored.identity && row.canonical == stored.canonical)
+        );
+        assert!(
+            sheet
+                .entries
+                .iter()
+                .any(|row| row.identity == contact.identity && row.phone == contact.phone)
+        );
+        assert!(
+            !sheet
+                .entries
+                .iter()
+                .any(|row| row.identity == inactive.identity)
+        );
+        assert_eq!(input.profile.vocabulary_snapshot, vec![stored]);
+
+        let docx = with
+            .files
+            .iter()
+            .find(|path| path.extension().unwrap() == "docx")
+            .unwrap();
+        let bytes =
+            office_crypto::decrypt_from_bytes(std::fs::read(docx).unwrap(), PASSWORD).unwrap();
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut xml)
+            .unwrap();
+        assert!(xml.contains("归档机关名") && xml.contains("010-22223333"));
+        assert!(!xml.contains("改名后的机关") && !xml.contains("010-99999999"));
     }
 
     #[test]
@@ -651,7 +844,7 @@ mod tests {
             let bytes = std::fs::read(&path).unwrap();
             match path.extension().unwrap().to_str().unwrap() {
                 "pdf" => assert!(Document::load_metadata_mem(&bytes).unwrap().encrypted),
-                "docx" => {
+                "docx" | "xlsx" => {
                     let plain = office_crypto::decrypt_from_bytes(bytes.clone(), PASSWORD).unwrap();
                     assert!(zip::ZipArchive::new(Cursor::new(&plain)).is_ok());
                     assert_ne!(

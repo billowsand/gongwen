@@ -78,6 +78,7 @@ impl DraftPage<'_> {
                 typst: false,
                 // 源码包只有正文，不带签收记录单。
                 receipt: false,
+                referenced_vocabulary: false,
                 overwrite: self.config.export.overwrite,
             });
             if self.doc.busy {

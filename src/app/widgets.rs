@@ -1290,6 +1290,14 @@ pub(crate) fn export_and_compile(
     )?;
     let compile_error = artifacts.compile_error;
     let files = artifacts.files;
+    if selection.referenced_vocabulary
+        && !files.iter().any(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("xlsx"))
+        })
+    {
+        warnings.push("本稿没有可随附的标准词库引用。".into());
+    }
     let sheets = artifacts.sheets;
     if let Some(outcome) = artifacts.typst {
         // 孤行只有排完版才知道：模板在段首段尾留下位置，拼成探针报告。

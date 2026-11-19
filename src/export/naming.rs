@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub(super) const MAX_EXPORT_FILENAME_CHARS: usize = 42;
-pub(super) const EXPORT_FILE_SUFFIXES: [&str; 7] = [
+pub(super) const EXPORT_FILE_SUFFIXES: [&str; 8] = [
     "-源码包.zip",
     ".docx",
     ".pdf",
@@ -14,6 +14,7 @@ pub(super) const EXPORT_FILE_SUFFIXES: [&str; 7] = [
     "-Typst包.zip",
     "_签收记录单.docx",
     "_签收记录单.pdf",
+    super::vocabulary::FILE_SUFFIX,
 ];
 
 pub(super) fn shorten(value: &str, budget: usize) -> String {

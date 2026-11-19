@@ -8,7 +8,7 @@ use crate::doc_import;
 use crate::draft_page::{DocKey, DraftPage, ExportKind, FileAction};
 use crate::export;
 use crate::images;
-use crate::models::{DraftInput, ExportSelection, ReviewNote};
+use crate::models::{DraftInput, ExportSelection, ManuscriptStatus, ReviewNote};
 #[cfg(feature = "ai-workbench")]
 use crate::revise_model;
 use crate::theme;
@@ -88,6 +88,7 @@ fn render_export_to(
     let memory_root = Path::new("memory-export");
     let mut selection = kind.selection(true, false);
     selection.print_trace = config.export.print_trace.clone();
+    selection.referenced_vocabulary = config.export.referenced_vocabulary;
     let (result, mut files) = mdx::memory_files::capture_outputs(|| {
         export_and_compile(
             memory_root,
@@ -117,12 +118,31 @@ fn render_export_to(
     } else {
         target.to_path_buf()
     };
-    let target = export::protection::write_final_with(protection, &logical_target, &bytes)?;
-    outcome.files = vec![target];
+    let workbook = files.into_iter().find_map(|(path, bytes)| {
+        path.extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("xlsx"))
+            .then_some(bytes)
+    });
+    let (document, workbook) = export::vocabulary::write_document_with_workbook(
+        protection,
+        &logical_target,
+        bytes,
+        workbook,
+    )?;
+    outcome.files = std::iter::once(document).chain(workbook).collect();
     Ok(outcome)
 }
 
 impl DraftPage<'_> {
+    /// 归档成品只用归档快照，活稿可按永久身份补齐。
+    fn live_vocabulary_for_export(&self) -> &[crate::models::VocabularyEntry] {
+        if self.doc.record_status == ManuscriptStatus::Archived {
+            &[]
+        } else {
+            &self.config.vocabulary
+        }
+    }
+
     /// 发起一次后台任务：记在本篇名下并推进序号，结果只认这一对标识。
     pub(crate) fn begin_job(&mut self) -> (DocKey, u64) {
         self.doc.busy = true;
@@ -169,6 +189,7 @@ impl DraftPage<'_> {
         print: bool,
     ) {
         selection.print_trace = self.config.export.print_trace.clone();
+        selection.referenced_vocabulary = !print && self.config.export.referenced_vocabulary;
         if self.doc.busy || self.doc.generated_markdown.trim().is_empty() || !selection.any() {
             // 沿用原入口的错误提示，不为不会启动的任务弹风险框。
             self.start_confirmed_export(selection, open, print);
@@ -204,6 +225,9 @@ impl DraftPage<'_> {
             }
             if selection.receipt {
                 formats.push("随行单据");
+            }
+            if selection.referenced_vocabulary {
+                formats.push("引用词库 Excel");
             }
             let operation = format!(
                 "导出当前稿件\n格式：{}\n输出目录：{}",
@@ -295,7 +319,7 @@ impl DraftPage<'_> {
         let input = self.doc.draft.clone();
         let output_dir = PathBuf::from(&self.config.output_dir);
         let markdown = self.doc.generated_markdown.clone();
-        let vocabulary = self.config.vocabulary.clone();
+        let vocabulary = self.live_vocabulary_for_export().to_vec();
         let fonts = self.config.fonts.clone();
         let numbering = self.config.numbering;
         // 设置页「加密传输单」里的默认填写内容：传发任务单上照填。
@@ -401,7 +425,10 @@ impl DraftPage<'_> {
         let (key, seq) = self.begin_job();
         let input = self.doc.draft.clone();
         let markdown = self.doc.generated_markdown.clone();
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        if self.doc.record_status == ManuscriptStatus::Archived {
+            config.vocabulary.clear();
+        }
         let tx = self.sender.clone();
         *self.status = "正在内存中生成刻录文件…".into();
         thread::spawn(move || {
@@ -698,6 +725,7 @@ impl DraftPage<'_> {
         &mut self,
         kind: ExportKind,
         target: PathBuf,
+        referenced_vocabulary: bool,
         protection: Option<export::protection::Protection>,
     ) {
         if self.doc.busy || self.doc.generated_markdown.trim().is_empty() {
@@ -705,7 +733,11 @@ impl DraftPage<'_> {
         }
         let input = self.doc.draft.clone();
         let markdown = self.doc.generated_markdown.clone();
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        config.export.referenced_vocabulary = referenced_vocabulary;
+        if self.doc.record_status == ManuscriptStatus::Archived {
+            config.vocabulary.clear();
+        }
         let (key, seq) = self.begin_job();
         self.doc.open_after_export = None;
         self.doc.output_files.clear();

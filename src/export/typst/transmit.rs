@@ -408,10 +408,21 @@ pub(crate) fn build(
     ));
     cells.push(label("签批人", row(3)));
     cells.push(signatory_cell(defaults));
+    let contact = input
+        .profile
+        .letter_responsible_entries()
+        .into_iter()
+        .find(|entry| !entry.name.trim().is_empty() || !entry.phone.trim().is_empty())
+        .unwrap_or_default();
     cells.push(label("联系人", row(4)));
-    cells.push(text_or_blank(&contact_name(input, display), 6, 1, 0.0));
+    cells.push(text_or_blank(
+        &display.person_name(&contact.name),
+        6,
+        1,
+        0.0,
+    ));
     cells.push(label2("联系电话"));
-    cells.push(text_or_blank(input.profile.contact_phone.trim(), 6, 1, 0.0));
+    cells.push(text_or_blank(contact.phone.trim(), 6, 1, 0.0));
     cells.push(label("通知收件人情况", row(5)));
     cells.push(TransmitCell {
         colspan: 3,
@@ -753,15 +764,6 @@ fn blank_value(colspan: usize, blank_chars: usize) -> TransmitCell {
         size_pt: 0.0,
         layout: TransmitLayout::default(),
     }
-}
-
-/// 版记里的联系人姓名。
-fn contact_name(input: &DraftInput, display: &UnitDisplay) -> String {
-    let person = input.profile.contact_person.trim();
-    if person.is_empty() {
-        return String::new();
-    }
-    display.person_name(person)
 }
 
 /// 密级：密级与保密期限都写上，便于收件单位核对。

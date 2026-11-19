@@ -561,9 +561,11 @@ impl GongwenApp {
             }
             let result: anyhow::Result<ImportPreview> = (|| {
                 let manifest = manuscript_io::read_manifest(&path, &worker_password)?;
-                let vocabulary = manuscript_io::read_vocabulary(&path, &worker_password)
-                    .map_err(|error| anyhow::anyhow!("稿件包词库读取失败：{error:#}"))
-                    .unwrap_or(None);
+                let (vocabulary, vocabulary_error) =
+                    match manuscript_io::read_vocabulary(&path, &worker_password) {
+                        Ok(vocabulary) => (vocabulary, None),
+                        Err(error) => (None, Some(format!("{error:#}"))),
+                    };
                 let mut store = ManuscriptStore::open(&db_path)
                     .with_context(|| format!("无法打开稿件库 {}", db_path.display()))?;
                 let relations = manuscript_io::sync::inspect(&mut store, &manifest)?;
@@ -644,8 +646,9 @@ impl GongwenApp {
                     manifest_hash,
                     package_diffs,
                     focused: None,
+                    merge_vocabulary: vocabulary.is_some(),
                     vocabulary,
-                    merge_vocabulary: true,
+                    vocabulary_error,
                     password: worker_password,
                     notice: None,
                 })
@@ -850,6 +853,9 @@ impl GongwenApp {
                     summary.skipped,
                     summary.pdfs_added
                 );
+                if let Some(error) = &preview.vocabulary_error {
+                    message.push_str(&format!(" 随包词库读取失败：{error}"));
+                }
                 if preview.merge_vocabulary
                     && let Some(vocabulary) = &preview.vocabulary
                 {
@@ -860,18 +866,25 @@ impl GongwenApp {
                     );
                     match report {
                         Err(error) => message.push_str(&format!(" 词库未合并：{error}")),
-                        Ok(report) => match storage::save(&staged_config) {
-                            Ok(()) => {
-                                self.config = staged_config;
-                                message.push_str(&format!(
-                                    " 词库合并：新增 {}、更新 {}、不变 {} 条。",
-                                    report.added, report.updated, report.unchanged
-                                ));
+                        Ok(report) => {
+                            if !staged_config.vocabulary.is_empty() {
+                                staged_config.vocabulary_setup =
+                                    crate::models::VocabularySetupStatus::Completed;
                             }
-                            Err(error) => message.push_str(&format!(
-                                " 词库未合并，保存失败：{error:#}（请检查配置目录权限）"
-                            )),
-                        },
+                            match storage::save(&staged_config) {
+                                Ok(()) => {
+                                    self.vocabulary_dirty = false;
+                                    self.config = staged_config;
+                                    message.push_str(&format!(
+                                        " 词库合并：新增 {}、更新 {}、不变 {} 条。",
+                                        report.added, report.updated, report.unchanged
+                                    ));
+                                }
+                                Err(error) => message.push_str(&format!(
+                                    " 词库未合并，保存失败：{error:#}（请检查配置目录权限）"
+                                )),
+                            }
+                        }
                     }
                 }
                 self.status = message;

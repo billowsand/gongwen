@@ -346,6 +346,8 @@ pub struct ExportSelection {
     /// 两者都与原公函分开成文件，不拼进公函。默认关闭；旧配置没有这一项时按关闭处理。
     #[serde(default)]
     pub receipt: bool,
+    /// 随文单独交付由文档引用生成的 Excel 词库。
+    pub referenced_vocabulary: bool,
     /// 旧配置兼容字段；导出现在始终覆盖同名文件。
     pub overwrite: bool,
     /// 导出 PDF 时叠加印制追溯码，默认关闭；与收文单位无关。
@@ -393,6 +395,7 @@ impl Default for ExportSelection {
             pdf: true,
             typst: false,
             receipt: false,
+            referenced_vocabulary: false,
             overwrite: true,
             print_trace: PrintTraceConfig::default(),
         }

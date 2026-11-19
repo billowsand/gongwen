@@ -44,13 +44,12 @@ pub(super) fn write(
     path: &Path,
     input: &DraftInput,
     markdown: &str,
+    record_display: &crate::units::UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
     elements: &crate::visual_diff::ElementMarks,
 ) -> Result<()> {
-    let record_display =
-        crate::units::UnitDisplay::new(&input.profile.vocabulary_snapshot).for_input(input);
-    let readable = crate::units::identity::readable_phone_record(input, &record_display);
+    let readable = crate::units::identity::readable_phone_record(input, record_display);
     let input = &readable;
     let r = &input.phone_record;
     let (level, period) = crate::export::element_display::security_parts(input);

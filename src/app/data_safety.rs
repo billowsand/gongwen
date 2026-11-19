@@ -228,6 +228,7 @@ impl GongwenApp {
         self.vocabulary_delete_confirm = None;
         self.vocabulary_clear_confirm = false;
         self.vocabulary_import_conflicts = None;
+        self.vocabulary_import = None;
         self.vocabulary_sort_undo = None;
         self.vocabulary_move = None;
         self.vocabulary_filter.clear();

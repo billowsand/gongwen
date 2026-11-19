@@ -475,6 +475,11 @@ impl GongwenApp {
         ai_busy
             || self.print_jobs_in_flight > 0
             || self.lexicon_busy
+            || self.vocabulary_export_busy
+            || self
+                .vocabulary_import
+                .as_ref()
+                .is_some_and(super::vocabulary::VocabularyImport::busy)
             || self.backup_busy
             || self.backup_restore_running
             || self.docs.iter().any(|doc| doc.busy || doc.in_flight > 0)
@@ -674,6 +679,7 @@ impl GongwenApp {
                     let spec = super::file_dialog::FileDialogSpec::save_file()
                         .file_name(name)
                         .filter(kind.label(), &[extension]);
+                    let referenced_vocabulary = self.config.export.referenced_vocabulary;
                     let save: super::output_guard::OutputAction = Box::new(move |app| {
                         let protection = match crate::export::protection::Protection::current() {
                             Ok(protection) => protection,
@@ -685,16 +691,26 @@ impl GongwenApp {
                         app.request_file(spec, move |app, target| {
                             let Some(target) = target else { return };
                             if let Some(index) = app.doc_index_of_key(key) {
-                                app.draft_page_at(index)
-                                    .export_current_to(kind, target, protection);
+                                app.draft_page_at(index).export_current_to(
+                                    kind,
+                                    target,
+                                    referenced_vocabulary,
+                                    protection,
+                                );
                             }
                         });
                     });
+                    let mut selection = kind.selection(true, false);
+                    selection.referenced_vocabulary = referenced_vocabulary;
                     if encrypted {
-                        let selection = kind.selection(true, false);
                         self.choose_draft_delivery(ctx, key, selection, None, Some(save));
                     } else {
-                        self.request_document_output("按当前正文和表单重新导出到所选位置", save);
+                        let operation = if selection.referenced_vocabulary {
+                            "按当前正文和表单重新导出，并附引用词库 Excel"
+                        } else {
+                            "按当前正文和表单重新导出到所选位置"
+                        };
+                        self.request_document_output(operation, save);
                     }
                 }
                 DraftAction::ImportBibliography { key } => {

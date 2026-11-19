@@ -16,6 +16,7 @@ mod research_theme;
 pub(crate) mod table;
 pub(crate) mod title;
 pub(crate) mod typst;
+pub(crate) mod vocabulary;
 pub(crate) use docx::record::automatic_print_copies;
 #[allow(unused_imports)]
 pub(crate) use docx::{write_docx, write_docx_with_numbering};
@@ -153,7 +154,12 @@ pub(crate) fn copy_count(input: &DraftInput) -> u32 {
 
 /// 份号与收文单位的对应清单：份号顺序与 [`copy_count`] 一致，依次为主送、抄送、承办单位。
 /// 未开逐份编号或文种无份号时返回 `None`。
+#[cfg(test)]
 pub(crate) fn copy_roster(input: &DraftInput) -> Option<String> {
+    copy_roster_with_display(input, &UnitDisplay::new(&input.profile.vocabulary_snapshot))
+}
+
+fn copy_roster_with_display(input: &DraftInput, display: &UnitDisplay) -> Option<String> {
     if !input.profile.number_copies || !input.kind.has_copy_numbering() {
         return None;
     }
@@ -171,7 +177,7 @@ pub(crate) fn copy_roster(input: &DraftInput) -> Option<String> {
         "份号	单位	类别
 ",
     );
-    let display = UnitDisplay::new(&input.profile.vocabulary_snapshot).for_input(input);
+    let display = display.for_input(input);
     let mut serial = 0u32;
     for (label, value) in groups {
         for unit in split_units(value) {
@@ -464,8 +470,11 @@ pub(crate) fn export_artifacts(
         }
         return Ok(artifacts);
     }
-    display
-        .for_input(input)
+    let mut live_input = input.clone();
+    crate::units::identity::complete_live_export(&mut live_input, display.entries());
+    let input = &live_input;
+    let scoped_display = display.for_input(input);
+    scoped_display
         .ensure_resolved(input)
         .map_err(anyhow::Error::msg)?;
     let title = document_title(input, markdown);
@@ -488,6 +497,16 @@ pub(crate) fn export_artifacts(
     let mut files = Vec::new();
     // 公函两类随行单据的份数；非公函或没勾选时保持为零。
     let mut sheet_outputs = SheetOutputs::default();
+
+    let referenced_workbook = if selection.referenced_vocabulary && selection.any() {
+        vocabulary::workbook(&vocabulary::referenced_entries(
+            input,
+            &scoped_display,
+            receipt,
+        ))?
+    } else {
+        None
+    };
 
     if selection.markdown {
         let path = document_dir.join(format!("{file_stem}-源码包.zip"));
@@ -610,6 +629,13 @@ pub(crate) fn export_artifacts(
             main.pdf =
                 mdx::memory_files::read_output(&document_dir.join(format!("{file_stem}.pdf")))?;
         }
+    }
+    if !files.is_empty()
+        && let Some(bytes) = referenced_workbook
+    {
+        let path = document_dir.join(format!("{file_stem}{}", vocabulary::FILE_SUFFIX));
+        vocabulary::write_workbook(&path, &bytes).context("写入随文引用词库失败")?;
+        files.push(path);
     }
     if !files.is_empty() && !mdx::memory_files::output_is_captured() {
         naming::record_outputs(
@@ -755,7 +781,7 @@ pub(crate) fn write_pdf(
     mdx::memory_files::write_output(path, &outcome.pdf)
         .with_context(|| format!("无法写入 PDF：{}", path.display()))?;
     if !input.kind.is_research()
-        && let Some(roster) = copy_roster(input)
+        && let Some(roster) = copy_roster_with_display(input, display)
     {
         // 清单含份号、主送/抄送/承办单位，和 PDF 同等敏感：原子写 + Unix 0600，
         // 不能默认 0644 摊在输出目录里。写失败不影响 PDF。
@@ -1989,6 +2015,7 @@ mod tests {
             pdf: false,
             typst: false,
             receipt: false,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let files = export_all(
@@ -2033,6 +2060,7 @@ mod tests {
             pdf: false,
             typst: false,
             receipt: false,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let markdown = format!("# 标题\n\n正文。\n\n![图](images/{name})");
@@ -2069,6 +2097,7 @@ mod tests {
             pdf: false,
             typst: false,
             receipt: false,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let files = export_all(
@@ -2109,6 +2138,7 @@ mod tests {
             pdf: false,
             typst: false,
             receipt: false,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let first = export_all(
@@ -2230,6 +2260,7 @@ mod tests {
             pdf: false,
             typst: false,
             receipt: false,
+            referenced_vocabulary: false,
             overwrite: false,
         };
         let run = |input: &DraftInput, body: &str| {
@@ -2287,6 +2318,7 @@ mod tests {
             pdf: false,
             typst: true,
             receipt: true,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let artifacts = export_artifacts(
@@ -2334,6 +2366,7 @@ mod tests {
             pdf: false,
             typst: false,
             receipt: true,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let artifacts = export_artifacts(
@@ -2397,6 +2430,7 @@ mod tests {
             pdf: false,
             typst: false,
             receipt: false,
+            referenced_vocabulary: false,
             overwrite: false,
         };
         let result = export_artifacts(
@@ -2609,6 +2643,7 @@ mod tests {
             pdf: false,
             typst: false,
             receipt: false,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let files = run(&selection);
@@ -2617,6 +2652,7 @@ mod tests {
         // 勾上后：多出一份独立的 Word，命名是「<主干名>_签收记录单.docx」，与公函同目录。
         let selection = ExportSelection {
             receipt: true,
+            referenced_vocabulary: false,
             ..selection
         };
         let files = run(&selection);
@@ -2635,6 +2671,7 @@ mod tests {
             pdf: false,
             typst: false,
             receipt: true,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         assert!(!only_receipt.any());
@@ -2655,6 +2692,7 @@ mod tests {
             pdf: false,
             typst: false,
             receipt: true,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let files = export_all(
@@ -2693,6 +2731,7 @@ mod tests {
             pdf: true,
             typst: false,
             receipt: true,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let files = export_all(
@@ -2733,6 +2772,7 @@ mod tests {
             pdf: true,
             typst: false,
             receipt: true,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let files = export_all(
@@ -2800,6 +2840,7 @@ mod tests {
             pdf: true,
             typst: false,
             receipt: true,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let artifacts = export_artifacts(
@@ -2857,6 +2898,7 @@ mod tests {
             pdf: false,
             typst: false,
             receipt: true,
+            referenced_vocabulary: false,
             overwrite: true,
         };
         let files = export_all(

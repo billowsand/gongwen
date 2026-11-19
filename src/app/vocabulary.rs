@@ -3,13 +3,13 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::vocabulary`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
-use super::file_dialog::FileDialogSpec;
 use crate::app::{
     GongwenApp, VersionScope, VocabularyMoveDraft, unique_name, vocabulary_depths,
     vocabulary_matches, warn, wrapped_hint,
 };
 use crate::modal::{self, Dismiss};
 use crate::models::{VocabularyCategory, VocabularyEntry, VocabularySetupStatus, split_units};
+#[cfg(test)]
 use crate::storage;
 use crate::theme;
 use crate::units;
@@ -21,6 +21,8 @@ use std::collections::BTreeMap;
 #[path = "vocabulary_drag.rs"]
 mod drag;
 pub(super) use drag::SortUndo;
+mod exchange;
+pub(super) use exchange::VocabularyImport;
 
 /// 同理，词库树上的增删和排序也要等本帧渲染完再改动 `Vec`。
 pub(crate) enum VocabAction {
@@ -172,147 +174,6 @@ fn tree_label(ui: &mut egui::Ui, rect: egui::Rect, text: egui::RichText, align: 
 }
 
 impl GongwenApp {
-    pub(crate) fn import_vocabulary_xlsx(&mut self) {
-        self.request_file(
-            FileDialogSpec::pick_file().filter("Excel 词库", &["xlsx"]),
-            |app, path| {
-                let Some(path) = path else {
-                    return;
-                };
-                app.vocabulary_import_conflicts = None;
-                let result = (|| -> Result<(usize, vocabulary_xlsx::MergeReport), String> {
-                    let mut staged_config = app.config.clone();
-                    let existing_codes: Vec<String> = app
-                        .config
-                        .vocabulary
-                        .iter()
-                        .filter(|e| e.category == VocabularyCategory::Unit)
-                        .map(|e| e.code.trim().to_string())
-                        .filter(|c| !c.is_empty())
-                        .collect();
-                    let report = vocabulary_xlsx::parse(&path, &existing_codes)
-                        .map_err(|error| error.summary)?;
-                    let parsed_count = report.entries.len();
-                    let merge =
-                        vocabulary_xlsx::merge(&mut staged_config.vocabulary, report.entries)?;
-                    units::normalize(&mut staged_config.vocabulary);
-                    if !staged_config.vocabulary.is_empty() {
-                        staged_config.vocabulary_setup = VocabularySetupStatus::Completed;
-                    }
-                    storage::save(&staged_config)
-                        .map_err(|error| format!("保存词库失败：{error:#}"))?;
-                    app.config = staged_config;
-                    Ok((parsed_count, merge))
-                })();
-                match result {
-                    Ok((parsed, merge)) => {
-                        app.vocabulary_dirty = false;
-                        app.status = format!(
-                            "已从“{}”解析 {} 条：新增 {} 条、更新 {} 条、未变化 {} 条。",
-                            path.file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("Excel 词库"),
-                            parsed,
-                            merge.added,
-                            merge.updated,
-                            merge.unchanged
-                        );
-                    }
-                    Err(summary) => {
-                        // 重新解析 conflict 列表用于渲染。如要优化可把 conflicts 放在错误里。
-                        let existing_codes: Vec<String> = app
-                            .config
-                            .vocabulary
-                            .iter()
-                            .filter(|e| e.category == VocabularyCategory::Unit)
-                            .map(|e| e.code.trim().to_string())
-                            .filter(|c| !c.is_empty())
-                            .collect();
-                        let conflicts = vocabulary_xlsx::parse(&path, &existing_codes)
-                            .err()
-                            .map(|e| e.conflicts)
-                            .unwrap_or_default();
-                        app.vocabulary_import_conflicts = if conflicts.is_empty() {
-                            None
-                        } else {
-                            Some(conflicts)
-                        };
-                        app.status = format!("词库导入失败：{summary}");
-                    }
-                }
-            },
-        );
-    }
-
-    pub(crate) fn export_vocabulary_xlsx(&mut self) {
-        const FILE_NAME: &str = "公文助手标准词库.xlsx";
-        if self.auxiliary_requires_protection() {
-            let vocabulary = self.config.vocabulary.clone();
-            self.request_protected_archive("导出标准词库 Excel", FILE_NAME, move || {
-                let codes = vocabulary_unit_codes(&vocabulary);
-                let bytes = vocabulary_xlsx::xlsx_bytes(&vocabulary, &codes)?;
-                Ok(vec![(FILE_NAME.into(), bytes)])
-            });
-            return;
-        }
-        let spec = FileDialogSpec::save_file()
-            .filter("Excel", &["xlsx"])
-            .file_name(FILE_NAME);
-        // 标准词库含姓名、职务、联系电话与个人简介，加密工作区里导出成普通表格要先确认风险。
-        self.request_output_with_warning(
-            "导出标准词库 Excel（含姓名、职务、联系电话、个人简介）",
-            super::output_guard::PII_EXPORT_WARNING,
-            move |app| {
-                app.request_file(spec, |app, path| {
-                    let Some(path) = path else {
-                        return;
-                    };
-                    let codes = vocabulary_unit_codes(&app.config.vocabulary);
-                    let result = vocabulary_xlsx::to_xlsx(&app.config.vocabulary, &path, &codes);
-                    match result {
-                        Ok(()) => app.status = format!("词库已导出到 {}。", path.display()),
-                        Err(error) => app.status = format!("词库导出失败：{error}"),
-                    }
-                });
-            },
-        );
-    }
-
-    pub(crate) fn export_blank_vocabulary_template(&mut self) {
-        const FILE_NAME: &str = "公文助手标准词库模板.xlsx";
-        if self.auxiliary_requires_protection() {
-            let vocabulary = self.config.vocabulary.clone();
-            self.request_protected_archive("导出词库模板 Excel", FILE_NAME, move || {
-                let codes = vocabulary_unit_codes(&vocabulary);
-                let bytes = vocabulary_xlsx::xlsx_bytes(&[], &codes)?;
-                Ok(vec![(FILE_NAME.into(), bytes)])
-            });
-            return;
-        }
-        let spec = FileDialogSpec::save_file()
-            .filter("Excel", &["xlsx"])
-            .file_name(FILE_NAME);
-        // 模板本身是空白表，但数据校验列表会带出配置里的单位代字（可反推发文单位），
-        // 与标准词库导出同属普通文件出口，加密工作区里先确认风险。
-        self.request_output_with_warning(
-            "导出空白词库模板（数据校验列表含单位代字）",
-            super::output_guard::PII_EXPORT_WARNING,
-            move |app| {
-                app.request_file(spec, |app, path| {
-                    let Some(path) = path else {
-                        return;
-                    };
-                    let codes = vocabulary_unit_codes(&app.config.vocabulary);
-                    let result = vocabulary_xlsx::to_xlsx(&[], &path, &codes);
-                    match result {
-                        Ok(()) => app.status = format!("空白词库模板已导出到 {}。", path.display()),
-                        Err(error) => app.status = format!("模板导出失败：{error}"),
-                    }
-                });
-            },
-        );
-    }
-
     pub(crate) fn renormalize_vocabulary(&mut self) {
         units::identity::restore_owners(&mut self.config.vocabulary);
         units::rebuild_parents_from_codes(&mut self.config.vocabulary);
@@ -398,11 +259,11 @@ impl GongwenApp {
                         }
                         if ui
                             .add(theme::icon_text_button(theme::Icon::FileDown, "导出 Excel"))
-                            .on_hover_text("把当前词库导出为 Excel 模板，含下拉与冻结")
+                            .on_hover_text("导出当前标准词库，保留单位、人员、身份编码和表格下拉")
                             .clicked()
                         {
                             ui.close();
-                            self.export_vocabulary_xlsx();
+                            self.export_vocabulary_xlsx(ui.ctx(), false);
                         }
                         ui.separator();
                         if ui
@@ -414,7 +275,7 @@ impl GongwenApp {
                             .clicked()
                         {
                             ui.close();
-                            self.export_blank_vocabulary_template();
+                            self.export_vocabulary_xlsx(ui.ctx(), true);
                         }
                     },
                 );
@@ -677,7 +538,7 @@ impl GongwenApp {
                             self.import_vocabulary_xlsx();
                         }
                         if ui.button("下载空白模板").clicked() {
-                            self.export_blank_vocabulary_template();
+                            self.export_vocabulary_xlsx(ui.ctx(), true);
                         }
                         if ui.button("暂不建立").clicked() {
                             self.config.vocabulary_setup = VocabularySetupStatus::Skipped;
@@ -2173,16 +2034,6 @@ impl GongwenApp {
     }
 }
 
-fn vocabulary_unit_codes(vocabulary: &[VocabularyEntry]) -> Vec<String> {
-    vocabulary
-        .iter()
-        .filter(|entry| entry.category == VocabularyCategory::Unit)
-        .map(|entry| entry.code.trim())
-        .filter(|code| !code.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2228,13 +2079,22 @@ mod tests {
     #[test]
     fn encrypted_vocabulary_export_waits_for_confirmation_and_cancel_writes_nothing() {
         let (mut app, dir, _reset) = encrypted_app();
-        app.export_vocabulary_xlsx();
+        app.export_vocabulary_xlsx(&egui::Context::default(), false);
+        assert!(app.media_export.is_some());
+        assert!(app.pending_output.is_none());
         assert!(
-            app.pending_output.is_some(),
-            "加密模式下导出标准词库应先弹一次性风险确认"
+            app.pending_file_dialogs.is_empty(),
+            "选择交付方式前不能打开保存框"
         );
-        assert!(app.pending_file_dialogs.is_empty(), "确认前不能打开保存框");
-        let app = cancel_output_risk(app);
+        let mut harness = harness_ui_state(
+            |ui, app: &mut GongwenApp| app.media_export_window(ui.ctx()),
+            app,
+        );
+        harness.run();
+        harness.get_by_label("取消").click();
+        harness.run();
+        let app = harness.into_state();
+        assert!(app.media_export.is_none());
         assert!(app.pending_output.is_none());
         assert!(app.pending_file_dialogs.is_empty(), "取消后不能打开保存框");
         assert!(

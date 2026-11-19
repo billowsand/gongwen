@@ -47,6 +47,7 @@ fn package_with_owner(kind: TemplateKind) -> (ManuscriptStore, SendPackagePanel)
     panel.confirm = Some(ExportConfirm {
         plan: Arc::new(store.send_package_plan(ids[0]).unwrap()),
         with_toc: true,
+        with_vocabulary: false,
     });
     (store, panel)
 }

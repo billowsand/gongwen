@@ -75,6 +75,9 @@ pub(crate) fn import_preview_form(
             format!("合并包内标准词库到本机（{units} 个单位、{people} 名人员）"),
         );
     }
+    if let Some(error) = &preview.vocabulary_error {
+        ui.colored_label(warn(), format!("随包标准词库读取失败：{error}"));
+    }
     ui.add_space(4.0);
     let list_width = (ui.available_width() * 0.4).clamp(260.0, 380.0);
     // 两栏放进定高的盒子：模态的 Area 不限高，竖分隔线会一路撑到无穷高。
@@ -141,7 +144,12 @@ pub(crate) fn import_preview_form(
     dialog_notice(ui, &preview.notice);
     let mut decision = None;
     ui.horizontal(|ui| {
-        if ui.button("确认所选处理").clicked() {
+        let confirm = if preview.vocabulary_error.is_some() {
+            "仅导入所选稿件"
+        } else {
+            "确认所选处理"
+        };
+        if ui.button(confirm).clicked() {
             decision = Some(true);
         }
         if ui.button("取消").clicked() {

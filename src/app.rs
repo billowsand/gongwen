@@ -247,6 +247,8 @@ pub struct GongwenApp {
     /// 正在后台进行的送批材料合并导出；同一时间只跑一个。
     send_package_export: Option<SendPackageExportJob>,
     vocabulary_import_conflicts: Option<Vec<vocabulary_xlsx::Conflict>>,
+    vocabulary_import: Option<vocabulary::VocabularyImport>,
+    vocabulary_export_busy: bool,
     /// 词库有尚未写入本机配置的编辑。
     vocabulary_dirty: bool,
     /// 首次建库引导里的顶级单位名称草稿。
@@ -847,6 +849,8 @@ impl GongwenApp {
             #[cfg(feature = "ai-workbench")]
             model_picker_show_all: std::collections::HashSet::new(),
             vocabulary_import_conflicts: None,
+            vocabulary_import: None,
+            vocabulary_export_busy: false,
             vocabulary_dirty: false,
             vocabulary_setup_name: String::new(),
             vocabulary_move: None,
@@ -1357,6 +1361,7 @@ impl GongwenApp {
         self.data_safety_windows(&ctx);
         self.media_export_window(&ctx);
         self.output_risk_window(&ctx);
+        self.vocabulary_import_window(&ctx);
         // 缩放边框放在最后：它要盖在所有浮窗之上，贴边那几像素归窗口缩放。
         self.window_resize_borders(&ctx);
         // 候选窗浮在所有面板之上；这时编辑框已经画完，光标矩形是本帧最终的那一个。
