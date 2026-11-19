@@ -100,7 +100,8 @@ pub(crate) enum WorkerResult {
     Lexicon(crate::app::LexiconJob),
     /// 扫描本机字体目录的结果。中文字体文件很大，扫描放在后台线程。
     SystemFonts(Vec<system_fonts::SystemFont>),
-    /// 关于窗的更新检查结果。
+    /// 关于窗的更新检查结果。非 AI 版没有检查更新入口。
+    #[cfg(feature = "ai-workbench")]
     UpdateChecked(Result<crate::update_check::ReleaseInfo, String>),
     /// 导出全量备份：目标路径与文件字节数。
     BackupExported {
@@ -461,7 +462,8 @@ impl GongwenApp {
         });
     }
 
-    /// 检查最新发布。只发一次请求，结果回到关于窗内联显示。
+    /// 检查最新发布。只发一次请求，结果回到关于窗内联显示。非 AI 版没有这个入口。
+    #[cfg(feature = "ai-workbench")]
     pub(crate) fn start_update_check(&mut self, ctx: &egui::Context) {
         if matches!(
             self.update_check,
@@ -676,6 +678,7 @@ impl GongwenApp {
                     };
                     self.system_fonts = fonts;
                 }
+                #[cfg(feature = "ai-workbench")]
                 WorkerResult::UpdateChecked(result) => {
                     self.update_check = match result {
                         Ok(info) => {

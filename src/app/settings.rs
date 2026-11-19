@@ -9,9 +9,11 @@
 
 use super::file_dialog::FileDialogSpec;
 use crate::app::{GongwenApp, warn};
+#[cfg(feature = "ai-workbench")]
+use crate::models::ProxyMode;
 use crate::models::{
     BoldStyle, DiagramTheme, EditorFontFace, EditorFontPreset, EditorFontSlot, FontRole,
-    HeadingNumbering, ListNumbering, PaperMode, ProxyMode, ThemeName,
+    HeadingNumbering, ListNumbering, PaperMode, ThemeName,
 };
 use crate::storage;
 use crate::system_fonts;
@@ -53,7 +55,8 @@ const SETTING_ROW_HEIGHT: f32 = theme::CONTROL_HEIGHT;
 /// 设置页的分区：左侧主菜单的一项对应右侧一屏设置项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SettingsSection {
-    /// 网络代理（访问模型服务走的通道）。
+    /// 网络代理（访问模型服务走的通道）。非 AI 版不联网，整个分区不编译。
+    #[cfg(feature = "ai-workbench")]
     Network,
     /// 输出与录入（输出目录、编辑器选项）。
     Output,
@@ -84,7 +87,7 @@ pub(crate) enum SettingsSection {
 
 /// 左侧主菜单的分组。分组名只是小字标题，不可点击——十几项平铺成一列时，
 /// 找一项要从头扫到尾；按「配什么」分成几摞，眼睛一次只在一摞里找。
-const MENU_GROUPS: [(&str, &[SettingsSection]); 5] = [
+const MENU_GROUPS: &[(&str, &[SettingsSection])] = &[
     (
         "外观",
         &[
@@ -114,6 +117,7 @@ const MENU_GROUPS: [(&str, &[SettingsSection]); 5] = [
             SettingsSection::Backup,
         ],
     ),
+    #[cfg(feature = "ai-workbench")]
     ("网络", &[SettingsSection::Network]),
 ];
 
@@ -121,6 +125,7 @@ impl SettingsSection {
     /// 左侧主菜单里显示的中文名，同时是右栏的标题。
     pub(crate) fn label(self) -> &'static str {
         match self {
+            #[cfg(feature = "ai-workbench")]
             SettingsSection::Network => "网络代理",
             SettingsSection::Output => "输出与录入",
             SettingsSection::Theme => "界面主题",
@@ -140,6 +145,7 @@ impl SettingsSection {
     /// 菜单项与右栏标题共用的图标。
     fn icon(self) -> theme::Icon {
         match self {
+            #[cfg(feature = "ai-workbench")]
             SettingsSection::Network => theme::Icon::Globe,
             SettingsSection::Output => theme::Icon::Folder,
             SettingsSection::Theme => theme::Icon::Palette,
@@ -160,6 +166,7 @@ impl SettingsSection {
     /// 看起来没有交互的标题，等于没写；这里改成常显的小字。
     fn description(self) -> &'static str {
         match self {
+            #[cfg(feature = "ai-workbench")]
             SettingsSection::Network => {
                 "配置网络请求使用的代理，支持 HTTP、HTTPS 和 SOCKS。本机地址始终直连。"
             }
@@ -285,6 +292,8 @@ fn page_keys_label(keys: &str) -> String {
 /// 一行文本输入设置项。
 ///
 /// 这里的字段全是接口地址、API Key、代理地址这类只收 ASCII 的值，不走应用内输入法。
+/// 一行设置项：左列标签，右列可编辑的单行文本。仅 AI 版的分区用到。
+#[cfg(feature = "ai-workbench")]
 pub(super) fn setting_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
     setting_row(ui, label, None, |ui| {
         crate::ime::exempt(ui.add(theme::field(value, hint, f32::INFINITY)));
@@ -1413,6 +1422,7 @@ impl GongwenApp {
                         ui.separator();
                         ui.add_space(8.0);
                         match section {
+                            #[cfg(feature = "ai-workbench")]
                             SettingsSection::Network => self.network_section_ui(ui),
                             SettingsSection::Output => self.output_section_ui(ui),
                             SettingsSection::Theme => self.theme_settings_ui(ui),
@@ -1448,9 +1458,10 @@ impl GongwenApp {
         });
     }
 
-    /// 网络代理分区：直连 / 跟随系统 / 自定义代理。
+    /// 网络代理分区：直连 / 跟随系统 / 自定义代理。非 AI 版没有网络请求，分区不编译。
     ///
     /// 改动每帧同步给 [`crate::net`]，不必保存就能点「测试连接」验证。
+    #[cfg(feature = "ai-workbench")]
     fn network_section_ui(&mut self, ui: &mut egui::Ui) {
         let proxy = &mut self.config.proxy;
         sub_heading(ui, "通道", None);

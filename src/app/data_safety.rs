@@ -974,6 +974,7 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "ai-workbench")]
     #[test]
     fn update_check_wakes_an_idle_context_when_the_worker_finishes() {
         with_app(|app, _| {

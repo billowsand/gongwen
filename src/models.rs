@@ -47,6 +47,7 @@ pub(crate) use draft::ReviewNote;
 pub(crate) use draft::StyleMode;
 pub(crate) use environment::{DevicePolicy, EnvironmentPolicy};
 pub(crate) use network::ProxyConfig;
+#[cfg(feature = "ai-workbench")]
 pub(crate) use network::ProxyMode;
 #[cfg(feature = "ai-workbench")]
 pub(crate) use provider::EmbeddingConfig;
@@ -1004,7 +1005,7 @@ mod tests {
         );
         assert_eq!(
             config.update_check_url,
-            crate::update_check::DEFAULT_UPDATE_CHECK_URL
+            super::config::default_update_check_url()
         );
         assert!(!config.samples_seeded);
 

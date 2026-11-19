@@ -259,7 +259,8 @@ pub struct GongwenApp {
     vocabulary_sort_undo: Option<vocabulary::SortUndo>,
     /// "关于公文助手"弹窗显隐。
     about_window_open: bool,
-    /// 关于窗里「检查更新」的当前状态；只留在本次运行。
+    /// 关于窗里「检查更新」的当前状态；只留在本次运行。非 AI 版没有这个入口。
+    #[cfg(feature = "ai-workbench")]
     update_check: crate::update_check::UpdateCheckState,
     quick_find: Option<quick_find::QuickFind>,
     vocabulary_filter: String,
@@ -857,6 +858,7 @@ impl GongwenApp {
             vocabulary_move: None,
             vocabulary_sort_undo: None,
             about_window_open: false,
+            #[cfg(feature = "ai-workbench")]
             update_check: crate::update_check::UpdateCheckState::default(),
             quick_find: None,
             modal_guard: crate::modal::ModalGuard::default(),
@@ -1175,6 +1177,7 @@ impl GongwenApp {
         }
         self.sync_lexicon_to_ime_if_due(&ctx);
         // 代理同理：设置页一改，下一个请求就按新通道走，不必先保存。
+        #[cfg(feature = "ai-workbench")]
         crate::net::set_proxy(&self.config.proxy);
         self.handle_shortcuts(&ctx);
         self.poll_workspace_results(&ctx);

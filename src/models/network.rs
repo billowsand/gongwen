@@ -23,6 +23,8 @@ impl ProxyMode {
         }
     }
 
+    /// 设置页「网络代理」分区的三种连接方式；非 AI 版没有这个分区。
+    #[cfg(feature = "ai-workbench")]
     pub const ALL: [Self; 3] = [Self::Direct, Self::System, Self::Custom];
 }
 

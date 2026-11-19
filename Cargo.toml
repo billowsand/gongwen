@@ -18,7 +18,7 @@ default = ["ai", "linux-gtk-dialogs"]
 
 # 产品组合与桌面后端独立选择。
 ai = ["ai-workbench"]
-ai-workbench = ["task-assistant", "dep:serde_yaml"]
+ai-workbench = ["task-assistant", "dep:serde_yaml", "dep:reqwest"]
 task-assistant = []
 linux-gtk-dialogs = ["rfd/gtk3"]
 linux-portal-dialogs = ["rfd/xdg-portal", "rfd/wayland"]
@@ -44,8 +44,8 @@ calamine = "0.38.0"
 chardetng = "1.0.0"
 chrono = { version = "0.4", features = ["serde"] }
 # 粘贴时的图片：内联 data: 图片用 data-url 解析（只认 image/*，解码后按体积上限收），
-# 本机 file: 路径用 url 解析并还原百分号编码（中文用户名）。两个 crate 本来就在
-# 依赖树里（arboard / reqwest 带进来），这里只是声明直接引用，不新增下载。
+# 本机 file: 路径用 url 解析并还原百分号编码（中文用户名）。两个 crate 本来就
+# 在依赖树里（usvg / hayagriva 带进来），这里只是声明直接引用，不新增下载。
 data-url = "0.3.2"
 directories = "6.0"
 docx-rs = "0.4.22"
@@ -80,7 +80,8 @@ merman-render = "0.7.0"
 nucleo-matcher = "0.3.1"
 pinyin = { version = "0.11", default-features = false, features = ["plain", "heteronym"] }
 regex = "1.11"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "socks", "system-proxy"] }
+# 仅 AI 版：模型服务、知识库检索、数据接口与关于窗「检查更新」都走它。
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "socks", "system-proxy"], optional = true }
 # Mermaid 的 SVG 由本进程自己转 PNG / PDF：随包字体只建一次字体库反复复用，
 # 并把图按版心宽落到画布上。两者版本与 merman 内部所用的一致，不多引入副本。
 resvg = "0.46"

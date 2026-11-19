@@ -106,6 +106,7 @@ pub struct AppConfig {
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
     /// 更新检查地址（GitHub `releases/latest` 接口）。内网环境可改成镜像地址。
+    /// 非 AI 版没有检查更新入口，缺省为空。
     #[serde(default = "default_update_check_url")]
     pub update_check_url: String,
     /// 首次启动的示例稿是否已写入稿件库。旧配置没有该字段时视为尚未写入。
@@ -800,8 +801,17 @@ pub(crate) fn follow_system_theme_default() -> bool {
 }
 
 /// 旧配置文件没有更新检查地址；缺省用项目主页的 GitHub 发布接口。
+///
+/// 非 AI 版不联网，也没有「检查更新」入口；缺省留空，旧配置里的值原样保留。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn default_update_check_url() -> String {
     crate::update_check::DEFAULT_UPDATE_CHECK_URL.to_string()
+}
+
+/// 非 AI 版不联网，也没有「检查更新」入口；缺省留空，旧配置里的值原样保留。
+#[cfg(not(feature = "ai-workbench"))]
+pub(crate) fn default_update_check_url() -> String {
+    String::new()
 }
 
 /// 旧配置文件里没有这个开关；缺省按开启处理。

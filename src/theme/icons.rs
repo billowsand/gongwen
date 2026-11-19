@@ -48,6 +48,7 @@ pub enum Icon {
     Folder,
     FolderPlus,
     GitCommit,
+    #[cfg(feature = "ai-workbench")]
     Globe,
     Grip,
     Hash,
@@ -213,6 +214,7 @@ impl Icon {
                 "git-commit-horizontal",
                 include_bytes!("../../assets/icons/git-commit-horizontal.svg"),
             ),
+            #[cfg(feature = "ai-workbench")]
             Self::Globe => ("globe", include_bytes!("../../assets/icons/globe.svg")),
             Self::Grip => (
                 "grip-vertical",

@@ -1075,6 +1075,7 @@ impl GongwenApp {
             return;
         }
         let mut close_clicked = false;
+        #[cfg(feature = "ai-workbench")]
         let mut start_check = false;
         let win = egui::Window::new("关于公文助手")
             .collapsible(false)
@@ -1117,48 +1118,51 @@ impl GongwenApp {
                 });
                 ui.add_space(4.0);
                 ui.weak("本软件为内部使用工具，所有数据仅保存在本机。");
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    match &self.update_check {
-                        crate::update_check::UpdateCheckState::Checking => {
-                            let _ = ui.add_enabled(false, egui::Button::new("正在检查…"));
-                        }
-                        _ => {
-                            if ui.button("检查更新").clicked() {
-                                start_check = true;
+                #[cfg(feature = "ai-workbench")]
+                {
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        match &self.update_check {
+                            crate::update_check::UpdateCheckState::Checking => {
+                                let _ = ui.add_enabled(false, egui::Button::new("正在检查…"));
+                            }
+                            _ => {
+                                if ui.button("检查更新").clicked() {
+                                    start_check = true;
+                                }
                             }
                         }
-                    }
-                    ui.weak("只检查一次，不轮询");
-                });
-                match &self.update_check {
-                    crate::update_check::UpdateCheckState::Idle
-                    | crate::update_check::UpdateCheckState::Checking => {}
-                    crate::update_check::UpdateCheckState::Latest => {
-                        ui.add_space(4.0);
-                        ui.label(format!("当前已是最新版本 v{}", env!("CARGO_PKG_VERSION")));
-                    }
-                    crate::update_check::UpdateCheckState::Available(info) => {
-                        ui.add_space(4.0);
-                        ui.label(format!(
-                            "发现新版本：v{} → v{}",
-                            env!("CARGO_PKG_VERSION"),
-                            info.version
-                        ));
-                        ui.hyperlink_to("打开发布页", &info.url);
-                        ui.weak("内网环境若无法访问发布页，请联系维护者获取安装包。");
-                    }
-                    crate::update_check::UpdateCheckState::Failed(error) => {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "无法连接更新服务：{}。可忽略，或到设置页修改更新检查地址。",
-                                error.trim_end_matches('。')
-                            ))
-                            .color(theme::danger()),
-                        );
+                        ui.weak("只检查一次，不轮询");
+                    });
+                    match &self.update_check {
+                        crate::update_check::UpdateCheckState::Idle
+                        | crate::update_check::UpdateCheckState::Checking => {}
+                        crate::update_check::UpdateCheckState::Latest => {
+                            ui.add_space(4.0);
+                            ui.label(format!("当前已是最新版本 v{}", env!("CARGO_PKG_VERSION")));
+                        }
+                        crate::update_check::UpdateCheckState::Available(info) => {
+                            ui.add_space(4.0);
+                            ui.label(format!(
+                                "发现新版本：v{} → v{}",
+                                env!("CARGO_PKG_VERSION"),
+                                info.version
+                            ));
+                            ui.hyperlink_to("打开发布页", &info.url);
+                            ui.weak("内网环境若无法访问发布页，请联系维护者获取安装包。");
+                        }
+                        crate::update_check::UpdateCheckState::Failed(error) => {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "无法连接更新服务：{}。可忽略，或到设置页修改更新检查地址。",
+                                    error.trim_end_matches('。')
+                                ))
+                                .color(theme::danger()),
+                            );
+                        }
                     }
                 }
                 ui.add_space(12.0);
@@ -1171,6 +1175,7 @@ impl GongwenApp {
         if let Some(w) = win {
             theme::window_enter_anim(ctx, egui::Id::unique("about_win_anim"), &w.response);
         }
+        #[cfg(feature = "ai-workbench")]
         if start_check {
             self.start_update_check(ctx);
         }

@@ -68,6 +68,7 @@ mod metafile;
 mod metrics;
 mod modal;
 mod models;
+#[cfg(feature = "ai-workbench")]
 mod net;
 #[allow(unsafe_code)]
 mod optical_burn;
@@ -126,6 +127,7 @@ mod typst_engine;
 #[cfg(test)]
 mod ui_snapshot;
 mod units;
+#[cfg(feature = "ai-workbench")]
 mod update_check;
 mod validator;
 mod vault;
