@@ -84,7 +84,7 @@ impl GongwenApp {
                     ctx,
                     move || match crate::file_limits::read_bytes(
                         &path,
-                        crate::file_limits::MAX_DOCUMENT_BYTES,
+                        vocabulary_xlsx::MAX_WORKBOOK_BYTES,
                         "Excel 词库",
                     ) {
                         Ok(bytes) if bytes.starts_with(&office::COMPOUND_MAGIC) => {
@@ -237,29 +237,38 @@ impl GongwenApp {
         let vocabulary = self.config.vocabulary.clone();
         let file_vocabulary = vocabulary.clone();
         let save = Box::new(move |app: &mut Self| {
-            let protection = match Protection::current() {
-                Ok(protection) => protection,
-                Err(error) => {
-                    app.status = format!("无法导出：{error:#}");
-                    return;
-                }
-            };
-            app.request_file_with_context(
-                FileDialogSpec::save_file()
-                    .filter("Excel", &["xlsx"])
-                    .file_name(filename),
-                move |app, path, ctx| {
-                    if let Some(path) = path {
-                        app.start_vocabulary_workbook_export(
-                            ctx,
-                            file_vocabulary,
-                            filename,
-                            blank,
-                            WorkbookDestination::File(path.with_extension("xlsx"), protection),
-                        );
+            // 文件出口与其它文档一致：加密工作区先输导出密码再开保存框。
+            // 普通工作区的明文风险已由调用方确认过，这里直接开保存框。
+            let run = move |app: &mut Self| {
+                let protection = match Protection::current() {
+                    Ok(protection) => protection,
+                    Err(error) => {
+                        app.status = format!("无法导出：{error:#}");
+                        return;
                     }
-                },
-            );
+                };
+                app.request_file_with_context(
+                    FileDialogSpec::save_file()
+                        .filter("Excel", &["xlsx"])
+                        .file_name(filename),
+                    move |app, path, ctx| {
+                        if let Some(path) = path {
+                            app.start_vocabulary_workbook_export(
+                                ctx,
+                                file_vocabulary,
+                                filename,
+                                blank,
+                                WorkbookDestination::File(path.with_extension("xlsx"), protection),
+                            );
+                        }
+                    },
+                );
+            };
+            if protection::encryption_enabled() {
+                app.request_document_output(operation, run);
+            } else {
+                run(app);
+            }
         });
         if protection::encryption_enabled() {
             self.choose_document_delivery(
@@ -342,4 +351,29 @@ fn load_workbook(
         ctx.request_repaint();
     });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 当前口径：词库正在读取/解密时计入忙状态，锁定要等它结束（锁定会丢弃工作区，
+    /// 晚到的导入结果不会写回）。这里把这个取舍钉住，改锁定时能看见影响面。
+    #[test]
+    fn pending_vocabulary_import_blocks_locking_until_it_finishes() {
+        let mut app = crate::app::management_samples::fixture();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.vocabulary_import = Some(VocabularyImport {
+            name: "标准词库.xlsx".into(),
+            slot: storage::current_slot(),
+            unlock: crate::vault::key_handle(),
+            encrypted: None,
+            password: Default::default(),
+            error: String::new(),
+            pending: Some(rx),
+        });
+        assert!(app.any_busy(), "读取中的词库导入应计入忙状态");
+        let error = app.save_before_lock().unwrap_err().to_string();
+        assert!(error.contains("仍有任务在运行"), "{error}");
+    }
 }

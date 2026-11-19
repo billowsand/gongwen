@@ -38,6 +38,10 @@ fn is_valid_code(value: &str) -> bool {
 const UNIT_SHEET: &str = "单位";
 const PERSON_SHEET: &str = "人员";
 
+/// 词库工作簿的体积上限。词库是配置数据（稿件包随附词库的上限只有 10 MiB），
+/// 与 256 MiB 的通用文档上限分开，避免一张超大表把配置撑到每次启动/保存都变慢。
+pub(crate) const MAX_WORKBOOK_BYTES: u64 = 32 * 1024 * 1024;
+
 const UNIT_HEADERS: &[&str] = &[
     "层级编码",
     "单位名称",
@@ -126,12 +130,16 @@ pub(crate) fn parse_bytes(
     let report = (|| -> anyhow::Result<ImportReport> {
         let mut archive =
             zip::ZipArchive::new(std::io::Cursor::new(bytes)).context("工作簿 ZIP 无效")?;
-        let limit = crate::file_limits::MAX_DOCUMENT_BYTES;
+        let limit = MAX_WORKBOOK_BYTES;
         let mut total = 0u64;
         for index in 0..archive.len() {
             let entry = archive.by_index_raw(index)?;
             total = total.saturating_add(entry.size());
-            anyhow::ensure!(total <= limit, "工作簿解压后超过大小上限");
+            anyhow::ensure!(
+                total <= limit,
+                "工作簿解压后超过 {} MiB 上限",
+                limit / 1024 / 1024
+            );
         }
         parse_reader(std::io::Cursor::new(bytes))
     })();

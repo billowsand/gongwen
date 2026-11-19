@@ -2107,6 +2107,36 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_vocabulary_export_asks_for_the_export_password_before_the_save_dialog() {
+        let (mut app, dir, _reset) = encrypted_app();
+        app.export_vocabulary_xlsx(&egui::Context::default(), false);
+        assert!(app.media_export.is_some());
+        let mut harness = harness_ui_state(
+            |ui, app: &mut GongwenApp| app.media_export_window(ui.ctx()),
+            app,
+        );
+        harness.run_steps(2);
+        harness.get_by_label("导出密码加密 Excel…").click();
+        harness.run_steps(2);
+        let app = harness.into_state();
+        assert!(
+            app.pending_output.is_some(),
+            "加密词库导出应先输导出密码，不能直接开保存框"
+        );
+        assert!(
+            app.pending_file_dialogs.is_empty(),
+            "确认导出密码前不能打开保存框"
+        );
+        let app = cancel_output_risk(app);
+        assert!(app.pending_output.is_none());
+        assert!(app.pending_file_dialogs.is_empty(), "取消后不能打开保存框");
+        assert!(
+            !dir.path().join("公文助手标准词库.xlsx").exists(),
+            "取消后不能生成词库文件"
+        );
+    }
+
+    #[test]
     fn encrypted_ime_word_table_export_waits_for_confirmation_and_cancel_writes_nothing() {
         let (mut app, dir, _reset) = encrypted_app();
         app.apply_ime_page_action(crate::ime::PageAction::ExportWordTable { filtered: false });
