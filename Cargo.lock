@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "gongwen-assistant"
-version = "0.10.14"
+version = "0.10.15"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm",
