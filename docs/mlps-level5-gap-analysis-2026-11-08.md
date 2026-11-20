@@ -356,7 +356,7 @@ AES 加密——都是国际算法/非国标 KDF，没有商用密码审查鉴�
 - DEK 经 stdin 传给 Node host，进程内有未清零副本，且 stderr scrub 只抹模型 API key
   （`src/pi_agent/process.rs:674-686`、`:1495-1530`）；
 - 7z 是「加密 + CRC32」，不是 AEAD；备份/稿件包完整性证明弱于加密强度；
-- 导出密码可由取得 DEK/解锁权限的人取出（`docs/encrypted-export-design.md:33`）。
+- 导出密码可由取得 DEK/解锁权限的人取出，设置页也可直接查看（`docs/encrypted-export-design.md`「边界」）。
 
 **准确表述**：公开条文里没有一句「禁止 AES」。所以不要说「违法」，要说「在要求使用商用密码
 （关基、政务、密评范围）的场景下不满足算法与产品要求」。普通内部使用、非关基、非密评范围，

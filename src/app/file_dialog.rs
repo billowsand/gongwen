@@ -194,6 +194,16 @@ impl GongwenApp {
             callback,
         });
     }
+
+    /// 占住文件对话框的槽位：测试里再触发「开保存框」不会真的弹出系统窗口，
+    /// 只会得到「已有一个文件对话框开着」的状态，用来钉住流程走到哪一步。
+    #[cfg(test)]
+    pub(crate) fn occupy_file_dialog_for_test(&mut self) {
+        self.pending_file_dialogs.push(PendingFileDialog {
+            future: Box::pin(std::future::pending()),
+            callback: FileDialogCallback::One(Box::new(|_, _| {})),
+        });
+    }
 }
 
 /// 问一次后台线程的结果：`Some` 表示问到了（可能是用户取消）。

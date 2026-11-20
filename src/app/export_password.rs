@@ -3,6 +3,15 @@ use super::settings::{setting_continuation, setting_row};
 use eframe::egui;
 use zeroize::{Zeroize, Zeroizing};
 
+/// 查看已保存密码后自动隐藏的秒数。密码只在这一小段时间里留在界面上。
+const REVEAL_SECONDS: f64 = 30.0;
+
+/// 界面上正在显示的已保存密码。
+struct Revealed {
+    password: Zeroizing<String>,
+    shown_at: f64,
+}
+
 #[derive(Default)]
 pub(super) struct PasswordSettings {
     password: Zeroizing<String>,
@@ -12,6 +21,8 @@ pub(super) struct PasswordSettings {
     saving: Option<std::sync::mpsc::Receiver<anyhow::Result<()>>>,
     /// 「重置损坏的导出设置」需要点两次，避免误删还能用的密码文件。
     reset_confirm: bool,
+    /// 明确点「查看」后才放进内存，超时、隐藏或锁定即释放。
+    revealed: Option<Revealed>,
 }
 
 impl PasswordSettings {
@@ -19,14 +30,16 @@ impl PasswordSettings {
         ui.strong("导出加密");
 
         if crate::vault::key_handle().is_none() {
+            self.revealed = None;
             ui.weak("先启用应用锁并解锁，再单独设置导出密码。");
             return;
         }
         match crate::export::protection::ExportPolicy::load() {
             Ok(_) => {
-                ui.weak("加密工作区导出到普通文件时，每次须输入独立导出密码。");
+                ui.weak("加密工作区导出到普通文件时，直接使用已保存的导出密码，不再逐次输入。");
             }
             Err(error) => {
+                self.revealed = None;
                 // fail-closed：解不开就不导出。但用户必须有一条恢复路径，
                 // 否则只能手工去配置目录删文件（而且不知道该删哪个）。
                 ui.colored_label(
@@ -52,6 +65,7 @@ impl PasswordSettings {
                                 },
                             );
                             self.reset_confirm = false;
+                            self.revealed = None;
                             self.notice = match result {
                                 Ok(()) => "已重置导出设置，请设置新的导出密码。".into(),
                                 Err(error) => format!("重置失败：{error:#}"),
@@ -77,6 +91,7 @@ impl PasswordSettings {
             match rx.try_recv() {
                 Ok(result) => {
                     self.saving = None;
+                    self.revealed = None;
                     self.notice = match result {
                         Ok(()) => "导出密码已单独保存。请妥善保管，旧文件仍使用旧密码。".into(),
                         Err(error) => format!("保存失败：{error:#}"),
@@ -94,9 +109,18 @@ impl PasswordSettings {
         }
         let configured =
             crate::export::protection::ExportPolicy::load().is_ok_and(|p| !p.password.is_empty());
-        ui.add_enabled_ui(self.saving.is_none(), |ui| {
+        let now = ui.input(|input| input.time);
+        self.expire_reveal(now);
+        if self.revealed.is_some() {
+            // 到点自动隐藏，不让明文一直停在屏幕上。
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        let can_edit = self.saving.is_none();
+        ui.add_enabled_ui(can_edit, |ui| {
+            self.reveal_row(ui, configured);
             let password_tip = concat!(
-                "必须与登录密码不同。已保存的导出密码由应用锁加密保护；能解锁本机数据的人仍可能取得它。\n",
+                "必须与登录密码不同。已保存的导出密码由应用锁加密保护；能解锁本机数据的人仍可能取得它，设置页也可直接查看。\n",
                 "接收方可用导出密码打开文件，登录本应用仍需登录密码。",
             );
             setting_row(ui, "新导出密码", Some(crate::password_policy::EXPORT_HINT), |ui| {
@@ -132,7 +156,7 @@ impl PasswordSettings {
                     "尚未设置密码"
                 })
                 .on_hover_text(if configured {
-                    "导出加密文件时，请输入此密码。"
+                    "加密导出直接使用这个密码，不再逐次输入；忘记时可点上方「查看已保存的密码」。"
                 } else {
                     "加密导出前需要先保存密码。"
                 });
@@ -158,6 +182,73 @@ impl PasswordSettings {
         });
         if !self.notice.is_empty() {
             ui.label(&self.notice);
+        }
+    }
+
+    /// 「已保存的密码」一行：默认只给按钮，点开后才把明文放进界面。
+    fn reveal_row(&mut self, ui: &mut egui::Ui, configured: bool) {
+        if !configured {
+            return;
+        }
+        let tip = concat!(
+            "点「查看」后显示 30 秒，到点自动隐藏。\n",
+            "能解锁本机数据的人都能看到这个密码；复制会先确认系统剪贴板风险。",
+        );
+        setting_row(ui, "已保存的密码", Some(tip), |ui| {
+            let mut hide = false;
+            let mut copy = None;
+            if let Some(revealed) = &self.revealed {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(revealed.password.as_str()).monospace())
+                        .selectable(true),
+                )
+                .on_hover_text("选中后复制会先确认系统剪贴板风险。");
+                if ui.button("复制").clicked() {
+                    copy = Some(revealed.password.to_string());
+                }
+                if ui.button("隐藏").clicked() {
+                    hide = true;
+                }
+            } else if ui.button("查看已保存的密码").on_hover_text(tip).clicked() {
+                self.reveal(ui.input(|input| input.time));
+            }
+            if hide {
+                self.revealed = None;
+            }
+            if let Some(text) = copy {
+                super::clipboard::request_system_copy(ui.ctx(), text);
+            }
+        });
+    }
+
+    /// 从槽位密文里读出已保存的密码，只放在设置页这块状态里。
+    fn reveal(&mut self, now: f64) {
+        match crate::export::protection::ExportPolicy::load() {
+            Ok(policy) if !policy.password.is_empty() => {
+                self.revealed = Some(Revealed {
+                    password: Zeroizing::new(policy.password.clone()),
+                    shown_at: now,
+                });
+                self.notice = format!("已显示已保存的导出密码，{REVEAL_SECONDS:.0} 秒后自动隐藏。");
+            }
+            Ok(_) => {
+                self.revealed = None;
+                self.notice = "尚未保存导出密码。".into();
+            }
+            Err(error) => {
+                self.revealed = None;
+                self.notice = format!("读取导出密码失败：{error:#}");
+            }
+        }
+    }
+
+    fn expire_reveal(&mut self, now: f64) {
+        if self
+            .revealed
+            .as_ref()
+            .is_some_and(|revealed| now - revealed.shown_at >= REVEAL_SECONDS)
+        {
+            self.revealed = None;
         }
     }
 }
@@ -207,17 +298,101 @@ mod tests {
         assert!(crate::vault::is_sealed_file(&raw));
         assert!(!raw.windows(EXPORT.len()).any(|p| p == EXPORT.as_bytes()));
         assert!(
-            crate::export::protection::Protection::current()
-                .unwrap()
-                .unwrap()
-                .matches_password(EXPORT)
-        );
-        assert!(
             crate::vault::Vault::load()
                 .unwrap()
                 .set_password(crate::storage::DataSlot::Real, EXPORT, Some(handle.dek()))
                 .is_err()
         );
         assert!(crate::export::protection::validate_password(&"汉".repeat(45)).is_err());
+    }
+
+    /// 已保存的密码只在该点「查看」后进界面，到点或锁定时释放。
+    #[test]
+    fn saved_password_is_revealed_on_request_and_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().into()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::vault::clear_key_handle();
+                crate::storage::set_test_config_dir(None);
+            }
+        }
+        let _reset = Reset;
+        let (_, unlocked) = crate::vault::Vault::create(LOGIN, None, false).unwrap();
+        crate::vault::set_key_handle(*unlocked.unwrap().dek, true);
+        let handle = crate::vault::key_handle().unwrap();
+        let mut settings = PasswordSettings::default();
+
+        // 还没保存时点查看不会显示任何东西。
+        settings.reveal(0.0);
+        assert!(settings.revealed.is_none());
+        assert!(settings.notice.contains("尚未保存"), "{}", settings.notice);
+
+        save_password(EXPORT, &handle).unwrap();
+        settings.reveal(10.0);
+        assert_eq!(
+            settings.revealed.as_ref().map(|r| r.password.as_str()),
+            Some(EXPORT)
+        );
+        settings.expire_reveal(20.0);
+        assert!(settings.revealed.is_some(), "没到 30 秒不能隐藏");
+        settings.expire_reveal(40.0);
+        assert!(settings.revealed.is_none(), "到点要自动隐藏");
+
+        // 锁定后即使还开着设置页，也不能把明文留在内存里。
+        settings.reveal(41.0);
+        assert!(settings.revealed.is_some());
+        crate::vault::clear_key_handle();
+        let ctx = egui::Context::default();
+        crate::test_support::run_ui(&ctx, egui::RawInput::default(), |ui| settings.ui(ui));
+        assert!(settings.revealed.is_none());
+    }
+
+    #[test]
+    #[ignore = "生成设置页「已保存的密码」样张"]
+    fn saved_password_row_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().into()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::vault::clear_key_handle();
+                crate::storage::set_test_config_dir(None);
+            }
+        }
+        let _reset = Reset;
+        let (_, unlocked) = crate::vault::Vault::create(LOGIN, None, false).unwrap();
+        crate::vault::set_key_handle(*unlocked.unwrap().dek, true);
+        let handle = crate::vault::key_handle().unwrap();
+        save_password(EXPORT, &handle).unwrap();
+        let mut settings = PasswordSettings::default();
+        settings.reveal(0.0);
+
+        let ctx = egui::Context::default();
+        crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        crate::theme::configure_style(&ctx);
+        let size = egui::vec2(760.0, 320.0);
+        let mut canvas = crate::ui_snapshot::Canvas::default();
+        for frame in 0..8 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    time: Some(frame as f64 * 0.1),
+                    ..Default::default()
+                },
+                |ui| settings.ui(ui),
+            );
+            canvas.absorb(&mut output.textures_delta);
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp");
+            std::fs::create_dir_all(&root).unwrap();
+            canvas.render(
+                &ctx,
+                output,
+                size,
+                crate::theme::canvas(),
+                &root.join("export-password-row.png"),
+            );
+        }
     }
 }

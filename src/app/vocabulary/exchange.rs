@@ -237,8 +237,8 @@ impl GongwenApp {
         let vocabulary = self.config.vocabulary.clone();
         let file_vocabulary = vocabulary.clone();
         let save = Box::new(move |app: &mut Self| {
-            // 文件出口与其它文档一致：加密工作区先输导出密码再开保存框。
-            // 普通工作区的明文风险已由调用方确认过，这里直接开保存框。
+            // 文件出口与其它文档一致：加密工作区直接用已保存的导出密码，
+            // 不再逐次输入；普通工作区的明文风险已由调用方确认过，这里直接开保存框。
             let run = move |app: &mut Self| {
                 let protection = match Protection::current() {
                     Ok(protection) => protection,

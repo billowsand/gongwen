@@ -2096,18 +2096,6 @@ mod tests {
         (crate::app::management_samples::fixture(), dir, Reset)
     }
 
-    /// 把待确认的风险框画出来并点「取消」，返回取消后的应用。
-    fn cancel_output_risk(app: GongwenApp) -> GongwenApp {
-        let mut harness = harness_ui_state(
-            |ui, app: &mut GongwenApp| app.output_risk_window(ui.ctx()),
-            app,
-        );
-        harness.run();
-        harness.get_by_label("取消").click();
-        harness.run();
-        harness.into_state()
-    }
-
     #[test]
     fn encrypted_vocabulary_export_waits_for_confirmation_and_cancel_writes_nothing() {
         let (mut app, dir, _reset) = encrypted_app();
@@ -2138,11 +2126,14 @@ mod tests {
         );
     }
 
+    /// 导出密码已保存：词库导出不再弹密码框，直接走到开保存框这一步。
     #[test]
-    fn encrypted_vocabulary_export_asks_for_the_export_password_before_the_save_dialog() {
+    fn encrypted_vocabulary_export_goes_straight_to_the_save_dialog() {
         let (mut app, dir, _reset) = encrypted_app();
         app.export_vocabulary_xlsx(&egui::Context::default(), false);
         assert!(app.media_export.is_some());
+        // 占住文件对话框槽位：走到「开保存框」就停下，不真的弹系统窗口。
+        app.occupy_file_dialog_for_test();
         let mut harness = harness_ui_state(
             |ui, app: &mut GongwenApp| app.media_export_window(ui.ctx()),
             app,
@@ -2152,38 +2143,40 @@ mod tests {
         harness.run_steps(2);
         let app = harness.into_state();
         assert!(
-            app.pending_output.is_some(),
-            "加密词库导出应先输导出密码，不能直接开保存框"
+            app.pending_output.is_none(),
+            "导出密码已保存，不能再弹输入框"
         );
         assert!(
-            app.pending_file_dialogs.is_empty(),
-            "确认导出密码前不能打开保存框"
+            app.status.contains("文件对话框"),
+            "应直接走到开保存框这一步：{}",
+            app.status
         );
-        let app = cancel_output_risk(app);
-        assert!(app.pending_output.is_none());
-        assert!(app.pending_file_dialogs.is_empty(), "取消后不能打开保存框");
         assert!(
             !dir.path().join("公文助手标准词库.xlsx").exists(),
-            "取消后不能生成词库文件"
+            "还没选保存位置，不能生成词库文件"
         );
     }
 
+    /// 输入法词表也走文档出口：导出密码已保存时不再弹输入框，直接开保存框。
     #[test]
-    fn encrypted_ime_word_table_export_waits_for_confirmation_and_cancel_writes_nothing() {
+    fn encrypted_ime_word_table_export_goes_straight_to_the_save_dialog() {
         let (mut app, dir, _reset) = encrypted_app();
+        // 占住文件对话框槽位：走到「开保存框」就停下，不真的弹系统窗口。
+        app.occupy_file_dialog_for_test();
         app.apply_ime_page_action(crate::ime::PageAction::ExportWordTable { filtered: false });
         assert!(
-            app.pending_output.is_some(),
-            "加密模式下导出输入法词表应先弹一次性风险确认"
+            app.pending_output.is_none(),
+            "导出密码已保存，不能再弹输入框"
         );
-        assert!(app.pending_file_dialogs.is_empty(), "确认前不能打开保存框");
-        let app = cancel_output_risk(app);
-        assert!(app.pending_output.is_none());
-        assert!(app.pending_file_dialogs.is_empty(), "取消后不能打开保存框");
+        assert!(
+            app.status.contains("文件对话框"),
+            "应直接走到开保存框这一步：{}",
+            app.status
+        );
         assert!(
             !dir.path().join("词表输入法-生效词表.txt").exists()
                 && !dir.path().join("词表输入法-生效词表.7z").exists(),
-            "取消后不能生成词表文件"
+            "还没选保存位置，不能生成词表文件"
         );
     }
 }

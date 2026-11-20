@@ -125,10 +125,6 @@ impl Protection {
         Ok(Some(Self { password, handle }))
     }
 
-    pub(crate) fn matches_password(&self, password: &str) -> bool {
-        self.password.as_str() == password
-    }
-
     fn check_slot(&self) -> Result<()> {
         ensure!(
             crate::storage::current_slot() == self.handle.slot(),
