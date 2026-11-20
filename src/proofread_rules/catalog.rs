@@ -15,6 +15,7 @@ impl RuleInfo {
     pub(crate) fn level_label(&self) -> &'static str {
         match self.id {
             "RULE-CITATION-NUMBER"
+            | "RULE-NUMBER-BRACKET"
             | "RULE-TITLE-PUNCT"
             | "RULE-TITLE-KIND"
             | "RULE-KIND-REQUEST" => "必错",
@@ -45,6 +46,14 @@ pub(crate) const RULES: &[RuleInfo] = &[
         "各文类中的可识别公文引用",
         "文号括号或序号写法不规范；不改引用名称",
         "公文格式及本程序引用格式",
+        false
+    ),
+    rule!(
+        "RULE-NUMBER-BRACKET",
+        "发文字号括号",
+        "各文类正文中带机关代字、四位年份与「号」的括号年份",
+        "年份括号不是六角括号〔〕；只改年份括号，不动代字与序号",
+        "GB/T 9704 发文字号写法",
         false
     ),
     rule!(

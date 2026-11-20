@@ -32,7 +32,8 @@ pub(crate) fn check_with_config(
     config: &crate::models::ProofreadConfig,
 ) -> Vec<ProofNote> {
     let mut notes = Vec::new();
-    // 先在原文上查引用写法，再把引用屏蔽掉：引用的名称与文号是事实，其他规则不该去改。
+    // 先在原文上查引用与发文字号写法，再把引用屏蔽掉：引用的名称与文号是事实，
+    // 其他规则不该去改。
     check_citations(markdown, &mut notes);
     let masked = crate::document_reference::masked(markdown);
     let original = masked.as_ref();
@@ -141,10 +142,13 @@ fn note_with_fix(
     }
 }
 
-// ── 公文引用 ────────────────────────────────────────────────────────────────
+// ── 公文引用与发文字号 ──────────────────────────────────────────────────────
 
-/// 正文里《名称》（文号）的括号写法：年份用六角括号、外层用全角括号、序号不编虚位。
-/// 规范写法是确定的，给一键改法。
+/// 正文里的文号写法。
+///
+/// 《名称》（文号）按引用整体规范：年份六角括号、外层全角括号、序号不编虚位。
+/// 没有书名号的裸发文字号只规范年份那一对括号——代字到哪里结束在中文里没有确定
+/// 边界，动代字或序号会把原文改坏。两种都给一键改法。
 fn check_citations(markdown: &str, notes: &mut Vec<ProofNote>) {
     for citation in crate::document_reference::detect_numbered(markdown) {
         if citation.standard(markdown) {
@@ -158,6 +162,19 @@ fn check_citations(markdown: &str, notes: &mut Vec<ProofNote>) {
             format!("公文引用的文号写法不规范，应为「{text}」"),
             citation.range,
             text,
+        ));
+    }
+    for number in crate::document_reference::detect_loose_numbers(markdown) {
+        notes.push(note_with_fix(
+            "RULE-NUMBER-BRACKET",
+            "发文字号",
+            Level::MustFix,
+            format!(
+                "发文字号的年份应使用六角括号〔〕，这里写作「{}」，应为「{}」",
+                number.written, number.fixed
+            ),
+            number.range,
+            number.fixed,
         ));
     }
 }
@@ -1285,6 +1302,43 @@ mod tests {
         );
         // 引用名称里的汉字年份是原文事实，不报年份写法。
         assert!(notes.iter().all(|note| note.entry_id != "RULE-NUM-YEAR"));
+    }
+
+    #[test]
+    fn bare_document_number_brackets_get_a_one_click_fix() {
+        let markdown = "# 关于测试有关事项的函\n\n\
+                        按照（某函【2026】12号）办理，另见某办发[2025]3号。\n";
+        let notes = check_all_with(markdown);
+        let hits = notes
+            .iter()
+            .filter(|note| note.entry_id == "RULE-NUMBER-BRACKET")
+            .collect::<Vec<_>>();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|note| note.level == Level::MustFix));
+        assert_eq!(hits[0].replacement.as_deref(), Some("〔2026〕"));
+        assert_eq!(&markdown[hits[0].span.clone()], "【2026】");
+        assert_eq!(hits[1].replacement.as_deref(), Some("〔2025〕"));
+        assert_eq!(&markdown[hits[1].span.clone()], "[2025]");
+    }
+
+    #[test]
+    fn citation_numbers_are_not_reported_twice() {
+        let markdown = "# 关于测试有关事项的函\n\n\
+                        根据《关于商洽的函》（某办函【2026】1号）办理。\n";
+        let notes = check_all_with(markdown);
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|note| note.entry_id == "RULE-CITATION-NUMBER")
+                .count(),
+            1
+        );
+        assert!(
+            notes
+                .iter()
+                .all(|note| note.entry_id != "RULE-NUMBER-BRACKET"),
+            "引用里的文号由引用规则整体处理，不再单报"
+        );
     }
 
     // ── 敬称与句末标点 ──────────────────────────────────────────────────

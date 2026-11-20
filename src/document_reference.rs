@@ -6,7 +6,8 @@
 //! 来源关联在运行时按文号与名称比对（见 `draft_page::references`），正文里不存任何 ID。
 
 use anyhow::{Result, ensure};
-use std::{borrow::Cow, collections::BTreeMap, ops::Range};
+use regex::Regex;
+use std::{borrow::Cow, collections::BTreeMap, ops::Range, sync::OnceLock};
 
 /// 正文里识别出的一处公文引用。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,6 +300,10 @@ pub(crate) fn ensure_preserved(before: &str, after: &str) -> Result<()> {
     Ok(())
 }
 
+/// 年份括号可以接受的写法；`normalize_number` 与正文里的发文字号识别共用。
+const OPEN_BRACKETS: &[char] = &['[', '(', '（', '【', '［', '{', '｛', '〖', '<', '＜', '〔'];
+const CLOSE_BRACKETS: &[char] = &[']', ')', '）', '】', '］', '}', '｝', '〗', '>', '＞', '〕'];
+
 /// 把手工输入的发文字号规范成「机关代字〔年份〕序号号」。
 ///
 /// 六角括号不好打，登记时允许用方括号、圆括号、方头括号或干脆不写括号，例如
@@ -306,8 +311,6 @@ pub(crate) fn ensure_preserved(before: &str, after: &str) -> Result<()> {
 /// 都规范为 `某办函〔2026〕12号`。全角数字转半角，空白去掉，序号按 GB/T 9704 不编虚位。
 /// 认不出年份的原样返回（只去空白），交给用户自己核对预览。
 pub(crate) fn normalize_number(input: &str) -> String {
-    const OPEN: &[char] = &['[', '(', '（', '【', '［', '〔', '{', '｛', '〖', '<', '＜'];
-    const CLOSE: &[char] = &[']', ')', '）', '】', '］', '〕', '}', '｝', '〗', '>', '＞'];
     // 空白先当分隔符保留（`某办函 2026 12` 要靠它把年份和序号分开），最后统一去掉。
     const SEPARATORS: &[char] = &[' ', '-', '－', '_', '.', '．', '、', '/', '／', '·', '•'];
     let text: String = input
@@ -331,16 +334,19 @@ pub(crate) fn normalize_number(input: &str) -> String {
         return squeeze(&text);
     };
     let prefix: String = chars[..start].iter().collect();
-    let prefix =
-        squeeze(prefix.trim_end_matches(|ch| OPEN.contains(&ch) || SEPARATORS.contains(&ch)));
+    let prefix = squeeze(
+        prefix.trim_end_matches(|ch| OPEN_BRACKETS.contains(&ch) || SEPARATORS.contains(&ch)),
+    );
     if prefix.is_empty() {
         return squeeze(&text);
     }
     let year: String = chars[start..start + 4].iter().collect();
     let rest: String = chars[start + 4..].iter().collect();
     let rest = squeeze(
-        rest.trim_start_matches(|ch| CLOSE.contains(&ch) || SEPARATORS.contains(&ch) || ch == '年')
-            .trim_start_matches('第'),
+        rest.trim_start_matches(|ch| {
+            CLOSE_BRACKETS.contains(&ch) || SEPARATORS.contains(&ch) || ch == '年'
+        })
+        .trim_start_matches('第'),
     );
     let serial = rest.strip_suffix('号').unwrap_or(&rest);
     let rest = if !serial.is_empty() && serial.chars().all(|ch| ch.is_ascii_digit()) {
@@ -350,6 +356,126 @@ pub(crate) fn normalize_number(input: &str) -> String {
         rest.clone()
     };
     format!("{prefix}〔{year}〕{rest}")
+}
+
+/// 正文里没有书名号的发文字号：只关心年份那对括号的写法。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LooseNumber {
+    /// 年份那对括号（含年份）的字节范围；一键改只动这一段。
+    pub range: Range<usize>,
+    /// 正文里的原写法，消息里回显。
+    pub written: String,
+    /// 规范后的写法，形如 `〔2026〕`。
+    pub fixed: String,
+}
+
+/// 正文里带机关代字、四位年份与「号」的括号年份，不论括号写成了哪一种。
+///
+/// 中文里代字到哪里结束没有确定边界（「按照某函【2026】12号」里哪几个字是代字，
+/// 程序分不清），所以替换范围只取年份那一对括号，代字与序号一概不碰；年份里的
+/// 全角数字顺手转半角。
+/// 书名号里的名称和已经识别出的公文引用整段跳过：那里的文号由
+/// `RULE-CITATION-NUMBER` 整体规范，同一处不报两遍。
+pub(crate) fn detect_loose_numbers(markdown: &str) -> Vec<LooseNumber> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        let open = regex_class(OPEN_BRACKETS);
+        let close = regex_class(CLOSE_BRACKETS);
+        Regex::new(&format!(
+            r"(?:\p{{Han}}[\p{{Han}}A-Za-z0-9]{{0,19}})\s*([{open}])\s*([0-9０-９]{{4}})\s*([{close}])\s*(?:第\s*)?[0-9０-９]+\s*号"
+        ))
+        .expect("发文字号正则")
+    });
+    let mut skip: Vec<Range<usize>> = detect_numbered(markdown)
+        .into_iter()
+        .map(|citation| citation.range)
+        .collect();
+    skip.extend(book_title_ranges(markdown));
+    let mut found = Vec::new();
+    for segment in plain_segments(markdown) {
+        let text = &markdown[segment.clone()];
+        for caps in re.captures_iter(text) {
+            let (Some(open), Some(year), Some(close)) = (caps.get(1), caps.get(2), caps.get(3))
+            else {
+                continue;
+            };
+            let range = segment.start + open.start()..segment.start + close.end();
+            // 引用与名称里的文号归引用规则，或属于名称事实，都不在这里动。
+            if skip
+                .iter()
+                .any(|span| span.start <= range.start && range.end <= span.end)
+            {
+                continue;
+            }
+            let year = halfwidth_digits(year.as_str());
+            if !(year.starts_with("19") || year.starts_with("20")) {
+                continue;
+            }
+            let written = markdown[range.clone()].to_owned();
+            let fixed = format!("〔{year}〕");
+            if written == fixed {
+                continue;
+            }
+            found.push(LooseNumber {
+                range,
+                written,
+                fixed,
+            });
+        }
+    }
+    found
+}
+
+/// 把字符集写成正则字符类里的转义形式。
+fn regex_class(chars: &[char]) -> String {
+    chars
+        .iter()
+        .map(|ch| match ch {
+            '\\' | ']' | '[' | '^' | '-' => format!("\\{ch}"),
+            _ => ch.to_string(),
+        })
+        .collect()
+}
+
+/// 全角数字转半角；括号里的年份与正文里的数字分开处理，别的一概不动。
+fn halfwidth_digits(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '０'..='９' => char::from(b'0' + (ch as u32 - '０' as u32) as u8),
+            _ => ch,
+        })
+        .collect()
+}
+
+/// 正文里成对书名号的字节范围；代码、公式与转义里的书名号不算。
+///
+/// 按嵌套深度配对，`《关于印发《某办法》的通知》` 整段都算名称——里面的文号
+/// 是名称的一部分，不能按发文字号去改。
+fn book_title_ranges(markdown: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    for segment in plain_segments(markdown) {
+        let text = &markdown[segment.clone()];
+        let mut depth = 0usize;
+        let mut start = 0usize;
+        for (index, ch) in text.char_indices() {
+            match ch {
+                '《' => {
+                    if depth == 0 {
+                        start = index;
+                    }
+                    depth += 1;
+                }
+                '》' if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        ranges.push(segment.start + start..segment.start + index + ch.len_utf8());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    ranges
 }
 
 #[cfg(test)]
@@ -463,5 +589,38 @@ mod tests {
         // 代字本身带数字时，只认四位年份。
         assert_eq!(normalize_number("某1办函(2026)3"), "某1办函〔2026〕3号");
         assert_eq!(normalize_number(""), "");
+    }
+
+    #[test]
+    fn loose_numbers_fix_only_the_year_brackets() {
+        let text = "按照（某函【2026】12号）办理，另见某办发[2025]3号；\
+                    规范写法某函〔2024〕9号不动；\
+                    全角【２０２６】12号也要转；\
+                    （2026年版）不是文号。";
+        let found = detect_loose_numbers(text);
+        let fixed: Vec<_> = found.iter().map(|number| number.fixed.as_str()).collect();
+        assert_eq!(fixed, ["〔2026〕", "〔2025〕", "〔2026〕"]);
+        // 替换范围只到年份括号：代字、数字与序号都留在原处。
+        assert_eq!(&text[found[0].range.clone()], "【2026】");
+        assert_eq!(&text[found[1].range.clone()], "[2025]");
+        assert_eq!(&text[found[2].range.clone()], "【２０２６】");
+    }
+
+    #[test]
+    fn loose_numbers_skip_citations_titles_code_and_math() {
+        let text = "根据《关于商洽的函》（某办函【2023】1号）办理；\
+                    《某办函【2022】2号》是名称；\
+                    《关于印发《某办法》的通知（某办函【2019】5号）》整段是名称；\
+                    代码 `某办函【2021】3号` 与公式 $某办函【2020】4号$ 不算。";
+        assert!(detect_loose_numbers(text).is_empty());
+    }
+
+    #[test]
+    fn loose_numbers_ignore_standard_and_non_number_brackets() {
+        assert!(detect_loose_numbers("某办函〔2026〕12号").is_empty());
+        assert!(detect_loose_numbers("（2026年版）与[2026]年度计划").is_empty());
+        // 没有「号」、或以 19/20 开头的四位年份以外都不算。
+        assert!(detect_loose_numbers("某办函【2026】12").is_empty());
+        assert!(detect_loose_numbers("某办函【1899】12号").is_empty());
     }
 }
