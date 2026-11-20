@@ -382,3 +382,36 @@ CREATE VIRTUAL TABLE manuscript_fts USING fts5(tokens, tokenize='unicode61');
 接 `DocumentMeta`（标题、文种、文号、日期、密级、份数、状态）到一个入口，
 把列表/搜索/导出命名改成从它取；再落 `Db`/`Migration` 的统一开库与迁移表。
 F1 先不碰台账、检索、通讯录的界面。
+
+## 11. F1 落地记录（2026-11-20）
+
+### 已落地
+
+- `src/platform/doc.rs`
+  - `DocumentMeta`/`SecurityMark` 契约：标题、文种、文号、日期、密级、状态；
+    研究报告的密级走 `security_marking()`，与普通公文归一。
+  - `parse_doc_date_iso` 从 `manuscript.rs` 迁到平台，稿件库写入与
+    `DocumentMeta` 共用同一套日期解析。
+- `src/platform/db.rs`
+  - `Db::open` 统一目录、SQLCipher 密钥、WAL、`busy_timeout`、外键；
+    `ManuscriptStore::open` 已改走它，开库只剩一个入口。
+  - `Migration`/`apply_migrations` 契约与幂等测试；现有旧迁移仍留在
+    `ManuscriptStore::migrate`，F4 再统一。
+- 文号接入
+  - `ManuscriptStore::search_rows` 的 `number_label` 改走 `DocNumber`；
+    纪要不再被当成“未填文号”，显示 `〔2026〕3号`（测试已锁）。
+  - `export/naming.rs::prefix` 改走 `DocNumber`，导出目录/文件名规则不变；
+    导出模块 371 项测试通过。
+- 验证：平台 14 项、稿件库 64 项、导出 371 项通过；fmt、clippy 零警告。
+
+### 与计划的出入
+
+- F1 只把“文号”这条链接到搜索和导出命名；`DocumentMeta` 的完整取数
+  （列表、导出数据层、密级/日期统一）留给 F2/F3，避免一次改太多。
+- `Db` 先接管 `ManuscriptStore::open`；`storage`、`wiki`、`resources` 等
+  其他开库点不动，等碰到再迁。
+
+### 下一步（F2）
+
+`manuscript_fts` + `SearchIndex`，先把正文检索做出来；顺带把
+`SearchQuery`/`SearchHit` 从类型变成真实实现。

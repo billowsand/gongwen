@@ -1,6 +1,7 @@
 //! 对外成品命名：固定目录、两种纸面状态、42 字符、中间省略。
 use super::clean_filename as safe_filename;
 use crate::models::{DraftInput, LetterVersion, TemplateKind};
+use crate::platform::doc::{DocNumber, UnitCodes};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -59,12 +60,9 @@ fn prefix(input: &DraftInput, numbered: bool) -> String {
         let code = input.profile.department_code.trim();
         let serial = input.profile.document_number.trim();
         let number = if numbered && !serial.is_empty() {
-            let year = input.document_year();
-            if year.is_empty() {
-                format!("{code}{serial}号")
-            } else {
-                format!("{code}〔{year}〕{serial}号")
-            }
+            DocNumber::from_draft(input, &UnitCodes::default())
+                .map(|number| number.display())
+                .unwrap_or_default()
         } else {
             code.to_string()
         };

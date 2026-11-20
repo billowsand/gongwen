@@ -2,6 +2,7 @@
 
 use super::{ManuscriptStore, str_to_kind, str_to_status};
 use crate::models::{ManuscriptStatus, TemplateKind};
+use crate::platform::doc::{DocNumber, NumberingScheme};
 use anyhow::Result;
 
 pub(crate) struct SearchRow {
@@ -17,31 +18,35 @@ pub(crate) struct SearchRow {
 
 impl SearchRow {
     pub(crate) fn number_label(&self) -> String {
-        if !self.kind.has_document_number() || self.doc_number.trim().is_empty() {
+        let Some(scheme) = NumberingScheme::for_kind(self.kind) else {
+            return "未填文号".into();
+        };
+        let serial = self.doc_number.trim();
+        if serial.is_empty() {
             return "未填文号".into();
         }
         let explicit = self.document_year.trim();
         let fallback = self.doc_date.trim().chars().take(4).collect::<String>();
         let year = if !explicit.is_empty() {
-            explicit
+            explicit.to_string()
         } else if fallback.len() == 4 && fallback.chars().all(|ch| ch.is_ascii_digit()) {
-            &fallback
+            fallback
         } else {
-            ""
+            String::new()
         };
-        if year.is_empty() {
-            format!(
-                "{}{}号",
-                self.department_code.trim(),
-                self.doc_number.trim()
-            )
+        let code = (!self.department_code.trim().is_empty())
+            .then(|| self.department_code.trim().to_string());
+        let label = DocNumber {
+            scheme,
+            code,
+            year,
+            serial: serial.to_string(),
+        }
+        .display();
+        if label.is_empty() {
+            "未填文号".into()
         } else {
-            format!(
-                "{}〔{}〕{}号",
-                self.department_code.trim(),
-                year,
-                self.doc_number.trim()
-            )
+            label
         }
     }
 }
@@ -75,6 +80,7 @@ impl ManuscriptStore {
 mod tests {
     use super::*;
     use crate::manuscript::NewManuscript;
+    use crate::models::TemplateProfile;
 
     #[test]
     fn search_rows_preserve_identity_and_explicit_document_year() {
@@ -97,6 +103,31 @@ mod tests {
         assert_eq!(
             store.search_rows().unwrap()[0].status,
             ManuscriptStatus::Archived
+        );
+    }
+
+    #[test]
+    fn minutes_number_label_is_not_treated_as_missing() {
+        let mut store = ManuscriptStore::open(std::path::Path::new(":memory:")).unwrap();
+        let new = NewManuscript {
+            snapshot: crate::models::DraftInput {
+                kind: TemplateKind::MeetingMinutes,
+                date: "2026-09-30".into(),
+                profile: TemplateProfile {
+                    document_year: "2026".into(),
+                    document_number: "3".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            content_markdown: "# 会议纪要\n\n正文。".into(),
+            status: ManuscriptStatus::Draft,
+            ..Default::default()
+        };
+        store.create(&new, None).unwrap();
+        assert_eq!(
+            store.search_rows().unwrap()[0].number_label(),
+            "〔2026〕3号"
         );
     }
 }

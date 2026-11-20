@@ -3,7 +3,7 @@
 //! F0 只落数据和纯算法；F1 起列表、导出命名接 `DocNumber`，F4 起台账接
 //! `NumberingScheme`。这里不读配置、不碰数据库，方便单测和两版构建。
 
-use crate::models::{DraftInput, TemplateKind, TemplateProfile};
+use crate::models::{DraftInput, ManuscriptStatus, TemplateKind, TemplateProfile};
 
 /// 一个单位的三套代字。发函、呈批、纪要各自独立；纪要代字可以没有。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -164,6 +164,71 @@ impl DocNumber {
     }
 }
 
+/// 密级与保密期限。研究报告的密级在封面元数据里，`DraftInput::security_marking`
+/// 已经替两套来源归一，这里只存结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SecurityMark {
+    pub level: String,
+    pub period: String,
+}
+
+/// 一份文稿的事实。列表、搜索、导出、台账、汇编以后都从这里取，
+/// 不再各自读 `DraftInput` 的字段或各自拼文号。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DocumentMeta {
+    pub title: String,
+    pub kind: TemplateKind,
+    pub number: Option<DocNumber>,
+    pub date_text: String,
+    /// `YYYY-MM-DD`；无法解析时为空串，与稿件库 `doc_date_iso` 同口径。
+    pub date_iso: String,
+    pub security: SecurityMark,
+    pub status: Option<ManuscriptStatus>,
+}
+
+impl DocumentMeta {
+    /// 从表单快照取事实。标题由调用方给（正文标题/文件名称的取法在导出层），
+    /// 这样平台不依赖 Markdown 解析器。
+    pub(crate) fn from_draft(draft: &DraftInput, title: impl Into<String>) -> Self {
+        let (level, period) = draft.security_marking();
+        Self {
+            title: title.into(),
+            kind: draft.kind,
+            // 表单里的 `profile.department_code` 已经是生效代字；这里不从词库猜。
+            number: DocNumber::from_draft(draft, &UnitCodes::default()),
+            date_text: draft.date.trim().to_string(),
+            date_iso: parse_doc_date_iso(&draft.date),
+            security: SecurityMark {
+                level: level.trim().to_string(),
+                period: period.trim().to_string(),
+            },
+            status: None,
+        }
+    }
+}
+
+/// 成文日期显示串 → `YYYY-MM-DD`，用于范围过滤。
+/// 支持 `2026年8月6日`、`2026-08-06`、`2026/8/6` 等；缺月/日时补 `01`；
+/// 无法解析返回空串。与稿件库 `doc_date_iso` 同一算法。
+pub(crate) fn parse_doc_date_iso(value: &str) -> String {
+    let parts: Vec<u32> = value
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|s| s.parse::<u32>().ok())
+        .collect();
+    let Some(&year) = parts.first() else {
+        return String::new();
+    };
+    if !(1900..=2200).contains(&year) {
+        return String::new();
+    }
+    let month = parts.get(1).copied().unwrap_or(1);
+    let day = parts.get(2).copied().unwrap_or(1);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return String::new();
+    }
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +378,47 @@ mod tests {
             number.display(),
             crate::export::minutes::minutes_number_text(&draft)
         );
+    }
+
+    #[test]
+    fn document_meta_keeps_research_security_and_iso_date() {
+        let mut draft = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            date: "2026年8月6日".into(),
+            ..Default::default()
+        };
+        draft.research.security = "内部".into();
+        draft.research.security_years = "5年".into();
+        let meta = DocumentMeta::from_draft(&draft, "研究报告");
+        assert_eq!(meta.title, "研究报告");
+        assert_eq!(meta.kind, TemplateKind::ResearchReport);
+        assert_eq!(meta.number, None);
+        assert_eq!(meta.date_text, "2026年8月6日");
+        assert_eq!(meta.date_iso, "2026-08-06");
+        assert_eq!(meta.security.level, "内部");
+        assert_eq!(meta.security.period, "5年");
+        assert_eq!(meta.status, None);
+    }
+
+    #[test]
+    fn document_meta_uses_the_same_number_and_status_as_the_form() {
+        let draft = draft(TemplateKind::OfficialLetter, "某函", "2026", "12");
+        let meta = DocumentMeta::from_draft(&draft, "关于某事的通知");
+        assert_eq!(meta.number.expect("应有文号").display(), "某函〔2026〕12号");
+        assert_eq!(meta.status, None);
+    }
+
+    #[test]
+    fn date_iso_parser_matches_manuscript_variants() {
+        assert_eq!(parse_doc_date_iso("2026年8月6日"), "2026-08-06");
+        assert_eq!(parse_doc_date_iso("2026年08月06日"), "2026-08-06");
+        assert_eq!(parse_doc_date_iso("2026-08-06"), "2026-08-06");
+        assert_eq!(parse_doc_date_iso("2026/8/6"), "2026-08-06");
+        assert_eq!(parse_doc_date_iso("2026年8月"), "2026-08-01");
+        assert_eq!(parse_doc_date_iso("2026年"), "2026-01-01");
+        assert_eq!(parse_doc_date_iso(""), "");
+        assert_eq!(parse_doc_date_iso("另行通知"), "");
+        assert_eq!(parse_doc_date_iso("9999年8月6日"), "");
     }
 
     #[test]

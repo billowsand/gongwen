@@ -11,13 +11,13 @@
 use crate::export::document_title;
 use crate::file_limits::MAX_ATTACHMENT_BYTES;
 use crate::models::{AppConfig, DraftInput, ManuscriptStatus, TemplateKind};
+use crate::platform::doc::parse_doc_date_iso;
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
 
 #[cfg(feature = "ai-workbench")]
 pub(crate) mod ai_checkpoints;
@@ -378,17 +378,10 @@ pub struct ManuscriptStore {
 
 impl ManuscriptStore {
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent).context("创建稿件库目录失败")?;
-        }
-        let conn =
-            Connection::open(path).with_context(|| format!("无法打开稿件库 {}", path.display()))?;
-        crate::storage::apply_db_key(&conn)?;
-        conn.busy_timeout(Duration::from_millis(2000))?;
-        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
-        let mut store = Self { conn };
+        let db = crate::platform::db::Db::open(path)?;
+        let mut store = Self {
+            conn: db.into_connection(),
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -1587,27 +1580,6 @@ pub(crate) fn str_to_kind(s: &str) -> Option<TemplateKind> {
     }
 }
 
-/// 成文日期显示串 → YYYY-MM-DD，用于范围过滤。
-/// 支持 `2026年8月6日`、`2026-08-06`、`2026/8/6` 等；缺月/日时补 `01`；无法解析返回空串。
-fn parse_doc_date_iso(value: &str) -> String {
-    let parts: Vec<u32> = value
-        .split(|c: char| !c.is_ascii_digit())
-        .filter_map(|s| s.parse::<u32>().ok())
-        .collect();
-    let Some(&year) = parts.first() else {
-        return String::new();
-    };
-    if !(1900..=2200).contains(&year) {
-        return String::new();
-    }
-    let month = parts.get(1).copied().unwrap_or(1);
-    let day = parts.get(2).copied().unwrap_or(1);
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return String::new();
-    }
-    format!("{year:04}-{month:02}-{day:02}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2133,19 +2105,6 @@ mod tests {
             .find(|row| row.id == id)
             .unwrap();
         assert_eq!(row.security_level, "内部");
-    }
-
-    #[test]
-    fn parse_doc_date_iso_variants() {
-        assert_eq!(parse_doc_date_iso("2026年8月6日"), "2026-08-06");
-        assert_eq!(parse_doc_date_iso("2026年08月06日"), "2026-08-06");
-        assert_eq!(parse_doc_date_iso("2026-08-06"), "2026-08-06");
-        assert_eq!(parse_doc_date_iso("2026/8/6"), "2026-08-06");
-        assert_eq!(parse_doc_date_iso("2026年8月"), "2026-08-01");
-        assert_eq!(parse_doc_date_iso("2026年"), "2026-01-01");
-        assert_eq!(parse_doc_date_iso(""), "");
-        assert_eq!(parse_doc_date_iso("另行通知"), "");
-        assert_eq!(parse_doc_date_iso("9999年8月6日"), "");
     }
 
     #[test]
