@@ -99,6 +99,7 @@ impl FieldId {
                 TemplateKind::OfficialLetter,
                 TemplateKind::PhoneNotice,
                 TemplateKind::RedHeadApproval,
+                TemplateKind::MeetingMinutes,
             ],
             Self::Recipient => &[TemplateKind::OfficialLetter, TemplateKind::PhoneNotice],
             Self::CopiesTo => &[TemplateKind::OfficialLetter],
@@ -302,14 +303,24 @@ pub(crate) fn apply_profile_field(
             let picked = [value.to_string()];
             exclude_from_multi(&mut profile.recipient, &picked);
             exclude_from_multi(&mut profile.copies_to, &picked);
-            if kind == TemplateKind::OfficialLetter || profile.department_code.trim().is_empty() {
+            if matches!(
+                kind,
+                TemplateKind::OfficialLetter | TemplateKind::MeetingMinutes
+            ) || profile.department_code.trim().is_empty()
+            {
                 let display = UnitDisplay::new(vocabulary);
                 let code = match kind {
                     TemplateKind::OfficialLetter => display.department_code_of(value),
                     TemplateKind::RedHeadApproval => display.approval_department_code_of(value),
+                    TemplateKind::MeetingMinutes => display.minutes_department_code_of(value),
                     _ => String::new(),
                 };
-                if kind == TemplateKind::OfficialLetter || !code.is_empty() {
+                // 纪要代字是单位属性：单位没有就清空，保证不出现“这一篇加、下一篇不加”。
+                if matches!(
+                    kind,
+                    TemplateKind::OfficialLetter | TemplateKind::MeetingMinutes
+                ) || !code.is_empty()
+                {
                     profile.department_code = code;
                 }
             }
@@ -619,6 +630,7 @@ mod tests {
                 code: "00".into(),
                 department_code: "甲函".into(),
                 approval_department_code: "甲呈".into(),
+                minutes_department_code: "甲纪".into(),
                 ..Default::default()
             },
             VocabularyEntry {
@@ -664,6 +676,16 @@ mod tests {
 
     /// 红线 2：对每个字段、每个适用文种跑一遍 `apply_field`，授权类要素与稿件
     /// 其余部分一个都不许变。
+    #[test]
+    fn minutes_code_follows_the_unit_and_clears_when_the_unit_has_none() {
+        let vocabulary = vocabulary();
+        let mut draft = draft_of(TemplateKind::MeetingMinutes);
+        apply_field(&mut draft, FieldId::IssuingUnit, "甲局", &vocabulary);
+        assert_eq!(draft.profile.department_code, "甲纪");
+        apply_field(&mut draft, FieldId::IssuingUnit, "乙局", &vocabulary);
+        assert_eq!(draft.profile.department_code, "");
+    }
+
     #[test]
     fn apply_field_never_touches_authorized_fields() {
         let vocabulary = vocabulary();

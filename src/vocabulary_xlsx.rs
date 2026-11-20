@@ -53,6 +53,7 @@ const UNIT_HEADERS: &[&str] = &[
     "别名/常见错写",
     "备注",
     "呈批代字",
+    "纪要代字",
     "职能任务",
     "身份编码",
     "上级单位身份编码",
@@ -74,7 +75,7 @@ const PERSON_HEADERS: &[&str] = &[
 ];
 
 const UNIT_COLUMN_WIDTHS: &[f64] = &[
-    14.0, 28.0, 28.0, 16.0, 14.0, 10.0, 28.0, 28.0, 14.0, 48.0, 38.0, 38.0,
+    14.0, 28.0, 28.0, 16.0, 14.0, 10.0, 28.0, 28.0, 14.0, 14.0, 48.0, 38.0, 38.0,
 ];
 const PERSON_COLUMN_WIDTHS: &[f64] = &[
     14.0, 10.0, 18.0, 14.0, 16.0, 16.0, 12.0, 28.0, 28.0, 48.0, 38.0, 38.0,
@@ -185,7 +186,11 @@ fn parse_reader<R: std::io::Read + std::io::Seek>(reader: R) -> Result<ImportRep
         if row.iter().all(|cell| cell.trim().is_empty()) {
             continue;
         }
-        entries.push(parse_unit_row(row, offset + 2)?);
+        entries.push(parse_unit_row(
+            row,
+            offset + 2,
+            unit_rows.unit_minutes_code,
+        )?);
     }
 
     let person_rows = read_sheet(&mut workbook, PERSON_SHEET, PERSON_HEADERS.len())?;
@@ -218,6 +223,8 @@ struct SheetRows {
     rows: Vec<Vec<String>>,
     /// 人员表是否为“办公电话 + 手机”两列；旧模板只有“联系电话”。
     two_phone_columns: bool,
+    /// 单位表是否有“纪要代字”列；旧模板没有这一列。
+    unit_minutes_code: bool,
 }
 
 fn read_sheet<R: std::io::Read + std::io::Seek>(
@@ -233,6 +240,8 @@ fn read_sheet<R: std::io::Read + std::io::Seek>(
         header.is_some_and(|row| row.iter().any(|c| cell_to_string(c) == "身份编码"));
     let two_phone_columns = sheet_name == PERSON_SHEET
         && header.is_some_and(|row| row.iter().any(|c| cell_to_string(c) == "手机"));
+    let unit_minutes_code = sheet_name == UNIT_SHEET
+        && header.is_some_and(|row| row.iter().any(|c| cell_to_string(c) == "纪要代字"));
     let mut rows = Vec::new();
     for row in range.rows() {
         let mut cells = Vec::with_capacity(width);
@@ -243,7 +252,9 @@ fn read_sheet<R: std::io::Read + std::io::Seek>(
             cells.push(String::new());
         }
         if !has_identities {
-            let start = if sheet_name == UNIT_SHEET || two_phone_columns {
+            let start = if sheet_name == UNIT_SHEET {
+                if unit_minutes_code { 11 } else { 10 }
+            } else if two_phone_columns {
                 10
             } else {
                 9
@@ -261,6 +272,7 @@ fn read_sheet<R: std::io::Read + std::io::Seek>(
     Ok(SheetRows {
         rows,
         two_phone_columns,
+        unit_minutes_code,
     })
 }
 
@@ -291,7 +303,11 @@ fn cell_to_string(cell: &Data) -> String {
     }
 }
 
-fn parse_unit_row(row: &[String], row_num: usize) -> Result<VocabularyEntry> {
+fn parse_unit_row(
+    row: &[String],
+    row_num: usize,
+    has_minutes_code: bool,
+) -> Result<VocabularyEntry> {
     let code = row[0].trim().to_string();
     let canonical = row[1].trim().to_string();
     let external_name = row[2].trim().to_string();
@@ -301,13 +317,22 @@ fn parse_unit_row(row: &[String], row_num: usize) -> Result<VocabularyEntry> {
     let seal_on_behalf = parse_bool_marker(&row[5]);
     let aliases = parse_aliases(&row[6]);
     let note = row[7].trim().to_string();
-    // 职能任务是后加的列，旧模板没有这一列时读出来是空串。
-    let duties = row[9].trim().to_string();
+    let (minutes_department_code, duties, identity_at, owner_at) = if has_minutes_code {
+        (
+            row[9].trim().to_string(),
+            row[10].trim().to_string(),
+            11,
+            12,
+        )
+    } else {
+        // 旧模板没有纪要代字列：职能任务在 9，身份编码在 10/11。
+        (String::new(), row[9].trim().to_string(), 10, 11)
+    };
     let _ = row_num; // 行号仅在出错时用，目前 parse_unit_row 不主动报冲突
     Ok(VocabularyEntry {
         id: 0,
-        identity: row.get(10).cloned().unwrap_or_default(),
-        owner_identity: row.get(11).cloned().unwrap_or_default(),
+        identity: row.get(identity_at).cloned().unwrap_or_default(),
+        owner_identity: row.get(owner_at).cloned().unwrap_or_default(),
         category: VocabularyCategory::Unit,
         code,
         canonical,
@@ -323,6 +348,7 @@ fn parse_unit_row(row: &[String], row_num: usize) -> Result<VocabularyEntry> {
         can_handle_parent_unit: false,
         department_code,
         approval_department_code,
+        minutes_department_code,
         duties,
         profile: String::new(),
         seal_on_behalf,
@@ -379,6 +405,7 @@ fn parse_person_row(
         can_handle_parent_unit,
         department_code: String::new(),
         approval_department_code: String::new(),
+        minutes_department_code: String::new(),
         duties: String::new(),
         profile,
         seal_on_behalf: false,
@@ -856,13 +883,13 @@ fn build_xlsx(entries: &[VocabularyEntry], existing_unit_codes: &[String]) -> Re
         ) {
             write_unit_row(sheet, row_index, entry)?;
         }
-        // 单位编码写到 M 列（隐藏），供人员表"所属单位编码"下拉引用。
-        sheet.set_column_hidden(12)?;
+        // 单位编码写到 N 列（隐藏），供人员表"所属单位编码"下拉引用。
+        sheet.set_column_hidden(13)?;
         for (i, code) in existing_unit_codes.iter().enumerate() {
             if code.trim().is_empty() {
                 continue;
             }
-            sheet.write_string(1 + i as u32, 12, code.trim())?;
+            sheet.write_string(1 + i as u32, 13, code.trim())?;
         }
         // 是否代章下拉：是 / 否 / -
         let daizhang_dv = DataValidation::new()
@@ -976,9 +1003,10 @@ fn write_unit_row(sheet: &mut Worksheet, row: u32, entry: &VocabularyEntry) -> R
     sheet.write_string(row, 6, entry.aliases.join("、"))?;
     sheet.write_string(row, 7, entry.note.trim())?;
     sheet.write_string(row, 8, entry.approval_department_code.trim())?;
-    sheet.write_string(row, 9, entry.duties.trim())?;
-    sheet.write_string(row, 10, &entry.identity)?;
-    sheet.write_string(row, 11, &entry.owner_identity)?;
+    sheet.write_string(row, 9, entry.minutes_department_code.trim())?;
+    sheet.write_string(row, 10, entry.duties.trim())?;
+    sheet.write_string(row, 11, &entry.identity)?;
+    sheet.write_string(row, 12, &entry.owner_identity)?;
     Ok(())
 }
 
@@ -1104,12 +1132,51 @@ mod tests {
         let mut unit = some_unit("00", "甲单位");
         unit.department_code = "甲函".into();
         unit.approval_department_code = "甲呈".into();
+        unit.minutes_department_code = "甲纪".into();
         unit.duties = "负责公共数据归集、共享与开放".into();
         to_xlsx(&[unit], &path, &codes(&["00"])).unwrap();
         let report = parse(&path, &codes(&["00"])).unwrap();
         assert_eq!(report.entries[0].department_code, "甲函");
         assert_eq!(report.entries[0].approval_department_code, "甲呈");
+        assert_eq!(report.entries[0].minutes_department_code, "甲纪");
         assert_eq!(report.entries[0].duties, "负责公共数据归集、共享与开放");
+    }
+
+    #[test]
+    fn imports_unit_sheet_without_minutes_code_column() {
+        let dir = tmp_dir();
+        let path = dir.join("legacy-unit-layout.xlsx");
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.set_name(UNIT_SHEET).unwrap();
+        let old_headers = [
+            "层级编码",
+            "单位名称",
+            "外部名称",
+            "简称",
+            "发函代字",
+            "是否代章",
+            "别名/常见错写",
+            "备注",
+            "呈批代字",
+            "职能任务",
+            "身份编码",
+            "上级单位身份编码",
+        ];
+        for (column, header) in old_headers.iter().enumerate() {
+            sheet.write_string(0, column as u16, *header).unwrap();
+        }
+        sheet.write_string(1, 0, "00").unwrap();
+        sheet.write_string(1, 1, "甲单位").unwrap();
+        sheet.write_string(1, 8, "甲呈").unwrap();
+        sheet.write_string(1, 9, "旧模板职能任务").unwrap();
+        workbook.add_worksheet().set_name(PERSON_SHEET).unwrap();
+        workbook.save(&path).unwrap();
+
+        let report = parse(&path, &codes(&["00"])).unwrap();
+        assert_eq!(report.entries[0].approval_department_code, "甲呈");
+        assert!(report.entries[0].minutes_department_code.is_empty());
+        assert_eq!(report.entries[0].duties, "旧模板职能任务");
     }
 
     #[test]

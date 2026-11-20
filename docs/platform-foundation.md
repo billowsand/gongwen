@@ -470,3 +470,18 @@ F1 先不碰台账、检索、通讯录的界面。
 
 纪要代字（单位属性，有就带、无就不带）+ `issue_register` 三个池 + 台账
 （手工补录、重号/断号）+ 制度有效性（状态、替代关系、引用提示）。
+
+## 14. F4a 纪要代字（2026-11-20）
+
+- 词库单位新增 `minutes_department_code`（纪要代字）；词库编辑区、树摘要、单位 Excel
+  都加了这一列。旧 Excel 没有该列时按旧列位读取，纪要代字为空。
+- 纪要编号仍是单位属性：选发文单位时 `element_fields::apply_field` 按
+  `UnitDisplay::minutes_department_code_of` 带出；单位没有就清空，表单里只读展示，
+  不能逐篇切换。
+- `export::minutes::minutes_number_text` 统一两种写法：有代字 `某纪〔2026〕3号`，
+  没有 `〔2026〕3号`；Typst、DOCX、预览共用这一个函数。
+- 校验按 `units::minutes_department_codes` 核对代字是否绑定单位；旧稿没有代字不报错。
+- 测试：全量 3207 通过 / 0 失败 / 94 忽略；fmt、clippy 零警告。
+
+下一步 F4b：`issue_register` 三个池（公函/呈批件/纪要）、手工补录、重号/断号、
+发文登记簿导出；然后 F4c 制度有效性。

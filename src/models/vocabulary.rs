@@ -66,6 +66,9 @@ pub struct VocabularyEntry {
     pub department_code: String,
     /// 单位专属：呈批代字，红头呈批件选中发文单位时自动带出。
     pub approval_department_code: String,
+    /// 单位专属：纪要代字。一个单位要么有、要么没有；有就所有纪要都带，
+    /// 没有就都排成「〔2026〕3号」。
+    pub minutes_department_code: String,
     /// 单位专属：职能任务（主要职责、分管事项）。智能体分配任务、推荐责任单位时按它对号。
     pub duties: String,
     /// 人员专属：个人简介（分管领域、专长、经历）。智能体推荐联系人、负责人时参考。

@@ -897,6 +897,7 @@ fn validate_metadata(
         // 出席、列席、请假、分送是人员，词库里不一定都有（外单位来人、临时列席），
         // 只校验单位。
         TemplateKind::MeetingMinutes => {
+            check_minutes_department_code(&profile.department_code, vocabulary, warnings);
             check_units(
                 &profile.issuing_unit,
                 &[VocabularyCategory::Unit],
@@ -1009,21 +1010,34 @@ fn check_department_code(
     if value.is_empty() {
         return;
     }
-    let known = if approval {
-        crate::units::approval_department_codes(vocabulary)
+    let (known, label) = if approval {
+        (
+            crate::units::approval_department_codes(vocabulary),
+            "呈批代字",
+        )
     } else {
-        crate::units::department_codes(vocabulary)
+        (crate::units::department_codes(vocabulary), "发函代字")
     };
-    if known.is_empty() || known.iter().any(|code| code == value) {
+    check_known_code(value, &known, label, warnings);
+}
+
+/// 纪要代字绑定在单位上；单位没有代字时表单留空，不在这里要求补。
+fn check_minutes_department_code(
+    value: &str,
+    vocabulary: &[VocabularyEntry],
+    warnings: &mut Vec<String>,
+) {
+    let known = crate::units::minutes_department_codes(vocabulary);
+    check_known_code(value, &known, "纪要代字", warnings);
+}
+
+fn check_known_code(value: &str, known: &[String], label: &str, warnings: &mut Vec<String>) {
+    let value = value.trim();
+    if value.is_empty() || known.is_empty() || known.iter().any(|code| code == value) {
         return;
     }
-    let kind = if approval {
-        "呈批代字"
-    } else {
-        "发函代字"
-    };
     warnings.push(format!(
-        "{kind}“{value}”没有绑定到任何单位，请核对或在标准词库中补入"
+        "{label}“{value}”没有绑定到任何单位，请核对或在标准词库中补入"
     ));
 }
 

@@ -265,13 +265,14 @@ pub(crate) fn vocabulary_matches(entry: &VocabularyEntry, filter: &str) -> bool 
         return true;
     }
     format!(
-        "{} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+        "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
         entry.code,
         entry.canonical,
         entry.external_name,
         entry.abbr,
         entry.department_code,
         entry.approval_department_code,
+        entry.minutes_department_code,
         entry.parent,
         entry.unit,
         entry.aliases.join(" "),

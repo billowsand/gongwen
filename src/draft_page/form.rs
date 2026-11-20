@@ -580,17 +580,33 @@ pub(crate) fn document_number_row(
     ui.end_row();
 }
 
-/// 会议纪要编号：只有年份与序号，没有机关代字，印成「〔2026〕3号」。
+/// 会议纪要编号：单位有纪要代字就带出，没有就只排「〔2026〕3号」。
+/// 代字是单位属性，这里只读展示，不在表单里逐篇切换。
 fn minutes_number_row(ui: &mut egui::Ui, profile: &mut crate::models::TemplateProfile) {
     row_label_with_info(
         ui,
         "编号",
-        "纪要编号只有年份与序号，不带机关代字；序号只在「盖章版」下可填。",
+        "纪要代字绑定发文单位：单位有就带出，没有就排成「〔2026〕3号」；序号只在「盖章版」下可填。",
     );
     let formal = profile.letter_version == LetterVersion::Formal;
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
+            if profile.department_code.trim().is_empty() {
+                ui.add_enabled(
+                    false,
+                    egui::TextEdit::singleline(&mut profile.department_code)
+                        .desired_width(96.0)
+                        .hint_text("本单位无纪要代字"),
+                )
+                .on_hover_text("如需带代字，请在标准词库的单位上填「纪要代字」");
+            } else {
+                ui.add_enabled(
+                    false,
+                    egui::TextEdit::singleline(&mut profile.department_code).desired_width(96.0),
+                )
+                .on_hover_text("纪要代字随发文单位带出，不能在单篇稿里改");
+            }
             ui.label("〔");
             ui.add(
                 egui::TextEdit::singleline(&mut profile.document_year)
@@ -607,15 +623,17 @@ fn minutes_number_row(ui: &mut egui::Ui, profile: &mut crate::models::TemplatePr
             );
             ui.label("号");
         });
+        let code = profile.department_code.trim();
         let year = profile.document_year.trim();
         if !year.is_empty() {
             let number = profile.document_number.trim();
+            let prefix = if code.is_empty() { "" } else { code };
             let text = if !formal {
-                format!("签字版：〔{year}〕 号（序号留空）")
+                format!("签字版：{prefix}〔{year}〕 号（序号留空）")
             } else if number.is_empty() {
-                format!("成文后显示为 〔{year}〕□号")
+                format!("成文后显示为 {prefix}〔{year}〕□号")
             } else {
-                format!("成文后显示为 〔{year}〕{number}号")
+                format!("成文后显示为 {prefix}〔{year}〕{number}号")
             };
             ui.label(
                 egui::RichText::new(text)

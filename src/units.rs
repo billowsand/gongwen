@@ -738,6 +738,21 @@ pub fn approval_department_codes(vocab: &[VocabularyEntry]) -> Vec<String> {
     codes
 }
 
+/// 词库中出现过的纪要代字，按单位的层级顺序去重。
+pub fn minutes_department_codes(vocab: &[VocabularyEntry]) -> Vec<String> {
+    let mut codes = Vec::new();
+    for entry in vocab
+        .iter()
+        .filter(|entry| entry.category == VocabularyCategory::Unit)
+    {
+        let code = entry.minutes_department_code.trim();
+        if !code.is_empty() && !codes.iter().any(|existing| existing == code) {
+            codes.push(code.to_string());
+        }
+    }
+    codes
+}
+
 /// 指定单位的直属下级单位在词库中的下标，按词库顺序。
 pub fn child_units(vocab: &[VocabularyEntry], unit_code: &str) -> Vec<usize> {
     let unit_code = unit_code.trim();
@@ -791,6 +806,13 @@ pub fn subtree_indices(vocab: &[VocabularyEntry], index: usize) -> Vec<usize> {
 }
 
 /// 词库层级解析器。`vocab` 仅借用，不持有。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodeKind {
+    Letter,
+    Approval,
+    Minutes,
+}
+
 #[derive(Debug, Clone)]
 pub struct UnitDisplay<'a> {
     vocab: Cow<'a, [VocabularyEntry]>,
@@ -1374,24 +1396,29 @@ impl<'a> UnitDisplay<'a> {
     /// 单位绑定的发函代字。处室通常不自编代字，用的是所在机关的代字，
     /// 因此本级没有绑定时逐级向上找；整棵链都没有绑定才返回空串。
     pub fn department_code_of(&self, key: &str) -> String {
-        self.department_code_of_kind(key, false)
+        self.department_code_of_kind(key, CodeKind::Letter)
     }
 
     /// 红头呈批件使用的代字，沿单位层级继承，与发函代字分别维护。
     pub fn approval_department_code_of(&self, key: &str) -> String {
-        self.department_code_of_kind(key, true)
+        self.department_code_of_kind(key, CodeKind::Approval)
     }
 
-    fn department_code_of_kind(&self, key: &str, approval: bool) -> String {
+    /// 会议纪要使用的代字；单位没有就返回空串，编号保持「〔2026〕3号」。
+    pub fn minutes_department_code_of(&self, key: &str) -> String {
+        self.department_code_of_kind(key, CodeKind::Minutes)
+    }
+
+    fn department_code_of_kind(&self, key: &str, kind: CodeKind) -> String {
         let mut current = self.find(key);
         for _ in 0..MAX_DEPTH {
             let Some(entry) = current else {
                 return String::new();
             };
-            let code = if approval {
-                entry.approval_department_code.trim()
-            } else {
-                entry.department_code.trim()
+            let code = match kind {
+                CodeKind::Letter => entry.department_code.trim(),
+                CodeKind::Approval => entry.approval_department_code.trim(),
+                CodeKind::Minutes => entry.minutes_department_code.trim(),
             };
             if !code.is_empty() {
                 return code.to_string();

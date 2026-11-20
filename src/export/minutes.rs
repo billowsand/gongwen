@@ -25,14 +25,20 @@ pub(crate) fn minutes_heading(input: &DraftInput, display: &UnitDisplay) -> Stri
     }
 }
 
-/// 编号「〔2026〕3号」的纸面文字：没有机关代字，预览版序号留一字空。
+/// 编号的纸面文字：单位有纪要代字时 `某纪〔2026〕3号`，没有时 `〔2026〕3号`；
+/// 预览版序号留一字空。代字来自表单里的 `profile.department_code`，由选发文单位带出。
 pub(crate) fn minutes_number_text(input: &DraftInput) -> String {
     let serial = if crate::export::element_display::is_preview_version(input) {
         crate::export::element_display::PREVIEW_PLACEHOLDER.to_string()
     } else {
         input.profile.document_number.trim().to_string()
     };
-    format!("〔{}〕{serial}号", input.document_year())
+    let code = input.profile.department_code.trim();
+    if code.is_empty() {
+        format!("〔{}〕{serial}号", input.document_year())
+    } else {
+        format!("{code}〔{}〕{serial}号", input.document_year())
+    }
 }
 
 /// 名单的一行：出席 / 列席 / 请假。
@@ -147,14 +153,17 @@ mod tests {
     }
 
     #[test]
-    fn number_has_no_department_code_and_blanks_serial_in_preview() {
+    fn number_supports_optional_department_code_and_blanks_serial_in_preview() {
         let mut input = DraftInput::default();
         input.profile.document_year = "2026".into();
         input.profile.document_number = "3".into();
-        input.profile.department_code = "某民函".into();
         assert_eq!(minutes_number_text(&input), "〔2026〕3号");
         input.profile.letter_version = crate::models::LetterVersion::Preview;
         assert_eq!(minutes_number_text(&input), "〔2026〕\u{2003}号");
+        input.profile.department_code = "某纪".into();
+        assert_eq!(minutes_number_text(&input), "某纪〔2026〕\u{2003}号");
+        input.profile.letter_version = crate::models::LetterVersion::Formal;
+        assert_eq!(minutes_number_text(&input), "某纪〔2026〕3号");
     }
 
     #[test]

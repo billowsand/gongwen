@@ -305,7 +305,7 @@ impl GongwenApp {
             ui.separator();
             ui.add(
                 egui::TextEdit::singleline(&mut self.vocabulary_filter)
-                    .hint_text("搜索单位、简称、呈批或发函代字、姓名或电话")
+                    .hint_text("搜索单位、简称、发函/呈批/纪要代字、姓名或电话")
                     .desired_width(280.0),
             );
             if !self.vocabulary_filter.is_empty()
@@ -924,6 +924,9 @@ impl GongwenApp {
                 }
                 if !entry.approval_department_code.trim().is_empty() {
                     parts.push(format!("呈 {}", entry.approval_department_code.trim()));
+                }
+                if !entry.minutes_department_code.trim().is_empty() {
+                    parts.push(format!("纪 {}", entry.minutes_department_code.trim()));
                 }
                 if entry.seal_on_behalf {
                     parts.push("代章".to_string());
@@ -1641,6 +1644,16 @@ impl GongwenApp {
                         &mut self.config.vocabulary[index].approval_department_code,
                     )
                     .hint_text("如“某教呈”；用于红头呈批件文号")
+                    .desired_width(width),
+                );
+                ui.end_row();
+
+                ui.label("纪要代字");
+                ui.add(
+                    egui::TextEdit::singleline(
+                        &mut self.config.vocabulary[index].minutes_department_code,
+                    )
+                    .hint_text("如“某纪”；留空时纪要编号为〔2026〕3号")
                     .desired_width(width),
                 );
                 ui.end_row();
