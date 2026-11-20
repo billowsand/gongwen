@@ -506,3 +506,13 @@ F1 先不碰台账、检索、通讯录的界面。
 ### 下一步（F4c）
 
 发文登记簿导出 XLSX；制度有效性（`document_registry` 加状态/替代关系、引用提示）。
+
+## 16. F4c 发文登记簿导出（2026-11-20）
+
+- 新增 `src/export/issue_register.rs`：年度/类型/编号/单位/标题/日期/密级/状态/来源/备注，
+  编号复用 `DocNumber`，单位用词库全称。
+- 台账窗口新增「导出 Excel」：走现有导出密码与后台写入，和通讯录导出同一套
+  `Protection`/`write_final_with`，不占界面线程。
+- 测试：导出工作簿可被 calamine 读回；全量 3212 通过 / 0 失败 / 94 忽略；fmt、clippy 零警告。
+
+下一步 F5a：制度有效性（`document_registry` 状态/替代关系、引用提示）；F5b 文件汇编。

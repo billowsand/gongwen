@@ -3,6 +3,10 @@
 //! 数据在 `manuscript::ledger`；这里只做窗口与动作，不直接拼 SQL。
 
 use crate::app::GongwenApp;
+use crate::app::file_dialog::FileDialogSpec;
+use crate::app::jobs::WorkerResult;
+use crate::app::output_guard::PII_EXPORT_WARNING;
+use crate::export::protection::{self, Protection};
 use crate::manuscript::ledger::{DuplicateGroup, GapGroup, IssueEntry, IssueFilter, NewIssue};
 use crate::models::VocabularyEntry;
 use crate::platform::doc::NumberingScheme;
@@ -39,6 +43,7 @@ impl Default for IssueLedgerState {
 enum LedgerAction {
     Refresh,
     Sync,
+    Export,
     Add(ManualIssue),
     Delete(i64),
     Close,
@@ -87,6 +92,65 @@ impl GongwenApp {
         }
     }
 
+    fn export_issue_register(
+        &mut self,
+        entries: Vec<IssueEntry>,
+        vocabulary: Vec<VocabularyEntry>,
+    ) {
+        let save = move |app: &mut Self| {
+            let protection = match Protection::current() {
+                Ok(protection) => protection,
+                Err(error) => {
+                    app.status = format!("无法导出发文登记簿：{error:#}");
+                    return;
+                }
+            };
+            app.request_file_with_context(
+                FileDialogSpec::save_file()
+                    .filter("Excel", &["xlsx"])
+                    .file_name("公文助手发文登记簿.xlsx"),
+                move |app, path, ctx| {
+                    if let Some(path) = path {
+                        app.start_issue_register_export(
+                            ctx,
+                            entries.clone(),
+                            vocabulary.clone(),
+                            path.with_extension("xlsx"),
+                            protection,
+                        );
+                    }
+                },
+            );
+        };
+        if protection::encryption_enabled() {
+            save(self);
+        } else {
+            self.request_output_with_warning("导出发文登记簿 Excel", PII_EXPORT_WARNING, save);
+        }
+    }
+
+    fn start_issue_register_export(
+        &mut self,
+        ctx: egui::Context,
+        entries: Vec<IssueEntry>,
+        vocabulary: Vec<VocabularyEntry>,
+        path: std::path::PathBuf,
+        protection: Option<Protection>,
+    ) {
+        self.status = "正在生成发文登记簿…".into();
+        let tx = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let bytes = crate::export::issue_register::xlsx_bytes(&entries, &vocabulary)?;
+                let path = protection::write_final_with(protection.as_ref(), &path, &bytes)?;
+                Ok::<_, anyhow::Error>(format!("发文登记簿已导出到 {}。", path.display()))
+            })()
+            .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::IssueRegisterExported(result));
+            ctx.request_repaint();
+        });
+    }
+
     fn reload_issue_ledger(&mut self, state: &mut IssueLedgerState) {
         state.needs_load = false;
         let Some(store) = self.manuscript_store.as_ref() else {
@@ -118,6 +182,11 @@ impl GongwenApp {
                 },
                 None => state.notice = Some("稿件库不可用。".into()),
             },
+            LedgerAction::Export => {
+                let entries = state.entries.clone();
+                let vocabulary = self.config.vocabulary.clone();
+                self.export_issue_register(entries, vocabulary);
+            }
             LedgerAction::Add(form) => match self.manuscript_store.as_mut() {
                 Some(store) => match store.add_manual_issue(&form) {
                     Ok(_) => {
@@ -199,6 +268,9 @@ impl IssueLedgerState {
             );
             if ui.button("查询").clicked() {
                 action = Some(LedgerAction::Refresh);
+            }
+            if ui.button("导出 Excel").clicked() {
+                action = Some(LedgerAction::Export);
             }
             if ui
                 .button("同步稿件库")

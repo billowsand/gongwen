@@ -9,6 +9,7 @@ pub(crate) mod bibliography;
 pub(crate) mod caption;
 mod docx;
 pub(crate) mod element_display;
+pub(crate) mod issue_register;
 pub(crate) mod minutes;
 pub(crate) mod print_trace;
 pub(crate) mod protection;

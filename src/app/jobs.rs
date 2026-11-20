@@ -45,6 +45,8 @@ pub(crate) enum WorkerResult {
     ManuscriptSearchIndexed(Result<usize, String>),
     /// 通讯录 Excel 导出结果（成功时是落盘路径说明）。
     AddressBookExported(Result<String, String>),
+    /// 发文登记簿 Excel 导出结果。
+    IssueRegisterExported(Result<String, String>),
     AuxiliaryArchiveExported(Result<PathBuf, String>),
     VocabularyWorkbookExported(Result<String, String>),
     /// 外部程序把文件放进系统剪贴板的结果，后台线程执行。
@@ -615,6 +617,10 @@ impl GongwenApp {
                         self.status = format!("正文索引已补建 {count} 篇，可以按正文检索。");
                     }
                     Err(error) => self.status = format!("正文索引补建失败：{error}"),
+                },
+                WorkerResult::IssueRegisterExported(result) => match result {
+                    Ok(message) => self.status = message,
+                    Err(error) => self.status = format!("发文登记簿导出失败：{error}"),
                 },
                 WorkerResult::AddressBookExported(result) => match result {
                     Ok(message) => self.status = message,
