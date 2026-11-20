@@ -78,8 +78,11 @@ mod package_file;
 mod password_policy;
 mod pdf_text;
 mod pdf_viewer;
+// 平台内核 F0 骨架：通用数据与纯算法先落地，F1 接第一个使用者后移除 allow。
 #[cfg(feature = "ai-workbench")]
 mod pi_agent;
+#[allow(dead_code)]
+mod platform;
 mod portable_runtime;
 mod preview;
 // 打印：Win32 那一半是 FFI，在 `print` 内部的 `win` 模块声明处单独放行 unsafe。
