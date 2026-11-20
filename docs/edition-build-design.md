@@ -46,9 +46,9 @@ GTK 与 portal 特性只影响 Linux，Windows 和 macOS 仍走各自的文件�
 
 独立二进制各用自己的数据和缓存目录。AI 版沿用原目录，非 AI 版使用 `GongwenAssistantNoAi`。单实例转发随目录隔离。打包脚本执行 `--build-edition` 校验输入二进制。两版共用字体、基础词表与许可证。AI 版正式包包含通过校验的 `runtime/pi` 和外部写作技能包，Windows 和 Linux 还附带模型示例配置。非 AI 版的包名加 `-no-ai`，安装标识、安装目录和桌面入口也各自独立。
 
-Windows 保留 AI 版完整包和现有增量升级流程。非 AI 版通过完整安装包升级，并登记独立的 `.gwx` 打开方式。Debian 和 Arch 为两版分别设置包名、命令和桌面标识，由 AI 包登记共享的 `.gwx` MIME 类型。macOS 为非 AI 版使用 `GongwenAssistantNoAi.app` 和 `com.billowsand.gongwen.no-ai`。
+Windows 保留 AI 版完整包和现有增量升级流程。非 AI 版通过完整安装包升级；两版各自登记 ProgId 并设为 `.gwx` 的默认打开方式（同机都装时以最后安装者为准）。Debian 和 Arch 为两版分别设置包名、命令和桌面标识，由 AI 包登记共享的 `.gwx` MIME 类型。macOS 为非 AI 版使用 `GongwenAssistantNoAi.app` 和 `com.billowsand.gongwen.no-ai`。
 
-打标签时，当前启用的 Windows 发布作业为两版分别生成安装程序和 SHA-256。macOS、Debian 和 Arch 的双版打包步骤也已配置，可按现有平台开关启用。
+打标签时，当前启用的 Windows 发布作业只构建并打包非 AI 版安装程序和 SHA-256；AI 全版手工出包。macOS、Debian 和 Arch 的双版打包步骤也已配置，可按现有平台开关启用。
 
 ## 打包与验收
 

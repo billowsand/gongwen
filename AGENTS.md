@@ -486,10 +486,14 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
   保留在 `ci.yml` 里但 `if: false` 停用，恢复时去掉那一行即可。代价是 Linux 专有代码
   （`linux-portal-dialogs` 变体等）不再随 CI 编译，改到那部分要走本地
   `cargo build --release --locked --no-default-features --features ai,linux-portal-dialogs`。
-  `release.yml` 在 push `v*` tag 时触发，产出 Windows x64 setup.exe、Linux ARM64 deb
-  （Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）、
-  Linux x86_64 的 Arch / Omarchy pacman 包（`archlinux:base` 容器构建，`makepkg` 打成
-  `.pkg.tar.zst`，供离线机器 `pacman -U`）与 macOS arm64 的 `.dmg`，各带 `.sha256`。
+  `release.yml` 在 push `v*` tag 时触发，**当前只产出 Windows x64 的非 AI 版安装程序**
+  （`gongwen-assistant-no-ai-<版本>-win-x64-setup.exe` + `.sha256`）；AI 全版用
+  `python scripts/build-editions.py` + `scripts/package-installer.ps1` 手工出包，不在 Release
+  里发布。Linux ARM64 deb（Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 /
+  麒麟 V10）、Linux x86_64 的 Arch / Omarchy pacman 包（`archlinux:base` 容器构建，
+  `makepkg` 打成 `.pkg.tar.zst`，供离线机器 `pacman -U`）与 macOS arm64 的 `.dmg` 的
+  打包作业保留在 `release.yml` 里但 `if: false` 停用，恢复时改回 `release` 作业的
+  needs 与资产校验。
   macOS 的签名与公证只在配置 `GONGWEN_MACOS_SIGN_IDENTITY` / `GONGWEN_MACOS_NOTARY_PROFILE`
   时执行，CI 未配 secrets 时发布的是未签名包（Gatekeeper 会拦，需右键打开）；x64 dmg
   可同法出包、暂不发布。Linux AMD64 的 deb 不再发布。

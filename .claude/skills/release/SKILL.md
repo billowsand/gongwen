@@ -13,17 +13,15 @@ description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与安�
 
 - 远程：`git@github.com:billowsand/gongwen.git`，发布分支 `main`。
 - 版本号只维护在 `Cargo.toml`（根包 `version`）+ `Cargo.lock`（根包 `gongwen-assistant` 的 `version`）。**注意 `Cargo.lock` 里另有若干同名版本的依赖**（`block2`、`type-map`、`windows-strings`、`zune-core` 等），只改 `name = "gongwen-assistant"` 那一条。
-- 工作流：`ci.yml` 在 push main 时触发，**当前只跑 Windows x64**（fmt / clippy / test + 随包 Pi 运行时、host 测试、离线验收、manifest 端到端）加一个 RustSec 依赖漏洞扫描；macOS / Linux / Ubuntu 20.04 启动冒烟三个作业 `if: false` 停用。`release.yml` 在 push `v*` tag 时触发，共 8 个 job，但当前只有 build-windows 与 release 会执行（其余 `if: false` 跳过）。
+- 工作流：`ci.yml` 在 push main 时触发，**当前只跑 Windows x64**（fmt / clippy / test + 随包 Pi 运行时、host 测试、离线验收、manifest 端到端）加一个 RustSec 依赖漏洞扫描；macOS / Linux / Ubuntu 20.04 启动冒烟三个作业 `if: false` 停用。`release.yml` 在 push `v*` tag 时触发，共 8 个 job，但当前只有 build-windows 与 release 会执行（其余 `if: false` 跳过）；build-windows 编译并打包的是**非 AI 版**（`--no-default-features --features task-assistant,linux-gtk-dialogs`），不组装 Pi 运行时。
 - **版本更新说明由工作流取仓库文件**：`release.yml` 的 `release` job 读 `docs/release-notes/${GITHUB_REF_NAME}.md`，有则 `gh release create --title "公文助手 vX.Y.Z" --notes-file <该文件>`；**缺文件才回退 `--generate-notes` 并打一条 `::warning::`**。所以说明必须在打 tag 前提交进仓库，不是发完再补。
 - **用户文档有两份，发版时都可能过期**（发版前必查，见步骤 3）：
   - `README.md`（根目录）：面向读者的宣发版，含成堆**会随版本漂移的硬数字**（文种 7 种、导入 24 种格式、校对词表 155 条、文档级规则 21 条、约 21.2 万行 Rust、1852 项自动化测试——括号里是 v0.9.1 的值，**每版都要重新数**，见步骤 3）。打包脚本会把它复制进发布包（`scripts/package-portable.ps1`、`scripts/package-dmg.sh`），所以它是**随包发行**的文档，不是仓库自留物。
   - `docs/install.md`（安装指南）。
 - 使用帮助/用户手册已于 2026-11-12 退役：`assets/help/`、`src/help/`、`docs/manual.md` 均已删除，发版时不要再找它们，也不要重新引入手册维护流程。旧版帮助截图与配置目录 `help/` PDF 仅由 `src/retired_help.rs` 与备份排除规则兼容。
-- **Release 资产是 8 个**（v0.10.0 起的口径：四件套各带 `.sha256`。macOS 作业拿不到托管 runner 时 dmg 可缺省、只剩 6 个；Linux AMD64 的 deb 不发布）：
-  - `gongwen-assistant-X.Y.Z-win-x64-setup.exe` + `.sha256`
-  - `gongwen-assistant-X.Y.Z-macos-arm64.dmg` + `.sha256`（`macos-15` 原生构建；未配置签名 / 公证 secrets 时为 ad-hoc 签名，只能右键打开）
-  - `gongwen-assistant_X.Y.Z_arm64.deb` + `.sha256`（Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）
-  - `gongwen-assistant-X.Y.Z-1-x86_64.pkg.tar.zst` + `.sha256`（Arch / Omarchy 包：`archlinux:base` 容器构建，`makepkg` 打包，离线机器 `pacman -U` 安装）
+- **Release 资产是 2 个**（v0.10.14 起的口径：只发布 Windows x64 非 AI 版）：
+  - `gongwen-assistant-no-ai-X.Y.Z-win-x64-setup.exe` + `.sha256`
+  macOS / Linux / Arch 作业在 `release.yml` 里保留但 `if: false` 停用；恢复时同步改 `release` 作业的 needs 与资产校验。AI 全版用 `python scripts/build-editions.py` + `scripts/package-installer.ps1` 手工出包，不在 Release 里发布。
 - 本机无 `pwsh`：不能跑 `scripts/bump-version.ps1`，版本号用手动编辑。
 - **提交预分诊（可选加速，用 eval 的 `judge_batch`）**：本机 omp 已接入 TypeSafe
   （judge 模型角色 = `typesafe/jev-latest`），一条 `judge_batch` 调用就能把本区间每条提交的
@@ -33,7 +31,7 @@ description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与安�
   **它不替代任何硬性要求**：版本更新说明仍要手写，README / 安装指南仍要人工过目。
   没配 TypeSafe 凭据就跳过，流程完全不变。
 - 历史惯例：tag 为 **annotated tag**（消息为中文概述）；release 标题为「公文助手 vX.Y.Z」；版本号按 **patch** 递增（`v0.5.x` 系列）；发布前有一个 `chore: release vX.Y.Z` 提交（可同时带上说明文件）。
-- 当前 Release 只构建 Windows x64，全程约 30–45 分钟（Rust 编译 + 组装 Pi 运行时 + 离线验收 + PDF 冒烟 + Inno 打包）；`gh run watch` 一轮就能等完。
+- 当前 Release 只构建 Windows x64 非 AI 版，全程约 25–40 分钟（Rust 编译 + 字体 runtime + PDF 冒烟 + Inno 打包）；`gh run watch` 一轮就能等完。
 
 ## 工作流
 
@@ -233,17 +231,17 @@ gh run view <release-run-id> --json status,conclusion
 gh api repos/billowsand/gongwen/releases/tags/vX.Y.Z \
   --jq '{name, tag_name, draft, prerelease, html_url}'
 gh release list --limit 3                                            # 本版应为 Latest
-gh release view vX.Y.Z --json assets --jq '.assets[] | .name'         # 应为 8 个资产（macOS 作业被取消时 6 个）
+gh release view vX.Y.Z --json assets --jq '.assets[] | .name'         # 应为 2 个资产（安装程序 + .sha256）
 git rev-parse vX.Y.Z^{commit}; git rev-parse HEAD                     # 两者相等
 git status -sb                                                       # 与 origin/main 同步、工作区干净
 ```
 
-- release 必须：`draft=false`、`prerelease=false`、标题「公文助手 vX.Y.Z」、正文为手写说明（与仓库文件一致）、**8 个资产齐全**（macOS 作业被取消时 6 个）且各安装包都有对应 `.sha256`。
-- 抽查一个校验和文件真的对得上（资产从同一轮 run 上传，抽查 deb 一个即可）：
+- release 必须：`draft=false`、`prerelease=false`、标题「公文助手 vX.Y.Z」、正文为手写说明（与仓库文件一致）、**2 个资产齐全**（`gongwen-assistant-no-ai-X.Y.Z-win-x64-setup.exe` 与其 `.sha256`）。
+- 抽查校验和文件真的对得上（资产从同一轮 run 上传）：
 
 ```bash
-cd /tmp && mkdir -p kw && cd kw && gh release download vX.Y.Z --pattern '*_arm64.deb*' --dir . --clobber
-sha256sum -c gongwen-assistant_X.Y.Z_arm64.deb.sha256     # 必须 OK
+cd /tmp && mkdir -p kw && cd kw && gh release download vX.Y.Z --pattern '*win-x64-setup.exe*' --dir . --clobber
+sha256sum -c gongwen-assistant-no-ai-X.Y.Z-win-x64-setup.exe.sha256     # 必须 OK
 cd - && rm -rf /tmp/kw
 ```
 
@@ -280,10 +278,9 @@ cd - && rm -rf /tmp/kw
 
 ### 下载
 
-- Windows x64 安装程序
-- Linux ARM64 Debian 软件包（兼容 GLIBC 2.28 / Ubuntu 20.04）
+- Windows x64 非 AI 版安装程序：`gongwen-assistant-no-ai-X.Y.Z-win-x64-setup.exe`
 
-各安装包均附带 SHA-256 校验文件。
+安装包附带 SHA-256 校验文件。本次只发布 Windows x64 非 AI 版；AI 全版按《安装指南》从源码构建。
 ```
 
 ## 常见故障

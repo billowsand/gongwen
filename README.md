@@ -255,7 +255,7 @@ AI 的形态是**右侧 AI 侧栏**：起草页点「智能写作」就开一格
 | 导出 | Markdown、DOCX（Word）、PDF（内置 Typst 排版，公文与研究报告）、Typst 包（模板 + 数据 + 资源，用 typst CLI 编译）、公函签收记录单、花脸稿、送批材料合并 PDF、文件 / 光盘销毁审批表、稿件包（.gwx） |
 | 校对 | 内置 155 条校对词表（错别字 / 近义混淆 / 语病 / 套话虚词 / 称谓规范 / 公文用语六组，必错一键替换）+ 20 条文档级规则（文号 / 日期 / 标题 / 附件 / 称谓 / 句末 / 行文语体），规则按文类收紧并在「校对词表」页可查编号、依据与适用范围 |
 | 导入 | 24 种格式文件新建文档（Word / Excel / PPT / ODF / RTF / EPUB / CSV / PDF 电子版…）；标准词库与词库模板可导出为带打开密码的 Excel 并回导，校对词表支持 Excel 导入导出 |
-| 平台 | 当前发布 Windows x64 的 AI 全版安装程序（附 SHA-256）；非 AI 版可从源码构建，不在 Release 里发布。macOS arm64 磁盘映像、Linux ARM64 deb（GLIBC 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）与 Arch / Omarchy pacman 包的打包作业保留在发布工作流里，当前停用，需要时再启用 |
+| 平台 | 当前发布 Windows x64 的非 AI 版安装程序（`gongwen-assistant-no-ai-<版本>-win-x64-setup.exe`，附 SHA-256）；AI 全版可从源码构建，不在 Release 里发布。macOS arm64 磁盘映像、Linux ARM64 deb（GLIBC 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）与 Arch / Omarchy pacman 包的打包作业保留在发布工作流里，当前停用，需要时再启用 |
 
 ## 快速开始
 
@@ -265,7 +265,7 @@ AI 的形态是**右侧 AI 侧栏**：起草页点「智能写作」就开一格
 
 1. 在「标准词库」维护本单位的单位与人员（可下载 Excel 模板批量导入）；
 2. 「起草」页选文种、填要素——写到哪一步，校验就跟到哪一步；
-3. 需要 AI 起草时，在「AI 管理」中配置模型服务（LM Studio / Ollama）；不配也能用，排版、校对、导出全部功能不受影响。
+3. 需要 AI 起草时，从源码构建 AI 全版，并在「AI 管理」中配置模型服务（LM Studio / Ollama）；Release 发布的非 AI 版不含 AI，排版、校对、导出等全部本地功能照常使用。
 
 **从源码构建**：Rust stable（edition 2024），`cargo run` 即可。
 
@@ -285,7 +285,7 @@ python3 scripts/build-editions.py
 ## 项目结构与开发
 
 ```text
-src/                应用代码（约 35.0 万行 Rust，3176 项自动化测试）
+src/                应用代码（约 35.0 万行 Rust，3184 项自动化测试）
 assets/             图标与界面资源
 examples/           示例公文
 skills/             gongwen-markdown 技能包（Agent Skill，随安装包分发）
@@ -307,7 +307,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-GitHub Actions：CI 只在 Windows x64 上执行格式、静态检查与测试——除整套用例，还包括随包 Pi 运行时的组装、Pi host 测试、离线验收与运行时 manifest 端到端校验；另有每周一次的依赖漏洞扫描。推送 `v*` 标签后自动构建 Windows x64 的 AI 全版安装程序，连同 SHA-256 校验和创建 Release。macOS arm64、Linux ARM64 deb 与 Arch / Omarchy pacman 包的作业以及它们的 CI 门禁都保留在仓库里（当前停用），需要时再启用。
+GitHub Actions：CI 只在 Windows x64 上执行格式、静态检查与测试——除整套用例，还包括随包 Pi 运行时的组装、Pi host 测试、离线验收与运行时 manifest 端到端校验；另有每周一次的依赖漏洞扫描。推送 `v*` 标签后自动构建 Windows x64 的非 AI 版安装程序，连同 SHA-256 校验和创建 Release。macOS arm64、Linux ARM64 deb 与 Arch / Omarchy pacman 包的作业以及它们的 CI 门禁都保留在仓库里（当前停用），需要时再启用。
 
 ## 许可
 

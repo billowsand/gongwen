@@ -127,9 +127,9 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 ; gwx-document.ico 第一次出现时是新文件，增量包会自动带上。
 ; 卸载时 ProgId 整键删除；.gwx 下只删我们写的值，别的程序也可能挂在那里。
 [Registry]
-#if MyNoAi == "0"
+; 两个版本各自登记 ProgId 并设为 .gwx 的默认打开方式（同机都装时以最后安装者为准，
+; 卸载只删自己的 ProgId 键）；非 AI 版是当前 Release 的主发版，双击就要能打开稿件包。
 Root: HKA; Subkey: "Software\Classes\.gwx"; ValueType: string; ValueName: ""; ValueData: "{#MyProgId}"; Flags: uninsdeletevalue
-#endif
 Root: HKA; Subkey: "Software\Classes\.gwx\OpenWithProgids"; ValueType: none; ValueName: "{#MyProgId}"; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\{#MyProgId}"; ValueType: string; ValueName: ""; ValueData: "公文助手稿件包"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\{#MyProgId}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\gwx-document.ico"
