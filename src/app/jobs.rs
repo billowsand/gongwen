@@ -41,6 +41,8 @@ use std::path::PathBuf;
 use std::thread;
 
 pub(crate) enum WorkerResult {
+    /// 启动时发现正文索引缺篇，后台补建的结果（补建篇数）。
+    ManuscriptSearchIndexed(Result<usize, String>),
     AuxiliaryArchiveExported(Result<PathBuf, String>),
     VocabularyWorkbookExported(Result<String, String>),
     /// 外部程序把文件放进系统剪贴板的结果，后台线程执行。
@@ -606,6 +608,12 @@ impl GongwenApp {
                     self.vocabulary_export_busy = false;
                     self.status = result.unwrap_or_else(|error| format!("Excel 导出失败：{error}"));
                 }
+                WorkerResult::ManuscriptSearchIndexed(result) => match result {
+                    Ok(count) => {
+                        self.status = format!("正文索引已补建 {count} 篇，可以按正文检索。");
+                    }
+                    Err(error) => self.status = format!("正文索引补建失败：{error}"),
+                },
                 WorkerResult::AuxiliaryArchiveExported(result) => {
                     self.status = match result {
                         Ok(path) => format!("已导出加密文件：{}", path.display()),

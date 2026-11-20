@@ -28,7 +28,9 @@ impl Entry {
             subtitle,
             target: target.clone(),
             icon: match &target {
-                Target::Document(_) | Target::Manuscript(_) => crate::theme::Icon::FileTypeDoc,
+                Target::Document(_) | Target::Manuscript(_) | Target::ManuscriptBody { .. } => {
+                    crate::theme::Icon::FileTypeDoc
+                }
                 Target::Vocabulary(_) => crate::theme::Icon::Building,
                 Target::Page(page) => page.icon(),
                 Target::NewDocument => crate::theme::Icon::FilePlus,

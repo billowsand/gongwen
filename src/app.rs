@@ -740,7 +740,26 @@ impl GongwenApp {
         // 稿件库打开失败不阻塞启动：其余标签页照常可用，稿件管理页显示错误。
         let (manuscript_store, manuscript_error) = match storage::manuscript_db_path() {
             Ok(path) => match manuscript::ManuscriptStore::open(&path) {
-                Ok(store) => (Some(store), None),
+                Ok(store) => {
+                    // 旧库第一次打开时 FTS 是空的：后台补建，不占启动和界面线程。
+                    let needs_index = store
+                        .search_index_counts()
+                        .map(|(indexed, total)| indexed != total)
+                        .unwrap_or(false);
+                    if needs_index {
+                        let sender = sender.clone();
+                        let wake = ctx.clone();
+                        let db_path = path.clone();
+                        std::thread::spawn(move || {
+                            let result = manuscript::ManuscriptStore::open(&db_path)
+                                .and_then(|mut store| store.rebuild_search_index())
+                                .map_err(|error| format!("{error:#}"));
+                            let _ = sender.send(WorkerResult::ManuscriptSearchIndexed(result));
+                            wake.request_repaint();
+                        });
+                    }
+                    (Some(store), None)
+                }
                 Err(error) => (None, Some(format!("稿件库打开失败：{error:#}"))),
             },
             Err(error) => (None, Some(format!("稿件库路径获取失败：{error:#}"))),

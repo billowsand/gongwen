@@ -17,6 +17,11 @@ use nucleo_matcher::{Config, Matcher};
 enum Target {
     Document(DocKey),
     Manuscript(i64),
+    /// 正文命中：打开稿件后把查找条定位到这句。
+    ManuscriptBody {
+        id: i64,
+        query: String,
+    },
     Vocabulary(u64),
     Page(NavPage),
     NewDocument,
@@ -26,6 +31,10 @@ enum Target {
 
 pub(super) struct QuickFind {
     entries: Vec<Entry>,
+    /// 标题/页面等固定条目数；正文命中追加在它后面，换查询时截掉。
+    base_count: usize,
+    /// 当前正文命中对应的查询；空串表示还没查过。
+    content_query: String,
     query: String,
     ranked_query: String,
     results: Vec<usize>,
@@ -39,8 +48,11 @@ pub(super) struct QuickFind {
 
 impl QuickFind {
     fn new(entries: Vec<Entry>, warning: Option<String>) -> Self {
+        let base_count = entries.len();
         Self {
             entries,
+            base_count,
+            content_query: String::new(),
             query: String::new(),
             ranked_query: String::new(),
             results: Vec::new(),
@@ -65,6 +77,51 @@ impl QuickFind {
         self.results.truncate(ui::MAX_RESULTS);
         self.ranked_query.clone_from(&self.query);
         self.selected = 0;
+    }
+
+    /// 把正文命中追加到固定条目后面；同一查询不重复追加。
+    fn set_content_hits(&mut self, query: &str, hits: Vec<crate::platform::search::SearchHit>) {
+        if self.content_query == query {
+            return;
+        }
+        self.entries.truncate(self.base_count);
+        for hit in hits {
+            let snippet = hit
+                .snippets
+                .first()
+                .map(|snippet| snippet.text.as_str())
+                .unwrap_or("");
+            let subtitle = if snippet.is_empty() {
+                "正文命中".to_string()
+            } else {
+                format!("正文：{snippet}")
+            };
+            self.entries.push(
+                Entry::new(
+                    hit.title,
+                    subtitle,
+                    &format!("{query} {snippet}"),
+                    Target::ManuscriptBody {
+                        id: hit.manuscript_id,
+                        query: query.to_string(),
+                    },
+                )
+                .with_badge("正文"),
+            );
+        }
+        self.content_query = query.to_string();
+        self.ranked_query.clear();
+        self.refresh_results();
+    }
+
+    fn clear_content_hits(&mut self) {
+        if self.content_query.is_empty() && self.entries.len() == self.base_count {
+            return;
+        }
+        self.entries.truncate(self.base_count);
+        self.content_query.clear();
+        self.ranked_query.clear();
+        self.refresh_results();
     }
 
     fn selected_target(&self) -> Option<Target> {
@@ -254,17 +311,23 @@ impl GongwenApp {
     }
 
     pub(crate) fn quick_find_window(&mut self, ctx: &egui::Context) {
-        let Some(state) = &mut self.quick_find else {
+        let Some(state) = self.quick_find.as_mut() else {
             return;
         };
         if state.focus_search {
             state.previous_focus = ctx.memory(|memory| memory.focused());
         }
         let response = ui::modal(ctx).show(ctx, |ui| state.ui(ui));
-        let (target, close) = response.inner.clone();
-        let close = close || response.should_close();
+        let (query, target, close) = (
+            state.query.trim().to_string(),
+            response.inner.0.clone(),
+            response.inner.1 || response.should_close(),
+        );
+        let previous_focus = state.previous_focus;
+        let needs_body = query.chars().count() >= 2 && state.content_query != query;
+        let clear_body = query.chars().count() < 2 && !state.content_query.is_empty();
+
         if target.is_some() || close {
-            let previous_focus = state.previous_focus;
             self.quick_find = None;
             ctx.memory_mut(|memory| {
                 memory.surrender_focus(ui::search_id());
@@ -274,9 +337,33 @@ impl GongwenApp {
                     memory.request_focus(id);
                 }
             });
+            if let Some(target) = target {
+                self.open_quick_find_target(target);
+            }
+            return;
         }
-        if let Some(target) = target {
-            self.open_quick_find_target(target);
+
+        if needs_body {
+            let result = self
+                .manuscript_store
+                .as_ref()
+                .map(|store| store.search_content(&query, 20));
+            if let Some(state) = self.quick_find.as_mut() {
+                match result {
+                    Some(Ok(hits)) => state.set_content_hits(&query, hits),
+                    Some(Err(error)) => {
+                        state.set_content_hits(&query, Vec::new());
+                        state.warning = Some(format!("正文检索失败：{error:#}"));
+                    }
+                    None => {}
+                }
+            }
+            ctx.request_repaint();
+        } else if clear_body {
+            if let Some(state) = self.quick_find.as_mut() {
+                state.clear_content_hits();
+            }
+            ctx.request_repaint();
         }
     }
 
@@ -314,6 +401,7 @@ impl GongwenApp {
                     Err(error) => self.status = format!("打开稿件失败：{error:#}"),
                 }
             }
+            Target::ManuscriptBody { id, query } => self.open_in_editor_at_query(id, &query),
             Target::Vocabulary(id) => {
                 self.vocabulary_filter.clear();
                 self.vocabulary_selected = Some(id);
@@ -331,5 +419,51 @@ impl GongwenApp {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::TemplateKind;
+    use crate::platform::search::{SearchHit, Snippet};
+
+    fn body_hit(id: i64, snippet: &str) -> SearchHit {
+        SearchHit {
+            manuscript_id: id,
+            title: format!("稿件 {id}"),
+            kind: TemplateKind::OfficialLetter,
+            doc_date: "2026-01-01".into(),
+            score: -1.0,
+            snippets: vec![Snippet {
+                text: snippet.into(),
+                span: 0..snippet.len(),
+            }],
+        }
+    }
+
+    #[test]
+    fn body_hits_append_after_base_entries_and_clear_back() {
+        let entries = vec![Entry::new(
+            "甲稿".into(),
+            "草稿".into(),
+            "",
+            Target::Manuscript(1),
+        )];
+        let mut state = QuickFind::new(entries, None);
+        state.query = "防汛".into();
+        state.set_content_hits("防汛", vec![body_hit(2, "正文：防汛值班")]);
+        assert_eq!(state.entries.len(), 2);
+        assert_eq!(
+            state.selected_target(),
+            Some(Target::ManuscriptBody {
+                id: 2,
+                query: "防汛".into(),
+            })
+        );
+
+        state.clear_content_hits();
+        assert_eq!(state.entries.len(), 1);
+        assert_eq!(state.content_query, "");
     }
 }

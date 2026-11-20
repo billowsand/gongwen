@@ -415,3 +415,30 @@ F1 先不碰台账、检索、通讯录的界面。
 
 `manuscript_fts` + `SearchIndex`，先把正文检索做出来；顺带把
 `SearchQuery`/`SearchHit` 从类型变成真实实现。
+
+## 12. F2 落地记录（2026-11-20）
+
+### 已落地
+
+- `manuscript_fts`（`src/manuscript/search.rs`）：FTS5 表，`rowid = manuscripts.id`，
+  tokens 由 `platform::search::index_text` 生成（jieba 词 + 连续汉字二元组）。
+- 索引维护：`create`/`update` 写索引，`delete`/`delete_many` 删索引，
+  `clear_all_content` 清空；旧库在启动时按 `search_index_counts` 比对，
+  缺篇就在后台 `rebuild_search_index`，界面线程不阻塞。
+- `ManuscriptStore::search_content(query, limit)`：返回稿件、标题、文种、日期、
+  BM25 分数与正文片段；查询词逐个加引号、组间 AND，用户输入不会变成 FTS 运算符。
+- 快捷查找接入：`Ctrl+K` 输入两个字以上会追加“正文”命中（标题 + 片段 + 徽标），
+  选中后打开稿件并把查找条定位到这句；`Target::ManuscriptBody` 只在本次查找里存在。
+- 验证：全量 `cargo test --locked --all-targets` **3202 通过 / 0 失败 / 94 忽略**；
+  fmt、clippy 零警告。
+
+### 已知边界
+
+- 正文检索先不带状态/文种/日期筛选，也不索引历史版本；先把“找得到”跑通。
+- 每次查询同步跑 FTS；1 万篇量级尚未压测，F3 再决定要不要加防抖/后台查询。
+- 片段取第一个命中词，标题命中但正文没有时退回标题。
+
+### 下一步（F3）
+
+通讯录两列电话 + `RenderPlan`/`Artifact`/`Protection`：先把词库电话迁移、
+旧 Excel 兼容、承办联系人办公优先和通讯录 PDF/XLSX 做完。

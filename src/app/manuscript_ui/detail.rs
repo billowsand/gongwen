@@ -941,6 +941,20 @@ impl GongwenApp {
         }
     }
 
+    /// 从正文检索打开：先开稿，再把查找条定位到命中的查询词。
+    pub(crate) fn open_in_editor_at_query(&mut self, id: i64, query: &str) {
+        self.open_in_editor(id);
+        if self.active_doc_ref().and_then(|doc| doc.manuscript_id) != Some(id) {
+            return;
+        }
+        let find = &mut self.doc_mut().markdown_find;
+        find.open = true;
+        find.query = query.to_string();
+        find.current = 0;
+        find.focus_query = false;
+        find.synced = None;
+    }
+
     /// 复制现有稿件为一份尚未入库的新稿，开在新标签里。只继承可编辑内容，
     /// 不继承原记录身份、生命周期状态、版本历史和 PDF 附件；首次保存会走
     /// 新建分支，绝不覆盖来源稿。

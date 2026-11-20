@@ -462,6 +462,8 @@ impl ManuscriptStore {
         ai_sessions::ensure_schema(&self.conn)?;
         // 公文登记簿：同样幂等建表，不单开档位。
         registry::ensure_schema(&self.conn)?;
+        // 正文检索索引：同样幂等建表，不单开档位。
+        search::ensure_schema(&self.conn)?;
         disposal::ensure_schema(&self.conn)?;
         sync::migrate(&mut self.conn)?;
         // 送批材料：同样幂等建表，不单开档位。
@@ -575,7 +577,9 @@ impl ManuscriptStore {
                 document_uuid,
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        search::index_row(&self.conn, id, &title, &new.content_markdown)?;
+        Ok(id)
     }
 
     /// 更新快照/正文/备注。归档稿件拒绝；历史遗留的“新建”记录在首次修改时兜底提升为草稿。
@@ -611,6 +615,7 @@ impl ManuscriptStore {
                 id,
             ],
         )?;
+        search::index_row(&self.conn, id, &title, &upd.content_markdown)?;
         Ok(())
     }
 
@@ -662,6 +667,7 @@ impl ManuscriptStore {
         let tx = self.conn.transaction()?;
         send_package::detach_before_delete(&tx, id)?;
         tx.execute("DELETE FROM manuscripts WHERE id=?1", [id])?;
+        search::remove_row(&tx, id)?;
         tx.commit()?;
         self.purge_orphan_images(&deleted, live_contents);
         Ok(())
@@ -674,6 +680,7 @@ impl ManuscriptStore {
     /// 事务里删除，任一步失败都不会留下清了一半的库。
     pub fn clear_all_content(&mut self) -> Result<()> {
         let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM manuscript_fts", [])?;
         #[cfg(feature = "ai-workbench")]
         {
             // wiki_fts 不是外部内容表，没有删除触发器，必须随页面一起清空。
@@ -726,6 +733,7 @@ impl ManuscriptStore {
             }
             send_package::detach_before_delete(&tx, id)?;
             tx.execute("DELETE FROM manuscripts WHERE id=?1", [id])?;
+            search::remove_row(&tx, id)?;
         }
         tx.commit()?;
         self.purge_orphan_images(&deleted, live_contents);
