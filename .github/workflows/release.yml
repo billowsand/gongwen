@@ -12,9 +12,9 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-# 当前发布口径（用户 2026-11-15 指定）：只发布 Windows x64 AI 版安装程序。
-# 非 AI 版仍可用 `python scripts/build-editions.py` + `scripts/package-installer.ps1
-# -Edition no-ai` 手工出包，不在 Release 里发布。Linux ARM64 deb、Linux x86_64
+# 当前发布口径（用户 2026-11-20 指定）：只发布 Windows x64 非 AI 版安装程序。
+# AI 全版仍可用 `python scripts/build-editions.py` + `scripts/package-installer.ps1`
+# 手工出包，不在 Release 里发布。Linux ARM64 deb、Linux x86_64
 # Arch 包与 macOS dmg 的构建作业保留但停用，需要恢复时去掉对应作业的
 # `if: false` 并把它们加回 release 的 needs 与资产校验。
 #
@@ -52,13 +52,13 @@ jobs:
           workspaces: . -> target
           cache-on-failure: true
 
-      - name: Build AI release binary
+      - name: Build non-AI release binary
         shell: pwsh
         run: |
-          cargo build --locked --release --bin gongwen-assistant --no-default-features --features task-assistant,linux-gtk-dialogs,ai
+          cargo build --locked --release --bin gongwen-assistant --no-default-features --features task-assistant,linux-gtk-dialogs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force -Path dist/editions | Out-Null
-          Copy-Item target/release/gongwen-assistant.exe dist/editions/gongwen-assistant.exe -Force
+          Copy-Item target/release/gongwen-assistant.exe dist/editions/gongwen-assistant-no-ai.exe -Force
           # 版本由上面的 --features 固定，不再回问程序：windows_subsystem = "windows"
           # 的可执行文件在 PowerShell 管道里拿不到 stdout（The pipe is being closed）。
 
@@ -73,25 +73,17 @@ jobs:
           Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
           Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force
 
-      - name: Stage bundled Pi runtime
-        shell: pwsh
-        run: ./scripts/stage-pi-runtime.ps1 -Platform win-x64 -Force
-
-      - name: Offline Pi runtime acceptance
-        shell: pwsh
-        run: ./runtime/pi/node.exe scripts/pi-offline-acceptance.mjs --runtime ./runtime/pi
-
       - name: Prepare full staging directory
         shell: pwsh
         run: |
-          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full"
-          ./scripts/package-portable.ps1 -Suffix win-x64 -BinaryPath dist/editions/gongwen-assistant.exe -OutputDir $staging -ArchiveFormat none -Force
+          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full-no-ai"
+          ./scripts/package-portable.ps1 -Edition no-ai -Suffix win-x64 -BinaryPath dist/editions/gongwen-assistant-no-ai.exe -OutputDir $staging -ArchiveFormat none -Force
 
       - name: Smoke test packaged runtime（PDF 排版）
         shell: pwsh
         run: |
-          $env:GONGWEN_RUNTIME_DIR = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full/runtime"
-          cargo test --locked --release --bin gongwen-assistant "shipped_runtime_typesets_every_kind" -- --ignored
+          $env:GONGWEN_RUNTIME_DIR = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full-no-ai/runtime"
+          cargo test --locked --release --bin gongwen-assistant --no-default-features --features task-assistant,linux-gtk-dialogs "shipped_runtime_typesets_every_kind" -- --ignored
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install Inno Setup
@@ -102,9 +94,9 @@ jobs:
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full"
-          ./scripts/package-installer.ps1 -Version $version -SourceDir $staging -OutputDir $env:GITHUB_WORKSPACE -Force
-          $asset = "gongwen-assistant-$version-win-x64-setup.exe"
+          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full-no-ai"
+          ./scripts/package-installer.ps1 -Edition no-ai -Version $version -SourceDir $staging -OutputDir $env:GITHUB_WORKSPACE -Force
+          $asset = "gongwen-assistant-no-ai-$version-win-x64-setup.exe"
           $hash = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLowerInvariant()
           [System.IO.File]::WriteAllText(
             "${asset}.sha256",
@@ -116,7 +108,7 @@ jobs:
         with:
           name: release-win-x64
           path: |
-            gongwen-assistant-[0-9]*-win-x64-setup.exe*
+            gongwen-assistant-no-ai-[0-9]*-win-x64-setup.exe*
           if-no-files-found: error
 
   build-macos-arm64:
@@ -610,7 +602,7 @@ jobs:
           set -euo pipefail
           cd release-assets
           version="${GITHUB_REF_NAME#v}"
-          asset="gongwen-assistant-$version-win-x64-setup.exe"
+          asset="gongwen-assistant-no-ai-$version-win-x64-setup.exe"
           test -f "$asset"
           sha256sum --check "$asset.sha256"
           # 版本更新说明随源码一起提交，发布时直接取用。
