@@ -47,6 +47,8 @@ pub(crate) enum WorkerResult {
     AddressBookExported(Result<String, String>),
     /// 发文登记簿 Excel 导出结果。
     IssueRegisterExported(Result<String, String>),
+    /// 文件汇编：编译合并后的内存 PDF。
+    CompilationMerged(Result<Vec<u8>, String>),
     AuxiliaryArchiveExported(Result<PathBuf, String>),
     VocabularyWorkbookExported(Result<String, String>),
     /// 外部程序把文件放进系统剪贴板的结果，后台线程执行。
@@ -617,6 +619,16 @@ impl GongwenApp {
                         self.status = format!("正文索引已补建 {count} 篇，可以按正文检索。");
                     }
                     Err(error) => self.status = format!("正文索引补建失败：{error}"),
+                },
+                WorkerResult::CompilationMerged(result) => match result {
+                    Ok(bytes) => {
+                        self.open_pdf_memory(
+                            -(self.next_pdf_key as i64) - 1,
+                            "文件汇编".into(),
+                            bytes,
+                        );
+                    }
+                    Err(error) => self.status = format!("合并失败：{error}"),
                 },
                 WorkerResult::IssueRegisterExported(result) => match result {
                     Ok(message) => self.status = message,

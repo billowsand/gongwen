@@ -42,6 +42,7 @@ mod api_settings;
 mod auxiliary_export;
 mod chrome;
 pub(crate) mod clipboard;
+mod compilation;
 mod data_safety;
 mod draft_pdf;
 mod environment_settings;

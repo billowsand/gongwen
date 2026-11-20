@@ -350,6 +350,17 @@ impl GongwenApp {
                             ui.close();
                         }
                         if ui
+                            .add(theme::icon_text_button(
+                                theme::Icon::FileTypeDoc,
+                                "合并为一篇 PDF",
+                            ))
+                            .on_hover_text("按列表顺序合并勾选稿件，打开后可打印")
+                            .clicked()
+                        {
+                            self.start_file_compilation(ui.ctx());
+                            ui.close();
+                        }
+                        if ui
                             .add_enabled(
                                 !self.manuscript_pdf_export_busy,
                                 theme::icon_text_button(theme::Icon::FileDown, "导出 PDF"),
