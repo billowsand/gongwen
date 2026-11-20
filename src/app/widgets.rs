@@ -265,7 +265,7 @@ pub(crate) fn vocabulary_matches(entry: &VocabularyEntry, filter: &str) -> bool 
         return true;
     }
     format!(
-        "{} {} {} {} {} {} {} {} {} {} {} {} {}",
+        "{} {} {} {} {} {} {} {} {} {} {} {} {} {}",
         entry.code,
         entry.canonical,
         entry.external_name,
@@ -277,6 +277,7 @@ pub(crate) fn vocabulary_matches(entry: &VocabularyEntry, filter: &str) -> bool 
         entry.aliases.join(" "),
         entry.note,
         entry.phone,
+        entry.office_phone,
         entry.position,
         if entry.seal_on_behalf { "代章" } else { "" }
     )
@@ -641,7 +642,10 @@ pub(crate) fn responsible_editor(
                         .filter(|person| {
                             person.category == crate::models::VocabularyCategory::Person
                         })
-                        .map(|person| (person.key(), person.phone.trim().to_string()))
+                        .map(|person| {
+                            let contact = crate::platform::doc::contact_of(person);
+                            (person.key(), contact.preferred_office_first().to_string())
+                        })
                         .collect()
                 } else {
                     display.responsible_people_of(&entry.unit)

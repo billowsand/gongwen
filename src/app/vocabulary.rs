@@ -265,6 +265,14 @@ impl GongwenApp {
                             ui.close();
                             self.export_vocabulary_xlsx(ui.ctx(), false);
                         }
+                        if ui
+                            .add(theme::icon_text_button(theme::Icon::FileDown, "导出通讯录"))
+                            .on_hover_text("只出有电话的人员；办公电话与手机分两列")
+                            .clicked()
+                        {
+                            ui.close();
+                            self.export_address_book_xlsx();
+                        }
                         ui.separator();
                         if ui
                             .add(theme::icon_text_button(
@@ -926,8 +934,11 @@ impl GongwenApp {
                 if !entry.position.trim().is_empty() {
                     parts.push(entry.position.trim().to_string());
                 }
+                if !entry.office_phone.trim().is_empty() {
+                    parts.push(format!("办 {}", entry.office_phone.trim()));
+                }
                 if !entry.phone.trim().is_empty() {
-                    parts.push(entry.phone.trim().to_string());
+                    parts.push(format!("手 {}", entry.phone.trim()));
                 }
                 if entry.can_handle_parent_unit {
                     parts.push("可承办上级单位".to_string());
@@ -1774,10 +1785,18 @@ impl GongwenApp {
                 );
                 ui.end_row();
 
-                ui.label("联系电话");
+                ui.label("办公电话");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.config.vocabulary[index].office_phone)
+                        .hint_text("可带区号、短号；承办联系人优先带出")
+                        .desired_width(width),
+                );
+                ui.end_row();
+
+                ui.label("手机");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.config.vocabulary[index].phone)
-                        .hint_text("与姓名一一绑定，起草页自动带出")
+                        .hint_text("11 位手机号；没有办公电话时回落到它")
                         .desired_width(width),
                 );
                 ui.end_row();

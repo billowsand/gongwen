@@ -232,7 +232,9 @@ fn person_phone_of(vocabulary: &[VocabularyEntry], unit: &str, name: &str) -> St
     {
         return String::new();
     }
-    person.phone.trim().to_string()
+    crate::platform::doc::contact_of(person)
+        .preferred_office_first()
+        .to_string()
 }
 
 /// 统一的写值入口：表单下拉框与 AI 建议采纳都走这里。
@@ -845,7 +847,11 @@ mod tests {
             ..Default::default()
         });
         crate::units::normalize(&mut vocabulary);
-        let selected = vocabulary.iter().find(|e| e.phone == "789").unwrap().key();
+        let selected = vocabulary
+            .iter()
+            .find(|e| e.phone == "789" || e.office_phone == "789")
+            .unwrap()
+            .key();
         let mut draft = draft_of(TemplateKind::OfficialLetter);
         apply_field(&mut draft, FieldId::ResponsibleUnit, "乙局", &vocabulary);
         apply_field(&mut draft, FieldId::ContactPerson, &selected, &vocabulary);

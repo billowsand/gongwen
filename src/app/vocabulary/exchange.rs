@@ -295,6 +295,66 @@ impl GongwenApp {
         }
     }
 
+    /// 通讯录 Excel：只出至少有一个号码的人员，办公电话与手机分列。
+    pub(super) fn export_address_book_xlsx(&mut self) {
+        let vocabulary = self.config.vocabulary.clone();
+        if protection::encryption_enabled() {
+            self.open_address_book_save(vocabulary);
+        } else {
+            self.request_output_with_warning(
+                "导出通讯录 Excel",
+                crate::app::output_guard::PII_EXPORT_WARNING,
+                Box::new(move |app: &mut Self| app.open_address_book_save(vocabulary)),
+            );
+        }
+    }
+
+    fn open_address_book_save(&mut self, vocabulary: Vec<VocabularyEntry>) {
+        let protection = match Protection::current() {
+            Ok(protection) => protection,
+            Err(error) => {
+                self.status = format!("无法导出通讯录：{error:#}");
+                return;
+            }
+        };
+        self.request_file_with_context(
+            FileDialogSpec::save_file()
+                .filter("Excel", &["xlsx"])
+                .file_name("公文助手通讯录.xlsx"),
+            move |app, path, ctx| {
+                if let Some(path) = path {
+                    app.start_address_book_export(
+                        ctx,
+                        vocabulary.clone(),
+                        path.with_extension("xlsx"),
+                        protection,
+                    );
+                }
+            },
+        );
+    }
+
+    fn start_address_book_export(
+        &mut self,
+        ctx: egui::Context,
+        vocabulary: Vec<VocabularyEntry>,
+        path: PathBuf,
+        protection: Option<Protection>,
+    ) {
+        self.status = "正在生成通讯录…".into();
+        let tx = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let bytes = crate::export::address_book::xlsx_bytes(&vocabulary)?;
+                let path = protection::write_final_with(protection.as_ref(), &path, &bytes)?;
+                Ok::<_, anyhow::Error>(format!("通讯录已导出到 {}。", path.display()))
+            })()
+            .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::AddressBookExported(result));
+            ctx.request_repaint();
+        });
+    }
+
     fn start_vocabulary_workbook_export(
         &mut self,
         ctx: egui::Context,

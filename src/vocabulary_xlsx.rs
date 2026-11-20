@@ -7,6 +7,7 @@
 //! 与 `units::normalize_preserving_codes` 行为一致。
 
 use crate::models::{VocabularyCategory, VocabularyEntry};
+use crate::platform::doc::PersonContact;
 use crate::units;
 use anyhow::{Context, Result};
 use calamine::{Data, Reader, Xlsx};
@@ -62,7 +63,8 @@ const PERSON_HEADERS: &[&str] = &[
     "人员编码",
     "姓名",
     "职务",
-    "联系电话",
+    "办公电话",
+    "手机",
     "承办上级单位",
     "别名/常见错写",
     "备注",
@@ -75,7 +77,7 @@ const UNIT_COLUMN_WIDTHS: &[f64] = &[
     14.0, 28.0, 28.0, 16.0, 14.0, 10.0, 28.0, 28.0, 14.0, 48.0, 38.0, 38.0,
 ];
 const PERSON_COLUMN_WIDTHS: &[f64] = &[
-    14.0, 10.0, 18.0, 14.0, 16.0, 12.0, 28.0, 28.0, 48.0, 38.0, 38.0,
+    14.0, 10.0, 18.0, 14.0, 16.0, 16.0, 12.0, 28.0, 28.0, 48.0, 38.0, 38.0,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,7 +181,7 @@ fn parse_reader<R: std::io::Read + std::io::Seek>(reader: R) -> Result<ImportRep
     let mut entries = Vec::new();
 
     let unit_rows = read_sheet(&mut workbook, UNIT_SHEET, UNIT_HEADERS.len())?;
-    for (offset, row) in unit_rows.iter().enumerate() {
+    for (offset, row) in unit_rows.rows.iter().enumerate() {
         if row.iter().all(|cell| cell.trim().is_empty()) {
             continue;
         }
@@ -187,11 +189,15 @@ fn parse_reader<R: std::io::Read + std::io::Seek>(reader: R) -> Result<ImportRep
     }
 
     let person_rows = read_sheet(&mut workbook, PERSON_SHEET, PERSON_HEADERS.len())?;
-    for (offset, row) in person_rows.iter().enumerate() {
+    for (offset, row) in person_rows.rows.iter().enumerate() {
         if row.iter().all(|cell| cell.trim().is_empty()) {
             continue;
         }
-        entries.push(parse_person_row(row, offset + 2)?);
+        entries.push(parse_person_row(
+            row,
+            offset + 2,
+            person_rows.two_phone_columns,
+        )?);
     }
 
     if entries.is_empty() {
@@ -208,18 +214,25 @@ fn parse_reader<R: std::io::Read + std::io::Seek>(reader: R) -> Result<ImportRep
     })
 }
 
+struct SheetRows {
+    rows: Vec<Vec<String>>,
+    /// 人员表是否为“办公电话 + 手机”两列；旧模板只有“联系电话”。
+    two_phone_columns: bool,
+}
+
 fn read_sheet<R: std::io::Read + std::io::Seek>(
     workbook: &mut Xlsx<R>,
     sheet_name: &str,
     width: usize,
-) -> Result<Vec<Vec<String>>> {
+) -> Result<SheetRows> {
     let range = workbook
         .worksheet_range(sheet_name)
         .map_err(|error| anyhow::anyhow!("读取 Sheet「{sheet_name}」失败：{error}"))?;
-    let has_identities = range
-        .rows()
-        .next()
-        .is_some_and(|row| row.iter().any(|c| cell_to_string(c) == "身份编码"));
+    let header = range.rows().next();
+    let has_identities =
+        header.is_some_and(|row| row.iter().any(|c| cell_to_string(c) == "身份编码"));
+    let two_phone_columns = sheet_name == PERSON_SHEET
+        && header.is_some_and(|row| row.iter().any(|c| cell_to_string(c) == "手机"));
     let mut rows = Vec::new();
     for row in range.rows() {
         let mut cells = Vec::with_capacity(width);
@@ -230,7 +243,11 @@ fn read_sheet<R: std::io::Read + std::io::Seek>(
             cells.push(String::new());
         }
         if !has_identities {
-            let start = if sheet_name == UNIT_SHEET { 10 } else { 9 };
+            let start = if sheet_name == UNIT_SHEET || two_phone_columns {
+                10
+            } else {
+                9
+            };
             for cell in cells.iter_mut().skip(start) {
                 cell.clear();
             }
@@ -241,7 +258,10 @@ fn read_sheet<R: std::io::Read + std::io::Seek>(
     if !rows.is_empty() {
         rows.remove(0);
     }
-    Ok(rows)
+    Ok(SheetRows {
+        rows,
+        two_phone_columns,
+    })
 }
 
 fn cell_to_string(cell: &Data) -> String {
@@ -295,6 +315,7 @@ fn parse_unit_row(row: &[String], row_num: usize) -> Result<VocabularyEntry> {
         aliases,
         note,
         phone: String::new(),
+        office_phone: String::new(),
         position: String::new(),
         parent: String::new(),
         abbr,
@@ -310,20 +331,39 @@ fn parse_unit_row(row: &[String], row_num: usize) -> Result<VocabularyEntry> {
     })
 }
 
-fn parse_person_row(row: &[String], _row_num: usize) -> Result<VocabularyEntry> {
+fn parse_person_row(
+    row: &[String],
+    _row_num: usize,
+    two_phone_columns: bool,
+) -> Result<VocabularyEntry> {
     let unit = row[0].trim().to_string();
     let code = row[1].trim().to_string();
     let canonical = row[2].trim().to_string();
     let position = row[3].trim().to_string();
-    let phone = row[4].trim().to_string();
-    let can_handle_parent_unit = parse_bool_marker(&row[5]);
-    let aliases = parse_aliases(&row[6]);
-    let note = row[7].trim().to_string();
-    let profile = row[8].trim().to_string();
+    let (office_phone, phone, handle, aliases_at, note_at, profile_at, identity_at, owner_at) =
+        if two_phone_columns {
+            (
+                row[4].trim().to_string(),
+                row[5].trim().to_string(),
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+            )
+        } else {
+            let contact = PersonContact::migrate_legacy(&row[4]);
+            (contact.office, contact.mobile, 5, 6, 7, 8, 9, 10)
+        };
+    let can_handle_parent_unit = parse_bool_marker(&row[handle]);
+    let aliases = parse_aliases(&row[aliases_at]);
+    let note = row[note_at].trim().to_string();
+    let profile = row[profile_at].trim().to_string();
     Ok(VocabularyEntry {
         id: 0,
-        identity: row.get(9).cloned().unwrap_or_default(),
-        owner_identity: row.get(10).cloned().unwrap_or_default(),
+        identity: row.get(identity_at).cloned().unwrap_or_default(),
+        owner_identity: row.get(owner_at).cloned().unwrap_or_default(),
         category: VocabularyCategory::Person,
         code,
         canonical,
@@ -331,6 +371,7 @@ fn parse_person_row(row: &[String], _row_num: usize) -> Result<VocabularyEntry> 
         aliases,
         note,
         phone,
+        office_phone,
         position,
         parent: String::new(),
         abbr: String::new(),
@@ -700,6 +741,10 @@ fn merge_staged(target: &mut Vec<VocabularyEntry>, incoming: Vec<VocabularyEntry
                 existing.phone = entry.phone;
                 changed = true;
             }
+            if !entry.office_phone.is_empty() && existing.office_phone != entry.office_phone {
+                existing.office_phone = entry.office_phone;
+                changed = true;
+            }
             if !entry.position.is_empty() && existing.position != entry.position {
                 existing.position = entry.position;
                 changed = true;
@@ -887,7 +932,7 @@ fn build_xlsx(entries: &[VocabularyEntry], existing_unit_codes: &[String]) -> Re
             .map_err(|e| anyhow::anyhow!("无法构造数据验证：{e}"))?
             .set_input_message("选择 -（空）、否、是")
             .map_err(|e| anyhow::anyhow!("无法构造数据验证：{e}"))?;
-        sheet.add_data_validation(1, 5, 5000, 5, &handle_dv)?;
+        sheet.add_data_validation(1, 6, 5000, 6, &handle_dv)?;
 
         let _ = sheet.protect_with_options(&rust_xlsxwriter::ProtectionOptions {
             select_locked_cells: true,
@@ -942,18 +987,19 @@ fn write_person_row(sheet: &mut Worksheet, row: u32, entry: &VocabularyEntry) ->
     sheet.write_string(row, 1, entry.code.trim())?;
     sheet.write_string(row, 2, entry.canonical.trim())?;
     sheet.write_string(row, 3, entry.position.trim())?;
-    sheet.write_string(row, 4, entry.phone.trim())?;
+    sheet.write_string(row, 4, entry.office_phone.trim())?;
+    sheet.write_string(row, 5, entry.phone.trim())?;
     let handle = if entry.can_handle_parent_unit {
         "是"
     } else {
         "否"
     };
-    sheet.write_string(row, 5, handle)?;
-    sheet.write_string(row, 6, entry.aliases.join("、"))?;
-    sheet.write_string(row, 7, entry.note.trim())?;
-    sheet.write_string(row, 8, entry.profile.trim())?;
-    sheet.write_string(row, 9, &entry.identity)?;
-    sheet.write_string(row, 10, &entry.owner_identity)?;
+    sheet.write_string(row, 6, handle)?;
+    sheet.write_string(row, 7, entry.aliases.join("、"))?;
+    sheet.write_string(row, 8, entry.note.trim())?;
+    sheet.write_string(row, 9, entry.profile.trim())?;
+    sheet.write_string(row, 10, &entry.identity)?;
+    sheet.write_string(row, 11, &entry.owner_identity)?;
     Ok(())
 }
 
@@ -1097,7 +1143,8 @@ mod tests {
             {
                 let mut p = some_person("0001", "张三");
                 p.position = "处长".into();
-                p.phone = "010-1234".into();
+                p.office_phone = "010-1234".into();
+                p.phone = "13812345678".into();
                 p.can_handle_parent_unit = true;
                 p.aliases = vec!["张处".into()];
                 p.profile = "分管网络舆情研判，长期从事新闻发布工作".into();
@@ -1115,10 +1162,64 @@ mod tests {
             .unwrap();
         assert_eq!(person.canonical, "张三");
         assert_eq!(person.position, "处长");
-        assert_eq!(person.phone, "010-1234");
+        assert_eq!(person.office_phone, "010-1234");
+        assert_eq!(person.phone, "13812345678");
         assert!(person.can_handle_parent_unit);
         assert_eq!(person.aliases, ["张处"]);
         assert_eq!(person.profile, "分管网络舆情研判，长期从事新闻发布工作");
+    }
+
+    #[test]
+    fn legacy_single_phone_splits_by_number_shape() {
+        let dir = tmp_dir();
+        let path = dir.join("legacy_people.xlsx");
+        let old_headers = [
+            "所属单位编码",
+            "人员编码",
+            "姓名",
+            "职务",
+            "联系电话",
+            "承办上级单位",
+            "别名/常见错写",
+            "备注",
+            "个人简介",
+            "身份编码",
+            "所属单位身份编码",
+        ];
+        let mut workbook = Workbook::new();
+        let unit_sheet = workbook.add_worksheet();
+        unit_sheet.set_name(UNIT_SHEET).unwrap();
+        unit_sheet.write_string(0, 0, "层级编码").unwrap();
+        unit_sheet.write_string(0, 1, "单位名称").unwrap();
+        unit_sheet.write_string(1, 0, "00").unwrap();
+        unit_sheet.write_string(1, 1, "甲单位").unwrap();
+        let person_sheet = workbook.add_worksheet();
+        person_sheet.set_name(PERSON_SHEET).unwrap();
+        for (column, header) in old_headers.iter().enumerate() {
+            person_sheet
+                .write_string(0, column as u16, *header)
+                .unwrap();
+        }
+        person_sheet.write_string(1, 0, "00").unwrap();
+        person_sheet.write_string(1, 1, "01").unwrap();
+        person_sheet.write_string(1, 2, "张三").unwrap();
+        person_sheet.write_string(1, 4, "010-1234").unwrap();
+        person_sheet.write_string(2, 0, "00").unwrap();
+        person_sheet.write_string(2, 1, "02").unwrap();
+        person_sheet.write_string(2, 2, "李四").unwrap();
+        person_sheet.write_string(2, 4, "13812345678").unwrap();
+        workbook.save(&path).unwrap();
+
+        let report = parse(&path, &codes(&["00"])).unwrap();
+        let people = report
+            .entries
+            .iter()
+            .filter(|entry| entry.category == VocabularyCategory::Person)
+            .collect::<Vec<_>>();
+        assert_eq!(people[0].office_phone, "010-1234");
+        assert_eq!(people[0].phone, "");
+        assert_eq!(people[1].office_phone, "");
+        assert_eq!(people[1].phone, "13812345678");
     }
 
     #[test]

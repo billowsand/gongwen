@@ -391,6 +391,7 @@ fn capture_with_keys(profile: &mut TemplateProfile, vocabulary: &[Entry], extra:
                             || is_ref(&key)
                             || contact_phone.is_empty()
                             || contact_phone == e.phone
+                            || contact_phone == e.office_phone
                     })
                     .map_or(key.clone(), |e| {
                         if available(vocabulary, e) {
@@ -853,6 +854,7 @@ pub(crate) fn snapshot_notice(
                     || e.external_name != old.external_name
                     || e.abbr != old.abbr
                     || e.phone != old.phone
+                    || e.office_phone != old.office_phone
                     || e.position != old.position
                     || e.owner_identity != old.owner_identity
                     || e.can_handle_parent_unit != old.can_handle_parent_unit
@@ -895,7 +897,8 @@ pub(crate) fn phone_insert_items(vocabulary: &[Entry]) -> Vec<InsertItem> {
         .filter(|entry| entry.category == Category::Person)
         .filter(|entry| !entry.canonical.trim().is_empty())
         .filter_map(|entry| {
-            let phone = entry.phone.trim();
+            let contact = crate::platform::doc::contact_of(entry);
+            let phone = contact.preferred_office_first();
             (!phone.is_empty()).then(|| InsertItem {
                 label: format!("{} {phone}", person_label(vocabulary, entry)),
                 text: phone.to_string(),

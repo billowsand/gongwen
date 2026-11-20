@@ -133,7 +133,8 @@ impl Tool for Persons {
                     "note": e.note,
                 });
                 if with_phone {
-                    row["phone"] = Value::String(e.phone.clone());
+                    let contact = crate::platform::doc::contact_of(e);
+                    row["phone"] = Value::String(contact.preferred_office_first().to_string());
                 }
                 row
             })

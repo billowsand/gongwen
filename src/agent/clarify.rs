@@ -567,8 +567,10 @@ pub(crate) fn vocabulary_choices(
                         .into_iter()
                         .filter(|part| !part.is_empty())
                         .collect();
-                    let value = if with_phone && !entry.phone.trim().is_empty() {
-                        format!("{name}，联系电话：{}", entry.phone.trim())
+                    let contact = crate::platform::doc::contact_of(entry);
+                    let phone = contact.preferred_office_first();
+                    let value = if with_phone && !phone.is_empty() {
+                        format!("{name}，联系电话：{phone}")
                     } else {
                         name.clone()
                     };

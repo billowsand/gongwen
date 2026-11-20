@@ -67,6 +67,23 @@ pub fn assign_missing_ids(vocab: &mut [VocabularyEntry]) {
     }
 }
 
+/// 旧词库只有一个“联系电话”：手机号留在 `phone`，其余（区号、短号、8 位固话）
+/// 迁到 `office_phone` 并清空 `phone`；已经是两列的保持原样。幂等。
+fn migrate_person_phones(vocab: &mut [VocabularyEntry]) {
+    for entry in vocab
+        .iter_mut()
+        .filter(|entry| entry.category == VocabularyCategory::Person)
+    {
+        if entry.office_phone.trim().is_empty()
+            && !entry.phone.trim().is_empty()
+            && !crate::platform::doc::PersonContact::is_mobile(&entry.phone)
+        {
+            entry.office_phone = entry.phone.trim().to_string();
+            entry.phone.clear();
+        }
+    }
+}
+
 /// 把词库整理成与树形界面一致的顺序，并重新生成层级编码：
 /// 单位深度优先排列，每个单位后面紧跟它的人员，再排下级单位。
 /// 单位使用层级编码；人员在各自所属单位内使用独立的两位顺序编码（01、02……）。
@@ -84,6 +101,7 @@ pub fn normalize(vocab: &mut Vec<VocabularyEntry>) {
 /// 第一步仍把空 code 的单位分配 `@{id}` 占位，是为了在排序与 walk 时把它们聚合在一起；
 /// 占位编码以 `@` 结尾，不会与用户填的合法编码（`^[A-Za-z0-9._\-]+$`）冲突。
 pub fn normalize_preserving_codes(vocab: &mut Vec<VocabularyEntry>) {
+    migrate_person_phones(vocab);
     assign_missing_ids(vocab);
     ensure_sort_orders(vocab);
     let mut source = std::mem::take(vocab);
@@ -1183,7 +1201,10 @@ impl<'a> UnitDisplay<'a> {
                 identity::parent(&self.vocab, person)
                     .is_some_and(|owner| owner.key() == selected.key())
             })
-            .map(|person| (person.key(), person.phone.trim().to_string()))
+            .map(|person| {
+                let contact = crate::platform::doc::contact_of(person);
+                (person.key(), contact.preferred_office_first().to_string())
+            })
             .collect()
     }
 
@@ -1235,7 +1256,10 @@ impl<'a> UnitDisplay<'a> {
                 }
                 false
             })
-            .map(|person| (person.key(), person.phone.trim().to_string()))
+            .map(|person| {
+                let contact = crate::platform::doc::contact_of(person);
+                (person.key(), contact.preferred_office_first().to_string())
+            })
             .collect()
     }
 
@@ -2312,6 +2336,41 @@ mod tests {
         assert_eq!(section.parent, "0101");
         assert_eq!(section.code, "010101");
         assert_eq!(person.unit, "010101");
+    }
+
+    #[test]
+    fn legacy_phone_splits_landline_to_office_and_keeps_mobile() {
+        let mut list = vec![
+            VocabularyEntry {
+                id: 1,
+                canonical: "甲单位".into(),
+                code: "00".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 2,
+                category: VocabularyCategory::Person,
+                canonical: "张三".into(),
+                unit: "00".into(),
+                phone: "010-1234".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 3,
+                category: VocabularyCategory::Person,
+                canonical: "李四".into(),
+                unit: "00".into(),
+                phone: "13812345678".into(),
+                ..Default::default()
+            },
+        ];
+        normalize(&mut list);
+        let zhang = list.iter().find(|entry| entry.canonical == "张三").unwrap();
+        assert_eq!(zhang.office_phone, "010-1234");
+        assert_eq!(zhang.phone, "");
+        let li = list.iter().find(|entry| entry.canonical == "李四").unwrap();
+        assert_eq!(li.office_phone, "");
+        assert_eq!(li.phone, "13812345678");
     }
 
     #[test]

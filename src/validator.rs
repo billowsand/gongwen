@@ -733,10 +733,15 @@ fn validate_metadata(
         if let Some(person) =
             crate::units::identity::resolve(vocabulary, VocabularyCategory::Person, name)
         {
-            let expected_phone = person.phone.trim();
-            if !expected_phone.is_empty() && expected_phone != phone {
+            let contact = crate::platform::doc::contact_of(person);
+            let expected = [contact.office.as_str(), contact.mobile.as_str()]
+                .into_iter()
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            if !expected.is_empty() && !expected.contains(&phone) {
                 warnings.push(format!(
-                    "联系人“{displayed_name}”在标准词库中的电话为“{expected_phone}”，与当前填写的“{phone}”不一致"
+                    "联系人“{displayed_name}”在标准词库中的电话为“{}”，与当前填写的“{phone}”不一致",
+                    expected.join(" / ")
                 ));
             }
             if !person.unit.trim().is_empty()

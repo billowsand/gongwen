@@ -94,7 +94,7 @@ fn exported_vocabulary_keeps_codes_layout_and_validation() {
     let mut archive = zip::ZipArchive::new(File::open(&path).expect("读取包")).expect("XLSX 包");
     for (name, expected_ranges) in [
         ("xl/worksheets/sheet1.xml", vec!["F2:F1001"]),
-        ("xl/worksheets/sheet2.xml", vec!["A2:A5001", "F2:F5001"]),
+        ("xl/worksheets/sheet2.xml", vec!["A2:A5001", "G2:G5001"]),
     ] {
         let xml = xml_entry(&mut archive, name);
         let panes = attributes(&xml, "pane");

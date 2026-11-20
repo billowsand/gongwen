@@ -18,6 +18,8 @@ pub(super) fn date_context() -> Value {
 
 fn row(entries: &[Entry], entry: &Entry) -> Value {
     let owner = crate::units::identity::parent(entries, entry);
+    let contact = crate::platform::doc::contact_of(entry);
+    let phone = contact.preferred_office_first();
     json!({
         "identity": entry.key(), "name": clip(&entry.canonical, 200),
         "category": entry.category.label(), "code": clip(&entry.code, 100),
@@ -25,7 +27,7 @@ fn row(entries: &[Entry], entry: &Entry) -> Value {
         "aliases": entry.aliases.iter().take(10).map(|name| clip(name, 100)).collect::<Vec<_>>(),
         "unit": owner.map(|unit| clip(&unit.canonical, 200)),
         "unit_identity": owner.map(Entry::key),
-        "position": clip(&entry.position, 200), "phone": clip(&entry.phone, 200), "note": clip(&entry.note, 500),
+        "position": clip(&entry.position, 200), "phone": clip(phone, 200), "note": clip(&entry.note, 500),
         "duties": clip(&entry.duties, 2000), "duties_truncated": entry.duties.chars().count() > 2000,
         "profile": clip(&entry.profile, 1000), "profile_truncated": entry.profile.chars().count() > 1000,
     })

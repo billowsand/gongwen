@@ -3,7 +3,7 @@
 //! F0 只落数据和纯算法；F1 起列表、导出命名接 `DocNumber`，F4 起台账接
 //! `NumberingScheme`。这里不读配置、不碰数据库，方便单测和两版构建。
 
-use crate::models::{DraftInput, ManuscriptStatus, TemplateKind, TemplateProfile};
+use crate::models::{DraftInput, ManuscriptStatus, TemplateKind, TemplateProfile, VocabularyEntry};
 
 /// 一个单位的三套代字。发函、呈批、纪要各自独立；纪要代字可以没有。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,6 +67,15 @@ impl PersonContact {
         } else {
             office
         }
+    }
+}
+
+/// 从词库人员取两个号码。旧 `phone` 是手机，`office_phone` 是办公电话；
+/// 载入时 `units::normalize` 会把旧的非手机号迁到办公电话。
+pub(crate) fn contact_of(entry: &VocabularyEntry) -> PersonContact {
+    PersonContact {
+        office: entry.office_phone.trim().to_string(),
+        mobile: entry.phone.trim().to_string(),
     }
 }
 

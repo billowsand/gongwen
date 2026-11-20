@@ -277,9 +277,9 @@ pub(crate) struct Check {
 | F0 | 盘点、契约、金样 | 本文档 + `src/platform/` 类型骨架（含 `UnitCodes`/`PersonContact`/`DocNumber`/`NumberingScheme`）+ 金样清单 | 3–5 天 |
 | F1 | Doc + Db | `DocumentMeta`、`DocNumber`/`NumberingScheme`、`Db`/`Migration`；列表/搜索/导出命名接上 | 1 周 |
 | F2 | Search + 正文检索 | `SearchIndex`、`manuscript_fts`、片段/跳转/筛选 | 1.5–2 周 |
-| F3 | 通讯录（两列电话）+ Render | 词库办公电话/手机（旧号码非手机一律进办公、承办联系人办公优先）、旧 Excel 兼容、通讯录 PDF/XLSX、`RenderPlan`/`Artifact`/`Protection` | 2 周 |
+| F3 | 通讯录（两列电话）+ Excel | 词库办公电话/手机（旧号码非手机一律进办公、承办联系人办公优先）、旧 Excel 兼容、通讯录 XLSX；PDF/Render 随 F5 | 2 周 |
 | F4 | 编号统一 + Ledger + 台账/制度 | 词库“纪要代字”（单位属性，有就带、无就不带）、纪要编号走 `NumberingScheme`、`LedgerEntry`、`issue_register` 三个池、手工补录、制度状态与引用提示 | 2–3 周 |
-| F5 | Batch + 文件汇编 | `BatchPlan`、勾选/排序/合并/打印，目录与连续页码按需 | 2 周 |
+| F5 | Render/Batch + 文件汇编 | `RenderPlan`/`Artifact`/`Protection`/`BatchPlan`、勾选/排序/合并/打印，目录与连续页码按需 | 2 周 |
 | 后置 | 秩序册 | 从词库勾选名单的单独模板，另立方案 | 另估 |
 
 F0–F1 只做地基，F2–F5 每期先抽内核、再让当期功能当第一个使用者。F3 与 F4 可以互换：先做通讯录是为了早一点暴露词库两列电话的迁移问题；如果更急着看台账，也可以先 F4。每期结束都能单独发版，不要求等全部完成。
@@ -442,3 +442,31 @@ F1 先不碰台账、检索、通讯录的界面。
 
 通讯录两列电话 + `RenderPlan`/`Artifact`/`Protection`：先把词库电话迁移、
 旧 Excel 兼容、承办联系人办公优先和通讯录 PDF/XLSX 做完。
+
+## 13. F3 落地记录（2026-11-20）
+
+### 已落地
+
+- 词库人员从 `phone` 一个字段扩成 `office_phone`（办公电话）+ `phone`（手机）：
+  - `units::normalize` 载入时迁移旧数据：11 位 `1[3-9]` 留在手机，其余（区号、
+    短号、8 位固话）迁到办公电话并清空手机；幂等。
+  - 词库编辑区两栏；树行摘要显示“办 … · 手 …”。
+- 承办联系人、收件人、传输单、签收单统一 `contact_of(...).preferred_office_first()`：
+  办公优先，手机回落。校验时两个号码都算命中。
+- 词库 Excel 人员表改成“办公电话 + 手机”两列；旧模板只有“联系电话”一列时按
+  号码形态自动拆；承办上级单位列随之后移，导出模板与数据验证同步。
+- 新增「导出通讯录」：只出至少有一个号码的人员，列单位/姓名/职务/办公电话/手机/备注；
+  Excel 走现有导出加密与后台写入，不占界面线程。
+- 验证：全量 `cargo test --locked --all-targets` **3205 通过 / 0 失败 / 94 忽略**；
+  fmt、clippy 零警告。
+
+### 与计划的出入
+
+- 通讯录先出 Excel，PDF 留到 F5 `RenderPlan` 落地后补；先把两列电话、旧数据兼容和
+  Excel 往返跑通，避免同时动排版层。
+- `RenderPlan`/`Artifact`/`Protection` 仍只有类型和现有导出链，F5 再接文件汇编。
+
+### 下一步（F4）
+
+纪要代字（单位属性，有就带、无就不带）+ `issue_register` 三个池 + 台账
+（手工补录、重号/断号）+ 制度有效性（状态、替代关系、引用提示）。

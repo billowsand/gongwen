@@ -45,8 +45,11 @@ pub struct VocabularyEntry {
     pub external_name: String,
     pub aliases: Vec<String>,
     pub note: String,
-    /// 与联系人绑定的电话；只对 `VocabularyCategory::Person` 有意义。
+    /// 手机。字段名沿用旧 `phone`，旧配置原样可读；载入时把非手机号迁到
+    /// `office_phone`（见 `units::normalize`）。只对 `VocabularyCategory::Person` 有意义。
     pub phone: String,
+    /// 办公电话；可以有区号、短号或不带区号，和手机分开维护。
+    pub office_phone: String,
     /// 人员专属：职务。姓名与职务分开维护，便于白头件按职务合并呈报称谓。
     pub position: String,
     /// 单位专属：上级单位的业务编码兼容列，空串表示顶层；永久关联以 owner_identity 为准。

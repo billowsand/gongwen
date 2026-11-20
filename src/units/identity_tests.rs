@@ -40,7 +40,10 @@ fn key(v: &[E], code: &str) -> String {
         .key()
 }
 fn person(v: &[E], phone: &str) -> String {
-    v.iter().find(|e| e.phone == phone).unwrap().key()
+    v.iter()
+        .find(|e| e.phone == phone || e.office_phone == phone)
+        .unwrap()
+        .key()
 }
 
 #[test]
@@ -226,7 +229,9 @@ fn snapshots_survive_move_rename_delete_and_code_reuse_without_changing_history(
         old_identity
     );
     assert_ne!(entries.iter().find(|e| e.id == id).unwrap().code, "A0101");
-    entries.retain(|e| e.key() != old_identity && e.phone != "010-1111");
+    entries.retain(|e| {
+        e.key() != old_identity && e.phone != "010-1111" && e.office_phone != "010-1111"
+    });
     let display = UnitDisplay::new(&entries).for_input(&draft);
     display.ensure_resolved(&draft).unwrap();
     assert_eq!(display.full_name(&old_identity), "甲市教育局办公室");
@@ -274,7 +279,7 @@ fn identity_merge_renames_one_person_and_does_not_merge_same_name_people() {
     let mut entries = fixture();
     let mut incoming = entries
         .iter()
-        .find(|e| e.phone == "010-2222")
+        .find(|e| e.phone == "010-2222" || e.office_phone == "010-2222")
         .unwrap()
         .clone();
     let identity = incoming.identity.clone();
@@ -543,7 +548,8 @@ fn explicit_reselection_refreshes_frozen_person_and_announces_dictionary_changes
     assert!(identity::snapshot_notice(&draft, &entries).is_none());
     let entry = entries.iter_mut().find(|e| e.key() == person).unwrap();
     entry.canonical = "张宁新名".into();
-    entry.phone = "010-9999".into();
+    entry.office_phone = "010-9999".into();
+    entry.phone.clear();
     identity::capture_input(&mut draft, &entries);
     assert!(identity::snapshot_notice(&draft, &entries).is_some());
     assert_eq!(draft.profile.contact_phone, "010-1111");

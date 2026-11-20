@@ -43,6 +43,8 @@ use std::thread;
 pub(crate) enum WorkerResult {
     /// 启动时发现正文索引缺篇，后台补建的结果（补建篇数）。
     ManuscriptSearchIndexed(Result<usize, String>),
+    /// 通讯录 Excel 导出结果（成功时是落盘路径说明）。
+    AddressBookExported(Result<String, String>),
     AuxiliaryArchiveExported(Result<PathBuf, String>),
     VocabularyWorkbookExported(Result<String, String>),
     /// 外部程序把文件放进系统剪贴板的结果，后台线程执行。
@@ -613,6 +615,10 @@ impl GongwenApp {
                         self.status = format!("正文索引已补建 {count} 篇，可以按正文检索。");
                     }
                     Err(error) => self.status = format!("正文索引补建失败：{error}"),
+                },
+                WorkerResult::AddressBookExported(result) => match result {
+                    Ok(message) => self.status = message,
+                    Err(error) => self.status = format!("通讯录导出失败：{error}"),
                 },
                 WorkerResult::AuxiliaryArchiveExported(result) => {
                     self.status = match result {
