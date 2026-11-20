@@ -15,6 +15,11 @@ CREATE TABLE IF NOT EXISTS document_registry (
     title       TEXT    NOT NULL,
     -- 规范后的完整发文字号；无文号时为空串
     number      TEXT    NOT NULL DEFAULT '',
+    -- 现行有效 / 已废止 / 被替代；替代关系只存文字，不强制外键
+    status          TEXT    NOT NULL DEFAULT 'active',
+    replaced_by     TEXT    NOT NULL DEFAULT '',
+    effective_date  TEXT    NOT NULL DEFAULT '',
+    abolished_date  TEXT    NOT NULL DEFAULT '',
     created_at  TEXT    NOT NULL,
     updated_at  TEXT    NOT NULL
 );
@@ -36,18 +41,75 @@ pub struct RegisteredDocument {
     pub number: String,
     /// 更正前的写法（名称、文号）。
     pub aliases: Vec<(String, String)>,
+    /// `active` / `abolished` / `replaced`。
+    pub status: String,
+    /// 被替代时填新文件（名称/文号），只作提示文字。
+    pub replaced_by: String,
+    pub effective_date: String,
+    pub abolished_date: String,
+}
+
+impl RegisteredDocument {
+    pub fn effectiveness_notice(&self) -> Option<String> {
+        match self.status.as_str() {
+            "abolished" => Some("该文件已废止".to_string()),
+            "replaced" if self.replaced_by.trim().is_empty() => Some("该文件已被替代".to_string()),
+            "replaced" => Some(format!("该文件已被“{}”替代", self.replaced_by.trim())),
+            _ => None,
+        }
+    }
 }
 
 /// 幂等建表，与候选区一样不单开 `user_version` 档位。
 pub(crate) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(DDL)
+    conn.execute_batch(DDL)?;
+    ensure_columns(conn)
+}
+
+/// 旧库补列；新库在 DDL 里已有，这里是空操作。
+fn ensure_columns(conn: &Connection) -> rusqlite::Result<()> {
+    for (name, ddl) in [
+        (
+            "status",
+            "ALTER TABLE document_registry ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+        ),
+        (
+            "replaced_by",
+            "ALTER TABLE document_registry ADD COLUMN replaced_by TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "effective_date",
+            "ALTER TABLE document_registry ADD COLUMN effective_date TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "abolished_date",
+            "ALTER TABLE document_registry ADD COLUMN abolished_date TEXT NOT NULL DEFAULT ''",
+        ),
+    ] {
+        if !column_exists(conn, "document_registry", name)? {
+            conn.execute_batch(ddl)?;
+        }
+    }
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 impl ManuscriptStore {
     /// 全部登记，最近登记或更正的在前。
     pub fn list_registry(&self) -> Result<Vec<RegisteredDocument>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, number FROM document_registry ORDER BY updated_at DESC, id DESC",
+            "SELECT id, title, number, status, replaced_by, effective_date, abolished_date
+             FROM document_registry ORDER BY updated_at DESC, id DESC",
         )?;
         let mut documents = stmt
             .query_map([], |row| {
@@ -56,6 +118,10 @@ impl ManuscriptStore {
                     title: row.get(1)?,
                     number: row.get(2)?,
                     aliases: Vec::new(),
+                    status: row.get(3)?,
+                    replaced_by: row.get(4)?,
+                    effective_date: row.get(5)?,
+                    abolished_date: row.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -119,6 +185,10 @@ impl ManuscriptStore {
             title,
             number,
             aliases: Vec::new(),
+            status: "active".into(),
+            replaced_by: String::new(),
+            effective_date: String::new(),
+            abolished_date: String::new(),
         })
     }
 
@@ -156,6 +226,36 @@ impl ManuscriptStore {
         Ok(())
     }
 
+    /// 只改制度状态与替代关系，不动名称/文号。
+    pub fn update_registry_meta(
+        &mut self,
+        id: i64,
+        status: &str,
+        replaced_by: &str,
+        effective_date: &str,
+        abolished_date: &str,
+    ) -> Result<()> {
+        ensure!(
+            matches!(status, "active" | "abolished" | "replaced"),
+            "未知的制度状态"
+        );
+        let changed = self.conn.execute(
+            "UPDATE document_registry
+             SET status=?2, replaced_by=?3, effective_date=?4, abolished_date=?5, updated_at=?6
+             WHERE id=?1",
+            params![
+                id,
+                status,
+                replaced_by.trim(),
+                effective_date.trim(),
+                abolished_date.trim(),
+                Local::now().to_rfc3339(),
+            ],
+        )?;
+        ensure!(changed == 1, "登记已不存在");
+        Ok(())
+    }
+
     /// 删除登记。正文里的引用文字不受影响，只是不再能核对来源。
     pub fn delete_registered(&mut self, id: i64) -> Result<()> {
         self.conn
@@ -168,6 +268,39 @@ impl ManuscriptStore {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn registry_status_and_replacement_round_trip() {
+        let mut store = ManuscriptStore::open(Path::new(":memory:")).unwrap();
+        let document = store
+            .register_document("关于做好防火工作的通知", "某应急〔2026〕8号", false)
+            .unwrap();
+        assert_eq!(document.status, "active");
+        assert_eq!(document.effectiveness_notice(), None);
+
+        store
+            .update_registry_meta(
+                document.id,
+                "replaced",
+                "关于做好消防工作的通知（某应急〔2026〕12号）",
+                "2026-01-01",
+                "2026-06-30",
+            )
+            .unwrap();
+        let updated = store.get_registered(document.id).unwrap().unwrap();
+        assert_eq!(updated.status, "replaced");
+        assert_eq!(updated.effective_date, "2026-01-01");
+        assert_eq!(updated.abolished_date, "2026-06-30");
+        assert_eq!(
+            updated.effectiveness_notice().as_deref(),
+            Some("该文件已被“关于做好消防工作的通知（某应急〔2026〕12号）”替代")
+        );
+        assert!(
+            store
+                .update_registry_meta(document.id, "nope", "", "", "")
+                .is_err()
+        );
+    }
 
     #[test]
     fn registry_dedups_keeps_aliases_and_deletes() {

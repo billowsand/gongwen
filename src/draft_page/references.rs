@@ -39,6 +39,8 @@ pub(crate) struct Source {
     note: String,
     /// 更正前的写法（只有登记簿有）。
     aliases: Vec<(String, String)>,
+    /// 登记簿制度的有效性提示（已废止/被替代）；稿件来源为 None。
+    effectiveness: Option<String>,
 }
 
 impl Source {
@@ -127,6 +129,10 @@ pub(crate) struct ReferencePicker {
     no_number: bool,
     /// 手工填写时同时存入公文登记簿。
     register: bool,
+    registry_status: String,
+    registry_replaced_by: String,
+    registry_effective_date: String,
+    registry_abolished_date: String,
     /// 删除登记要再点一次确认。
     confirm_delete: bool,
     error: Option<String>,
@@ -286,6 +292,10 @@ impl DraftPage<'_> {
             number: String::new(),
             no_number: false,
             register: true,
+            registry_status: "active".into(),
+            registry_replaced_by: String::new(),
+            registry_effective_date: String::new(),
+            registry_abolished_date: String::new(),
             confirm_delete: false,
             error,
         };
@@ -378,11 +388,14 @@ impl DraftPage<'_> {
     ) -> anyhow::Result<bool> {
         match picker.view {
             View::EditRegistry(id) => {
-                self.picker_store()?.update_registered(
+                let store = self.picker_store()?;
+                store.update_registered(id, &picker.title, &picker.number, picker.no_number)?;
+                store.update_registry_meta(
                     id,
-                    &picker.title,
-                    &picker.number,
-                    picker.no_number,
+                    &picker.registry_status,
+                    &picker.registry_replaced_by,
+                    &picker.registry_effective_date,
+                    &picker.registry_abolished_date,
                 )?;
                 self.reload_sources(picker)?;
                 picker.view = View::Browse;
@@ -493,6 +506,10 @@ impl DraftPage<'_> {
                     picker.view = View::EditRegistry(id);
                     let no_number = document.number.is_empty();
                     picker.fill_form(&document.title, &document.number, no_number);
+                    picker.registry_status = document.status.clone();
+                    picker.registry_replaced_by = document.replaced_by.clone();
+                    picker.registry_effective_date = document.effective_date.clone();
+                    picker.registry_abolished_date = document.abolished_date.clone();
                     Ok(())
                 }),
                 Action::DeleteRegistry(id) => (|| {
@@ -696,6 +713,14 @@ fn browse_ui(ui: &mut egui::Ui, picker: &mut ReferencePicker, actions: &mut Vec<
     });
 }
 
+fn registry_status_label(status: &str) -> &'static str {
+    match status {
+        "abolished" => "已废止",
+        "replaced" => "被替代",
+        _ => "现行有效",
+    }
+}
+
 fn form_ui(ui: &mut egui::Ui, picker: &mut ReferencePicker) {
     let width = ui.available_width() - 72.0;
     egui::Grid::new("reference_form")
@@ -719,6 +744,53 @@ fn form_ui(ui: &mut egui::Ui, picker: &mut ReferencePicker) {
             ui.label("");
             ui.checkbox(&mut picker.no_number, "该文件没有发文字号");
             ui.end_row();
+
+            if matches!(picker.view, View::EditRegistry(_)) {
+                ui.label("制度状态");
+                egui::ComboBox::from_id_salt("registry_status")
+                    .selected_text(registry_status_label(&picker.registry_status))
+                    .width(width)
+                    .show_ui(ui, |ui| {
+                        for (value, label) in [
+                            ("active", "现行有效"),
+                            ("abolished", "已废止"),
+                            ("replaced", "被替代"),
+                        ] {
+                            ui.selectable_value(
+                                &mut picker.registry_status,
+                                value.to_string(),
+                                label,
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                if picker.registry_status == "replaced" {
+                    ui.label("替代文件");
+                    ui.add(theme::field(
+                        &mut picker.registry_replaced_by,
+                        "新文件名称或文号",
+                        width,
+                    ));
+                    ui.end_row();
+                }
+
+                ui.label("生效日期");
+                ui.add(
+                    egui::TextEdit::singleline(&mut picker.registry_effective_date)
+                        .hint_text("可空，YYYY-MM-DD")
+                        .desired_width(width),
+                );
+                ui.end_row();
+
+                ui.label("废止日期");
+                ui.add(
+                    egui::TextEdit::singleline(&mut picker.registry_abolished_date)
+                        .hint_text("可空，YYYY-MM-DD")
+                        .desired_width(width),
+                );
+                ui.end_row();
+            }
         });
     if picker.view == View::Manual {
         ui.add_space(4.0);
@@ -991,6 +1063,17 @@ fn current_row(
             false,
         ));
     }
+    if let Some(source) = source
+        && let Some(notice) = source.effectiveness.as_deref()
+        && let SourceKey::Registry(id) = source.key
+    {
+        problems.push((
+            format!("登记簿提示：{notice}"),
+            "编辑登记",
+            Action::EditRegistry(id),
+            false,
+        ));
+    }
     let open = match source.map(|source| source.key) {
         Some(SourceKey::Manuscript(id)) => Some(id),
         _ => None,
@@ -1104,13 +1187,17 @@ fn load_sources(store: &mut ManuscriptStore, own: Option<i64>) -> anyhow::Result
     let mut sources = store
         .list_registry()?
         .into_iter()
-        .map(|document| Source {
-            key: SourceKey::Registry(document.id),
-            title: document.title,
-            number: document.number,
-            origin: "登记簿".into(),
-            note: "取自公文登记簿".into(),
-            aliases: document.aliases,
+        .map(|document| {
+            let effectiveness = document.effectiveness_notice();
+            Source {
+                key: SourceKey::Registry(document.id),
+                title: document.title,
+                number: document.number,
+                origin: "登记簿".into(),
+                note: "取自公文登记簿".into(),
+                aliases: document.aliases,
+                effectiveness,
+            }
         })
         .collect::<Vec<_>>();
     let mut manuscripts = Vec::new();
@@ -1177,6 +1264,7 @@ fn manuscript_source(store: &mut ManuscriptStore, id: i64) -> anyhow::Result<Opt
         origin,
         note,
         aliases: Vec::new(),
+        effectiveness: None,
     }))
 }
 
@@ -1209,6 +1297,7 @@ mod tests {
                 .iter()
                 .map(|(title, number)| ((*title).into(), (*number).into()))
                 .collect(),
+            effectiveness: None,
         }
     }
 
