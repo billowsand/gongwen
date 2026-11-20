@@ -50,6 +50,7 @@ mod export_password;
 pub(crate) mod file_dialog;
 pub(crate) mod gate;
 mod ime_page;
+mod issue_ledger;
 mod jobs;
 #[cfg(feature = "ai-workbench")]
 mod knowledge_local;
@@ -263,6 +264,7 @@ pub struct GongwenApp {
     #[cfg(feature = "ai-workbench")]
     update_check: crate::update_check::UpdateCheckState,
     quick_find: Option<quick_find::QuickFind>,
+    issue_ledger: Option<issue_ledger::IssueLedgerState>,
     vocabulary_filter: String,
     /// 词库树上当前选中的词条 id，右侧编辑区显示它的详情。
     vocabulary_selected: Option<u64>,
@@ -880,6 +882,7 @@ impl GongwenApp {
             #[cfg(feature = "ai-workbench")]
             update_check: crate::update_check::UpdateCheckState::default(),
             quick_find: None,
+            issue_ledger: None,
             modal_guard: crate::modal::ModalGuard::default(),
             vocabulary_filter: String::new(),
             vocabulary_selected: None,
@@ -1379,6 +1382,7 @@ impl GongwenApp {
         self.knowledge_preview_window(&ctx);
         self.about_window(&ctx);
         self.quick_find_window(&ctx);
+        self.issue_ledger_window(&ctx);
         self.disposal_forms_window(&ctx);
         // 压缩包密码框既服务稿件库页，也服务设置页的备份导出/恢复，放在全局窗口这层。
         self.zip_password_window(&ctx);

@@ -55,6 +55,13 @@ impl GongwenApp {
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
+                    .add(theme::icon_text_button(theme::Icon::List, "发文登记簿"))
+                    .on_hover_text("按公函/呈批件/纪要三个池查看文号，补录纸质件、查重号断号")
+                    .clicked()
+                {
+                    self.open_issue_ledger();
+                }
+                if ui
                     .add(theme::icon_text_button(theme::Icon::FilePlus, "新建稿件"))
                     .on_hover_text("新开一个空白稿件标签，当前稿不受影响")
                     .clicked()

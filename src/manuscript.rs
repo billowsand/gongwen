@@ -25,6 +25,7 @@ pub(crate) mod ai_checkpoints;
 pub(crate) mod ai_sessions;
 pub(crate) mod candidates;
 pub(crate) mod disposal;
+pub(crate) mod ledger;
 pub(crate) mod merge;
 pub(crate) mod print_trace;
 pub(crate) mod registry;
@@ -464,6 +465,8 @@ impl ManuscriptStore {
         registry::ensure_schema(&self.conn)?;
         // 正文检索索引：同样幂等建表，不单开档位。
         search::ensure_schema(&self.conn)?;
+        // 发文字号台账：同样幂等建表，不单开档位。
+        ledger::ensure_schema(&self.conn)?;
         disposal::ensure_schema(&self.conn)?;
         sync::migrate(&mut self.conn)?;
         // 送批材料：同样幂等建表，不单开档位。
@@ -579,6 +582,13 @@ impl ManuscriptStore {
         )?;
         let id = self.conn.last_insert_rowid();
         search::index_row(&self.conn, id, &title, &new.content_markdown)?;
+        ledger::upsert_auto(
+            &self.conn,
+            id,
+            &title,
+            &new.snapshot,
+            &Local::now().to_rfc3339(),
+        )?;
         Ok(id)
     }
 
@@ -616,6 +626,13 @@ impl ManuscriptStore {
             ],
         )?;
         search::index_row(&self.conn, id, &title, &upd.content_markdown)?;
+        ledger::upsert_auto(
+            &self.conn,
+            id,
+            &title,
+            &upd.snapshot,
+            &Local::now().to_rfc3339(),
+        )?;
         Ok(())
     }
 
@@ -668,6 +685,7 @@ impl ManuscriptStore {
         send_package::detach_before_delete(&tx, id)?;
         tx.execute("DELETE FROM manuscripts WHERE id=?1", [id])?;
         search::remove_row(&tx, id)?;
+        ledger::remove_auto(&tx, id)?;
         tx.commit()?;
         self.purge_orphan_images(&deleted, live_contents);
         Ok(())
@@ -681,6 +699,7 @@ impl ManuscriptStore {
     pub fn clear_all_content(&mut self) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM manuscript_fts", [])?;
+        tx.execute("DELETE FROM issue_register", [])?;
         #[cfg(feature = "ai-workbench")]
         {
             // wiki_fts 不是外部内容表，没有删除触发器，必须随页面一起清空。
@@ -734,6 +753,7 @@ impl ManuscriptStore {
             send_package::detach_before_delete(&tx, id)?;
             tx.execute("DELETE FROM manuscripts WHERE id=?1", [id])?;
             search::remove_row(&tx, id)?;
+            ledger::remove_auto(&tx, id)?;
         }
         tx.commit()?;
         self.purge_orphan_images(&deleted, live_contents);

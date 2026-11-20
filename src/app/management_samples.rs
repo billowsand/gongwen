@@ -93,6 +93,7 @@ pub(crate) fn fixture() -> GongwenApp {
         #[cfg(feature = "ai-workbench")]
         update_check: crate::update_check::UpdateCheckState::default(),
         quick_find: None,
+        issue_ledger: None,
         modal_guard: crate::modal::ModalGuard::default(),
         vocabulary_filter: String::new(),
         vocabulary_selected: None,

@@ -102,6 +102,24 @@ impl NumberingScheme {
         matches!(self, Self::Minutes)
     }
 
+    /// 存库/界面用的稳定短名；改字面值会让旧台账读不出来，别改。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Letter => "letter",
+            Self::Approval => "approval",
+            Self::Minutes => "minutes",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "letter" => Some(Self::Letter),
+            "approval" => Some(Self::Approval),
+            "minutes" => Some(Self::Minutes),
+            _ => None,
+        }
+    }
+
     /// 从单位词条取这一方案对应的代字；空串按“没有”处理。
     pub(crate) fn code(self, codes: &UnitCodes) -> Option<&str> {
         let value = match self {
