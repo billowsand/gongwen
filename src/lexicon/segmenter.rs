@@ -90,7 +90,9 @@ pub fn install_from_store(store: &super::LexiconStore) {
 }
 
 /// 把文本切成空格分隔的词串，供 FTS5 索引与查询使用。
-#[cfg(any(test, feature = "ai-workbench"))]
+///
+/// 平台内核的检索（`platform::search`）在非 AI 版也要用，因此不按
+/// `ai-workbench` 特性裁剪。
 pub fn tokenize(text: &str) -> String {
     shared()
         .cut(text, true)
