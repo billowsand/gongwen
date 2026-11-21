@@ -266,7 +266,9 @@
 - `src/units/identity.rs`：唯一解析、结构校验、可用范围、逐级消歧、活稿捕获、纸面快照与导出身份检查。
 - `src/models/{vocabulary,template}.rs`、`src/units.rs`：持久身份、父属关联、保留人员编号、原子移动与安全补码。
 - `src/vocabulary_xlsx.rs`、`src/app/vocabulary.rs`：新旧 Excel 兼容、同父重名约束、按身份暂存合并与原子保存。
-  旧模板隐藏 K 列是下拉编码源，不能误读为新增身份列；新模板编码源移至 M 列。
+  旧模板隐藏 K 列是下拉编码源，不能误读为新增身份列；当前模板的编码源在隐藏 N 列，
+  人员表下拉通过定义名称 `UnitCodes` 引用该区域（内联列表有 Excel 255 字符上限，
+  88 个单位编码就会超限）。
 - `src/draft_page/{form,phone_record}.rs`、`src/app/widgets.rs`、`src/element_fields.rs`：真实候选值、单位联动、电话与人员作用域。
 - `src/agent/{clarify,tools/vocab,ops/prepare}.rs`、`src/ai_panel/field_card.rs`：同名选择题、身份建议、可读展示和采纳前再校验。
 - `src/export/`、`src/preview/`、`src/prompt.rs`、`src/validator.rs`：快照显示、正式输出检查、提示词可读值。

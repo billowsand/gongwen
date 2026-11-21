@@ -921,6 +921,14 @@ fn build_xlsx(entries: &[VocabularyEntry], existing_unit_codes: &[String]) -> Re
         });
     }
 
+    // 人员表的"所属单位编码"下拉引用单位表隐藏的编码列。Excel 对内联列表有
+    // 255 字符上限（88 个单位编码就超过），所以用定义名称指向单元格区域；
+    // 编码过多（>1000）时仍降级为自由填写。
+    if !existing_unit_codes.is_empty() && existing_unit_codes.len() <= 1000 {
+        let last_row = 1 + existing_unit_codes.len();
+        workbook.define_name("UnitCodes", &format!("=单位!$N$2:$N${last_row}"))?;
+    }
+
     // 人员 Sheet
     {
         let sheet = workbook.add_worksheet();
@@ -940,12 +948,11 @@ fn build_xlsx(entries: &[VocabularyEntry], existing_unit_codes: &[String]) -> Re
         ) {
             write_person_row(sheet, row_index, entry)?;
         }
-        // 人员"所属单位编码"下拉：直接列出当前词库的编码（超过 1000 个降级为自由填写）。
+        // 人员"所属单位编码"下拉：引用单位表隐藏列的定义名称，避免内联列表
+        // 超过 Excel 的 255 字符上限；编码过多（>1000）时降级为自由填写。
         if !existing_unit_codes.is_empty() && existing_unit_codes.len() <= 1000 {
-            let list: Vec<&str> = existing_unit_codes.iter().map(|c| c.as_str()).collect();
             let unit_dv = DataValidation::new()
-                .allow_list_strings(&list)
-                .map_err(|e| anyhow::anyhow!("无法构造数据验证：{e}"))?
+                .allow_list_formula("=UnitCodes".into())
                 .set_input_title("所属单位编码")
                 .map_err(|e| anyhow::anyhow!("无法构造数据验证：{e}"))?
                 .set_input_message("下拉中选择；留空表示未归属人员")
@@ -1470,5 +1477,44 @@ mod tests {
         assert!(!is_valid_code("@id"));
         assert!(!is_valid_code("a b"));
         assert!(!is_valid_code("a/b"));
+    }
+
+    #[test]
+    fn person_unit_dropdown_uses_a_range_instead_of_a_long_inline_list() {
+        let dir = tmp_dir();
+        let path = dir.join("标准词库.xlsx");
+        let mut entries = Vec::new();
+        let mut unit_codes = Vec::new();
+        for index in 0..88 {
+            let code = format!("90-{index:02}");
+            entries.push(some_unit(&code, &format!("单位{index:02}")));
+            unit_codes.push(code);
+        }
+        entries.push(some_person("90-00", "张三"));
+        // 88 个编码的内联列表超过 Excel 的 255 字符上限，旧实现会导出失败。
+        to_xlsx(&entries, &path, &unit_codes).unwrap();
+        let report = parse(&path, &unit_codes).unwrap();
+        assert_eq!(report.entries.len(), 89);
+
+        use std::io::Read as _;
+        let mut archive = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
+        let mut sheet = String::new();
+        archive
+            .by_name("xl/worksheets/sheet2.xml")
+            .unwrap()
+            .read_to_string(&mut sheet)
+            .unwrap();
+        assert!(
+            sheet.contains("UnitCodes"),
+            "人员表下拉应引用定义名称而不是内联长列表"
+        );
+        let mut workbook = String::new();
+        archive
+            .by_name("xl/workbook.xml")
+            .unwrap()
+            .read_to_string(&mut workbook)
+            .unwrap();
+        assert!(workbook.contains("UnitCodes"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
