@@ -280,6 +280,12 @@
 身份合并冲突、改名移树删除、任意业务编码、无词库加密稿件包往返和校验值保持。
 实际命令与最终结果记入试用目录的说明；沙箱端口／缓存限制之外的完整回归使用已批准的本机环境运行。
 
+2026-11-21 修复：词库导入门禁误把 `vault_locked`（application lock 已启用，解锁后的
+加密工作区同样为 true）当成“当前锁屏”，导致加密工作区导入标准词库一律提示
+“工作区已变化或已有导入任务，已取消本次导入”。门禁现只检查密钥/槽位/停写与是否已有导入；
+新增 `encrypted_unlocked_workspace_can_start_vocabulary_import` 等回归，并验证加密工作区
+导入后配置仍写成密文。
+
 `cargo test --locked typst_samples_identity -- --ignored` 生成
 `output/vocabulary-identity-trial/`：示例 Excel、身份快照、Word、PDF、页面 PNG。
 初样发现长单位版记越过底线，已通过共用量尺修复并再次目视检查；Word 使用既有自动行高，

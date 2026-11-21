@@ -45,6 +45,17 @@ impl VocabularyImport {
     }
 }
 
+impl GongwenApp {
+    /// 开始词库导入前的门禁：只拦「工作区/密钥已变化」和「已有导入在跑」。
+    ///
+    /// 不能用 `vault_locked` 当门禁：它表示**应用锁已启用**，解锁后的普通加密
+    /// 工作区同样为 true（工作区真正锁屏时本对象已经被丢弃）。曾经把它写进
+    /// 门禁，导致所有加密工作区导入词库都被取消。
+    fn can_start_vocabulary_import(&self, state: &VocabularyImport) -> bool {
+        state.same_workspace() && self.vocabulary_import.is_none()
+    }
+}
+
 enum WorkbookDestination {
     File(PathBuf, Option<Protection>),
     Disc(Medium, KeyHandle),
@@ -75,7 +86,7 @@ impl GongwenApp {
                     error: String::new(),
                     pending: None,
                 };
-                if !state.same_workspace() || app.vault_locked || app.vocabulary_import.is_some() {
+                if !app.can_start_vocabulary_import(&state) {
                     app.status = "工作区已变化或已有导入任务，已取消本次导入。".into();
                     return;
                 }
@@ -110,7 +121,7 @@ impl GongwenApp {
         let Some(mut state) = self.vocabulary_import.take() else {
             return;
         };
-        if !state.same_workspace() || self.vault_locked {
+        if !state.same_workspace() {
             self.status = "工作区已变化，已取消词库导入。".into();
             return;
         }
@@ -435,5 +446,89 @@ mod tests {
         assert!(app.any_busy(), "读取中的词库导入应计入忙状态");
         let error = app.save_before_lock().unwrap_err().to_string();
         assert!(error.contains("仍有任务在运行"), "{error}");
+    }
+
+    fn state_for_import() -> VocabularyImport {
+        VocabularyImport {
+            name: "标准词库.xlsx".into(),
+            slot: storage::current_slot(),
+            unlock: crate::vault::key_handle(),
+            encrypted: None,
+            password: Default::default(),
+            error: String::new(),
+            pending: None,
+        }
+    }
+
+    /// `vault_locked` 表示应用锁已启用（解锁后的加密工作区也为 true），不是锁屏；
+    /// 不能拿它当导入门禁，否则加密工作区永远无法导入词库。
+    #[test]
+    fn encrypted_unlocked_workspace_can_start_vocabulary_import() {
+        let mut app = crate::app::management_samples::fixture();
+        app.vault_locked = true;
+        let state = state_for_import();
+        assert!(
+            app.can_start_vocabulary_import(&state),
+            "解锁后的加密工作区应允许导入"
+        );
+
+        app.vocabulary_import = Some(state_for_import());
+        assert!(
+            !app.can_start_vocabulary_import(&state),
+            "已有导入在跑时应拒绝第二个导入"
+        );
+    }
+
+    #[test]
+    fn vocabulary_import_rejects_a_changed_slot() {
+        let app = crate::app::management_samples::fixture();
+        let mut state = state_for_import();
+        state.slot = storage::DataSlot::Decoy;
+        assert!(!app.can_start_vocabulary_import(&state));
+    }
+
+    #[test]
+    fn encrypted_workspace_import_persists_a_sealed_config() {
+        let dir = tempfile::tempdir().unwrap();
+        storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        let (_, unlocked) = crate::vault::Vault::create("Test#Valid2026Lock", None, false).unwrap();
+        let unlocked = unlocked.unwrap();
+        crate::vault::set_key_handle_for_slot(*unlocked.dek, true, storage::DataSlot::Real);
+
+        let mut app = crate::app::management_samples::fixture();
+        app.vault_locked = true;
+        app.config.vocabulary.clear();
+        let report = ImportReport {
+            entries: vec![
+                VocabularyEntry {
+                    category: crate::models::VocabularyCategory::Unit,
+                    code: "001".into(),
+                    canonical: "测试单位".into(),
+                    ..Default::default()
+                },
+                VocabularyEntry {
+                    category: crate::models::VocabularyCategory::Person,
+                    unit: "001".into(),
+                    code: "01".into(),
+                    canonical: "张三".into(),
+                    ..Default::default()
+                },
+            ],
+            conflicts: Vec::new(),
+        };
+        app.apply_vocabulary_workbook("测试.xlsx", Ok(report));
+        assert!(
+            app.status.starts_with("已从"),
+            "加密工作区导入应成功：{}",
+            app.status
+        );
+        assert_eq!(app.config.vocabulary.len(), 2);
+        let raw = std::fs::read(storage::config_path().unwrap()).unwrap();
+        assert!(crate::vault::is_sealed_file(&raw), "配置应写成密文");
+        let (loaded, _) = storage::load().unwrap();
+        assert_eq!(loaded.vocabulary.len(), 2);
+
+        crate::vault::clear_key_handle();
+        storage::set_test_config_dir(None);
     }
 }
