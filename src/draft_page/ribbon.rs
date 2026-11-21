@@ -60,16 +60,18 @@ const BOX_NAMES: [(&str, &str); 4] = [
 
 /// 「清洗」分区里点下的动作。按钮只记下选了什么，等闭包结束再动正文——
 /// 否则取 `&mut self` 与借 `self.doc` 会在同一个闭包里打架。
+///
+/// 分区里的命令只做正向转换：把不合公文助手 Markdown 标准的写法改成合规写法。
+/// 「Markdown 退回公文编号」「剥掉 Markdown 标记」「清除全部编号」这类反向操作
+/// 已经去掉——那些方向把已经成形的结构拆散，与清洗的目的正相反。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CleanAction {
-    /// 段首手打编号 → Markdown 标题与列表。
-    BusinessToMarkdown,
-    /// Markdown 标题 → 段首公文编号。
-    MarkdownToBusiness,
-    /// 去掉 Markdown 标记，变正文。
-    StripMarkers,
-    /// 再去掉段首公文编号，全部变正文。
-    StripNumbering,
+    /// 结构总纲：段首公文编号转成标题与列表，再修标题、列表与表格。
+    NormalizeStructure,
+    /// 只修标题：剥手写编号、层级不跳级、正文区不留第二个一级标题。
+    NormalizeHeadings,
+    /// 只修列表：把程序不认的列表写法改成标准写法。
+    NormalizeLists,
     /// 清理多余空格与全角数字、字母。
     NormalizeSpaces,
     /// 中文语境里的半角标点改全角。
@@ -78,7 +80,7 @@ enum CleanAction {
     StripConverterNoise,
     /// 表格按分隔行补齐列数、规范单元格。
     NormalizeTables,
-    /// 按导入端的固定顺序把上面几步全跑一遍。
+    /// 按固定顺序把上面几步全跑一遍。
     CleanAll,
     /// 直引号统一成配对的中文引号。
     NormalizeQuotes,
@@ -1248,58 +1250,56 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 清洗：编号互转与格式清理。
+    /// 清洗：把不合公文助手 Markdown 标准的写法改成合规写法。
     ///
     /// 这里的命令全是确定性的文本替换：只改审校稿 `generated_markdown`，改完重新
     /// 校验。只读稿件与 AI 工作区视图下整组禁用——那种视图里的正文不许就地改。
+    ///
+    /// 分区里的命令只做正向转换：把可能不合标准的 Markdown 变成合规的 Markdown。
+    /// 反向操作（Markdown 退回公文编号、剥掉 Markdown 标记、清除全部编号）已经
+    /// 去掉——它们把已经成形的结构拆散，与清洗的目的正相反。
     pub(crate) fn ribbon_clean(&mut self, ui: &mut egui::Ui) {
         let editable = !self.doc.read_only() && !self.doc.ai_workspace_open();
         let mut action = None;
         ui.add_enabled_ui(editable, |ui| {
-            // 一、编号互转
+            // 一、结构标注：把不合标准的标注改成公文助手认的标注。
             if ui
                 .add(theme::icon_text_button(
-                    theme::Icon::Heading,
-                    "编号→Markdown",
+                    theme::Icon::SquareCheck,
+                    "规范公文标注",
                 ))
                 .on_hover_text(
-                    "段首的「一、」「（一）」「1.」「（1）」「①」按公文版式转成 Markdown 标题与列表",
+                    "按「段首公文编号转标题与列表 → 修标题 → 修列表 → 修表格」的顺序把全文改成合规的公文 Markdown 标注",
                 )
                 .clicked()
             {
-                action = Some(CleanAction::BusinessToMarkdown);
+                action = Some(CleanAction::NormalizeStructure);
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Heading, "规范标题"))
+                .on_hover_text(
+                    "剥掉标题行首手写的编号、层级不跳级时降一级、正文区不留第二个一级标题、末尾不加句号",
+                )
+                .clicked()
+            {
+                action = Some(CleanAction::NormalizeHeadings);
             }
             if ui
                 .add(theme::icon_text_button(
                     theme::Icon::ListOrdered,
-                    "Markdown→公文编号",
+                    "规范列表",
                 ))
-                .on_hover_text(
-                    "把 ## 至 ##### 标题按编号设置展开成「一、」「（一）」「1.」「（1）」正文段落；文档标题与列表不动",
-                )
+                .on_hover_text("把程序不认的列表写法（+ 内容、-内容、1.内容、1)内容）改成 1. 内容 / - 内容")
                 .clicked()
             {
-                action = Some(CleanAction::MarkdownToBusiness);
+                action = Some(CleanAction::NormalizeLists);
             }
             if ui
-                .add(theme::icon_text_button(
-                    theme::Icon::RemoveFormatting,
-                    "去 Markdown 标记",
-                ))
-                .on_hover_text("去掉行首的 # 标题与 - 、* 、1. 列表标记，只留文字")
+                .add(theme::icon_text_button(theme::Icon::Table, "规范表格"))
+                .on_hover_text("缺分隔行的表格补上分隔行，按分隔行补齐或截断列数，单元格里的换行统一写成 <br>")
                 .clicked()
             {
-                action = Some(CleanAction::StripMarkers);
-            }
-            if ui
-                .add(theme::icon_text_button(
-                    theme::Icon::Eraser,
-                    "清除全部编号",
-                ))
-                .on_hover_text("去掉 Markdown 标记后，再剥掉段首的手打公文编号，全部变成正文")
-                .clicked()
-            {
-                action = Some(CleanAction::StripNumbering);
+                action = Some(CleanAction::NormalizeTables);
             }
             toolbar_separator(ui);
 
@@ -1319,35 +1319,6 @@ impl DraftPage<'_> {
                 action = Some(CleanAction::NormalizePunctuation);
             }
             if ui
-                .add(theme::icon_text_button(theme::Icon::Trash, "删转换残留"))
-                .on_hover_text("删掉目录行、链接地址、脚注定义、代码围栏与分隔线，只留文字")
-                .clicked()
-            {
-                action = Some(CleanAction::StripConverterNoise);
-            }
-            if ui
-                .add(theme::icon_text_button(theme::Icon::Table, "规范表格"))
-                .on_hover_text("按分隔行补齐或截断表格列数，单元格里的换行统一写成 <br>")
-                .clicked()
-            {
-                action = Some(CleanAction::NormalizeTables);
-            }
-            toolbar_separator(ui);
-
-            // 三、一键与原有清理
-            if ui
-                .add(theme::icon_text_button(
-                    theme::Icon::WandSparkles,
-                    "一键整理",
-                ))
-                .on_hover_text(
-                    "按「删转换残留 → 清理空格 → 规范标点 → 规范表格 → 清理空行」的顺序全跑一遍",
-                )
-                .clicked()
-            {
-                action = Some(CleanAction::CleanAll);
-            }
-            if ui
                 .add(theme::icon_text_button(theme::Icon::Quote, "规范引号"))
                 .on_hover_text("把全文的直引号、方向错乱的引号统一成配对的中文引号")
                 .clicked()
@@ -1355,11 +1326,33 @@ impl DraftPage<'_> {
                 action = Some(CleanAction::NormalizeQuotes);
             }
             if ui
+                .add(theme::icon_text_button(theme::Icon::Trash, "删转换残留"))
+                .on_hover_text("删掉目录行、链接地址、脚注定义、代码围栏与分隔线，只留文字")
+                .clicked()
+            {
+                action = Some(CleanAction::StripConverterNoise);
+            }
+            if ui
                 .add(theme::icon_text_button(theme::Icon::Eraser, "清理空行"))
                 .on_hover_text("连续空行压成一行，去掉行尾空格")
                 .clicked()
             {
                 action = Some(CleanAction::TidyBlankLines);
+            }
+            toolbar_separator(ui);
+
+            // 三、一键：把上面几步按固定顺序全跑一遍。
+            if ui
+                .add(theme::icon_text_button(
+                    theme::Icon::WandSparkles,
+                    "一键规范",
+                ))
+                .on_hover_text(
+                    "按「删转换残留 → 清理空格 → 规范标点 → 规范引号 → 规范公文标注 → 清理空行」的顺序全跑一遍",
+                )
+                .clicked()
+            {
+                action = Some(CleanAction::CleanAll);
             }
         });
         if let Some(action) = action {
@@ -1375,24 +1368,22 @@ impl DraftPage<'_> {
             return;
         }
         let before = std::mem::take(&mut self.doc.generated_markdown);
-        let numbering = self.config.numbering;
+        // 研究报告的标题与区段口径跟公文不同（部分区可以多个一级标题），清洗时分开处理。
+        let research = self.doc.draft.kind.is_research();
         let after = match action {
-            CleanAction::BusinessToMarkdown => {
-                clean::tidy(&crate::doc_import::structure::restructure(
-                    &before,
-                    &crate::doc_import::structure::Options::restructure_only(),
-                ))
-            }
-            CleanAction::MarkdownToBusiness => {
-                format_clean::markdown_to_business_numbering(&before, &numbering)
-            }
-            CleanAction::StripMarkers => format_clean::strip_markdown_markers(&before),
-            CleanAction::StripNumbering => format_clean::strip_all_numbering(&before),
+            CleanAction::NormalizeStructure => format_clean::normalize_structure(&before, research),
+            CleanAction::NormalizeHeadings => format_clean::normalize_headings(&before, research),
+            CleanAction::NormalizeLists => format_clean::normalize_lists(&before),
             CleanAction::NormalizeSpaces => clean::normalize_spaces(&before),
             CleanAction::NormalizePunctuation => clean::normalize_punctuation(&before),
             CleanAction::StripConverterNoise => clean::strip_converter_noise(&before),
-            CleanAction::NormalizeTables => clean::normalize_tables(&before),
-            CleanAction::CleanAll => clean::clean_before_structure(&before),
+            CleanAction::NormalizeTables => format_clean::normalize_tables(&before),
+            CleanAction::CleanAll => {
+                let text = clean::clean_before_structure(&before);
+                let text = export::normalize_chinese_quotes(&text);
+                let text = format_clean::normalize_structure(&text, research);
+                tidy_blank_lines(&text)
+            }
             CleanAction::NormalizeQuotes => export::normalize_chinese_quotes(&before),
             CleanAction::TidyBlankLines => tidy_blank_lines(&before),
         };
@@ -1403,21 +1394,20 @@ impl DraftPage<'_> {
         }
         let changed = changed_line_count(&before, &after);
         let status = match action {
-            CleanAction::BusinessToMarkdown => format!(
-                "已按公文版式整理编号（识别出 {} 个标题）。",
+            CleanAction::NormalizeStructure => format!(
+                "已按公文 Markdown 标准整理全文（{} 个正文标题，{changed} 行有变化）。",
                 format_clean::heading_line_count(&after)
             ),
-            CleanAction::MarkdownToBusiness => format!(
-                "已把 {} 处 Markdown 标题展开为公文编号。",
-                format_clean::heading_line_count(&before)
+            CleanAction::NormalizeHeadings => format!(
+                "已规范标题（{} 个正文标题，{changed} 行有变化）。",
+                format_clean::heading_line_count(&after)
             ),
-            CleanAction::StripMarkers => format!("已去掉 {changed} 行 Markdown 标记。"),
-            CleanAction::StripNumbering => format!("已清除 {changed} 行的编号与标记。"),
+            CleanAction::NormalizeLists => format!("已规范列表写法（{changed} 行有变化）。"),
             CleanAction::NormalizeSpaces => format!("已清理 {changed} 行的多余空格与全角字符。"),
             CleanAction::NormalizePunctuation => format!("已规范 {changed} 行的标点。"),
             CleanAction::StripConverterNoise => format!("已删掉转换残留（{changed} 行有变化）。"),
             CleanAction::NormalizeTables => format!("已规范表格（{changed} 行有变化）。"),
-            CleanAction::CleanAll => format!("已按顺序完成一轮格式整理（{changed} 行有变化）。"),
+            CleanAction::CleanAll => format!("已按顺序完成一轮规范（{changed} 行有变化）。"),
             CleanAction::NormalizeQuotes => "已把全文引号规范为中文引号。".to_string(),
             CleanAction::TidyBlankLines => "已清理多余空行与行尾空格。".to_string(),
         };

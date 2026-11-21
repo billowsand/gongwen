@@ -357,7 +357,7 @@ pub enum RibbonTab {
     Research,
     /// 改已有文字的 Markdown 标记：标题层级、加粗、列表、清理。
     Format,
-    /// 公文编号与 Markdown 编号互转，以及空格、标点、表格等格式清理。
+    /// 把不合公文助手 Markdown 标准的写法改成合规写法：标题、列表、表格与空格标点。
     Clean,
     /// 校验、版本比对、查找、字数。
     Review,
@@ -406,7 +406,7 @@ impl RibbonTab {
             Self::Insert => "表格、图片、正文与附件标记、词库词条、日期与符号",
             Self::Research => "研究报告的区段标记、锚点、交叉引用、文献引用、脚注与表题",
             Self::Format => "标题层级、加粗、项目符号，以及引号与空行的规范化",
-            Self::Clean => "公文编号与 Markdown 编号互转、空格/标点/表格/目录等格式清理",
+            Self::Clean => "把不合公文 Markdown 标准的写法改成合规写法：标题、列表、表格、空格标点",
             Self::Review => "重新校验、版本对照、查找替换、字数统计",
             Self::View => "显示方式、预览缩放、各个面板的开关",
             Self::Output => "按格式导出、打开输出目录与最近一次的成品",

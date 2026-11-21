@@ -96,6 +96,15 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 也不再维护 docs 手册。旧版留在 `images/` 的六张帮助截图与配置目录 `help/` 下的 PDF
 只由 `src/retired_help.rs` 和备份排除规则做兼容，不要重新引入手册维护流程。
 
+**「清洗」分区只做正向转换**（2026-11-21 用户确认）：目标是「把一份可能不合公文助手
+Markdown 标准的正文变成合规的正文」，所以按钮只有规范方向——段首手打公文编号还原成
+标题与列表、标题剥手写编号且层级不跳级、列表统一成 `1. ` / `- `、表格补分隔行并对齐
+列数、空格标点引号与转换残留清理。反向操作（Markdown 退回公文编号、剥掉 Markdown
+标记、清除全部编号）已经删除，不要再加回来：那些方向把已经成形的结构拆散，与清洗的
+目的正相反。代码在 `src/draft_page/format_clean.rs`（纯文本，不碰 egui），判据跟
+`skills/gongwen-markdown` 的《公文助手 Markdown 语法完整参考》和自检脚本
+`check_gongwen_md.py` 对齐；改清洗规则时两边一起改。
+
 顶层模块清单在 `src/main.rs`。注意 `mod` 声明里 `outline`、`proofread_rules` 等
 并非全部集中在文件头部，改动前先 `grep -n "^mod " src/main.rs`。
 

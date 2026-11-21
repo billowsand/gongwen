@@ -29,7 +29,7 @@
 |---|---|---|
 | 编号 → 标题 / 列表 | `src/doc_import/structure/` | 第X章、一、（一）、1.、（1）、①；一是二是；附件；版头版记；Word 自动编号把「一、」转成「1、」（`from_list`）；层级压紧时第一层保持固定层级（只粘「（一）」仍是 `###`） |
 | 文本清洗 | `src/doc_import/clean.rs` | `clean_before_structure`：噪音、空格、标点、表格、空行 |
-| 整篇整理 | `src/draft_page/ribbon.rs` 的 `CleanAction::BusinessToMarkdown` | 对整篇稿子跑 `restructure(Options::restructure_only())` |
+| 整篇整理 | `src/draft_page/ribbon.rs` 的 `CleanAction::NormalizeStructure` | 对整篇稿子跑 `restructure(Options::restructure_only())`，再修标题、列表与表格（`src/draft_page/format_clean.rs`） |
 | HTML → 文档模型 | `vendor/anydoc/src/shared/html.rs` 的 `to_blocks` | 给 EPUB 用；认 h1–h6、table（跨行跨列）、blockquote、pre、math（转 TeX）、br、img、b/strong、del/s、列表的 start/type/value，以及一小组语义 CSS（粗、斜、删除线、`display:none`）。只吃格式严格的 XHTML 元素树，**模块是私有的** |
 | 文档模型 → Markdown | `anydoc::document_to_markdown` | 已有的 vendor 补丁公开的 |
 | 读 HTML 剪贴板 | `arboard 3.6.1`（egui-winit 的间接依赖）的 `get().html()` | Windows 读 `HTML Format` 并只取 StartFragment…EndFragment（**`<head>` 里的 `<style>` 拿不到**）；macOS 读 `public.html`；Linux 走 X11 |
