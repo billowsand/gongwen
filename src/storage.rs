@@ -452,8 +452,41 @@ pub(crate) fn migrate_legacy_recovery_evidence() -> Result<()> {
     Ok(())
 }
 
+/// 应用自己创建、内容由程序管理的工作目录（比较前会抹掉 `alt-` 槽位前缀）。
+///
+/// 普通模式跑过一次就会留下 `images/`、`ime/` 这些目录（旧版本还会留下空的
+/// `images/`），它们不代表「已有工作区数据」。若把它们当成既有数据，首次设置
+/// 密码时会跳过补默认配置，加密后环境闸门又以「配置文件缺失」永久阻断，用户
+/// 再也进不去。真实数据（稿件库、配置副本、留证、未知目录）仍按既有数据处理。
+const APP_MANAGED_DIRS: [&str; 7] = [
+    "apis",
+    "images",
+    "ime",
+    "logs",
+    "mermaid-cache",
+    "pi",
+    "skills",
+];
+
+/// 应用自己管理、会随解锁迁移一起密封的根目录文件。它们不是「配置丢失的旧
+/// 工作区」的证据：普通模式里用一次文字复核就可能只留下 `metrics.json`。
+/// `config.json` 不在此列——它存在时本来就不该补默认配置（会被误判为需恢复）。
+const APP_MANAGED_FILES: [&str; 9] = [
+    "apis.json",
+    ZIP_PASSWORD_FILE,
+    ".export-password",
+    ".export-devices",
+    "api-secrets.json",
+    "api-envs.json",
+    "api-tests.json",
+    "styles.json",
+    "metrics.json",
+];
+
 /// 是否已有可确认的工作区数据。首次设置密码只允许在真正的空白目录里补默认
-/// 配置；已有稿件库、资源目录或未知文件时，缺配置必须继续走恢复阻断。
+/// 配置；已有稿件库、配置副本、恢复留证或未知文件/目录时，缺配置必须继续走
+/// 恢复阻断。应用自己管理的目录与文件不算既有数据（否则会因一次普通模式运行
+/// 就永久卡在「加密工作区的配置文件缺失」）。
 pub(crate) fn workspace_has_existing_data() -> bool {
     let Ok(dir) = config_dir() else {
         return true;
@@ -483,14 +516,23 @@ pub(crate) fn workspace_has_existing_data() -> bool {
             return true;
         };
         if meta.is_dir() {
-            // 日志、旧帮助与进程转交目录不是工作区数据；其余目录只要存在
-            // 就按已有数据处理，宁可继续阻断也不覆盖现场。
-            if matches!(name.as_str(), "logs" | "alt-logs" | "help" | "inbox") {
+            // 日志、旧帮助与进程转交目录不是工作区数据；应用自己管理的资源
+            // 目录（图片、词表、Pi、技能、接口定义）也不算——它们的内容会随
+            // 迁移一起加密，不需要也不应该阻止补默认配置。其余目录（尤其是
+            // 恢复留证 `recovery/`）只要存在就按既有数据处理。
+            let base = name.strip_prefix(DECOY_PREFIX).unwrap_or(&name);
+            if matches!(base, "help" | "inbox") || APP_MANAGED_DIRS.contains(&base) {
                 continue;
             }
             return true;
         }
         if meta.is_file() {
+            // 应用自己管理的密钥/统计/样式文件同样不是「丢失配置的旧工作区」：
+            // 它们的内容由迁移密封保留，补默认配置不会覆盖它们。
+            let base = name.strip_prefix(DECOY_PREFIX).unwrap_or(&name);
+            if APP_MANAGED_FILES.contains(&base) {
+                continue;
+            }
             return true;
         }
     }
@@ -1020,6 +1062,48 @@ mod tests {
         // 已有工作区数据但配置缺失：不能补默认配置，继续交给恢复阻断。
         fs::remove_file(dir.path().join("config.json")).unwrap();
         fs::write(dir.path().join("manuscripts.db"), b"").unwrap();
+        assert!(workspace_has_existing_data());
+        prepare_first_setup_config().unwrap();
+        assert!(!dir.path().join("config.json").exists());
+        set_test_config_dir(None);
+    }
+
+    #[test]
+    fn app_managed_leftovers_do_not_block_first_setup_config() {
+        let dir = tempfile::tempdir().unwrap();
+        set_test_config_dir(Some(dir.path().to_owned()));
+        // 普通模式会留下这些应用目录（含旧版空 images/ 与诱饵槽 alt- 变体），
+        // 但 config.json 从未写过。它们不应被判成「已有工作区数据」。
+        for name in [
+            "images",
+            "alt-ime",
+            "pi",
+            "skills",
+            "apis",
+            "mermaid-cache",
+            "alt-logs",
+            "inbox",
+        ] {
+            fs::create_dir_all(dir.path().join(name)).unwrap();
+        }
+        fs::write(dir.path().join("images/旧图.png"), b"legacy").unwrap();
+        fs::write(dir.path().join("metrics.json"), b"{}").unwrap();
+        fs::write(dir.path().join(".zip-password"), b"legacy").unwrap();
+        assert!(
+            !workspace_has_existing_data(),
+            "应用自己的资源目录与统计文件不是既有工作区数据"
+        );
+        prepare_first_setup_config().unwrap();
+        assert!(dir.path().join("config.json").is_file());
+
+        // 稿件库、恢复留证与未知目录仍按既有数据处理，不能补默认配置。
+        fs::remove_file(dir.path().join("config.json")).unwrap();
+        fs::write(dir.path().join("manuscripts.db"), b"").unwrap();
+        assert!(workspace_has_existing_data());
+        prepare_first_setup_config().unwrap();
+        assert!(!dir.path().join("config.json").exists());
+        fs::remove_file(dir.path().join("manuscripts.db")).unwrap();
+        fs::create_dir_all(dir.path().join("recovery")).unwrap();
         assert!(workspace_has_existing_data());
         prepare_first_setup_config().unwrap();
         assert!(!dir.path().join("config.json").exists());

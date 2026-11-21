@@ -483,7 +483,13 @@ AEAD、`data_backup` 适配。**验收**：565 MB 真实库迁移后检索 / 词
 停用加密的解封扫描，也不进入全量备份；旧版固定名 `config.json.recovery-backup` 会在解锁迁移或
 停用解密前自动迁入该范围，避免绑定旧路径的密文卡住停用。
 全新目录首次设置密码时，流程在迁移前原子写入默认关闭的配置，迁移随即把它密封；只有确认目录里
-没有既有工作区数据才会这样做，已有数据而缺配置时仍保持阻断并走恢复。
+没有既有工作区数据才会这样做，已有数据而缺配置时仍保持阻断并走恢复。应用自己管理的目录
+（`images/`、`ime/`、`pi/`、`skills/`、`apis/`、`mermaid-cache/`、`logs/` 及其 `alt-` 槽位变体）
+与 `api-*.json`、`styles.json`、`metrics.json`、`.zip-password` 等密封名单里的非 `config.json`
+文件不算「既有工作区数据」：普通模式跑过一次就可能留下它们却没有 `config.json`，若因此跳过补配置，
+加密后环境闸门会以「配置文件缺失」永久挡住登录（2026-11-21 修复，回归测试
+`first_setup_ignores_app_managed_directories_left_by_normal_mode`）。稿件库、配置副本、恢复留证
+`recovery/` 与未知文件/目录仍按既有数据处理。
 
 ### 截屏边界
 
@@ -505,6 +511,12 @@ Windows 可选择为本进程顶层窗口设置并每 5 秒复核 `WDA_EXCLUDEFR
   不拆除、预检失败仍保存其他设置、配置缺失需密码恢复、诱饵密码恢复中性、风险解除后提示刷新、
   以及遮罩层之上退出按钮可点击。首设配置与恢复留证另有 `setup` / `recovery_*` / `legacy_recovery`
   专项测试。
+- 2026-11-21 修复「首次设置密码后登录被『无法读取环境策略：加密工作区的配置文件缺失』永久挡住」：
+  根因是普通模式遗留的 `images/`、`ime/` 等应用目录被 `workspace_has_existing_data` 当成既有工作区
+  数据，首次设置密码跳过补默认配置，加密后环境闸门在缺 `config.json` 时 fail-closed。新增
+  `app_managed_leftovers_do_not_block_first_setup_config` 与
+  `first_setup_ignores_app_managed_directories_left_by_normal_mode` 两个回归用例；已经卡住的
+  工作区用锁屏「验证密码并恢复默认环境策略」重建默认配置即可进入（原密文留证不变）。
 - `cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check` 与
   `cargo check --locked --no-default-features --all-targets` 通过。
 - Windows 和 Linux 后端用独立小 crate 链接真实源文件完成目标类型检查与 clippy；整项目 Windows

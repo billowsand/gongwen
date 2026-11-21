@@ -1985,7 +1985,7 @@ fn unlock_form(ui: &mut egui::Ui, gate: &mut GateState, event: &mut Option<GateE
                 if ui
                     .add_enabled(
                         !gate.password.is_empty(),
-                        egui::Button::new("验证密码并停用外设感知"),
+                        egui::Button::new("验证密码并恢复默认环境策略"),
                     )
                     .clicked()
                 {
@@ -2705,6 +2705,115 @@ mod lifecycle_tests {
             let key = crate::vault::key_handle().expect("迁移后仍有密钥句柄");
             let policy = storage::read_environment_policy(&key).unwrap();
             assert!(!policy.enabled);
+        });
+    }
+
+    #[test]
+    fn first_setup_ignores_app_managed_directories_left_by_normal_mode() {
+        isolated(|| {
+            // 普通模式跑过一次（或旧版本）就会留下这些应用自己的目录，却没有
+            // config.json。首设必须仍然补默认配置，不能被它们误判成「已有工作区
+            // 数据」而跳过，否则加密后环境闸门会以「配置文件缺失」永久阻断。
+            let dir = storage::config_dir().unwrap();
+            std::fs::create_dir_all(dir.join("images")).unwrap();
+            std::fs::write(dir.join("images/old.png"), b"legacy image").unwrap();
+            std::fs::create_dir_all(dir.join("ime")).unwrap();
+            std::fs::write(dir.join("ime/base.txt"), b"legacy ime").unwrap();
+            std::fs::create_dir_all(dir.join("pi")).unwrap();
+            std::fs::write(dir.join("instance.lock"), b"").unwrap();
+
+            let ctx = egui::Context::default();
+            let mut shell = AppShell::gate(GateState::setup_password(), None);
+            shell.apply_outcome(
+                &ctx,
+                GateOutcome::Setup {
+                    real: "Test#Valid2026Lock".into(),
+                    decoy: None,
+                },
+            );
+            let ShellPhase::Gate(gate) = &shell.phase else {
+                panic!("首次设置应进入加密进度页")
+            };
+            let working = gate.working.as_ref().expect("应启动加密迁移");
+            let result = working
+                .rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("加密迁移应完成");
+            assert!(result.is_ok(), "迁移失败：{result:?}");
+            shell.finish_work(&ctx, WorkKind::Encrypt, DataSlot::Real, result);
+            let ShellPhase::Gate(gate) = &shell.phase else {
+                panic!("测试没有启动资源，应停留在闸门");
+            };
+            assert!(
+                gate.environment_block.is_none(),
+                "残留的应用目录不应让首设被阻断：{:?}",
+                gate.environment_block
+            );
+            let raw = std::fs::read(storage::config_path().unwrap()).unwrap();
+            assert!(crate::vault::is_sealed_file(&raw), "首设配置应已加密");
+        });
+    }
+
+    #[test]
+    fn missing_config_after_first_setup_is_recoverable_with_the_password() {
+        isolated(|| {
+            let ctx = egui::Context::default();
+            // 复现旧版首设留下的现场：锁已建立，但加密工作区里没有 config.json。
+            let (_, unlocked) = Vault::create("Test#Valid2026Lock", None, false).unwrap();
+            crate::vault::clear_key_handle();
+            drop(unlocked);
+            assert!(!storage::config_path().unwrap().exists());
+
+            let mut shell = AppShell::gate(GateState::unlock(), None);
+            shell.startup = Some(StartupBundle {
+                startup_imports: None,
+                instance: None,
+                forwarded_requests: None,
+                macos_titlebar_metrics: None,
+            });
+            shell.apply_outcome(&ctx, GateOutcome::Unlock("Test#Valid2026Lock".into()));
+            let ShellPhase::Unlocking(state) = &shell.phase else {
+                panic!("解锁应在后台校验密码")
+            };
+            let result = state.rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            shell.finish_unlock(&ctx, result);
+            let ShellPhase::Gate(gate) = &shell.phase else {
+                panic!("缺配置应被环境闸门挡住")
+            };
+            assert!(
+                gate.environment_block
+                    .as_deref()
+                    .is_some_and(|text| text.contains("配置文件缺失")),
+                "应给出配置缺失的原因：{:?}",
+                gate.environment_block
+            );
+
+            // 锁屏恢复入口用访问密码重建默认配置后，重新解锁应能进入。
+            shell.apply_outcome(
+                &ctx,
+                GateOutcome::RecoverEnvironment("Test#Valid2026Lock".into()),
+            );
+            let ShellPhase::Unlocking(state) = &shell.phase else {
+                panic!("恢复也应在后台校验密码")
+            };
+            let result = state.rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            shell.finish_unlock(&ctx, result);
+            let ShellPhase::Gate(gate) = &shell.phase else {
+                panic!("恢复后仍需重新解锁")
+            };
+            assert!(gate.environment_block.is_none());
+            assert!(storage::config_path().unwrap().is_file());
+
+            shell.apply_outcome(&ctx, GateOutcome::Unlock("Test#Valid2026Lock".into()));
+            let ShellPhase::Unlocking(state) = &shell.phase else {
+                panic!("解锁应在后台校验密码")
+            };
+            let result = state.rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            shell.finish_unlock(&ctx, result);
+            assert!(
+                matches!(shell.phase, ShellPhase::Ready(_)),
+                "恢复默认配置后应能进入工作区"
+            );
         });
     }
 
