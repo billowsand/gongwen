@@ -125,6 +125,73 @@ pub(crate) fn normalize_for_save_for_kind(markdown: &str, research: bool) -> Cor
     }
 }
 
+/// 预览/导出排版用的 1:1 标点替换。
+///
+/// 只改字符本身、不增删字符，所以 `inline_atoms` 的源码范围仍然对得上。重复标点、
+/// 省略号这类会改字符数的留给保存 pass。
+pub(crate) fn style_chars(chars: &[char], protected: &[bool]) -> Vec<char> {
+    let mut output = chars.to_vec();
+    for index in 0..chars.len() {
+        if protected.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        let left = output[..index]
+            .iter()
+            .rev()
+            .find(|ch| !ch.is_whitespace())
+            .copied();
+        let right = output[index + 1..]
+            .iter()
+            .find(|ch| !ch.is_whitespace())
+            .copied();
+        if let Some(fullwidth) = style_one(chars[index], left, right) {
+            output[index] = fullwidth;
+        }
+    }
+    output
+}
+
+fn style_one(ch: char, left: Option<char>, right: Option<char>) -> Option<char> {
+    let cjk = |ch: Option<char>| ch.is_some_and(crate::doc_import::clean::is_cjk_side);
+    if !cjk(left) && !cjk(right) {
+        return None;
+    }
+    match ch {
+        ',' if left.is_some_and(|ch| ch.is_ascii_digit())
+            && right.is_some_and(|ch| ch.is_ascii_digit()) =>
+        {
+            None
+        }
+        ',' => Some('，'),
+        '.' if left.is_some_and(|ch| ch.is_ascii_alphanumeric())
+            || right.is_some_and(|ch| ch.is_ascii_alphanumeric()) =>
+        {
+            None
+        }
+        '.' => Some('。'),
+        ';' => Some('；'),
+        ':' if left.is_some_and(|ch| ch.is_ascii_alphanumeric()) => None,
+        ':' => Some('：'),
+        '!' => Some('！'),
+        // LaTeX 的悬空引用占位符 `??` 不是中文问号，留给预览/导出原样显示。
+        '?' if left == Some('?') || right == Some('?') => None,
+        '?' => Some('？'),
+        // 括号成对才该转全角；预览的逐字符替换看不到配对，留给保存 pass。
+        _ => None,
+    }
+}
+
+/// 预览/导出时不能改的区段：代码围栏、行内代码、公文引用。
+pub(crate) fn protected_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = code_ranges(text);
+    ranges.extend(
+        document_reference::detect_numbered(text)
+            .into_iter()
+            .map(|citation| citation.range),
+    );
+    merge_ranges(ranges)
+}
+
 fn normalize_document_numbers(markdown: &str, changes: &mut Vec<Change>) -> String {
     let mut edits = Vec::new();
     for citation in document_reference::detect_numbered(markdown) {
@@ -359,6 +426,14 @@ mod tests {
     fn spaces_are_normalized_but_code_is_kept() {
         let corrected = normalize_for_save("2026 年   5 人，正文 `a  b`。");
         assert_eq!(corrected.text, "2026年5人，正文 `a  b`。");
+    }
+
+    #[test]
+    fn preview_style_converts_halfwidth_but_keeps_numbering_and_placeholders() {
+        let text = "工作,通知 见??。";
+        let chars = text.chars().collect::<Vec<_>>();
+        let styled = style_chars(&chars, &vec![false; chars.len()]);
+        assert_eq!(styled.iter().collect::<String>(), "工作，通知 见??。");
     }
 
     #[test]

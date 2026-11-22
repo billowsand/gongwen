@@ -468,13 +468,31 @@ fn inline_atoms(text: &str) -> Vec<InlineAtom> {
         index = end;
     }
 
-    // 引号规范化是一进一出；处理后仍可沿用每个 atom 的来源范围。
-    let visible = atoms.iter().map(|atom| atom.ch).collect::<String>();
-    for (atom, normalized) in atoms
-        .iter_mut()
-        .zip(normalize_chinese_quotes(&visible).chars())
-    {
-        atom.ch = normalized;
+    // 引号与中文语境半角标点都是「一进一出」，处理后仍可沿用每个 atom 的来源
+    // 范围。代码、公式、公文引用里的字符保持原样。
+    let protected = {
+        let ranges = crate::punctuation::protected_ranges(text);
+        atoms
+            .iter()
+            .map(|atom| {
+                ranges
+                    .iter()
+                    .any(|range| range.contains(&atom.source.start))
+            })
+            .collect::<Vec<_>>()
+    };
+    let original = atoms.iter().map(|atom| atom.ch).collect::<Vec<_>>();
+    let visible = original.iter().collect::<String>();
+    let quoted = normalize_chinese_quotes(&visible)
+        .chars()
+        .collect::<Vec<_>>();
+    let styled = crate::punctuation::style_chars(&quoted, &protected);
+    for (index, atom) in atoms.iter_mut().enumerate() {
+        atom.ch = if protected[index] {
+            original[index]
+        } else {
+            styled[index]
+        };
     }
     atoms
 }

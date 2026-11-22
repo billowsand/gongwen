@@ -73,7 +73,7 @@ fn is_cjk_punct(ch: char) -> bool {
 }
 
 /// 汉字或中文标点，即「CJK 一侧」。
-fn is_cjk_side(ch: char) -> bool {
+pub(crate) fn is_cjk_side(ch: char) -> bool {
     is_cjk(ch) || is_cjk_punct(ch)
 }
 
@@ -423,7 +423,7 @@ fn convert_punctuation(chars: &[char], in_comment: &mut bool) -> String {
     out
 }
 
-fn fullwidth_of(ch: char) -> Option<char> {
+pub(crate) fn fullwidth_of(ch: char) -> Option<char> {
     Some(match ch {
         ',' => '，',
         '.' => '。',
