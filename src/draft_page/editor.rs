@@ -1339,7 +1339,31 @@ impl DraftPage<'_> {
             .filter(|range| {
                 !range.is_empty() && self.doc.generated_markdown.get(range.clone()).is_some()
             });
-        preview::set_text_selection(ui.ctx(), &self.doc.generated_markdown, selection.clone());
+        // 预览用更正后的副本排版；源码不动。更正为空时清掉上一帧的缓存。
+        let correction = {
+            let corrected = crate::punctuation::normalize_for_preview(
+                &self.doc.generated_markdown,
+                self.doc.draft.kind.is_research(),
+            );
+            corrected.changed().then(|| {
+                std::sync::Arc::new(preview::PreviewCorrection::new(
+                    self.doc.generated_markdown.clone(),
+                    corrected,
+                ))
+            })
+        };
+        preview::set_preview_correction(ui.ctx(), correction.clone());
+        let preview_markdown = correction
+            .as_ref()
+            .map_or(self.doc.generated_markdown.as_str(), |correction| {
+                correction.text()
+            });
+        let preview_selection = selection.clone().map(|range| {
+            correction
+                .as_ref()
+                .map_or(range.clone(), |correction| correction.to_new(range.clone()))
+        });
+        preview::set_text_selection(ui.ctx(), preview_markdown, preview_selection);
         // 对照模式下源码编辑框有焦点、光标就在跟随高亮的那一行里时，版面上也画
         // 出光标竖线；查找命中、点版面带过去的高亮不跟光标走，不画。
         let caret = (self.doc.preview_mode == PreviewMode::Split && selection.is_none())
@@ -1357,7 +1381,12 @@ impl DraftPage<'_> {
                     .and_then(|anchor| anchor.range_in(&self.doc.generated_markdown))
                     .is_some_and(|range| range.start <= *byte && *byte <= range.end)
             });
-        preview::set_text_cursor(ui.ctx(), &self.doc.generated_markdown, caret);
+        let preview_caret = caret.map(|byte| {
+            correction
+                .as_ref()
+                .map_or(byte, |correction| correction.byte_to_new(byte))
+        });
+        preview::set_text_cursor(ui.ctx(), preview_markdown, preview_caret);
         let scrolled = egui::ScrollArea::both()
             .id_salt("render_scroll")
             .auto_shrink([false; 2])

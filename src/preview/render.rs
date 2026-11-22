@@ -547,7 +547,50 @@ pub(crate) fn attachment_sheet(
 /// 把 Markdown 连同表单锁定的行文要素按公文版式画在 `ui` 里；调用方负责套滚动区。
 /// 返回本次实际使用的缩放倍率，供“适应宽度”状态下的加减档以它为起点。
 #[allow(clippy::too_many_arguments)]
+/// 公文版式预览。若本帧设置了更正文本，排版用更正后的副本，点击范围再映射回
+/// 源码；选区/光标已在 `markdown_render` 里按同一张映射表换过。
 pub(crate) fn official_preview(
+    ui: &mut egui::Ui,
+    input: &DraftInput,
+    display: &UnitDisplay,
+    markdown: &str,
+    scale: PreviewScale,
+    anchor: Option<&Range<usize>>,
+    scroll_to_anchor: bool,
+    numbering: &NumberingConfig,
+    line_numbers: bool,
+    elements: &ElementMarks,
+) -> PreviewOutput {
+    let correction = super::preview_correction(ui.ctx())
+        .filter(|correction| correction.original.as_ref() == markdown);
+    let parsed = correction
+        .as_ref()
+        .map_or(markdown, |correction| correction.text());
+    let mapped_anchor = anchor.map(|range| {
+        correction
+            .as_ref()
+            .map_or(range.clone(), |correction| correction.to_new(range.clone()))
+    });
+    let mut output = official_preview_inner(
+        ui,
+        input,
+        display,
+        parsed,
+        scale,
+        mapped_anchor.as_ref(),
+        scroll_to_anchor,
+        numbering,
+        line_numbers,
+        elements,
+    );
+    if let Some(correction) = correction {
+        output.clicked = output.clicked.map(|range| correction.to_old(range));
+    }
+    output
+}
+
+#[allow(clippy::too_many_arguments)]
+fn official_preview_inner(
     ui: &mut egui::Ui,
     input: &DraftInput,
     display: &UnitDisplay,

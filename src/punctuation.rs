@@ -17,6 +17,7 @@
 
 use crate::document_reference;
 use regex::Regex;
+use similar::TextDiff;
 use std::sync::OnceLock;
 
 /// 一处改动的说明，供状态栏/审校抽屉报数。
@@ -31,9 +32,133 @@ pub(crate) struct Change {
 pub(crate) struct Corrected {
     pub(crate) text: String,
     pub(crate) changes: Vec<Change>,
+    pub(crate) map: SourceMap,
+}
+
+/// 一段源码到更正文本的坐标映射。相等段按偏移换算，替换段按整段换算。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SourceMap {
+    segments: Vec<MapSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MapSegment {
+    old: std::ops::Range<usize>,
+    new: std::ops::Range<usize>,
+}
+
+impl SourceMap {
+    pub(crate) fn identity(len: usize) -> Self {
+        Self {
+            segments: vec![MapSegment {
+                old: 0..len,
+                new: 0..len,
+            }],
+        }
+    }
+
+    pub(crate) fn new(old: &str, new: &str) -> Self {
+        if old == new {
+            return Self::identity(old.len());
+        }
+        let old_chars = old.char_indices().map(|(byte, _)| byte).collect::<Vec<_>>();
+        let new_chars = new.char_indices().map(|(byte, _)| byte).collect::<Vec<_>>();
+        let byte = |chars: &[usize], index: usize, len: usize| -> usize {
+            chars.get(index).copied().unwrap_or(len)
+        };
+        let diff = TextDiff::from_chars(old, new);
+        let mut segments = Vec::new();
+        for op in diff.ops() {
+            let old_range = op.old_range();
+            let new_range = op.new_range();
+            segments.push(MapSegment {
+                old: byte(&old_chars, old_range.start, old.len())
+                    ..byte(&old_chars, old_range.end, old.len()),
+                new: byte(&new_chars, new_range.start, new.len())
+                    ..byte(&new_chars, new_range.end, new.len()),
+            });
+        }
+        Self { segments }
+    }
+
+    /// 源码范围 → 更正文本范围。替换段取整段；调用方拿到的是可用的粗范围。
+    pub(crate) fn to_new(&self, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        self.map(&range, false)
+    }
+
+    /// 更正文本范围 → 源码范围。
+    pub(crate) fn to_old(&self, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        self.map(&range, true)
+    }
+
+    fn map(&self, range: &std::ops::Range<usize>, reverse: bool) -> std::ops::Range<usize> {
+        let mut start = None;
+        let mut end = None;
+        for segment in &self.segments {
+            let (source_start, source_end, target_start, target_end) = if reverse {
+                (
+                    segment.new.start,
+                    segment.new.end,
+                    segment.old.start,
+                    segment.old.end,
+                )
+            } else {
+                (
+                    segment.old.start,
+                    segment.old.end,
+                    segment.new.start,
+                    segment.new.end,
+                )
+            };
+            if source_end < range.start {
+                continue;
+            }
+            if source_start > range.end {
+                break;
+            }
+            let same_length = source_end - source_start == target_end - target_start;
+            if start.is_none() && range.start < source_end {
+                let at = range.start.max(source_start);
+                start = Some(if same_length {
+                    target_start + (at - source_start)
+                } else {
+                    target_start
+                });
+            }
+            if range.end <= source_end {
+                let at = range.end.max(source_start);
+                end = Some(if same_length {
+                    target_start + (at - source_start)
+                } else {
+                    target_end
+                });
+                break;
+            }
+        }
+        let start = start.unwrap_or_else(|| {
+            self.segments.last().map_or(0, |segment| {
+                if reverse {
+                    segment.old.end
+                } else {
+                    segment.new.end
+                }
+            })
+        });
+        let end = end.unwrap_or(start);
+        start..end.max(start)
+    }
 }
 
 impl Corrected {
+    pub(crate) fn unchanged(text: String) -> Self {
+        let map = SourceMap::identity(text.len());
+        Self {
+            text,
+            changes: Vec::new(),
+            map,
+        }
+    }
+
     pub(crate) fn changed(&self) -> bool {
         !self.changes.is_empty()
     }
@@ -63,6 +188,15 @@ pub(crate) fn normalize_for_save(markdown: &str) -> Corrected {
 ///
 /// 只在显式保存调用；自动保存、失焦、切标签、复制全文都不调用。
 pub(crate) fn normalize_for_save_for_kind(markdown: &str, research: bool) -> Corrected {
+    normalize_impl(markdown, research, true)
+}
+
+/// 预览与导出用的同一套规范，但不做列表末尾整篇判断（那是保存的事）。
+pub(crate) fn normalize_for_preview(markdown: &str, research: bool) -> Corrected {
+    normalize_impl(markdown, research, false)
+}
+
+fn normalize_impl(markdown: &str, research: bool, list_tail: bool) -> Corrected {
     let mut changes = Vec::new();
 
     // 1. 公文引用与发文字号。两边的识别都在原文上做，互不重叠：
@@ -114,10 +248,10 @@ pub(crate) fn normalize_for_save_for_kind(markdown: &str, research: bool) -> Cor
     // 6. 有序列表末尾标点：整篇扫一遍，按每个连续列表组判断。
     //    研究报告不套公文的 `；`/`。` 收尾规则：研报列表常以单位、英文缩写或公式
     //    结尾，套上去反而是错的（与 `finalize_markdown` 同一口径）。
-    let normalized = if research {
-        text.clone()
-    } else {
+    let normalized = if list_tail && !research {
         crate::export::normalize_ordered_list_punctuation(&text)
+    } else {
+        text.clone()
     };
     if normalized != text {
         changes.push(Change {
@@ -125,10 +259,9 @@ pub(crate) fn normalize_for_save_for_kind(markdown: &str, research: bool) -> Cor
         });
     }
 
-    Corrected {
-        text: unmask_sensitive(&normalized, &protected),
-        changes,
-    }
+    let text = unmask_sensitive(&normalized, &protected);
+    let map = SourceMap::new(markdown, &text);
+    Corrected { text, changes, map }
 }
 
 /// 预览/导出排版用的 1:1 标点替换。
@@ -539,6 +672,23 @@ mod tests {
     fn spaces_are_normalized_but_code_is_kept() {
         let corrected = normalize_for_save("2026 年   5 人，正文 `a  b`。");
         assert_eq!(corrected.text, "2026年5人，正文 `a  b`。");
+    }
+
+    #[test]
+    fn preview_correction_maps_ranges_back_to_source() {
+        let source = "第一项...第二项";
+        let corrected = normalize_for_preview(source, false);
+        assert_eq!(corrected.text, "第一项……第二项");
+        let start = source.find("第二项").unwrap();
+        let mapped = corrected.map.to_new(start..start + "第二项".len());
+        assert_eq!(&corrected.text[mapped.clone()], "第二项");
+        assert_eq!(corrected.map.to_old(mapped), start..start + "第二项".len());
+    }
+
+    #[test]
+    fn preview_does_not_judge_list_tail() {
+        let corrected = normalize_for_preview("1. 甲\n1. 乙\n", false);
+        assert_eq!(corrected.text, "1. 甲\n1. 乙\n");
     }
 
     #[test]

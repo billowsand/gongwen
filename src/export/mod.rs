@@ -778,6 +778,8 @@ pub(crate) fn compile_pdf_preview(
         .for_input(input)
         .ensure_resolved(input)
         .map_err(anyhow::Error::msg)?;
+    let corrected = crate::punctuation::normalize_for_preview(markdown, input.kind.is_research());
+    let markdown = &corrected.text;
     let (fonts, mut warnings) = crate::system_fonts::resolve(fonts);
     let mut outcome = if input.kind.is_research() {
         self::typst::research::compile_pdf_with_base(input, markdown, numbering, base_dir)?

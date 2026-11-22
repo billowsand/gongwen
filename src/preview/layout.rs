@@ -30,6 +30,59 @@ struct PreviewTextSelection {
     range: Range<usize>,
 }
 
+/// 当前版式预览使用的更正文本与来源映射。
+#[derive(Clone)]
+pub(crate) struct PreviewCorrection {
+    pub(crate) original: std::sync::Arc<str>,
+    pub(crate) corrected: std::sync::Arc<crate::punctuation::Corrected>,
+}
+
+impl PreviewCorrection {
+    pub(crate) fn new(original: String, corrected: crate::punctuation::Corrected) -> Self {
+        Self {
+            original: std::sync::Arc::from(original),
+            corrected: std::sync::Arc::new(corrected),
+        }
+    }
+
+    pub(crate) fn text(&self) -> &str {
+        &self.corrected.text
+    }
+
+    pub(crate) fn to_new(&self, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        self.corrected.map.to_new(range)
+    }
+
+    pub(crate) fn to_old(&self, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        self.corrected.map.to_old(range)
+    }
+
+    pub(crate) fn byte_to_new(&self, byte: usize) -> usize {
+        self.corrected.map.to_new(byte..byte).start
+    }
+}
+
+fn correction_id() -> egui::Id {
+    egui::Id::unique("gw-preview-correction")
+}
+
+pub(crate) fn set_preview_correction(
+    ctx: &egui::Context,
+    correction: Option<std::sync::Arc<PreviewCorrection>>,
+) {
+    ctx.data_mut(|data| {
+        if let Some(correction) = correction {
+            data.insert_temp(correction_id(), correction);
+        } else {
+            data.remove::<std::sync::Arc<PreviewCorrection>>(correction_id());
+        }
+    });
+}
+
+pub(crate) fn preview_correction(ctx: &egui::Context) -> Option<std::sync::Arc<PreviewCorrection>> {
+    ctx.data(|data| data.get_temp::<std::sync::Arc<PreviewCorrection>>(correction_id()))
+}
+
 fn selection_id() -> egui::Id {
     egui::Id::unique("gw-preview-text-selection")
 }

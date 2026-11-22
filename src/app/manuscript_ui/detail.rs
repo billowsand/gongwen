@@ -1053,10 +1053,7 @@ impl GongwenApp {
                 self.doc().draft.kind.is_research(),
             )
         } else {
-            crate::punctuation::Corrected {
-                text: raw.clone(),
-                changes: Vec::new(),
-            }
+            crate::punctuation::Corrected::unchanged(raw.clone())
         };
         let snapshot = self.doc().draft.clone();
         let content = corrected.text.clone();

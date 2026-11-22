@@ -1282,6 +1282,9 @@ pub(crate) fn export_and_compile(
     } else {
         "正在生成导出文件…"
     });
+    // 成品用更正后的副本排版；列表末尾整篇判断仍只在保存时做。
+    let corrected = crate::punctuation::normalize_for_preview(markdown, input.kind.is_research());
+    let markdown = &corrected.text;
     let display = UnitDisplay::new(vocabulary);
     // 本机字体在排版之前就要落实：文件不在了还来得及退回内置字体。
     let (fonts, mut warnings) = system_fonts::resolve(fonts);
