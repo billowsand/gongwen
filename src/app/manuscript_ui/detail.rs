@@ -984,45 +984,94 @@ impl GongwenApp {
         }
     }
 
-    /// 起草页“保存到稿件库”：新建记录或更新当前打开的记录。
+    /// 显式保存：先整篇规范标点，再入稿件库。
+    ///
+    /// 只有用户明确按保存（`Ctrl+S`、标题栏、保存并关闭、提交版本）才走这里；
+    /// 自动保存、切标签、首次输入新稿走 [`Self::save_to_manuscript_library_quiet`]，
+    /// 不碰源码。
     pub(crate) fn save_to_manuscript_library(&mut self) {
-        let _ = self.try_save_to_manuscript_library();
+        let _ = self.save_to_manuscript_library_impl(true, None);
     }
 
-    /// 备份前也复用普通保存路径，但必须把失败交给调用方，防止导出旧内容。
+    /// 显式保存，带编辑器上下文：整篇规范后写回，可用一次 `Ctrl+Z` 撤回。
+    pub(crate) fn save_to_manuscript_library_with_ctx(&mut self, ctx: &egui::Context) {
+        let _ = self.save_to_manuscript_library_impl(true, Some(ctx));
+    }
+
+    /// 后台保存：原样入库，不跑整篇标点规范。
+    pub(crate) fn save_to_manuscript_library_quiet(&mut self) {
+        let _ = self.save_to_manuscript_library_impl(false, None);
+    }
+
+    /// 备份前也复用普通保存路径，但不跑标点规范；失败交给调用方，防止导出旧内容。
     pub(crate) fn try_save_to_manuscript_library(&mut self) -> anyhow::Result<()> {
-        let normalized = export::normalize_ordered_list_punctuation(&self.doc().generated_markdown);
-        self.doc_mut().generated_markdown = normalized;
-        // 表单刚改过而正文未动时也要在保存点重跑函号等元数据规则。
-        self.draft_page().revalidate();
-        let snapshot = self.doc().draft.clone();
-        let content = self.doc().generated_markdown.clone();
-        let title = export::document_title(&snapshot, &content);
+        self.save_to_manuscript_library_impl(false, None)
+    }
+
+    fn save_to_manuscript_library_impl(
+        &mut self,
+        normalize: bool,
+        ctx: Option<&egui::Context>,
+    ) -> anyhow::Result<()> {
+        // 先把会失败的前置检查做完：库不可用、归档/已发布、记录被删。
+        // 检查通过之前一个字都不改，避免保存失败却把正文规整了。
         let current_id = self.doc().manuscript_id;
+        let preflight: anyhow::Result<String> = (|| {
+            let Some(id) = current_id else {
+                return Ok(String::new());
+            };
+            let store = self
+                .manuscript_store
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("稿件库不可用，无法保存"))?;
+            let status = store
+                .manuscript_brief(id)?
+                .ok_or_else(|| anyhow::anyhow!("稿件不存在或已被删除"))?
+                .status;
+            if status == ManuscriptStatus::Archived {
+                anyhow::bail!("归档稿件不可修改，请在稿件管理页查看。");
+            }
+            if status == ManuscriptStatus::Published {
+                anyhow::bail!("该稿件已发布，请先在稿件管理页“退回草稿”再修改。");
+            }
+            store
+                .notes_of(id)?
+                .ok_or_else(|| anyhow::anyhow!("稿件不存在或已被删除"))
+        })();
+        let notes = match preflight {
+            Ok(notes) => notes,
+            Err(error) => {
+                self.status = format!("保存失败：{error:#}");
+                return Err(error);
+            }
+        };
+
+        let raw = self.doc().generated_markdown.clone();
+        let corrected = if normalize {
+            crate::punctuation::normalize_for_save_for_kind(
+                &raw,
+                self.doc().draft.kind.is_research(),
+            )
+        } else {
+            crate::punctuation::Corrected {
+                text: raw.clone(),
+                changes: Vec::new(),
+            }
+        };
+        let snapshot = self.doc().draft.clone();
+        let content = corrected.text.clone();
+        let title = export::document_title(&snapshot, &content);
         let result: anyhow::Result<String> = (|| {
             let store = self
                 .manuscript_store
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("稿件库不可用，无法保存"))?;
             if let Some(id) = current_id {
-                let status = store
-                    .manuscript_brief(id)?
-                    .ok_or_else(|| anyhow::anyhow!("稿件不存在或已被删除"))?
-                    .status;
-                let notes = store
-                    .notes_of(id)?
-                    .ok_or_else(|| anyhow::anyhow!("稿件不存在或已被删除"))?;
-                if status == ManuscriptStatus::Archived {
-                    anyhow::bail!("归档稿件不可修改，请在稿件管理页查看。");
-                }
-                if status == ManuscriptStatus::Published {
-                    anyhow::bail!("该稿件已发布，请先在稿件管理页“退回草稿”再修改。");
-                }
                 store.update(
                     id,
                     &ManuscriptUpdate {
                         snapshot,
-                        content_markdown: content,
+                        content_markdown: content.clone(),
                         notes,
                     },
                 )?;
@@ -1031,7 +1080,7 @@ impl GongwenApp {
                 let new_id = store.create(
                     &NewManuscript {
                         snapshot,
-                        content_markdown: content,
+                        content_markdown: content.clone(),
                         notes: String::new(),
                         status: ManuscriptStatus::Draft,
                         ..Default::default()
@@ -1047,9 +1096,33 @@ impl GongwenApp {
         self.manuscript_dirty = true;
         match result {
             Ok(message) => {
+                // 保存成功后才把规范结果写回编辑器；保存失败时源码保持原样。
+                if corrected.changed() && content != raw {
+                    if let Some(ctx) = ctx {
+                        let cursor =
+                            crate::draft_page::editor_cursor(ctx, &raw).unwrap_or(raw.len());
+                        crate::draft_page::replace_with_undo(
+                            ctx,
+                            &mut self.doc_mut().generated_markdown,
+                            content,
+                            cursor,
+                        );
+                    } else {
+                        self.doc_mut().generated_markdown = content;
+                    }
+                }
+                self.draft_page().revalidate();
                 self.doc_mut().mark_saved();
                 self.refresh_committed_baseline(self.active_doc);
-                self.status = message;
+                self.status = if corrected.changed() {
+                    format!(
+                        "{message} 已自动规范 {} 处：{}。",
+                        corrected.changes.len(),
+                        corrected.summary()
+                    )
+                } else {
+                    message
+                };
                 Ok(())
             }
             Err(error) => {
@@ -1150,6 +1223,68 @@ mod tests {
             .unwrap()
             .commit_manuscript_version(id, "第一版", "", &snapshot, &content, "")
             .unwrap();
+    }
+
+    #[test]
+    fn explicit_save_normalizes_document_numbers_and_list_tail() {
+        let (mut app, id) = saved_manuscript();
+        app.doc_mut().generated_markdown =
+            "1. 第一项，\n1. 第二项\n\n按照某办函[2026]12号办理。".into();
+        app.save_to_manuscript_library();
+        assert_eq!(
+            app.doc().generated_markdown,
+            "1. 第一项。\n1. 第二项。\n\n按照某办函〔2026〕12号办理。"
+        );
+        let saved = app
+            .manuscript_store
+            .as_mut()
+            .unwrap()
+            .get_for_editor(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.content_markdown, app.doc().generated_markdown);
+        assert!(!app.doc().is_dirty());
+    }
+
+    #[test]
+    fn background_save_keeps_source_verbatim() {
+        let (mut app, id) = saved_manuscript();
+        let raw = "1. 第一项，\n1. 第二项\n\n按照某办函[2026]12号办理。";
+        app.doc_mut().generated_markdown = raw.into();
+        app.save_to_manuscript_library_quiet();
+        assert_eq!(app.doc().generated_markdown, raw);
+        let saved = app
+            .manuscript_store
+            .as_mut()
+            .unwrap()
+            .get_for_editor(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.content_markdown, raw);
+    }
+
+    #[test]
+    fn failed_explicit_save_does_not_touch_source() {
+        let (mut app, id) = saved_manuscript();
+        app.manuscript_store
+            .as_mut()
+            .unwrap()
+            .set_status(id, ManuscriptStatus::Archived)
+            .unwrap();
+        let raw = "1. 第一项，\n1. 第二项\n\n按照某办函[2026]12号办理。";
+        app.doc_mut().generated_markdown = raw.into();
+        assert_eq!(app.doc().manuscript_id, Some(id), "测试稿件应已入库");
+        let brief = app
+            .manuscript_store
+            .as_mut()
+            .unwrap()
+            .manuscript_brief(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(brief.status, ManuscriptStatus::Archived);
+        app.save_to_manuscript_library();
+        assert_eq!(app.doc().generated_markdown, raw);
+        assert!(app.status.contains("归档稿件不可修改"), "{}", app.status);
     }
 
     #[test]

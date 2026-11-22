@@ -150,8 +150,7 @@ pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String
         }
         let mut updated = text.to_string();
         updated.replace_range(line_start..line_end, "");
-        updated = export::normalize_ordered_list_punctuation(&updated);
-        // 标点规范化可能改变前面列表项的字节长度；按行数重新找当前空行。
+        // 列表末尾标点只在显式保存时整篇判断；这里只改光标所在这一行。
         let line_number = text[..line_start]
             .bytes()
             .filter(|byte| *byte == b'\n')
@@ -1104,10 +1103,10 @@ mod ordered_list_tests {
     }
 
     #[test]
-    fn enter_on_empty_item_exits_and_normalizes_the_group() {
+    fn enter_on_empty_item_exits_without_rewriting_the_group() {
         let text = "正文\n1. 第一项；\n1. 第二项，\n1. ";
         let (updated, cursor) = continue_ordered_list(text, text.len()).unwrap();
-        assert_eq!(updated, "正文\n1. 第一项；\n1. 第二项。\n");
+        assert_eq!(updated, "正文\n1. 第一项；\n1. 第二项，\n");
         assert_eq!(cursor, updated.len());
     }
 
@@ -1118,7 +1117,7 @@ mod ordered_list_tests {
         let (promoted, cursor) = continue_ordered_list(text, cursor).unwrap();
         assert_eq!(promoted, "1. 父项\n2. \n3. 后项");
         let (exited, _) = continue_ordered_list(&promoted, cursor).unwrap();
-        assert_eq!(exited, "1. 父项。\n\n3. 后项。");
+        assert_eq!(exited, "1. 父项\n\n3. 后项");
     }
 
     #[test]

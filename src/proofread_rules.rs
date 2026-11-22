@@ -182,7 +182,7 @@ fn check_citations(markdown: &str, notes: &mut Vec<ProofNote>) {
 // ── 标题规范 ────────────────────────────────────────────────────────────────
 
 /// 公文标题里允许出现的标点：书名号和引号。除此之外标题不加标点，尤其不加句号。
-const TITLE_ALLOWED_PUNCT: [char; 6] = ['《', '》', '“', '”', '‘', '’'];
+const TITLE_ALLOWED_PUNCT: [char; 7] = ['《', '》', '“', '”', '‘', '’', '、'];
 
 /// 各文种标题允许的结尾文种词。空表示不比较。
 ///
@@ -276,11 +276,18 @@ fn check_title(kind: TemplateKind, title: &Title, notes: &mut Vec<ProofNote>) {
 /// 不在此列（「关于印发《某某工作：试行办法》的通知」不报）。
 fn first_stray_punctuation(text: &str) -> Option<(usize, char)> {
     let mut depth = 0usize;
+    let mut parentheses = 0usize;
     for (index, ch) in text.char_indices() {
         match ch {
             '《' | '“' | '‘' => depth += 1,
             '》' | '”' | '’' => depth = depth.saturating_sub(1),
-            _ if depth == 0 && is_punctuation(ch) && !TITLE_ALLOWED_PUNCT.contains(&ch) => {
+            '（' | '(' => parentheses += 1,
+            '）' | ')' => parentheses = parentheses.saturating_sub(1),
+            _ if depth == 0
+                && parentheses == 0
+                && is_punctuation(ch)
+                && !TITLE_ALLOWED_PUNCT.contains(&ch) =>
+            {
                 return Some((index, ch));
             }
             _ => {}
@@ -1582,6 +1589,26 @@ mod tests {
             "# 电话记录单（重要）\n\n来电内容。",
         );
         assert!(!ids(&record).contains(&"RULE-TITLE-PUNCT"));
+    }
+
+    #[test]
+    fn a_title_may_use_a_serial_comma_and_parentheses() {
+        let input = draft(TemplateKind::OfficialLetter);
+        let notes = check(&input, "# 关于做好元旦、春节期间有关工作的通知\n\n正文。");
+        assert!(
+            !ids(&notes).contains(&"RULE-TITLE-PUNCT"),
+            "标题里的顿号是正常写法：{:?}",
+            ids(&notes)
+        );
+        let notes = check(
+            &input,
+            "# 关于印发《XX办法》（2026年修订，试行）的函\n\n正文。",
+        );
+        assert!(
+            !ids(&notes).contains(&"RULE-TITLE-PUNCT"),
+            "括号里的标点不按标题标点判：{:?}",
+            ids(&notes)
+        );
     }
 
     #[test]

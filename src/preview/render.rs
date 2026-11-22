@@ -1382,14 +1382,14 @@ mod source_segment_tests {
         let MarkdownBlock::Paragraph(text) = &located.block else {
             panic!("expected paragraph")
         };
-        assert_eq!(text, "正文内容：①第一项；②第二项；③第三项。");
+        assert_eq!(text, "正文内容：①第一项，②第二项。；③第三项，");
         let segments = paragraph_source_segments(markdown, &located, text);
         assert_eq!(
             segments
                 .iter()
                 .map(|segment| segment.chars.clone())
                 .collect::<Vec<_>>(),
-            [0..5, 5..10, 10..15, 15..20]
+            [0..5, 5..10, 10..16, 16..21]
         );
         assert_eq!(
             segments

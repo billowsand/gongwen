@@ -403,8 +403,6 @@ impl DraftPage<'_> {
             )
             .clicked()
         {
-            self.doc.generated_markdown =
-                export::normalize_ordered_list_punctuation(&self.doc.generated_markdown);
             ui.ctx().copy_text(self.doc.generated_markdown.clone());
             *self.status = "审校稿已复制到应用内剪贴板。".into();
         }

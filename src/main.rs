@@ -93,6 +93,7 @@ mod prompt;
 mod proofread;
 mod proofread_rules;
 mod proofread_xlsx;
+mod punctuation;
 #[cfg(feature = "ai-workbench")]
 mod qa;
 #[cfg(feature = "ai-workbench")]

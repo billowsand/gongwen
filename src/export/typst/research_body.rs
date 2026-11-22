@@ -120,7 +120,7 @@ mod tests {
         let normalized = normalize(source, &NumberingConfig::default());
         assert_eq!(
             unmark(&normalized),
-            "1.主要任务：①完善制度。②强化督查。\n\n2.保障措施。\n\n"
+            "1.主要任务：①完善制度②强化督查\n\n2.保障措施\n\n"
         );
         // 本项序号与两个子项编号都标成列表编号，PDF 排成西文字面。
         let first = normalized.lines().next().unwrap();
@@ -133,7 +133,7 @@ mod tests {
         let source = "第一行\n第二行。\n\nEnglish\nwords.\n\n要求：\n3. **甲**；\n1. 乙。\n\n3. 独立甲\n1. 独立乙\n";
         assert_eq!(
             unmark(&normalize(source, &NumberingConfig::default())),
-            "第一行第二行。\n\nEnglish words.\n\n要求：③**甲**；④乙。\n\n3.独立甲。\n\n4.独立乙。\n\n"
+            "第一行第二行。\n\nEnglish words.\n\n要求：③**甲**；④乙。\n\n3.独立甲\n\n4.独立乙\n\n"
         );
         let numbering = NumberingConfig {
             list1: ListNumbering::HalfParen,
@@ -142,7 +142,7 @@ mod tests {
         };
         assert_eq!(
             unmark(&normalize("要求：\n- 甲\n- 乙\n\n- 丙\n- 丁", &numbering)),
-            "要求：(1)甲。(2)乙。\n\n（1）丙。\n\n（2）丁。\n\n"
+            "要求：(1)甲(2)乙\n\n（1）丙\n\n（2）丁\n\n"
         );
     }
 
@@ -192,9 +192,9 @@ mod tests {
                 .any(|r| r["t"] == "math")
         );
         for (block, label, text) in [
-            (paragraphs[2], "3.", "独立甲。"),
-            (paragraphs[3], "4.", "独立乙。"),
-            (paragraphs[4], "1.", "新组。"),
+            (paragraphs[2], "3.", "独立甲"),
+            (paragraphs[3], "4.", "独立乙"),
+            (paragraphs[4], "1.", "新组"),
         ] {
             assert_eq!(block["c"][0]["t"], "list-label");
             assert_eq!(block["c"][0]["v"], label);

@@ -301,8 +301,12 @@ pub(crate) fn ensure_preserved(before: &str, after: &str) -> Result<()> {
 }
 
 /// 年份括号可以接受的写法；`normalize_number` 与正文里的发文字号识别共用。
-const OPEN_BRACKETS: &[char] = &['[', '(', '（', '【', '［', '{', '｛', '〖', '<', '＜', '〔'];
-const CLOSE_BRACKETS: &[char] = &[']', ')', '）', '】', '］', '}', '｝', '〗', '>', '＞', '〕'];
+const OPEN_BRACKETS: &[char] = &[
+    '[', '(', '（', '【', '［', '{', '｛', '〖', '<', '＜', '〔', '〈', '「', '『',
+];
+const CLOSE_BRACKETS: &[char] = &[
+    ']', ')', '）', '】', '］', '}', '｝', '〗', '>', '＞', '〕', '〉', '」', '』',
+];
 
 /// 把手工输入的发文字号规范成「机关代字〔年份〕序号号」。
 ///

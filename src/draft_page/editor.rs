@@ -983,7 +983,6 @@ impl DraftPage<'_> {
         // 研究报告的 mdx 扩展标记（{#id}、{@id}、[@key]、[^id]:(…)）只在
         // 源码高亮里上色；在闭包外先算成 bool，避免闭包再去借 self.doc。
         let research = self.doc.draft.kind.is_research();
-        let mut editor_lost_focus = false;
         let mut cursor_follow = None;
         let mut selected_after = None;
         let mut drag_move = None;
@@ -1097,7 +1096,6 @@ impl DraftPage<'_> {
                         &output,
                         show_line_numbers,
                     );
-                    editor_lost_focus |= output.response.lost_focus();
                     menu_action =
                         candidates::editor_context_menu(ui, &output, selection_before, editable);
                     drag_move = handle_text_drag(
@@ -1227,12 +1225,6 @@ impl DraftPage<'_> {
                 state.store(ui.ctx(), editor_id());
             }
             ui.ctx().request_repaint();
-        }
-        if editable && editor_lost_focus {
-            let normalized = export::normalize_ordered_list_punctuation(text);
-            if normalized != *text {
-                *text = normalized;
-            }
         }
         if self.doc.preview_mode == PreviewMode::Split {
             if self.doc.preview_selection != selected_after {

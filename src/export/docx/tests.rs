@@ -1712,10 +1712,10 @@ fn ordered_lists_use_circles_inline_and_two_char_first_line_indent_when_independ
     )
     .unwrap();
     let xml = zip_text(&path, "word/document.xml");
-    assert!(xml.contains("正文：①第一项；②第二项。"), "{xml}");
-    let first = paragraph_containing(&xml, "1.独立甲。");
+    assert!(xml.contains("正文：①第一项；②第二项，"), "{xml}");
+    let first = paragraph_containing(&xml, "1.独立甲，");
     assert!(first.contains(r#"w:firstLine="640""#), "{first}");
-    let second = paragraph_containing(&xml, "2.独立乙。");
+    let second = paragraph_containing(&xml, "2.独立乙；");
     assert!(second.contains(r#"w:firstLine="640""#), "{second}");
     assert!(!xml.contains("1. 独立甲"), "编号与正文之间不得留空格");
 }

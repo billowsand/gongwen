@@ -35,9 +35,9 @@ fn indented_items_under_a_standalone_item_join_it_as_inline_list() {
     assert_eq!(
         blocks,
         vec![
-            item(1, "主要任务：①完善制度；②强化督查；"),
+            item(1, "主要任务：①完善制度；②强化督查，"),
             item(2, "保障措施；"),
-            item(3, "工作要求。"),
+            item(3, "工作要求"),
         ]
     );
     // 父项的源码范围覆盖到最后一个子项，点击预览回跳整段。
@@ -60,8 +60,8 @@ fn children_restart_per_parent_and_use_the_inline_numbering_style() {
     assert_eq!(
         blocks,
         vec![
-            item(1, "甲：（1）子一。（2）子二。"),
-            item(2, "乙：（3）子三。（4）子四。"),
+            item(1, "甲：（1）子一（2）子二"),
+            item(2, "乙：（3）子三（4）子四"),
         ]
     );
 }
@@ -71,14 +71,14 @@ fn deeper_indentation_stays_in_the_same_child_group() {
     let blocks = parse_markdown("1. 甲：\n  1. 子一，\n      1. 孙一，\n  1. 子二，\n2. 乙。");
     assert_eq!(
         blocks,
-        vec![item(1, "甲：①子一。②孙一。③子二。"), item(2, "乙。")]
+        vec![item(1, "甲：①子一，②孙一，③子二，"), item(2, "乙。")]
     );
 }
 
 #[test]
 fn one_column_of_indentation_is_not_a_child() {
     let blocks = parse_markdown("1. 甲\n 1. 乙");
-    assert_eq!(blocks, vec![item(1, "甲。"), item(2, "乙。")]);
+    assert_eq!(blocks, vec![item(1, "甲"), item(2, "乙")]);
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn indented_group_without_a_parent_stays_standalone() {
         vec![
             MarkdownBlock::Paragraph("说明：".into()),
             item(1, "甲；"),
-            item(2, "乙。"),
+            item(2, "乙"),
         ]
     );
 }
@@ -99,7 +99,7 @@ fn inline_list_after_a_paragraph_flattens_indentation() {
     let blocks = parse_markdown("要求如下：\n1. 甲；\n   1. 子；\n1. 乙");
     assert_eq!(
         blocks,
-        vec![MarkdownBlock::Paragraph("要求如下：①甲；②子；③乙。".into())]
+        vec![MarkdownBlock::Paragraph("要求如下：①甲；②子；③乙".into())]
     );
 }
 
@@ -107,7 +107,7 @@ fn inline_list_after_a_paragraph_flattens_indentation() {
 fn parent_without_punctuation_keeps_its_text_and_bold_survives() {
     let source = "1. **主要任务**\n   1. 甲\n   1. **乙**";
     let located = parse_markdown_located(source);
-    assert_eq!(located[0].block, item(1, "**主要任务**①甲。②**乙**。"));
+    assert_eq!(located[0].block, item(1, "**主要任务**①甲②**乙**"));
     assert_eq!(labels(&located[0]), ["①", "②"]);
 }
 
@@ -164,8 +164,9 @@ fn source_renumbering_numbers_children_per_parent() {
 #[test]
 fn source_rewrites_agree_with_the_parser() {
     let source = "1. 主要任务：\n    1. 甲，\n    1. 乙，\n1. 保障措施，\n\t1. 丙\n1. 要求";
-    let rewritten = renumber_ordered_groups(&normalize_ordered_list_punctuation(source));
-    assert_eq!(parse_markdown(source), parse_markdown(&rewritten));
+    let normalized = normalize_ordered_list_punctuation(source);
+    let rewritten = renumber_ordered_groups(&normalized);
+    assert_eq!(parse_markdown(&normalized), parse_markdown(&rewritten));
 }
 
 #[test]

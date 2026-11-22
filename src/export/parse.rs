@@ -909,14 +909,8 @@ fn parse_located(
             if !paragraph.is_empty() {
                 // 正文之后没有空行：源码仍逐项换行，成文时把它们接回同一自然段，
                 // 使用圈号且不额外插入空格。段内列表不分父子，缩进一律拉平。
-                let normalized = normalize_ordered_item_punctuation(
-                    &items
-                        .iter()
-                        .map(|(_, _, _, text)| text.clone())
-                        .collect::<Vec<_>>(),
-                );
                 let items = items.into_iter().map(|(source, _, _, text)| (source, text));
-                for (offset, ((source, _), text)) in items.zip(normalized).enumerate() {
+                for (offset, (source, text)) in items.enumerate() {
                     let number = render_list_number(numbering.list1, start_number + offset);
                     paragraph.push(ParagraphPart {
                         prefix_chars: number.chars().count(),
@@ -935,16 +929,14 @@ fn parse_located(
                         .map(|(source, indent, number, text)| (indent, (source, number, text)))
                         .collect(),
                 );
-                let normalized = normalize_nested_item_punctuation(
-                    &nested
-                        .iter()
-                        .map(|item| NestedItem {
-                            head: item.head.2.clone(),
-                            children: item.children.iter().map(|child| child.2.clone()).collect(),
-                        })
-                        .collect::<Vec<_>>(),
-                );
-                for (offset, (item, texts)) in nested.into_iter().zip(normalized).enumerate() {
+                let texts = nested
+                    .iter()
+                    .map(|item| NestedItem {
+                        head: item.head.2.clone(),
+                        children: item.children.iter().map(|child| child.2.clone()).collect(),
+                    })
+                    .collect::<Vec<_>>();
+                for (offset, (item, texts)) in nested.into_iter().zip(texts).enumerate() {
                     let number = start_number + offset;
                     let head_source = item.head.0;
                     if item.children.is_empty() {
@@ -1197,6 +1189,17 @@ fn terminal_punctuation(ch: char) -> bool {
 /// 一组列表只允许两种标点风格：任一非末项以分号收尾时，中间统一分号、
 /// 末项句号；否则所有项统一句号。只观察末尾标点串，不会把正文内部的分号
 /// 当成风格信号。
+/// 列表项末尾已经是问号、叹号、省略号或破折号时保持原样。
+///
+/// 这几类是「句子的语气/引用/停顿」本身，不是列表体例；统一成句号或分号会把意思改掉。
+/// 右引号、右括号、右书名号先剥掉再看最后一个可见标点，避免「他说『……』」被误判。
+fn keeps_list_terminal(item: &str) -> bool {
+    let trimmed = item
+        .trim_end()
+        .trim_end_matches(['”', '’', '」', '』', '）', ')', '】', '》']);
+    trimmed.ends_with(['？', '！', '…', '—'])
+}
+
 pub(crate) fn normalize_ordered_item_punctuation(items: &[String]) -> Vec<String> {
     let semicolon_style = items
         .iter()
@@ -1215,6 +1218,9 @@ pub(crate) fn normalize_ordered_item_punctuation(items: &[String]) -> Vec<String
             let trimmed = item.trim_end();
             if trimmed.is_empty() {
                 return String::new();
+            }
+            if keeps_list_terminal(trimmed) {
+                return trimmed.to_string();
             }
             if trimmed.contains(super::is_redline_sentinel) {
                 // 花脸稿：项尾可能是一段删除（被删的下一项折进来）。标点看
@@ -2297,20 +2303,20 @@ mod ordered_list_tests {
         );
         assert_eq!(
             blocks[0],
-            MarkdownBlock::Paragraph("正文内容：①第一项；②第二项；③第三项。".into())
+            MarkdownBlock::Paragraph("正文内容：①第一项，②第二项。；③第三项，".into())
         );
         assert_eq!(
             blocks[1],
             MarkdownBlock::OrderedListItem {
                 number: 1,
-                text: "独立甲。".into(),
+                text: "独立甲，".into(),
             }
         );
         assert_eq!(
             blocks[2],
             MarkdownBlock::OrderedListItem {
                 number: 2,
-                text: "独立乙。".into(),
+                text: "独立乙；".into(),
             }
         );
     }

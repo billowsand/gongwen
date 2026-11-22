@@ -622,7 +622,7 @@ impl GongwenApp {
             ui.painter().circle_filled(center, 2.5, theme::accent());
         }
         if save.clicked() {
-            self.save_to_manuscript_library();
+            self.save_to_manuscript_library_with_ctx(ui.ctx());
         }
         let commit_hint = if saved {
             "提交版本：把当前内容固化为一个新版本"

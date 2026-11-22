@@ -320,6 +320,51 @@ fn convert_punctuation(chars: &[char], in_comment: &mut bool) -> String {
                 continue;
             }
         }
+        // 省略号：三个以上 ASCII 点、三个以上中文句号、单个或双个省略号字符。
+        // 只在中日韩语境里做，英文的 `wait...` 与代码里的 `...` 不动。
+        if ch == '.' {
+            let run = repeat_run(chars, index, '.');
+            if run >= 2 {
+                let left = last_visible(&out);
+                let right = next_visible(chars, index + run);
+                if in_cjk_context(left, right) {
+                    out.push_str("……");
+                    index += run;
+                    continue;
+                }
+            }
+        }
+        if ch == '。' {
+            let run = repeat_run(chars, index, '。');
+            if run >= 2 {
+                if run >= 3 {
+                    out.push_str("……");
+                } else {
+                    out.push('。');
+                }
+                index += run;
+                continue;
+            }
+        }
+        if ch == '…' {
+            let run = repeat_run(chars, index, '…');
+            out.push_str("……");
+            index += run;
+            continue;
+        }
+        // 重复的逗号、顿号、分号、问号、叹号收成一个；破折号成对是规范写法，不动。
+        if matches!(ch, '，' | ',' | '、' | '；' | ';' | '！' | '!' | '？' | '?') {
+            let run = repeat_run(chars, index, ch);
+            if run >= 2 {
+                let left = last_visible(&out);
+                let right = next_visible(chars, index + run);
+                if in_cjk_context(left, right) {
+                    out.push(fullwidth_of(ch).unwrap_or(ch));
+                    index += run;
+                    continue;
+                }
+            }
+        }
         if let Some(fullwidth) = fullwidth_of(ch) {
             let left = last_visible(&out);
             let right = next_visible(chars, index + 1);
@@ -383,6 +428,15 @@ fn should_convert(ch: char, left: Option<char>, right: Option<char>) -> bool {
 
 fn is_digit(ch: Option<char>) -> bool {
     ch.is_some_and(|ch| ch.is_ascii_digit())
+}
+
+/// 从 `index` 起连续相同字符的个数（至少 1）。
+fn repeat_run(chars: &[char], index: usize, target: char) -> usize {
+    chars[index..]
+        .iter()
+        .take_while(|ch| **ch == target)
+        .count()
+        .max(1)
 }
 
 /// 已经写出的最后一个非空白字符。用输出判断而不是输入：成对括号转全角后，
@@ -990,6 +1044,22 @@ mod tests {
             normalize_punctuation("工作,通知;时间:上午(附件)!"),
             "工作，通知；时间：上午（附件）！"
         );
+    }
+
+    #[test]
+    fn 标点_重复标点和省略号收敛() {
+        assert_eq!(
+            normalize_punctuation("注意！！真的？？好的，，"),
+            "注意！真的？好的，"
+        );
+        assert_eq!(normalize_punctuation("他说..."), "他说……");
+        assert_eq!(normalize_punctuation("他说。。。"), "他说……");
+        assert_eq!(normalize_punctuation("他说……"), "他说……");
+        assert_eq!(
+            normalize_punctuation("两个句号。。下一句"),
+            "两个句号。下一句"
+        );
+        assert_eq!(normalize_punctuation("wait..."), "wait...");
     }
 
     #[test]

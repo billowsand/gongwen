@@ -741,9 +741,9 @@ mod tests {
             .filter(|text| !text.is_empty())
             .collect();
         for expected in [
-            "要求：①甲。②乙。",
-            "1.主要任务：①完善制度。②强化督查。",
-            "2.保障措施。",
+            "要求：①甲②乙",
+            "1.主要任务：①完善制度②强化督查",
+            "2.保障措施",
         ] {
             assert!(
                 texts.iter().any(|text| text == expected),

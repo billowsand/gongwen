@@ -610,7 +610,7 @@ impl GongwenApp {
         if doc.manuscript_id.is_some() || doc.busy || !doc.touched() {
             return;
         }
-        self.save_to_manuscript_library();
+        self.save_to_manuscript_library_quiet();
         self.remember_session();
     }
 
@@ -641,7 +641,7 @@ impl GongwenApp {
         let previous = self.active_doc;
         for index in targets {
             self.active_doc = index;
-            self.save_to_manuscript_library();
+            self.save_to_manuscript_library_quiet();
         }
         self.active_doc = previous.min(self.docs.len().saturating_sub(1));
     }
@@ -730,7 +730,7 @@ impl GongwenApp {
 
         let save = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
         if ctx.input_mut(|input| input.consume_shortcut(&save)) && self.showing_doc() {
-            self.save_to_manuscript_library();
+            self.save_to_manuscript_library_with_ctx(ctx);
         }
 
         // 主快捷键+B 与功能区「格式 → 加粗」是同一件事。这里必须确认焦点
