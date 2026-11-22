@@ -154,7 +154,57 @@ pub(crate) fn style_chars(chars: &[char], protected: &[bool]) -> Vec<char> {
             output[index] = fullwidth;
         }
     }
+    // 括号要成对改，否则会出现「（API)」这种半边全角。`(1)` 这类编号不动：
+    // 它由列表编号设置控制，生成出来的半角括号不能被这里改掉。
+    for (open, close) in parenthesis_pairs(chars) {
+        if protected.get(open).copied().unwrap_or(false)
+            || protected.get(close).copied().unwrap_or(false)
+        {
+            continue;
+        }
+        if chars[open] != '(' || chars[close] != ')' {
+            continue;
+        }
+        let digits_only = chars[open + 1..close]
+            .iter()
+            .all(|ch| ch.is_ascii_digit() || ch.is_whitespace());
+        if digits_only {
+            continue;
+        }
+        let left = chars[..open]
+            .iter()
+            .rev()
+            .find(|ch| !ch.is_whitespace())
+            .copied();
+        let right = chars[close + 1..]
+            .iter()
+            .find(|ch| !ch.is_whitespace())
+            .copied();
+        if left.is_some_and(crate::doc_import::clean::is_cjk_side)
+            || right.is_some_and(crate::doc_import::clean::is_cjk_side)
+        {
+            output[open] = '（';
+            output[close] = '）';
+        }
+    }
     output
+}
+
+fn parenthesis_pairs(chars: &[char]) -> Vec<(usize, usize)> {
+    let mut stack = Vec::new();
+    let mut pairs = Vec::new();
+    for (index, ch) in chars.iter().copied().enumerate() {
+        match ch {
+            '(' => stack.push(index),
+            ')' => {
+                if let Some(open) = stack.pop() {
+                    pairs.push((open, index));
+                }
+            }
+            _ => {}
+        }
+    }
+    pairs
 }
 
 fn style_one(ch: char, left: Option<char>, right: Option<char>) -> Option<char> {
@@ -500,6 +550,17 @@ mod tests {
         assert!(corrected.text.contains("a@b.com"));
         assert!(corrected.text.contains("C:\\我的 文件\\a.docx"));
         assert!(corrected.text.contains("正常，标点。"));
+    }
+
+    #[test]
+    fn preview_style_converts_paired_parentheses_but_not_numbering() {
+        let text = "接口(API)调用 (1) 编号";
+        let chars = text.chars().collect::<Vec<_>>();
+        let styled = style_chars(&chars, &vec![false; chars.len()]);
+        assert_eq!(
+            styled.iter().collect::<String>(),
+            "接口（API）调用 (1) 编号"
+        );
     }
 
     #[test]
