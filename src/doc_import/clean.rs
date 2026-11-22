@@ -105,11 +105,22 @@ fn unify_newlines(text: &str) -> String {
 /// 连续空格，删零宽字符与控制字符，去行尾空白，全角数字转半角。西文单词之间的
 /// 空格保留；行首缩进原样保留（嵌套列表与代码块靠它）。
 pub(crate) fn normalize_spaces(text: &str) -> String {
-    unify_newlines(text)
-        .split('\n')
-        .map(normalize_spaces_line)
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut in_fence = false;
+    let mut lines = Vec::new();
+    for line in unify_newlines(text).split('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            lines.push(line.to_string());
+            continue;
+        }
+        if in_fence {
+            lines.push(line.to_string());
+        } else {
+            lines.push(normalize_spaces_line(line));
+        }
+    }
+    lines.join("\n")
 }
 
 fn normalize_spaces_line(line: &str) -> String {
@@ -131,6 +142,29 @@ fn collapse_inline_spaces(rest: &str) -> String {
     let mut index = 0;
     while index < chars.len() {
         let ch = chars[index];
+        // 行内代码里的连续空格原样保留：`let x = "a  b";` 不是排版空格。
+        if ch == '`' {
+            let ticks = chars[index..].iter().take_while(|ch| **ch == '`').count();
+            if (1..=3).contains(&ticks) {
+                let mut end = index + ticks;
+                while end < chars.len() {
+                    if chars[end] == '`' {
+                        let close = chars[end..].iter().take_while(|ch| **ch == '`').count();
+                        if close == ticks {
+                            out.extend(chars[index..end + close].iter());
+                            index = end + close;
+                            break;
+                        }
+                        end += close;
+                    } else {
+                        end += 1;
+                    }
+                }
+                if index >= end + ticks {
+                    continue;
+                }
+            }
+        }
         if matches!(ch, ' ' | '\t' | '\u{3000}' | '\u{00A0}') {
             let mut end = index;
             while end < chars.len() && matches!(chars[end], ' ' | '\t' | '\u{3000}' | '\u{00A0}') {
@@ -1031,6 +1065,23 @@ mod tests {
             normalize_spaces("２０２６年\u{200B}５人\u{FEFF}"),
             "2026年5人"
         );
+    }
+
+    #[test]
+    fn 空格_代码围栏与行内代码不动() {
+        let fenced = "```\nlet x = \"a  b\";\n```\n正文  文字";
+        assert_eq!(
+            normalize_spaces(fenced),
+            "```\nlet x = \"a  b\";\n```\n正文文字"
+        );
+        assert_eq!(normalize_spaces("正文 `a  b` 继续"), "正文 `a  b` 继续");
+    }
+
+    #[test]
+    fn 空格_列表标记和标题的空格保留() {
+        assert_eq!(normalize_spaces("1. 第一项"), "1. 第一项");
+        assert_eq!(normalize_spaces("# 标题"), "# 标题");
+        assert_eq!(normalize_spaces("- 第一项"), "- 第一项");
     }
 
     #[test]

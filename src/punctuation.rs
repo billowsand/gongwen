@@ -87,7 +87,16 @@ pub(crate) fn normalize_for_save_for_kind(markdown: &str, research: bool) -> Cor
         text = basic;
     }
 
-    // 4. 引号配对。代码围栏与行内代码原样保留。
+    // 4. 空格：删汉字/标点/数字之间的多余空格，保留代码与西文词间空格。
+    let spaced = crate::doc_import::clean::normalize_spaces(&text);
+    if spaced != text {
+        changes.push(Change {
+            label: "规范空格".to_string(),
+        });
+        text = spaced;
+    }
+
+    // 5. 引号配对。代码围栏与行内代码原样保留。
     let quoted = normalize_quotes_outside_code(&text);
     if quoted != text {
         changes.push(Change {
@@ -96,7 +105,7 @@ pub(crate) fn normalize_for_save_for_kind(markdown: &str, research: bool) -> Cor
         text = quoted;
     }
 
-    // 5. 有序列表末尾标点：整篇扫一遍，按每个连续列表组判断。
+    // 6. 有序列表末尾标点：整篇扫一遍，按每个连续列表组判断。
     //    研究报告不套公文的 `；`/`。` 收尾规则：研报列表常以单位、英文缩写或公式
     //    结尾，套上去反而是错的（与 `finalize_markdown` 同一口径）。
     let normalized = if research {
@@ -344,6 +353,12 @@ mod tests {
     fn fullwidth_list_marker_is_normalized_at_save() {
         let corrected = normalize_for_save("1。 第一项\n2． 第二项\n3.5万元\n");
         assert_eq!(corrected.text, "1. 第一项。\n2. 第二项。\n3.5万元\n");
+    }
+
+    #[test]
+    fn spaces_are_normalized_but_code_is_kept() {
+        let corrected = normalize_for_save("2026 年   5 人，正文 `a  b`。");
+        assert_eq!(corrected.text, "2026年5人，正文 `a  b`。");
     }
 
     #[test]
