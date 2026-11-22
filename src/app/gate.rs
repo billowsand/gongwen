@@ -2259,12 +2259,15 @@ fn gate_card(ui: &mut egui::Ui, gate: &mut GateState) -> Option<GateOutcome> {
 }
 
 fn password_field(ui: &mut egui::Ui, id: &str, hint: &str, text: &mut String) {
+    // 输入框按控件高度撑开后，TextEdit 默认按左上对齐排字（hint、密码点与光标一起贴在
+    // 框的上沿，看着像整体偏上）。这里显式竖直居中，与解锁页的密码框取同一口径。
     ui.add_sized(
         [CARD_WIDTH, GATE_CONTROL_HEIGHT],
         egui::TextEdit::singleline(text)
             .id(egui::Id::unique(id))
             .password(true)
             .hint_text(hint)
+            .align(egui::Align2::LEFT_CENTER)
             .margin(egui::Margin::symmetric(10, 0)),
     );
 }
@@ -2421,6 +2424,63 @@ mod lifecycle_tests {
             gate.submit_password_setup(),
             Some(GateOutcome::Setup { decoy: Some(_), .. })
         ));
+    }
+
+    /// 密码框被撑到控件高度后，占位文字与密码点必须竖直居中。
+    ///
+    /// egui 的 `TextEdit` 默认按左上对齐排字，`add_sized` 把框拉高以后文字仍贴在
+    /// 上沿，看上去就是「密码框偏上」。这里量渲染出的框与文字位置，防止再退回去。
+    #[test]
+    fn setup_password_field_centers_text_vertically() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 140.0));
+        let mut text = String::new();
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        password_field(ui, "center_probe", "hint text", &mut text);
+                    });
+                },
+            );
+            // 纹理增量必须处理完再析构，否则 epaint 会 panic。
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let frame = shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if (rect.rect.width() - CARD_WIDTH).abs() < 0.5
+                        && (rect.rect.height() - GATE_CONTROL_HEIGHT).abs() < 0.5 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("应画出一个控件高度的密码框");
+        let hint = shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text_shape) if text_shape.galley.text() == "hint text" => Some(
+                    egui::Rect::from_min_size(text_shape.pos, text_shape.galley.size()),
+                ),
+                _ => None,
+            })
+            .expect("应画出占位文字");
+        assert!(
+            (hint.center().y - frame.center().y).abs() <= 2.0,
+            "密码框文字应竖直居中：框 {frame:?}，文字 {hint:?}"
+        );
+        assert!(
+            hint.left() < frame.center().x,
+            "密码框文字应靠左排：框 {frame:?}，文字 {hint:?}"
+        );
     }
 
     #[test]
