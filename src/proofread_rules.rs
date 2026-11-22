@@ -230,12 +230,13 @@ fn check_title(kind: TemplateKind, title: &Title, notes: &mut Vec<ProofNote>) {
     // 标点。逐字找，报第一个就够，免得一个标题刷出一串提示。
     if let Some((index, ch)) = first_stray_punctuation(text) {
         let start = title.span.start + index;
-        notes.push(note(
+        notes.push(note_with_fix(
             "RULE-TITLE-PUNCT",
             "标题规范",
-            Level::MustFix,
+            Level::Suspect,
             format!("公文标题内不用标点（书名号、引号除外），这里有一个「{ch}」"),
             start..start + ch.len_utf8(),
+            String::new(),
         ));
     }
 
@@ -1530,7 +1531,12 @@ mod tests {
     fn a_title_with_a_full_stop_is_flagged() {
         let input = draft(TemplateKind::OfficialLetter);
         let notes = check(&input, "# 关于报送情况的函。\n\n正文。");
-        assert!(ids(&notes).contains(&"RULE-TITLE-PUNCT"));
+        let hit = notes
+            .iter()
+            .find(|note| note.entry_id == "RULE-TITLE-PUNCT")
+            .expect("标题句号应报出来");
+        assert_eq!(hit.level, Level::Suspect);
+        assert_eq!(hit.replacement.as_deref(), Some(""));
     }
 
     #[test]

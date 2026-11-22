@@ -16,7 +16,6 @@ impl RuleInfo {
         match self.id {
             "RULE-CITATION-NUMBER"
             | "RULE-NUMBER-BRACKET"
-            | "RULE-TITLE-PUNCT"
             | "RULE-TITLE-KIND"
             | "RULE-KIND-REQUEST" => "必错",
             "RULE-TITLE-LONG" | "EXPORT-DOC-DATE" => "提示",

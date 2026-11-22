@@ -357,13 +357,12 @@ punctuation::correct(markdown, Options) -> Corrected {
   源码范围不变；代码围栏、行内代码、公文引用保持原样。重复标点、省略号、括号成对
   仍是保存 pass 的事（预览逐字符看不到配对/改字符数）。
 - **列表末尾不再吃掉 `？`/`！`/`……`/`——`**。
-- **标题标点规则**：`、` 允许；`（）` 内的标点不再按标题标点报。
+- **标题标点规则**：`、` 允许；`（）` 内的标点不再按标题标点报；级别降为疑似，并给
+  「删除这个标点」的改法。
 - 新增 `punctuation` 模块的 11 个单测、`normalize_punctuation` 的重复/省略号测试、
   保存路径 3 个单测；全量测试只剩仓库约定的 5 个沙箱权限失败。
 
 下一步（尚未做）：
 
 - 预览/导出显示重复标点、省略号与成对括号（需要源码偏移映射或成对扫描）；
-- 标题标点规则补删除改法与级别（`、` 与括号深度已修）；
-- `normalize_punctuation` / `normalize_spaces` / `normalize_chinese_quotes` 的
-  代码、URL、路径、裸域名保护。
+- `normalize_punctuation` / `normalize_chinese_quotes` 的 URL、路径、裸域名保护。
