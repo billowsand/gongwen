@@ -16,6 +16,8 @@
 //! 标记和代码加保护。
 
 use crate::document_reference;
+use regex::Regex;
+use std::sync::OnceLock;
 
 /// 一处改动的说明，供状态栏/审校抽屉报数。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,9 +67,13 @@ pub(crate) fn normalize_for_save_for_kind(markdown: &str, research: bool) -> Cor
 
     // 1. 公文引用与发文字号。两边的识别都在原文上做，互不重叠：
     //    `detect_loose_numbers` 会跳过已识别为引用的范围。
-    let mut text = normalize_document_numbers(markdown, &mut changes);
+    let text = normalize_document_numbers(markdown, &mut changes);
 
-    // 2. 粘贴/导入带来的全角列表标记 `1。`/`1．`：输入层只管手打，
+    // 2. 先把网址、邮箱、裸域名、路径、带扩展名的文件摘出来，避免后续的
+    //    半角/全角与空格规整把 `例子.中国`、`C:\我的 文件.docx` 改坏。
+    let (mut text, protected) = mask_sensitive(&text);
+
+    // 3. 粘贴/导入带来的全角列表标记 `1。`/`1．`：输入层只管手打，
     //    这里兜底，让后续列表末尾判断能认出它。
     let markers = normalize_list_markers(&text);
     if markers != text {
@@ -77,7 +83,7 @@ pub(crate) fn normalize_for_save_for_kind(markdown: &str, research: bool) -> Cor
         text = markers;
     }
 
-    // 3. 半角/全角、重复标点、省略号。代码、公式、链接、URL 由
+    // 4. 半角/全角、重复标点、省略号。代码、公式、链接、URL 由
     //    `normalize_punctuation` 自己跳过。
     let basic = crate::doc_import::clean::normalize_punctuation(&text);
     if basic != text {
@@ -87,7 +93,7 @@ pub(crate) fn normalize_for_save_for_kind(markdown: &str, research: bool) -> Cor
         text = basic;
     }
 
-    // 4. 空格：删汉字/标点/数字之间的多余空格，保留代码与西文词间空格。
+    // 5. 空格：删汉字/标点/数字之间的多余空格，保留代码与西文词间空格。
     let spaced = crate::doc_import::clean::normalize_spaces(&text);
     if spaced != text {
         changes.push(Change {
@@ -96,7 +102,7 @@ pub(crate) fn normalize_for_save_for_kind(markdown: &str, research: bool) -> Cor
         text = spaced;
     }
 
-    // 5. 引号配对。代码围栏与行内代码原样保留。
+    // 6. 引号配对。代码围栏与行内代码原样保留。
     let quoted = normalize_quotes_outside_code(&text);
     if quoted != text {
         changes.push(Change {
@@ -120,7 +126,7 @@ pub(crate) fn normalize_for_save_for_kind(markdown: &str, research: bool) -> Cor
     }
 
     Corrected {
-        text: normalized,
+        text: unmask_sensitive(&normalized, &protected),
         changes,
     }
 }
@@ -189,6 +195,63 @@ pub(crate) fn protected_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
             .into_iter()
             .map(|citation| citation.range),
     );
+    ranges.extend(sensitive_ranges(text));
+    merge_ranges(ranges)
+}
+
+/// 把网址、邮箱、裸域名、路径和带扩展名的文件换成占位符。
+///
+/// 这些片段的内部标点/空格不能参与中文标点规整；占位符用私用区字符，后续的
+/// 半角全角、空格、引号、列表末尾判断都不会碰它，最后原样换回。
+fn mask_sensitive(text: &str) -> (String, Vec<(String, String)>) {
+    let ranges = sensitive_ranges(text);
+    if ranges.is_empty() {
+        return (text.to_string(), Vec::new());
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut protected = Vec::with_capacity(ranges.len());
+    let mut cursor = 0usize;
+    for (index, range) in ranges.iter().enumerate() {
+        output.push_str(&text[cursor..range.start]);
+        let token = format!("\u{E100}{index}\u{E101}");
+        output.push_str(&token);
+        protected.push((token, text[range.clone()].to_string()));
+        cursor = range.end;
+    }
+    output.push_str(&text[cursor..]);
+    (output, protected)
+}
+
+fn unmask_sensitive(text: &str, protected: &[(String, String)]) -> String {
+    let mut output = text.to_string();
+    for (token, original) in protected {
+        output = output.replace(token, original);
+    }
+    output
+}
+
+/// 网址、邮箱、裸域名、Windows 路径、带 ASCII/常见中文扩展名的文件名。
+fn sensitive_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            r"(?i)(?:https?|ftp|file)://[^\s，。；：！？、）】》”’]+",
+            r"(?i)www\.[^\s，。；：！？、）】》”’]+",
+            r"(?i)[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+            r"(?i)[A-Z]:[\\/][^，。；：！？、\n]*",
+            r"\\\\[^，。；：！？、\n]*",
+            r"(?i)(?:[a-z0-9-]+\.)+(?:com|cn|net|org|gov|edu|io|ai|info|top|xyz)\b",
+            r"(?i)[^\s，。；：！？、]+\.[A-Za-z0-9]{1,8}\b",
+            r"[^\s，。；：！？、]+\.(?:中国|公司|网络|文档|表格|演示|图片|压缩包)",
+        ]
+        .into_iter()
+        .filter_map(|pattern| Regex::new(pattern).ok())
+        .collect()
+    });
+    let mut ranges = Vec::new();
+    for pattern in patterns {
+        ranges.extend(pattern.find_iter(text).map(|found| found.range()));
+    }
     merge_ranges(ranges)
 }
 
@@ -426,6 +489,17 @@ mod tests {
     fn spaces_are_normalized_but_code_is_kept() {
         let corrected = normalize_for_save("2026 年   5 人，正文 `a  b`。");
         assert_eq!(corrected.text, "2026年5人，正文 `a  b`。");
+    }
+
+    #[test]
+    fn urls_emails_domains_and_paths_are_protected() {
+        let corrected = normalize_for_save(
+            "见www.例子.中国，邮箱a@b.com，路径C:\\我的 文件\\a.docx，正常,标点。",
+        );
+        assert!(corrected.text.contains("www.例子.中国"));
+        assert!(corrected.text.contains("a@b.com"));
+        assert!(corrected.text.contains("C:\\我的 文件\\a.docx"));
+        assert!(corrected.text.contains("正常，标点。"));
     }
 
     #[test]
