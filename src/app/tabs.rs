@@ -533,7 +533,7 @@ impl GongwenApp {
     pub(crate) fn apply_draft_actions(&mut self, ctx: &egui::Context) {
         for action in std::mem::take(&mut self.draft_actions) {
             match action {
-                DraftAction::SaveToLibrary => self.save_to_manuscript_library(),
+                DraftAction::SaveToLibrary => self.save_to_manuscript_library_with_ctx(ctx),
                 DraftAction::PreviewPdf(key) => self.start_draft_pdf(key, ctx, false),
                 DraftAction::OpenSendPackage(id) => self.open_send_package(id),
                 DraftAction::OpenManuscript(id) => self.open_in_editor(id),
