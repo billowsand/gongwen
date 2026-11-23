@@ -1339,19 +1339,12 @@ impl DraftPage<'_> {
             .filter(|range| {
                 !range.is_empty() && self.doc.generated_markdown.get(range.clone()).is_some()
             });
-        // 预览用更正后的副本排版；源码不动。更正为空时清掉上一帧的缓存。
-        let correction = {
-            let corrected = crate::punctuation::normalize_for_preview(
-                &self.doc.generated_markdown,
-                self.doc.draft.kind.is_research(),
-            );
-            corrected.changed().then(|| {
-                std::sync::Arc::new(preview::PreviewCorrection::new(
-                    self.doc.generated_markdown.clone(),
-                    corrected,
-                ))
-            })
-        };
+        // 预览用更正后的副本排版；源码不动。更正结果按文本缓存，帧间没变就不重算。
+        let correction = preview::preview_correction_cached(
+            ui.ctx(),
+            &self.doc.generated_markdown,
+            self.doc.draft.kind.is_research(),
+        );
         preview::set_preview_correction(ui.ctx(), correction.clone());
         let preview_markdown = correction
             .as_ref()

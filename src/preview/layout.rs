@@ -83,6 +83,46 @@ pub(crate) fn preview_correction(ctx: &egui::Context) -> Option<std::sync::Arc<P
     ctx.data(|data| data.get_temp::<std::sync::Arc<PreviewCorrection>>(correction_id()))
 }
 
+fn correction_cache_id() -> egui::Id {
+    egui::Id::unique("gw-preview-correction-cache")
+}
+
+/// 帧间缓存的更正结果：源码与上一帧相同就直接复用，不重新跑标点规整。
+#[derive(Clone)]
+struct CorrectionCache {
+    source: std::sync::Arc<str>,
+    correction: Option<std::sync::Arc<PreviewCorrection>>,
+}
+
+/// 取预览用的更正副本。`source` 与缓存一致时直接复用；变化时重算并写入缓存。
+/// 逐帧调用也只付一次文本比较，长文档不会在每帧全量跑规整。
+pub(crate) fn preview_correction_cached(
+    ctx: &egui::Context,
+    source: &str,
+    research: bool,
+) -> Option<std::sync::Arc<PreviewCorrection>> {
+    let cached = ctx.data(|data| data.get_temp::<CorrectionCache>(correction_cache_id()));
+    if let Some(cache) = cached
+        && cache.source.as_ref() == source
+    {
+        return cache.correction.clone();
+    }
+    let corrected = crate::punctuation::normalize_for_preview(source, research);
+    let correction = corrected
+        .changed()
+        .then(|| std::sync::Arc::new(PreviewCorrection::new(source.to_string(), corrected)));
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            correction_cache_id(),
+            CorrectionCache {
+                source: std::sync::Arc::from(source),
+                correction: correction.clone(),
+            },
+        )
+    });
+    correction
+}
+
 fn selection_id() -> egui::Id {
     egui::Id::unique("gw-preview-text-selection")
 }

@@ -39,12 +39,12 @@ pub(crate) use header::{document_number, header_block, header_unit, is_joint_mod
 #[cfg(test)]
 pub(crate) use layout::append_inline_with_bold_ranges;
 pub(crate) use layout::{
-    ClickableSourceSegment, PreviewCorrection, aligned_block, append_numbered_inline, body_block,
-    clickable, clickable_body_block, clickable_justified_job, draw_justified_with_bold, first_ink,
+    ClickableSourceSegment, aligned_block, append_numbered_inline, body_block, clickable,
+    clickable_body_block, clickable_justified_job, draw_justified_with_bold, first_ink,
     heading_family, hovered_source, indent, is_renderable_paragraph, job, justified_rows, layout,
-    line_block, line_galley, numbered_body_block, place, preview_correction, row_tint_offset,
-    scroll_preview_to_rect, set_preview_correction, set_text_cursor, set_text_selection, sheet,
-    single_line, stacked, table_block, text_format,
+    line_block, line_galley, numbered_body_block, place, preview_correction,
+    preview_correction_cached, row_tint_offset, scroll_preview_to_rect, set_preview_correction,
+    set_text_cursor, set_text_selection, sheet, single_line, stacked, table_block, text_format,
 };
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 #[cfg(feature = "ai-workbench")]
