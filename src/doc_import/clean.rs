@@ -354,7 +354,8 @@ fn convert_punctuation(chars: &[char], in_comment: &mut bool) -> String {
                 continue;
             }
         }
-        // 省略号：三个以上 ASCII 点、三个以上中文句号、单个或双个省略号字符。
+        // 省略号与重复句点：两个及以上连续的 `.` 在中文语境里视作省略号；连续
+        // `。` 收敛成一个，三个及以上视作省略号；`…`（无论单双）统一成 `……`。
         // 只在中日韩语境里做，英文的 `wait...` 与代码里的 `...` 不动。
         if ch == '.' {
             let run = repeat_run(chars, index, '.');
