@@ -60,7 +60,6 @@ mod versions;
 #[cfg(feature = "ai-workbench")]
 pub(crate) mod writing;
 
-#[cfg(feature = "ai-workbench")]
 pub(crate) use diff_editor::replace_with_undo;
 pub(crate) use editor::{PreviewAnchor, editor_id};
 pub(crate) use find::{
