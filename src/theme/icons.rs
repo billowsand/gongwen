@@ -67,7 +67,6 @@ pub enum Icon {
     Paperclip,
     Palette,
     PencilLine,
-    Phone,
     Plus,
     #[cfg(feature = "ai-workbench")]
     PlugZap,
@@ -257,7 +256,6 @@ impl Icon {
                 "pencil-line",
                 include_bytes!("../../assets/icons/pencil-line.svg"),
             ),
-            Self::Phone => ("phone", include_bytes!("../../assets/icons/phone.svg")),
             Self::Plus => ("plus", include_bytes!("../../assets/icons/plus.svg")),
             #[cfg(feature = "ai-workbench")]
             Self::PlugZap => (

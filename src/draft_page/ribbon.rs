@@ -9,8 +9,8 @@ use crate::doc_import::clean;
 #[cfg(feature = "ai-workbench")]
 use crate::draft_page::editor_selection;
 use crate::draft_page::{
-    DraftPage, PreviewMode, TOOLBAR_CONTROL_HEIGHT, TableOp, body_stats, chinese_today,
-    format_clean, table_grid_picker, tidy_blank_lines, toggle_bullet, toolbar_separator,
+    DraftPage, PreviewMode, TOOLBAR_CONTROL_HEIGHT, TableOp, body_stats, format_clean,
+    table_grid_picker, tidy_blank_lines, toggle_bullet, toolbar_separator,
 };
 use crate::export;
 use crate::export::ColumnAlign;
@@ -689,11 +689,11 @@ impl DraftPage<'_> {
                 self.import_document(ui.ctx());
             }
         });
-        toolbar_separator(ui);
-
         // 四、公文构件：按正文/附件切区段。研究报告的区段标记另有五种（外加目录标记），连同
         // 锚点、交叉引用这些 mdx research 语法一起摆在「研报」分区，不占这里。
+        // 这是本分区的最后一组，分隔线画在组前，末尾不拖线。
         if !self.doc.draft.kind.is_research() {
+            toolbar_separator(ui);
             let mut marker = None;
             ui.add_enabled_ui(editable, |ui| {
                 if ui
@@ -717,40 +717,6 @@ impl DraftPage<'_> {
             if let Some((text, label)) = marker {
                 self.insert_section_marker(ui.ctx(), text, label);
             }
-            toolbar_separator(ui);
-        }
-
-        // 五、标准词库：单位、人员、联系方式直接插到光标处
-        ui.add_enabled_ui(editable, |ui| self.vocabulary_menus(ui));
-        toolbar_separator(ui);
-
-        // 六、公文里反复要写的符号与日期
-        let mut snippet: Option<(String, usize, &'static str)> = None;
-        ui.add_enabled_ui(editable, |ui| {
-            if ui
-                .add(theme::icon_text_button(theme::Icon::Calendar, "中文日期"))
-                .on_hover_text("插入今天的中文数字日期，即成文日期的写法")
-                .clicked()
-            {
-                snippet = Some((chinese_today(), 0, "中文日期"));
-            }
-            if ui
-                .add(theme::icon_text_button(theme::Icon::Quote, "引号"))
-                .on_hover_text("插入一对中文双引号，光标落在中间")
-                .clicked()
-            {
-                snippet = Some(("“”".to_string(), "”".len(), "中文引号"));
-            }
-            if ui
-                .add(theme::icon_text_button(theme::Icon::Braces, "待核实"))
-                .on_hover_text("插入【待核实】占位，校验会把它挑出来提醒补齐")
-                .clicked()
-            {
-                snippet = Some(("【待核实】".to_string(), 0, "待核实占位"));
-            }
-        });
-        if let Some((text, back, label)) = snippet {
-            self.insert_inline(ui.ctx(), &text, back, label);
         }
     }
 
@@ -983,86 +949,6 @@ impl DraftPage<'_> {
             Some(MarkupInsert::Citation(keys)) => self.insert_citations(ui.ctx(), &keys),
             Some(MarkupInsert::ImportBibliography) => self.import_bibliography(None),
             None => {}
-        }
-    }
-
-    /// 标准词库的三个下拉：单位、人员、联系方式。菜单上显示词条名称，
-    /// 选中后写进正文的也是名称——表单里的身份引用（`@unit:` / `@person:`）
-    /// 只用于关联词条，绝不进正文。
-    pub(crate) fn vocabulary_menus(&mut self, ui: &mut egui::Ui) {
-        let units = self.unit_pool(false);
-        let people = crate::units::identity::person_insert_items(&self.config.vocabulary);
-        let phones = crate::units::identity::phone_insert_items(&self.config.vocabulary);
-        let mut snippet: Option<(String, &'static str)> = None;
-
-        egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
-            theme::Icon::Building,
-            "单位",
-        ))
-        .ui(ui, |ui| {
-            ui.set_min_width(260.0);
-            if units.is_empty() {
-                ui.weak("标准词库里还没有单位。");
-                return;
-            }
-            theme::popup_scroll(320.0).show(ui, |ui| {
-                for option in &units {
-                    if ui
-                        .add(theme::menu_text_item(option.full.as_str()))
-                        .clicked()
-                    {
-                        snippet = Some((
-                            crate::units::identity::insert_text(
-                                &self.config.vocabulary,
-                                &option.value,
-                            ),
-                            "单位名称",
-                        ));
-                        ui.close();
-                    }
-                }
-            });
-        });
-        egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
-            theme::Icon::UserPlus,
-            "人员",
-        ))
-        .ui(ui, |ui| {
-            ui.set_min_width(200.0);
-            if people.is_empty() {
-                ui.weak("标准词库里还没有人员。");
-                return;
-            }
-            theme::popup_scroll(320.0).show(ui, |ui| {
-                for item in &people {
-                    if ui.add(theme::menu_text_item(item.label.as_str())).clicked() {
-                        snippet = Some((item.text.clone(), "人员姓名"));
-                        ui.close();
-                    }
-                }
-            });
-        });
-        egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
-            theme::Icon::Phone,
-            "联系方式",
-        ))
-        .ui(ui, |ui| {
-            ui.set_min_width(220.0);
-            if phones.is_empty() {
-                ui.weak("词库里的人员都还没填电话。");
-                return;
-            }
-            theme::popup_scroll(320.0).show(ui, |ui| {
-                for item in &phones {
-                    if ui.add(theme::menu_text_item(item.label.as_str())).clicked() {
-                        snippet = Some((item.text.clone(), "联系电话"));
-                        ui.close();
-                    }
-                }
-            });
-        });
-        if let Some((text, label)) = snippet {
-            self.insert_inline(ui.ctx(), &text, 0, label);
         }
     }
 

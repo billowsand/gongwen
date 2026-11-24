@@ -701,14 +701,6 @@ fn body_stats_counts_visible_text_only() {
     assert_eq!(paragraphs, 2, "只有两个真正的段落");
 }
 
-/// 中文日期是公文成文日期的写法：年份逐位、月日用中文数字。
-#[test]
-fn chinese_today_reads_like_a_document_date() {
-    let today = chinese_today();
-    assert!(export::chinese_date_parts(&today).is_some(), "{today}");
-    assert!(!today.chars().any(|ch| ch.is_ascii_digit()), "{today}");
-}
-
 /// 收集一帧内所有文本及其中心点，用于定位可点击控件。
 fn text_centers(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Pos2)> {
     fn collect(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Pos2)>) {

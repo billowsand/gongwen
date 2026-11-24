@@ -403,7 +403,7 @@ impl RibbonTab {
     pub(crate) fn hint(self) -> &'static str {
         match self {
             Self::Home => "保存、版本、查找替换、AI 起草与优化、规则校验",
-            Self::Insert => "表格、图片、正文与附件标记、词库词条、日期与符号",
+            Self::Insert => "表格、图片、导入文档、公文引用、正文与附件标记",
             Self::Research => "研究报告的区段标记、锚点、交叉引用、文献引用、脚注与表题",
             Self::Format => "标题层级、加粗、项目符号，以及引号与空行的规范化",
             Self::Clean => "把不合公文 Markdown 标准的写法改成合规写法：标题、列表、表格、空格标点",

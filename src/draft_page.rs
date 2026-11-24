@@ -68,8 +68,8 @@ pub(crate) use find::{
 };
 pub(crate) use form::FormSectionState;
 pub(crate) use markdown::{
-    body_stats, chinese_today, continue_ordered_list, display_width, editor_cursor,
-    editor_selection, is_table_separator_line, is_table_source_line, line_at_byte, line_ranges,
+    body_stats, continue_ordered_list, display_width, editor_cursor, editor_selection,
+    is_table_separator_line, is_table_source_line, line_at_byte, line_ranges,
     markdown_heading_level, split_row, tidy_blank_lines, toggle_bullet,
 };
 // test-only names: only compiled in test builds

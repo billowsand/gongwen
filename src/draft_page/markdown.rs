@@ -322,26 +322,6 @@ pub(crate) fn body_stats(markdown: &str) -> (usize, usize) {
     (characters, paragraphs)
 }
 
-/// 今天的中文数字日期，即公文成文日期的写法：二〇二五年八月十一日。
-pub(crate) fn chinese_today() -> String {
-    const DIGITS: [char; 10] = ['〇', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
-    let now = chrono::Local::now();
-    let year = now
-        .format("%Y")
-        .to_string()
-        .chars()
-        .filter_map(|ch| ch.to_digit(10))
-        .map(|digit| DIGITS[digit as usize])
-        .collect::<String>();
-    let month = now.format("%m").to_string().parse::<usize>().unwrap_or(1);
-    let day = now.format("%d").to_string().parse::<usize>().unwrap_or(1);
-    format!(
-        "{year}年{}月{}日",
-        export::number_to_chinese(month),
-        export::number_to_chinese(day)
-    )
-}
-
 /// 编辑框记着的光标位置（字节）。这里**不看焦点**：点功能区按钮时焦点已经被
 /// 按钮抢走了，但用户的意思显然是「对我刚才编辑的地方动手」，所以认 TextEdit
 /// 自己存着的那个光标。从没点进过编辑框时返回 None，调用方按文末处理。

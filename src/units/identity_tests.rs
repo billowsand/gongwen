@@ -669,40 +669,13 @@ fn reused_business_codes_in_saved_snapshots_do_not_merge_units_or_their_people()
     display.ensure_resolved(&old).unwrap();
 }
 
-/// 「插入」菜单：菜单上显示可读名称，写进正文的只有纯文字。
+/// 词条写进正文的纯文字：身份引用（`@person:<uuid>`）不得泄漏进正文。
 /// 提交 cc312be 把人员字段改成 `@person:<uuid>` 后，这里一度把引用直接
-/// 显示到菜单上、又原样插进正文。
+/// 显示到菜单上、又原样插进正文；词库插入菜单已删除，`insert_text` 仍服务
+/// 表单控件与稿件详情的只读显示。
 #[test]
-fn insert_menus_show_readable_names_and_write_plain_text() {
+fn insert_text_writes_plain_names() {
     let entries = fixture();
-    let people = identity::person_insert_items(&entries);
-    // 三个人同名（张宁）：菜单标签必须能区分，正文只写姓名。
-    assert_eq!(people.len(), 3);
-    assert!(people.iter().all(|item| item.text == "张宁"));
-    assert!(people.iter().all(|item| item.label.contains("办公室")));
-    assert_eq!(
-        people
-            .iter()
-            .map(|item| item.label.as_str())
-            .collect::<std::collections::HashSet<_>>()
-            .len(),
-        3
-    );
-    let phones = identity::phone_insert_items(&entries);
-    assert_eq!(phones.len(), 3);
-    assert!(
-        phones
-            .iter()
-            .any(|item| item.text == "010-2222" && item.label.ends_with("010-2222"))
-    );
-    for item in people.iter().chain(phones.iter()) {
-        assert!(
-            !item.label.contains('@') && !item.text.contains('@'),
-            "身份引用泄漏：{} / {}",
-            item.label,
-            item.text
-        );
-    }
     assert_eq!(
         identity::insert_text(&entries, &key(&entries, "A0101")),
         "办公室"

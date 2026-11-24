@@ -253,9 +253,10 @@
 
 - 新增 `units::identity::readable(input, vocabulary)`（整篇只读副本）、
   `readable_profile(profile, vocabulary)`（只要版式要素）、`insert_text(vocabulary, key)`
-  （写进正文的纯文字）、`person_insert_items` / `phone_insert_items`（插入菜单候选）。
-  它们都是**显示专用**，不得写回表单，也不得拿结果做身份判断。
-- 起草页「插入 → 单位／人员／联系方式」菜单：菜单显示名称、正文插入规范名称或电话。
+  （写进正文的纯文字）。它们都是**显示专用**，不得写回表单，也不得拿结果做身份判断。
+  同期的 `person_insert_items` / `phone_insert_items` 候选函数与起草页
+  「插入 → 单位／人员／联系方式」菜单已于 2026-11-25 一并删除（用户确认不需要），
+  `person_label` 等消歧显示仍服务表单候选与详情展示。
 - 稿件详情「公文元数据」、版本对照（稿件要素与配置版式）、校验提示、要素建议卡提示、
   Pi 智能体的 `doc_elements` / `form_facts`、提示词落款值：全部走上面的显示助手。
 - 表单控件 `single_select` / `multi_select` 增加词库参数：候选池里没有的引用（历史稿

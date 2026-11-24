@@ -869,44 +869,6 @@ pub(crate) fn snapshot_notice(
     })
 }
 
-/// 「插入」菜单里的一项：`label` 显示在菜单上，`text` 才是写进正文的文字。
-/// 身份引用只存在表单里，正文永远只放名称（见 docs/vocabulary-identity-design.md 4.3）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InsertItem {
-    pub(crate) label: String,
-    pub(crate) text: String,
-}
-
-/// 「插入 → 人员」候选：菜单显示可消歧的名称，正文插入规范姓名。
-pub(crate) fn person_insert_items(vocabulary: &[Entry]) -> Vec<InsertItem> {
-    vocabulary
-        .iter()
-        .filter(|entry| entry.category == Category::Person)
-        .filter(|entry| !entry.canonical.trim().is_empty())
-        .map(|entry| InsertItem {
-            label: person_label(vocabulary, entry),
-            text: entry.canonical.trim().to_string(),
-        })
-        .collect()
-}
-
-/// 「插入 → 联系方式」候选：菜单显示「姓名 电话」，正文只插入电话。
-pub(crate) fn phone_insert_items(vocabulary: &[Entry]) -> Vec<InsertItem> {
-    vocabulary
-        .iter()
-        .filter(|entry| entry.category == Category::Person)
-        .filter(|entry| !entry.canonical.trim().is_empty())
-        .filter_map(|entry| {
-            let contact = crate::platform::doc::contact_of(entry);
-            let phone = contact.preferred_office_first();
-            (!phone.is_empty()).then(|| InsertItem {
-                label: format!("{} {phone}", person_label(vocabulary, entry)),
-                text: phone.to_string(),
-            })
-        })
-        .collect()
-}
-
 /// 词条写进正文的纯文字：单位、人员都取规范名称，不带消歧前缀与编号。
 /// 正文是自由文字，纸面消歧只作用于主送、抄送、落款这些要素位。
 pub(crate) fn insert_text(vocabulary: &[Entry], key: &str) -> String {
