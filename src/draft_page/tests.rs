@@ -701,6 +701,69 @@ fn body_stats_counts_visible_text_only() {
     assert_eq!(paragraphs, 2, "只有两个真正的段落");
 }
 
+/// 收集一帧内所有文本及其外接矩形。
+fn text_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
+    fn collect(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                let s = text.galley.text().to_string();
+                let rect = text.galley.rect.translate(text.pos.to_vec2());
+                out.push((s, rect));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in shapes {
+        collect(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// 收集一帧内所有非文本图形的包围盒：矩形、网格（图标、图片）与线段。
+/// 叠压判定用——文本本身由 [`text_rects`] 另收。网格附带「是否实色」标记：
+/// egui 滚动区在裁掉溢出内容的一缘画的渐隐提示（底色、半透明）不算叠压。
+fn shape_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<(&'static str, egui::Rect, bool)> {
+    fn collect(shape: &egui::epaint::Shape, out: &mut Vec<(&'static str, egui::Rect, bool)>) {
+        match shape {
+            egui::epaint::Shape::Rect(rect) => out.push(("rect", rect.rect, true)),
+            egui::epaint::Shape::Mesh(mesh) => {
+                let mut rect = egui::Rect::NOTHING;
+                for vertex in &mesh.vertices {
+                    rect.extend_with(vertex.pos);
+                }
+                if rect.is_finite() {
+                    let solid = mesh.vertices.iter().any(|v| v.color.a() >= 128);
+                    out.push(("mesh", rect, solid));
+                }
+            }
+            egui::epaint::Shape::LineSegment { points, stroke } => {
+                out.push((
+                    "line",
+                    egui::Rect::from_two_pos(points[0], points[1]).expand(stroke.width / 2.0),
+                    true,
+                ));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in shapes {
+        collect(&clipped.shape, &mut out);
+    }
+    out
+}
+
 /// 收集一帧内所有文本及其中心点，用于定位可点击控件。
 fn text_centers(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Pos2)> {
     fn collect(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Pos2)>) {
@@ -822,4 +885,88 @@ fn switching_kind_combo_to_plain_document_does_not_panic() {
         .expect("下拉里应有“普通公文”");
     let _ = click(&mut frame, &ctx, plain.1);
     assert_eq!(doc.draft.kind, TemplateKind::PlainDocument);
+}
+
+/// 回归测试：窗口窄下来时，分区卡条与右侧的预览切换、收起箭头不能叠在一起。
+///
+/// 旧实现从左往右先排分区卡，右侧组拿剩下的宽度；窗口窄到排不下时右侧组往回
+/// 溢，图标直接盖在「输出」等分区卡文字上（2026-11-25 真机发现）。现在右侧先
+/// 占住右缘，分区卡条在剩余宽度里横向滚动、溢出部分被裁掉：除整框包住文字的
+/// 底色外，任何控件图形都不应与分区卡文字相交。
+#[test]
+fn ribbon_tabs_do_not_collide_with_view_switch_when_narrow() {
+    for width in [720.0, 1200.0] {
+        let ctx = egui::Context::default();
+        crate::theme::configure_icons(&ctx);
+        crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        // 不要在首帧前调 set_pixels_per_point：egui 会把 RawInput.screen_rect
+        // 换成旧 content_rect 的缩放值，窗口宽度就失控了。
+        let mut config = AppConfig::default();
+        let markdown = "# 测试标题\n\n正文内容。".to_string();
+        let mut doc = DraftSession::with_markdown(1, &config, markdown);
+        let (sender, _keep) = std::sync::mpsc::channel();
+        let mut status = String::new();
+        let mut version_switch = None;
+        let mut revert_confirm = None;
+        let mut actions = Vec::new();
+        let mut export_links = ExportLinks::default();
+        let mut metrics = crate::metrics::Metrics::default();
+        let mut frame = |ctx: &egui::Context| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 900.0),
+                )),
+                ..Default::default()
+            };
+            crate::test_support::run_ui(ctx, raw, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let mut page = DraftPage {
+                        doc: &mut doc,
+                        config: &mut config,
+                        store: None,
+                        sender: &sender,
+                        status: &mut status,
+                        version_switch: &mut version_switch,
+                        revert_confirm: &mut revert_confirm,
+                        actions: &mut actions,
+                        export_links: &mut export_links,
+                        metrics: &mut metrics,
+                    };
+                    page.create_ui(ui);
+                });
+            })
+        };
+        // 画两帧再断言：首帧滚动区还没量到内容宽，会画出临时的滚动提示，不代表
+        // 稳态界面；第二帧起才是用户实际看到的样子（样张测试同样跑三帧）。
+        let _ = frame(&ctx);
+        let output = frame(&ctx);
+        const TABS: [&str; 7] = ["开始", "插入", "格式", "清洗", "审校", "视图", "输出"];
+        let tab_rects: Vec<(String, egui::Rect)> = text_rects(&output.shapes)
+            .into_iter()
+            .filter(|(s, _)| TABS.contains(&s.as_str()))
+            .map(|(s, r)| (s, r.shrink(1.0)))
+            .collect();
+        // 只查网格（图标、图片）与线段：选中的分区卡底下那几片承托底色也是
+        // rect，属于正常装饰；图标/线段压住文字才是真叠压。溢出滚动区被裁掉的
+        // 分区卡不绘制，只要求看得见的几张彼此不叠压——旧实现里右侧按钮组往回
+        // 溢、图标盖住「输出」等文字，这里一定会被抓住。
+        assert!(
+            !tab_rects.is_empty(),
+            "宽 {width}：至少应有分区卡文字排出来"
+        );
+        for (label, text_rect) in &tab_rects {
+            for (kind, other, _) in shape_rects(&output.shapes) {
+                // rect 是分区卡自己的承托底色；比控件高得多的半透明网格是滚动区
+                // 裁掉溢出内容时在边缘画的通高渐隐提示——都不是控件叠压。
+                if kind == "rect" || other.height() > 48.0 {
+                    continue;
+                }
+                assert!(
+                    !other.intersects(*text_rect) || other.contains_rect(*text_rect),
+                    "宽 {width}：分区卡「{label}」被 {kind} 叠压：{other:?} vs {text_rect:?}"
+                );
+            }
+        }
+    }
 }

@@ -142,6 +142,8 @@ impl DraftPage<'_> {
 
     /// 分区卡那一行。左端常驻文档要素填报区的开关，右端常驻五个视图模式和
     /// 收起功能区的箭头——这三样都不属于任何一个分区，切分区卡时必须一直在。
+    /// 右侧按钮先贴着右缘占好位置，左侧分区卡条拿剩余宽度；窗口窄下来时分区卡条
+    /// 横向滚动（与第二行 ribbon_items 一致），不会盖到右侧按钮上。
     pub(crate) fn ribbon_tabs(&mut self, ui: &mut egui::Ui) -> Option<egui::Rect> {
         ui.scope(|ui| {
             let compact = theme::smartisan::active() && ui.available_width() < 960.0;
@@ -151,147 +153,156 @@ impl DraftPage<'_> {
             ui.spacing_mut().interact_size.y = 26.0;
             ui.spacing_mut().item_spacing.x = 2.0;
             let mut selected_rect = None;
-            ui.horizontal(|ui| {
-                let collapsed = self.doc.form_collapsed;
-                let icon = if collapsed {
-                    theme::Icon::PanelOpen
-                } else {
-                    theme::Icon::PanelClose
-                };
-                if theme::nav_button(ui, !collapsed, icon, "文档要素")
-                    .on_hover_text(if collapsed {
-                        "展开文档要素填报区"
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let collapsed = self.config.ribbon_collapsed;
+                if theme::icon_button(
+                    ui,
+                    if collapsed {
+                        theme::Icon::ChevronDown
                     } else {
-                        "收起文档要素填报区"
-                    })
-                    .clicked()
+                        theme::Icon::ChevronUp
+                    },
+                    if collapsed {
+                        "展开功能区"
+                    } else {
+                        "收起功能区"
+                    },
+                )
+                .on_hover_text("也可以双击当前分区卡收起或展开")
+                .clicked()
                 {
-                    self.doc.form_collapsed = !collapsed;
+                    self.config.ribbon_collapsed = !collapsed;
+                    self.persist_ribbon();
                 }
                 toolbar_separator(ui);
+                // 视图入口仿 Zed 收到最右侧，只保留稳定的图标锚点。
+                for (mode, icon, label, tip) in [
+                    (
+                        PreviewMode::VersionDiff,
+                        theme::Icon::GitCommit,
+                        "版本对照",
+                        "版本对照：最新提交版本与当前修订逐字比较",
+                    ),
+                    (
+                        PreviewMode::Split,
+                        theme::Icon::Compare,
+                        "Markdown 对照",
+                        "Markdown 对照：左边编辑源码，右边同步显示打印分页",
+                    ),
+                    (
+                        PreviewMode::Rendered,
+                        theme::Icon::Eye,
+                        "公文预览",
+                        "公文预览：按导出后的字体与行距排版",
+                    ),
+                    (
+                        PreviewMode::Source,
+                        theme::Icon::PencilLine,
+                        "Markdown",
+                        "Markdown：带语法高亮的源码，导出以此为准",
+                    ),
+                ] {
+                    if theme::view_icon_button(ui, self.doc.preview_mode == mode, icon, label)
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        self.switch_preview_mode(mode);
+                    }
+                }
+                if self.doc.preview_mode == PreviewMode::Source {
+                    toolbar_separator(ui);
+                    if theme::view_icon_button(
+                        ui,
+                        self.config.show_source_minimap,
+                        theme::Icon::Rows,
+                        "Markdown 缩略图",
+                    )
+                    .on_hover_text("显示或收起源码右侧的全文缩略图")
+                    .clicked()
+                    {
+                        self.config.show_source_minimap = !self.config.show_source_minimap;
+                        self.persist_ribbon();
+                    }
+                    if theme::view_icon_button(
+                        ui,
+                        self.config.show_source_outline,
+                        theme::Icon::List,
+                        "Markdown 目录",
+                    )
+                    .on_hover_text("显示或收起源码左侧的标题目录")
+                    .clicked()
+                    {
+                        self.config.show_source_outline = !self.config.show_source_outline;
+                        self.persist_ribbon();
+                    }
+                }
 
                 // 分区卡的悬停底色要与相邻的选中轮廓留出清晰间隔。
                 ui.spacing_mut().item_spacing.x = if compact { 2.0 } else { 10.0 };
-                let current = self.config.ribbon_tab;
-                let mut picked = None;
-                let mut toggle_collapse = false;
-                let kind = self.doc.draft.kind;
-                for tab in RibbonTab::ALL.into_iter().filter(|tab| tab.shown_for(kind)) {
-                    // 双击当前分区卡收起/展开功能区（与 Word 一致），在悬停提示里
-                    // 写明，不然这个手势几乎不可能被发现。
-                    let tip = if current == tab {
-                        format!("{}（双击收起/展开功能区）", tab.hint())
-                    } else {
-                        tab.hint().to_string()
-                    };
-                    let response =
-                        theme::ribbon_tab_button(ui, current == tab, tab.label(), compact)
-                            .on_hover_text(tip);
-                    if current == tab {
-                        selected_rect = Some(response.rect);
-                    }
-                    // 双击当前分区卡收起第二行，与 Word 一致。
-                    if response.double_clicked() && current == tab {
-                        toggle_collapse = true;
-                    } else if response.clicked() {
-                        picked = Some(tab);
-                    }
-                }
-                if let Some(tab) = picked
-                    && tab != current
-                {
-                    self.config.ribbon_tab = tab;
-                    self.persist_ribbon();
-                }
-                if toggle_collapse {
-                    self.config.ribbon_collapsed = !self.config.ribbon_collapsed;
-                    self.persist_ribbon();
-                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    egui::ScrollArea::horizontal()
+                        .id_salt("ribbon_tab_strip")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            let collapsed = self.doc.form_collapsed;
+                            let icon = if collapsed {
+                                theme::Icon::PanelOpen
+                            } else {
+                                theme::Icon::PanelClose
+                            };
+                            if theme::nav_button(ui, !collapsed, icon, "文档要素")
+                                .on_hover_text(if collapsed {
+                                    "展开文档要素填报区"
+                                } else {
+                                    "收起文档要素填报区"
+                                })
+                                .clicked()
+                            {
+                                self.doc.form_collapsed = !collapsed;
+                            }
+                            toolbar_separator(ui);
 
-                ui.spacing_mut().item_spacing.x = 2.0;
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let collapsed = self.config.ribbon_collapsed;
-                    if theme::icon_button(
-                        ui,
-                        if collapsed {
-                            theme::Icon::ChevronDown
-                        } else {
-                            theme::Icon::ChevronUp
-                        },
-                        if collapsed {
-                            "展开功能区"
-                        } else {
-                            "收起功能区"
-                        },
-                    )
-                    .on_hover_text("也可以双击当前分区卡收起或展开")
-                    .clicked()
-                    {
-                        self.config.ribbon_collapsed = !collapsed;
-                        self.persist_ribbon();
-                    }
-                    toolbar_separator(ui);
-                    // 视图入口仿 Zed 收到最右侧，只保留稳定的图标锚点。
-                    for (mode, icon, label, tip) in [
-                        (
-                            PreviewMode::VersionDiff,
-                            theme::Icon::GitCommit,
-                            "版本对照",
-                            "版本对照：最新提交版本与当前修订逐字比较",
-                        ),
-                        (
-                            PreviewMode::Split,
-                            theme::Icon::Compare,
-                            "Markdown 对照",
-                            "Markdown 对照：左边编辑源码，右边同步显示打印分页",
-                        ),
-                        (
-                            PreviewMode::Rendered,
-                            theme::Icon::Eye,
-                            "公文预览",
-                            "公文预览：按导出后的字体与行距排版",
-                        ),
-                        (
-                            PreviewMode::Source,
-                            theme::Icon::PencilLine,
-                            "Markdown",
-                            "Markdown：带语法高亮的源码，导出以此为准",
-                        ),
-                    ] {
-                        if theme::view_icon_button(ui, self.doc.preview_mode == mode, icon, label)
-                            .on_hover_text(tip)
-                            .clicked()
-                        {
-                            self.switch_preview_mode(mode);
-                        }
-                    }
-                    if self.doc.preview_mode == PreviewMode::Source {
-                        toolbar_separator(ui);
-                        if theme::view_icon_button(
-                            ui,
-                            self.config.show_source_minimap,
-                            theme::Icon::Rows,
-                            "Markdown 缩略图",
-                        )
-                        .on_hover_text("显示或收起源码右侧的全文缩略图")
-                        .clicked()
-                        {
-                            self.config.show_source_minimap = !self.config.show_source_minimap;
-                            self.persist_ribbon();
-                        }
-                        if theme::view_icon_button(
-                            ui,
-                            self.config.show_source_outline,
-                            theme::Icon::List,
-                            "Markdown 目录",
-                        )
-                        .on_hover_text("显示或收起源码左侧的标题目录")
-                        .clicked()
-                        {
-                            self.config.show_source_outline = !self.config.show_source_outline;
-                            self.persist_ribbon();
-                        }
-                    }
+                            let current = self.config.ribbon_tab;
+                            let mut picked = None;
+                            let mut toggle_collapse = false;
+                            let kind = self.doc.draft.kind;
+                            for tab in RibbonTab::ALL.into_iter().filter(|tab| tab.shown_for(kind))
+                            {
+                                // 双击当前分区卡收起/展开功能区（与 Word 一致），在悬停提示里
+                                // 写明，不然这个手势几乎不可能被发现。
+                                let tip = if current == tab {
+                                    format!("{}（双击收起/展开功能区）", tab.hint())
+                                } else {
+                                    tab.hint().to_string()
+                                };
+                                let response = theme::ribbon_tab_button(
+                                    ui,
+                                    current == tab,
+                                    tab.label(),
+                                    compact,
+                                )
+                                .on_hover_text(tip);
+                                if current == tab {
+                                    selected_rect = Some(response.rect);
+                                }
+                                // 双击当前分区卡收起第二行，与 Word 一致。
+                                if response.double_clicked() && current == tab {
+                                    toggle_collapse = true;
+                                } else if response.clicked() {
+                                    picked = Some(tab);
+                                }
+                            }
+                            if let Some(tab) = picked
+                                && tab != current
+                            {
+                                self.config.ribbon_tab = tab;
+                                self.persist_ribbon();
+                            }
+                            if toggle_collapse {
+                                self.config.ribbon_collapsed = !self.config.ribbon_collapsed;
+                                self.persist_ribbon();
+                            }
+                        });
                 });
             });
             selected_rect
