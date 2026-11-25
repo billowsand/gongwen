@@ -726,8 +726,9 @@ fn text_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)
 }
 
 /// 收集一帧内所有非文本图形的包围盒：矩形、网格（图标、图片）与线段。
-/// 叠压判定用——文本本身由 [`text_rects`] 另收。网格附带「是否实色」标记：
-/// egui 滚动区在裁掉溢出内容的一缘画的渐隐提示（底色、半透明）不算叠压。
+/// 叠压判定用——文本本身由 [`text_rects`] 另收。网格附带「是否整片实色」标记：
+/// 图标、图片顶点全部不透明；egui 滚动区在裁掉溢出内容的一缘画的渐隐提示
+/// 是渐变网格（顶点带透明度），属于装饰，不算叠压。
 fn shape_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<(&'static str, egui::Rect, bool)> {
     fn collect(shape: &egui::epaint::Shape, out: &mut Vec<(&'static str, egui::Rect, bool)>) {
         match shape {
@@ -738,7 +739,7 @@ fn shape_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<(&'static str, egui
                     rect.extend_with(vertex.pos);
                 }
                 if rect.is_finite() {
-                    let solid = mesh.vertices.iter().any(|v| v.color.a() >= 128);
+                    let solid = mesh.vertices.iter().all(|v| v.color.a() == 255);
                     out.push(("mesh", rect, solid));
                 }
             }
@@ -947,19 +948,18 @@ fn ribbon_tabs_do_not_collide_with_view_switch_when_narrow() {
             .filter(|(s, _)| TABS.contains(&s.as_str()))
             .map(|(s, r)| (s, r.shrink(1.0)))
             .collect();
-        // 只查网格（图标、图片）与线段：选中的分区卡底下那几片承托底色也是
-        // rect，属于正常装饰；图标/线段压住文字才是真叠压。溢出滚动区被裁掉的
-        // 分区卡不绘制，只要求看得见的几张彼此不叠压——旧实现里右侧按钮组往回
-        // 溢、图标盖住「输出」等文字，这里一定会被抓住。
+        // 只查整片实色的网格（图标、图片）与线段：选中的分区卡底下那几片承托
+        // 底色也是 rect，属于正常装饰；滚动区裁掉溢出内容时在边缘画半透明渐隐
+        // 提示，也是装饰。图标/线段压住文字才是真叠压。溢出滚动区被裁掉的分区
+        // 卡不绘制，只要求看得见的几张彼此不叠压——旧实现里右侧按钮组往回溢、
+        // 图标盖住「输出」等文字，这里一定会被抓住。
         assert!(
             !tab_rects.is_empty(),
             "宽 {width}：至少应有分区卡文字排出来"
         );
         for (label, text_rect) in &tab_rects {
-            for (kind, other, _) in shape_rects(&output.shapes) {
-                // rect 是分区卡自己的承托底色；比控件高得多的半透明网格是滚动区
-                // 裁掉溢出内容时在边缘画的通高渐隐提示——都不是控件叠压。
-                if kind == "rect" || other.height() > 48.0 {
+            for (kind, other, solid) in shape_rects(&output.shapes) {
+                if kind == "rect" || (kind == "mesh" && !solid) {
                     continue;
                 }
                 assert!(
@@ -968,5 +968,81 @@ fn ribbon_tabs_do_not_collide_with_view_switch_when_narrow() {
                 );
             }
         }
+    }
+}
+
+/// 回归测试：功能区第一行的高度必须逐帧稳定，且始终贴在窗口顶部。
+///
+/// egui 的 `Layout::right_to_left(Align::Center)` 只把垂直居中记在 cross_align
+/// 上，并把每个控件的框撑到「全部剩余高度」、再并进行高；这个行若直接用
+/// `with_layout` 挂在顶面板上，面板高度又由内容决定，就形成逐帧 +40px 的
+/// 反馈回路——分区卡一路下沉到窗口正中、功能区铺满整窗（2026-11-25 真机
+/// 回归）。行必须收在 `ui.horizontal` 给出的固定高度里：这里连画 30 帧，
+/// 断言分区卡文字不再逐帧下沉、且始终停在窗口顶部。
+#[test]
+fn ribbon_tab_row_height_stays_put_across_frames() {
+    let ctx = egui::Context::default();
+    crate::theme::configure_icons(&ctx);
+    crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+    let mut config = AppConfig::default();
+    let markdown = "# 测试标题\n\n正文内容。".to_string();
+    let mut doc = DraftSession::with_markdown(1, &config, markdown);
+    let (sender, _keep) = std::sync::mpsc::channel();
+    let mut status = String::new();
+    let mut version_switch = None;
+    let mut revert_confirm = None;
+    let mut actions = Vec::new();
+    let mut export_links = ExportLinks::default();
+    let mut metrics = crate::metrics::Metrics::default();
+    let mut frame = |ctx: &egui::Context| {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1361.0, 770.0),
+            )),
+            ..Default::default()
+        };
+        crate::test_support::run_ui(ctx, raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let mut page = DraftPage {
+                    doc: &mut doc,
+                    config: &mut config,
+                    store: None,
+                    sender: &sender,
+                    status: &mut status,
+                    version_switch: &mut version_switch,
+                    revert_confirm: &mut revert_confirm,
+                    actions: &mut actions,
+                    export_links: &mut export_links,
+                    metrics: &mut metrics,
+                };
+                page.create_ui(ui);
+            });
+        })
+    };
+    let _ = frame(&ctx);
+    let mut first_top = None;
+    for _ in 0..30 {
+        let output = frame(&ctx);
+        let mut top = f32::MAX;
+        for (label, rect) in text_rects(&output.shapes) {
+            if label == "开始" {
+                top = top.min(rect.top());
+            }
+        }
+        assert!(
+            top.is_finite(),
+            "分区卡「开始」应始终排得出来，行高失控时它会整个掉出窗口"
+        );
+        let top = top.round();
+        let first = *first_top.get_or_insert(top);
+        assert_eq!(
+            top, first,
+            "分区卡行高在逐帧变化：行的矩形必须固定，不能随上一帧的面板高度继续生长"
+        );
+        assert!(
+            top < 60.0,
+            "分区卡应贴在窗口顶部（top={top}）；掉到窗口中部说明功能区又铺满了整窗"
+        );
     }
 }
