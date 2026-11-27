@@ -942,7 +942,7 @@ fn ribbon_tabs_do_not_collide_with_view_switch_when_narrow() {
         // 稳态界面；第二帧起才是用户实际看到的样子（样张测试同样跑三帧）。
         let _ = frame(&ctx);
         let output = frame(&ctx);
-        const TABS: [&str; 7] = ["开始", "插入", "格式", "清洗", "审校", "视图", "输出"];
+        const TABS: [&str; 6] = ["开始", "插入", "格式", "清洗", "审校", "输出"];
         let tab_rects: Vec<(String, egui::Rect)> = text_rects(&output.shapes)
             .into_iter()
             .filter(|(s, _)| TABS.contains(&s.as_str()))

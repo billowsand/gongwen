@@ -15,7 +15,7 @@ impl PrintTraceConfig {
             let unit = self.unit.trim();
             ensure!(
                 !unit.is_empty(),
-                "请先在「设置 → 导出格式」填写追溯码的印制单位"
+                "请先在「设置 → 导出」填写追溯码的印制单位"
             );
             ensure!(
                 unit.chars().count() <= 60 && !unit.chars().any(char::is_control),

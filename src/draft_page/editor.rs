@@ -838,32 +838,6 @@ impl DraftPage<'_> {
         close_requested
     }
 
-    /// 预览缩放：默认按面板宽度自适应，也可以手动锁定倍率。
-    pub(crate) fn zoom_controls(&mut self, ui: &mut egui::Ui) {
-        // 自适应时以当前实际倍率为起点加减，避免首次放大反而变小。
-        let current = self.doc.preview_zoom.unwrap_or(self.doc.preview_fit_scale);
-        if theme::icon_button(ui, theme::Icon::ZoomOut, "缩小").clicked() {
-            self.doc.preview_zoom = Some((current - 0.1).max(0.4));
-        }
-        ui.label(
-            egui::RichText::new(format!("{:.0}%", current * 100.0)).color(theme::text_muted()),
-        );
-        if theme::icon_button(ui, theme::Icon::ZoomIn, "放大").clicked() {
-            self.doc.preview_zoom = Some((current + 0.1).min(2.0));
-        }
-        if theme::icon_button_enabled(
-            ui,
-            self.doc.preview_zoom.is_some(),
-            theme::Icon::FitWidth,
-            "适应宽度",
-        )
-        .on_hover_text("回到按窗格宽度自动缩放")
-        .clicked()
-        {
-            self.doc.preview_zoom = None;
-        }
-    }
-
     /// Markdown 源码编辑框，带语法高亮。
     pub(crate) fn markdown_editor(&mut self, ui: &mut egui::Ui) {
         #[cfg(feature = "ai-workbench")]

@@ -2210,7 +2210,7 @@ impl GongwenApp {
                 self.docs[index]
                     .warnings
                     .dedup_by(|a, b| a.message == b.message);
-                // 成品不再进抽屉：让工具栏的 PDF / Word / Typst 包入口重新扫盘点亮即可。
+                // 成品不再进抽屉：让「输出」分区的格式按钮重新扫盘即可。
                 self.export_links.invalidate();
                 let orphans = self.docs[index].proof_warnings.len();
                 // 要素问题不挡导出，但导出成功不等于这稿子能签发。数出来缀在状态栏

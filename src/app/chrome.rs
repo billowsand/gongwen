@@ -177,6 +177,14 @@ fn status_icon_button(
     response.on_hover_text(label)
 }
 
+/// 状态栏里带弹层的条目：外观与 [`status_icon_button`] 一致，只是点开的是菜单。
+fn status_menu_button<'a>(selected: bool, content: egui::Button<'a>) -> egui::Button<'a> {
+    content
+        .selected(selected)
+        .frame_when_inactive(selected)
+        .corner_radius(theme::chrome_radius(4))
+}
+
 /// 标签关闭键的圆形热区直径。18 px 在 28 px 高的胶囊里上下各余 5 px，
 /// 悬停底圆不会顶到描边，热区又够一次点准。
 const CLOSE_HIT: f32 = 18.0;
@@ -594,7 +602,7 @@ impl GongwenApp {
         );
     }
 
-    /// 标题栏上的快速访问：保存、提交版本、导出。这三件事跟当前停在哪个分区卡
+    /// 标题栏上的快速访问：保存、提交版本。这两件事跟当前停在哪个分区卡
     /// 无关，任何时候都该够得着，所以仿 Word 快速访问工具栏挂在标题栏上。
     /// 只放图标、常态无底色，分量压到比功能区和标签行都轻；含义靠悬停说明，
     /// 保存键上的小圆点表示有未写回稿件库的改动。
@@ -605,7 +613,6 @@ impl GongwenApp {
         let editable = !doc.read_only();
         let saved = doc.manuscript_id.is_some();
         let manuscript_id = doc.manuscript_id;
-        let ready_to_export = !doc.busy && !doc.generated_markdown.trim().is_empty();
         let dirty = doc.is_dirty();
         let save_shortcut = theme::primary_shortcut("S");
         let save_hint = if saved {
@@ -635,15 +642,6 @@ impl GongwenApp {
             && let Some(id) = manuscript_id
         {
             self.open_version_commit(VersionScope::Manuscript(id));
-        }
-        let export = theme::titlebar_icon_button(
-            ui,
-            ready_to_export,
-            theme::Icon::FileDown,
-            "导出：按设置里勾选的格式出文件",
-        );
-        if export.clicked() {
-            self.draft_page().start_export_current();
         }
     }
 
@@ -1714,6 +1712,17 @@ impl GongwenApp {
                     .x
                     + 12.0
             });
+            // 两个「显示」入口各自只在讲得通的模式里出场：源码/分栏给导航与行号，
+            // 版式/分栏给倍率与纸面项。版本对照两边都不适用，状态栏保持原样。
+            let (source_nav_visible, zoom_visible) = if show_doc_controls {
+                let mode = self.docs[active_doc].preview_mode;
+                (
+                    matches!(mode, PreviewMode::Source | PreviewMode::Split),
+                    matches!(mode, PreviewMode::Rendered | PreviewMode::Split),
+                )
+            } else {
+                (false, false)
+            };
             let (
                 timeline_active,
                 result_open,
@@ -1750,6 +1759,8 @@ impl GongwenApp {
                 + if show_doc_controls { 64.0 } else { 0.0 }
                 + if ime_active { 96.0 } else { 0.0 }
                 + if candidates_visible { 36.0 } else { 0.0 }
+                + if source_nav_visible { 30.0 } else { 0.0 }
+                + if zoom_visible { 58.0 } else { 0.0 }
                 + 32.0;
             let status_limit = (ui.available_width() * 0.38)
                 .clamp(160.0, 420.0)
@@ -1868,6 +1879,12 @@ impl GongwenApp {
                             doc.preview_mode = PreviewMode::VersionDiff;
                             doc.draft_diff.timeline.expanded = true;
                         }
+                        if zoom_visible {
+                            self.status_zoom_menu(ui, active_doc);
+                        }
+                        if source_nav_visible {
+                            self.status_source_nav_menu(ui, active_doc);
+                        }
                         if let Some((label, tip)) = &statistics {
                             ui.add_space(8.0);
                             let response = ui.add_sized(
@@ -1922,6 +1939,137 @@ impl GongwenApp {
                 }
             });
         });
+    }
+
+    /// 显示类开关改完立即落盘，与功能区里同名的开关一致：两处读写同一份配置。
+    fn persist_view_prefs(&mut self) {
+        let _ = crate::storage::save(&self.config);
+    }
+
+    /// 状态栏右端的「倍率」入口：百分比常显，点开选档位或切纸面显示项。
+    ///
+    /// 「视图」分区退役后，缩放、纸面行号与导航刻度由这里接管。它们回答的是
+    /// 「这一篇现在怎么看」，属于状态；常显百分比还顺带说明「当前不是 100%」。
+    fn status_zoom_menu(&mut self, ui: &mut egui::Ui, doc: usize) {
+        let zoom = self.docs[doc].preview_zoom;
+        let current = zoom.unwrap_or(self.docs[doc].preview_fit_scale);
+        let chip = status_menu_button(
+            false,
+            egui::Button::new(egui::RichText::new(format!("{:.0}%", current * 100.0)))
+                .frame_when_inactive(false)
+                .min_size(egui::vec2(38.0, 20.0)),
+        );
+        let _ = egui::containers::menu::MenuButton::from_button(chip)
+            .ui(ui, |ui| {
+                compact_menu(ui);
+                ui.set_min_width(168.0);
+                ui.label(egui::RichText::new("缩放").color(theme::text_muted()));
+                let fit_selected = zoom.is_none();
+                if ui
+                    .add(
+                        theme::menu_item(theme::Icon::FitWidth, "适应宽度")
+                            .selected(fit_selected)
+                            .frame_when_inactive(fit_selected),
+                    )
+                    .on_hover_text("回到按窗格宽度自动缩放")
+                    .clicked()
+                {
+                    self.docs[doc].preview_zoom = None;
+                    ui.close();
+                }
+                for step in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] {
+                    let selected = zoom.is_some_and(|zoom| (zoom - step).abs() < 0.001);
+                    if ui
+                        .add(theme::menu_selectable_item(
+                            selected,
+                            &format!("{:.0}%", step * 100.0),
+                        ))
+                        .clicked()
+                    {
+                        self.docs[doc].preview_zoom = Some(step);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                ui.label(egui::RichText::new("版式").color(theme::text_muted()));
+                let mut paper_lines = self.config.show_preview_line_numbers;
+                if ui
+                    .checkbox(&mut paper_lines, "纸面行号")
+                    .on_hover_text(
+                        "投屏对稿用：公文预览的左页边逐行标号，点一下号码把光标带到那一行",
+                    )
+                    .changed()
+                {
+                    self.config.show_preview_line_numbers = paper_lines;
+                    self.persist_view_prefs();
+                }
+                let mut navigator = self.config.show_preview_navigator;
+                if ui
+                    .checkbox(&mut navigator, "导航刻度")
+                    .on_hover_text("版式右缘按标题显示刻度；鼠标靠近右缘展开标题列表")
+                    .changed()
+                {
+                    self.config.show_preview_navigator = navigator;
+                    self.persist_view_prefs();
+                }
+            })
+            .0
+            .on_hover_text("预览倍率与纸面显示项");
+    }
+
+    /// 状态栏右端的「源码显示」入口：目录、缩略图与编辑区行号。
+    ///
+    /// 目录和缩略图只画在 Markdown 模式（对照模式左栏是编辑器、没有这两列），
+    /// 所以在对照模式下把它们灰掉并说明原因，而不是让用户点了没反应。
+    fn status_source_nav_menu(&mut self, ui: &mut egui::Ui, doc: usize) {
+        let source_only = self.docs[doc].preview_mode == PreviewMode::Source;
+        let outline = self.config.show_source_outline;
+        let minimap = self.config.show_source_minimap;
+        let button = status_menu_button(
+            outline || minimap,
+            egui::Button::image(theme::Icon::List.image())
+                .image_tint_follows_text_color(true)
+                .min_size(egui::vec2(26.0, 20.0)),
+        );
+        let _ = egui::containers::menu::MenuButton::from_button(button)
+            .ui(ui, |ui| {
+                compact_menu(ui);
+                ui.set_min_width(168.0);
+                ui.label(egui::RichText::new("源码显示").color(theme::text_muted()));
+                let mut outline = outline;
+                let mut minimap = minimap;
+                ui.add_enabled_ui(source_only, |ui| {
+                    if ui
+                        .checkbox(&mut outline, "目录")
+                        .on_hover_text("源码左侧的标题目录，点标题跳转")
+                        .on_disabled_hover_text("目录只画在 Markdown 模式里")
+                        .changed()
+                    {
+                        self.config.show_source_outline = outline;
+                        self.persist_view_prefs();
+                    }
+                    if ui
+                        .checkbox(&mut minimap, "缩略图")
+                        .on_hover_text("源码右侧的全文缩略图，滚轮浏览，点击或拖动定位")
+                        .on_disabled_hover_text("缩略图只画在 Markdown 模式里")
+                        .changed()
+                    {
+                        self.config.show_source_minimap = minimap;
+                        self.persist_view_prefs();
+                    }
+                });
+                let mut line_numbers = self.config.show_editor_line_numbers;
+                if ui
+                    .checkbox(&mut line_numbers, "编辑区行号")
+                    .on_hover_text("在 Markdown 源码编辑器左侧显示源码行号")
+                    .changed()
+                {
+                    self.config.show_editor_line_numbers = line_numbers;
+                    self.persist_view_prefs();
+                }
+            })
+            .0
+            .on_hover_text("源码模式的目录、缩略图与行号");
     }
 }
 

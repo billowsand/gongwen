@@ -254,13 +254,13 @@ impl DocumentStatistics {
             Pages::Ready(count) => format!("{} 页", grouped(*count)),
             Pages::Failed(_) => "页数 —".to_owned(),
         };
-        let label = format!(
-            "中文 {} 字 · 英文 {} 词 · {pages}",
-            grouped(self.counts.chinese),
-            grouped(self.counts.english)
-        );
+        // 标签只留正文汉字数与页数：状态栏右边还要放倍率与源码显示两个入口，
+        // 「英文 X 词」这种细节放进悬停提示，不和它们抢那一行的宽度。
+        let label = format!("{} 字 · {pages}", grouped(self.counts.chinese));
         let mut tip = format!(
-            "统计当前稿件的标题、正文、表格、图题与附件正文。\n中文按汉字计，英文按单词计（连字符和撇号相连算一词）。\n数字 {} 个字符；不计空白、标点、Markdown 标记、图片内文字、自动编号与目录重复文字。\n研究报告公式只计文字说明，不计变量和公式命令。\n页数按单份完整定稿的 Typst 实际排版，含封面、目录和空白页；不含花脸稿与送批随行件。\n页数不自动算：点一下这行才开始排版（长稿排版较慢、占用较多内存），算过的页数留到正文或版式改动为止。",
+            "统计当前稿件的标题、正文、表格、图题与附件正文。\n中文按汉字计 {} 字，英文按单词计 {} 词（连字符和撇号相连算一词）。\n数字 {} 个字符；不计空白、标点、Markdown 标记、图片内文字、自动编号与目录重复文字。\n研究报告公式只计文字说明，不计变量和公式命令。\n页数按单份完整定稿的 Typst 实际排版，含封面、目录和空白页；不含花脸稿与送批随行件。\n页数不自动算：点一下这行才开始排版（长稿排版较慢、占用较多内存），算过的页数留到正文或版式改动为止。",
+            grouped(self.counts.chinese),
+            grouped(self.counts.english),
             grouped(self.counts.digits)
         );
         match &self.pages {
@@ -511,7 +511,7 @@ mod tests {
         let ctx = egui::Context::default();
         statistics.observe(&input, "正文 hello", &config);
         let (label, tip) = statistics.update(&input, "正文 hello", &config, &ctx);
-        assert_eq!(label, "中文 2 字 · 英文 1 词 · 页数未算");
+        assert_eq!(label, "2 字 · 页数未算");
         assert!(tip.contains("点一下这行"));
         assert!(statistics.running.is_none());
 
@@ -519,7 +519,7 @@ mod tests {
         statistics.running = Some((statistics.generation.load(Ordering::Relaxed), receiver));
         sender.send(Err("排版失败".into())).unwrap();
         let (label, tip) = statistics.update(&input, "正文 hello", &config, &ctx);
-        assert_eq!(label, "中文 2 字 · 英文 1 词 · 页数 —");
+        assert_eq!(label, "2 字 · 页数 —");
         assert!(tip.contains("排版失败"));
         statistics.request_pages();
         assert!(matches!(statistics.pages, Pages::Pending));

@@ -76,7 +76,7 @@ fn start_scan(ctx: &egui::Context, key: Option<KeyHandle>) -> Receiver<MediaScan
         {
             Ok(targets) if targets.is_empty() => scan
                 .notices
-                .push("未检测到已认证的 IS903。请在「设置 → 导出格式」认证设备。".into()),
+                .push("未检测到已认证的 IS903。请在「设置 → 导出」认证设备。".into()),
             Ok(targets) => scan.devices.extend(targets.into_iter().map(Medium::Is903)),
             Err(error) => scan.notices.push(format!("IS903：{error:#}")),
         }

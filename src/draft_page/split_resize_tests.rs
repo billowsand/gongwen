@@ -1122,7 +1122,7 @@ fn approaching_the_right_edge_lays_out_a_steady_outline() {
     }
 }
 
-/// 「视图 → 导航」关掉之后，右缘就该彻底安静：刻度带一层都不建，
+/// 状态栏里关掉「导航刻度」之后，右缘就该彻底安静：刻度带一层都不建，
 /// 在同一位置点下去也不许有任何跳转。关不掉的开关等于没有这个开关。
 #[test]
 fn turning_the_navigator_off_keeps_the_right_edge_quiet() {

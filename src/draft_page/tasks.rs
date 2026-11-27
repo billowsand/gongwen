@@ -3,7 +3,7 @@
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::tasks`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::app::{DocJob, DraftAction, WorkerResult, accent, export_and_compile, reveal_in_os};
+use crate::app::{DocJob, DraftAction, WorkerResult, export_and_compile, reveal_in_os};
 use crate::doc_import;
 use crate::draft_page::{DocKey, DraftPage, ExportKind, FileAction};
 use crate::export;
@@ -11,7 +11,6 @@ use crate::images;
 use crate::models::{DraftInput, ExportSelection, ManuscriptStatus, ReviewNote};
 #[cfg(feature = "ai-workbench")]
 use crate::revise_model;
-use crate::theme;
 use crate::validator;
 #[cfg(feature = "ai-workbench")]
 use crate::{models::GeneratedDraft, prompt};
@@ -151,11 +150,6 @@ impl DraftPage<'_> {
         (self.doc.key, self.doc.job_seq)
     }
 
-    /// 以右侧编辑框的当前内容为准导出，可以反复调用；这是“改稿—导出”的闭环出口。
-    pub(crate) fn start_export_current(&mut self) {
-        self.start_export_with(self.config.export.clone());
-    }
-
     /// 「打印…」：更新一份 PDF，导完由外壳打开并弹打印对话框。
     /// 走的就是 [`Self::start_export_with`]，不另写一条导出路径。
     pub(crate) fn start_export_for_print(&mut self) {
@@ -267,7 +261,7 @@ impl DraftPage<'_> {
             return;
         }
         if !selection.any() {
-            *self.status = "请至少勾选一种导出格式。".into();
+            *self.status = "这一次没有要导出的格式。".into();
             return;
         }
         // 这里没有校验闸门，是想清楚了的：缺主送单位、名称不规范这类问题决定的是
@@ -596,85 +590,6 @@ impl DraftPage<'_> {
         crate::app::widgets::open_output_dir(&self.config.output_dir, self.status);
     }
 
-    /// PDF 单击直接看内存预览，下拉是成品命令。Word / Typst 包仍单击导出。
-    pub(crate) fn export_open_buttons(&mut self, ui: &mut egui::Ui) {
-        // 导出目录里同一文稿的文件夹都以“去掉时间戳的导出主干”为前缀，
-        // 用它过滤出属于当前文稿的目录，避免打开别的文稿的成品。
-        let stem = export::document_stem_prefix(
-            &self.doc.draft,
-            &export::document_title(&self.doc.draft, &self.doc.generated_markdown),
-        );
-        self.export_links
-            .refresh(&self.config.output_dir, Some(&stem));
-        let ready = !self.doc.busy && !self.doc.generated_markdown.trim().is_empty();
-        let mut action = None;
-        let mut export = None;
-        for kind in ExportKind::ALL {
-            let path = self.export_links.path(kind).map(Path::to_path_buf);
-            if kind == ExportKind::Pdf {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    if ui
-                        .add_enabled(ready, theme::icon_text_button(kind.icon(), "PDF 预览"))
-                        .on_hover_text("在应用内查看当前稿件的实际分页，无需导出")
-                        .clicked()
-                    {
-                        self.actions.push(DraftAction::PreviewPdf(self.doc.key));
-                    }
-                    let menu = theme::icon_button_enabled(
-                        ui,
-                        ready || path.is_some(),
-                        theme::Icon::ChevronDown,
-                        "PDF 导出与文件操作",
-                    );
-                    egui::Popup::menu(&menu).show(|ui| {
-                        if ui
-                            .add_enabled(
-                                ready,
-                                theme::menu_item(theme::Icon::FileDown, "导出 PDF 并打开"),
-                            )
-                            .clicked()
-                        {
-                            export = Some(kind);
-                            ui.close();
-                        }
-                        action = export_file_menu(ui, kind, path.as_deref(), ready);
-                    });
-                });
-                continue;
-            }
-            let label = kind.label();
-            let tint = if ready { accent() } else { theme::text_muted() };
-            let response = ui.add_enabled(
-                ready,
-                egui::Button::image(kind.icon().image_sized(16.0).tint(tint))
-                    .image_tint_follows_text_color(false)
-                    .min_size(egui::vec2(34.0, 26.0))
-                    .corner_radius(theme::chrome_radius(6)),
-            );
-            let opens = match kind {
-                ExportKind::Typst => "在文件管理器里定位",
-                _ => "打开",
-            };
-            let tip = format!("按当前审校稿导出 {label} 并{opens}，不改设置里勾好的常用格式");
-            let response = response
-                .on_hover_text(tip.as_str())
-                .on_disabled_hover_text(tip.as_str());
-            if response.clicked() {
-                export = Some(kind);
-            }
-            response.context_menu(|ui| {
-                action = export_file_menu(ui, kind, path.as_deref(), ready);
-            });
-        }
-        if let Some(action) = action {
-            self.run_file_action(action);
-        }
-        if let Some(kind) = export {
-            self.start_export_and_open(kind);
-        }
-    }
-
     pub(crate) fn run_file_action(&mut self, action: FileAction) {
         let (result, path, verb) = match action {
             FileAction::Reveal(path) => (reveal_in_os(&path), path, "定位"),
@@ -855,36 +770,6 @@ impl DraftPage<'_> {
             self.open_result_drawer();
         }
     }
-}
-
-fn export_file_menu(
-    ui: &mut egui::Ui,
-    kind: ExportKind,
-    path: Option<&Path>,
-    ready: bool,
-) -> Option<FileAction> {
-    let copy = ui.add_enabled(
-        path.is_some(),
-        theme::menu_item(theme::Icon::Copy, "复制文件"),
-    );
-    let save = ui.add_enabled(ready, theme::menu_item(theme::Icon::FileDown, "导出到…"));
-    let reveal = ui.add_enabled(
-        path.is_some(),
-        theme::menu_item(theme::Icon::Reveal, "在文件管理器中定位"),
-    );
-    let action = if copy.clicked() {
-        path.map(|path| FileAction::CopyToClipboard(path.to_owned()))
-    } else if save.clicked() {
-        Some(FileAction::SaveAs(kind))
-    } else if reveal.clicked() {
-        path.map(|path| FileAction::Reveal(path.to_owned()))
-    } else {
-        None
-    };
-    if action.is_some() {
-        ui.close();
-    }
-    action
 }
 
 #[cfg(test)]

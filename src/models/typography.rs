@@ -351,7 +351,11 @@ impl EditorFontPreset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RibbonTab {
     /// 常用：存盘、版本、查找、AI、校验。
+    ///
+    /// 「视图」分区已退役（显示开关改在状态栏右端与设置页），旧配置里的
+    /// `"View"` 读回时落到这里；不加这条别名，整份配置会因反序列化失败被重置。
     #[default]
+    #[serde(alias = "View")]
     Home,
     /// 往光标处插入表格、图片、公文构件、词库词条与符号。
     Insert,
@@ -363,8 +367,6 @@ pub enum RibbonTab {
     Clean,
     /// 校验、版本比对、查找、字数。
     Review,
-    /// 显示方式、缩放与各个面板的开关。
-    View,
     /// 导出与打开成品。
     Output,
 }
@@ -372,14 +374,13 @@ pub enum RibbonTab {
 impl RibbonTab {
     /// 分区卡顺序即屏幕上从左到右的顺序。「研报」紧挨着「插入」：两者干的是
     /// 同一类活（往稿子里放构件），只是一个通用、一个只有研究报告用得上。
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::Home,
         Self::Insert,
         Self::Research,
         Self::Format,
         Self::Clean,
         Self::Review,
-        Self::View,
         Self::Output,
     ];
 
@@ -397,7 +398,6 @@ impl RibbonTab {
             Self::Format => "格式",
             Self::Clean => "清洗",
             Self::Review => "审校",
-            Self::View => "视图",
             Self::Output => "输出",
         }
     }
@@ -410,7 +410,6 @@ impl RibbonTab {
             Self::Format => "标题层级、加粗、项目符号，以及引号与空行的规范化",
             Self::Clean => "把不合公文 Markdown 标准的写法改成合规写法：标题、列表、表格、空格标点",
             Self::Review => "重新校验、版本对照、查找替换、字数统计",
-            Self::View => "显示方式、预览缩放、各个面板的开关",
             Self::Output => "按格式导出、打开输出目录与最近一次的成品",
         }
     }

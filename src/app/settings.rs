@@ -8,7 +8,7 @@
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
 use super::file_dialog::FileDialogSpec;
-use crate::app::{GongwenApp, warn};
+use crate::app::GongwenApp;
 #[cfg(feature = "ai-workbench")]
 use crate::models::ProxyMode;
 use crate::models::{
@@ -67,7 +67,7 @@ pub(crate) enum SettingsSection {
     Font,
     /// 标题与列表编号样式。
     Numbering,
-    /// 导出格式。
+    /// 导出。
     Export,
     /// 加密传输单（《传发任务单》）的默认填写内容。
     Transmit,
@@ -131,7 +131,7 @@ impl SettingsSection {
             SettingsSection::Theme => "界面主题",
             SettingsSection::Font => "字体",
             SettingsSection::Numbering => "标题与列表编号",
-            SettingsSection::Export => "导出格式",
+            SettingsSection::Export => "导出",
             SettingsSection::Transmit => "加密传输单",
             SettingsSection::Persistence => "保存与现场",
             SettingsSection::Backup => "数据备份",
@@ -183,7 +183,7 @@ impl SettingsSection {
                  保证预览所见即导出所得。"
             }
             SettingsSection::Export => {
-                "这些格式适用于所有稿件。起草页按所选格式导出。同一稿件使用固定目录，同名文件直接替换。"
+                "成品的随行件、加密与存放。起草页点哪种格式就直接导出那一种；同一稿件使用固定目录，同名文件直接替换。"
             }
             SettingsSection::Transmit => {
                 "公函导出时随《传发任务单》一同印出的内容：题名（传输任务，留空按密级自动带）、\
@@ -1614,6 +1614,7 @@ impl GongwenApp {
              点一下号码把光标带到那一行。行号只在屏幕上，不会写进稿件或导出文件",
         );
         ui.add_space(4.0);
+        ui.weak("这几项也能从起草页状态栏右端的「源码显示」与倍率入口随时切换，改哪边都立即记住。");
         ui.weak("编辑器的字体与字号在「字体」一节设置。");
     }
 
@@ -1749,31 +1750,6 @@ impl GongwenApp {
     }
 
     fn export_section_ui(&mut self, ui: &mut egui::Ui) {
-        // Word 导出尚未达到 PDF 的成熟度，入口保留但暂不允许启用。
-        self.config.export.docx = false;
-        setting_row(
-            ui,
-            "格式",
-            Some(SettingsSection::Export.description()),
-            |ui| {
-                ui.checkbox(&mut self.config.export.markdown, "Markdown");
-                ui.add_enabled(
-                    false,
-                    egui::Checkbox::new(&mut self.config.export.docx, "Word"),
-                )
-                .on_disabled_hover_text("Word 导出仍在完善，当前请使用 PDF");
-                ui.checkbox(&mut self.config.export.pdf, "PDF");
-                ui.checkbox(&mut self.config.export.typst, "Typst 包")
-                .on_hover_text(
-                    "模板、数据与插图打成一个 zip，装有仿宋/楷体/黑体/宋体的机器可用 Typst 命令行编译",
-                );
-            },
-        );
-        if !self.config.export.any() {
-            setting_continuation(ui, |ui| {
-                ui.colored_label(warn(), "未勾选任何导出格式，起草页的导出按钮不会产生文件。");
-            });
-        }
         ui.add_space(6.0);
         ui.checkbox(
             &mut self.config.export.receipt,
@@ -1790,12 +1766,6 @@ impl GongwenApp {
         .on_hover_text(
             "另附稿件要素所引用的单位、人员及必要的上级单位。词库可能包含人员电话和简介。",
         );
-        #[cfg(feature = "ai-workbench")]
-        ui.checkbox(
-            &mut self.config.auto_export,
-            "AI 起草或优化完成后自动导出一次",
-        )
-        .on_hover_text("同一稿件使用固定目录，同名文件直接替换。");
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(8.0);
@@ -1920,7 +1890,9 @@ impl GongwenApp {
         });
 
         setting_continuation(ui, |ui| {
-            ui.weak("这些内容对所有公函的传发任务单生效；单据本身在「导出格式」里勾选导出。");
+            ui.weak(
+                "这些内容对所有公函的传发任务单生效；单据本身在「设置 → 导出」里勾选随文生成。",
+            );
         });
     }
 

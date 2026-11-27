@@ -205,9 +205,14 @@ fn draft_pdf_ribbon_click_opens_preview_instead_of_export() {
     harness.get_by_label("返回稿件").click();
     harness.step();
     harness.step();
-    harness.get_by_label("PDF 导出与文件操作").click();
-    harness.step();
-    harness.step();
-    assert!(harness.query_by_label("导出 PDF 并打开").is_some());
+    // 输出分区不再有统一导出与格式勾选：点哪种格式就导出哪一种。
+    for label in ["PDF", "Word", "Markdown", "Typst 包"] {
+        assert!(
+            harness.query_by_label(label).is_some(),
+            "缺少格式按钮：{label}"
+        );
+    }
+    assert!(harness.query_by_label("成品").is_none());
+    assert!(harness.query_by_label("导出").is_none());
     storage::set_test_config_dir(None);
 }

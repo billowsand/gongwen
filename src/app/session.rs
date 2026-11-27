@@ -735,6 +735,17 @@ impl GongwenApp {
             self.save_to_manuscript_library_with_ctx(ctx);
         }
 
+        // 主快捷键+P：打印。系统惯例，哪个模式都能用，不必先切到「输出」分区；
+        // 没有打印服务时不消费按键，留给系统。
+        let print = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::P);
+        if self.showing_doc()
+            && self.print_dialog.is_none()
+            && crate::print::printing_available_cached()
+            && ctx.input_mut(|input| input.consume_shortcut(&print))
+        {
+            self.draft_page().start_export_for_print();
+        }
+
         // 主快捷键+B 与功能区「格式 → 加粗」是同一件事。这里必须确认焦点
         // 确实在审校稿编辑框上，避免焦点在要素表单或查找框时改到正文。
         let bold = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::B);

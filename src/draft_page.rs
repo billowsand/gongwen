@@ -116,7 +116,7 @@ impl ExportKind {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Pdf => "PDF",
-            Self::Word => "WORD",
+            Self::Word => "Word",
             Self::Typst => "Typst 包",
         }
     }
@@ -433,8 +433,9 @@ pub(crate) struct DraftSession {
     /// 点了「打印…」：这次导出结束后打开 PDF 并弹打印对话框。导出失败、
     /// 排版失败或没导出 PDF 时由外壳清掉，不打印。
     pub(crate) print_after_export: bool,
-    /// 点了「输出」分区的 PDF / Word / Typst 包图标：这次导出结束后打开这份成品
-    /// （Typst 包在文件管理器里定位）。导出失败或没出这种成品时由外壳清掉。
+    /// 点了「输出」分区的某一种格式按钮：这次导出结束后打开这份成品
+    /// （PDF 在应用内、Word 交给系统程序、Typst 包在文件管理器里定位）。
+    /// 导出失败或没出这种成品时由外壳清掉。
     pub(crate) open_after_export: Option<ExportKind>,
     /// 当前编辑内容来自的版本（起草页横幅）。
     pub(crate) loaded_version: Option<LoadedVersion>,

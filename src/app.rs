@@ -1635,6 +1635,45 @@ mod tests {
         }
     }
 
+    /// 「视图」分区退役后，显示入口搬到状态栏右端：分栏两侧都能调，Markdown 模式
+    /// 只留源码显示、不出现倍率。点开的菜单要真能改到配置（走一次存盘）。
+    #[test]
+    fn status_bar_offers_display_entries_for_the_current_mode() {
+        use crate::draft_page::PreviewMode;
+        use egui_kittest::kittest::Queryable;
+
+        let dir = tempfile::tempdir().unwrap();
+        crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::storage::set_test_config_dir(None);
+            }
+        }
+        let _reset = Reset;
+
+        let mut app = management_samples::fixture();
+        app.docs[0].generated_markdown = "# 标题\n\n正文\n".into();
+        app.docs[0].preview_mode = PreviewMode::Split;
+        let mut harness = crate::test_support::harness_ui_state(|ui, app| app.status_bar(ui), app);
+        harness.set_size(egui::vec2(1200.0, 500.0));
+        harness.run();
+
+        // 分栏：倍率常显，点开能选档位、也能切纸面显示项。
+        harness.get_by_label("100%").click();
+        harness.run();
+        assert!(harness.query_by_label_contains("适应宽度").is_some());
+        assert!(harness.query_by_label_contains("纸面行号").is_some());
+        harness.get_by_label("导航刻度").click();
+        harness.run();
+        assert!(!harness.state().config.show_preview_navigator);
+
+        // Markdown 模式没有纸面，倍率入口应当消失。
+        harness.state_mut().docs[0].preview_mode = PreviewMode::Source;
+        harness.run();
+        assert!(harness.query_by_label_contains("100%").is_none());
+    }
+
     /// 构造一个单位候选池：`(取值, 上级)`，全称按上级递归拼接。
     fn pool(units: &[(&str, &str)]) -> Vec<SelectOption> {
         fn full(units: &[(&str, &str)], value: &str) -> String {

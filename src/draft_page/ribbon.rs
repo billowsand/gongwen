@@ -1,5 +1,6 @@
-//! 功能区（Ribbon）各分区：开始/插入/研报/格式/清洗/审校/视图/输出。
-//! 「研报」只在研究报告下出现，其余各分区所有文种都在。
+//! 功能区（Ribbon）各分区：开始/插入/研报/格式/清洗/审校/输出。
+//! 「研报」只在研究报告下出现，其余各分区所有文种都在；显示开关不在功能区，
+//! 在状态栏右端与设置页（原「视图」分区已退役）。
 //!
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::ribbon`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
@@ -126,7 +127,6 @@ impl DraftPage<'_> {
                             RibbonTab::Format => self.ribbon_format(ui),
                             RibbonTab::Clean => self.ribbon_clean(ui),
                             RibbonTab::Review => self.ribbon_review(ui),
-                            RibbonTab::View => self.ribbon_view(ui),
                             RibbonTab::Output => self.ribbon_output(ui),
                         });
                     });
@@ -140,7 +140,7 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 分区卡那一行。左端常驻文档要素填报区的开关，右端常驻五个视图模式和
+    /// 分区卡那一行。左端常驻文档要素填报区的开关，右端常驻四个视图模式和
     /// 收起功能区的箭头——这三样都不属于任何一个分区，切分区卡时必须一直在。
     /// 右侧按钮先贴着右缘占好位置，左侧分区卡条拿剩余宽度；窗口窄下来时分区卡条
     /// 横向滚动（与第二行 ribbon_items 一致），不会盖到右侧按钮上。
@@ -217,34 +217,6 @@ impl DraftPage<'_> {
                             self.switch_preview_mode(mode);
                         }
                     }
-                    if self.doc.preview_mode == PreviewMode::Source {
-                        toolbar_separator(ui);
-                        if theme::view_icon_button(
-                            ui,
-                            self.config.show_source_minimap,
-                            theme::Icon::Rows,
-                            "Markdown 缩略图",
-                        )
-                        .on_hover_text("显示或收起源码右侧的全文缩略图")
-                        .clicked()
-                        {
-                            self.config.show_source_minimap = !self.config.show_source_minimap;
-                            self.persist_ribbon();
-                        }
-                        if theme::view_icon_button(
-                            ui,
-                            self.config.show_source_outline,
-                            theme::Icon::List,
-                            "Markdown 目录",
-                        )
-                        .on_hover_text("显示或收起源码左侧的标题目录")
-                        .clicked()
-                        {
-                            self.config.show_source_outline = !self.config.show_source_outline;
-                            self.persist_ribbon();
-                        }
-                    }
-
                     // 分区卡的悬停底色要与相邻的选中轮廓留出清晰间隔。
                     ui.spacing_mut().item_spacing.x = if compact { 2.0 } else { 10.0 };
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -1392,169 +1364,6 @@ impl DraftPage<'_> {
             .frame(false),
         )
         .on_hover_text("正文字数：不含 Markdown 标记、表格竖线与图片引用");
-    }
-
-    /// 视图：显示方式、缩放，以及各个面板的开关。
-    pub(crate) fn ribbon_view(&mut self, ui: &mut egui::Ui) {
-        for (mode, icon, label, tip) in [
-            (
-                PreviewMode::Source,
-                theme::Icon::PencilLine,
-                "Markdown",
-                "带语法高亮的源码，导出以此为准",
-            ),
-            (
-                PreviewMode::Rendered,
-                theme::Icon::Eye,
-                "公文预览",
-                "按导出后的字体与行距排版",
-            ),
-            (
-                PreviewMode::Split,
-                theme::Icon::Compare,
-                "对照",
-                "左边改 Markdown，右边看公文版式",
-            ),
-            (
-                PreviewMode::VersionDiff,
-                theme::Icon::GitCommit,
-                "版本对照",
-                "最新提交版本与当前修订逐字比较",
-            ),
-        ] {
-            if ui
-                .add(theme::icon_text_button(icon, label).selected(self.doc.preview_mode == mode))
-                .on_hover_text(tip)
-                .clicked()
-            {
-                self.switch_preview_mode(mode);
-            }
-        }
-        toolbar_separator(ui);
-
-        // 缩放只作用于版式预览；源码与版本对照按界面字号显示。
-        let zoomable = matches!(
-            self.doc.preview_mode,
-            PreviewMode::Rendered | PreviewMode::Split
-        );
-        ui.add_enabled_ui(zoomable, |ui| self.zoom_controls(ui));
-        toolbar_separator(ui);
-
-        let source = self.doc.preview_mode == PreviewMode::Source;
-        if ui
-            .add_enabled(
-                source,
-                theme::icon_text_button(theme::Icon::List, "目录")
-                    .selected(self.config.show_source_outline),
-            )
-            .on_hover_text("Markdown 源码左侧的标题目录，点标题跳转")
-            .clicked()
-        {
-            self.config.show_source_outline = !self.config.show_source_outline;
-            self.persist_ribbon();
-        }
-        if ui
-            .add_enabled(
-                source,
-                theme::icon_text_button(theme::Icon::Rows, "缩略图")
-                    .selected(self.config.show_source_minimap),
-            )
-            .on_hover_text("Markdown 源码右侧的缩略图，滚轮浏览，点击或拖动定位")
-            .clicked()
-        {
-            self.config.show_source_minimap = !self.config.show_source_minimap;
-            self.persist_ribbon();
-        }
-        toolbar_separator(ui);
-
-        let form_collapsed = self.doc.form_collapsed;
-        if ui
-            .add(
-                theme::icon_text_button(theme::Icon::PanelOpen, "文档要素")
-                    .selected(!form_collapsed),
-            )
-            .on_hover_text("开关左侧的文档要素填报区")
-            .clicked()
-        {
-            self.doc.form_collapsed = !form_collapsed;
-        }
-        let drawer_open = self.doc.result_drawer_open;
-        if ui
-            .add(
-                theme::icon_text_button(theme::Icon::TriangleAlert, "校验结果")
-                    .selected(drawer_open),
-            )
-            .on_hover_text("开关右侧的审校提示抽屉")
-            .clicked()
-        {
-            self.doc.result_drawer_open = !drawer_open;
-        }
-        let timeline_active = self.doc.preview_mode == PreviewMode::VersionDiff
-            && self.doc.draft_diff.timeline.expanded;
-        if ui
-            .add_enabled(
-                self.doc.manuscript_id.is_some(),
-                theme::icon_text_button(theme::Icon::History, "版本历史").selected(timeline_active),
-            )
-            .on_hover_text("进入版本对照模式并展开左侧的版本时间轴")
-            .clicked()
-        {
-            self.switch_preview_mode(PreviewMode::VersionDiff);
-            self.doc.draft_diff.timeline.expanded = true;
-        }
-        // 两处行号各管一边，标签必须各自说清是哪一边：编辑区的号数的是源码行，
-        // 纸面的号数的是纸上排出来的行，两个数原本就对不上，名字再一样就会
-        // 出现「你说的第几行」这种问题。
-        let line_numbers = self.config.show_editor_line_numbers;
-        if ui
-            .add(
-                theme::icon_text_button(theme::Icon::ListOrdered, "编辑区行号")
-                    .selected(line_numbers),
-            )
-            .on_hover_text("在 Markdown 源码编辑器左侧显示源码行号")
-            .clicked()
-        {
-            self.config.show_editor_line_numbers = !line_numbers;
-            self.persist_ribbon();
-        }
-        // 纸面行号只画在公文版式上，别的模式里按钮灰掉，免得点了没反应。
-        let papered = matches!(
-            self.doc.preview_mode,
-            PreviewMode::Rendered | PreviewMode::Split
-        );
-        let paper_lines = self.config.show_preview_line_numbers;
-        if ui
-            .add_enabled(
-                papered,
-                theme::icon_text_button(theme::Icon::Hash, "纸面行号").selected(paper_lines),
-            )
-            .on_hover_text(
-                "投屏对稿用：公文预览的左页边逐行标号，点一下号码把光标带到那一行；\
-                 只标正文这些改得动的行，不写进导出文件",
-            )
-            .clicked()
-        {
-            self.config.show_preview_line_numbers = !paper_lines;
-            self.persist_ribbon();
-        }
-        // 导航刻度只在这两种模式下画得出来，别的模式里按钮灰掉——
-        // 否则点了没反应，用户只能靠猜。
-        let navigable = matches!(
-            self.doc.preview_mode,
-            PreviewMode::Rendered | PreviewMode::Split
-        );
-        let navigator = self.config.show_preview_navigator;
-        if ui
-            .add_enabled(
-                navigable,
-                theme::icon_text_button(theme::Icon::List, "导航").selected(navigator),
-            )
-            .on_hover_text("公文预览与对照模式的右缘显示导航刻度；鼠标靠近右缘展开标题列表")
-            .clicked()
-        {
-            self.config.show_preview_navigator = !navigator;
-            self.persist_ribbon();
-        }
     }
 }
 

@@ -118,7 +118,7 @@ impl Protection {
         };
         let policy = ExportPolicy::load()?;
         if policy.password.is_empty() {
-            anyhow::bail!("请先到「设置 → 导出格式」单独设置导出密码");
+            anyhow::bail!("请先到「设置 → 导出」单独设置导出密码");
         }
         let password = Zeroizing::new(policy.password.clone());
         validate_password(&password)?;

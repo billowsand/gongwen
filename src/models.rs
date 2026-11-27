@@ -580,6 +580,19 @@ mod tests {
         }
     }
 
+    /// 「视图」分区退役后，旧配置里的 `"View"` 仍要能读：`RibbonTab` 读不出值时
+    /// `storage::load` 会把整份配置当损坏文件重置，主题、模型服务商、词库引用一并丢。
+    #[test]
+    fn retired_view_ribbon_tab_reads_back_as_home() {
+        use super::RibbonTab;
+        let tab: RibbonTab = serde_json::from_str("\"View\"").unwrap();
+        assert_eq!(tab, RibbonTab::Home);
+        // 现存分区照常往返，别名不能把其它值也吞掉。
+        let tab: RibbonTab = serde_json::from_str("\"Output\"").unwrap();
+        assert_eq!(tab, RibbonTab::Output);
+        assert_eq!(serde_json::to_string(&RibbonTab::Home).unwrap(), "\"Home\"");
+    }
+
     /// 密级是所有文稿类型的必要填报项目：新模板默认“机密、20年”。
     #[test]
     fn profile_defaults_to_confidential_20_years() {
