@@ -993,7 +993,7 @@ impl GongwenApp {
         let follow = self.config.theme_follows_system;
         if ui
             .add(theme::menu_selectable_item(follow, "明暗跟随系统"))
-            .on_hover_text("随桌面深浅模式在 Claude 奶油与复古暗之间切换；点下面的主题改为手动选择")
+            .on_hover_text("随桌面深浅模式在月白与北欧之间切换；点下面的主题改为手动选择")
             .clicked()
         {
             self.apply_theme_follow_system(ui.ctx(), !follow);

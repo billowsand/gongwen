@@ -1106,13 +1106,13 @@ mod tests {
     fn expanded_candidates_samples() {
         for (name, theme_name, percent, density) in [
             ("dark", crate::models::ThemeName::GruvboxDark, 100, 2.0),
-            ("light", crate::models::ThemeName::Claude, 100, 2.0),
+            ("light", crate::models::ThemeName::MoonWhite, 100, 2.0),
             ("font125", crate::models::ThemeName::GruvboxDark, 125, 2.0),
             ("font150", crate::models::ThemeName::GruvboxDark, 150, 2.0),
             ("large", crate::models::ThemeName::GruvboxDark, 200, 2.0),
-            ("dpi100", crate::models::ThemeName::Claude, 100, 1.0),
-            ("dpi125", crate::models::ThemeName::Claude, 100, 1.25),
-            ("dpi150", crate::models::ThemeName::Claude, 100, 1.5),
+            ("dpi100", crate::models::ThemeName::MoonWhite, 100, 1.0),
+            ("dpi125", crate::models::ThemeName::MoonWhite, 100, 1.25),
+            ("dpi150", crate::models::ThemeName::MoonWhite, 100, 1.5),
         ] {
             theme::set_current(theme_name);
             let ctx = egui::Context::default();

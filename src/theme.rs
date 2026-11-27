@@ -1,7 +1,7 @@
 //! 主题化的界面配色与 egui 全局样式。
 //!
-//! 默认取色思路与 Claude 一致：奶油色纸面打底、黏土橙（clay）作唯一强调色、
-//! 暖灰而非纯黑的文字。各功能域已拆分到 `theme/` 子模块（色板、外壳、图标、
+//! 默认取色以月白冷底、墨蓝文字与青瓷强调构成清冷的东方色序，朱砂只承担
+//! 风险与待核实提示。各功能域已拆分到 `theme/` 子模块（色板、外壳、图标、
 //! 控件、字体、全局样式），这里保留字号/动效常量、`paper` 与 `md` 取色模块及测试。
 
 mod mdex;
@@ -102,16 +102,16 @@ pub mod anim {
 // ── 主题结构 ────────────────────────────────────────────────────────────────
 
 /// 当前生效的主题。egui 的 UI 循环单线程读取，切换主题时短暂写锁一次。
-static CURRENT: RwLock<Theme> = RwLock::new(Theme::claude());
+static CURRENT: RwLock<Theme> = RwLock::new(Theme::moon_white());
 
 /// 当前的纸面显示模式，与 [`CURRENT`] 同样只在切换时写一次。
 static CURRENT_PAPER: RwLock<PaperMode> = RwLock::new(PaperMode::Follow);
 
-/// 跟随系统明暗时选用的配色：浅色系统用默认的 Claude 奶油，深色系统用
-/// 「复古暗」（默认主题的深色亲戚）。这里只决定配色，不改用户保存的手动主题。
+/// 跟随系统明暗时选用的配色：浅色系统用默认的「月白」，深色系统用冷灰蓝
+/// 「北欧」。这里只决定配色，不改用户保存的手动主题。
 pub(crate) fn follow_system_theme(dark: bool) -> ThemeName {
     if dark {
-        ThemeName::GruvboxDark
+        ThemeName::Nord
     } else {
         ThemeName::default()
     }
@@ -378,7 +378,7 @@ pub mod paper {
         /// 跟随主题时，通用纸面与专属纸面使用各自确认过的配色。
         #[test]
         fn follow_mode_maps_themes_to_paper_families() {
-            assert_follow(&[ThemeName::Claude], ORIGINAL_SHEET);
+            assert_follow(&[ThemeName::MoonWhite], ORIGINAL_SHEET);
             assert_follow(&[ThemeName::Mdex], PARCHMENT_SHEET);
             assert_follow(&[ThemeName::Smartisan], SMARTISAN_SHEET);
             assert_follow(&[ThemeName::MdexDark], GREEN_INK_SHEET);
@@ -399,8 +399,8 @@ pub mod paper {
         /// 显式深色纸面仍按主题冷暖分组，不退回一套无差别的中性黑纸。
         #[test]
         fn forced_dark_paper_keeps_themes_cool_or_warm() {
-            let cool = [ThemeName::Nord];
-            let warm = [ThemeName::Claude, ThemeName::Mdex, ThemeName::GruvboxDark];
+            let cool = [ThemeName::MoonWhite, ThemeName::Nord];
+            let warm = [ThemeName::Mdex, ThemeName::GruvboxDark];
             for name in cool {
                 assert_eq!(
                     sheet_for(by_name(name), PaperMode::Dark),
@@ -767,13 +767,36 @@ mod tests {
         }
     }
 
-    /// 跟随系统时只在明暗上对应：浅色落到默认奶油，深色落到复古暗。
+    /// 实底强调按钮的三种状态都要保证正文级对比度。
+    ///
+    /// 这套断言是为北欧补的：强调色是浅蓝，`on_accent` 却还是白色，常规态只有
+    /// 2.0:1、悬停 1.68:1；它成为深色默认后，主按钮几乎读不出来。复古暗的亮橙
+    /// 实底也有同类问题。任何固定主题都不该只在「选中色」上过得去。
+    #[test]
+    fn every_preset_keeps_accent_text_readable_in_all_states() {
+        for name in ThemeName::ALL {
+            let theme = by_name(name);
+            for (state, background) in [
+                ("常规", theme.accent),
+                ("悬停", theme.accent_hover),
+                ("按下", theme.accent_active),
+            ] {
+                let ratio = contrast(theme.on_accent, background);
+                assert!(
+                    ratio >= 4.5,
+                    "{name:?} 的{state}按钮字色对比度只有 {ratio:.2}，低于 4.5"
+                );
+            }
+        }
+    }
+
+    /// 跟随系统时只在明暗上对应：浅色落到默认月白，深色落到北欧。
     #[test]
     fn follow_system_theme_picks_a_palette_of_the_matching_brightness() {
         let light = super::follow_system_theme(false);
         let dark = super::follow_system_theme(true);
         assert_eq!(light, ThemeName::default());
-        assert_eq!(dark, ThemeName::GruvboxDark);
+        assert_eq!(dark, ThemeName::Nord);
         assert!(!by_name(light).dark, "浅色系统不该选中深色主题");
         assert!(by_name(dark).dark, "深色系统不该选中浅色主题");
     }

@@ -24,12 +24,12 @@ pub(crate) const MUTED_MIN: f32 = 3.0;
 #[cfg(test)]
 pub(crate) const ON_ACCENT_MIN: f32 = 4.5;
 
-/// 主题缺某个色相键时的后备色，取自默认的 Claude 奶油。
-const FALLBACK_RED: Color32 = Color32::from_rgb(0xB4, 0x46, 0x3C);
-const FALLBACK_YELLOW: Color32 = Color32::from_rgb(0xA1, 0x63, 0x1C);
-const FALLBACK_GREEN: Color32 = Color32::from_rgb(0x3C, 0x74, 0x53);
-const FALLBACK_BLUE: Color32 = Color32::from_rgb(0x44, 0x66, 0x8A);
-const FALLBACK_MAGENTA: Color32 = Color32::from_rgb(0x6B, 0x57, 0x8A);
+/// 主题缺某个色相键时的后备色，与默认的月白保持同一冷色体系。
+const FALLBACK_RED: Color32 = Color32::from_rgb(0xA1, 0x32, 0x2A);
+const FALLBACK_YELLOW: Color32 = Color32::from_rgb(0x86, 0x64, 0x14);
+const FALLBACK_GREEN: Color32 = Color32::from_rgb(0x23, 0x71, 0x51);
+const FALLBACK_BLUE: Color32 = Color32::from_rgb(0x31, 0x5D, 0x9A);
+const FALLBACK_MAGENTA: Color32 = Color32::from_rgb(0x6C, 0x3A, 0x86);
 
 /// 换算一份 Omarchy 配色。
 pub(crate) fn derive(colors: &Colors) -> Theme {

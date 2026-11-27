@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成系统应用图标、主题图标和稿件包图标。"""
+"""生成系统应用图标、稿件包图标与标题栏品牌标。"""
 
 from __future__ import annotations
 
@@ -27,28 +27,8 @@ LABEL_FONTS = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
 )
-THEMES = {
-    "claude": {
-        "tile": ("#F7F6F3", "#DEDDD9"),
-        "ink": ("#292928", "#101010"),
-    },
-    "nord": {
-        "tile": ("#EEF2F7", "#CCD5E2"),
-        "ink": ("#344354", "#161E2B"),
-    },
-    "gruvbox-dark": {
-        "tile": ("#F4EBDA", "#DBCCB2"),
-        "ink": ("#40352B", "#201915"),
-    },
-    "mdex": {
-        "tile": ("#F8F7EF", "#DDE2D2"),
-        "ink": ("#29352C", "#111A14"),
-    },
-    "mdex-dark": {
-        "tile": ("#343B35", "#181D19"),
-        "ink": ("#F2F2E9", "#C6CEBA"),
-    },
-}
+# 稿件包文档图标色带使用的默认主题墨色（月白：青瓷强调 → 墨蓝文字）。
+DOC_ICON_INK = ("#00747A", "#102D3A")
 
 # 轮廓坐标以 1024 为画布。COUNTER 是「文」字两笔交汇处留下的墨面。
 PAGE = (
@@ -90,14 +70,6 @@ COUNTER = (
     ("L", 569, 491),
     ("C", 555, 524, 534, 554, 506, 580),
     ("C", 477, 554, 456, 524, 442, 491),
-)
-FOLD = (
-    ("M", 608, 205),
-    ("C", 615, 208, 620, 211, 624, 215),
-    ("L", 747, 333),
-    ("C", 755, 341, 760, 350, 763, 360),
-    ("L", 652, 360),
-    ("C", 626, 360, 608, 342, 608, 316),
 )
 
 
@@ -188,25 +160,6 @@ def writing_mask(size: int, *, cutout: bool) -> Image.Image:
     return mask.resize((size, size), Image.Resampling.LANCZOS)
 
 
-def render_icon(tile_colors: tuple[str, str], ink_colors: tuple[str, str]) -> Image.Image:
-    size = 1024
-    tile = vertical_gradient(size, *tile_colors).convert("RGBA")
-    mark = writing_mask(size, cutout=True)
-
-    # 柔影定方向，贴边窄影让薄薄一层墨面有厚度。镂空里也保留投影。
-    shadow(tile, mark, (13, 26), 24, 0.29)
-    shadow(tile, mark, (2, 6), 4, 0.32)
-    over(tile, vertical_gradient(size, *ink_colors), mark)
-
-    fold = Image.new("L", (size * 2, size * 2))
-    paint_outline(ImageDraw.Draw(fold), FOLD, 255)
-    over(tile, ink_colors[0], fold.resize(tile.size, Image.Resampling.LANCZOS))
-    tile_mask = Image.new("L", fold.size)
-    ImageDraw.Draw(tile_mask).rounded_rectangle((112, 112, 1935, 1935), radius=436, fill=255)
-    tile.putalpha(tile_mask.resize(tile.size, Image.Resampling.LANCZOS))
-    return tile
-
-
 def write_brand_mark() -> None:
     contours = (PAGE, DOT, WRITING, COUNTER)
     path = " ".join(
@@ -282,7 +235,7 @@ def render_document_icon(compact: bool) -> Image.Image:
     band_mask = Image.new("L", (size, size), 0)
     ImageDraw.Draw(band_mask).rectangle((left, band_top, right, band_bottom), fill=255)
     band_mask = Image.composite(band_mask, Image.new("L", (size, size), 0), page_mask)
-    ink_colors = THEMES["claude"]["ink"]
+    ink_colors = DOC_ICON_INK
     over(image, vertical_gradient(size, *ink_colors), band_mask)
 
     writing = writing_mask(size, cutout=False)
@@ -311,7 +264,7 @@ def render_document_icon(compact: bool) -> Image.Image:
 def write_document_icons(resampling: Image.Resampling) -> None:
     """稿件包文档图标：Windows 安装包登记用 ico，Linux 的 hicolor mimetypes 用 png。
 
-    主题切换不影响系统里登记的图标，只出默认（claude）主题一套。
+    主题切换不影响系统里登记的图标，只出默认（月白）主题一套。
     """
     DOC_OUT.mkdir(parents=True, exist_ok=True)
     full = render_document_icon(compact=False)
@@ -362,18 +315,7 @@ def main() -> None:
     if args.app_only:
         return
 
-    resampling = Image.Resampling.LANCZOS
-    for name, theme in THEMES.items():
-        base = render_icon(theme["tile"], theme["ink"])
-        theme_dir = OUT / "themes" / name
-        theme_dir.mkdir(parents=True, exist_ok=True)
-        icons = {size: base.resize((size, size), resampling) for size in SIZES}
-        for size, icon in icons.items():
-            icon.save(theme_dir / f"app-icon-{size}.png", optimize=True)
-
-        if name in ("mdex", "mdex-dark"):
-            write_ico(theme_dir / "app-icon.ico", icons)
-    write_document_icons(resampling)
+    write_document_icons(Image.Resampling.LANCZOS)
     write_brand_mark()
 
 

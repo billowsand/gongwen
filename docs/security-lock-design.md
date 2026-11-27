@@ -366,7 +366,7 @@ AEAD、`data_backup` 适配。**验收**：565 MB 真实库迁移后检索 / 词
   错密码保持蒙版、窗口本地坐标与首帧遮罩、清理旧编辑缓存、模糊底图与紧凑排版。
 - 针对性测试覆盖关闭自动保存后的新旧稿保存、保存失败保留修改、错误密码保持蒙版、反复交接单实例队列。
 - 样张命令：`cargo test --locked gate_samples -- --ignored --test-threads=1`，输出
-  `tmp/gate-{claude,dark,paper,square}-{unlock,veil,setup}.png`。square 使用 MDEX 夜墨验证直角外壳；
+  `tmp/gate-{moon-white,dark,paper,square}-{unlock,veil,setup}.png`。square 使用 MDEX 夜墨验证直角外壳；
   Omarchy 实际桌面、原生窗口移动/缩放和 300ms 过渡仍需真机验收。
 
 - 本轮最终结果：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、

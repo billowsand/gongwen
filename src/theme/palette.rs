@@ -121,54 +121,55 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// 默认：Claude 奶油底 + 黏土橙强调。
-    pub(crate) const fn claude() -> Self {
+    /// 默认：月白冷底、墨蓝文字、青瓷强调，朱砂只用于风险与待核实项。
+    pub(crate) const fn moon_white() -> Self {
         Self {
-            label: "Claude 奶油",
+            label: "月白",
             dark: false,
             paper_family: PaperFamily::Original,
-            dark_paper_family: PaperFamily::Sandalwood,
-            canvas: Color32::from_rgb(0xF5, 0xF4, 0xEE),
-            surface: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-            surface_sunk: Color32::from_rgb(0xF0, 0xEE, 0xE6),
-            surface_hover: Color32::from_rgb(0xE9, 0xE6, 0xDA),
-            surface_active: Color32::from_rgb(0xE0, 0xDC, 0xCC),
-            border: Color32::from_rgb(0xE3, 0xE0, 0xD5),
-            border_strong: Color32::from_rgb(0xD1, 0xCC, 0xBC),
-            text: Color32::from_rgb(0x1F, 0x1E, 0x1D),
-            text_soft: Color32::from_rgb(0x45, 0x44, 0x41),
-            text_muted: Color32::from_rgb(0x86, 0x84, 0x7B),
-            accent: Color32::from_rgb(0xC9, 0x64, 0x42),
-            accent_hover: Color32::from_rgb(0xD4, 0x74, 0x50),
-            accent_active: Color32::from_rgb(0x9E, 0x4B, 0x30),
-            accent_soft: Color32::from_rgb(0xF4, 0xE5, 0xDC),
+            dark_paper_family: PaperFamily::NightBlue,
+            canvas: Color32::from_rgb(0xEA, 0xF2, 0xF4),
+            surface: Color32::from_rgb(0xF8, 0xFB, 0xFB),
+            surface_sunk: Color32::from_rgb(0xDF, 0xEB, 0xEE),
+            surface_hover: Color32::from_rgb(0xD2, 0xE4, 0xE8),
+            surface_active: Color32::from_rgb(0xBE, 0xD8, 0xDE),
+            border: Color32::from_rgb(0xC2, 0xD5, 0xDA),
+            border_strong: Color32::from_rgb(0x91, 0xB1, 0xBA),
+            text: Color32::from_rgb(0x10, 0x2D, 0x3A),
+            text_soft: Color32::from_rgb(0x36, 0x55, 0x63),
+            text_muted: Color32::from_rgb(0x61, 0x7C, 0x87),
+            accent: Color32::from_rgb(0x00, 0x74, 0x7A),
+            accent_hover: Color32::from_rgb(0x00, 0x7F, 0x86),
+            accent_active: Color32::from_rgb(0x00, 0x5C, 0x64),
+            accent_soft: Color32::from_rgb(0xD5, 0xEF, 0xF0),
             on_accent: Color32::WHITE,
-            warn: Color32::from_rgb(0xA1, 0x63, 0x1C),
-            warn_soft: Color32::from_rgb(0xF9, 0xF0, 0xDE),
-            danger: Color32::from_rgb(0xB4, 0x46, 0x3C),
-            danger_soft: Color32::from_rgb(0xFA, 0xE9, 0xE6),
-            success: Color32::from_rgb(0x3C, 0x74, 0x53),
-            success_soft: Color32::from_rgb(0xE7, 0xEF, 0xE9),
-            info: Color32::from_rgb(0x44, 0x66, 0x8A),
+            warn: Color32::from_rgb(0x86, 0x64, 0x14),
+            warn_soft: Color32::from_rgb(0xF7, 0xF0, 0xD9),
+            danger: Color32::from_rgb(0xA1, 0x32, 0x2A),
+            danger_soft: Color32::from_rgb(0xF9, 0xE4, 0xE2),
+            success: Color32::from_rgb(0x23, 0x71, 0x51),
+            success_soft: Color32::from_rgb(0xDF, 0xF0, 0xE7),
+            info: Color32::from_rgb(0x31, 0x5D, 0x9A),
             md: MdPalette {
-                body: Color32::from_rgb(0x2A, 0x29, 0x27),
-                marker: Color32::from_rgb(0xC4, 0x9A, 0x86),
-                title: Color32::from_rgb(0xC9, 0x64, 0x42),
-                heading: Color32::from_rgb(0x1A, 0x19, 0x18),
-                strong: Color32::from_rgb(0x8A, 0x3F, 0x24),
-                strong_bg: Color32::from_rgb(0xF4, 0xE5, 0xDC),
-                bullet: Color32::from_rgb(0xC9, 0x64, 0x42),
-                table_pipe: Color32::from_rgb(0xBC, 0xB7, 0xA6),
-                table_rule: Color32::from_rgb(0xA8, 0xA3, 0x93),
-                table_cell: Color32::from_rgb(0x33, 0x4A, 0x52),
-                comment: Color32::from_rgb(0x5F, 0x7A, 0x6B),
-                comment_bg: Color32::from_rgb(0xEC, 0xF1, 0xEB),
-                todo: Color32::from_rgb(0xB4, 0x46, 0x3C),
-                todo_bg: Color32::from_rgb(0xFA, 0xE9, 0xE6),
-                code: Color32::from_rgb(0x6B, 0x57, 0x8A),
-                quoted: Color32::from_rgb(0x2C, 0x53, 0x6B),
-                anchor_bg: Color32::from_rgb(0xF4, 0xE5, 0xDC),
-                search_bg: Color32::from_rgb(0xF6, 0xE7, 0xA9),
+                body: Color32::from_rgb(0x17, 0x37, 0x43),
+                marker: Color32::from_rgb(0x56, 0x8B, 0x96),
+                title: Color32::from_rgb(0x00, 0x6F, 0x78),
+                heading: Color32::from_rgb(0x10, 0x2D, 0x3A),
+                // 加粗用墨青，与「待核实」的朱砂分开，免得源码里两种含义撞色。
+                strong: Color32::from_rgb(0x00, 0x5C, 0x64),
+                strong_bg: Color32::from_rgb(0xD5, 0xEF, 0xF0),
+                bullet: Color32::from_rgb(0x00, 0x74, 0x7A),
+                table_pipe: Color32::from_rgb(0xAA, 0xC5, 0xCC),
+                table_rule: Color32::from_rgb(0x7F, 0xA4, 0xAE),
+                table_cell: Color32::from_rgb(0x2E, 0x52, 0x68),
+                comment: Color32::from_rgb(0x4D, 0x71, 0x80),
+                comment_bg: Color32::from_rgb(0xE6, 0xF0, 0xF2),
+                todo: Color32::from_rgb(0xA1, 0x32, 0x2A),
+                todo_bg: Color32::from_rgb(0xF9, 0xE4, 0xE2),
+                code: Color32::from_rgb(0x6C, 0x3A, 0x86),
+                quoted: Color32::from_rgb(0x24, 0x5C, 0x8A),
+                anchor_bg: Color32::from_rgb(0xCD, 0xE8, 0xEB),
+                search_bg: Color32::from_rgb(0xF2, 0xE6, 0xA7),
             },
         }
     }
@@ -195,9 +196,10 @@ impl Theme {
             text_muted: Color32::from_rgb(0x7B, 0x87, 0x9C),
             accent: Color32::from_rgb(0x88, 0xC0, 0xD0),
             accent_hover: Color32::from_rgb(0x9B, 0xD0, 0xDE),
-            accent_active: Color32::from_rgb(0x5E, 0x81, 0xAC),
+            accent_active: Color32::from_rgb(0x6E, 0x92, 0xBD),
             accent_soft: Color32::from_rgb(0x33, 0x41, 0x4F),
-            on_accent: Color32::WHITE,
+            // 浅蓝实底上用深墨，白色只有 2:1；按下态调亮一点，保证三态都在 4.5 以上。
+            on_accent: Color32::from_rgb(0x1B, 0x20, 0x29),
             warn: Color32::from_rgb(0xEB, 0xCB, 0x8B),
             warn_soft: Color32::from_rgb(0x3D, 0x3A, 0x2C),
             danger: Color32::from_rgb(0xBF, 0x61, 0x6A),
@@ -228,7 +230,7 @@ impl Theme {
         }
     }
 
-    /// 复古暗：Gruvbox Dark。暖褐底 + 橙强调，默认主题的深色亲戚。
+    /// 复古暗：Gruvbox Dark。独立暖色暗色方案，暖褐底 + 橙强调。
     const fn gruvbox_dark() -> Self {
         Self {
             label: "复古暗",
@@ -247,9 +249,10 @@ impl Theme {
             text_muted: Color32::from_rgb(0x92, 0x83, 0x74),
             accent: Color32::from_rgb(0xFE, 0x80, 0x19),
             accent_hover: Color32::from_rgb(0xFF, 0x96, 0x45),
-            accent_active: Color32::from_rgb(0xD6, 0x5D, 0x0E),
+            accent_active: Color32::from_rgb(0xE0, 0x6C, 0x1A),
             accent_soft: Color32::from_rgb(0x3B, 0x2D, 0x1F),
-            on_accent: Color32::WHITE,
+            // 亮橙实底上用深墨；按下态比旧值略亮，避免深墨在 #D65D0E 上掉到 4.2。
+            on_accent: Color32::from_rgb(0x1D, 0x20, 0x21),
             warn: Color32::from_rgb(0xFA, 0xBD, 0x2F),
             warn_soft: Color32::from_rgb(0x3C, 0x33, 0x20),
             danger: Color32::from_rgb(0xFB, 0x49, 0x34),
@@ -285,13 +288,13 @@ impl Theme {
 /// 「跟随 Omarchy」还没读到配色（不在 Omarchy 上、读失败）时也回退默认主题。
 pub(crate) fn by_name(name: ThemeName) -> Theme {
     match name {
-        ThemeName::Claude => Theme::claude(),
+        ThemeName::MoonWhite => Theme::moon_white(),
         ThemeName::Mdex => mdex::palette(),
         ThemeName::Smartisan => smartisan::palette(),
         ThemeName::MdexDark => mdex::dark_palette(),
         ThemeName::Nord => Theme::nord(),
         ThemeName::GruvboxDark => Theme::gruvbox_dark(),
-        ThemeName::Omarchy => omarchy::palette().unwrap_or_else(Theme::claude),
+        ThemeName::Omarchy => omarchy::palette().unwrap_or_else(Theme::moon_white),
     }
 }
 

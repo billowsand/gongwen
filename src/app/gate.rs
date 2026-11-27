@@ -2288,7 +2288,7 @@ mod samples {
             .find(|name| theme::by_name(*name).label == theme::current().label)
             .unwrap_or_default();
         for (theme_name, tag) in [
-            (ThemeName::default(), "claude"),
+            (ThemeName::default(), "moon-white"),
             (ThemeName::GruvboxDark, "dark"),
             (ThemeName::Smartisan, "paper"),
             (ThemeName::MdexDark, "square"),

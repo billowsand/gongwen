@@ -128,8 +128,8 @@ pub struct AppConfig {
     pub numbering: NumberingConfig,
     /// 界面主题。旧配置没有该字段时回退默认。
     pub theme: ThemeName,
-    /// 界面明暗是否跟随系统：浅色系统用默认的 Claude 奶油，深色系统用
-    /// 「复古暗」（`ThemeName::GruvboxDark`）。默认开启，旧配置没有该字段时
+    /// 界面明暗是否跟随系统：浅色系统用默认的「月白」，深色系统用
+    /// 「北欧」（`ThemeName::Nord`）。默认开启，旧配置没有该字段时
     /// 也按跟随系统处理；手动点选主题会把这一项关掉。
     #[serde(default = "follow_system_theme_default")]
     pub theme_follows_system: bool,

@@ -159,7 +159,7 @@ Root: HKA; Subkey: "Software\Classes\GongwenAssistant.Package\shell\open\command
 
 - 造型：白色纸页 + 右上角折角，纸页下半部放缩小的品牌标（`assets/icons/brand-mark.svg` 的几何），
   底部一条强调色色带写 `GWX`（48 px 及以下去掉文字、程序图标放大、页边描线加粗，只留纸页和色带）。
-- 颜色：取默认主题的强调色（`generate-brand-icons.py` 里 `claude` 主题的 `accent`），不随主题切换——
+- 颜色：取默认主题的墨色（`generate-brand-icons.py` 里 `DOC_ICON_INK` 的 `#00747A` → `#102D3A` 渐变），不随主题切换——
   系统里登记的图标只有一套。
 - 生成：在 `scripts/generate-brand-icons.py` 里加一个 `document_icon()`，复用现有几何与绘制函数，
   输出到 `assets/doc-icon/`：`gwx-document.ico`（16/24/32/48/64/256 多尺寸）和

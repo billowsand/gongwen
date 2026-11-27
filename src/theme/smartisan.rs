@@ -20,7 +20,7 @@ pub const PROOF_PAPER: Color32 = Color32::from_rgb(244, 236, 222);
 pub const PROOF_STAMP: Color32 = Color32::from_rgba_unmultiplied_const(178, 140, 82, 150);
 
 pub(super) const fn palette() -> Theme {
-    let mut theme = Theme::claude();
+    let mut theme = Theme::moon_white();
     theme.label = LABEL;
     theme.paper_family = PaperFamily::Parchment;
     theme.canvas = Color32::from_rgb(233, 221, 206);
@@ -38,6 +38,14 @@ pub(super) const fn palette() -> Theme {
     theme.accent_hover = Color32::from_rgb(102, 79, 64);
     theme.accent_active = Color32::from_rgb(72, 54, 43);
     theme.accent_soft = Color32::from_rgb(233, 223, 208);
+    theme.dark_paper_family = PaperFamily::Sandalwood;
+    theme.warn = Color32::from_rgb(0xA1, 0x63, 0x1C);
+    theme.warn_soft = Color32::from_rgb(0xF9, 0xF0, 0xDE);
+    theme.danger = Color32::from_rgb(0xB4, 0x46, 0x3C);
+    theme.danger_soft = Color32::from_rgb(0xFA, 0xE9, 0xE6);
+    theme.success = Color32::from_rgb(0x3C, 0x74, 0x53);
+    theme.success_soft = Color32::from_rgb(0xE7, 0xEF, 0xE9);
+    theme.info = Color32::from_rgb(0x44, 0x66, 0x8A);
     theme.md.body = theme.text;
     theme.md.marker = Color32::from_rgb(148, 125, 103);
     theme.md.title = theme.text;
@@ -51,7 +59,11 @@ pub(super) const fn palette() -> Theme {
     theme.md.code = theme.accent;
     theme.md.quoted = theme.text_soft;
     theme.md.anchor_bg = theme.accent_soft;
+    theme.md.comment = Color32::from_rgb(0x5F, 0x7A, 0x6B);
     theme.md.comment_bg = Color32::TRANSPARENT;
+    theme.md.todo = Color32::from_rgb(0xB4, 0x46, 0x3C);
+    theme.md.todo_bg = Color32::from_rgb(0xFA, 0xE9, 0xE6);
+    theme.md.search_bg = Color32::from_rgb(0xF6, 0xE7, 0xA9);
     theme
 }
 

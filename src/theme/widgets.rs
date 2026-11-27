@@ -82,7 +82,7 @@ pub(crate) fn accent_text_for(palette: Theme) -> Color32 {
 
 /// 在子作用域内把按钮三态底色覆盖成主题强调色（clone-on-write，退出自动还原），
 /// 让 `egui::Button` 自己按状态切换底色并保留按压动效。供主按钮与需要自定义
-/// 尺寸的橙色按钮共用。
+/// 尺寸的强调色按钮共用。
 pub(crate) fn accent_scope<R>(
     ui: &mut egui::Ui,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,

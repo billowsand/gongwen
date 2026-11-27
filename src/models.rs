@@ -787,9 +787,9 @@ mod tests {
         assert_eq!(back.active_ui_font().unwrap().display, "思源黑体");
     }
 
-    /// 主题字段序列化后能原样读回；旧配置没有 `theme` 字段时回退默认 Claude。
+    /// 主题字段序列化后能原样读回；旧配置没有 `theme` 字段时回退默认月白。
     #[test]
-    fn theme_name_round_trips_and_old_config_defaults_to_claude() {
+    fn theme_name_round_trips_and_old_config_defaults_to_moon_white() {
         let mut config = AppConfig::default();
         config.theme = ThemeName::Nord;
         let json = serde_json::to_string(&config).expect("应能序列化");
@@ -802,8 +802,10 @@ mod tests {
         let old: AppConfig = serde_json::from_value(value.clone()).expect("旧配置应能反序列化");
         assert_eq!(old.theme, ThemeName::default(), "旧配置回退默认主题");
 
-        // 移除主题后仍能读取完整旧配置，其他设置不受影响。
-        for removed in [
+        // 已移除或改名的主题仍能读取完整旧配置，其他设置不受影响。
+        for legacy in [
+            "claude",
+            "celadon",
             "sky",
             "lilac",
             "green",
@@ -814,12 +816,16 @@ mod tests {
             "dracula",
             "tokyo_night",
         ] {
-            value["theme"] = serde_json::json!(removed);
+            value["theme"] = serde_json::json!(legacy);
             let migrated: AppConfig =
                 serde_json::from_value(value.clone()).expect("旧主题配置应能读取");
-            assert_eq!(migrated.theme, ThemeName::Claude);
+            assert_eq!(migrated.theme, ThemeName::MoonWhite);
             assert_eq!(migrated.paper, back.paper);
         }
+        assert_eq!(
+            serde_json::to_value(ThemeName::default()).expect("默认主题应能序列化"),
+            serde_json::json!("moon_white")
+        );
     }
 
     #[test]

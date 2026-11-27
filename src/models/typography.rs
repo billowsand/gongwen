@@ -6,7 +6,7 @@
 use crate::models::TemplateKind;
 use serde::{Deserialize, Serialize};
 
-/// 界面主题。与 `ThemeName::ALL` 的预设一一对应，缺省为默认的 Claude 奶油。
+/// 界面主题。与 `ThemeName::ALL` 的预设一一对应，缺省为默认的月白。
 ///
 /// 前三项是明色，后三项是深色。深色主题只影响界面外壳，
 /// 公文纸面另由 [`PaperMode`] 决定。
@@ -14,8 +14,10 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum ThemeName {
     #[default]
-    // 已移除的主题兼容旧配置，统一回退奶油主题。
+    // 已移除的主题与旧默认主题兼容旧配置，统一回退月白。
     #[serde(
+        alias = "celadon",
+        alias = "claude",
         alias = "sky",
         alias = "lilac",
         alias = "green",
@@ -26,14 +28,14 @@ pub enum ThemeName {
         alias = "dracula",
         alias = "tokyo_night"
     )]
-    Claude,
+    MoonWhite,
     /// MDEX 纸墨：米白底、墨黑字与终端绿。
     Mdex,
     /// 锤子稿纸：灰棕拟物工具栏、浅木纹底板与横线稿纸。
     Smartisan,
-    /// Nord：冷灰蓝，饱和度最低。
+    /// Nord：冷灰蓝，饱和度最低，深色系统的默认配色。
     Nord,
-    /// Gruvbox Dark：暖褐底 + 橙强调，默认主题的深色亲戚。
+    /// Gruvbox Dark：暖褐底 + 橙强调。
     GruvboxDark,
     /// MDEX 夜墨：纸墨的深色版，暖墨底与鼠尾草绿。
     MdexDark,
@@ -46,7 +48,7 @@ impl ThemeName {
     /// 全部固定预设，顺序与设置页展示一致：先明色后深色。
     /// 「跟随 Omarchy」随桌面而定，单列在外。
     pub const ALL: [ThemeName; 6] = [
-        Self::Claude,
+        Self::MoonWhite,
         Self::Mdex,
         Self::Smartisan,
         Self::Nord,

@@ -37,7 +37,7 @@
   | 色相 | `red` `yellow` `orange` `green` `cyan` `blue` `magenta` `brown` |
   | 亮色相 | `bright_red` … `bright_magenta`（六个） |
 
-- 其余配置（kitty、alacritty、fcitx5、VS Code、Claude Code……）都由
+- 其余配置（kitty、alacritty、fcitx5、VS Code 等编辑器……）都由
   `default/themed/*.tpl` 模板从 `colors.toml` 渲染出来；用户模板放
   `~/.config/omarchy/themed/*.tpl`，同名优先。切主题末尾会调
   `omarchy-hook theme-set <名字>`。
@@ -75,7 +75,7 @@
   Tokyo Night」。
 - 选中它时「明暗跟随系统」开关置灰：明暗已由 Omarchy 的 `mode` 决定。
 - 配置里是 `omarchy` 但当前机器找不到 Omarchy 主题目录（换了桌面、目录被删）：
-  本次退回 Claude 奶油并在状态栏说明，**不改写配置**，回到 Omarchy 自动恢复。
+  本次退回月白并在状态栏说明，**不改写配置**，回到 Omarchy 自动恢复。
 
 ### 4.2 探测
 
@@ -183,9 +183,8 @@ Omarchy 默认 Hyprland 边框是直角细线。选「跟随 Omarchy」时外壳
 不读 `hyprctl getoption decoration:rounding`：要起子进程，收益只是几个像素的圆角，
 而且用户圆角调大时我们的面板圆角也不该跟着变大。
 
-窗口图标：Wayland 不允许客户端设窗口图标（`icons.rs` 已注明），Omarchy 模式下
-`apply_app_icon` 用 Claude 那张即可；标题栏品牌标按现有逻辑用 `accent` 染色，
-自然跟着主题走。
+窗口图标：Wayland 不允许客户端设窗口图标（`icons.rs` 已注明），所有主题统一用
+默认品牌图标（`app_icon()`）；标题栏品牌标按现有逻辑用 `accent` 染色，自然跟着主题走。
 
 ### 4.7 切主题即时生效
 
@@ -196,7 +195,7 @@ Omarchy 默认 Hyprland 边框是直角细线。选「跟随 Omarchy」时外壳
 - 主线程每帧比较缓存版本号，变了且当前主题是 `Omarchy`，就走现有那套
   `set_current` → `reconfigure_style`，与 `sync_system_theme` 同一形状。
 - Omarchy 切主题是先换目录、再渲染、再逐个通知应用，中途 `colors.toml` 可能短暂
-  缺失：读失败时保持上一份配色，下一秒再试，不闪回 Claude 奶油。
+  缺失：读失败时保持上一份配色，下一秒再试，不闪回月白。
 - 不用 inotify / `notify` crate：目录本身是被整个替换的符号链接，inotify 要跟着重
   挂，轮询更简单可靠。不装 `omarchy-hook`，理由同第三节。
 
@@ -223,9 +222,9 @@ src/theme/omarchy/
 
 - `src/models/typography.rs`：`ThemeName::Omarchy`、`available()`。
 - `src/theme/palette.rs`：`Theme` 加 `on_accent`；`by_name` 加 `Omarchy` 分支（无缓存时
-  退回 `Theme::claude()`）。
+  退回 `Theme::moon_white()`）。
 - `src/theme/widgets.rs`：`accent_text_for` 读 `on_accent`。
-- `src/theme/icons.rs`：`square_chrome()`；`app_icon_png` 加分支。
+- `src/theme/icons.rs`：`square_chrome()`；窗口图标不随主题切换。
 - `src/app/settings.rs`、`src/app/chrome.rs`：主题列表改用 `available()`；Omarchy 卡片
   副标题；选中时置灰「明暗跟随系统」；每帧检查缓存版本。
 - 使用帮助「外观」一节补一段；`README.md` 的 Linux 说明提一句。
@@ -270,7 +269,7 @@ src/theme/omarchy/
 
 - `ThemeName::Omarchy`（存为 `"omarchy"`），**不在 `ThemeName::ALL` 里**；设置页与
   应用菜单在明色、深色两组之后另起「Omarchy 桌面」一组，只有 `available()` 时出现。
-- `by_name(Omarchy)` 读缓存，没读到过就退回 Claude 奶油。
+- `by_name(Omarchy)` 读缓存，没读到过就退回月白。
 - 启动时 `GongwenApp::new` 调一次 `omarchy::refresh()`；配置是 Omarchy 却读不到时
   状态栏说明，配置不改。
 - `apply_theme(Omarchy)` 每次都重读；已选中时再点卡片或菜单项也会重读，这就是
@@ -286,7 +285,7 @@ src/theme/omarchy/
 
 - `border_strong` 不用 `muted`，一律 `mix(bg, fg, 24%)`（见 4.4 表）。
 - 「明暗跟随系统」开关没有置灰：选「跟随 Omarchy」时 `apply_theme` 本来就会把它
-  关掉，再勾上就是回到按系统明暗选 Claude 奶油 / 复古暗，语义清楚，不必禁用。
+  关掉，再勾上就是回到按系统明暗选月白 / 北欧，语义清楚，不必禁用。
 - `available()` 的含义是「读到过一份可用配色」，不是「探测到目录」，界面每帧调用
   不碰磁盘；目录在但文件坏了，卡片也不出现。
 - 近黑主题除 `vantablack` 外还有 `last-horizon`（`#0c0b0c`，没有更暗的底）同样走
@@ -305,7 +304,7 @@ src/theme/omarchy/
 2. 点选后整个界面换色；`omarchy theme set` 换一套，再点卡片（或菜单项）跟上。
 3. 明暗主题互切（如 Tokyo Night ↔ Rose Pine），纸面家族跟着换，导出不变。
 4. 选着「跟随 Omarchy」时退出，删掉或改坏 `colors.toml` 再启动：状态栏说明、界面
-   为 Claude 奶油；恢复文件再启动自动回来。
+   为月白；恢复文件再启动自动回来。
 
 ### 第二期（已完成，2026-10-29，待真机验收）
 
@@ -320,7 +319,7 @@ src/theme/omarchy/
   `reconfigure_style`，状态栏说「Omarchy 换了主题，界面已跟上：「X」」；不写配置。
   `apply_theme` 自己重读后同步记下版本号，免得下一帧再套一遍、状态栏被改写。
 - **中途缺文件**：读失败时缓存不动，也不记这次指纹，下一秒重试；界面停在上一套，
-  不闪回 Claude 奶油。
+  不闪回月白。
 - **直角外壳**：`theme::square_chrome()`（`src/theme/icons.rs`）= MDEX 两套或当前
   label 是「跟随 Omarchy」。原来所有 `is_mdex()` 调用点都换成它，`is_mdex()` 降为
   私有，只剩标题栏品牌图标一处用。Omarchy 主题的 label 固定是 `LABEL`，测试逐套核对。
@@ -334,12 +333,12 @@ src/theme/omarchy/
   用淡色工具带加强调色短标记、文档标签选中用淡强调底加底线、纸边减淡、对照分栏的
   拖动点。这些原来都挂在 `is_mdex()` 上，本来就是「平面工具区」这一个意思，与
   Hyprland 平铺窗口的观感一致，没有逐项拆开。
-- Omarchy 换主题时不重设窗口图标：「跟随 Omarchy」用的一直是 Claude 那张。
+- Omarchy 换主题时不重设窗口图标：全应用统一用默认品牌图标。
 
 ### 待真机验收（第二期）
 
 1. 选着「跟随 Omarchy」，`omarchy theme set <另一套>`：一两秒内界面换色，状态栏说明
-   新主题名；切换过程中不闪回 Claude 奶油。
+   新主题名；切换过程中不闪回月白。
 2. 连切几套（含明暗互切），每次都跟上；纸面家族随明暗换。
 3. 选着别的主题时 Omarchy 换主题：界面不动，设置页 Omarchy 卡片的副标题跟着变。
 4. 外壳：圆角全部为直角，浮层无投影，功能区、文档标签是 MDEX 那种平面样式。
