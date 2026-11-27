@@ -27,8 +27,40 @@ struct ShellPreferences {
     maximized: bool,
     fullscreen: bool,
     theme: crate::models::ThemeName,
+    /// 手动主题还是「明暗跟随系统」。旧版本的外壳偏好没有这一项：缺省按手动
+    /// 主题处理，升级后锁屏配色不跳；下次保存时就会补上真实值。
+    #[serde(default)]
+    follows_system: bool,
 }
 const SHELL_KEY: &str = "gongwen_shell_v1";
+
+/// 锁屏用哪套配色：跟随系统时按系统明暗选预设（浅色月白 / 深色北欧），
+/// 否则用记录下来的手动主题。系统还没报告明暗时先用手动主题，下一帧再校正。
+fn gate_theme_name(
+    manual: crate::models::ThemeName,
+    follows_system: bool,
+    system: Option<egui::Theme>,
+) -> crate::models::ThemeName {
+    match (follows_system, system) {
+        (true, Some(system)) => theme::follow_system_theme(system == egui::Theme::Dark),
+        _ => manual,
+    }
+}
+
+/// 清掉控件级记忆（弹窗、焦点、编辑撤销栈、滚动位置），准备换数据槽或退回锁屏。
+///
+/// 不能直接把 `Memory` 换成 `egui::Memory::default()`：`Memory` 里的 `options`
+/// 同时装着主题明暗偏好、亮/暗两套全局样式、界面缩放与原生标题栏跟随等**进程级
+/// 外观**。整块重置后，锁屏卡片仍按 `theme::surface()` 画，输入框却退回 egui 内建
+/// 配色——深色系统上就是一块纯黑底、浅色系统上是另一套灰底，明暗与卡片对不上。
+/// 这里只保留外观选项，其余控件状态照旧清空。
+fn reset_widget_memory(ctx: &egui::Context) {
+    let options = ctx.options(|options| options.clone());
+    ctx.memory_mut(|memory| {
+        *memory = egui::Memory::default();
+        memory.options = options;
+    });
+}
 
 /// 外壳持有的启动参数：解锁成功后才交给工作区。锁屏期间双击 .gwx 之类
 /// 转交进来的请求排队等解锁，不绕过闸门。
@@ -264,6 +296,9 @@ pub(crate) struct AppShell {
     saved_workspace_rect: Option<egui::Rect>,
     saved_maximized: bool,
     saved_fullscreen: bool,
+    /// 锁屏外观是否跟随系统明暗。启用应用锁后配置是密文，锁屏读不到
+    /// `theme_follows_system`，只能沿用上次退出时记下的值（解锁后再按槽位配置纠正）。
+    gate_follows_system: bool,
     unlock_fade_started: Option<f64>,
     environment: crate::environment::Monitor,
     capture_guard: crate::environment::CaptureGuard,
@@ -281,16 +316,24 @@ impl AppShell {
         window: crate::DeferredWindowState,
     ) -> Self {
         // 主题先装起来：锁屏也要跟随主题。此时只能只读探真实系统的配置
-        // （诱饵槽位的主题等解锁后按槽位配置重套），配置读不到就用默认主题。
+        // （诱饵槽位的主题等解锁后按槽位配置重套）；配置被应用锁密封时读不到，
+        // 再退回上次退出时记下的外壳偏好（只有外观，不含槽位与密钥）。
         let preferences = cc
             .storage
             .and_then(|storage| eframe::get_value::<ShellPreferences>(storage, SHELL_KEY));
+        let (shell_theme, gate_follows_system) = match storage::peek_shell_theme() {
+            Some(shell) => shell,
+            None => preferences.as_ref().map_or_else(
+                || (crate::models::ThemeName::default(), false),
+                |p| (p.theme, p.follows_system),
+            ),
+        };
         let _ = theme::omarchy::refresh();
-        theme::set_current(
-            preferences
-                .as_ref()
-                .map_or_else(storage::peek_theme, |p| p.theme),
-        );
+        theme::set_current(gate_theme_name(
+            shell_theme,
+            gate_follows_system,
+            cc.egui_ctx.system_theme(),
+        ));
         theme::set_current_paper(PaperMode::Follow);
         crate::mermaid::set_theme(DiagramTheme::Auto);
         super::clipboard::configure(&cc.egui_ctx);
@@ -335,6 +378,7 @@ impl AppShell {
             saved_fullscreen: preferences
                 .as_ref()
                 .map_or(window.fullscreen, |p| p.fullscreen),
+            gate_follows_system,
             unlock_fade_started: None,
             environment: crate::environment::Monitor::start(&cc.egui_ctx),
             capture_guard: crate::environment::CaptureGuard::new(cc),
@@ -417,6 +461,7 @@ impl AppShell {
             saved_workspace_rect: None,
             saved_maximized: false,
             saved_fullscreen: false,
+            gate_follows_system: false,
             unlock_fade_started: None,
             environment: crate::environment::Monitor::disabled_for_test(),
             capture_guard: crate::environment::CaptureGuard::disabled_for_test(),
@@ -708,8 +753,9 @@ impl AppShell {
 
     /// 构造工作区并切过去。`notice` 是解锁后要放进状态栏的一句话。
     fn enter_workspace(&mut self, ctx: &egui::Context, slot: DataSlot, notice: Option<String>) {
-        // 不把上一工作区的弹窗、编辑撤销栈与焦点带入另一数据槽。
-        ctx.memory_mut(|memory| *memory = egui::Memory::default());
+        // 不把上一工作区的弹窗、编辑撤销栈与焦点带入另一数据槽。这里只清控件
+        // 状态；全局样式随后由 `GongwenApp::new` 按该槽位的配置重新套用。
+        reset_widget_memory(ctx);
         ctx.data_mut(|data| data.clear());
         super::clipboard::configure(ctx);
         if slot == DataSlot::Real
@@ -1133,6 +1179,11 @@ impl AppShell {
         // 资源库连接随工作区一起释放：换槽、重锁与备份换入之后都必须重新打开。
         crate::resources::close();
         storage::set_current_slot(DataSlot::Real);
+        // 工作区配置随下面一起 drop：先把「锁屏是否跟随系统明暗」记到外壳上，
+        // 否则退回锁屏后既读不到密文配置，也不知道该不该按系统明暗换配色。
+        if let ShellPhase::Ready(app) = &self.phase {
+            self.gate_follows_system = app.config.theme_follows_system;
+        }
         let previous = std::mem::replace(&mut self.phase, ShellPhase::Gate(GateState::unlock()));
         if let ShellPhase::Ready(mut app) = previous
             && let Some(startup) = self.startup.as_mut()
@@ -1141,7 +1192,7 @@ impl AppShell {
             startup.retain_lifecycle(instance, receiver);
         }
         crate::vault::clear_key_handle();
-        ctx.memory_mut(|memory| *memory = egui::Memory::default());
+        reset_widget_memory(ctx);
         ctx.data_mut(|data| data.clear());
         super::clipboard::configure(ctx);
         // 锁定即丢弃工作区：顺手清掉应用自己的明文缓存与花脸稿预览副本。
@@ -1149,6 +1200,26 @@ impl AppShell {
         if let ShellPhase::Gate(gate) = &mut self.phase {
             gate.veiled = true;
         }
+    }
+
+    /// 锁屏与解锁等待期也要跟随系统明暗。
+    ///
+    /// 锁屏期间读不到工作区配置（应用锁会把 `config.json` 密封），只能靠外壳记住
+    /// 的「是否跟随系统」；系统在锁屏时切了深浅模式，这里每帧对一次，免得登录框
+    /// 停在另一套明暗上。已经是对应配色时是空操作。
+    fn sync_gate_theme(&mut self, ctx: &egui::Context) {
+        if !self.gate_follows_system {
+            return;
+        }
+        let Some(system) = ctx.system_theme() else {
+            return;
+        };
+        let target = theme::follow_system_theme(system == egui::Theme::Dark);
+        if theme::current().label == theme::by_name(target).label {
+            return;
+        }
+        theme::set_current(target);
+        theme::reconfigure_style(ctx);
     }
 
     fn compact_gate(&self, ctx: &egui::Context) {
@@ -1190,12 +1261,14 @@ impl AppShell {
         if self.environment_lock_frame(&ctx) {
             return;
         }
-        if matches!(self.phase, ShellPhase::Gate(_) | ShellPhase::Unlocking(_))
-            && theme::current().label == theme::omarchy::LABEL
-            && theme::omarchy::palette().is_some_and(|palette| palette != theme::current())
-        {
-            theme::set_current(crate::models::ThemeName::Omarchy);
-            theme::reconfigure_style(&ctx);
+        if matches!(self.phase, ShellPhase::Gate(_) | ShellPhase::Unlocking(_)) {
+            self.sync_gate_theme(&ctx);
+            if theme::current().label == theme::omarchy::LABEL
+                && theme::omarchy::palette().is_some_and(|palette| palette != theme::current())
+            {
+                theme::set_current(crate::models::ThemeName::Omarchy);
+                theme::reconfigure_style(&ctx);
+            }
         }
         if matches!(self.phase, ShellPhase::Ready(_)) {
             let info = ctx.input(|input| input.viewport().clone());
@@ -1502,6 +1575,13 @@ impl eframe::App for AppShell {
             .chain(std::iter::once(crate::models::ThemeName::Omarchy))
             .find(|name| theme::by_name(*name).label == theme::current().label)
             .unwrap_or_default();
+        // 锁屏外观要跨重启保住：应用锁把配置密封后，下次启动只能靠这份外壳偏好
+        // 决定登录框是浅色还是深色。工作区在跑时以它的配置为准（可能刚在设置页
+        // 改过跟随开关），锁定期间用外壳记下的值。
+        let follows_system = match &self.phase {
+            ShellPhase::Ready(app) => app.config.theme_follows_system,
+            _ => self.gate_follows_system,
+        };
         eframe::set_value(
             storage,
             SHELL_KEY,
@@ -1511,6 +1591,7 @@ impl eframe::App for AppShell {
                 maximized: self.saved_maximized,
                 fullscreen: self.saved_fullscreen,
                 theme,
+                follows_system,
             },
         );
     }
@@ -3351,6 +3432,164 @@ mod lifecycle_tests {
             assert!(
                 crate::vault::slot_has_encrypted_data(DataSlot::Real),
                 "启用密码后磁盘上应能检出密文数据"
+            );
+        });
+    }
+
+    /// 锁定后回到密码框，输入框必须还是主题底色。
+    ///
+    /// 这里复现「有时输入框变成黑色」：`lock_now` 曾把整个 `egui::Memory` 换成
+    /// 默认值，连 `options` 里的明暗偏好、亮/暗两套全局样式与界面缩放一起清掉。
+    /// 锁屏卡片仍按 `theme::surface()` 画，输入框却退回 egui 内建配色——深色系统
+    /// 上就是一块近黑的底，浅色系统上是另一套灰底，明暗与卡片对不上。
+    #[test]
+    fn relocking_keeps_the_themed_password_field() {
+        isolated(|| {
+            theme::set_current(crate::models::ThemeName::default());
+            let ctx = egui::Context::default();
+            theme::configure_fonts(&ctx, &FontConfig::default());
+            theme::configure_style(&ctx);
+            ctx.options_mut(|options| options.zoom_factor = 1.25);
+
+            let mut app = crate::app::management_samples::fixture();
+            app.config.theme = crate::models::ThemeName::default();
+            app.config.theme_follows_system = false;
+            let mut shell = AppShell::gate(GateState::unlock(), None);
+            shell.phase = ShellPhase::Ready(Box::new(app));
+            shell.lock_now(&ctx);
+
+            assert_eq!(
+                ctx.theme(),
+                egui::Theme::Light,
+                "锁屏不能丢掉明暗偏好，否则输入框会按系统明暗换一套内建配色"
+            );
+            assert_eq!(
+                ctx.options(|options| options.zoom_factor),
+                1.25,
+                "锁屏不能顺手把界面缩放清回 100%"
+            );
+
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(380.0, 250.0));
+            let mut field_fill = None;
+            for _ in 0..2 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        egui::CentralPanel::default().show(ui, |ui| {
+                            if let ShellPhase::Gate(gate) = &mut shell.phase {
+                                gate_ui(ui, gate);
+                            }
+                        });
+                    },
+                );
+                output.textures_delta.clear();
+                for clipped in &output.shapes {
+                    if let egui::Shape::Rect(rect) = &clipped.shape
+                        && (rect.rect.height() - 40.0).abs() < 0.5
+                        && rect.rect.width() > 150.0
+                    {
+                        field_fill = Some(rect.fill);
+                    }
+                }
+            }
+            assert_eq!(
+                field_fill.expect("锁屏应画出密码框"),
+                theme::surface(),
+                "锁定后的密码框必须沿用主题底色，不能退回 egui 内建配色"
+            );
+        });
+    }
+
+    /// 旧版本写下的外壳偏好没有 `follows_system`：读取时要按「手动主题」继续用，
+    /// 不能整条解析失败退回默认窗口尺寸；新版本写回后要能原样读回跟随开关。
+    #[test]
+    fn shell_preferences_round_trip_and_old_values_stay_manual() {
+        use std::collections::BTreeMap;
+        struct MemoryStorage(BTreeMap<String, String>);
+        impl eframe::Storage for MemoryStorage {
+            fn get_string(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
+            fn set_string(&mut self, key: &str, value: String) {
+                self.0.insert(key.to_owned(), value);
+            }
+            fn remove_string(&mut self, key: &str) {
+                self.0.remove(key);
+            }
+            fn flush(&mut self) {}
+        }
+        let old_ron = r#"(size:(1280.0,820.0),position:Some((80.0,60.0)),maximized:false,fullscreen:false,theme:nord)"#;
+        let mut storage =
+            MemoryStorage(BTreeMap::from([(SHELL_KEY.to_owned(), old_ron.to_owned())]));
+        let old: ShellPreferences =
+            eframe::get_value(&storage, SHELL_KEY).expect("旧版本的外壳偏好应能读取");
+        assert_eq!(old.theme, crate::models::ThemeName::Nord);
+        assert!(!old.follows_system, "旧偏好没有跟随开关，按手动主题处理");
+
+        eframe::set_value(
+            &mut storage,
+            SHELL_KEY,
+            &ShellPreferences {
+                follows_system: true,
+                ..old
+            },
+        );
+        let back: ShellPreferences =
+            eframe::get_value(&storage, SHELL_KEY).expect("新版本的外壳偏好应能读取");
+        assert!(
+            back.follows_system && back.theme == crate::models::ThemeName::Nord,
+            "跟随开关与主题都要写回并读回"
+        );
+    }
+
+    /// 锁屏选配色：跟随系统时按系统明暗取预设，手动主题不随系统走；
+    /// 系统还没报告明暗时先用手动主题，下一帧再校正。
+    #[test]
+    fn gate_theme_follows_the_system_only_when_asked() {
+        use crate::models::ThemeName;
+        assert_eq!(
+            gate_theme_name(ThemeName::MoonWhite, true, Some(egui::Theme::Dark)),
+            ThemeName::Nord
+        );
+        assert_eq!(
+            gate_theme_name(ThemeName::Nord, true, Some(egui::Theme::Light)),
+            ThemeName::MoonWhite
+        );
+        assert_eq!(
+            gate_theme_name(ThemeName::Smartisan, false, Some(egui::Theme::Dark)),
+            ThemeName::Smartisan
+        );
+        assert_eq!(
+            gate_theme_name(ThemeName::Smartisan, true, None),
+            ThemeName::Smartisan
+        );
+    }
+
+    /// 锁屏期间系统切到深色，登录框也要跟着换，不能等解锁后才变。
+    #[test]
+    fn locked_shell_follows_a_system_dark_switch() {
+        isolated(|| {
+            theme::set_current(crate::models::ThemeName::default());
+            let ctx = egui::Context::default();
+            theme::configure_fonts(&ctx, &FontConfig::default());
+            theme::configure_style(&ctx);
+            let mut shell = AppShell::gate(GateState::unlock(), None);
+            shell.gate_follows_system = true;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    system_theme: Some(egui::Theme::Dark),
+                    ..Default::default()
+                },
+                |_ui| shell.sync_gate_theme(&ctx),
+            );
+            output.textures_delta.clear();
+            assert_eq!(
+                theme::current().label,
+                theme::by_name(crate::models::ThemeName::Nord).label,
+                "系统深色时锁屏应换成北欧，而不是停在浅色月白"
             );
         });
     }

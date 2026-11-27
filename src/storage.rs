@@ -556,21 +556,20 @@ pub(crate) fn prepare_first_setup_config() -> Result<()> {
     .context("首次设置密码时写入默认配置失败")
 }
 
-/// 启动外壳需要提前读取主题时使用：只读解析，不迁移、不挪走损坏文件。
+/// 启动外壳需要提前决定锁屏外观时使用：只读解析，不迁移、不挪走损坏文件。
+///
+/// 返回「手动主题 + 是否明暗跟随系统」。启用应用锁后 `config.json` 是密文，
+/// 这里解析不出 `Some`，锁屏改用外壳偏好里记的外观（见
+/// `app::gate::ShellPreferences`）；两边都拿不到才回落默认。
 ///
 /// 真正的配置读取与损坏兜底留给 `GongwenApp::new`——如果这里也调 [`load`]，
 /// 损坏的 `config.json` 会在界面建起来之前就被改名，后面再也收不到「配置已损坏」
 /// 的提示。
-pub fn peek_theme() -> crate::models::ThemeName {
-    let Ok(path) = config_path() else {
-        return AppConfig::default().theme;
-    };
-    let Ok(raw) = fs::read_to_string(path) else {
-        return AppConfig::default().theme;
-    };
-    serde_json::from_str::<AppConfig>(&raw)
-        .map(|config| config.theme)
-        .unwrap_or_default()
+pub fn peek_shell_theme() -> Option<(crate::models::ThemeName, bool)> {
+    let path = config_path().ok()?;
+    let raw = fs::read_to_string(path).ok()?;
+    let config = serde_json::from_str::<AppConfig>(&raw).ok()?;
+    Some((config.theme, config.theme_follows_system))
 }
 
 /// 稿件库 SQLite 文件，与 config.json 同目录，仅保存在本机。
@@ -1498,19 +1497,43 @@ mod tests {
         assert!(result.is_err(), "路径不可读时应如实报错");
     }
 
-    /// 启动早期取主题只能只读：它若把损坏文件挪走，界面上就收不到恢复提示了。
+    /// 启动早期取锁屏外观只能只读：它若把损坏文件挪走，界面上就收不到恢复提示了。
     #[test]
-    fn peek_theme_leaves_a_corrupt_config_in_place() {
+    fn peek_shell_theme_leaves_a_corrupt_config_in_place() {
         let dir = tempfile::tempdir().unwrap();
         super::set_test_config_dir(Some(dir.path().to_path_buf()));
         let path = dir.path().join("config.json");
         fs::write(&path, b"not json").unwrap();
 
-        let theme = peek_theme();
+        let theme = peek_shell_theme();
         super::set_test_config_dir(None);
 
-        assert_eq!(theme, AppConfig::default().theme);
-        assert!(path.exists(), "peek_theme 不能改写或挪走配置文件");
+        assert!(theme.is_none(), "损坏的配置不该被当成有效外观");
+        assert!(path.exists(), "peek_shell_theme 不能改写或挪走配置文件");
+    }
+
+    /// 配置还是明文时，锁屏应当读到用户当前的手动主题与「跟随系统」开关，
+    /// 而不是只认主题名、把跟随状态丢掉（那会让锁屏与工作区明暗对不上）。
+    #[test]
+    fn peek_shell_theme_reads_the_follow_system_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        super::set_test_config_dir(Some(dir.path().to_path_buf()));
+        let path = dir.path().join("config.json");
+        let config = AppConfig {
+            theme: crate::models::ThemeName::Nord,
+            theme_follows_system: true,
+            ..Default::default()
+        };
+        fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+        let shell = peek_shell_theme();
+        super::set_test_config_dir(None);
+
+        assert_eq!(
+            shell,
+            Some((crate::models::ThemeName::Nord, true)),
+            "明文配置里的主题与跟随开关都要读到"
+        );
     }
     /// 密封配置在「没有密钥句柄」时必须是 Err，不能当损坏文件改名，更不能
     /// 随后以明文默认配置覆盖（那是一次静默加密降级）。
