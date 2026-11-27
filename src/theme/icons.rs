@@ -24,6 +24,7 @@ pub enum Icon {
     Bold,
     BookmarkCheck,
     Book,
+    #[cfg(feature = "ai-workbench")]
     Braces,
     Building,
     Calendar,
@@ -141,6 +142,7 @@ impl Icon {
                 "book-open",
                 include_bytes!("../../assets/icons/book-open.svg"),
             ),
+            #[cfg(feature = "ai-workbench")]
             Self::Braces => ("braces", include_bytes!("../../assets/icons/braces.svg")),
             Self::Building => (
                 "building-2",
