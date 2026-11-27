@@ -15,6 +15,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NavPage {
     Manuscript,
+    IssueLedger,
     #[cfg(feature = "task-assistant")]
     TaskAssistant,
     Vocabulary,
@@ -45,6 +46,7 @@ impl NavPage {
     pub(crate) fn key(self) -> &'static str {
         match self {
             Self::Manuscript => "manuscript",
+            Self::IssueLedger => "issue_ledger",
             #[cfg(feature = "task-assistant")]
             Self::TaskAssistant => "task_assistant",
             Self::Vocabulary => "vocabulary",
@@ -64,6 +66,7 @@ impl NavPage {
     pub(crate) fn from_key(key: &str) -> Option<Self> {
         match key {
             "manuscript" => Some(Self::Manuscript),
+            "issue_ledger" => Some(Self::IssueLedger),
             #[cfg(feature = "task-assistant")]
             "task_assistant" => Some(Self::TaskAssistant),
             "vocabulary" => Some(Self::Vocabulary),
@@ -84,6 +87,7 @@ impl NavPage {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Manuscript => "稿件管理",
+            Self::IssueLedger => "发文登记簿",
             #[cfg(feature = "task-assistant")]
             Self::TaskAssistant => "任务助手",
             Self::Vocabulary => "标准词库",
@@ -103,6 +107,7 @@ impl NavPage {
     pub(crate) fn icon(self) -> theme::Icon {
         match self {
             Self::Manuscript => theme::Icon::Library,
+            Self::IssueLedger => theme::Icon::ListOrdered,
             #[cfg(feature = "task-assistant")]
             Self::TaskAssistant => theme::Icon::List,
             Self::Vocabulary => theme::Icon::Book,
@@ -537,6 +542,7 @@ impl GongwenApp {
                 DraftAction::PreviewPdf(key) => self.start_draft_pdf(key, ctx, false),
                 DraftAction::OpenSendPackage(id) => self.open_send_package(id),
                 DraftAction::OpenManuscript(id) => self.open_in_editor(id),
+                DraftAction::OpenIssueLedger => self.open_issue_ledger_for_active_draft(),
                 DraftAction::OpenVersionCommit(scope) => self.open_version_commit(scope),
                 #[cfg(feature = "ai-workbench")]
                 DraftAction::OpenStyleSettings => {
@@ -744,6 +750,7 @@ mod tests {
     fn 每个导航页的键都能往返() {
         for page in [
             NavPage::Manuscript,
+            NavPage::IssueLedger,
             #[cfg(feature = "task-assistant")]
             NavPage::TaskAssistant,
             NavPage::Vocabulary,

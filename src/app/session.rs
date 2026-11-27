@@ -39,6 +39,8 @@ pub(crate) enum DraftAction {
     OpenSendPackage(i64),
     /// 查看引用来源稿件，沿用稿件库的只读与标签规则。
     OpenManuscript(i64),
+    /// 按当前稿件的单位/方案/年度打开发文登记簿。
+    OpenIssueLedger,
     /// 到 AI 管理页「风格」。
     #[cfg(feature = "ai-workbench")]
     OpenStyleSettings,

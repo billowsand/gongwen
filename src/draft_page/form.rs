@@ -10,10 +10,12 @@ use crate::app::{
 };
 use crate::draft_page::DraftPage;
 use crate::element_fields::{self, FieldId};
+use crate::manuscript::ledger;
 use crate::models::{
     CorrespondenceScope, DraftInput, JointIssuanceMode, LetterVersion, ReviewNote, SecurityLevel,
-    StyleMode, TemplateKind, VocabularyCategory, split_units,
+    StyleMode, TemplateKind, VocabularyCategory, VocabularyEntry, split_units,
 };
+use crate::platform::doc::NumberingScheme;
 use crate::proofread;
 use crate::proofread_rules;
 use crate::theme;
@@ -21,7 +23,7 @@ use crate::units;
 use crate::units::UnitDisplay;
 use crate::validator;
 use eframe::egui;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 mod research;
 
@@ -1570,6 +1572,7 @@ impl DraftPage<'_> {
                                 "例如：X政函",
                                 "department_code",
                             );
+                            self.issue_number_hint_row(ui, NumberingScheme::Letter, field_width);
                         }
                         TemplateKind::PhoneNotice => {
                             required_row_label(
@@ -1638,6 +1641,7 @@ impl DraftPage<'_> {
                                 "例如：X政呈",
                                 "red_approval_department_code",
                             );
+                            self.issue_number_hint_row(ui, NumberingScheme::Approval, field_width);
                         }
                         TemplateKind::MeetingMinutes => {
                             required_row_label(
@@ -1684,6 +1688,7 @@ impl DraftPage<'_> {
                             ui.end_row();
 
                             minutes_number_row(ui, &mut self.doc.draft.profile);
+                            self.issue_number_hint_row(ui, NumberingScheme::Minutes, field_width);
                         }
                         TemplateKind::PhoneRecord | TemplateKind::PlainDocument
                         | TemplateKind::MeetingAgenda
@@ -2403,6 +2408,178 @@ impl DraftPage<'_> {
 }
 
 impl DraftPage<'_> {
+    /// 文号行下方的取号卡：按「单位 + 方案 + 年度」查一次池，显示已用到几号、
+    /// 下一号、缺号，并把选中的号写回序号字段。查询请求交给 `create_ui` 在
+    /// `form_ui` 之后执行，避免在表单绘制中间开库。
+    fn issue_number_hint_row(&mut self, ui: &mut egui::Ui, scheme: NumberingScheme, width: f32) {
+        ui.label("");
+        ui.vertical(|ui| {
+            ui.set_max_width(width);
+            ui.set_width(width);
+            let unit = ledger::effective_issue_unit(&self.doc.draft).to_string();
+            if unit.trim().is_empty() {
+                ui.weak("选发文单位后，可按本年台账看已用到几号、下一号是几号。");
+                return;
+            }
+            let year = self.doc.draft.document_year();
+            if year.len() != 4 || !year.chars().all(|ch| ch.is_ascii_digit()) {
+                ui.weak("填好四位发文年度后，可按台账取号。");
+                return;
+            }
+            let unit_keys = issue_unit_keys(&self.config.vocabulary, &unit);
+            let signature = format!("{}|{}|{}", unit_keys.join("\u{1f}"), scheme.as_str(), year);
+            if self.doc.issue_hint_request.is_none() && self.doc.issue_hint.signature != signature {
+                let display = UnitDisplay::new(&self.config.vocabulary);
+                self.doc.issue_hint_request = Some(crate::draft_page::IssueHintRequest {
+                    signature,
+                    unit_keys,
+                    pool_label: format!(
+                        "{} · {} · {}",
+                        display.full_name(&unit),
+                        issue_scheme_label(scheme),
+                        year
+                    ),
+                    scheme,
+                    year: year.clone(),
+                });
+            }
+            if self.doc.issue_hint_request.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak("正在查台账…");
+                });
+                return;
+            }
+            let entries = self.doc.issue_hint.entries.clone();
+            let error = self.doc.issue_hint.error.clone();
+            let pool_label = self.doc.issue_hint.pool_label.clone();
+            if let Some(error) = error {
+                ui.colored_label(theme::danger(), error);
+                return;
+            }
+            let current = self.doc.draft.profile.document_number.trim().to_string();
+            let formal = self.doc.draft.profile.letter_version == LetterVersion::Formal;
+            let mut last: Option<u32> = None;
+            let mut present = HashSet::new();
+            let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+            for entry in &entries {
+                let Ok(value) = entry.serial.trim().parse::<u32>() else {
+                    continue;
+                };
+                last = Some(last.map_or(value, |last| last.max(value)));
+                present.insert(value);
+                if entry.status != "void" {
+                    *counts.entry(value).or_default() += 1;
+                }
+            }
+            let next = last.map_or(1, |last| last + 1);
+            let gaps: Vec<u32> = (1..=last.unwrap_or(0))
+                .filter(|value| !present.contains(value))
+                .take(4)
+                .collect();
+            let conflict = if current.is_empty() {
+                None
+            } else {
+                entries
+                    .iter()
+                    .find(|entry| {
+                        entry.serial.trim() == current
+                            && entry.status != "void"
+                            && entry.manuscript_id != self.doc.manuscript_id
+                    })
+                    .map(|entry| entry.title.clone())
+            };
+            let duplicates: Vec<u32> = counts
+                .iter()
+                .filter(|(_, count)| **count > 1)
+                .map(|(value, _)| *value)
+                .collect();
+            let last_text = last.map_or_else(|| "—".to_string(), |last| last.to_string());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("{pool_label} 已用到 {last_text} · 下一号 {next}"))
+                        .size(theme::font_sizes::SMALL)
+                        .color(theme::text_muted()),
+                )
+                .wrap(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                if formal {
+                    if ui.small_button(format!("填入 {next}")).clicked() {
+                        self.doc.draft.profile.document_number = next.to_string();
+                    }
+                    for gap in &gaps {
+                        if ui
+                            .small_button(format!("缺号 {gap}"))
+                            .on_hover_text("这个号没有登记，可以直接填入")
+                            .clicked()
+                        {
+                            self.doc.draft.profile.document_number = gap.to_string();
+                        }
+                    }
+                }
+                if ui.link("打开登记簿").clicked() {
+                    self.actions.push(DraftAction::OpenIssueLedger);
+                }
+            });
+            if let Some(conflict) = conflict {
+                ui.colored_label(
+                    theme::warn(),
+                    format!(
+                        "当前序号 {current} 已登记给《{}》",
+                        if conflict.trim().is_empty() {
+                            "同号条目"
+                        } else {
+                            conflict.trim()
+                        }
+                    ),
+                );
+            }
+            if !duplicates.is_empty() {
+                ui.colored_label(
+                    theme::warn(),
+                    format!("本池重号：{}", summarize_issue_numbers(&duplicates)),
+                );
+            }
+            if !formal {
+                ui.weak("签字版不填序号；切到盖章版后可在这里取号。");
+            }
+        });
+        ui.end_row();
+    }
+
+    /// 查一次台账池，填进 `doc.issue_hint`。返回是否真的查过（查过就让界面再画一帧）。
+    pub(crate) fn resolve_issue_hint(&mut self) -> bool {
+        let Some(request) = self.doc.issue_hint_request.take() else {
+            return false;
+        };
+        let result = self.store.as_deref().map(|store| {
+            store.issue_pool_entries(&request.unit_keys, request.scheme, &request.year)
+        });
+        let hint = match result {
+            Some(Ok(entries)) => crate::draft_page::IssueHint {
+                signature: request.signature,
+                pool_label: request.pool_label,
+                entries,
+                error: None,
+            },
+            Some(Err(error)) => crate::draft_page::IssueHint {
+                signature: request.signature,
+                pool_label: request.pool_label,
+                entries: Vec::new(),
+                error: Some(format!("查台账失败：{error:#}")),
+            },
+            None => crate::draft_page::IssueHint {
+                signature: request.signature,
+                pool_label: request.pool_label,
+                entries: Vec::new(),
+                error: Some("稿件库不可用，暂时查不了台账。".into()),
+            },
+        };
+        self.doc.issue_hint = hint;
+        true
+    }
+
     /// 挂着送批材料的呈批件改成别的文种时提示一句：清单不删，只是面板隐藏，
     /// 改回白头件或红头呈批件即恢复。只在文种切换那一刻查一次库。
     fn notice_hidden_send_package(&mut self, old_kind: TemplateKind) {
@@ -2437,3 +2614,36 @@ pub(crate) const MEETING_AGENDA_MARKDOWN_TEMPLATE: &str = r#"# 【会议标题�
 1. 【第一项议程；】
 2. 【第二项议程；】
 3. 【最后一项议程。】"#;
+
+fn issue_unit_keys(vocabulary: &[VocabularyEntry], unit: &str) -> Vec<String> {
+    let mut keys = vec![unit.trim().to_string()];
+    if let Some(entry) = crate::units::identity::resolve(vocabulary, VocabularyCategory::Unit, unit)
+    {
+        keys.push(entry.key());
+        keys.push(entry.canonical.trim().to_string());
+        if !entry.code.trim().is_empty() {
+            keys.push(entry.code.trim().to_string());
+        }
+    }
+    keys.retain(|key| !key.is_empty());
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn issue_scheme_label(scheme: NumberingScheme) -> &'static str {
+    match scheme {
+        NumberingScheme::Letter => "公函",
+        NumberingScheme::Approval => "红头呈批件",
+        NumberingScheme::Minutes => "会议纪要",
+    }
+}
+
+fn summarize_issue_numbers(numbers: &[u32]) -> String {
+    numbers
+        .iter()
+        .take(8)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("、")
+}

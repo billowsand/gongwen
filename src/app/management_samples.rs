@@ -93,7 +93,7 @@ pub(crate) fn fixture() -> GongwenApp {
         #[cfg(feature = "ai-workbench")]
         update_check: crate::update_check::UpdateCheckState::default(),
         quick_find: None,
-        issue_ledger: None,
+        issue_ledger: crate::app::issue_ledger::IssueLedgerState::default(),
         modal_guard: crate::modal::ModalGuard::default(),
         vocabulary_filter: String::new(),
         vocabulary_selected: None,
@@ -416,6 +416,59 @@ pub(crate) fn fixture() -> GongwenApp {
     app
 }
 
+#[cfg(feature = "ai-workbench")]
+fn seed_issue_ledger(app: &mut GongwenApp) {
+    if let Some(store) = app.manuscript_store.as_mut() {
+        use crate::manuscript::ledger::NewIssue;
+        use crate::platform::doc::NumberingScheme;
+        for (scheme, serial, title, status) in [
+            (
+                NumberingScheme::Letter,
+                "1",
+                "关于做好年度总结的通知",
+                "used",
+            ),
+            (
+                NumberingScheme::Letter,
+                "3",
+                "关于开展专项检查的通知",
+                "used",
+            ),
+            (
+                NumberingScheme::Approval,
+                "1",
+                "关于采购办公设备的请示",
+                "used",
+            ),
+            (
+                NumberingScheme::Approval,
+                "2",
+                "关于调整值班安排的请示",
+                "reserved",
+            ),
+            (NumberingScheme::Minutes, "1", "局长办公会议纪要", "used"),
+        ] {
+            let _ = store.add_manual_issue(&NewIssue {
+                unit: "政策研究办公室".into(),
+                scheme,
+                code: match scheme {
+                    NumberingScheme::Letter => "某政函",
+                    NumberingScheme::Approval => "某政呈",
+                    NumberingScheme::Minutes => "某纪",
+                }
+                .into(),
+                year: "2026".into(),
+                serial: serial.into(),
+                title: title.into(),
+                doc_date: "2026-03-18".into(),
+                security: "内部".into(),
+                status: status.into(),
+                note: String::new(),
+            });
+        }
+    }
+}
+
 #[test]
 #[ignore = "出五个管理页样张，手动跑"]
 #[cfg(feature = "ai-workbench")]
@@ -427,9 +480,14 @@ fn smartisan_management_samples() {
     theme::configure_style(&ctx);
     ctx.set_pixels_per_point(1.0);
     let mut app = fixture();
+    seed_issue_ledger(&mut app);
     let mut canvas = crate::ui_snapshot::Canvas::default();
     for (index, (page, stem)) in [
         (NavPage::Manuscript, "manuscript"),
+        (NavPage::IssueLedger, "issue-ledger"),
+        (NavPage::IssueLedger, "issue-ledger-detail"),
+        (NavPage::IssueLedger, "issue-ledger-add"),
+        (NavPage::IssueLedger, "issue-ledger-problems"),
         (NavPage::Vocabulary, "vocabulary"),
         (NavPage::Proofread, "proofread"),
         (NavPage::Lexicon, "lexicon"),
@@ -452,6 +510,15 @@ fn smartisan_management_samples() {
         );
         app.tabs = vec![TabRef::Page(page), TabRef::Doc(0)];
         app.active_tab = 0;
+        match stem {
+            "issue-ledger-detail" => app.issue_ledger.select_entry(1),
+            "issue-ledger-add" => {
+                let vocabulary = app.config.vocabulary.clone();
+                app.issue_ledger.open_compose(&vocabulary);
+            }
+            "issue-ledger-problems" => app.issue_ledger.open_problems(),
+            _ => {}
+        }
         for frame in 0..3 {
             let mut output = ctx.run_ui(
                 egui::RawInput {
@@ -473,6 +540,7 @@ fn smartisan_management_samples() {
                         .show(ui, |ui| {
                             theme::smartisan::management_page(ui, |ui| match page {
                                 NavPage::Manuscript => app.manuscript_ui(ui),
+                                NavPage::IssueLedger => app.issue_ledger_page(ui),
                                 NavPage::Vocabulary => app.vocabulary_ui(ui),
                                 NavPage::Proofread => app.proofread_ui(ui),
                                 NavPage::Lexicon => crate::lexicon_ui::lexicon_ui(&mut app, ui),
@@ -500,6 +568,79 @@ fn smartisan_management_samples() {
                     std::path::Path::new(&format!("tmp/smartisan-{stem}.png")),
                 );
             }
+        }
+    }
+    theme::set_current(crate::models::ThemeName::default());
+}
+
+#[test]
+#[ignore = "出起草页取号卡样张，手动跑"]
+#[cfg(feature = "ai-workbench")]
+fn smartisan_draft_ledger_hint_sample() {
+    let ctx = egui::Context::default();
+    theme::set_current(crate::models::ThemeName::Smartisan);
+    theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+    theme::configure_icons(&ctx);
+    theme::configure_style(&ctx);
+    ctx.set_pixels_per_point(1.0);
+    let mut app = fixture();
+    seed_issue_ledger(&mut app);
+    let unit = app
+        .config
+        .vocabulary
+        .iter()
+        .find(|entry| entry.category == VocabularyCategory::Unit)
+        .map(|entry| entry.key())
+        .expect("fixture unit");
+    {
+        let doc = &mut app.docs[0];
+        doc.draft.kind = crate::models::TemplateKind::OfficialLetter;
+        doc.draft.profile = crate::models::TemplateProfile::for_kind(doc.draft.kind);
+        doc.draft.profile.issuing_unit = unit;
+        doc.draft.profile.department_code = "某政函".into();
+        doc.draft.profile.document_year = "2026".into();
+        doc.draft.profile.letter_version = crate::models::LetterVersion::Formal;
+        doc.form_collapsed = false;
+    }
+    app.tabs = vec![TabRef::Doc(0)];
+    app.active_tab = 0;
+    let size = egui::vec2(1280.0, 820.0);
+    let mut canvas = crate::ui_snapshot::Canvas::default();
+    for frame in 0..4 {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(frame as f64),
+                ..Default::default()
+            },
+            |ui| {
+                egui::Panel::top("sample_title")
+                    .show_separator_line(false)
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| app.window_titlebar(ui));
+                egui::Panel::top("sample_tabs")
+                    .show_separator_line(false)
+                    .frame(theme::panel(theme::surface(), 12))
+                    .show(ui, |ui| app.top_bar(ui));
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        app.draft_page().create_ui(ui);
+                    });
+            },
+        );
+        if frame < 3 {
+            canvas.absorb(&mut output.textures_delta);
+        } else {
+            let mut output = output;
+            output.textures_delta.clear();
+            canvas.render(
+                &ctx,
+                output,
+                size,
+                theme::canvas(),
+                std::path::Path::new("tmp/smartisan-draft-hint.png"),
+            );
         }
     }
     theme::set_current(crate::models::ThemeName::default());

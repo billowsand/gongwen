@@ -85,6 +85,10 @@ impl DraftPage<'_> {
                         });
                 });
         }
+        // 文号行的取号卡在表单里只登记请求，查库放到这里：不在表单绘制中间开库。
+        if self.resolve_issue_hint() {
+            ui.ctx().request_repaint();
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {

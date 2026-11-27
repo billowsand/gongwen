@@ -587,6 +587,8 @@ impl ManuscriptStore {
             id,
             &title,
             &new.snapshot,
+            status,
+            None,
             &Local::now().to_rfc3339(),
         )?;
         Ok(id)
@@ -631,6 +633,8 @@ impl ManuscriptStore {
             id,
             &title,
             &upd.snapshot,
+            status,
+            None,
             &Local::now().to_rfc3339(),
         )?;
         Ok(())
@@ -648,11 +652,35 @@ impl ManuscriptStore {
         let now = Local::now().to_rfc3339();
         let published_at = (target == ManuscriptStatus::Published).then(|| now.clone());
         let archived_at = (target == ManuscriptStatus::Archived).then(|| now.clone());
-        self.conn.execute(
-            "UPDATE manuscripts SET status=?1, published_at=?2, archived_at=?3, updated_at=?4 WHERE id=?5",
-            params![status_to_str(target), published_at, archived_at, now, id],
-        )?;
-        Ok(())
+        // 用 SAVEPOINT 而不是 transaction：归档/同步会把 set_status 包在自己的
+        // 事务或 savepoint 里，嵌套 transaction 会直接报错；savepoint 可以嵌套，
+        // 外层回滚时台账状态也跟着回滚。
+        self.conn.execute_batch("SAVEPOINT manuscript_status")?;
+        let result = (|| -> Result<()> {
+            self.conn.execute(
+                "UPDATE manuscripts SET status=?1, published_at=?2, archived_at=?3, updated_at=?4 WHERE id=?5",
+                params![status_to_str(target), published_at, archived_at, now, id],
+            )?;
+            if matches!(
+                target,
+                ManuscriptStatus::Published | ManuscriptStatus::Archived
+            ) {
+                ledger::mark_used(&self.conn, id, &now)?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("RELEASE manuscript_status")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self
+                    .conn
+                    .execute_batch("ROLLBACK TO manuscript_status; RELEASE manuscript_status");
+                Err(error)
+            }
+        }
     }
 
     /// 删除稿件（连同附件级联）。归档行拒绝删除；被已归档呈批件用作送批材料的也拒绝，

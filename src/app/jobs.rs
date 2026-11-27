@@ -47,6 +47,8 @@ pub(crate) enum WorkerResult {
     AddressBookExported(Result<String, String>),
     /// 发文登记簿 Excel 导出结果。
     IssueRegisterExported(Result<String, String>),
+    /// 发文登记簿从稿件库重建自动行的结果（同步篇数）。
+    IssueLedgerSynced(Result<usize, String>),
     /// 文件汇编：编译合并后的内存 PDF。
     CompilationMerged(Result<Vec<u8>, String>),
     AuxiliaryArchiveExported(Result<PathBuf, String>),
@@ -634,6 +636,21 @@ impl GongwenApp {
                     Ok(message) => self.status = message,
                     Err(error) => self.status = format!("发文登记簿导出失败：{error}"),
                 },
+                WorkerResult::IssueLedgerSynced(result) => {
+                    self.issue_ledger.syncing = false;
+                    match result {
+                        Ok(count) => {
+                            self.issue_ledger.notice =
+                                Some(format!("已从稿件库同步 {count} 篇有文号的稿件。"));
+                            self.issue_ledger.needs_load = true;
+                            self.status = "发文登记簿已同步。".into();
+                        }
+                        Err(error) => {
+                            self.issue_ledger.notice = Some(format!("同步稿件库失败：{error}"));
+                        }
+                    }
+                    ctx.request_repaint();
+                }
                 WorkerResult::AddressBookExported(result) => match result {
                     Ok(message) => self.status = message,
                     Err(error) => self.status = format!("通讯录导出失败：{error}"),

@@ -10,12 +10,14 @@ use crate::app::{DraftAction, VersionSwitchPrompt, WorkerResult};
 use crate::export;
 use crate::highlight::MarkdownHighlighter;
 use crate::manuscript::ManuscriptStore;
+use crate::manuscript::ledger::IssueEntry;
 #[cfg(feature = "ai-workbench")]
 use crate::models::GeneratedDraft;
 use crate::models::{
     AppConfig, DraftInput, ExportSelection, ManuscriptStatus, ResearchMetadata, ReviewNote,
     TemplateKind, TemplateProfile,
 };
+use crate::platform::doc::NumberingScheme;
 use crate::theme;
 use eframe::egui;
 use std::collections::BTreeSet;
@@ -392,6 +394,25 @@ pub(crate) struct AiProposal {
     pub(crate) locate: Option<String>,
 }
 
+/// 文号行取号卡的数据。只缓存当前池，单位/年度/方案一变就重新查。
+#[derive(Default, Clone)]
+pub(crate) struct IssueHint {
+    /// 当前池的签名（单位写法 + 方案 + 年度）；对不上说明缓存过期。
+    pub(crate) signature: String,
+    pub(crate) pool_label: String,
+    pub(crate) entries: Vec<IssueEntry>,
+    pub(crate) error: Option<String>,
+}
+
+/// 起草页请应用层查一次台账池；查询在 `form_ui` 之后执行，避免界面线程每帧开库。
+pub(crate) struct IssueHintRequest {
+    pub(crate) signature: String,
+    pub(crate) unit_keys: Vec<String>,
+    pub(crate) pool_label: String,
+    pub(crate) scheme: NumberingScheme,
+    pub(crate) year: String,
+}
+
 /// 一篇打开的稿件：内容、审校结果与这篇稿子自己的视图状态。
 pub(crate) struct DraftSession {
     pub(crate) key: DocKey,
@@ -421,6 +442,9 @@ pub(crate) struct DraftSession {
     pub(crate) draft_diff: DraftDiffState,
     /// 已切换为“手工输入”的字段 id；其余字段一律从标准词库选择。
     pub(crate) manual_fields: BTreeSet<String>,
+    /// 文号行取号卡的缓存与查询请求。只在内存里，不随稿件存盘。
+    pub(crate) issue_hint: IssueHint,
+    pub(crate) issue_hint_request: Option<IssueHintRequest>,
     /// 左侧的文档要素填报区是否已收起。默认收起。
     pub(crate) form_collapsed: bool,
     /// 要素区三段（版头/主体/版记）的展开状态与待跳转目标。
@@ -599,6 +623,8 @@ impl DraftSession {
             loaded_version: None,
             draft_diff: DraftDiffState::default(),
             manual_fields: BTreeSet::new(),
+            issue_hint: IssueHint::default(),
+            issue_hint_request: None,
             // 打开稿件第一眼就是满屏审校稿；要改抬头文号再展开要素区。
             form_collapsed: true,
             form_sections: FormSectionState::default(),

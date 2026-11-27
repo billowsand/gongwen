@@ -265,7 +265,7 @@ pub struct GongwenApp {
     #[cfg(feature = "ai-workbench")]
     update_check: crate::update_check::UpdateCheckState,
     quick_find: Option<quick_find::QuickFind>,
-    issue_ledger: Option<issue_ledger::IssueLedgerState>,
+    issue_ledger: issue_ledger::IssueLedgerState,
     vocabulary_filter: String,
     /// 词库树上当前选中的词条 id，右侧编辑区显示它的详情。
     vocabulary_selected: Option<u64>,
@@ -883,7 +883,7 @@ impl GongwenApp {
             #[cfg(feature = "ai-workbench")]
             update_check: crate::update_check::UpdateCheckState::default(),
             quick_find: None,
-            issue_ledger: None,
+            issue_ledger: issue_ledger::IssueLedgerState::default(),
             modal_guard: crate::modal::ModalGuard::default(),
             vocabulary_filter: String::new(),
             vocabulary_selected: None,
@@ -1242,6 +1242,11 @@ impl GongwenApp {
             self.last_content_tab = Some(active);
             ctx.animate_bool_with_time(egui::Id::unique("content_fade"), false, 0.0);
             ctx.animate_value_with_time(egui::Id::unique("content_slide"), CONTENT_SLIDE_PX, 0.0);
+            // 台账是稿件库的投影：切回这一页时重新读一次，别的标签页里刚保存的
+            // 文号、状态变化不会等到手动点刷新才出现。
+            if matches!(active, TabRef::Page(NavPage::IssueLedger)) {
+                self.issue_ledger.needs_load = true;
+            }
         }
         egui::CentralPanel::default()
             .frame(if theme::smartisan::active() {
@@ -1310,6 +1315,11 @@ impl GongwenApp {
                     TabRef::Page(NavPage::Manuscript) => {
                         theme::smartisan::management_page(&mut content_ui, |ui| {
                             self.manuscript_ui(ui)
+                        })
+                    }
+                    TabRef::Page(NavPage::IssueLedger) => {
+                        theme::smartisan::management_page(&mut content_ui, |ui| {
+                            self.issue_ledger_page(ui)
                         })
                     }
                     #[cfg(feature = "task-assistant")]
@@ -1383,7 +1393,6 @@ impl GongwenApp {
         self.knowledge_preview_window(&ctx);
         self.about_window(&ctx);
         self.quick_find_window(&ctx);
-        self.issue_ledger_window(&ctx);
         self.disposal_forms_window(&ctx);
         // 压缩包密码框既服务稿件库页，也服务设置页的备份导出/恢复，放在全局窗口这层。
         self.zip_password_window(&ctx);
