@@ -57,12 +57,14 @@ pub(crate) use palette::{
 pub(crate) use style::{configure_style, reconfigure_style};
 #[cfg(test)]
 pub(crate) use widgets::accent_text_for;
+#[cfg(feature = "ai-workbench")]
+pub(crate) use widgets::titlebar_icon_button;
 pub(crate) use widgets::{
     accent_scope, accent_text, caption, chip, danger_icon_button, divider_v, dot, dropdown_button,
     field, hairline, icon_button, icon_button_enabled, icon_text_button, menu_item,
     menu_selectable_item, menu_text_item, metric, nav_button, notice, popup_scroll,
-    primary_button_widget, primary_icon_button, primary_icon_button_enabled, removable_tag_button,
-    ribbon_tab_button, secondary_icon_button, segmented, spinner, titlebar_icon_button,
+    primary_button_widget, primary_icon_button, primary_icon_button_enabled, rail_icon_button,
+    removable_tag_button, ribbon_tab_button, secondary_icon_button, segmented, spinner,
     view_icon_button, warning_icon_button,
 };
 

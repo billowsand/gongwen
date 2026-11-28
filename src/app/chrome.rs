@@ -9,7 +9,7 @@ use crate::app::{
     truncate_middle,
 };
 use crate::doc_import;
-use crate::draft_page::{PreviewMode, TOOLBAR_CONTROL_HEIGHT, toolbar_separator};
+use crate::draft_page::{PreviewMode, TOOLBAR_CONTROL_HEIGHT};
 use crate::models::{DiagramTheme, ManuscriptStatus, ThemeName};
 use crate::theme;
 use crate::version;
@@ -215,6 +215,26 @@ const TOOL_BUTTON_SIZE: f32 = TOOLBAR_CONTROL_HEIGHT;
 const TOOL_BUTTON_GAP: f32 = 2.0;
 /// 换肤弹层里每个主题的色样直径。
 const THEME_SWATCH_SIZE: f32 = 14.0;
+
+/// 合并后整条顶栏的高度：标签胶囊 28 + 上下各 6 —— 正是过去标签行的高度，
+/// 标题栏那一行（34 px）整行省掉。
+const RAIL_HEIGHT: f32 = 40.0;
+/// 左侧固定簇宽度：10 内边距 + 菜单 40 + 8 + 分隔 1 + 7 + 保存 28 + 2 + 提交 28 + 10。
+/// 标签从左簇之后起排；非稿件页保存/提交变灰而不消失，起点才不会跳。
+const RAIL_LEFT_WIDTH: f32 = 134.0;
+/// 右端工具组（检索 + 换肤）宽 58：28 + 2 + 28。
+const RAIL_TOOLS_WIDTH: f32 = 58.0;
+/// 工具组与窗口按钮之间：10 空白 + 1 分隔线 + 10 空白。
+const RAIL_CONTROLS_GAP: f32 = 21.0;
+/// 窗口按钮每格宽度，与 Windows 11 的标题栏按钮同档。
+const RAIL_CONTROL_WIDTH: f32 = 46.0;
+/// 标签条与右侧工具之间至少留出的拖拽带：窗口再窄也要留得下一段能拖的地方。
+const RAIL_DRAG_MIN: f32 = 40.0;
+/// 菜单按钮（品牌标 + 小箭头）的宽度与高度，仿 Figma 左上角「图标即菜单」。
+const MENU_BUTTON_W: f32 = 40.0;
+const MENU_BUTTON_H: f32 = 28.0;
+/// 顶栏分隔线的高度。
+const RAIL_DIVIDER_HEIGHT: f32 = 16.0;
 /// 收进「词库」子菜单的四张词表，菜单与当前页高亮共用。
 const LEXICON_PAGES: [NavPage; 4] = [
     NavPage::Vocabulary,
@@ -283,36 +303,31 @@ fn muted_shortcut(text: &str) -> egui::RichText {
 }
 
 impl GongwenApp {
-    /// 无边框窗口的顶栏。
+    /// 无边框窗口的顶栏：菜单、保存/提交、标签条、检索/换肤与窗口按钮共用一条 40 px 横带。
     ///
-    /// macOS 使用左侧 AppKit 原生红黄绿按钮、居中标题和右侧快速操作；
-    /// Windows 与传统 Linux 桌面使用右侧三枚自绘窗口按钮；Hyprland 平铺会话
-    /// 只保留关闭按钮，避免显示 compositor 不采用的最小化/最大化语义。
+    /// 过去是两条面板：标题栏 34 px 放品牌标、快速访问、居中的稿名和窗口按钮，
+    /// 标签行 44 px 放菜单、标签与两枚工具，中间还夹一道分隔线。合并后纵向让出
+    /// 38 px，而标签仍是 28 px 胶囊、上下各留 6 px——正是过去标签行的内边距。
+    ///
+    /// 两条布局约束在这里立住：左簇宽度固定（保存/提交在非稿件页变灰而不消失），
+    /// 标签起点不随页面切换跳；右端先留 40 px 拖拽带再放工具，窗口再窄也拖得动。
     pub(crate) fn window_titlebar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let native_size = self
+        let native = self
             .macos_titlebar_metrics
             .map(|metrics| metrics.reserved_size(&ctx));
-        let height = if let Some(size) = native_size {
-            34.0_f32.max(size.y)
-        } else if theme::smartisan::active() {
-            30.0
-        } else {
-            34.0
-        };
-        const BTN_W: f32 = 46.0;
-
+        let height = native.map_or(RAIL_HEIGHT, |size| RAIL_HEIGHT.max(size.y));
         let maximized = ctx
             .input(|input| input.viewport().maximized)
             .unwrap_or(false);
-        // 失焦时标题和图标弱化，提示窗口不在前台。
         let focused = ctx.input(|input| input.viewport().focused).unwrap_or(true);
-        let title_color = if theme::smartisan::active() {
-            theme::smartisan::chrome_ink().gamma_multiply(if focused { 1.0 } else { 0.75 })
-        } else if focused {
-            theme::text_soft()
+        let hyprland = crate::linux_desktop::hyprland_session();
+        let window_buttons = if native.is_some() {
+            0
+        } else if hyprland {
+            1
         } else {
-            theme::text_muted()
+            3
         };
 
         let (rect, _) = ui.allocate_exact_size(
@@ -320,310 +335,201 @@ impl GongwenApp {
             egui::Sense::hover(),
         );
 
-        theme::smartisan::chrome(ui.painter(), rect);
-
-        if let Some(size) = native_size {
-            self.macos_titlebar(ui, rect, size.x, title_color);
-            return;
+        // 稿纸主题：整条铺牛皮纸，底边留 2 px 纸色——原来标签行底部那条纸边，
+        // 现在就是正文区的上沿。背景先占槽位，控件随后画在它上面。
+        if theme::smartisan::active() {
+            let background = ui.painter().add(egui::Shape::Noop);
+            theme::smartisan::tab_background(ui.painter(), background, rect);
+            ui.painter().hline(
+                rect.x_range(),
+                rect.top() + 0.5,
+                egui::Stroke::new(1.0, egui::Color32::from_white_alpha(28)),
+            );
         }
 
-        let hyprland = crate::linux_desktop::hyprland_session();
-        let titlebar_buttons: &[TitlebarBtn] = if hyprland {
-            &[TitlebarBtn::Close]
-        } else {
-            &[
-                TitlebarBtn::Minimize,
-                TitlebarBtn::Maximize,
-                TitlebarBtn::Close,
-            ]
-        };
-        let controls_width = titlebar_buttons.len() as f32 * BTN_W;
+        let zones = rail_zones(rect, native.map_or(0.0, |size| size.x), window_buttons);
 
-        // 左侧标题区：空白处可拖拽移动窗口，双击切换最大化。
-        let title_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + 14.0, rect.top()),
-            egui::pos2(rect.right() - controls_width, rect.bottom()),
+        // 整条先铺一层拖拽区，后面加的控件自然盖在它上面：空白带拖动窗口、双击最大化。
+        // 不必再像过去那样把拖拽区切成两段、绕开快速访问。
+        let drag = ui.interact(
+            rect,
+            ui.scope_id().with("window_chrome_drag"),
+            egui::Sense::click_and_drag(),
         );
-        let mut text_right = title_rect.left();
-        if title_rect.width() > 60.0 {
-            let brand_rect = egui::Rect::from_center_size(
-                title_rect.left_center() + egui::vec2(9.0, 0.0),
-                egui::vec2(18.0, 18.0),
-            );
-            let brand_color = if theme::smartisan::active() {
-                title_color
-            } else if focused {
-                theme::accent()
-            } else {
-                title_color
-            };
-            ui.put(brand_rect, theme::brand_image(18.0, brand_color))
-                .on_hover_text(version::APP_TITLE);
-            text_right = brand_rect.right();
-        }
-        // 快速访问工具栏：仿 Word 挂在标题栏上，与停在哪个分区卡无关。
-        // 只在活动标签是稿件时出现——设置页、词库页上它们没有作用对象。
-        let mut quick_rect: Option<egui::Rect> = None;
-        if self.showing_doc() {
-            let left = text_right + 8.0;
-            let inset = if theme::smartisan::active() { 3.0 } else { 4.0 };
-            let available = egui::Rect::from_min_max(
-                egui::pos2(left, rect.top() + inset),
-                egui::pos2(title_rect.right() - 8.0, rect.bottom() - inset),
-            );
-            if available.width() > 120.0 {
-                let mut quick = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(available)
-                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                );
-                quick.spacing_mut().item_spacing.x = 2.0;
-                // 品牌标与按钮组之间一道细竖线，看得出后面是一组工具而不是标题。
-                theme::divider_v(&mut quick, 16.0);
-                quick.add_space(6.0);
-                self.titlebar_quick_access(&mut quick);
-                quick_rect = Some(quick.min_rect());
-            }
-        }
-        // 当前稿件标题按整窗几何中心摆放，左右让开快速访问与窗口按钮。
-        let title_left = quick_rect.map_or(text_right, |quick| quick.right()) + 16.0;
-        let title_right = rect.right() - controls_width - 16.0;
-        self.paint_centered_title(ui, rect, title_left, title_right, title_color);
-        // 拖拽区绕开快速访问那几枚按钮：两侧各留一段，中间让给按钮。
-        let gap = quick_rect.map_or(title_rect.right()..title_rect.right(), |quick| {
-            (quick.left() - 4.0)..(quick.right() + 4.0)
-        });
-        for (index, zone) in [
-            egui::Rect::from_min_max(title_rect.min, egui::pos2(gap.start, title_rect.bottom())),
-            egui::Rect::from_min_max(egui::pos2(gap.end, title_rect.top()), title_rect.max),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if zone.width() < 4.0 {
-                continue;
-            }
-            let drag = ui.interact(
-                zone,
-                ui.scope_id().with(("titlebar_drag", index)),
-                egui::Sense::click_and_drag(),
-            );
-            if drag.double_clicked() && !hyprland {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-            } else if drag.drag_started() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            }
-        }
-
-        // 传统桌面显示最小化 / 最大化·还原 / 关闭；Hyprland 只显示关闭。
-        let mut action: Option<TitlebarAction> = None;
-        for (index, kind) in titlebar_buttons.iter().copied().enumerate() {
-            let btn_rect = egui::Rect::from_min_size(
-                egui::pos2(
-                    rect.right() - (titlebar_buttons.len() - index) as f32 * BTN_W,
-                    rect.top(),
-                ),
-                egui::vec2(BTN_W, height),
-            );
-            let response = ui
-                .interact(
-                    btn_rect,
-                    ui.scope_id().with(("titlebar_btn", index)),
-                    egui::Sense::click(),
-                )
-                .on_hover_text(match kind {
-                    TitlebarBtn::Minimize => "最小化",
-                    TitlebarBtn::Maximize => {
-                        if maximized {
-                            "还原"
-                        } else {
-                            "最大化"
-                        }
-                    }
-                    TitlebarBtn::Close => "关闭",
-                });
-            let is_close = kind == TitlebarBtn::Close;
-            let hovered = response.hovered();
-            let pressed = response.is_pointer_button_down_on();
-            let fill = if hovered {
-                if is_close {
-                    // 关闭键按下再加深一档，与其余按钮的按压手感一致。
-                    if pressed {
-                        theme::danger().gamma_multiply(0.85)
-                    } else {
-                        theme::danger()
-                    }
-                } else if pressed {
-                    theme::surface_active()
-                } else {
-                    theme::surface_hover()
-                }
-            } else {
-                egui::Color32::TRANSPARENT
-            };
-            if fill != egui::Color32::TRANSPARENT {
-                ui.painter().rect_filled(btn_rect, 0.0, fill);
-            }
-            // 关闭键悬停用红底白字（Windows 惯例），其余按钮保持文字色。
-            let icon_color = if is_close && hovered {
-                theme::accent_text()
-            } else if hovered && theme::smartisan::active() {
-                theme::text()
-            } else {
-                title_color
-            };
-            let glyph = match kind {
-                TitlebarBtn::Minimize => WindowGlyph::Minimize,
-                TitlebarBtn::Maximize if maximized => WindowGlyph::Restore,
-                TitlebarBtn::Maximize => WindowGlyph::Maximize,
-                TitlebarBtn::Close => WindowGlyph::Close,
-            };
-            draw_window_glyph(ui.painter(), btn_rect.center(), glyph, icon_color);
-            if response.clicked() {
-                action = Some(match kind {
-                    TitlebarBtn::Minimize => TitlebarAction::Minimize,
-                    TitlebarBtn::Maximize => TitlebarAction::Maximize(!maximized),
-                    TitlebarBtn::Close => TitlebarAction::Close,
-                });
-            }
-        }
-        match action {
-            Some(TitlebarAction::Minimize) => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            }
-            Some(TitlebarAction::Maximize(next)) => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(next));
-            }
-            Some(TitlebarAction::Close) => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-            None => {}
-        }
-    }
-
-    /// macOS 顶栏：左侧红黄绿由 AppKit 原生视图绘制，egui 只负责
-    /// 中间的当前标题、可拖拽区和右侧稿件快速操作。
-    pub(crate) fn macos_titlebar(
-        &mut self,
-        ui: &mut egui::Ui,
-        rect: egui::Rect,
-        native_controls_width: f32,
-        title_color: egui::Color32,
-    ) {
-        const RIGHT_MARGIN: f32 = 12.0;
-        /// 三枚 26 px 图标按钮加两道 2 px 间距。
-        const QUICK_WIDTH: f32 = 82.0;
-
-        let content_left = rect.left() + native_controls_width;
-        let mut drag_right = rect.right() - RIGHT_MARGIN;
-
-        // 快速操作是稿件上下文才有的工具，固定收在右边，避免和
-        // 左侧红黄绿或中间标题抢位置。
-        if self.showing_doc() {
-            let quick_left = (rect.right() - RIGHT_MARGIN - QUICK_WIDTH).max(content_left + 120.0);
-            let available = egui::Rect::from_min_max(
-                egui::pos2(quick_left, rect.top() + 4.0),
-                egui::pos2(rect.right() - RIGHT_MARGIN, rect.bottom() - 4.0),
-            );
-            if available.width() >= QUICK_WIDTH {
-                let mut quick = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(available)
-                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                );
-                quick.spacing_mut().item_spacing.x = 2.0;
-                self.titlebar_quick_access(&mut quick);
-                drag_right = available.left() - 8.0;
-            }
-        }
-
-        self.paint_centered_title(ui, rect, content_left, drag_right, title_color);
-
-        let drag_rect = egui::Rect::from_min_max(
-            egui::pos2(content_left, rect.top()),
-            egui::pos2(drag_right, rect.bottom()),
-        );
-        if drag_rect.width() > 4.0 {
-            let drag = ui.interact(
-                drag_rect,
-                ui.scope_id().with("macos_titlebar_drag"),
-                egui::Sense::click_and_drag(),
-            );
-            if drag.double_clicked() {
+        if drag.double_clicked() {
+            if native.is_some() {
                 crate::macos_window::perform_titlebar_double_click();
-            } else if drag.drag_started() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            } else if !hyprland {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
             }
+        } else if drag.drag_started() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+
+        self.chrome_left_cluster(ui, rect, zones);
+        self.chrome_tab_strip(ui, zones);
+        self.chrome_tools(ui, zones);
+        if window_buttons > 0 {
+            let buttons: &[TitlebarBtn] = if hyprland {
+                &[TitlebarBtn::Close]
+            } else {
+                &[
+                    TitlebarBtn::Minimize,
+                    TitlebarBtn::Maximize,
+                    TitlebarBtn::Close,
+                ]
+            };
+            chrome_window_buttons(ui, rect, zones, buttons, maximized, focused);
         }
     }
 
-    /// 顶栏正中显示当前标签标题；稿纸主题显示应用身份，稿名留在纸签里。
+    /// 左簇：菜单（品牌标 + 小箭头）、分隔线、保存与提交。
+    fn chrome_left_cluster(&mut self, ui: &mut egui::Ui, rect: egui::Rect, zones: RailZones) {
+        let mut left = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(egui::Rect::from_min_size(
+                    egui::pos2(zones.menu_left, rect.top()),
+                    egui::vec2(RAIL_LEFT_WIDTH - 10.0, rect.height()),
+                ))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        left.spacing_mut().item_spacing.x = 0.0;
+        let response = self.chrome_menu_button(&mut left);
+        response.on_hover_text(format!(
+            "{}：新建文档、稿件管理、词库与设置",
+            version::APP_TITLE
+        ));
+        left.add_space(8.0);
+        theme::divider_v(&mut left, RAIL_DIVIDER_HEIGHT);
+        left.add_space(7.0);
+        self.titlebar_quick_access(&mut left);
+    }
+
+    /// 左上角的菜单按钮：品牌标 + 一枚小箭头，仿 Figma 那种「图标即菜单」。
     ///
-    /// 按窗口整体的几何中心摆，不因左右控件宽度不对称而偏移；剪裁区以中心
-    /// 对称收进 `[left, right]`，窄窗口时不会压到窗口按钮或快速访问。
-    fn paint_centered_title(
-        &self,
-        ui: &egui::Ui,
-        rect: egui::Rect,
-        left: f32,
-        right: f32,
-        color: egui::Color32,
-    ) {
-        let center_x = rect.center().x;
-        let half_width = (center_x - left).min(right - center_x).max(0.0);
-        if half_width <= 40.0 {
+    /// 不走 `egui::Button`：它的高度下限是全局 `interact_size.y`（30 px），比标签
+    /// 胶囊高 2 px。这里自己分配 40×28，和标签、右侧工具落在同一条基线上。
+    fn chrome_menu_button(&mut self, ui: &mut egui::Ui) -> egui::Response {
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(MENU_BUTTON_W, MENU_BUTTON_H),
+            egui::Sense::click(),
+        );
+        let (mark, chevron) = if theme::smartisan::active() {
+            (
+                theme::smartisan::chrome_ink(),
+                theme::smartisan::chrome_ink().gamma_multiply(0.72),
+            )
+        } else {
+            (theme::accent(), theme::text_muted())
+        };
+        let pressed = response.is_pointer_button_down_on();
+        if response.hovered() || pressed {
+            let fill = if theme::smartisan::active() {
+                if pressed {
+                    egui::Color32::from_black_alpha(16)
+                } else {
+                    egui::Color32::from_white_alpha(18)
+                }
+            } else if pressed {
+                theme::surface_active()
+            } else {
+                theme::surface_hover()
+            };
+            ui.painter()
+                .rect_filled(rect, theme::chrome_radius(7), fill);
+        }
+        paint_menu_button(ui, rect, mark, chevron);
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "菜单"));
+        egui::Popup::menu(&response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| self.app_menu(ui));
+        response
+    }
+
+    /// 标签条：从左簇之后排到右侧工具前的拖拽带。
+    fn chrome_tab_strip(&mut self, ui: &mut egui::Ui, zones: RailZones) {
+        if zones.tabs.width() < 1.0 {
             return;
         }
-        let (mark, active_title) = self.tab_label(self.active_tab);
-        // 稿纸主题由纸签承载稿名，顶栏只保留应用身份，避免上下重复争夺重心。
-        let active_title = if theme::smartisan::active() {
-            format!("{} · 离线写作", version::APP_TITLE)
-        } else if active_title.is_empty() {
-            version::APP_TITLE.to_string()
-        } else if mark.is_empty() {
-            active_title
-        } else {
-            format!("{mark} {active_title}")
-        };
-        let clip = egui::Rect::from_min_max(
-            egui::pos2(center_x - half_width, rect.top()),
-            egui::pos2(center_x + half_width, rect.bottom()),
+        let mut strip = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(zones.tabs)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        ui.painter().with_clip_rect(clip).text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            truncate_middle(&active_title, 42),
-            if theme::smartisan::active() {
-                egui::TextStyle::Small.resolve(ui.style())
-            } else {
-                egui::TextStyle::Body.resolve(ui.style())
-            },
-            color,
-        );
+        self.tab_strip(&mut strip);
     }
 
-    /// 标题栏上的快速访问：保存、提交版本。这两件事跟当前停在哪个分区卡
-    /// 无关，任何时候都该够得着，所以仿 Word 快速访问工具栏挂在标题栏上。
-    /// 只放图标、常态无底色，分量压到比功能区和标签行都轻；含义靠悬停说明，
+    /// 右端工具组：检索与换肤。窗口按钮前留一道短分隔线，关闭键不挨着功能键。
+    fn chrome_tools(&mut self, ui: &mut egui::Ui, zones: RailZones) {
+        let mut tools = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(zones.tools)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        tool_button_scope(&mut tools, |ui| {
+            egui::containers::menu::MenuButton::from_button(tool_button(theme::Icon::Shirt))
+                .ui(ui, |ui| self.theme_menu(ui))
+                .0
+                .on_hover_text("外观主题");
+            if ui
+                .add(tool_button(theme::Icon::Search))
+                .on_hover_text(format!(
+                    "快捷查找：稿件、单位人员与页面（{}）",
+                    theme::primary_shortcut("K")
+                ))
+                .clicked()
+            {
+                self.open_quick_find();
+            }
+        });
+        if let Some(divider) = zones.divider {
+            ui.painter().rect_filled(divider, 0.0, theme::border());
+        }
+    }
+
+    /// 顶栏的快速访问：保存、提交版本。
+    ///
+    /// 这两件事跟当前停在哪个分区卡无关，任何时候都该够得着，所以仿 Word 快速访问
+    /// 工具栏挂在最左边、紧挨着菜单。只放图标、常态无底色；非稿件页也占住位置
+    /// （变灰不可点），这样标签条的起点不会随页面切换左右跳。
     /// 保存键上的小圆点表示有未写回稿件库的改动。
     pub(crate) fn titlebar_quick_access(&mut self, ui: &mut egui::Ui) {
-        let Some(doc) = self.active_doc_ref() else {
+        // `active_doc` 记的是最后编辑的那篇稿，停在设置/词库页时它仍然有值；
+        // 这里要问的是「当前标签是不是稿件」，所以先看 `showing_doc`。
+        let state = if self.showing_doc() {
+            self.active_doc_ref().map(|doc| {
+                (
+                    doc.read_only(),
+                    doc.manuscript_id.is_some(),
+                    doc.is_dirty(),
+                    doc.manuscript_id,
+                )
+            })
+        } else {
+            None
+        };
+        let Some((read_only, saved, dirty, manuscript_id)) = state else {
+            // 非稿件页：位置照样占住，只是变灰。
+            theme::rail_icon_button(ui, false, theme::Icon::Save, "保存：当前不是稿件页");
+            ui.add_space(2.0);
+            theme::rail_icon_button(
+                ui,
+                false,
+                theme::Icon::GitCommit,
+                "提交版本：当前不是稿件页",
+            );
             return;
         };
-        let editable = !doc.read_only();
-        let saved = doc.manuscript_id.is_some();
-        let manuscript_id = doc.manuscript_id;
-        let dirty = doc.is_dirty();
+        let editable = !read_only;
         let save_shortcut = theme::primary_shortcut("S");
         let save_hint = if saved {
             format!("保存：写回稿件库中这条记录（{save_shortcut}）")
         } else {
             format!("保存：在稿件库中新建一条草稿记录（{save_shortcut}）")
         };
-
-        let save = theme::titlebar_icon_button(ui, editable, theme::Icon::Save, &save_hint);
+        let save = theme::rail_icon_button(ui, editable, theme::Icon::Save, &save_hint);
         if dirty {
-            // 脏标记：强调色圆点外套一圈与标题栏同色的环，压在图标右上角也分得清。
+            // 脏标记：强调色圆点外套一圈与顶栏同色的环，压在图标右上角也分得清。
             let center = save.rect.right_top() + egui::vec2(-5.0, 5.0);
             ui.painter().circle_filled(center, 4.0, theme::surface());
             ui.painter().circle_filled(center, 2.5, theme::accent());
@@ -631,13 +537,14 @@ impl GongwenApp {
         if save.clicked() {
             self.save_to_manuscript_library_with_ctx(ui.ctx());
         }
+        ui.add_space(2.0);
         let commit_hint = if saved {
             "提交版本：把当前内容固化为一个新版本"
         } else {
             "提交版本：先保存，再提交版本"
         };
         let commit =
-            theme::titlebar_icon_button(ui, saved && editable, theme::Icon::GitCommit, commit_hint);
+            theme::rail_icon_button(ui, saved && editable, theme::Icon::GitCommit, commit_hint);
         if commit.clicked()
             && let Some(id) = manuscript_id
         {
@@ -772,160 +679,87 @@ impl GongwenApp {
         }
     }
 
-    /// 顶格一整行：左边菜单，中间标签条（末尾是新建按钮），右端贴窗口右沿放
-    /// 快捷查找与换肤两枚图标按钮。稿件和导航页共用这一条，界面纵向只让出一行。
-    pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
-        let background = ui.painter().add(egui::Shape::Noop);
-        if theme::smartisan::active() {
-            ui.spacing_mut().item_spacing.x = 4.0;
-        }
-        ui.horizontal(|ui| {
-            self.app_menu_button(ui);
-            toolbar_separator(ui);
-            // 先给右端按钮留足宽度，标签条只在剩下的地方排，标签再多也挤不掉它们。
-            let tools_width =
-                2.0 * TOOL_BUTTON_SIZE + TOOL_BUTTON_GAP + ui.spacing().item_spacing.x;
-            let tabs_width = (ui.available_width() - tools_width).max(0.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(tabs_width, TOOLBAR_CONTROL_HEIGHT),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| self.tab_strip(ui),
-            );
-            // `allocate_ui_with_layout` 只按内容实际宽度占位，不会撑满给定宽度；
-            // 右端按钮必须另起一个靠右的布局才贴得住右沿。右到左排，先放的在最右。
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                tool_button_scope(ui, |ui| {
-                    egui::containers::menu::MenuButton::from_button(tool_button(
-                        theme::Icon::Shirt,
-                    ))
-                    .ui(ui, |ui| self.theme_menu(ui))
-                    .0
-                    .on_hover_text("外观主题");
-                    if ui
-                        .add(tool_button(theme::Icon::Search))
-                        .on_hover_text(format!(
-                            "快捷查找：稿件、单位人员与页面（{}）",
-                            theme::primary_shortcut("K")
-                        ))
-                        .clicked()
-                    {
-                        self.open_quick_find();
-                    }
-                });
-            });
-        });
-        let rect = egui::Rect::from_min_max(
-            egui::pos2(ui.max_rect().left() - 12.0, ui.min_rect().top() - 6.0),
-            egui::pos2(ui.max_rect().right() + 12.0, ui.min_rect().bottom() + 6.0),
-        );
-        theme::smartisan::tab_background(ui.painter(), background, rect);
-    }
-
-    /// 左上角的菜单：应用图标 + 「菜单」文字，点开是新建入口与各个常驻页面。
-    /// 入口本身带文字而非纯图标——过去只有一枚汉堡图标，常驻页面和
-    /// 新建公文这些高频入口藏在里面几乎不可见。
-    pub(crate) fn app_menu_button(&mut self, ui: &mut egui::Ui) {
-        let mut button = egui::Button::image_and_text(
-            theme::Icon::Menu
-                .image()
-                .fit_to_exact_size(egui::vec2(18.0, 18.0)),
-            "菜单",
+    /// 左上角菜单的内容：新建入口、常驻页面、图表样式与设置。
+    ///
+    /// 入口是顶栏左端的品牌标（见 [`menu_button`]），不再单占「菜单」两个字；
+    /// 悬停图标即可看到这组入口的说明。
+    fn app_menu(&mut self, ui: &mut egui::Ui) {
+        compact_menu(ui);
+        ui.set_min_width(148.0);
+        self.new_document_items(ui);
+        ui.separator();
+        self.nav_menu_item(ui, NavPage::Manuscript);
+        self.nav_menu_item(ui, NavPage::IssueLedger);
+        #[cfg(feature = "task-assistant")]
+        self.nav_menu_item(ui, NavPage::TaskAssistant);
+        // 四张词表同属「词库」，收进一个子菜单；当前页是其中之一时，
+        // 子菜单入口也带选中底，顺着高亮就能找到所在位置。
+        let lexicon_active = LEXICON_PAGES
+            .iter()
+            .any(|page| self.tabs.get(self.active_tab) == Some(&TabRef::Page(*page)));
+        egui::containers::menu::SubMenuButton::from_button(
+            theme::menu_item(theme::Icon::Book, "词库")
+                .selected(lexicon_active)
+                .frame_when_inactive(lexicon_active)
+                .right_text(egui::containers::menu::SubMenuButton::arrow_atom(None)),
         )
-        .image_tint_follows_text_color(true);
-        if theme::smartisan::active() {
-            button = egui::Button::image_and_text(
-                theme::Icon::Menu
-                    .image()
-                    .tint(theme::smartisan::chrome_ink())
-                    .fit_to_exact_size(egui::vec2(18.0, 18.0)),
-                egui::RichText::new("菜单").color(theme::smartisan::chrome_ink()),
-            )
-            .frame_when_inactive(false)
-            .fill(egui::Color32::from_white_alpha(18))
-            .stroke(egui::Stroke::NONE)
-            .corner_radius(5);
-        }
-        egui::containers::menu::MenuButton::from_button(button)
-            .ui(ui, |ui| {
-                compact_menu(ui);
-                ui.set_min_width(148.0);
-                self.new_document_items(ui);
-                ui.separator();
-                self.nav_menu_item(ui, NavPage::Manuscript);
-                self.nav_menu_item(ui, NavPage::IssueLedger);
-                #[cfg(feature = "task-assistant")]
-                self.nav_menu_item(ui, NavPage::TaskAssistant);
-                // 四张词表同属「词库」，收进一个子菜单；当前页是其中之一时，
-                // 子菜单入口也带选中底，顺着高亮就能找到所在位置。
-                let lexicon_active = LEXICON_PAGES
-                    .iter()
-                    .any(|page| self.tabs.get(self.active_tab) == Some(&TabRef::Page(*page)));
-                egui::containers::menu::SubMenuButton::from_button(
-                    theme::menu_item(theme::Icon::Book, "词库")
-                        .selected(lexicon_active)
-                        .frame_when_inactive(lexicon_active)
-                        .right_text(egui::containers::menu::SubMenuButton::arrow_atom(None)),
-                )
-                .ui(ui, |ui| {
-                    compact_menu(ui);
-                    ui.set_min_width(132.0);
-                    for page in LEXICON_PAGES {
-                        self.nav_menu_item(ui, page);
-                    }
-                });
-                #[cfg(feature = "ai-workbench")]
-                self.nav_menu_item(ui, NavPage::AiPrompts);
-                #[cfg(feature = "ai-workbench")]
-                self.nav_menu_item(ui, NavPage::Knowledge);
-                #[cfg(feature = "ai-workbench")]
-                self.nav_menu_item(ui, NavPage::Wiki);
-                ui.separator();
-                // 外观主题在顶栏右端的换肤按钮里。图表样式管的是纸面上的图，
-                // 导出也跟着变，留在菜单里挨着设置。
-                egui::containers::menu::SubMenuButton::from_button(
-                    theme::menu_item(theme::Icon::GitCommit, "图表样式")
-                        .right_text(egui::containers::menu::SubMenuButton::arrow_atom(None)),
-                )
-                .ui(ui, |ui| {
-                    compact_menu(ui);
-                    for diagram_theme in DiagramTheme::ALL {
-                        let selected = diagram_theme == self.config.diagram_theme;
-                        if ui
-                            .add(theme::menu_selectable_item(selected, diagram_theme.label()))
-                            .on_hover_text(diagram_theme.hint())
-                            .clicked()
-                            && !selected
-                        {
-                            self.apply_diagram_theme(diagram_theme);
-                            ui.close();
-                        }
-                        // 「按文种自动」与四套具体配色分开两段。
-                        if diagram_theme == DiagramTheme::Auto {
-                            ui.separator();
-                        }
-                    }
-                });
-                self.nav_menu_item(ui, NavPage::Settings);
-                if self.vault_locked
-                    && ui
-                        .add(theme::menu_item(theme::Icon::Lock, "锁定窗口"))
-                        .on_hover_text("立即退回锁屏；闲置超时也会自动锁定。")
-                        .clicked()
-                {
-                    self.request_lock();
-                    ui.close();
-                }
-                ui.separator();
+        .ui(ui, |ui| {
+            compact_menu(ui);
+            ui.set_min_width(132.0);
+            for page in LEXICON_PAGES {
+                self.nav_menu_item(ui, page);
+            }
+        });
+        #[cfg(feature = "ai-workbench")]
+        self.nav_menu_item(ui, NavPage::AiPrompts);
+        #[cfg(feature = "ai-workbench")]
+        self.nav_menu_item(ui, NavPage::Knowledge);
+        #[cfg(feature = "ai-workbench")]
+        self.nav_menu_item(ui, NavPage::Wiki);
+        ui.separator();
+        // 外观主题在顶栏右端的换肤按钮里。图表样式管的是纸面上的图，
+        // 导出也跟着变，留在菜单里挨着设置。
+        egui::containers::menu::SubMenuButton::from_button(
+            theme::menu_item(theme::Icon::GitCommit, "图表样式")
+                .right_text(egui::containers::menu::SubMenuButton::arrow_atom(None)),
+        )
+        .ui(ui, |ui| {
+            compact_menu(ui);
+            for diagram_theme in DiagramTheme::ALL {
+                let selected = diagram_theme == self.config.diagram_theme;
                 if ui
-                    .add(theme::menu_item(theme::Icon::BrandMark, "关于公文助手"))
+                    .add(theme::menu_selectable_item(selected, diagram_theme.label()))
+                    .on_hover_text(diagram_theme.hint())
                     .clicked()
+                    && !selected
                 {
-                    self.about_window_open = true;
+                    self.apply_diagram_theme(diagram_theme);
                     ui.close();
                 }
-            })
-            .0
-            .on_hover_text("新建文档、稿件管理、词库与设置");
+                // 「按文种自动」与四套具体配色分开两段。
+                if diagram_theme == DiagramTheme::Auto {
+                    ui.separator();
+                }
+            }
+        });
+        self.nav_menu_item(ui, NavPage::Settings);
+        if self.vault_locked
+            && ui
+                .add(theme::menu_item(theme::Icon::Lock, "锁定窗口"))
+                .on_hover_text("立即退回锁屏；闲置超时也会自动锁定。")
+                .clicked()
+        {
+            self.request_lock();
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add(theme::menu_item(theme::Icon::BrandMark, "关于公文助手"))
+            .clicked()
+        {
+            self.about_window_open = true;
+            ui.close();
+        }
     }
 
     /// 菜单里的一个常驻页面入口。
@@ -2070,6 +1904,234 @@ impl GongwenApp {
             })
             .0
             .on_hover_text("源码模式的目录、缩略图与行号");
+    }
+}
+
+/// 一条顶栏的横向分区（窗口坐标，逻辑像素）。
+#[derive(Debug, Clone, Copy)]
+struct RailZones {
+    /// 菜单按钮左沿。
+    menu_left: f32,
+    /// 标签条：高度已经收成胶囊高，竖直居中。
+    tabs: egui::Rect,
+    /// 检索 / 换肤两枚工具。
+    tools: egui::Rect,
+    /// 工具与窗口按钮之间的分隔线；macOS 没有窗口按钮，也就没有这条线。
+    divider: Option<egui::Rect>,
+    /// 窗口按钮区左沿；macOS 用不上。
+    controls_left: f32,
+}
+
+/// 按窗口矩形算顶栏各段的位置。
+///
+/// 抽成纯函数是为了脱开 egui 上下文测两条硬约束：标签永远不许压到右侧工具，
+/// 并且两者之间至少留出 [`RAIL_DRAG_MIN`] 的拖拽带——窗口再窄也要拖得动。
+fn rail_zones(rect: egui::Rect, native_left: f32, window_buttons: usize) -> RailZones {
+    let left = rect.left() + native_left;
+    let controls_left = rect.right() - window_buttons as f32 * RAIL_CONTROL_WIDTH;
+    let (tools_right, divider) = if window_buttons == 0 {
+        // macOS：红黄绿灯在左，右侧没有窗口按钮，工具组自己收边。
+        (rect.right() - 12.0, None)
+    } else {
+        let divider_x = controls_left - 11.0;
+        (
+            controls_left - RAIL_CONTROLS_GAP,
+            Some(egui::Rect::from_min_size(
+                egui::pos2(divider_x, rect.center().y - RAIL_DIVIDER_HEIGHT / 2.0),
+                egui::vec2(1.0, RAIL_DIVIDER_HEIGHT),
+            )),
+        )
+    };
+    let tools = egui::Rect::from_min_max(
+        egui::pos2(tools_right - RAIL_TOOLS_WIDTH, rect.top()),
+        egui::pos2(tools_right, rect.bottom()),
+    );
+    let tabs_left = left + RAIL_LEFT_WIDTH;
+    let tabs_right = (tools.left() - RAIL_DRAG_MIN).max(tabs_left);
+    let half = TOOLBAR_CONTROL_HEIGHT / 2.0;
+    RailZones {
+        menu_left: left + 10.0,
+        tabs: egui::Rect::from_min_max(
+            egui::pos2(tabs_left, rect.center().y - half),
+            egui::pos2(tabs_right, rect.center().y + half),
+        ),
+        tools,
+        divider,
+        controls_left,
+    }
+}
+
+/// 品牌标压在左侧留白里，小箭头贴右沿：两者合起来是一枚 40 px 宽的按钮。
+fn paint_menu_button(ui: &egui::Ui, rect: egui::Rect, mark: egui::Color32, chevron: egui::Color32) {
+    theme::brand_image(18.0, mark).paint_at(
+        ui,
+        egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 13.0, rect.center().y),
+            egui::Vec2::splat(18.0),
+        ),
+    );
+    theme::Icon::ChevronDown
+        .image_sized(9.0)
+        .tint(chevron)
+        .paint_at(
+            ui,
+            egui::Rect::from_center_size(
+                egui::pos2(rect.left() + 31.0, rect.center().y + 0.5),
+                egui::Vec2::splat(9.0),
+            ),
+        );
+}
+
+/// 窗口按钮：传统桌面三枚（46 px 一格、满高），Hyprland 只有关闭。
+fn chrome_window_buttons(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    zones: RailZones,
+    buttons: &[TitlebarBtn],
+    maximized: bool,
+    focused: bool,
+) {
+    let ctx = ui.ctx().clone();
+    let title_color = if theme::smartisan::active() {
+        theme::smartisan::chrome_ink().gamma_multiply(if focused { 1.0 } else { 0.75 })
+    } else if focused {
+        theme::text_soft()
+    } else {
+        theme::text_muted()
+    };
+
+    let mut action: Option<TitlebarAction> = None;
+    for (index, kind) in buttons.iter().copied().enumerate() {
+        let btn_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                zones.controls_left + index as f32 * RAIL_CONTROL_WIDTH,
+                rect.top(),
+            ),
+            egui::vec2(RAIL_CONTROL_WIDTH, rect.height()),
+        );
+        let response = ui
+            .interact(
+                btn_rect,
+                ui.scope_id().with(("titlebar_btn", index)),
+                egui::Sense::click(),
+            )
+            .on_hover_text(match kind {
+                TitlebarBtn::Minimize => "最小化",
+                TitlebarBtn::Maximize => {
+                    if maximized {
+                        "还原"
+                    } else {
+                        "最大化"
+                    }
+                }
+                TitlebarBtn::Close => "关闭",
+            });
+        let is_close = kind == TitlebarBtn::Close;
+        let hovered = response.hovered();
+        let pressed = response.is_pointer_button_down_on();
+        let fill = if hovered {
+            if is_close {
+                // 关闭键按下再加深一档，与其余按钮的按压手感一致。
+                if pressed {
+                    theme::danger().gamma_multiply(0.85)
+                } else {
+                    theme::danger()
+                }
+            } else if pressed {
+                theme::surface_active()
+            } else {
+                theme::surface_hover()
+            }
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        if fill != egui::Color32::TRANSPARENT {
+            ui.painter().rect_filled(btn_rect, 0.0, fill);
+        }
+        // 关闭键悬停用白字（Windows 惯例），其余按钮保持文字色。
+        let icon_color = if is_close && hovered {
+            theme::accent_text()
+        } else if hovered && theme::smartisan::active() {
+            theme::text()
+        } else {
+            title_color
+        };
+        let glyph = match kind {
+            TitlebarBtn::Minimize => WindowGlyph::Minimize,
+            TitlebarBtn::Maximize if maximized => WindowGlyph::Restore,
+            TitlebarBtn::Maximize => WindowGlyph::Maximize,
+            TitlebarBtn::Close => WindowGlyph::Close,
+        };
+        draw_window_glyph(ui.painter(), btn_rect.center(), glyph, icon_color);
+        if response.clicked() {
+            action = Some(match kind {
+                TitlebarBtn::Minimize => TitlebarAction::Minimize,
+                TitlebarBtn::Maximize => TitlebarAction::Maximize(!maximized),
+                TitlebarBtn::Close => TitlebarAction::Close,
+            });
+        }
+    }
+    match action {
+        Some(TitlebarAction::Minimize) => {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+        Some(TitlebarAction::Maximize(next)) => {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(next));
+        }
+        Some(TitlebarAction::Close) => {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        None => {}
+    }
+}
+
+#[cfg(test)]
+mod rail_tests {
+    use super::*;
+
+    fn rail(width: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, RAIL_HEIGHT))
+    }
+
+    #[test]
+    fn the_tabs_start_after_a_fixed_left_cluster() {
+        let zones = rail_zones(rail(1560.0), 0.0, 3);
+        assert!((zones.tabs.left() - RAIL_LEFT_WIDTH).abs() < f32::EPSILON);
+        assert!(
+            (zones.controls_left - (1560.0 - 3.0 * RAIL_CONTROL_WIDTH)).abs() < f32::EPSILON,
+            "窗口按钮从右沿往前排"
+        );
+    }
+
+    #[test]
+    fn the_tabs_always_leave_a_drag_band_before_the_tools() {
+        for width in [760.0, 900.0, 1280.0, 1560.0, 2560.0] {
+            let zones = rail_zones(rail(width), 0.0, 3);
+            assert!(
+                zones.tabs.right() <= zones.tools.left() - RAIL_DRAG_MIN + 0.01,
+                "{width} px 宽时标签压到了工具"
+            );
+            assert!(
+                zones.tabs.width() >= DOC_TAB_MIN_WIDTH,
+                "{width} px 宽时标签不够一格"
+            );
+        }
+    }
+
+    #[test]
+    fn the_window_buttons_keep_their_distance() {
+        let zones = rail_zones(rail(1560.0), 0.0, 3);
+        let divider = zones.divider.expect("有窗口按钮就该有分隔线");
+        assert!(zones.tools.right() <= divider.left());
+        assert!(divider.right() + 9.0 <= zones.controls_left);
+    }
+
+    #[test]
+    fn macos_leaves_room_for_the_traffic_lights() {
+        let zones = rail_zones(rail(1560.0), 70.0, 0);
+        assert!((zones.tabs.left() - (70.0 + RAIL_LEFT_WIDTH)).abs() < f32::EPSILON);
+        assert!(zones.divider.is_none());
+        assert!((zones.tools.right() - (1560.0 - 12.0)).abs() < f32::EPSILON);
     }
 }
 

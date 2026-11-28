@@ -527,14 +527,10 @@ fn smartisan_management_samples() {
                     ..Default::default()
                 },
                 |ui| {
-                    egui::Panel::top("sample_title")
+                    egui::Panel::top("sample_chrome")
                         .show_separator_line(false)
                         .frame(egui::Frame::NONE)
                         .show(ui, |ui| app.window_titlebar(ui));
-                    egui::Panel::top("sample_tabs")
-                        .show_separator_line(false)
-                        .frame(theme::panel(theme::surface(), 12))
-                        .show(ui, |ui| app.top_bar(ui));
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE)
                         .show(ui, |ui| {
@@ -614,14 +610,10 @@ fn smartisan_draft_ledger_hint_sample() {
                 ..Default::default()
             },
             |ui| {
-                egui::Panel::top("sample_title")
+                egui::Panel::top("sample_chrome")
                     .show_separator_line(false)
                     .frame(egui::Frame::NONE)
                     .show(ui, |ui| app.window_titlebar(ui));
-                egui::Panel::top("sample_tabs")
-                    .show_separator_line(false)
-                    .frame(theme::panel(theme::surface(), 12))
-                    .show(ui, |ui| app.top_bar(ui));
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show(ui, |ui| {
@@ -746,14 +738,10 @@ fn smartisan_document_chrome_samples() {
                     ..Default::default()
                 },
                 |ui| {
-                    egui::Panel::top("chrome_title")
+                    egui::Panel::top("chrome_rail")
                         .show_separator_line(false)
                         .frame(egui::Frame::NONE)
                         .show(ui, |ui| app.window_titlebar(ui));
-                    egui::Panel::top("chrome_tabs")
-                        .show_separator_line(false)
-                        .frame(theme::panel(theme::surface(), 12))
-                        .show(ui, |ui| app.top_bar(ui));
                     egui::Panel::top("chrome_ribbon")
                         .show_separator_line(false)
                         .frame(theme::panel(theme::surface(), 10))

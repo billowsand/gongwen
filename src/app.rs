@@ -1215,7 +1215,9 @@ impl GongwenApp {
         if let Some(elapsed) = crate::rag::take_retrieval_elapsed() {
             self.knowledge_retrieval_elapsed = Some(elapsed);
         }
-        egui::Panel::top("window_titlebar")
+        // 顶栏只有一条：菜单、保存/提交、标签、检索/换肤与窗口按钮共用 40 px，
+        // 标题栏那一行整行让给正文（见 chrome::window_titlebar）。
+        egui::Panel::top("window_chrome")
             .show_separator_line(!theme::smartisan::active())
             .frame(
                 egui::Frame::new()
@@ -1223,10 +1225,6 @@ impl GongwenApp {
                     .inner_margin(egui::Margin::ZERO),
             )
             .show(ui, |ui| self.window_titlebar(ui));
-        egui::Panel::top("app_top")
-            .show_separator_line(!theme::smartisan::active())
-            .frame(theme::panel(theme::surface(), 12))
-            .show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("app_status")
             .frame(theme::panel(theme::surface(), 8))
             .show(ui, |ui| self.status_bar(ui));

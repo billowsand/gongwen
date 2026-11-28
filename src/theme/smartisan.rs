@@ -103,7 +103,8 @@ fn gradient_shape(rect: Rect, top: Color32, bottom: Color32) -> egui::Shape {
     egui::Shape::mesh(mesh)
 }
 
-/// 标签条先占背景槽，排完内容再确定高度，避免覆盖标签或误铺到正文区。
+/// 顶栏的牛皮纸底：先占背景槽、排完内容再回填，免得盖住标签与按钮；
+/// 底边留 2 px 纸色，作为正文区的上沿（标题栏与标签行合并后，整条只有这一层底）。
 pub fn tab_background(painter: &egui::Painter, slot: egui::layers::ShapeIdx, rect: Rect) {
     if active() {
         // 以面板裁剪边界统一纸面起点，避免控件高度和边距产生一像素断层。

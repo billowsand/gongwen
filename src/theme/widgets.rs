@@ -277,20 +277,44 @@ pub(crate) fn icon_button_impl(
 
 /// 标题栏快速访问的图标按钮：常态无底色、悬停才铺浅底，仿 Word 快速访问工具栏。
 ///
-/// 自己分配固定的 26×24 而不走 `egui::Button`：后者的高度下限是全局
-/// `interact_size.y`（30 px），塞进 34 px 高的标题栏会上下各溢出、压到下沿分隔线。
+/// 自己分配固定尺寸而不走 `egui::Button`：后者的高度下限是全局
+/// `interact_size.y`（30 px），塞进顶栏会上下各溢出、压到底线。
+/// 26×24 是 AI 侧栏标题行的那一档，只有 AI 版用得到；顶栏合并后用
+/// [`rail_icon_button`] 的 28×28，和标签胶囊、右侧工具同高。
+#[cfg(feature = "ai-workbench")]
 pub(crate) fn titlebar_icon_button(
     ui: &mut egui::Ui,
     enabled: bool,
     icon: Icon,
     label: &str,
 ) -> egui::Response {
+    icon_button_sized(ui, enabled, icon, label, egui::vec2(26.0, 24.0))
+}
+
+/// 顶栏合并后的快速访问图标：与标签胶囊同高（28×28），和右侧工具、标签同一条基线。
+pub(crate) fn rail_icon_button(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    icon: Icon,
+    label: &str,
+) -> egui::Response {
+    icon_button_sized(ui, enabled, icon, label, egui::vec2(28.0, 28.0))
+}
+
+/// 快速访问按钮的主体：尺寸由调用方定，常态无底色、悬停才铺浅底。
+fn icon_button_sized(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    icon: Icon,
+    label: &str,
+    size: egui::Vec2,
+) -> egui::Response {
     let sense = if enabled {
         egui::Sense::click()
     } else {
         egui::Sense::hover()
     };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), sense);
+    let (rect, response) = ui.allocate_exact_size(size, sense);
     if ui.is_rect_visible(rect) {
         if smartisan::active() {
             let pressed = response.is_pointer_button_down_on();
